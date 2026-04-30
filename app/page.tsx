@@ -1,13 +1,13 @@
 "use client";
 
 import React from "react";
-import MainScreen from "@/components/MainScreen";
-import NewsReaderScreen from "@/components/NewsReaderScreen";
-import DictionaryScreen from "@/components/DictionaryScreen";
-import NewsHistoryScreen from "@/components/NewsHistoryScreen";
-import SettingsScreen from "@/components/SettingsScreen";
-import CustomizeScreen from "@/components/CustomizeScreen";
-import GachaScreen from "@/components/GachaScreen";
+import MainScreen from "@/components/screens/MainScreen";
+import NewsReaderScreen from "@/components/screens/NewsReaderScreen";
+import DictionaryScreen from "@/components/screens/DictionaryScreen";
+import NewsHistoryScreen from "@/components/screens/NewsHistoryScreen";
+import SettingsScreen from "@/components/screens/SettingsScreen";
+import CustomizeScreen from "@/components/screens/CustomizeScreen";
+import GachaScreen from "@/components/screens/GachaScreen";
 
 type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize" | "gacha";
 
