@@ -1,0 +1,14 @@
+{
+  "editor.formatOnSave": true,
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "rust-analyzer.checkOnSave": true,
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/src-tauri/target": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/src-tauri/target": true,
+    "**/dist": true
+  }
+}
