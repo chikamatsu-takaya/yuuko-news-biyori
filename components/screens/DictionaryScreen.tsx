@@ -25,9 +25,6 @@ import {
   Share2,
   Trash2,
   Pencil,
-  Minus,
-  Square,
-  X,
   Bell,
   HelpCircle,
 } from "lucide-react";
@@ -35,6 +32,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Select,
   SelectContent,
@@ -176,22 +175,6 @@ const filterOptions: { id: FilterType; label: string; icon?: React.ComponentType
 
 // ============ Sub Components ============
 
-function WindowControls() {
-  return (
-    <div className="flex items-center gap-2">
-      <button className="w-6 h-6 rounded flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors">
-        <Minus className="w-3.5 h-3.5" />
-      </button>
-      <button className="w-6 h-6 rounded flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors">
-        <Square className="w-3 h-3" />
-      </button>
-      <button className="w-6 h-6 rounded flex items-center justify-center text-muted-foreground hover:bg-red-100 hover:text-red-500 transition-colors">
-        <X className="w-3.5 h-3.5" />
-      </button>
-    </div>
-  );
-}
-
 function PawIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -205,31 +188,6 @@ function PawIcon({ className }: { className?: string }) {
       <circle cx="9" cy="6" r="2" />
       <circle cx="15" cy="6" r="2" />
     </svg>
-  );
-}
-
-function SidebarNavItem({
-  item,
-  onNavigate,
-}: {
-  item: NavigationItem;
-  onNavigate: (id: string) => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        item.isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={() => onNavigate(item.id)}
-    >
-      <Icon
-        className={`w-5 h-5 ${item.isActive ? "text-[var(--yuuko-green)]" : ""}`}
-      />
-      <span>{item.label}</span>
-    </button>
   );
 }
 
@@ -435,35 +393,24 @@ export default function DictionaryScreen({
   );
 
   const handleNavigate = (id: string) => {
-    console.log("Navigate to:", id);
     if (onNavigate) {
       onNavigate(id);
     }
   };
 
   const handleGoHome = () => {
-    console.log("Go home");
     if (onNavigate) {
       onNavigate("home");
     }
   };
 
   return (
-    <div className="h-screen w-full bg-background flex flex-col overflow-hidden">
-      {/* Header / Title Bar */}
-      <header className="h-10 bg-white border-b border-border/50 flex items-center justify-between px-4 flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <PawIcon className="w-5 h-5 text-[var(--yuuko-green)]" />
-          <span className="text-sm font-medium text-foreground">
-            ゆうこと、ニュースを読みやすく。
-          </span>
-        </div>
-        <WindowControls />
-      </header>
+    <div className="h-dvh w-full bg-background flex flex-col overflow-hidden">
+      <AppTitleBar className="bg-white border-border/50" />
 
       <div className="flex-1 flex overflow-hidden">
         {/* Left Sidebar */}
-        <aside className="w-[200px] bg-white border-r border-border/50 flex flex-col flex-shrink-0">
+        <aside className="w-52 bg-white border-r border-border/50 flex flex-col flex-shrink-0">
           {/* Back to Home Button */}
           <div className="p-3">
             <Button
@@ -481,8 +428,10 @@ export default function DictionaryScreen({
             {mockNavigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
-                item={item}
-                onNavigate={handleNavigate}
+                label={item.label}
+                icon={item.icon}
+                isActive={item.isActive}
+                onClick={() => handleNavigate(item.id)}
               />
             ))}
           </nav>
@@ -538,7 +487,7 @@ export default function DictionaryScreen({
         </aside>
 
         {/* Main Content Area */}
-        <main className="flex-1 flex overflow-hidden">
+        <main className="flex-1 min-w-0 flex overflow-hidden">
           {/* Center - Dictionary List */}
           <div className="flex-1 p-6 overflow-y-auto">
             {/* Breadcrumb */}
@@ -648,7 +597,7 @@ export default function DictionaryScreen({
           </div>
 
           {/* Right Sidebar - Yuuko & Detail Panel */}
-          <aside className="w-[300px] bg-[var(--yuuko-cream-dark)]/30 border-l border-border/50 p-4 overflow-y-auto flex-shrink-0">
+        <aside className="w-72 bg-[var(--yuuko-cream-dark)]/30 border-l border-border/50 p-4 overflow-y-auto flex-shrink-0">
             {/* Yuuko Speech Bubble */}
             <div className="relative mb-2">
               <div className="bg-white border-2 border-[var(--yuuko-green)]/30 rounded-2xl p-3 relative">

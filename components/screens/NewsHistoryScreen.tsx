@@ -5,6 +5,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Newspaper,
@@ -22,9 +24,6 @@ import {
   Star,
   Archive,
   ChevronDown,
-  Minus,
-  Square,
-  X,
   Bell,
   HelpCircle,
   RotateCcw,
@@ -258,30 +257,6 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
   );
 }
 
-// Sidebar Navigation Item
-function SidebarNavItem({
-  item,
-  onNavigate,
-}: {
-  item: NavigationItem;
-  onNavigate: (id: string) => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        item.isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={() => onNavigate(item.id)}
-    >
-      <Icon className={`w-5 h-5 ${item.isActive ? "text-[var(--yuuko-green)]" : ""}`} />
-      <span>{item.label}</span>
-    </button>
-  );
-}
-
 // Filter Chip
 function FilterChipButton({
   chip,
@@ -404,29 +379,8 @@ export default function NewsHistoryScreen({
   };
 
   return (
-    <div className="min-h-screen bg-[var(--yuuko-cream)] flex flex-col">
-      {/* Title Bar */}
-      <header className="h-10 bg-white border-b border-border flex items-center justify-between px-4 flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
-            <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" />
-            </svg>
-          </div>
-          <span className="text-sm font-medium text-foreground">ゆうこと、ニュースを読みやすく。</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-muted rounded">
-            <Minus className="w-4 h-4" />
-          </button>
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-muted rounded">
-            <Square className="w-3.5 h-3.5" />
-          </button>
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-red-100 hover:text-red-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
+    <div className="h-dvh bg-[var(--yuuko-cream)] flex flex-col overflow-hidden">
+      <AppTitleBar />
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -443,9 +397,15 @@ export default function NewsHistoryScreen({
           </Button>
 
           {/* Navigation */}
-          <nav className="space-y-1 flex-1">
+          <nav className="space-y-1 flex-1 overflow-y-auto">
             {mockNavigationItems.map((item) => (
-              <SidebarNavItem key={item.id} item={item} onNavigate={handleNavigate} />
+              <SidebarNavItem
+                key={item.id}
+                label={item.label}
+                icon={item.icon}
+                isActive={item.isActive}
+                onClick={() => handleNavigate(item.id)}
+              />
             ))}
           </nav>
 
@@ -481,7 +441,7 @@ export default function NewsHistoryScreen({
         </aside>
 
         {/* Center - History List */}
-        <main className="flex-1 flex flex-col p-4 overflow-hidden">
+        <main className="flex-1 min-w-0 flex flex-col p-4 overflow-hidden">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
             <span className="hover:text-[var(--yuuko-green)] cursor-pointer">ホーム</span>
@@ -538,7 +498,7 @@ export default function NewsHistoryScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0">
+        <aside className="w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
           {/* Yuuko Speech Bubble */}
           <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
             <CardContent className="p-3">

@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Bell,
@@ -17,9 +19,6 @@ import {
   Download,
   Archive,
   Check,
-  Minus,
-  Square,
-  X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -132,33 +131,6 @@ const settingsMenuItems: SettingsMenuItem[] = [
 ];
 
 // Sub Components
-function SettingsMenuItem({
-  item,
-  isActive,
-  onClick,
-}: {
-  item: SettingsMenuItem;
-  isActive: boolean;
-  onClick: () => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={onClick}
-    >
-      <Icon
-        className={`w-5 h-5 ${isActive ? "text-[var(--yuuko-green)]" : ""}`}
-      />
-      <span>{item.label}</span>
-    </button>
-  );
-}
-
 function SettingRow({
   label,
   helpText,
@@ -303,29 +275,8 @@ export default function SettingsScreen({
     (settings.data.usedStorageGb / settings.data.maxStorageGb) * 100;
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      {/* Title Bar */}
-      <header className="h-10 bg-white border-b border-border flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
-            <span className="text-white text-xs">🐾</span>
-          </div>
-          <span className="text-sm font-medium text-foreground">
-            ゆうこと、ニュースを読みやすく。
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-muted rounded">
-            <Minus className="w-4 h-4" />
-          </button>
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-muted rounded">
-            <Square className="w-3.5 h-3.5" />
-          </button>
-          <button className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:bg-red-100 hover:text-red-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
+    <div className="h-dvh bg-background flex flex-col overflow-hidden">
+      <AppTitleBar />
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -348,11 +299,12 @@ export default function SettingsScreen({
             </span>
           </div>
 
-          <nav className="flex-1 px-2 space-y-1">
+          <nav className="flex-1 px-2 space-y-1 overflow-y-auto">
             {settingsMenuItems.map((item) => (
-              <SettingsMenuItem
+              <SidebarNavItem
                 key={item.id}
-                item={item}
+                label={item.label}
+                icon={item.icon}
                 isActive={activeMenu === item.id}
                 onClick={() => setActiveMenu(item.id)}
               />
@@ -397,7 +349,7 @@ export default function SettingsScreen({
         </aside>
 
         {/* Center Main Area */}
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 min-w-0 overflow-y-auto p-6">
           {/* Page Title */}
           <div className="flex items-center gap-3 mb-6">
             <Settings className="w-6 h-6 text-foreground" />
@@ -656,7 +608,7 @@ export default function SettingsScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4">
+        <aside className="w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4 overflow-y-auto">
           {/* Yuuko's Comment Card */}
           <Card className="border-0 shadow-sm overflow-hidden">
             <div className="bg-[var(--yuuko-green)] px-4 py-2 flex items-center gap-2">
