@@ -7,8 +7,9 @@ import DictionaryScreen from "@/components/DictionaryScreen";
 import NewsHistoryScreen from "@/components/NewsHistoryScreen";
 import SettingsScreen from "@/components/SettingsScreen";
 import CustomizeScreen from "@/components/CustomizeScreen";
+import GachaScreen from "@/components/GachaScreen";
 
-type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize";
+type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize" | "gacha";
 
 export default function Page() {
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
@@ -26,6 +27,8 @@ export default function Page() {
       setCurrentScreen("settings");
     } else if (screen === "customize") {
       setCurrentScreen("customize");
+    } else if (screen === "gacha") {
+      setCurrentScreen("gacha");
     }
   };
 
@@ -47,6 +50,10 @@ export default function Page() {
 
   if (currentScreen === "customize") {
     return <CustomizeScreen onNavigate={handleNavigate} />;
+  }
+
+  if (currentScreen === "gacha") {
+    return <GachaScreen onNavigate={handleNavigate} />;
   }
 
   return <MainScreen onNavigate={handleNavigate} />;
