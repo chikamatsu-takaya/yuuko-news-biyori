@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Newspaper,
@@ -17,9 +19,6 @@ import {
   ArrowLeft,
   Bell,
   HelpCircle,
-  Minus,
-  Square,
-  X,
   ChevronRight,
   MessageCircle,
   Palette,
@@ -196,31 +195,6 @@ const tabItems = [
 ];
 
 // Sub-components
-function SidebarNavItem({
-  item,
-  onNavigate,
-}: {
-  item: NavigationItem;
-  onNavigate: (id: string) => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        item.isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={() => onNavigate(item.id)}
-    >
-      <Icon
-        className={`w-5 h-5 ${item.isActive ? "text-[var(--yuuko-green)]" : ""}`}
-      />
-      <span>{item.label}</span>
-    </button>
-  );
-}
-
 function DecoItemCard({
   item,
   isSelected,
@@ -315,29 +289,8 @@ export default function CustomizeScreen({
   const progressPercent = (customizeState.currentPoints / customizeState.nextRankPoints) * 100;
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
-      {/* Header */}
-      <header className="h-10 bg-white border-b border-border flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
-            <span className="text-white text-xs font-bold">ゆ</span>
-          </div>
-          <span className="text-sm font-medium text-foreground">
-            ゆうこと、ニュースを読みやすく。
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button className="p-1.5 hover:bg-muted rounded transition-colors">
-            <Minus className="w-4 h-4 text-muted-foreground" />
-          </button>
-          <button className="p-1.5 hover:bg-muted rounded transition-colors">
-            <Square className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
-          <button className="p-1.5 hover:bg-red-100 rounded transition-colors">
-            <X className="w-4 h-4 text-muted-foreground hover:text-red-500" />
-          </button>
-        </div>
-      </header>
+    <div className="h-dvh flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
+      <AppTitleBar />
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -358,8 +311,10 @@ export default function CustomizeScreen({
             {mockNavigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
-                item={item}
-                onNavigate={handleNavigate}
+                label={item.label}
+                icon={item.icon}
+                isActive={item.isActive}
+                onClick={() => handleNavigate(item.id)}
               />
             ))}
           </nav>
@@ -407,7 +362,7 @@ export default function CustomizeScreen({
         </aside>
 
         {/* Center Content */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
           <div className="flex-1 p-4 overflow-y-auto">
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
@@ -426,14 +381,14 @@ export default function CustomizeScreen({
             </p>
 
             {/* Tabs */}
-            <div className="flex gap-1 mb-4">
+            <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
               {tabItems.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = customizeState.activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0 ${
                       isActive
                         ? "bg-[var(--yuuko-green)] text-white"
                         : "bg-white text-muted-foreground hover:bg-muted border border-border"

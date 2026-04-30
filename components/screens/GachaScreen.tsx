@@ -5,6 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Newspaper,
@@ -16,9 +18,6 @@ import {
   ArrowLeft,
   Bell,
   HelpCircle,
-  Minus,
-  Square,
-  X,
   ChevronRight,
   MessageCircle,
   Star,
@@ -193,31 +192,6 @@ function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
   );
 }
 
-function SidebarNavItem({
-  item,
-  onNavigate,
-}: {
-  item: NavigationItem;
-  onNavigate: (id: string) => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        item.isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={() => onNavigate(item.id)}
-    >
-      <Icon
-        className={`w-5 h-5 ${item.isActive ? "text-[var(--yuuko-green)]" : ""}`}
-      />
-      <span>{item.label}</span>
-    </button>
-  );
-}
-
 function GachaMachine() {
   return (
     <div className="relative w-24 h-36">
@@ -345,7 +319,7 @@ export default function GachaScreen({
   const progressPercent = (gachaState.currentPoints / gachaState.nextRankPoints) * 100;
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
+    <div className="h-dvh flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
       {/* Custom CSS for animations */}
       <style jsx global>{`
         @keyframes float {
@@ -358,26 +332,7 @@ export default function GachaScreen({
         }
       `}</style>
 
-      {/* Header */}
-      <header className="h-10 bg-white border-b border-border flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-2">
-          <PawIcon className="w-5 h-5 text-[var(--yuuko-green)]" />
-          <span className="text-sm font-medium text-foreground">
-            ゆうこと、ニュースを読みやすく。
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button className="p-1.5 hover:bg-muted rounded transition-colors">
-            <Minus className="w-4 h-4 text-muted-foreground" />
-          </button>
-          <button className="p-1.5 hover:bg-muted rounded transition-colors">
-            <Square className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
-          <button className="p-1.5 hover:bg-red-100 rounded transition-colors">
-            <X className="w-4 h-4 text-muted-foreground hover:text-red-500" />
-          </button>
-        </div>
-      </header>
+      <AppTitleBar />
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -398,8 +353,10 @@ export default function GachaScreen({
             {mockNavigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
-                item={item}
-                onNavigate={handleNavigate}
+                label={item.label}
+                icon={item.icon}
+                isActive={item.isActive}
+                onClick={() => handleNavigate(item.id)}
               />
             ))}
           </nav>
@@ -446,7 +403,7 @@ export default function GachaScreen({
         </aside>
 
         {/* Center Content */}
-        <main className="flex-1 flex flex-col overflow-y-auto">
+        <main className="flex-1 min-w-0 flex flex-col overflow-y-auto">
           {/* Top Bar */}
           <div className="flex items-center justify-between p-4 pb-2">
             {/* Breadcrumb */}
@@ -506,8 +463,11 @@ export default function GachaScreen({
           </div>
 
           {/* Main Gacha Area - Grid Layout */}
-          <div className="flex-1 px-4 pb-4">
-            <div className="grid grid-cols-[180px_1fr_240px] gap-4 h-full" style={{ minHeight: '400px' }}>
+          <div className="flex-1 px-4 pb-4 overflow-x-auto">
+            <div
+              className="grid grid-cols-[180px_minmax(420px,1fr)_240px] gap-4 h-full min-w-[920px]"
+              style={{ minHeight: "400px" }}
+            >
               {/* Left: Pickup */}
               <div className="space-y-4">
                 <Card className="border-yellow-400 bg-gradient-to-br from-yellow-50 to-orange-50 overflow-hidden">
