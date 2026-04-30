@@ -4,6 +4,8 @@ import React from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { AppTitleBar } from "@/components/layout/AppTitleBar";
+import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Newspaper,
@@ -21,8 +23,6 @@ import {
   ArrowLeft,
   ExternalLink,
   X,
-  Minus,
-  Square,
   Search,
 } from "lucide-react";
 
@@ -33,7 +33,7 @@ import {
 type NavigationItem = {
   id: string;
   label: string;
-  icon: React.ElementType;
+  icon: React.ComponentType<{ className?: string }>;
   isActive?: boolean;
 };
 
@@ -145,31 +145,6 @@ const mockYuukoSpeechBubble = `この記事を、わかりやすく
 // Sub Components
 // ============================================
 
-function WindowControls() {
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        className="w-4 h-4 rounded-sm bg-muted hover:bg-muted-foreground/20 flex items-center justify-center transition-colors"
-        onClick={() => console.log("Minimize")}
-      >
-        <Minus className="w-2.5 h-2.5 text-muted-foreground" />
-      </button>
-      <button
-        className="w-4 h-4 rounded-sm bg-muted hover:bg-muted-foreground/20 flex items-center justify-center transition-colors"
-        onClick={() => console.log("Maximize")}
-      >
-        <Square className="w-2 h-2 text-muted-foreground" />
-      </button>
-      <button
-        className="w-4 h-4 rounded-sm bg-muted hover:bg-red-100 flex items-center justify-center transition-colors group"
-        onClick={() => console.log("Close")}
-      >
-        <X className="w-2.5 h-2.5 text-muted-foreground group-hover:text-red-500" />
-      </button>
-    </div>
-  );
-}
-
 function PawIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -184,31 +159,6 @@ function PawIcon({ className }: { className?: string }) {
       <circle cx="9" cy="6" r="2" />
       <circle cx="15" cy="6" r="2" />
     </svg>
-  );
-}
-
-function SidebarNavItem({
-  item,
-  onNavigate,
-}: {
-  item: NavigationItem;
-  onNavigate: (id: string) => void;
-}) {
-  const Icon = item.icon;
-  return (
-    <button
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all text-sm ${
-        item.isActive
-          ? "bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] font-medium border border-[var(--yuuko-green)]/30"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-      onClick={() => onNavigate(item.id)}
-    >
-      <Icon
-        className={`w-5 h-5 ${item.isActive ? "text-[var(--yuuko-green)]" : ""}`}
-      />
-      <span>{item.label}</span>
-    </button>
   );
 }
 
@@ -378,31 +328,20 @@ export default function NewsReaderScreen({
   );
 
   const handleNavigate = (id: string) => {
-    console.log("Navigate to:", id);
     if (onNavigate) {
       onNavigate(id);
     }
   };
 
   const handleGoBack = () => {
-    console.log("Go back to home");
     if (onNavigate) {
       onNavigate("home");
     }
   };
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
-      {/* Title Bar */}
-      <header className="h-10 bg-white/80 backdrop-blur-sm border-b border-border/50 flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-2">
-          <PawIcon className="w-5 h-5 text-[var(--yuuko-green)]" />
-          <span className="text-sm font-medium text-foreground">
-            ゆうこと、ニュースを読みやすく。
-          </span>
-        </div>
-        <WindowControls />
-      </header>
+    <div className="h-dvh w-full overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
+      <AppTitleBar className="bg-white border-border/50" />
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -422,12 +361,14 @@ export default function NewsReaderScreen({
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 p-3 space-y-1">
+          <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
             {mockNavigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
-                item={item}
-                onNavigate={handleNavigate}
+                label={item.label}
+                icon={item.icon}
+                isActive={item.isActive}
+                onClick={() => handleNavigate(item.id)}
               />
             ))}
           </nav>
@@ -476,7 +417,7 @@ export default function NewsReaderScreen({
         </aside>
 
         {/* Center Content */}
-        <main className="flex-1 flex flex-col overflow-hidden relative">
+        <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
           <div className="flex-1 overflow-y-auto p-6">
             {/* Breadcrumb */}
             <Breadcrumb />
@@ -688,7 +629,7 @@ export default function NewsReaderScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 p-4 flex flex-col shrink-0">
+        <aside className="w-72 p-4 flex flex-col shrink-0 overflow-y-auto">
           {/* Yuuko Speech Bubble */}
           <div className="mb-2">
             <YuukoSpeechBubbleRight message={mockYuukoSpeechBubble} />
