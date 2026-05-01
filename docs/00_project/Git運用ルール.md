@@ -442,7 +442,7 @@ Thumbs.db
 AGENT_Tauri.md
 README.md
 package.json
-package-lock.json
+pnpm-lock.yaml
 src/
 src-tauri/
 docs/

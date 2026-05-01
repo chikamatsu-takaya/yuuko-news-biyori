@@ -42,7 +42,7 @@ AIは、コード生成、修正、リファクタリング、UI調整、文書�
 | デスクトップアプリ基盤 | Tauri v2 |
 | UI | React |
 | UI言語 | TypeScript |
-| UIビルド | Vite |
+| UIビルド | Next.js (App Router) |
 | 中核ロジック | Rust |
 | パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
