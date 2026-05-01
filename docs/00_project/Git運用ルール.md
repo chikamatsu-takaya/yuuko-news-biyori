@@ -642,12 +642,12 @@ git push
 
 ## 14.1 起動確認
 ```bash
-npm run tauri dev
+pnpm tauri dev
 ```
 
 ## 14.2 フロントエンド確認
 ```bash
-npm run dev
+pnpm dev
 ```
 
 ## 14.3 Rust確認
@@ -666,7 +666,7 @@ cargo check
 `package.json` を変更した場合:
 
 ```bash
-npm install
+pnpm install
 ```
 
 `Cargo.toml` を変更した場合:
@@ -676,7 +676,7 @@ cargo check
 ```
 
 ## 14.5 注意
-- `npm install` 後に `package-lock.json` が変わる場合がある。
+- `pnpm install` 後に `pnpm-lock.yaml` が変わる場合がある。
 - `Cargo.toml` 更新後に `Cargo.lock` が変わる場合がある。
 - アプリ開発では `Cargo.lock` は基本的にコミット対象とする。
 - `node_modules/` と `src-tauri/target/` はコミットしない。
@@ -721,7 +721,7 @@ cargo check
 ### 16.2 発表前チェック
 発表前は以下を確認する。
 
-- `npm run tauri dev` でアプリが起動する
+- `pnpm tauri dev` でアプリが起動する
 - メイン画面が表示される
 - ゆうこが表示される
 - ニュース閲覧画面に遷移できる

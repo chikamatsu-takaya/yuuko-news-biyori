@@ -44,7 +44,7 @@ AIは、コード生成、修正、リファクタリング、UI調整、文書�
 | UI言語 | TypeScript |
 | UIビルド | Vite |
 | 中核ロジック | Rust |
-| パッケージ管理 | npm |
+| パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
 | AI利用 | Gemini API + MockProvider |
 | エディタ | VS Code |
@@ -391,7 +391,7 @@ Rust側を変更した場合は、少なくとも以下を確認すること。
 ### 9.5 TypeScript / React変更時
 React側を変更した場合は、少なくとも以下を確認すること。
 
-- `npm run dev` または `npm run tauri dev` で画面確認できるか
+- `pnpm dev` または `pnpm tauri dev` で画面確認できるか
 - TypeScript型エラーがないか
 - ESLint / Prettierの指摘がないか
 - 画面遷移が壊れていないか

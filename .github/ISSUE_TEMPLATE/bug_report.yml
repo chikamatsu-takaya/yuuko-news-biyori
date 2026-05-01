@@ -1,0 +1,77 @@
+name: "Bug report"
+description: "不具合報告テンプレート"
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        不具合の再現に必要な情報を揃えるためのテンプレートです。
+        可能な範囲で具体的に記入してください。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きたかを簡潔に記載してください。
+      placeholder: 例) 設定画面で保存ボタンを押すと何も反応しない
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待結果
+      description: 本来どうなるべきかを記載してください。
+      placeholder: 例) 設定が保存されてトーストが表示される
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の結果
+      description: 実際に起きた結果を記載してください。
+      placeholder: 例) ボタン押下後に表示変化なし。コンソールにエラーが出る
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 1ステップ1行で記載してください。
+      placeholder: |
+        1. アプリを起動
+        2. 設定画面へ移動
+        3. 任意項目を変更して保存ボタンを押す
+        4. 現象を確認
+    validations:
+      required: true
+
+  - type: input
+    id: branch
+    attributes:
+      label: 発生ブランチ
+      description: どのブランチで確認したかを記載してください。
+      placeholder: 例) main / ui/main-layout-fix
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ・スクリーンショット
+      description: エラーログ、画像、動画があれば添付してください（秘密情報は除外）。
+      placeholder: 例) エラーメッセージ、スクリーンショットURL
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 補足
+      description: 回避策、関連Issue、気づきがあれば記載してください。
+    validations:
+      required: false
