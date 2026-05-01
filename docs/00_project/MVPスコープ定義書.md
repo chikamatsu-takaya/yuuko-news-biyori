@@ -28,7 +28,7 @@ Tauri版MVPでは、以下の技術構成を前提とする。
 | UI | React | 画面、ゆうこ表示、モーダル、ポップアップ |
 | UI言語 | TypeScript | 型安全な画面実装、Tauri command呼び出し |
 | 中核ロジック | Rust | ニュース取得、保存、AI連携、辞書、ランク管理 |
-| ビルド | Vite / npm | フロントエンド開発、Tauri起動 |
+| ビルド | Next.js / pnpm | フロントエンド開発、Tauri起動 |
 | 保存 | Markdown / JSON | ローカルニュース、設定、辞書、状態保存 |
 | AI | Gemini API / MockProvider | 要約、再説明、用語解説 |
 | エディタ | VS Code | 開発、拡張機能、AI駆動開発 |
@@ -48,13 +48,13 @@ Tauri command = ReactとRustの接続口
 MVP開発では、最低限以下が通る状態を維持する。
 
 ```bash
-npm run tauri dev
+pnpm tauri dev
 ```
 
 必要に応じて以下も確認する。
 
 ```bash
-npm run dev
+pnpm dev
 cd src-tauri
 cargo check
 ```
@@ -645,7 +645,7 @@ MVPでは、以下のTauri commandを優先する。
 MVPは、以下を満たした時点で完了とみなす。
 
 ### 14.1 必須完了条件
-- `npm run tauri dev` でアプリが起動できる
+- `pnpm tauri dev` でアプリが起動できる
 - RSSからニュースを取得できる
 - ニュースをローカル保存できる
 - メイン画面にニュース一覧を表示できる
