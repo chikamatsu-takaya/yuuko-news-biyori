@@ -14,6 +14,11 @@ import {
   Clock,
   Bell,
   BellOff,
+  Sparkles,
+  Zap,
+  Info,
+  Home,
+  Settings,
 } from "lucide-react";
 
 // ============================================
@@ -43,6 +48,23 @@ type NotificationOptionProps = {
   description: string;
   selected: boolean;
   onClick: () => void;
+};
+
+type AIOptionCardProps = {
+  title: string;
+  description: string;
+  selected: boolean;
+  onClick: () => void;
+  recommended?: boolean;
+  icon: React.ReactNode;
+};
+
+type OnboardingSettings = {
+  selectedGenres: string[];
+  notificationFrequency: string;
+  startTime: string;
+  endTime: string;
+  aiMode: string;
 };
 
 // ============================================
@@ -169,6 +191,54 @@ function NotificationOption({
   );
 }
 
+function AIOptionCard({
+  title,
+  description,
+  selected,
+  onClick,
+  recommended,
+  icon,
+}: AIOptionCardProps) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full p-5 rounded-xl text-left transition-all border relative ${
+        selected
+          ? "bg-[var(--yuuko-green-light)] border-[var(--yuuko-green)] ring-2 ring-[var(--yuuko-green)]/20"
+          : "bg-white border-border hover:border-[var(--yuuko-green)]/50"
+      }`}
+    >
+      {recommended && (
+        <span className="absolute -top-2 left-4 px-2 py-0.5 bg-[var(--yuuko-green)] text-white text-xs rounded-full">
+          おすすめ
+        </span>
+      )}
+      <div className="flex items-start gap-4">
+        <div
+          className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+            selected
+              ? "bg-[var(--yuuko-green)] text-white"
+              : "bg-[var(--yuuko-cream)] text-[var(--yuuko-green)]"
+          }`}
+        >
+          {icon}
+        </div>
+        <div className="flex-1">
+          <div className="font-semibold text-foreground text-lg">{title}</div>
+          <div className="text-sm text-muted-foreground mt-1 leading-relaxed">
+            {description}
+          </div>
+        </div>
+        {selected && (
+          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center shrink-0">
+            <Check className="w-4 h-4 text-white" />
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
+
 function YuukoSpeechBubble({ message }: { message: string }) {
   return (
     <div className="relative bg-white rounded-2xl px-5 py-4 shadow-md border border-border/50 max-w-[220px]">
@@ -284,10 +354,14 @@ function Step2GenreSelection({
   onNext,
   onBack,
   onSkip,
+  settings,
+  onSettingsChange,
 }: {
   onNext: () => void;
   onBack: () => void;
   onSkip: () => void;
+  settings: OnboardingSettings;
+  onSettingsChange: (settings: Partial<OnboardingSettings>) => void;
 }) {
   const genres = [
     "AI・テクノロジー",
@@ -302,15 +376,11 @@ function Step2GenreSelection({
     "環境・エネルギー",
   ];
 
-  const [selectedGenres, setSelectedGenres] = useState<string[]>([
-    "AI・テクノロジー",
-    "ビジネス",
-  ]);
-
   const toggleGenre = (genre: string) => {
-    setSelectedGenres((prev) =>
-      prev.includes(genre) ? prev.filter((g) => g !== genre) : [...prev, genre]
-    );
+    const newGenres = settings.selectedGenres.includes(genre)
+      ? settings.selectedGenres.filter((g) => g !== genre)
+      : [...settings.selectedGenres, genre];
+    onSettingsChange({ selectedGenres: newGenres });
   };
 
   return (
@@ -334,7 +404,7 @@ function Step2GenreSelection({
             <GenreChip
               key={genre}
               label={genre}
-              selected={selectedGenres.includes(genre)}
+              selected={settings.selectedGenres.includes(genre)}
               onClick={() => toggleGenre(genre)}
             />
           ))}
@@ -342,7 +412,7 @@ function Step2GenreSelection({
 
         {/* Selected count */}
         <div className="mb-6 text-sm text-muted-foreground">
-          {selectedGenres.length}個のジャンルを選択中
+          {settings.selectedGenres.length}個のジャンルを選択中
         </div>
 
         {/* Buttons */}
@@ -379,15 +449,15 @@ function Step3NotificationSettings({
   onNext,
   onBack,
   onSkip,
+  settings,
+  onSettingsChange,
 }: {
   onNext: () => void;
   onBack: () => void;
   onSkip: () => void;
+  settings: OnboardingSettings;
+  onSettingsChange: (settings: Partial<OnboardingSettings>) => void;
 }) {
-  const [selectedFrequency, setSelectedFrequency] = useState("normal");
-  const [startTime, setStartTime] = useState("07:00");
-  const [endTime, setEndTime] = useState("22:00");
-
   const frequencyOptions = [
     {
       id: "quiet",
@@ -431,8 +501,10 @@ function Step3NotificationSettings({
               key={option.id}
               title={option.title}
               description={option.description}
-              selected={selectedFrequency === option.id}
-              onClick={() => setSelectedFrequency(option.id)}
+              selected={settings.notificationFrequency === option.id}
+              onClick={() =>
+                onSettingsChange({ notificationFrequency: option.id })
+              }
             />
           ))}
         </div>
@@ -452,8 +524,8 @@ function Step3NotificationSettings({
               </label>
               <input
                 type="time"
-                value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
+                value={settings.startTime}
+                onChange={(e) => onSettingsChange({ startTime: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-border bg-white text-foreground"
               />
             </div>
@@ -464,8 +536,8 @@ function Step3NotificationSettings({
               </label>
               <input
                 type="time"
-                value={endTime}
-                onChange={(e) => setEndTime(e.target.value)}
+                value={settings.endTime}
+                onChange={(e) => onSettingsChange({ endTime: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-border bg-white text-foreground"
               />
             </div>
@@ -507,6 +579,237 @@ function Step3NotificationSettings({
   );
 }
 
+function Step4AISettings({
+  onNext,
+  onBack,
+  onSkip,
+  settings,
+  onSettingsChange,
+}: {
+  onNext: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+  settings: OnboardingSettings;
+  onSettingsChange: (settings: Partial<OnboardingSettings>) => void;
+}) {
+  const aiOptions = [
+    {
+      id: "trial",
+      title: "お試しモード",
+      description:
+        "APIキーなしで雰囲気を確認できます。\n画面や流れを試したい人向けです。",
+      icon: <Sparkles className="w-6 h-6" />,
+      recommended: true,
+    },
+    {
+      id: "full",
+      title: "AI要約を使う",
+      description:
+        "Gemini API を使って、実際にニュース要約や用語解説を生成します。\n詳しい設定はあとから変更できます。",
+      icon: <Zap className="w-6 h-6" />,
+      recommended: false,
+    },
+  ];
+
+  return (
+    <Card className="flex-1 max-w-xl border border-border/50 shadow-sm py-0">
+      <CardContent className="p-8">
+        {/* Title */}
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold text-foreground mb-3">
+            AI要約の使い方を選ぼう
+          </h2>
+          <p className="text-muted-foreground leading-relaxed">
+            ニュースのやさしい再説明や用語解説に使うAI機能の初期モードを選べます。
+            <br />
+            まずはお試しモードから始めても大丈夫です。
+          </p>
+        </div>
+
+        {/* AI Option Cards */}
+        <div className="space-y-4 mb-6">
+          {aiOptions.map((option) => (
+            <AIOptionCard
+              key={option.id}
+              title={option.title}
+              description={option.description}
+              selected={settings.aiMode === option.id}
+              onClick={() => onSettingsChange({ aiMode: option.id })}
+              recommended={option.recommended}
+              icon={option.icon}
+            />
+          ))}
+        </div>
+
+        {/* Info Box */}
+        <div className="flex items-start gap-3 p-4 bg-[var(--yuuko-cream)] rounded-xl mb-6">
+          <Info className="w-5 h-5 text-[var(--yuuko-green)] shrink-0 mt-0.5" />
+          <p className="text-sm text-muted-foreground">
+            APIキーの詳細設定は、あとで設定画面から行えます。
+          </p>
+        </div>
+
+        {/* Buttons */}
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            onClick={onBack}
+            className="h-12 px-6 text-muted-foreground border-border hover:bg-muted"
+          >
+            <ChevronLeft className="w-4 h-4 mr-1" />
+            戻る
+          </Button>
+          <Button
+            variant="outline"
+            onClick={onSkip}
+            className="flex-1 h-12 text-muted-foreground border-border hover:bg-muted"
+          >
+            あとで設定する
+          </Button>
+          <Button
+            onClick={onNext}
+            className="flex-1 bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white h-12"
+          >
+            次へ
+            <ChevronRight className="w-4 h-4 ml-1" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Step5Complete({
+  onBack,
+  onReview,
+  onComplete,
+  settings,
+}: {
+  onBack: () => void;
+  onReview: () => void;
+  onComplete: () => void;
+  settings: OnboardingSettings;
+}) {
+  const frequencyLabels: Record<string, string> = {
+    quiet: "控えめ",
+    normal: "ふつう",
+    active: "しっかり",
+  };
+
+  const aiModeLabels: Record<string, string> = {
+    trial: "お試しモード",
+    full: "AI要約を使う",
+  };
+
+  return (
+    <Card className="flex-1 max-w-xl border border-border/50 shadow-sm py-0">
+      <CardContent className="p-8">
+        {/* Title with sparkles */}
+        <div className="mb-6 text-center">
+          <div className="flex items-center justify-center gap-2 mb-3">
+            <Sparkles className="w-6 h-6 text-amber-400" />
+            <h2 className="text-2xl font-bold text-foreground">準備できたよ！</h2>
+            <Sparkles className="w-6 h-6 text-amber-400" />
+          </div>
+          <p className="text-muted-foreground leading-relaxed">
+            これで、ゆうこと一緒にニュースを読みやすくする準備ができました。
+          </p>
+        </div>
+
+        {/* Summary Card */}
+        <div className="bg-[var(--yuuko-cream)] rounded-xl p-5 mb-6 space-y-4">
+          {/* Selected Genres */}
+          <div>
+            <div className="text-xs font-medium text-muted-foreground mb-2">
+              選んだジャンル
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {settings.selectedGenres.length > 0 ? (
+                settings.selectedGenres.map((genre) => (
+                  <span
+                    key={genre}
+                    className="px-3 py-1 bg-white rounded-full text-sm text-foreground border border-border/50"
+                  >
+                    {genre}
+                  </span>
+                ))
+              ) : (
+                <span className="text-sm text-muted-foreground">未設定</span>
+              )}
+            </div>
+          </div>
+
+          {/* Notification Settings */}
+          <div className="border-t border-border/50 pt-4">
+            <div className="text-xs font-medium text-muted-foreground mb-2">
+              通知設定
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Bell className="w-4 h-4 text-[var(--yuuko-green)]" />
+                <span className="text-sm text-foreground">
+                  {frequencyLabels[settings.notificationFrequency] || "ふつう"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-[var(--yuuko-green)]" />
+                <span className="text-sm text-foreground">
+                  {settings.startTime}〜{settings.endTime}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* AI Mode */}
+          <div className="border-t border-border/50 pt-4">
+            <div className="text-xs font-medium text-muted-foreground mb-2">
+              AIモード
+            </div>
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[var(--yuuko-green)]" />
+              <span className="text-sm text-foreground">
+                {aiModeLabels[settings.aiMode] || "お試しモード"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Note */}
+        <p className="text-xs text-muted-foreground text-center mb-6">
+          これらの設定は、あとから設定画面でいつでも変更できます。
+        </p>
+
+        {/* Buttons */}
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            onClick={onBack}
+            className="h-12 px-6 text-muted-foreground border-border hover:bg-muted"
+          >
+            <ChevronLeft className="w-4 h-4 mr-1" />
+            戻る
+          </Button>
+          <Button
+            variant="outline"
+            onClick={onReview}
+            className="flex-1 h-12 text-muted-foreground border-border hover:bg-muted"
+          >
+            <Settings className="w-4 h-4 mr-1" />
+            設定を見直す
+          </Button>
+          <Button
+            onClick={onComplete}
+            className="flex-1 bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white h-12"
+          >
+            <Home className="w-4 h-4 mr-1" />
+            ホームへ
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ============================================
 // Main Component
 // ============================================
@@ -518,6 +821,19 @@ export default function OnboardingScreen({
 }: OnboardingScreenProps) {
   const [currentStep, setCurrentStep] = useState(1);
   const totalSteps = 5;
+
+  // Shared settings state
+  const [settings, setSettings] = useState<OnboardingSettings>({
+    selectedGenres: ["AI・テクノロジー", "ビジネス"],
+    notificationFrequency: "normal",
+    startTime: "07:00",
+    endTime: "22:00",
+    aiMode: "trial",
+  });
+
+  const handleSettingsChange = (newSettings: Partial<OnboardingSettings>) => {
+    setSettings((prev) => ({ ...prev, ...newSettings }));
+  };
 
   const handleNext = () => {
     if (currentStep < totalSteps) {
@@ -549,11 +865,16 @@ export default function OnboardingScreen({
     }
   };
 
+  const handleReview = () => {
+    // Go back to step 2 to review settings
+    setCurrentStep(2);
+  };
+
   const stepTitles: Record<number, string> = {
     1: "ようこそ",
     2: "ジャンル選択",
     3: "通知設定",
-    4: "外観設定",
+    4: "AI設定",
     5: "完了",
   };
 
@@ -567,10 +888,12 @@ export default function OnboardingScreen({
     3: `ニュースを見つけたら、
 画面の端からそっとお知らせするね。
 多すぎないように気をつけるよ！`,
-    4: `見た目もカスタマイズできるよ！
-好きな色を選んでね〜`,
-    5: `準備完了！
-一緒にニュースを読もう〜！`,
+    4: `ニュースを短くまとめたり、
+むずかしい言葉を説明したりできるよ。
+まずはお試しモードでも大丈夫！`,
+    5: `これで準備完了！
+気になるニュースを見つけたら、
+ぼくがそっと届けに行くね〜！`,
   };
 
   const renderStepContent = () => {
@@ -583,6 +906,8 @@ export default function OnboardingScreen({
             onNext={handleNext}
             onBack={handleBack}
             onSkip={handleSkip}
+            settings={settings}
+            onSettingsChange={handleSettingsChange}
           />
         );
       case 3:
@@ -591,41 +916,31 @@ export default function OnboardingScreen({
             onNext={handleNext}
             onBack={handleBack}
             onSkip={handleSkip}
+            settings={settings}
+            onSettingsChange={handleSettingsChange}
+          />
+        );
+      case 4:
+        return (
+          <Step4AISettings
+            onNext={handleNext}
+            onBack={handleBack}
+            onSkip={handleSkip}
+            settings={settings}
+            onSettingsChange={handleSettingsChange}
+          />
+        );
+      case 5:
+        return (
+          <Step5Complete
+            onBack={handleBack}
+            onReview={handleReview}
+            onComplete={handleComplete}
+            settings={settings}
           />
         );
       default:
-        // Placeholder for steps 4-5 (to be implemented)
-        return (
-          <Card className="flex-1 max-w-xl border border-border/50 shadow-sm py-0">
-            <CardContent className="p-8">
-              <div className="text-center py-12">
-                <h2 className="text-2xl font-bold text-foreground mb-4">
-                  {stepTitles[currentStep]}
-                </h2>
-                <p className="text-muted-foreground mb-8">
-                  この画面は準備中です...
-                </p>
-                <div className="flex items-center gap-3 justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={handleBack}
-                    className="h-12 px-6"
-                  >
-                    <ChevronLeft className="w-4 h-4 mr-1" />
-                    戻る
-                  </Button>
-                  <Button
-                    onClick={handleNext}
-                    className="h-12 px-8 bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white"
-                  >
-                    {currentStep === totalSteps ? "完了" : "次へ"}
-                    <ChevronRight className="w-4 h-4 ml-1" />
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        );
+        return null;
     }
   };
 
