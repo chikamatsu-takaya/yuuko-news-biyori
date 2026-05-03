@@ -21,6 +21,7 @@ import {
   HelpCircle,
   ChevronRight,
   Sparkles,
+  PlayCircle,
 } from "lucide-react";
 
 // ============================================
@@ -589,6 +590,16 @@ export default function MainScreen({
               </div>
             </CardContent>
           </Card>
+
+          {/* Onboarding Button */}
+          <Button
+            variant="outline"
+            className="w-full border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] h-10"
+            onClick={() => handleNavigate("onboarding")}
+          >
+            <PlayCircle className="w-4 h-4 mr-2" />
+            オンボーディングを見る
+          </Button>
         </aside>
       </div>
 

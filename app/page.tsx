@@ -8,8 +8,9 @@ import NewsHistoryScreen from "@/components/screens/NewsHistoryScreen";
 import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
+import OnboardingScreen from "@/components/screens/OnboardingScreen";
 
-type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize" | "gacha";
+type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize" | "gacha" | "onboarding";
 
 export default function Page() {
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
@@ -29,6 +30,8 @@ export default function Page() {
       setCurrentScreen("customize");
     } else if (screen === "gacha") {
       setCurrentScreen("gacha");
+    } else if (screen === "onboarding") {
+      setCurrentScreen("onboarding");
     }
   };
 
@@ -54,6 +57,10 @@ export default function Page() {
 
   if (currentScreen === "gacha") {
     return <GachaScreen onNavigate={handleNavigate} />;
+  }
+
+  if (currentScreen === "onboarding") {
+    return <OnboardingScreen onNavigate={handleNavigate} />;
   }
 
   return <MainScreen onNavigate={handleNavigate} />;
