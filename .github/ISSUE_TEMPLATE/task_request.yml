@@ -1,0 +1,67 @@
+name: "Task request"
+description: "作業依頼・改善提案テンプレート"
+title: "[Task] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        新規タスクや改善提案を、実装しやすい粒度で整理するためのテンプレートです。
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景 / 課題
+      description: なぜこのタスクが必要かを記載してください。
+      placeholder: 例) 画面ごとに余白定義がばらつき、UI微修正の手戻りが発生している
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目的
+      description: このタスク完了時にどうなっていれば成功かを記載してください。
+      placeholder: 例) 共通レイアウト基準に揃い、主要画面で余白差異がなくなる
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 対象範囲
+      description: 触る画面・フォルダ・機能範囲を記載してください。
+      placeholder: 例) components/screens/**, components/layout/** の見た目調整のみ
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 非対象
+      description: 今回やらないことを明記してください。
+      placeholder: 例) 色テーマの大幅変更、Rust実装、Tauri command接続
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 完了条件
+      description: チェック可能な完了条件を記載してください。
+      placeholder: |
+        - [ ] 主要画面でカードのはみ出しがない
+        - [ ] スクロール領域が崩れない
+        - [ ] pnpm lint / pnpm build / cargo check が通る
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参照資料
+      description: 関連ドキュメントやリンクを記載してください。
+      placeholder: 例) docs/02_design/画面詳細設計書.md
+    validations:
+      required: false
