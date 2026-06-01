@@ -30,6 +30,7 @@ dist-ssr/
 .vite/
 out/
 build/
+*.tsbuildinfo
 
 # Tauri / Rust
 src-tauri/target/

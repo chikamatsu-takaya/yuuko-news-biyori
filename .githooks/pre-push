@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${SKIP_REVIEW_HOOK:-0}" = "1" ]; then
+  echo "[pre-push] SKIP_REVIEW_HOOK=1: skipping review checks."
+  exit 0
+fi
+
+echo "[pre-push] Running review:strict..."
+
+if command -v corepack >/dev/null 2>&1; then
+  corepack pnpm run review:strict
+elif command -v pnpm >/dev/null 2>&1; then
+  pnpm run review:strict
+else
+  echo "[pre-push] pnpm/corepack not found. Install Node.js + Corepack." >&2
+  exit 1
+fi
