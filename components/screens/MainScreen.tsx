@@ -24,6 +24,10 @@ import {
   Sparkles,
   PlayCircle,
 } from "lucide-react";
+import {
+  getRecommendedArticles,
+  type ArticleSummaryDto as TauriArticleSummary,
+} from "@/lib/tauri/articles";
 import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
 
 // ============================================
@@ -78,7 +82,7 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings },
 ];
 
-const mockArticles: Article[] = [
+const fallbackMockArticles: Article[] = [
   {
     id: "1",
     category: "AI・テクノロジー",
@@ -149,6 +153,39 @@ const mockYuukoComment = `今日もいろんな
 一緒に見てこっ♪`;
 
 const fallbackStatusMessage = "新しいニュースが3件届いてるよ！";
+
+const toCategoryColor = (genre: string): string => {
+  if (genre.includes("AI")) {
+    return "bg-blue-500";
+  }
+  if (genre.includes("ビジネス")) {
+    return "bg-emerald-500";
+  }
+  return "bg-purple-500";
+};
+
+const toThumbnailType = (genre: string): Article["thumbnailType"] => {
+  if (genre.includes("AI")) {
+    return "ai";
+  }
+  if (genre.includes("ビジネス")) {
+    return "business";
+  }
+  return "quantum";
+};
+
+const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
+  id: article.articleId,
+  category: article.genre,
+  categoryColor: toCategoryColor(article.genre),
+  title: article.title,
+  description: article.summary ?? "要約は準備中だよ。気になったら開いてみてね。",
+  source: article.sourceName,
+  timeAgo: article.publishedAtText,
+  isNew: article.readState === "unread",
+  isFavorite: article.isFavorite,
+  thumbnailType: toThumbnailType(article.genre),
+});
 
 // ============================================
 // Sub Components
@@ -382,6 +419,7 @@ export default function MainScreen({
   onNavigate?: (screen: string) => void;
 }) {
   const [isAutoStart] = React.useState(true);
+  const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
   const [yuukoBalloonMessage, setYuukoBalloonMessage] =
     React.useState(fallbackYuukoMessage);
   const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
@@ -428,6 +466,29 @@ export default function MainScreen({
     };
 
     void loadYuukoNotificationState();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadRecommendedArticles = async () => {
+      try {
+        const recommendedArticles = await getRecommendedArticles({ limit: 10 });
+        if (!active || !recommendedArticles || recommendedArticles.length === 0) {
+          return;
+        }
+
+        setArticles(recommendedArticles.map(mapTauriArticleToUi));
+      } catch (error) {
+        console.warn("Failed to load recommended articles:", error);
+      }
+    };
+
+    void loadRecommendedArticles();
 
     return () => {
       active = false;
@@ -532,7 +593,7 @@ export default function MainScreen({
             </div>
 
             <div className="space-y-3">
-              {mockArticles.map((article) => (
+              {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
                   article={article}

@@ -46,7 +46,7 @@
 - [x] 設定保存の安全化（temp + backup + restore）
 - [x] 型安全強化（`AiProvider` / `ExplanationLevel` enum）
 - [ ] 設計上の残コマンド実装
-  - [ ] `get_recommended_articles`
+  - [x] `get_recommended_articles`（2026-06-01）
   - [ ] `get_article_detail`
   - [ ] `generate_article_summary`
   - [ ] `explain_selected_term`
@@ -82,3 +82,4 @@
 - [x] 2026-06-01: ローカル厳密レビューゲート導入
 - [x] 2026-06-01: Tauri設定コマンド基盤実装
 - [x] 2026-06-01: ゆうこ通知状態/報酬確認コマンドの基盤実装
+- [x] 2026-06-01: `get_recommended_articles` 実装とMainScreen段階接続
