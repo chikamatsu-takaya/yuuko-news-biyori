@@ -52,8 +52,8 @@
   - [ ] `explain_selected_term`
   - [ ] `save_dictionary_entry`
   - [ ] `update_article_favorite`
-  - [ ] `get_yuuko_notification_state`
-  - [ ] `confirm_rank_up_reward`
+  - [x] `get_yuuko_notification_state`（2026-06-01）
+  - [x] `confirm_rank_up_reward`（2026-06-01）
 
 ### D. フロント-バック接続
 - [x] 画面側のTauri呼び出しラッパー作成（型付き）（2026-06-01）
@@ -81,3 +81,4 @@
 - [x] 2026-06-01: `develop` を開発統合ブランチとして運用開始
 - [x] 2026-06-01: ローカル厳密レビューゲート導入
 - [x] 2026-06-01: Tauri設定コマンド基盤実装
+- [x] 2026-06-01: ゆうこ通知状態/報酬確認コマンドの基盤実装
