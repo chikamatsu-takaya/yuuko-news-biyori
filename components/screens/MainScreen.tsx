@@ -24,6 +24,7 @@ import {
   Sparkles,
   PlayCircle,
 } from "lucide-react";
+import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
 
 // ============================================
 // TypeScript Types
@@ -136,7 +137,7 @@ const mockUserStats: UserStats = {
   unclaimedRewards: 2,
 };
 
-const mockYuukoMessage = `ふむふむ…
+const fallbackYuukoMessage = `ふむふむ…
 これなんか
 おもしろそうだよ〜！
 気になるのあったら
@@ -146,6 +147,8 @@ const mockYuukoComment = `今日もいろんな
 ニュースがあるよ〜！
 気になるの、
 一緒に見てこっ♪`;
+
+const fallbackStatusMessage = "新しいニュースが3件届いてるよ！";
 
 // ============================================
 // Sub Components
@@ -379,6 +382,57 @@ export default function MainScreen({
   onNavigate?: (screen: string) => void;
 }) {
   const [isAutoStart] = React.useState(true);
+  const [yuukoBalloonMessage, setYuukoBalloonMessage] =
+    React.useState(fallbackYuukoMessage);
+  const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadYuukoNotificationState = async () => {
+      try {
+        const state = await getYuukoNotificationState();
+        if (!active || !state) {
+          return;
+        }
+
+        const rewardMessage =
+          state.rewardNotification?.pending && state.rewardNotification.message
+            ? state.rewardNotification.message
+            : undefined;
+        setYuukoBalloonMessage(
+          rewardMessage ?? state.balloonText ?? fallbackYuukoMessage
+        );
+
+        if (state.rewardNotification?.pending) {
+          setStatusMessage(
+            `未確認の報酬が${state.rewardNotification.rewardIds.length}件あるよ！`
+          );
+          return;
+        }
+
+        if (state.hasNotification) {
+          setStatusMessage("新しいニュース通知があるよ！");
+          return;
+        }
+
+        if (state.state === "Suppressed") {
+          setStatusMessage("通知はOFF中だよ。設定からいつでも変更できるよ。");
+          return;
+        }
+
+        setStatusMessage(fallbackStatusMessage);
+      } catch (error) {
+        console.warn("Failed to load yuuko notification state:", error);
+      }
+    };
+
+    void loadYuukoNotificationState();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -491,7 +545,7 @@ export default function MainScreen({
           {/* Yuuko Character Area */}
           <div className="flex-1 relative flex items-end justify-center pb-4">
             <div className="flex items-end gap-2">
-              <YuukoSpeechBubble message={mockYuukoMessage} />
+              <YuukoSpeechBubble message={yuukoBalloonMessage} />
               <YuukoCharacter />
             </div>
           </div>
@@ -615,7 +669,7 @@ export default function MainScreen({
           <span className="text-xs text-muted-foreground">|</span>
           <span className="text-xs text-[var(--yuuko-green)] flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]" />
-            新しいニュースが3件届いてるよ！
+            {statusMessage}
           </span>
         </div>
         <div className="flex items-center gap-3">
