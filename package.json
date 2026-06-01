@@ -6,13 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test": "node --test",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "check:frontend": "pnpm run lint && pnpm run typecheck",
+    "check:frontend": "pnpm run lint && pnpm run typecheck && pnpm run test",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "check:rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check:rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "check:rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
-    "review:quick": "pnpm run check:frontend && pnpm run check:rust",
+    "review:quick": "pnpm run check:frontend && pnpm run check:rust && pnpm run check:rust:test",
     "review:strict": "pnpm run review:quick && pnpm run build && pnpm run check:rust:fmt && pnpm run check:rust:clippy",
     "review": "pnpm run review:strict",
     "hooks:install": "git config --local core.hooksPath .githooks"
@@ -56,7 +58,7 @@
     "embla-carousel-react": "8.6.0",
     "input-otp": "1.4.2",
     "lucide-react": "^0.564.0",
-    "next": "16.2.4",
+    "next": "16.2.6",
     "next-themes": "^0.4.6",
     "react": "^19",
     "react-day-picker": "9.13.2",
@@ -76,10 +78,17 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9.38.0",
-    "eslint-config-next": "16.2.4",
+    "eslint-config-next": "16.2.6",
     "postcss": "^8.5",
     "tailwindcss": "^4.2.0",
     "tw-animate-css": "1.3.3",
     "typescript": "5.7.3"
+  },
+  "pnpm": {
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-r5fr-rjxr-66jc"
+      ]
+    }
   }
 }
