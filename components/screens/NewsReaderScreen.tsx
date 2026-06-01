@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -280,8 +281,10 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
 function YuukoCharacter() {
   return (
     <div className="relative">
-      <img
+      <Image
         src="/assets/yuuko.png"
+        width={192}
+        height={192}
         alt="ゆうこ"
         className="w-48 h-auto drop-shadow-lg animate-float"
         onError={(e) => {
@@ -321,7 +324,7 @@ export default function NewsReaderScreen({
 }: {
   onNavigate?: (screen: string) => void;
 }) {
-  const [isAutoStart, setIsAutoStart] = React.useState(true);
+  const [isAutoStart] = React.useState(true);
   const [showTermPopup, setShowTermPopup] = React.useState(true);
   const [selectedTerm, setSelectedTerm] = React.useState(
     mockArticle.highlightedTerms[0]

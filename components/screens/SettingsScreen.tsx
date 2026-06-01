@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
@@ -642,8 +643,10 @@ export default function SettingsScreen({
             <div className="absolute bottom-4 left-2 text-[var(--yuuko-green-light)] opacity-50">
               🐾
             </div>
-            <img
+            <Image
               src="/assets/yuuko.png"
+              width={192}
+              height={192}
               alt="ゆうこ"
               className="w-48 h-auto object-contain animate-[float_3s_ease-in-out_infinite]"
               onError={(e) => {
