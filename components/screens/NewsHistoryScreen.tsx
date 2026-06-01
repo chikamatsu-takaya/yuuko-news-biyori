@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -520,8 +521,10 @@ export default function NewsHistoryScreen({
           {/* Yuuko Character */}
           <div className="flex justify-center mb-3">
             <div className="relative">
-              <img
+              <Image
                 src="/assets/yuuko.png"
+                width={160}
+                height={160}
                 alt="ゆうこ"
                 className="w-40 h-40 object-contain animate-[float_3s_ease-in-out_infinite]"
                 onError={(e) => {

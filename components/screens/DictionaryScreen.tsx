@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import {
   Home,
   Newspaper,
@@ -21,7 +22,6 @@ import {
   CircuitBoard,
   ChevronLeft,
   ChevronRight,
-  ExternalLink,
   Share2,
   Trash2,
   Pencil,
@@ -615,8 +615,10 @@ export default function DictionaryScreen({
             {/* Yuuko Character */}
             <div className="flex justify-center mb-4">
               <div className="relative">
-                <img
+                <Image
                   src="/assets/yuuko.png"
+                  width={144}
+                  height={144}
                   alt="ゆうこ"
                   className="w-36 h-auto animate-float"
                   style={{

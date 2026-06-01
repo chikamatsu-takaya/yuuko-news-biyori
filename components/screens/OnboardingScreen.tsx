@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
@@ -254,8 +255,10 @@ function YuukoSpeechBubble({ message }: { message: string }) {
 function YuukoCharacter() {
   return (
     <div className="relative">
-      <img
+      <Image
         src="/assets/yuuko.png"
+        width={256}
+        height={256}
         alt="ゆうこ"
         className="w-64 h-auto drop-shadow-lg animate-float"
         onError={(e) => {

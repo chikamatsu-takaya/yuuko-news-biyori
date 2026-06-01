@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -347,8 +348,10 @@ function YuukoSpeechBubble({ message }: { message: string }) {
 function YuukoCharacter() {
   return (
     <div className="relative">
-      <img
+      <Image
         src="/assets/yuuko.png"
+        width={224}
+        height={224}
         alt="ゆうこ"
         className="w-56 h-auto drop-shadow-lg animate-float"
         onError={(e) => {
@@ -375,7 +378,7 @@ export default function MainScreen({
 }: {
   onNavigate?: (screen: string) => void;
 }) {
-  const [isAutoStart, setIsAutoStart] = React.useState(true);
+  const [isAutoStart] = React.useState(true);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -384,6 +387,7 @@ export default function MainScreen({
   };
 
   const handleArticleClick = (articleId: string) => {
+    void articleId;
     if (onNavigate) {
       onNavigate("news");
     }

@@ -24,9 +24,9 @@
 - [x] `CONTRIBUTING.md` / `.env.example` 整備
 - [x] ローカル厳密レビュー導入（`review:strict`, `.githooks/pre-push`）
 - [ ] 全メンバーのhook有効化確認（`pnpm run hooks:install`）
-- [ ] Lint warning（13件）の解消
-  - [ ] 未使用変数の整理
-  - [ ] `<img>` を `next/image` へ移行（優先度が低い画面は後回し可）
+- [x] Lint warning（13件）の解消（2026-06-01）
+  - [x] 未使用変数の整理
+  - [x] `<img>` を `next/image` へ移行（優先度が低い画面は後回し可）
 
 ### B. フロントエンド（MVP安定化）
 - [x] 主要画面の土台作成（Main / Reader / Dictionary / Settings / Customize / Gacha / History / Onboarding）
