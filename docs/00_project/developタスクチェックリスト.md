@@ -56,8 +56,8 @@
   - [ ] `confirm_rank_up_reward`
 
 ### D. フロント-バック接続
-- [ ] 画面側のTauri呼び出しラッパー作成（型付き）
-- [ ] 設定画面を `get_user_settings` / `save_user_settings` に接続
+- [x] 画面側のTauri呼び出しラッパー作成（型付き）（2026-06-01）
+- [x] 設定画面を `get_user_settings` / `save_user_settings` に接続（2026-06-01）
 - [ ] Mockデータ依存箇所を段階的に置換
 - [ ] 失敗時UI（トースト/再試行/フォールバック）統一
 

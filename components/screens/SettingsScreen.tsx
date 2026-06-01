@@ -34,6 +34,11 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
+import {
+  getUserSettings,
+  saveUserSettings,
+  type UserSettingsDto,
+} from "@/lib/tauri/settings";
 
 // Types
 type NotificationSettings = {
@@ -131,6 +136,81 @@ const settingsMenuItems: SettingsMenuItem[] = [
   { id: "other", label: "その他", icon: Settings },
 ];
 
+const fallbackUserSettingsDto: UserSettingsDto = {
+  genres: ["AI", "IT"],
+  notifyStartTime: "09:00",
+  notifyEndTime: "18:00",
+  notifyMaxPerDay: 3,
+  enableYuukoPopup: true,
+  suppressDuringMeeting: true,
+  suppressDuringMicUse: true,
+  suppressDuringFullscreen: true,
+  autoStartOnPcBoot: false,
+  explanationLevel: "normal",
+  selectedThemeId: "default",
+  selectedToneId: "gentle",
+  selectedPersonalityId: "standard",
+  nickname: "",
+  aiProvider: "mock",
+};
+
+const mapSettingsFromDto = (
+  base: SettingsState,
+  dto: UserSettingsDto
+): SettingsState => ({
+  ...base,
+  notification: {
+    ...base.notification,
+    enabled: dto.enableYuukoPopup,
+    startTime: dto.notifyStartTime,
+    endTime: dto.notifyEndTime,
+    minRecommendCount: dto.notifyMaxPerDay,
+  },
+  suppression: {
+    ...base.suppression,
+    suppressInMeeting: dto.suppressDuringMeeting,
+    suppressWhenMicInUse: dto.suppressDuringMicUse,
+    suppressWhenFullscreen: dto.suppressDuringFullscreen,
+  },
+  ai: {
+    ...base.ai,
+    provider: dto.aiProvider,
+    providerStatus: dto.aiProvider,
+  },
+});
+
+const buildDtoForSave = (
+  settingsState: SettingsState,
+  baseDto: UserSettingsDto | null
+): UserSettingsDto => {
+  const source = baseDto ?? fallbackUserSettingsDto;
+  const normalizedProvider =
+    settingsState.ai.provider === "mock" ||
+    settingsState.ai.provider === "gemini" ||
+    settingsState.ai.provider === "openai" ||
+    settingsState.ai.provider === "local"
+      ? settingsState.ai.provider
+      : source.aiProvider;
+
+  return {
+    genres: source.genres,
+    notifyStartTime: settingsState.notification.startTime,
+    notifyEndTime: settingsState.notification.endTime,
+    notifyMaxPerDay: settingsState.notification.minRecommendCount,
+    enableYuukoPopup: settingsState.notification.enabled,
+    suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
+    suppressDuringMicUse: settingsState.suppression.suppressWhenMicInUse,
+    suppressDuringFullscreen: settingsState.suppression.suppressWhenFullscreen,
+    autoStartOnPcBoot: source.autoStartOnPcBoot,
+    explanationLevel: source.explanationLevel,
+    selectedThemeId: source.selectedThemeId,
+    selectedToneId: source.selectedToneId,
+    selectedPersonalityId: source.selectedPersonalityId,
+    nickname: source.nickname,
+    aiProvider: normalizedProvider,
+  };
+};
+
 // Sub Components
 function SettingRow({
   label,
@@ -201,6 +281,8 @@ export default function SettingsScreen({
   onNavigate?: (screen: string) => void;
 }) {
   const [settings, setSettings] = React.useState<SettingsState>(mockSettings);
+  const [backendSettings, setBackendSettings] =
+    React.useState<UserSettingsDto | null>(null);
   const [activeMenu, setActiveMenu] = React.useState("notification");
 
   const handleNavigate = (screen: string) => {
@@ -208,6 +290,30 @@ export default function SettingsScreen({
       onNavigate(screen);
     }
   };
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const dto = await getUserSettings();
+        if (!dto || cancelled) {
+          return;
+        }
+
+        setBackendSettings(dto);
+        setSettings((prev) => mapSettingsFromDto(prev, dto));
+      } catch (error) {
+        console.error("Failed to load settings from tauri command:", error);
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateNotification = (
     key: keyof NotificationSettings,
@@ -246,13 +352,22 @@ export default function SettingsScreen({
     }));
   };
 
-  const handleSave = () => {
-    console.log("Settings saved:", settings);
+  const handleSave = async () => {
+    try {
+      const dto = buildDtoForSave(settings, backendSettings);
+      await saveUserSettings(dto);
+      setBackendSettings(dto);
+      console.log("Settings saved via tauri command.");
+    } catch (error) {
+      console.error("Failed to save settings via tauri command:", error);
+    }
   };
 
   const handleCancel = () => {
-    console.log("Settings cancelled");
-    setSettings(mockSettings);
+    const rollback = backendSettings
+      ? mapSettingsFromDto(mockSettings, backendSettings)
+      : mockSettings;
+    setSettings(rollback);
   };
 
   const handleResetToDefault = () => {
