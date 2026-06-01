@@ -13,7 +13,7 @@
 
 ## 2. 現在地（2026-06-01時点）
 - `develop` / `main` の同期済み
-- CIあり（`pnpm lint` / `pnpm build` / `cargo check`）
+- CIあり（`lint` / `typecheck` / `build` / `test` / `cargo check` / `cargo fmt` / `cargo clippy` / `audit` / `secret scan`）
 - ローカル品質ゲートあり（`pnpm run review` / `pre-push` hook）
 - Tauri/Rustは設定系コマンドの基盤まで実装済み
 
@@ -62,7 +62,7 @@
 - [ ] 失敗時UI（トースト/再試行/フォールバック）統一
 
 ## 4. 中期タスク（MVP後半）
-- [ ] `cargo fmt --check` / `cargo clippy -D warnings` をCIへ追加
+- [x] `cargo fmt --check` / `cargo clippy -D warnings` をCIへ追加（2026-06-01）
 - [ ] バックエンド単体テスト（settings service/repository）追加
 - [ ] develop -> main マージ判定チェックリストを明文化
 - [ ] 実装状況マトリクス（リーダー資料）とリンク
@@ -83,3 +83,4 @@
 - [x] 2026-06-01: Tauri設定コマンド基盤実装
 - [x] 2026-06-01: ゆうこ通知状態/報酬確認コマンドの基盤実装
 - [x] 2026-06-01: `get_recommended_articles` 実装とMainScreen段階接続
+- [x] 2026-06-01: Test CI / Security CI / Secret Scan CI を追加

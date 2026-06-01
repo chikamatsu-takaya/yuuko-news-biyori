@@ -58,3 +58,23 @@ fn sample_articles() -> Vec<ArticleSummaryDto> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ArticleRepository;
+
+    #[test]
+    fn list_recommended_respects_limit() {
+        let repository = ArticleRepository::new();
+        let articles = repository.list_recommended(2);
+        assert_eq!(articles.len(), 2);
+    }
+
+    #[test]
+    fn list_recommended_keeps_recommendation_order() {
+        let repository = ArticleRepository::new();
+        let articles = repository.list_recommended(3);
+        assert!(articles[0].recommendation_score >= articles[1].recommendation_score);
+        assert!(articles[1].recommendation_score >= articles[2].recommendation_score);
+    }
+}

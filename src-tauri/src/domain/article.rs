@@ -41,3 +41,29 @@ impl GetRecommendedArticlesParams {
         Ok(limit as usize)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GetRecommendedArticlesParams;
+
+    #[test]
+    fn normalized_limit_defaults_to_twenty() {
+        let params = GetRecommendedArticlesParams { limit: None };
+        assert_eq!(params.normalized_limit().unwrap(), 20);
+    }
+
+    #[test]
+    fn normalized_limit_accepts_valid_range() {
+        let params = GetRecommendedArticlesParams { limit: Some(10) };
+        assert_eq!(params.normalized_limit().unwrap(), 10);
+    }
+
+    #[test]
+    fn normalized_limit_rejects_out_of_range_values() {
+        let zero = GetRecommendedArticlesParams { limit: Some(0) };
+        assert!(zero.normalized_limit().is_err());
+
+        let too_large = GetRecommendedArticlesParams { limit: Some(51) };
+        assert!(too_large.normalized_limit().is_err());
+    }
+}
