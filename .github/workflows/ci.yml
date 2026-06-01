@@ -9,7 +9,7 @@ on:
 
 jobs:
   frontend:
-    name: Frontend (lint/build)
+    name: Frontend (lint/typecheck/build)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,15 +32,29 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Typecheck
+        run: pnpm run typecheck
+
       - name: Build
         run: pnpm build
 
   rust:
-    name: Rust (cargo check)
+    name: Rust (check/fmt/clippy)
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo fmt check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
