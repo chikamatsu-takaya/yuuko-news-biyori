@@ -6,7 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check:frontend": "pnpm run lint && pnpm run typecheck",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "check:rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "check:rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "review:quick": "pnpm run check:frontend && pnpm run check:rust",
+    "review:strict": "pnpm run review:quick && pnpm run build && pnpm run check:rust:fmt && pnpm run check:rust:clippy",
+    "review": "pnpm run review:strict",
+    "hooks:install": "git config --local core.hooksPath .githooks"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
