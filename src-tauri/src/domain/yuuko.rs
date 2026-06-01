@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::article::ArticleSummaryDto;
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -27,20 +28,6 @@ pub enum YuukoPositionMode {
     LeftBottom,
     RightCenter,
     LeftCenter,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArticleSummaryDto {
-    pub article_id: String,
-    pub title: String,
-    pub source_name: String,
-    pub published_at_text: String,
-    pub genre: String,
-    pub summary: Option<String>,
-    pub is_favorite: bool,
-    pub read_state: String,
-    pub recommendation_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
