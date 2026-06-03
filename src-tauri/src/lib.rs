@@ -8,9 +8,11 @@ mod state;
 
 use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
+use repositories::dictionary_repository::DictionaryRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::article_service::ArticleService;
+use services::dictionary_service::DictionaryService;
 use services::settings_service::SettingsService;
 use services::yuuko_service::YuukoService;
 use state::AppState;
@@ -28,12 +30,14 @@ pub fn run() {
             let settings_service = SettingsService::new(settings_repository);
             settings_service.initialize_default_if_missing()?;
             let article_service = ArticleService::new(ArticleRepository::new());
+            let dictionary_service = DictionaryService::new(DictionaryRepository::new());
             let yuuko_state_repository = YuukoStateRepository::new(&paths);
             let yuuko_service =
                 YuukoService::new(SettingsRepository::new(&paths), yuuko_state_repository);
             yuuko_service.initialize_default_if_missing()?;
             app.manage(AppState {
                 article_service,
+                dictionary_service,
                 settings_service,
                 yuuko_service,
             });
@@ -55,6 +59,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::article_commands::get_recommended_articles,
             commands::article_commands::get_article_detail,
+            commands::dictionary_commands::explain_selected_term,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,
