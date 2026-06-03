@@ -24,6 +24,21 @@ pub struct DictionaryEntryDto {
     pub is_starred: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryEntryListItemDto {
+    pub entry_id: String,
+    pub key_text: String,
+    #[serde(rename = "type")]
+    pub entry_type: DictionaryEntryType,
+    pub short_explanation: String,
+    pub detail_explanation: String,
+    pub related_article_id: Option<String>,
+    pub related_article_title: Option<String>,
+    pub last_viewed_at_text: Option<String>,
+    pub is_starred: bool,
+}
+
 impl DictionaryEntryDto {
     pub fn validate(&self) -> Result<(), AppError> {
         if self.entry_id.trim().is_empty() {
@@ -58,6 +73,19 @@ impl DictionaryEntryDto {
     }
 }
 
+impl DictionaryEntryType {
+    pub fn from_filter_value(value: &str) -> Result<Self, AppError> {
+        match value.trim() {
+            "term" => Ok(Self::Term),
+            "phrase" => Ok(Self::Phrase),
+            "key_point" => Ok(Self::KeyPoint),
+            _ => Err(AppError::Validation(format!(
+                "type must be one of term, phrase, key_point: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainSelectedTermParams {
@@ -82,6 +110,35 @@ impl ExplainSelectedTermParams {
         }
 
         Ok((article_id.to_string(), selected_text.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDictionaryEntriesParams {
+    pub keyword: Option<String>,
+    #[serde(rename = "type")]
+    pub entry_type: Option<String>,
+    pub starred_only: Option<bool>,
+}
+
+impl ListDictionaryEntriesParams {
+    pub fn validated_filters(
+        &self,
+    ) -> Result<(Option<String>, Option<DictionaryEntryType>, bool), AppError> {
+        let keyword = self
+            .keyword
+            .as_ref()
+            .map(|value| normalize_text(value))
+            .filter(|value| !value.is_empty());
+        let entry_type = self
+            .entry_type
+            .as_deref()
+            .map(DictionaryEntryType::from_filter_value)
+            .transpose()?;
+        let starred_only = self.starred_only.unwrap_or(false);
+
+        Ok((keyword, entry_type, starred_only))
     }
 }
 
@@ -214,6 +271,23 @@ impl PersistedDictionaryEntry {
             is_starred: self.favorite,
         }
     }
+
+    pub fn to_list_item_dto(&self) -> DictionaryEntryListItemDto {
+        DictionaryEntryListItemDto {
+            entry_id: self.dictionary_id.clone(),
+            key_text: self.target_text.clone(),
+            entry_type: self.entry_type.clone(),
+            short_explanation: self.short_explanation.clone(),
+            detail_explanation: self.detail_explanation.clone(),
+            related_article_id: self.related_article_id.clone(),
+            related_article_title: self.related_article_title.clone(),
+            last_viewed_at_text: self
+                .last_referenced_at
+                .clone()
+                .or_else(|| Some(self.created_at.clone())),
+            is_starred: self.favorite,
+        }
+    }
 }
 
 pub fn normalize_text(value: &str) -> String {
@@ -224,7 +298,7 @@ pub fn normalize_text(value: &str) -> String {
 mod tests {
     use super::{
         DictionaryEntryDto, DictionaryEntryType, ExplainSelectedTermParams,
-        SaveDictionaryEntryParams,
+        ListDictionaryEntriesParams, SaveDictionaryEntryParams,
     };
 
     #[test]
@@ -247,6 +321,31 @@ mod tests {
         };
 
         assert!(params.validated_inputs().is_err());
+    }
+
+    #[test]
+    fn validated_filters_normalize_keyword_and_type() {
+        let params = ListDictionaryEntriesParams {
+            keyword: Some("  生成AI ".to_string()),
+            entry_type: Some("term".to_string()),
+            starred_only: Some(true),
+        };
+
+        let (keyword, entry_type, starred_only) = params.validated_filters().unwrap();
+        assert_eq!(keyword.as_deref(), Some("生成ai"));
+        assert_eq!(entry_type, Some(DictionaryEntryType::Term));
+        assert!(starred_only);
+    }
+
+    #[test]
+    fn validated_filters_reject_unknown_type() {
+        let params = ListDictionaryEntriesParams {
+            keyword: None,
+            entry_type: Some("unknown".to_string()),
+            starred_only: None,
+        };
+
+        assert!(params.validated_filters().is_err());
     }
 
     #[test]

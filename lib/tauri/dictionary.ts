@@ -15,9 +15,27 @@ export type DictionaryEntryDto = {
   isStarred: boolean;
 };
 
+export type DictionaryEntryListItemDto = {
+  entryId: string;
+  keyText: string;
+  type: DictionaryEntryType;
+  shortExplanation: string;
+  detailExplanation: string;
+  relatedArticleId?: string;
+  relatedArticleTitle?: string;
+  lastViewedAtText?: string;
+  isStarred: boolean;
+};
+
 export type ExplainSelectedTermParams = {
   articleId: string;
   selectedText: string;
+};
+
+export type ListDictionaryEntriesParams = {
+  keyword?: string;
+  type?: DictionaryEntryType;
+  starredOnly?: boolean;
 };
 
 export type SaveDictionaryEntryParams = {
@@ -32,6 +50,18 @@ export const explainSelectedTerm = async (
   }
 
   return invoke<DictionaryEntryDto>("explain_selected_term", { params });
+};
+
+export const listDictionaryEntries = async (
+  params: ListDictionaryEntriesParams = {}
+): Promise<DictionaryEntryListItemDto[] | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<DictionaryEntryListItemDto[]>("list_dictionary_entries", {
+    params,
+  });
 };
 
 export const saveDictionaryEntry = async (

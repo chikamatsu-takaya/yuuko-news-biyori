@@ -1,7 +1,8 @@
 use tauri::State;
 
 use crate::domain::dictionary::{
-    DictionaryEntryDto, ExplainSelectedTermParams, SaveDictionaryEntryParams,
+    DictionaryEntryDto, DictionaryEntryListItemDto, ExplainSelectedTermParams,
+    ListDictionaryEntriesParams, SaveDictionaryEntryParams,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -21,6 +22,26 @@ pub async fn explain_selected_term(
             )
         })?
         .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn list_dictionary_entries(
+    state: State<'_, AppState>,
+    params: Option<ListDictionaryEntriesParams>,
+) -> CommandResult<Vec<DictionaryEntryListItemDto>> {
+    let dictionary_service = state.dictionary_service.clone();
+    let normalized_params = params.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        dictionary_service.list_dictionary_entries(normalized_params)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "JOIN_ERROR",
+            format!("failed to join list-dictionary-entries task: {error}"),
+        )
+    })?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

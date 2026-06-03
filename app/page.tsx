@@ -62,7 +62,12 @@ export default function Page() {
   }
 
   if (currentScreen === "dictionary") {
-    return <DictionaryScreen onNavigate={handleNavigate} />;
+    return (
+      <DictionaryScreen
+        onNavigate={handleNavigate}
+        onOpenArticle={handleOpenArticle}
+      />
+    );
   }
 
   if (currentScreen === "history") {

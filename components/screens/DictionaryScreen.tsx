@@ -32,6 +32,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
@@ -41,42 +42,38 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  listDictionaryEntries,
+  type DictionaryEntryListItemDto as TauriDictionaryEntryListItemDto,
+  type DictionaryEntryType as TauriDictionaryEntryType,
+} from "@/lib/tauri/dictionary";
 
-// ============ Type Definitions ============
-
-type DictionaryEntryType = "単語" | "フレーズ" | "要点説明";
-
-interface DictionaryEntry {
-  id: string;
-  term: string;
-  type: DictionaryEntryType;
-  shortDescription: string;
-  fullDescription: string;
-  lastViewed: string;
-  relatedArticle: string;
-  isFavorite: boolean;
-  iconType: "robot" | "brain" | "database" | "chip" | "circuit";
-}
-
-interface RelatedNews {
-  id: string;
-  title: string;
-  source: string;
-  datetime: string;
-  isNew: boolean;
-  thumbnailType: string;
-}
-
-interface NavigationItem {
+type NavigationItem = {
   id: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   isActive: boolean;
-}
+};
 
-// ============ Mock Data ============
+type FilterType = "all" | TauriDictionaryEntryType | "favorite";
+type SortOption = "recent" | "name" | "favorite";
+type DictionaryIconType = "robot" | "brain" | "database" | "chip" | "circuit";
 
-const mockNavigationItems: NavigationItem[] = [
+type DictionaryEntry = {
+  id: string;
+  term: string;
+  type: TauriDictionaryEntryType;
+  shortDescription: string;
+  fullDescription: string;
+  lastViewedText: string;
+  lastViewedRaw?: string;
+  relatedArticleId?: string;
+  relatedArticle?: string;
+  isFavorite: boolean;
+  iconType: DictionaryIconType;
+};
+
+const navigationItems: NavigationItem[] = [
   { id: "home", label: "ホーム", icon: Home, isActive: false },
   { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
   { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
@@ -86,94 +83,94 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings, isActive: false },
 ];
 
-const mockDictionaryEntries: DictionaryEntry[] = [
+const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
-    id: "1",
-    term: "AIエージェント",
-    type: "単語",
-    shortDescription: "自ら考え、判断し、目標に向かって行動できるAIのこと。",
+    id: "entry-article-001-generated-ai",
+    term: "生成AI",
+    type: "term",
+    shortDescription: "文章や画像などを自動生成する AI 全般を指す言葉です。",
     fullDescription:
-      "AIエージェントとは、自分で考えて、目標を決めて、その目標を達成するために行動できるAIのことだよ。\nたとえば、「スケジュールを整理して」「予約を取って」とお願いすると、必要な情報を集めて、自分で手順を考えて作業を進めてくれるんだ！",
-    lastViewed: "2025/05/20",
-    relatedArticle: "AIコーディング支援ツールの最新動向まとめ",
+      "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
+    lastViewedText: "2025/05/20",
+    lastViewedRaw: "1747699200",
+    relatedArticleId: "article-001",
+    relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: true,
     iconType: "robot",
   },
   {
-    id: "2",
-    term: "マルチモーダル",
-    type: "単語",
-    shortDescription:
-      "テキスト・画像・音声など、複数の種類の情報を同時に扱うこと。",
+    id: "entry-article-001-fundraising",
+    term: "資金調達",
+    type: "phrase",
+    shortDescription: "企業が事業拡大のために投資や融資で資金を集めることです。",
     fullDescription:
-      "マルチモーダルとは、テキスト、画像、音声、動画など、異なる種類のデータを組み合わせて処理できる技術のことだよ。\n最近のAIは、文章だけでなく画像を見て説明したり、音声を聞いて返答したりできるようになってきているんだ！",
-    lastViewed: "2025/05/18",
-    relatedArticle: "iOS 19、注目の新機能を徹底解説",
+      "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
+    lastViewedText: "2025/05/20",
+    lastViewedRaw: "1747699200",
+    relatedArticleId: "article-001",
+    relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: false,
     iconType: "brain",
   },
   {
-    id: "3",
-    term: "RAG",
-    type: "単語",
-    shortDescription: "外部の情報を検索してAIの回答に活用する仕組みのこと。",
+    id: "entry-article-002-saas",
+    term: "SaaS",
+    type: "term",
+    shortDescription: "インターネット経由で利用するソフトウェア提供形態です。",
     fullDescription:
-      "RAG（Retrieval-Augmented Generation）は、AIが回答を生成する前に、外部のデータベースや文書から関連情報を検索して取り込む技術だよ。\nこれにより、AIは最新の情報や専門的な知識を使って、より正確な回答ができるようになるんだ！",
-    lastViewed: "2025/05/16",
-    relatedArticle: "再生可能エネルギーの未来と課題",
+      "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
+    lastViewedText: "2025/05/18",
+    lastViewedRaw: "1747526400",
+    relatedArticleId: "article-002",
+    relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
     iconType: "database",
   },
   {
-    id: "4",
-    term: "半導体不足",
-    type: "要点説明",
-    shortDescription:
-      "世界的に半導体の供給が需要に追いつかない状態のこと。",
+    id: "entry-article-002-business-improvement",
+    term: "業務改善",
+    type: "key_point",
+    shortDescription: "仕事の流れを見直して効率や成果を高めることです。",
     fullDescription:
-      "半導体不足とは、世界中で半導体（チップ）の需要が供給を大きく上回っている状態のことだよ。\nスマホ、パソコン、自動車など、あらゆる電子機器に半導体が使われているから、不足すると製品が作れなくなってしまうんだ。",
-    lastViewed: "2025/05/14",
-    relatedArticle: "日経平均、続伸　半導体株がけん引",
+      "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
+    lastViewedText: "2025/05/18",
+    lastViewedRaw: "1747526400",
+    relatedArticleId: "article-002",
+    relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
     iconType: "chip",
   },
   {
-    id: "5",
-    term: "エッジAI",
-    type: "単語",
-    shortDescription: "データをクラウドに送らず、端末側でAI処理を行う技術。",
+    id: "entry-article-003-quantum",
+    term: "量子コンピュータ",
+    type: "term",
+    shortDescription: "量子力学の性質を利用して計算する新しい計算機です。",
     fullDescription:
-      "エッジAIとは、スマホやカメラなどの端末（エッジデバイス）で直接AI処理を行う技術のことだよ。\nクラウドにデータを送らなくていいから、処理が速くて、プライバシーも守りやすいんだ！",
-    lastViewed: "2025/05/12",
-    relatedArticle: "身近になる生成AI、生活をどう変える？",
+      "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
+    lastViewedText: "2025/05/16",
+    lastViewedRaw: "1747353600",
+    relatedArticleId: "article-003",
+    relatedArticle: "量子コンピュータ研究で新たな誤り訂正手法",
     isFavorite: false,
     iconType: "circuit",
   },
 ];
 
-const mockRelatedNews: RelatedNews = {
-  id: "news-1",
-  title: "AIコーディング支援ツールの最新動向まとめ",
-  source: "TechCrunch Japan",
-  datetime: "2025/05/20 10:30",
-  isNew: true,
-  thumbnailType: "ai",
-};
+const itemsPerPage = 5;
+const previewNotice =
+  "ブラウザプレビューではモック辞書を表示しています。Tauri で起動すると保存済みの辞書が表示されます。";
 
-const mockMemo =
-  "ツールによって得意分野が違うので目的に応じて使い分けたい。RAGとの組み合わせも注目！";
-
-type FilterType = "all" | "単語" | "フレーズ" | "要点説明" | "favorite";
-
-const filterOptions: { id: FilterType; label: string; icon?: React.ComponentType<{ className?: string }> }[] = [
+const filterOptions: Array<{
+  id: FilterType;
+  label: string;
+  icon?: React.ComponentType<{ className?: string }>;
+}> = [
   { id: "all", label: "すべて", icon: List },
-  { id: "単語", label: "単語", icon: Search },
-  { id: "フレーズ", label: "フレーズ", icon: Sparkles },
-  { id: "要点説明", label: "要点説明", icon: Pencil },
-  { id: "favorite", label: "付き", icon: Star },
+  { id: "term", label: "単語", icon: Search },
+  { id: "phrase", label: "フレーズ", icon: Sparkles },
+  { id: "key_point", label: "要点説明", icon: Pencil },
+  { id: "favorite", label: "お気に入り", icon: Star },
 ];
-
-// ============ Sub Components ============
 
 function PawIcon({ className }: { className?: string }) {
   return (
@@ -181,6 +178,7 @@ function PawIcon({ className }: { className?: string }) {
       viewBox="0 0 24 24"
       fill="currentColor"
       className={className}
+      xmlns="http://www.w3.org/2000/svg"
     >
       <ellipse cx="12" cy="17" rx="5" ry="4" />
       <circle cx="6" cy="10" r="2.5" />
@@ -191,7 +189,124 @@ function PawIcon({ className }: { className?: string }) {
   );
 }
 
-function EntryIcon({ type }: { type: DictionaryEntry["iconType"] }) {
+function typeLabel(type: TauriDictionaryEntryType): string {
+  if (type === "phrase") {
+    return "フレーズ";
+  }
+  if (type === "key_point") {
+    return "要点説明";
+  }
+  return "単語";
+}
+
+function iconTypeFor(type: TauriDictionaryEntryType): DictionaryIconType {
+  if (type === "phrase") {
+    return "brain";
+  }
+  if (type === "key_point") {
+    return "chip";
+  }
+  return "robot";
+}
+
+function formatLastViewedText(value?: string): string {
+  if (!value) {
+    return "未参照";
+  }
+
+  const unixSeconds = Number(value);
+  if (Number.isFinite(unixSeconds) && unixSeconds > 0) {
+    const date = new Date(unixSeconds * 1000);
+    if (!Number.isNaN(date.getTime())) {
+      const year = date.getFullYear();
+      const month = `${date.getMonth() + 1}`.padStart(2, "0");
+      const day = `${date.getDate()}`.padStart(2, "0");
+      return `${year}/${month}/${day}`;
+    }
+  }
+
+  return value;
+}
+
+function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
+  return {
+    id: entry.entryId,
+    term: entry.keyText,
+    type: entry.type,
+    shortDescription: entry.shortExplanation,
+    fullDescription: entry.detailExplanation,
+    lastViewedText: formatLastViewedText(entry.lastViewedAtText),
+    lastViewedRaw: entry.lastViewedAtText,
+    relatedArticleId: entry.relatedArticleId,
+    relatedArticle: entry.relatedArticleTitle,
+    isFavorite: entry.isStarred,
+    iconType: iconTypeFor(entry.type),
+  };
+}
+
+function filterFallbackEntries(
+  entries: DictionaryEntry[],
+  keyword: string,
+  filter: FilterType
+): DictionaryEntry[] {
+  const normalizedKeyword = keyword.trim().toLowerCase();
+
+  return entries.filter((entry) => {
+    if (filter === "favorite" && !entry.isFavorite) {
+      return false;
+    }
+
+    if (filter !== "all" && filter !== "favorite" && entry.type !== filter) {
+      return false;
+    }
+
+    if (!normalizedKeyword) {
+      return true;
+    }
+
+    return [
+      entry.term,
+      entry.shortDescription,
+      entry.fullDescription,
+      entry.relatedArticle,
+    ]
+      .filter(Boolean)
+      .some((value) => value!.toLowerCase().includes(normalizedKeyword));
+  });
+}
+
+function sortEntries(
+  entries: DictionaryEntry[],
+  sortOption: SortOption
+): DictionaryEntry[] {
+  const sortedEntries = [...entries];
+
+  if (sortOption === "name") {
+    sortedEntries.sort((left, right) =>
+      left.term.localeCompare(right.term, "ja")
+    );
+    return sortedEntries;
+  }
+
+  if (sortOption === "favorite") {
+    sortedEntries.sort((left, right) => {
+      if (left.isFavorite !== right.isFavorite) {
+        return left.isFavorite ? -1 : 1;
+      }
+      return left.term.localeCompare(right.term, "ja");
+    });
+    return sortedEntries;
+  }
+
+  sortedEntries.sort((left, right) => {
+    const leftTimestamp = Number(left.lastViewedRaw ?? 0);
+    const rightTimestamp = Number(right.lastViewedRaw ?? 0);
+    return rightTimestamp - leftTimestamp;
+  });
+  return sortedEntries;
+}
+
+function EntryIcon({ type }: { type: DictionaryIconType }) {
   const iconMap = {
     robot: Bot,
     brain: Brain,
@@ -199,33 +314,34 @@ function EntryIcon({ type }: { type: DictionaryEntry["iconType"] }) {
     chip: Cpu,
     circuit: CircuitBoard,
   };
-  const Icon = iconMap[type];
-  const bgColors = {
+  const backgroundColors = {
     robot: "bg-emerald-100",
     brain: "bg-cyan-100",
     database: "bg-blue-100",
     chip: "bg-purple-100",
     circuit: "bg-teal-100",
   };
+  const Icon = iconMap[type];
 
   return (
     <div
-      className={`w-12 h-12 rounded-lg ${bgColors[type]} flex items-center justify-center flex-shrink-0`}
+      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${backgroundColors[type]}`}
     >
-      <Icon className="w-6 h-6 text-[var(--yuuko-green)]" />
+      <Icon className="h-6 w-6 text-[var(--yuuko-green)]" />
     </div>
   );
 }
 
-function TypeBadge({ type }: { type: DictionaryEntryType }) {
+function TypeBadge({ type }: { type: TauriDictionaryEntryType }) {
   const colors = {
-    単語: "bg-[var(--yuuko-green)] text-white",
-    フレーズ: "bg-blue-500 text-white",
-    要点説明: "bg-amber-500 text-white",
-  };
+    term: "bg-[var(--yuuko-green)] text-white",
+    phrase: "bg-blue-500 text-white",
+    key_point: "bg-amber-500 text-white",
+  } as const;
+
   return (
-    <Badge className={`${colors[type]} border-0 text-[10px] px-2 py-0`}>
-      {type}
+    <Badge className={`${colors[type]} border-0 px-2 py-0 text-[10px]`}>
+      {typeLabel(type)}
     </Badge>
   );
 }
@@ -241,40 +357,48 @@ function DictionaryEntryCard({
 }) {
   return (
     <Card
-      className={`cursor-pointer transition-all hover:shadow-md py-2 px-0 ${
+      className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${
         isSelected
-          ? "border-[var(--yuuko-green)] border-2 bg-[var(--yuuko-green-light)]/30"
+          ? "border-2 border-[var(--yuuko-green)] bg-[var(--yuuko-green-light)]/30"
           : "border-border/50 hover:border-border"
       }`}
       onClick={onClick}
     >
-      <CardContent className="p-3 flex items-start gap-3">
+      <CardContent className="flex items-start gap-3 p-3">
         <EntryIcon type={entry.iconType} />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="font-semibold text-sm text-foreground">
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />
           </div>
-          <p className="text-xs text-muted-foreground line-clamp-1 mb-1.5">
+          <p className="mb-1.5 line-clamp-1 text-xs text-muted-foreground">
             {entry.shortDescription}
           </p>
           <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <span>最終閲覧：{entry.lastViewed}</span>
-            <span className="mx-1">|</span>
-            <span className="truncate">関連記事：{entry.relatedArticle}</span>
+            <span>最終閲覧：{entry.lastViewedText}</span>
+            {entry.relatedArticle ? (
+              <>
+                <span className="mx-1">|</span>
+                <span className="truncate">関連記事：{entry.relatedArticle}</span>
+              </>
+            ) : null}
           </div>
         </div>
         <button
-          className="flex-shrink-0 p-1"
-          onClick={(e) => {
-            e.stopPropagation();
-            console.log("Toggle favorite:", entry.id);
+          type="button"
+          className="shrink-0 p-1"
+          onClick={(event) => {
+            event.stopPropagation();
+            console.log(
+              "Dictionary favorite toggle is not implemented yet:",
+              entry.id
+            );
           }}
         >
           <Star
-            className={`w-5 h-5 ${
+            className={`h-5 w-5 ${
               entry.isFavorite
                 ? "fill-yellow-400 text-yellow-400"
                 : "text-muted-foreground/50"
@@ -299,11 +423,26 @@ function Pagination({
   itemsPerPage: number;
   onPageChange: (page: number) => void;
 }) {
+  if (totalPages <= 1) {
+    return (
+      <div className="mt-4 text-right text-xs text-muted-foreground">
+        全 {totalItems} 件
+      </div>
+    );
+  }
+
   const startItem = (currentPage - 1) * itemsPerPage + 1;
   const endItem = Math.min(currentPage * itemsPerPage, totalItems);
+  const visiblePages = Array.from(
+    new Set([
+      Math.max(1, currentPage - 1),
+      currentPage,
+      Math.min(totalPages, currentPage + 1),
+    ])
+  );
 
   return (
-    <div className="flex items-center justify-between mt-4">
+    <div className="mt-4 flex items-center justify-between">
       <span className="text-xs text-muted-foreground">
         全 {totalItems} 件中 {startItem}〜{endItem} 件を表示
       </span>
@@ -315,9 +454,12 @@ function Pagination({
           onClick={() => onPageChange(currentPage - 1)}
           disabled={currentPage === 1}
         >
-          <ChevronLeft className="w-4 h-4" />
+          <ChevronLeft className="h-4 w-4" />
         </Button>
-        {[1, 2, 3].map((page) => (
+        {visiblePages[0] > 1 ? (
+          <span className="px-1 text-muted-foreground">…</span>
+        ) : null}
+        {visiblePages.map((page) => (
           <Button
             key={page}
             variant={currentPage === page ? "default" : "ghost"}
@@ -332,15 +474,9 @@ function Pagination({
             {page}
           </Button>
         ))}
-        <span className="text-muted-foreground px-1">…</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 w-7 p-0"
-          onClick={() => onPageChange(totalPages)}
-        >
-          {totalPages}
-        </Button>
+        {visiblePages[visiblePages.length - 1] < totalPages ? (
+          <span className="px-1 text-muted-foreground">…</span>
+        ) : null}
         <Button
           variant="ghost"
           size="sm"
@@ -348,7 +484,7 @@ function Pagination({
           onClick={() => onPageChange(currentPage + 1)}
           disabled={currentPage === totalPages}
         >
-          <ChevronRight className="w-4 h-4" />
+          <ChevronRight className="h-4 w-4" />
         </Button>
       </div>
     </div>
@@ -357,13 +493,13 @@ function Pagination({
 
 function RelatedNewsThumbnail() {
   return (
-    <div className="w-14 h-14 rounded-lg bg-gradient-to-br from-blue-900 to-indigo-900 flex items-center justify-center flex-shrink-0 overflow-hidden">
-      <svg viewBox="0 0 40 40" className="w-8 h-8">
+    <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-blue-900 to-indigo-900">
+      <svg viewBox="0 0 40 40" className="h-8 w-8">
         <circle cx="20" cy="20" r="8" fill="rgba(100,200,255,0.3)" />
         <circle cx="20" cy="20" r="4" fill="rgba(150,220,255,0.5)" />
-        {[0, 60, 120, 180, 240, 300].map((angle, i) => (
+        {[0, 60, 120, 180, 240, 300].map((angle) => (
           <circle
-            key={i}
+            key={angle}
             cx={20 + 12 * Math.cos((angle * Math.PI) / 180)}
             cy={20 + 12 * Math.sin((angle * Math.PI) / 180)}
             r="2"
@@ -375,57 +511,160 @@ function RelatedNewsThumbnail() {
   );
 }
 
-// ============ Main Component ============
-
 export default function DictionaryScreen({
   onNavigate,
+  onOpenArticle,
 }: {
   onNavigate?: (screen: string) => void;
+  onOpenArticle?: (articleId: string) => void;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [activeFilter, setActiveFilter] = React.useState<FilterType>("all");
-  const [selectedEntryId, setSelectedEntryId] = React.useState("1");
+  const [sortOption, setSortOption] = React.useState<SortOption>("recent");
+  const [selectedEntryId, setSelectedEntryId] = React.useState<string | null>(
+    null
+  );
   const [currentPage, setCurrentPage] = React.useState(1);
   const [isAutoStart, setIsAutoStart] = React.useState(true);
+  const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
 
-  const selectedEntry = mockDictionaryEntries.find(
-    (e) => e.id === selectedEntryId
+  const trimmedSearchQuery = searchQuery.trim();
+
+  React.useEffect(() => {
+    let isMounted = true;
+
+    const loadEntries = async () => {
+      setIsLoading(true);
+      setLoadNotice(null);
+
+      try {
+        const dictionaryEntries = await listDictionaryEntries({
+          keyword: trimmedSearchQuery || undefined,
+          type:
+            activeFilter !== "all" && activeFilter !== "favorite"
+              ? activeFilter
+              : undefined,
+          starredOnly: activeFilter === "favorite" ? true : undefined,
+        });
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (!dictionaryEntries) {
+          setEntries(
+            filterFallbackEntries(
+              fallbackDictionaryEntries,
+              trimmedSearchQuery,
+              activeFilter
+            )
+          );
+          setLoadNotice(previewNotice);
+          return;
+        }
+
+        setEntries(dictionaryEntries.map(toUiEntry));
+      } catch (error) {
+        if (!isMounted) {
+          return;
+        }
+
+        setEntries([]);
+        setLoadNotice(
+          "辞書一覧の取得に失敗しました。時間をおいてもう一度お試しください。"
+        );
+        console.warn("Failed to load dictionary entries:", error);
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadEntries();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeFilter, trimmedSearchQuery]);
+
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [activeFilter, trimmedSearchQuery, sortOption]);
+
+  const sortedEntries = React.useMemo(
+    () => sortEntries(entries, sortOption),
+    [entries, sortOption]
   );
+  const totalPages = Math.max(1, Math.ceil(sortedEntries.length / itemsPerPage));
 
-  const handleNavigate = (id: string) => {
-    if (onNavigate) {
-      onNavigate(id);
+  React.useEffect(() => {
+    if (sortedEntries.length === 0) {
+      if (selectedEntryId !== null) {
+        setSelectedEntryId(null);
+      }
+      return;
     }
+
+    if (
+      !selectedEntryId ||
+      !sortedEntries.some((entry) => entry.id === selectedEntryId)
+    ) {
+      setSelectedEntryId(sortedEntries[0].id);
+    }
+  }, [selectedEntryId, sortedEntries]);
+
+  React.useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedEntries = React.useMemo(() => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    return sortedEntries.slice(startIndex, startIndex + itemsPerPage);
+  }, [currentPage, sortedEntries]);
+
+  const selectedEntry =
+    sortedEntries.find((entry) => entry.id === selectedEntryId) ?? null;
+
+  const handleNavigate = (screen: string) => {
+    onNavigate?.(screen);
   };
 
   const handleGoHome = () => {
-    if (onNavigate) {
-      onNavigate("home");
+    onNavigate?.("home");
+  };
+
+  const handleOpenRelatedArticle = () => {
+    if (!selectedEntry?.relatedArticleId) {
+      return;
     }
+
+    onOpenArticle?.(selectedEntry.relatedArticleId);
   };
 
   return (
-    <div className="h-dvh w-full bg-background flex flex-col overflow-hidden">
-      <AppTitleBar className="bg-white border-border/50" />
+    <div className="flex h-dvh w-full flex-col overflow-hidden bg-background">
+      <AppTitleBar className="border-border/50 bg-white" />
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar */}
-        <aside className="w-52 bg-white border-r border-border/50 flex flex-col flex-shrink-0">
-          {/* Back to Home Button */}
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="flex w-52 shrink-0 flex-col border-r border-border/50 bg-white">
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
               onClick={handleGoHome}
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="h-4 w-4" />
               ホームへ戻る
             </Button>
           </div>
 
-          {/* Navigation */}
-          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
+          <nav className="flex-1 space-y-1 overflow-y-auto px-3">
+            {navigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
                 label={item.label}
@@ -436,14 +675,13 @@ export default function DictionaryScreen({
             ))}
           </nav>
 
-          {/* Yuuko's Comment Card */}
           <div className="p-3">
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
               <CardContent className="p-3">
-                <p className="text-xs font-medium text-[var(--yuuko-green)] mb-2">
+                <p className="mb-2 text-xs font-medium text-[var(--yuuko-green)]">
                   ゆうこの一言
                 </p>
-                <p className="text-[11px] text-foreground leading-relaxed">
+                <p className="text-[11px] leading-relaxed text-foreground">
                   難しい言葉も、
                   <br />
                   少しずつ覚えれば
@@ -452,28 +690,30 @@ export default function DictionaryScreen({
                   <br />
                   一緒にレベルアップしよっ♪
                 </p>
-                <div className="flex justify-end mt-2">
-                  <PawIcon className="w-4 h-4 text-[var(--yuuko-green)]/50" />
+                <div className="mt-2 flex justify-end">
+                  <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]/50" />
                 </div>
               </CardContent>
             </Card>
           </div>
 
-          {/* Auto Start & Exit */}
-          <div className="p-3 border-t border-border/50">
-            <div className="flex items-center gap-2 mb-2">
+          <div className="border-t border-border/50 p-3">
+            <div className="mb-2 flex items-center gap-2">
               <span className="text-xs text-muted-foreground">自動起動：</span>
               <button
+                type="button"
                 className={`text-xs font-medium ${
-                  isAutoStart ? "text-[var(--yuuko-green)]" : "text-muted-foreground"
+                  isAutoStart
+                    ? "text-[var(--yuuko-green)]"
+                    : "text-muted-foreground"
                 }`}
-                onClick={() => setIsAutoStart(!isAutoStart)}
+                onClick={() => setIsAutoStart((currentValue) => !currentValue)}
               >
                 {isAutoStart ? "ON" : "OFF"}
               </button>
-              {isAutoStart && (
-                <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" />
-              )}
+              {isAutoStart ? (
+                <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
+              ) : null}
             </div>
             <Button
               variant="outline"
@@ -486,72 +726,70 @@ export default function DictionaryScreen({
           </div>
         </aside>
 
-        {/* Main Content Area */}
-        <main className="flex-1 min-w-0 flex overflow-hidden">
-          {/* Center - Dictionary List */}
-          <div className="flex-1 p-6 overflow-y-auto">
-            {/* Breadcrumb */}
-            <div className="flex items-center gap-2 text-xs text-muted-foreground mb-4">
+        <main className="flex min-w-0 flex-1 overflow-hidden">
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="mb-4 flex items-center gap-2 text-xs text-muted-foreground">
               <button
-                className="hover:text-foreground transition-colors"
+                type="button"
+                className="transition-colors hover:text-foreground"
                 onClick={handleGoHome}
               >
                 ホーム
               </button>
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="h-3 w-3" />
               <span className="text-foreground">ゆうこ辞書</span>
             </div>
 
-            {/* Title */}
-            <div className="flex items-center gap-2 mb-6">
-              <BookOpen className="w-6 h-6 text-[var(--yuuko-green)]" />
+            <div className="mb-6 flex items-center gap-2">
+              <BookOpen className="h-6 w-6 text-[var(--yuuko-green)]" />
               <h1 className="text-xl font-bold text-foreground">ゆうこ辞書</h1>
             </div>
 
-            {/* Search */}
-            <div className="flex items-center gap-3 mb-4">
+            <div className="mb-4 flex items-center gap-3">
               <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   placeholder="単語やフレーズで検索"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-10 bg-white"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  className="bg-white pl-10"
                 />
               </div>
-              <Button variant="outline" className="gap-2">
-                <Filter className="w-4 h-4" />
+              <Button variant="outline" className="gap-2" disabled>
+                <Filter className="h-4 w-4" />
                 絞り込み
               </Button>
             </div>
 
-            {/* Filter Chips */}
-            <div className="flex items-center gap-2 mb-6">
+            <div className="mb-6 flex flex-wrap items-center gap-2">
               {filterOptions.map((filter) => {
                 const Icon = filter.icon;
                 const isActive = activeFilter === filter.id;
                 return (
                   <button
                     key={filter.id}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                    type="button"
+                    className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
                       isActive
                         ? "bg-[var(--yuuko-green)] text-white"
-                        : "bg-white border border-border text-muted-foreground hover:border-[var(--yuuko-green)]/50"
+                        : "border border-border bg-white text-muted-foreground hover:border-[var(--yuuko-green)]/50"
                     }`}
                     onClick={() => setActiveFilter(filter.id)}
                   >
-                    {Icon && <Icon className="w-3.5 h-3.5" />}
+                    {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
                     {filter.label}
                   </button>
                 );
               })}
             </div>
 
-            {/* Dictionary List */}
+            {loadNotice ? (
+              <p className="mb-4 text-xs text-amber-700">{loadNotice}</p>
+            ) : null}
+
             <Card className="border-border/50 py-0">
               <CardContent className="p-4">
-                {/* List Header */}
-                <div className="flex items-center justify-between mb-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
                   <h2 className="text-sm font-semibold text-foreground">
                     登録済みの辞書
                   </h2>
@@ -559,8 +797,13 @@ export default function DictionaryScreen({
                     <span className="text-xs text-muted-foreground">
                       並び替え：
                     </span>
-                    <Select defaultValue="recent">
-                      <SelectTrigger className="w-[120px] h-8 text-xs">
+                    <Select
+                      value={sortOption}
+                      onValueChange={(value) =>
+                        setSortOption(value as SortOption)
+                      }
+                    >
+                      <SelectTrigger className="h-8 w-[132px] text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -572,58 +815,76 @@ export default function DictionaryScreen({
                   </div>
                 </div>
 
-                {/* Entry List */}
-                <div className="space-y-2">
-                  {mockDictionaryEntries.map((entry) => (
-                    <DictionaryEntryCard
-                      key={entry.id}
-                      entry={entry}
-                      isSelected={entry.id === selectedEntryId}
-                      onClick={() => setSelectedEntryId(entry.id)}
-                    />
-                  ))}
-                </div>
+                {isLoading ? (
+                  <div className="flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-4 text-sm text-muted-foreground">
+                    <Spinner className="size-4" />
+                    <span>辞書一覧を読み込んでいます...</span>
+                  </div>
+                ) : null}
 
-                {/* Pagination */}
-                <Pagination
-                  currentPage={currentPage}
-                  totalPages={6}
-                  totalItems={28}
-                  itemsPerPage={5}
-                  onPageChange={setCurrentPage}
-                />
+                {!isLoading && paginatedEntries.length === 0 ? (
+                  <Card className="border-dashed border-border/60 py-0 shadow-none">
+                    <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
+                      <BookOpen className="h-8 w-8 text-[var(--yuuko-green)]/60" />
+                      <p className="text-sm font-medium text-foreground">
+                        まだ表示できる辞書項目がありません
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        ニュース詳細画面で用語を保存すると、ここに一覧表示されます。
+                      </p>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {!isLoading && paginatedEntries.length > 0 ? (
+                  <div className="space-y-2">
+                    {paginatedEntries.map((entry) => (
+                      <DictionaryEntryCard
+                        key={entry.id}
+                        entry={entry}
+                        isSelected={entry.id === selectedEntryId}
+                        onClick={() => setSelectedEntryId(entry.id)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+
+                {!isLoading ? (
+                  <Pagination
+                    currentPage={currentPage}
+                    totalPages={totalPages}
+                    totalItems={sortedEntries.length}
+                    itemsPerPage={itemsPerPage}
+                    onPageChange={setCurrentPage}
+                  />
+                ) : null}
               </CardContent>
             </Card>
           </div>
 
-          {/* Right Sidebar - Yuuko & Detail Panel */}
-        <aside className="w-72 bg-[var(--yuuko-cream-dark)]/30 border-l border-border/50 p-4 overflow-y-auto flex-shrink-0">
-            {/* Yuuko Speech Bubble */}
+          <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
             <div className="relative mb-2">
-              <div className="bg-white border-2 border-[var(--yuuko-green)]/30 rounded-2xl p-3 relative">
-                <p className="text-xs text-foreground leading-relaxed">
+              <div className="relative rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3">
+                <p className="text-xs leading-relaxed text-foreground">
                   わからない言葉は
                   <br />
                   ここで見返せるよ〜！
                 </p>
-                <div className="absolute -bottom-2 left-8 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
-                <div className="absolute -bottom-3 left-8 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
-                <PawIcon className="absolute top-2 right-2 w-4 h-4 text-[var(--yuuko-green)]/40" />
+                <div className="absolute -bottom-2 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                <div className="absolute -bottom-3 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
+                <PawIcon className="absolute right-2 top-2 h-4 w-4 text-[var(--yuuko-green)]/40" />
               </div>
             </div>
 
-            {/* Yuuko Character */}
-            <div className="flex justify-center mb-4">
+            <div className="mb-4 flex justify-center">
               <div className="relative">
                 <Image
                   src="/assets/yuuko.png"
                   width={144}
                   height={144}
                   alt="ゆうこ"
-                  className="w-36 h-auto animate-float"
-                  style={{
-                    animation: "float 3s ease-in-out infinite",
-                  }}
+                  className="h-auto w-36 animate-float"
+                  style={{ animation: "float 3s ease-in-out infinite" }}
                 />
                 <style jsx>{`
                   @keyframes float {
@@ -639,22 +900,20 @@ export default function DictionaryScreen({
               </div>
             </div>
 
-            {/* Detail Panel */}
-            {selectedEntry && (
+            {selectedEntry ? (
               <div className="space-y-3">
-                {/* Entry Header */}
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-start justify-between">
+                    <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-2">
-                        <h3 className="font-bold text-base text-foreground">
+                        <h3 className="text-base font-bold text-foreground">
                           {selectedEntry.term}
                         </h3>
                         <TypeBadge type={selectedEntry.type} />
                       </div>
                       <div className="flex items-center gap-1 text-xs">
                         <Star
-                          className={`w-4 h-4 ${
+                          className={`h-4 w-4 ${
                             selectedEntry.isFavorite
                               ? "fill-yellow-400 text-yellow-400"
                               : "text-muted-foreground"
@@ -666,130 +925,151 @@ export default function DictionaryScreen({
                   </CardContent>
                 </Card>
 
-                {/* Full Description */}
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <BookOpen className="w-4 h-4 text-[var(--yuuko-green)]" />
+                    <div className="mb-2 flex items-center gap-1.5">
+                      <BookOpen className="h-4 w-4 text-[var(--yuuko-green)]" />
                       <h4 className="text-sm font-semibold text-foreground">
                         やさしい説明
                       </h4>
                     </div>
-                    <p className="text-xs text-foreground leading-relaxed whitespace-pre-line">
+                    <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
                       {selectedEntry.fullDescription}
                     </p>
-                    <div className="flex justify-end mt-2">
-                      <PawIcon className="w-4 h-4 text-[var(--yuuko-green)]/40" />
+                    <div className="mt-2 flex justify-end">
+                      <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]/40" />
                     </div>
                   </CardContent>
                 </Card>
 
-                {/* Related News */}
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5">
-                        <Newspaper className="w-4 h-4 text-[var(--yuuko-green)]" />
+                        <Newspaper className="h-4 w-4 text-[var(--yuuko-green)]" />
                         <h4 className="text-sm font-semibold text-foreground">
                           関連ニュース
                         </h4>
                       </div>
-                      <button className="text-[10px] text-[var(--yuuko-green)] hover:underline flex items-center gap-0.5">
-                        すべて見る
-                        <ChevronRight className="w-3 h-3" />
+                      <button
+                        type="button"
+                        className="flex items-center gap-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                        onClick={handleOpenRelatedArticle}
+                        disabled={!selectedEntry.relatedArticleId}
+                      >
+                        開く
+                        <ChevronRight className="h-3 w-3" />
                       </button>
                     </div>
-                    <div className="flex items-start gap-2">
-                      <RelatedNewsThumbnail />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start gap-1">
-                          <h5 className="text-xs font-medium text-foreground line-clamp-2 flex-1">
-                            {mockRelatedNews.title}
+                    {selectedEntry.relatedArticle ? (
+                      <div className="flex items-start gap-2">
+                        <RelatedNewsThumbnail />
+                        <div className="min-w-0 flex-1">
+                          <h5 className="line-clamp-2 text-xs font-medium text-foreground">
+                            {selectedEntry.relatedArticle}
                           </h5>
-                          {mockRelatedNews.isNew && (
-                            <Badge className="bg-red-500 text-white border-0 text-[9px] px-1 py-0 flex-shrink-0">
-                              NEW
-                            </Badge>
-                          )}
+                          <p className="mt-1 text-[10px] text-muted-foreground">
+                            関連記事から保存された辞書項目です
+                          </p>
                         </div>
-                        <p className="text-[10px] text-muted-foreground mt-1">
-                          {mockRelatedNews.source} ・ {mockRelatedNews.datetime}
-                        </p>
                       </div>
-                    </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        関連記事情報はまだ登録されていません。
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
 
-                {/* Memo */}
                 <Card className="border-amber-200 bg-amber-50/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5">
-                        <Pencil className="w-4 h-4 text-amber-600" />
+                        <Pencil className="h-4 w-4 text-amber-600" />
                         <h4 className="text-sm font-semibold text-foreground">
-                          メモ（自分用の付箋）
+                          メモ（次タスク予定）
                         </h4>
                       </div>
-                      <button className="text-[10px] text-[var(--yuuko-green)] hover:underline flex items-center gap-0.5 bg-white px-2 py-0.5 rounded border border-[var(--yuuko-green)]/30">
+                      <button
+                        type="button"
+                        className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                        onClick={() =>
+                          console.log("Edit dictionary memo:", selectedEntry.id)
+                        }
+                      >
                         編集
                       </button>
                     </div>
-                    <p className="text-xs text-foreground leading-relaxed">
-                      {mockMemo}
+                    <p className="text-xs leading-relaxed text-foreground">
+                      一覧・詳細表示までは接続済みです。メモ保存とお気に入り切替は次のタスクでつなぎ込みます。
                     </p>
-                    <div className="flex justify-end mt-2">
-                      <PawIcon className="w-4 h-4 text-amber-400/50" />
+                    <div className="mt-2 flex justify-end">
+                      <PawIcon className="h-4 w-4 text-amber-400/50" />
                     </div>
                   </CardContent>
                 </Card>
 
-                {/* Action Buttons */}
                 <div className="flex items-center gap-2 pt-2">
                   <Button
                     variant="outline"
                     size="sm"
-                    className="flex-1 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-                    onClick={() => console.log("Share:", selectedEntry.id)}
+                    className="flex-1 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                    onClick={() =>
+                      console.log("Share dictionary entry:", selectedEntry.id)
+                    }
                   >
-                    <Share2 className="w-4 h-4 mr-1" />
+                    <Share2 className="mr-1 h-4 w-4" />
                     共有する
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="flex-1 text-red-500 border-red-300 hover:bg-red-50"
-                    onClick={() => console.log("Delete:", selectedEntry.id)}
+                    className="flex-1 border-red-300 text-red-500 hover:bg-red-50"
+                    onClick={() =>
+                      console.log("Delete dictionary entry:", selectedEntry.id)
+                    }
                   >
-                    <Trash2 className="w-4 h-4 mr-1" />
+                    <Trash2 className="mr-1 h-4 w-4" />
                     削除する
                   </Button>
                 </div>
               </div>
+            ) : (
+              <Card className="border-dashed border-border/60 py-0 shadow-none">
+                <CardContent className="p-6 text-center">
+                  <BookOpen className="mx-auto mb-2 h-8 w-8 text-[var(--yuuko-green)]/60" />
+                  <p className="text-sm font-medium text-foreground">
+                    辞書項目を選ぶと詳細が見られます
+                  </p>
+                </CardContent>
+              </Card>
             )}
           </aside>
         </main>
       </div>
 
-      {/* Footer / Status Bar */}
-      <footer className="h-8 bg-white border-t border-border/50 flex items-center justify-between px-4 flex-shrink-0">
+      <footer className="flex h-8 shrink-0 items-center justify-between border-t border-border/50 bg-white px-4">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <Bell className="w-3.5 h-3.5 text-muted-foreground" />
+            <Bell className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-xs text-muted-foreground">お知らせ</span>
           </div>
           <span className="text-xs text-muted-foreground">|</span>
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" />
+            <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
             <span className="text-xs text-foreground">
               新しいニュースが3件届いてるよ！
             </span>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button className="text-muted-foreground hover:text-foreground transition-colors">
-            <HelpCircle className="w-4 h-4" />
+          <button
+            type="button"
+            className="text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <HelpCircle className="h-4 w-4" />
           </button>
-          <PawIcon className="w-4 h-4 text-muted-foreground" />
+          <PawIcon className="h-4 w-4 text-muted-foreground" />
         </div>
       </footer>
     </div>

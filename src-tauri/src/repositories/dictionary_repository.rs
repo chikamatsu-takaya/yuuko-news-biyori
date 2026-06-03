@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::dictionary::{
-    normalize_text, DictionaryEntryDto, DictionaryEntryType, PersistedDictionaryEntry,
-    PersistedDictionaryStore,
+    normalize_text, DictionaryEntryDto, DictionaryEntryListItemDto, DictionaryEntryType,
+    PersistedDictionaryEntry, PersistedDictionaryStore,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -74,6 +74,22 @@ impl DictionaryRepository {
         store.entries.push(persisted_entry);
         self.save_store(&store)?;
         Ok(saved_entry)
+    }
+
+    pub fn list_dictionary_entries(
+        &self,
+        keyword: Option<&str>,
+        entry_type: Option<DictionaryEntryType>,
+        starred_only: bool,
+    ) -> Result<Vec<DictionaryEntryListItemDto>, AppError> {
+        let mut entries = self.load_store_or_default()?.entries;
+        entries.sort_by(|left, right| entry_timestamp_key(right).cmp(entry_timestamp_key(left)));
+
+        Ok(entries
+            .into_iter()
+            .filter(|entry| matches_filters(entry, keyword, entry_type.as_ref(), starred_only))
+            .map(|entry| entry.to_list_item_dto())
+            .collect())
     }
 
     fn find_saved_entry(
@@ -231,6 +247,49 @@ fn current_unix_timestamp_text() -> String {
         Ok(duration) => duration.as_secs().to_string(),
         Err(_) => "0".to_string(),
     }
+}
+
+fn matches_filters(
+    entry: &PersistedDictionaryEntry,
+    keyword: Option<&str>,
+    entry_type: Option<&DictionaryEntryType>,
+    starred_only: bool,
+) -> bool {
+    if starred_only && !entry.favorite {
+        return false;
+    }
+
+    if let Some(entry_type) = entry_type {
+        if &entry.entry_type != entry_type {
+            return false;
+        }
+    }
+
+    if let Some(keyword) = keyword {
+        let related_article_title = entry.related_article_title.as_deref().unwrap_or_default();
+        let keyword_matched = [
+            entry.target_text.as_str(),
+            entry.short_explanation.as_str(),
+            entry.detail_explanation.as_str(),
+            related_article_title,
+        ]
+        .into_iter()
+        .map(normalize_text)
+        .any(|value| value.contains(keyword));
+
+        if !keyword_matched {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn entry_timestamp_key(entry: &PersistedDictionaryEntry) -> &str {
+    entry
+        .last_referenced_at
+        .as_deref()
+        .unwrap_or(&entry.created_at)
 }
 
 fn article_title_for(article_id: &str) -> Option<&'static str> {
@@ -457,5 +516,55 @@ mod tests {
 
         assert_eq!(updated.short_explanation, "更新後の短い説明");
         assert_eq!(updated.detail_explanation, "更新後の詳しい説明");
+    }
+
+    #[test]
+    fn list_dictionary_entries_returns_saved_entries_only() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(None, None, false)
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key_text, "生成AI");
+        assert!(entries[0].is_starred);
+    }
+
+    #[test]
+    fn list_dictionary_entries_filters_by_keyword_and_starred() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let non_starred = DictionaryEntryDto {
+            entry_id: "entry-article-002-saas".to_string(),
+            key_text: "SaaS".to_string(),
+            entry_type: DictionaryEntryType::Term,
+            short_explanation: "クラウドで提供されるソフトウェア".to_string(),
+            detail_explanation: "導入支援を含むSaaSの説明".to_string(),
+            related_article_id: Some("article-002".to_string()),
+            related_article_title: Some("国内SaaS企業、業務改善支援の新施策を発表".to_string()),
+            is_starred: false,
+        };
+        context
+            .repository
+            .save_dictionary_entry(non_starred)
+            .unwrap();
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(Some("生成ai"), Some(DictionaryEntryType::Term), true)
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key_text, "生成AI");
     }
 }
