@@ -616,7 +616,7 @@ MVPでは、以下のTauri commandを優先する。
 |---|---|---:|
 | `get_recommended_articles` | メイン画面ニュース一覧取得 | 高 |
 | `get_article_detail` | ニュース詳細取得 | 高 |
-| `toggle_article_favorite` | お気に入り切替 | 中 |
+| `update_article_favorite` | お気に入り切替 | 中 |
 | `explain_selected_term` | 用語解説取得・辞書保存 | 高 |
 | `list_dictionary_entries` | 辞書一覧取得 | 中 |
 | `update_dictionary_memo` | 辞書メモ保存 | 中 |

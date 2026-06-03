@@ -1,7 +1,8 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleSummaryDto, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ArticleDetailDto, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
+    GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -38,6 +39,23 @@ pub async fn get_article_detail(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join article-detail task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn update_article_favorite(
+    state: State<'_, AppState>,
+    params: UpdateArticleFavoriteParams,
+) -> CommandResult<FavoriteUpdateResult> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.update_article_favorite(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join update-article-favorite task: {error}"),
             )
         })?
         .map_err(CommandError::from)

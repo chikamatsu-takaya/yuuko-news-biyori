@@ -29,7 +29,7 @@ pub fn run() {
             let settings_repository = SettingsRepository::new(&paths);
             let settings_service = SettingsService::new(settings_repository);
             settings_service.initialize_default_if_missing()?;
-            let article_service = ArticleService::new(ArticleRepository::new());
+            let article_service = ArticleService::new(ArticleRepository::new(&paths));
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let yuuko_state_repository = YuukoStateRepository::new(&paths);
             let yuuko_service =
@@ -59,6 +59,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::article_commands::get_recommended_articles,
             commands::article_commands::get_article_detail,
+            commands::article_commands::update_article_favorite,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::save_dictionary_entry,
             commands::health_commands::ping,

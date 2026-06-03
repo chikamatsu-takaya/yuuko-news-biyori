@@ -41,6 +41,13 @@ pub struct ArticleDetailDto {
     pub keyword_candidates: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteUpdateResult {
+    pub article_id: String,
+    pub is_favorite: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GetRecommendedArticlesParams {
@@ -78,9 +85,31 @@ impl GetArticleDetailParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateArticleFavoriteParams {
+    pub article_id: String,
+    pub is_favorite: bool,
+}
+
+impl UpdateArticleFavoriteParams {
+    pub fn validated_inputs(&self) -> Result<(String, bool), AppError> {
+        let article_id = self.article_id.trim();
+        if article_id.is_empty() {
+            return Err(AppError::Validation(
+                "articleId must not be empty".to_string(),
+            ));
+        }
+
+        Ok((article_id.to_string(), self.is_favorite))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GetArticleDetailParams, GetRecommendedArticlesParams};
+    use super::{
+        GetArticleDetailParams, GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
+    };
 
     #[test]
     fn normalized_limit_defaults_to_twenty() {
@@ -119,5 +148,27 @@ mod tests {
         };
 
         assert!(params.validated_article_id().is_err());
+    }
+
+    #[test]
+    fn update_article_favorite_params_trim_values() {
+        let params = UpdateArticleFavoriteParams {
+            article_id: " article-001 ".to_string(),
+            is_favorite: true,
+        };
+
+        let (article_id, is_favorite) = params.validated_inputs().unwrap();
+        assert_eq!(article_id, "article-001");
+        assert!(is_favorite);
+    }
+
+    #[test]
+    fn update_article_favorite_params_reject_empty_value() {
+        let params = UpdateArticleFavoriteParams {
+            article_id: " ".to_string(),
+            is_favorite: false,
+        };
+
+        assert!(params.validated_inputs().is_err());
     }
 }

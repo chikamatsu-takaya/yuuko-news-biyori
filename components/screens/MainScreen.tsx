@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import {
   getRecommendedArticles,
+  updateArticleFavorite,
   type ArticleSummaryDto as TauriArticleSummary,
 } from "@/lib/tauri/articles";
 import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
@@ -300,9 +301,13 @@ function ThumbnailPlaceholder({ type }: { type: Article["thumbnailType"] }) {
 function ArticleCard({
   article,
   onClick,
+  onToggleFavorite,
+  isFavoriteSaving,
 }: {
   article: Article;
   onClick: (id: string) => void;
+  onToggleFavorite: (id: string, nextValue: boolean) => void;
+  isFavoriteSaving: boolean;
 }) {
   return (
     <Card
@@ -337,10 +342,11 @@ function ArticleCard({
               <span>{article.timeAgo}</span>
             </div>
             <button
-              className="text-muted-foreground hover:text-yellow-500 transition-colors"
+              className="text-muted-foreground hover:text-yellow-500 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isFavoriteSaving}
               onClick={(e) => {
                 e.stopPropagation();
-                console.log("Toggle favorite:", article.id);
+                onToggleFavorite(article.id, !article.isFavorite);
               }}
             >
               <Star
@@ -422,6 +428,9 @@ export default function MainScreen({
 }) {
   const [isAutoStart] = React.useState(true);
   const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
+  const [favoriteSavingArticleId, setFavoriteSavingArticleId] =
+    React.useState<string | null>(null);
+  const [articleNotice, setArticleNotice] = React.useState<string | null>(null);
   const [yuukoBalloonMessage, setYuukoBalloonMessage] =
     React.useState(fallbackYuukoMessage);
   const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
@@ -514,6 +523,52 @@ export default function MainScreen({
     }
   };
 
+  const handleToggleFavorite = React.useCallback(
+    async (articleId: string, nextValue: boolean) => {
+      const previousArticles = articles;
+
+      setFavoriteSavingArticleId(articleId);
+      setArticleNotice(null);
+      setArticles((currentArticles) =>
+        currentArticles.map((article) =>
+          article.id === articleId
+            ? {
+                ...article,
+                isFavorite: nextValue,
+              }
+            : article
+        )
+      );
+
+      try {
+        const result = await updateArticleFavorite({
+          articleId,
+          isFavorite: nextValue,
+        });
+
+        setArticles((currentArticles) =>
+          currentArticles.map((article) =>
+            article.id === result.articleId
+              ? {
+                  ...article,
+                  isFavorite: result.isFavorite,
+                }
+              : article
+          )
+        );
+      } catch (error) {
+        setArticles(previousArticles);
+        setArticleNotice(
+          "お気に入りの更新に失敗しました。時間をおいてもう一度お試しください。"
+        );
+        console.warn("Failed to update article favorite:", error);
+      } finally {
+        setFavoriteSavingArticleId(null);
+      }
+    },
+    [articles]
+  );
+
   return (
     <div className="h-dvh w-full overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
       <AppTitleBar className="bg-white border-border/50" />
@@ -598,12 +653,18 @@ export default function MainScreen({
               </Button>
             </div>
 
+            {articleNotice ? (
+              <p className="mb-3 text-xs text-amber-700">{articleNotice}</p>
+            ) : null}
+
             <div className="space-y-3">
               {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
                   article={article}
                   onClick={handleArticleClick}
+                  onToggleFavorite={handleToggleFavorite}
+                  isFavoriteSaving={favoriteSavingArticleId === article.id}
                 />
               ))}
             </div>

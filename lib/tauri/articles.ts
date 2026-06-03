@@ -38,6 +38,16 @@ export type GetArticleDetailParams = {
   articleId: string;
 };
 
+export type UpdateArticleFavoriteParams = {
+  articleId: string;
+  isFavorite: boolean;
+};
+
+export type FavoriteUpdateResult = {
+  articleId: string;
+  isFavorite: boolean;
+};
+
 export const getRecommendedArticles = async (
   params: GetRecommendedArticlesParams = {}
 ): Promise<ArticleSummaryDto[] | null> => {
@@ -56,4 +66,14 @@ export const getArticleDetail = async (
   }
 
   return invoke<ArticleDetailDto>("get_article_detail", { params });
+};
+
+export const updateArticleFavorite = async (
+  params: UpdateArticleFavoriteParams
+): Promise<FavoriteUpdateResult> => {
+  if (!isTauriRuntime()) {
+    return params;
+  }
+
+  return invoke<FavoriteUpdateResult>("update_article_favorite", { params });
 };
