@@ -71,6 +71,7 @@ pub fn run() {
             commands::article_commands::update_article_favorite,
             commands::article_commands::generate_article_summary,
             commands::dictionary_commands::explain_selected_term,
+            commands::dictionary_commands::list_dictionary_entries,
             commands::dictionary_commands::save_dictionary_entry,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
