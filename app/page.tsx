@@ -10,10 +10,21 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 
-type ScreenType = "home" | "news" | "dictionary" | "history" | "settings" | "customize" | "gacha" | "onboarding";
+type ScreenType =
+  | "home"
+  | "news"
+  | "dictionary"
+  | "history"
+  | "settings"
+  | "customize"
+  | "gacha"
+  | "onboarding";
 
 export default function Page() {
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
+  const [selectedArticleId, setSelectedArticleId] = React.useState<string | null>(
+    null
+  );
 
   const handleNavigate = (screen: string) => {
     if (screen === "home") {
@@ -35,8 +46,19 @@ export default function Page() {
     }
   };
 
+  const handleOpenArticle = (articleId: string) => {
+    setSelectedArticleId(articleId);
+    setCurrentScreen("news");
+  };
+
   if (currentScreen === "news") {
-    return <NewsReaderScreen onNavigate={handleNavigate} />;
+    return (
+      <NewsReaderScreen
+        articleId={selectedArticleId ?? undefined}
+        onNavigate={handleNavigate}
+        onOpenArticle={handleOpenArticle}
+      />
+    );
   }
 
   if (currentScreen === "dictionary") {
@@ -63,5 +85,5 @@ export default function Page() {
     return <OnboardingScreen onNavigate={handleNavigate} />;
   }
 
-  return <MainScreen onNavigate={handleNavigate} />;
+  return <MainScreen onNavigate={handleNavigate} onOpenArticle={handleOpenArticle} />;
 }

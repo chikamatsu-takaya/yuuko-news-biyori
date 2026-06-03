@@ -47,7 +47,7 @@
 - [x] 型安全強化（`AiProvider` / `ExplanationLevel` enum）
 - [ ] 設計上の残コマンド実装
   - [x] `get_recommended_articles`（2026-06-01）
-  - [ ] `get_article_detail`
+  - [x] `get_article_detail`（2026-06-03）
   - [ ] `generate_article_summary`
   - [ ] `explain_selected_term`
   - [ ] `save_dictionary_entry`
@@ -84,3 +84,4 @@
 - [x] 2026-06-01: ゆうこ通知状態/報酬確認コマンドの基盤実装
 - [x] 2026-06-01: `get_recommended_articles` 実装とMainScreen段階接続
 - [x] 2026-06-01: Test CI / Security CI / Secret Scan CI を追加
+- [x] 2026-06-03: `get_article_detail` 実装とNewsReaderScreen段階接続

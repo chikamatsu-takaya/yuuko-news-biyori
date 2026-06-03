@@ -1,4 +1,6 @@
-use crate::domain::article::{ArticleSummaryDto, GetRecommendedArticlesParams};
+use crate::domain::article::{
+    ArticleDetailDto, ArticleSummaryDto, GetArticleDetailParams, GetRecommendedArticlesParams,
+};
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 
@@ -18,5 +20,13 @@ impl ArticleService {
     ) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let limit = params.normalized_limit()?;
         Ok(self.repository.list_recommended(limit))
+    }
+
+    pub fn get_article_detail(
+        &self,
+        params: GetArticleDetailParams,
+    ) -> Result<ArticleDetailDto, AppError> {
+        let article_id = params.validated_article_id()?;
+        self.repository.get_article_detail(&article_id)
     }
 }
