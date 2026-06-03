@@ -48,7 +48,7 @@
 - [ ] 設計上の残コマンド実装
   - [x] `get_recommended_articles`（2026-06-01）
   - [x] `get_article_detail`（2026-06-03）
-  - [ ] `generate_article_summary`
+  - [x] `generate_article_summary`（2026-06-03）
   - [x] `explain_selected_term`（2026-06-03）
   - [x] `save_dictionary_entry`（2026-06-03）
   - [x] `update_article_favorite`（2026-06-03）
@@ -85,6 +85,7 @@
 - [x] 2026-06-01: `get_recommended_articles` 実装とMainScreen段階接続
 - [x] 2026-06-01: Test CI / Security CI / Secret Scan CI を追加
 - [x] 2026-06-03: `get_article_detail` 実装とNewsReaderScreen段階接続
+- [x] 2026-06-03: `generate_article_summary` 実装とNewsReaderScreen要約更新接続
 - [x] 2026-06-03: `explain_selected_term` 実装とNewsReaderScreen用語ポップアップ接続
 - [x] 2026-06-03: `save_dictionary_entry` 実装とNewsReaderScreen辞書保存ボタン接続
 - [x] 2026-06-03: `update_article_favorite` 実装とMain/Readerお気に入り接続
