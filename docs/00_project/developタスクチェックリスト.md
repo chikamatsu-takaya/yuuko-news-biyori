@@ -49,7 +49,7 @@
   - [x] `get_recommended_articles`（2026-06-01）
   - [x] `get_article_detail`（2026-06-03）
   - [ ] `generate_article_summary`
-  - [ ] `explain_selected_term`
+  - [x] `explain_selected_term`（2026-06-03）
   - [ ] `save_dictionary_entry`
   - [ ] `update_article_favorite`
   - [x] `get_yuuko_notification_state`（2026-06-01）
@@ -85,3 +85,4 @@
 - [x] 2026-06-01: `get_recommended_articles` 実装とMainScreen段階接続
 - [x] 2026-06-01: Test CI / Security CI / Secret Scan CI を追加
 - [x] 2026-06-03: `get_article_detail` 実装とNewsReaderScreen段階接続
+- [x] 2026-06-03: `explain_selected_term` 実装とNewsReaderScreen用語ポップアップ接続

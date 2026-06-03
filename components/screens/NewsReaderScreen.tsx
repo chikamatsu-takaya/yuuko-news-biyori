@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
@@ -32,6 +33,11 @@ import {
   type ArticleDetailDto as TauriArticleDetail,
   type ArticleSummaryDto as TauriArticleSummary,
 } from "@/lib/tauri/articles";
+import {
+  explainSelectedTerm,
+  type DictionaryEntryDto as TauriDictionaryEntry,
+  type DictionaryEntryType,
+} from "@/lib/tauri/dictionary";
 
 type NavigationItem = {
   id: string;
@@ -44,7 +50,6 @@ type SupportTerm = {
   id: string;
   term: string;
   explanation: string;
-  reading?: string;
 };
 
 type ReaderArticleDetail = {
@@ -87,7 +92,7 @@ const fallbackSupportTerms: SupportTerm[] = [
     id: "article-001-term-0",
     term: "生成AI",
     explanation:
-      "文章や画像などを自動生成するAIの総称です。個人利用だけでなく業務支援への活用が広がっています。",
+      "文章や画像などを自動生成するAI全般を指す言葉です。個人利用だけでなく、業務支援への活用も広がっています。",
   },
   {
     id: "article-001-term-1",
@@ -99,43 +104,40 @@ const fallbackSupportTerms: SupportTerm[] = [
     id: "article-001-term-2",
     term: "業務自動化",
     explanation:
-      "定型的な業務や繰り返し作業を仕組み化し、人手を減らして効率化する考え方です。",
+      "定型業務や繰り返し作業を仕組み化し、手間を減らして効率化する考え方です。",
   },
 ];
 
-const fallbackArticle: ReaderArticleDetail = {
-  id: "article-001",
-  title: "生成AIスタートアップの資金調達が再加速",
-  source: "TechCrunch Japan",
-  timeAgo: "5分前",
-  category: "AI・テクノロジー",
-  categoryColor: "border-[var(--yuuko-green)] text-[var(--yuuko-green)] bg-white",
-  isFavorite: false,
-  externalUrl: "https://example.com/articles/article-001",
-  yuukoExplanation:
-    "この記事は、生成AIの新しさそのものよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
-  highlightedTerms: fallbackSupportTerms,
-  keyPoints: [
-    "投資対象が研究寄りから業務課題の解決寄りへ移っている",
-    "導入効果を定量化できるサービスが評価されやすい",
-    "既存業務フローへ自然に組み込める点が差別化要因になっている",
-  ],
-  attentionPoint:
-    "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
-  yuukoThoughts:
-    "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
-};
-
 const fallbackArticleCatalog: ReaderArticleDetail[] = [
-  fallbackArticle,
+  {
+    id: "article-001",
+    title: "生成AIスタートアップの資金調達が再加速",
+    source: "TechCrunch Japan",
+    timeAgo: "5分前",
+    category: "AI・テクノロジー",
+    categoryColor: "border-[var(--yuuko-green)] text-[var(--yuuko-green)] bg-white",
+    isFavorite: false,
+    externalUrl: "https://example.com/articles/article-001",
+    yuukoExplanation:
+      "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
+    highlightedTerms: fallbackSupportTerms,
+    keyPoints: [
+      "投資対象が研究寄りから業務課題の解決寄りへ移っている",
+      "導入効果を定量化できるサービスが評価されやすい",
+      "既存業務フローへ自然に組み込める点が差別化要因になっている",
+    ],
+    attentionPoint:
+      "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
+    yuukoThoughts:
+      "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
+  },
   {
     id: "article-002",
     title: "国内SaaS企業、業務改善支援の新施策を発表",
     source: "日経ビジネス",
     timeAgo: "1時間前",
     category: "ビジネス",
-    categoryColor:
-      "border-emerald-500 text-emerald-600 bg-white",
+    categoryColor: "border-emerald-500 text-emerald-600 bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-002",
     yuukoExplanation:
@@ -145,19 +147,19 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
         id: "article-002-term-0",
         term: "SaaS",
         explanation:
-          "インターネット経由で利用するソフトウェア提供形態です。導入のしやすさと継続運用のしやすさが特徴です。",
+          "インターネット経由で利用するソフトウェア提供形態です。導入しやすさと運用しやすさが特徴です。",
       },
       {
         id: "article-002-term-1",
         term: "導入支援",
         explanation:
-          "システムやサービスを使い始める際に、設定や定着までを支援する取り組みです。",
+          "サービスを使い始める際の設定や教育、現場への定着を支える取り組みです。",
       },
       {
         id: "article-002-term-2",
         term: "業務改善",
         explanation:
-          "現在の仕事の流れを見直して、時間や手間を減らしながら成果を上げることです。",
+          "仕事の流れを見直して、時間や手間を減らしながら成果を上げることです。",
       },
     ],
     keyPoints: [
@@ -176,8 +178,7 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     source: "ITmedia NEWS",
     timeAgo: "2時間前",
     category: "テクノロジー",
-    categoryColor:
-      "border-purple-500 text-purple-600 bg-white",
+    categoryColor: "border-purple-500 text-purple-600 bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-003",
     yuukoExplanation:
@@ -193,13 +194,13 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
         id: "article-003-term-1",
         term: "誤り訂正",
         explanation:
-          "計算中に起こる誤差を検知・補正して、正しい結果に近づけるための仕組みです。",
+          "計算中の誤差を検知・補正して、正しい結果に近づけるための仕組みです。",
       },
       {
         id: "article-003-term-2",
         term: "研究成果",
         explanation:
-          "学術研究や実験から得られた新しい知見や結果を指します。",
+          "研究や実験によって得られた、新しい知見や結果のことです。",
       },
     ],
     keyPoints: [
@@ -213,6 +214,53 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいですね。",
   },
 ];
+
+const fallbackArticle = fallbackArticleCatalog[0];
+
+const fallbackYuukoComment = `記事を読むときは
+「何が便利になるのか」
+を探すとぐっと分かりやすくなります。
+一緒に見ていきましょう。`;
+
+const fallbackSpeechBubble = `この記事を、わかりやすく
+まとめてみました。
+気になる言葉も
+すぐに開けますよ。`;
+
+const defaultTermExplanation = (term: string) =>
+  `「${term}」はこの記事を理解するための補助キーワードです。現時点では記事文脈に沿った簡易解説を表示しています。`;
+
+const dictionaryTypeLabel = (type: DictionaryEntryType): string => {
+  if (type === "phrase") {
+    return "フレーズ";
+  }
+  if (type === "key_point") {
+    return "要点";
+  }
+  return "用語";
+};
+
+const toCategoryColor = (genre: string): string => {
+  if (genre.includes("AI")) {
+    return "border-blue-500 text-blue-600 bg-white";
+  }
+  if (genre.includes("ビジネス")) {
+    return "border-emerald-500 text-emerald-600 bg-white";
+  }
+  return "border-purple-500 text-purple-600 bg-white";
+};
+
+const toThumbnailType = (
+  genre: string
+): RelatedArticle["thumbnailType"] => {
+  if (genre.includes("AI")) {
+    return "ai";
+  }
+  if (genre.includes("ビジネス")) {
+    return "business";
+  }
+  return "quantum";
+};
 
 const toRelatedFallback = (article: ReaderArticleDetail): RelatedArticle => ({
   id: article.id,
@@ -237,41 +285,6 @@ const getFallbackRelatedArticles = (articleId?: string): RelatedArticle[] => {
     : fallbackArticleCatalog.slice(1).map(toRelatedFallback);
 };
 
-const fallbackYuukoComment = `記事を読むときは
-「何が便利になるのか」
-を探すとぐっと分かりやすくなります。
-一緒に見ていきましょう。`;
-
-const fallbackSpeechBubble = `この記事を、わかりやすく
-まとめてみました。
-気になる言葉も
-すぐに開けますよ。`;
-
-const defaultTermExplanation = (term: string) =>
-  `「${term}」の詳しい用語解説は次の段階で explain_selected_term に接続予定です。現時点では記事理解の補助キーワードとして表示しています。`;
-
-const toCategoryColor = (genre: string): string => {
-  if (genre.includes("AI")) {
-    return "border-blue-500 text-blue-600 bg-white";
-  }
-  if (genre.includes("ビジネス")) {
-    return "border-emerald-500 text-emerald-600 bg-white";
-  }
-  return "border-purple-500 text-purple-600 bg-white";
-};
-
-const toThumbnailType = (
-  genre: string
-): RelatedArticle["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  return "quantum";
-};
-
 const buildSupportTerms = (
   articleId: string,
   keywordCandidates: string[]
@@ -287,6 +300,20 @@ const buildSupportTerms = (
     explanation: defaultTermExplanation(term),
   }));
 };
+
+const buildFallbackDictionaryEntry = (
+  currentArticle: ReaderArticleDetail,
+  term: SupportTerm
+): TauriDictionaryEntry => ({
+  entryId: `${currentArticle.id}-${term.id}`,
+  keyText: term.term,
+  type: "term",
+  shortExplanation: `「${term.term}」はこの記事を理解するためのキーワードです。`,
+  detailExplanation: term.explanation || defaultTermExplanation(term.term),
+  relatedArticleId: currentArticle.id,
+  relatedArticleTitle: currentArticle.title,
+  isStarred: false,
+});
 
 const mapTauriArticleToUi = (
   article: TauriArticleDetail
@@ -379,17 +406,35 @@ function Breadcrumb({
 
 function TermPopup({
   term,
-  explanation,
+  dictionaryEntry,
+  isLoading,
+  notice,
   onClose,
 }: {
   term: string;
-  explanation: string;
+  dictionaryEntry: TauriDictionaryEntry | null;
+  isLoading: boolean;
+  notice: string | null;
   onClose: () => void;
 }) {
   return (
-    <div className="absolute left-1/2 top-1/2 z-50 w-72 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
-      <div className="mb-2 flex items-start justify-between">
-        <h4 className="text-sm font-semibold text-foreground">{term}とは</h4>
+    <div className="absolute left-1/2 top-1/2 z-50 w-80 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-foreground">{term}</h4>
+          {dictionaryEntry ? (
+            <div className="mt-1 flex items-center gap-2">
+              <Badge variant="outline" className="text-[10px]">
+                {dictionaryTypeLabel(dictionaryEntry.type)}
+              </Badge>
+              {dictionaryEntry.relatedArticleTitle ? (
+                <span className="text-[10px] text-muted-foreground">
+                  {dictionaryEntry.relatedArticleTitle}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
         <button
           className="text-muted-foreground transition-colors hover:text-foreground"
           onClick={onClose}
@@ -397,9 +442,32 @@ function TermPopup({
           <X className="h-4 w-4" />
         </button>
       </div>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        {explanation}
-      </p>
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <Spinner className="size-4" />
+          <span>用語解説を取得しています…</span>
+        </div>
+      ) : null}
+
+      {notice ? (
+        <p className="mb-2 text-xs text-amber-700">{notice}</p>
+      ) : null}
+
+      {dictionaryEntry ? (
+        <div className="space-y-2">
+          <p className="text-xs font-medium leading-relaxed text-foreground">
+            {dictionaryEntry.shortExplanation}
+          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {dictionaryEntry.detailExplanation}
+          </p>
+        </div>
+      ) : (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          用語解説を表示できませんでした。
+        </p>
+      )}
     </div>
   );
 }
@@ -526,6 +594,14 @@ export default function NewsReaderScreen({
   const [selectedTerm, setSelectedTerm] = React.useState<SupportTerm | null>(
     getFallbackArticleById(articleId).highlightedTerms[0] ?? null
   );
+  const [selectedDictionaryEntry, setSelectedDictionaryEntry] =
+    React.useState<TauriDictionaryEntry | null>(() =>
+      selectedTerm
+        ? buildFallbackDictionaryEntry(getFallbackArticleById(articleId), selectedTerm)
+        : null
+    );
+  const [isExplainingTerm, setIsExplainingTerm] = React.useState(false);
+  const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
@@ -625,6 +701,55 @@ export default function NewsReaderScreen({
       active = false;
     };
   }, [resolvedArticleId]);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadTermExplanation = async () => {
+      if (!selectedTerm || !showTermPopup) {
+        setSelectedDictionaryEntry(null);
+        setIsExplainingTerm(false);
+        setTermNotice(null);
+        return;
+      }
+
+      const fallbackEntry = buildFallbackDictionaryEntry(article, selectedTerm);
+      setSelectedDictionaryEntry(fallbackEntry);
+      setIsExplainingTerm(true);
+      setTermNotice(null);
+
+      try {
+        const entry = await explainSelectedTerm({
+          articleId: article.id,
+          selectedText: selectedTerm.term,
+        });
+
+        if (!active) {
+          return;
+        }
+
+        setSelectedDictionaryEntry(entry ?? fallbackEntry);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setSelectedDictionaryEntry(fallbackEntry);
+        setTermNotice("用語解説の取得に失敗したため、補助説明を表示しています。");
+        console.warn("Failed to explain selected term:", error);
+      } finally {
+        if (active) {
+          setIsExplainingTerm(false);
+        }
+      }
+    };
+
+    void loadTermExplanation();
+
+    return () => {
+      active = false;
+    };
+  }, [article, selectedTerm, showTermPopup]);
 
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
@@ -892,7 +1017,9 @@ export default function NewsReaderScreen({
           {showTermPopup && selectedTerm ? (
             <TermPopup
               term={selectedTerm.term}
-              explanation={selectedTerm.explanation}
+              dictionaryEntry={selectedDictionaryEntry}
+              isLoading={isExplainingTerm}
+              notice={termNotice}
               onClose={() => setShowTermPopup(false)}
             />
           ) : null}
