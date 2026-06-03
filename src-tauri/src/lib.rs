@@ -30,7 +30,7 @@ pub fn run() {
             let settings_service = SettingsService::new(settings_repository);
             settings_service.initialize_default_if_missing()?;
             let article_service = ArticleService::new(ArticleRepository::new());
-            let dictionary_service = DictionaryService::new(DictionaryRepository::new());
+            let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let yuuko_state_repository = YuukoStateRepository::new(&paths);
             let yuuko_service =
                 YuukoService::new(SettingsRepository::new(&paths), yuuko_state_repository);
@@ -60,6 +60,7 @@ pub fn run() {
             commands::article_commands::get_recommended_articles,
             commands::article_commands::get_article_detail,
             commands::dictionary_commands::explain_selected_term,
+            commands::dictionary_commands::save_dictionary_entry,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,

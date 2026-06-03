@@ -1,15 +1,30 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::dictionary::{DictionaryEntryDto, DictionaryEntryType};
+use crate::domain::dictionary::{
+    normalize_text, DictionaryEntryDto, DictionaryEntryType, PersistedDictionaryEntry,
+    PersistedDictionaryStore,
+};
 use crate::error::AppError;
+use crate::paths::AppPaths;
 
-#[derive(Debug, Clone, Default)]
-pub struct DictionaryRepository;
+#[derive(Debug, Clone)]
+pub struct DictionaryRepository {
+    dictionary_path: PathBuf,
+}
 
 impl DictionaryRepository {
-    pub fn new() -> Self {
-        Self
+    pub fn new(paths: &AppPaths) -> Self {
+        Self {
+            dictionary_path: paths.dictionary_path.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_path(dictionary_path: PathBuf) -> Self {
+        Self { dictionary_path }
     }
 
     pub fn explain_selected_term(
@@ -21,6 +36,10 @@ impl DictionaryRepository {
             .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))?;
         let normalized_text = normalize_text(selected_text);
 
+        if let Some(saved_entry) = self.find_saved_entry(article_id, &normalized_text)? {
+            return Ok(saved_entry);
+        }
+
         let entry = sample_dictionary_entries()
             .into_iter()
             .find(|entry| {
@@ -30,6 +49,127 @@ impl DictionaryRepository {
             .unwrap_or_else(|| build_generic_entry(article_id, article_title, selected_text));
 
         Ok(entry)
+    }
+
+    pub fn save_dictionary_entry(
+        &self,
+        entry: DictionaryEntryDto,
+    ) -> Result<DictionaryEntryDto, AppError> {
+        let mut store = self.load_store_or_default()?;
+        let now_text = current_unix_timestamp_text();
+
+        if let Some(existing_entry) = store
+            .entries
+            .iter_mut()
+            .find(|existing_entry| existing_entry.dictionary_id == entry.entry_id)
+        {
+            existing_entry.apply_from_dto(entry, now_text);
+            let saved_entry = existing_entry.to_dto();
+            self.save_store(&store)?;
+            return Ok(saved_entry);
+        }
+
+        let persisted_entry = PersistedDictionaryEntry::from_dto(entry, now_text);
+        let saved_entry = persisted_entry.to_dto();
+        store.entries.push(persisted_entry);
+        self.save_store(&store)?;
+        Ok(saved_entry)
+    }
+
+    fn find_saved_entry(
+        &self,
+        article_id: &str,
+        normalized_text: &str,
+    ) -> Result<Option<DictionaryEntryDto>, AppError> {
+        let store = self.load_store_or_default()?;
+        Ok(store
+            .entries
+            .into_iter()
+            .find(|entry| {
+                entry.normalized_text == normalized_text
+                    && entry
+                        .source_article_ids
+                        .iter()
+                        .any(|source_article_id| source_article_id == article_id)
+            })
+            .map(|entry| entry.to_dto()))
+    }
+
+    fn load_store_or_default(&self) -> Result<PersistedDictionaryStore, AppError> {
+        self.restore_backup_if_primary_missing();
+
+        if !self.dictionary_path.exists() {
+            return Ok(PersistedDictionaryStore::with_current_version());
+        }
+
+        let raw = std::fs::read_to_string(&self.dictionary_path)?;
+        let mut store = serde_json::from_str::<PersistedDictionaryStore>(&raw)?;
+        if store.version == 0 {
+            store.version = 1;
+        }
+        Ok(store)
+    }
+
+    fn save_store(&self, store: &PersistedDictionaryStore) -> Result<(), AppError> {
+        if let Some(parent) = self.dictionary_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let temp_path = self.dictionary_path.with_extension("json.tmp");
+        let backup_path = self.dictionary_path.with_extension("json.bak");
+        let payload = serde_json::to_vec_pretty(store)?;
+        std::fs::write(&temp_path, payload)?;
+
+        let had_existing = self.dictionary_path.exists();
+        if had_existing {
+            if backup_path.exists() {
+                std::fs::remove_file(&backup_path)?;
+            }
+            std::fs::rename(&self.dictionary_path, &backup_path)?;
+        }
+
+        match std::fs::rename(&temp_path, &self.dictionary_path) {
+            Ok(()) => {
+                if had_existing && backup_path.exists() {
+                    if let Err(error) = std::fs::remove_file(&backup_path) {
+                        log::warn!("Failed to remove dictionary backup: {error}");
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                log::error!("Failed to promote temporary dictionary file: {error}");
+
+                if had_existing && backup_path.exists() {
+                    if let Err(restore_error) = std::fs::rename(&backup_path, &self.dictionary_path)
+                    {
+                        log::error!("Failed to restore dictionary backup: {restore_error}");
+                    }
+                }
+
+                if temp_path.exists() {
+                    let _ = std::fs::remove_file(&temp_path);
+                }
+
+                Err(error.into())
+            }
+        }
+    }
+
+    fn restore_backup_if_primary_missing(&self) {
+        if self.dictionary_path.exists() {
+            return;
+        }
+
+        let backup_path = self.dictionary_path.with_extension("json.bak");
+        if !backup_path.exists() {
+            return;
+        }
+
+        log::warn!("dictionary entries file is missing. attempting backup restore.");
+        if let Err(error) = std::fs::rename(&backup_path, &self.dictionary_path) {
+            log::error!("Failed to restore dictionary backup: {error}");
+        }
     }
 }
 
@@ -58,10 +198,6 @@ impl SampleDictionaryEntry {
     }
 }
 
-fn normalize_text(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
 fn build_entry_id(article_id: &str, selected_text: &str) -> String {
     let mut hasher = DefaultHasher::new();
     article_id.hash(&mut hasher);
@@ -87,6 +223,13 @@ fn build_generic_entry(
         related_article_id: Some(article_id.to_string()),
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
+    }
+}
+
+fn current_unix_timestamp_text() -> String {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs().to_string(),
+        Err(_) => "0".to_string(),
     }
 }
 
@@ -176,23 +319,75 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::domain::dictionary::{DictionaryEntryDto, DictionaryEntryType};
+
     use super::DictionaryRepository;
+
+    struct TestRepositoryContext {
+        repository: DictionaryRepository,
+        root_dir: PathBuf,
+    }
+
+    impl TestRepositoryContext {
+        fn new() -> Self {
+            let unique_suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root_dir = std::env::temp_dir().join(format!(
+                "yuuko-dictionary-tests-{}-{unique_suffix}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root_dir).unwrap();
+            let dictionary_path = root_dir.join("dictionary").join("entries.json");
+            let repository = DictionaryRepository::with_path(dictionary_path);
+            Self {
+                repository,
+                root_dir,
+            }
+        }
+    }
+
+    impl Drop for TestRepositoryContext {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root_dir);
+        }
+    }
+
+    fn saved_entry() -> DictionaryEntryDto {
+        DictionaryEntryDto {
+            entry_id: "entry-article-001-generated-ai".to_string(),
+            key_text: "生成AI".to_string(),
+            entry_type: DictionaryEntryType::Term,
+            short_explanation: "保存済みの短い説明".to_string(),
+            detail_explanation: "保存済みの詳しい説明".to_string(),
+            related_article_id: Some("article-001".to_string()),
+            related_article_title: Some("生成AIスタートアップの資金調達が再加速".to_string()),
+            is_starred: true,
+        }
+    }
 
     #[test]
     fn explain_selected_term_returns_exact_match() {
-        let repository = DictionaryRepository::new();
-        let entry = repository
+        let context = TestRepositoryContext::new();
+        let entry = context
+            .repository
             .explain_selected_term("article-001", "生成AI")
             .unwrap();
 
         assert_eq!(entry.key_text, "生成AI");
         assert_eq!(entry.related_article_id.as_deref(), Some("article-001"));
+        assert!(!entry.is_starred);
     }
 
     #[test]
     fn explain_selected_term_matches_ascii_case_insensitively() {
-        let repository = DictionaryRepository::new();
-        let entry = repository
+        let context = TestRepositoryContext::new();
+        let entry = context
+            .repository
             .explain_selected_term("article-002", "saas")
             .unwrap();
 
@@ -201,8 +396,9 @@ mod tests {
 
     #[test]
     fn explain_selected_term_falls_back_for_unknown_term() {
-        let repository = DictionaryRepository::new();
-        let entry = repository
+        let context = TestRepositoryContext::new();
+        let entry = context
+            .repository
             .explain_selected_term("article-001", "評価指標")
             .unwrap();
 
@@ -212,8 +408,9 @@ mod tests {
 
     #[test]
     fn explain_selected_term_rejects_unknown_article() {
-        let repository = DictionaryRepository::new();
-        let error = repository
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
             .explain_selected_term("article-999", "生成AI")
             .unwrap_err();
 
@@ -221,5 +418,44 @@ mod tests {
             error.to_string(),
             "not found: article not found: article-999"
         );
+    }
+
+    #[test]
+    fn save_dictionary_entry_persists_and_returns_starred_entry() {
+        let context = TestRepositoryContext::new();
+        let saved = context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        assert!(saved.is_starred);
+        assert_eq!(saved.key_text, "生成AI");
+
+        let explained = context
+            .repository
+            .explain_selected_term("article-001", "生成AI")
+            .unwrap();
+        assert!(explained.is_starred);
+        assert_eq!(explained.short_explanation, "保存済みの短い説明");
+    }
+
+    #[test]
+    fn save_dictionary_entry_updates_existing_entry() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let mut updated_entry = saved_entry();
+        updated_entry.short_explanation = "更新後の短い説明".to_string();
+        updated_entry.detail_explanation = "更新後の詳しい説明".to_string();
+        let updated = context
+            .repository
+            .save_dictionary_entry(updated_entry)
+            .unwrap();
+
+        assert_eq!(updated.short_explanation, "更新後の短い説明");
+        assert_eq!(updated.detail_explanation, "更新後の詳しい説明");
     }
 }
