@@ -8,28 +8,30 @@ import { Badge } from "@/components/ui/badge";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
+  ArrowLeft,
+  Bell,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Gift,
+  Heart,
+  HelpCircle,
+  History,
   Home,
   Newspaper,
-  History,
-  BookOpen,
   Palette,
-  Gift,
+  Search,
   Settings,
   Star,
-  Heart,
-  Bell,
-  HelpCircle,
-  ChevronRight,
-  ChevronLeft,
-  ArrowLeft,
-  ExternalLink,
   X,
-  Search,
 } from "lucide-react";
-
-// ============================================
-// TypeScript Types
-// ============================================
+import {
+  getArticleDetail,
+  getRecommendedArticles,
+  type ArticleDetailDto as TauriArticleDetail,
+  type ArticleSummaryDto as TauriArticleSummary,
+} from "@/lib/tauri/articles";
 
 type NavigationItem = {
   id: string;
@@ -38,7 +40,14 @@ type NavigationItem = {
   isActive?: boolean;
 };
 
-type ArticleDetail = {
+type SupportTerm = {
+  id: string;
+  term: string;
+  explanation: string;
+  reading?: string;
+};
+
+type ReaderArticleDetail = {
   id: string;
   title: string;
   source: string;
@@ -48,7 +57,7 @@ type ArticleDetail = {
   isFavorite: boolean;
   externalUrl: string;
   yuukoExplanation: string;
-  highlightedTerms: { term: string; explanation: string }[];
+  highlightedTerms: SupportTerm[];
   keyPoints: string[];
   attentionPoint: string;
   yuukoThoughts: string;
@@ -63,17 +72,7 @@ type RelatedArticle = {
   thumbnailType: "ai" | "business" | "quantum";
 };
 
-type SupportTerm = {
-  id: string;
-  term: string;
-  reading?: string;
-};
-
-// ============================================
-// Mock Data
-// ============================================
-
-const mockNavigationItems: NavigationItem[] = [
+const navigationItems: NavigationItem[] = [
   { id: "home", label: "ホーム", icon: Home },
   { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: true },
   { id: "history", label: "ニュース履歴", icon: History },
@@ -83,68 +82,257 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings },
 ];
 
-const mockArticle: ArticleDetail = {
-  id: "1",
-  title: "生成AIが変えるソフトウェア開発の未来",
+const fallbackSupportTerms: SupportTerm[] = [
+  {
+    id: "article-001-term-0",
+    term: "生成AI",
+    explanation:
+      "文章や画像などを自動生成するAIの総称です。個人利用だけでなく業務支援への活用が広がっています。",
+  },
+  {
+    id: "article-001-term-1",
+    term: "資金調達",
+    explanation:
+      "企業が事業拡大のために投資家や金融機関から資金を集めることです。",
+  },
+  {
+    id: "article-001-term-2",
+    term: "業務自動化",
+    explanation:
+      "定型的な業務や繰り返し作業を仕組み化し、人手を減らして効率化する考え方です。",
+  },
+];
+
+const fallbackArticle: ReaderArticleDetail = {
+  id: "article-001",
+  title: "生成AIスタートアップの資金調達が再加速",
   source: "TechCrunch Japan",
   timeAgo: "5分前",
   category: "AI・テクノロジー",
   categoryColor: "border-[var(--yuuko-green)] text-[var(--yuuko-green)] bg-white",
   isFavorite: false,
-  externalUrl: "https://example.com/article/1",
+  externalUrl: "https://example.com/articles/article-001",
   yuukoExplanation:
-    "AIが「コードの自動生成」や「解説」レビューを支援し、開発のスピードと品質が大きく向上しています。単純作業をAIに任せることで、エンジニアは「考える仕事」に集中できるようになります。今後は、AIをうまく使いこなせる人が、より価値を発揮できる時代になりそうです。",
-  highlightedTerms: [
-    {
-      term: "コードの自動生成",
-      explanation:
-        "AIが人の指示や目的に合わせて、プログラムのコードを自動で作ってくれることです。たとえば「ログイン機能を作って」と伝えると、必要なコードのたたき台を提案してくれます。",
-    },
-    {
-      term: "解説",
-      explanation: "コードの内容や動作をわかりやすく説明すること。",
-    },
-  ],
+    "この記事は、生成AIの新しさそのものよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
+  highlightedTerms: fallbackSupportTerms,
   keyPoints: [
-    "AIがコードの自動生成やレビューを支援する",
-    "開発スピードが向上し、品質改善にもつながる",
-    "エンジニアはより創造的な仕事に集中できる",
-    "AIを使いこなすスキルが今後ますます重要に",
+    "投資対象が研究寄りから業務課題の解決寄りへ移っている",
+    "導入効果を定量化できるサービスが評価されやすい",
+    "既存業務フローへ自然に組み込める点が差別化要因になっている",
   ],
   attentionPoint:
-    "開発現場だけでなく、教育や非エンジニアの分野にもAIコーディング支援が広がりつつあります。社会全体のデジタル化を加速する可能性に注目です。",
+    "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
   yuukoThoughts:
-    "AIは「仕事を奪う存在」じゃなくて、「頼れるパートナー」だね！うまく付き合えば、もっと楽しく、もっとすごいものが作れそうだよ〜♪",
+    "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
 };
 
-const mockRelatedArticle: RelatedArticle = {
-  id: "2",
-  title: "AIコーディング支援ツールの最新動向まとめ",
-  source: "日経クロステック",
-  timeAgo: "2時間前",
-  isNew: true,
-  thumbnailType: "ai",
-};
-
-const mockSupportTerms: SupportTerm[] = [
-  { id: "1", term: "コードの自動生成" },
-  { id: "2", term: "レビュー（コードレビュー）" },
-  { id: "3", term: "エンジニアリング生産性" },
+const fallbackArticleCatalog: ReaderArticleDetail[] = [
+  fallbackArticle,
+  {
+    id: "article-002",
+    title: "国内SaaS企業、業務改善支援の新施策を発表",
+    source: "日経ビジネス",
+    timeAgo: "1時間前",
+    category: "ビジネス",
+    categoryColor:
+      "border-emerald-500 text-emerald-600 bg-white",
+    isFavorite: false,
+    externalUrl: "https://example.com/articles/article-002",
+    yuukoExplanation:
+      "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントです。現場で定着するかどうかが成果を大きく左右します。",
+    highlightedTerms: [
+      {
+        id: "article-002-term-0",
+        term: "SaaS",
+        explanation:
+          "インターネット経由で利用するソフトウェア提供形態です。導入のしやすさと継続運用のしやすさが特徴です。",
+      },
+      {
+        id: "article-002-term-1",
+        term: "導入支援",
+        explanation:
+          "システムやサービスを使い始める際に、設定や定着までを支援する取り組みです。",
+      },
+      {
+        id: "article-002-term-2",
+        term: "業務改善",
+        explanation:
+          "現在の仕事の流れを見直して、時間や手間を減らしながら成果を上げることです。",
+      },
+    ],
+    keyPoints: [
+      "導入支援と社内教育を一体で提供している",
+      "中堅企業の現場定着を重視した設計になっている",
+      "単発導入ではなく継続改善を前提にしている",
+    ],
+    attentionPoint:
+      "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが重要です。",
+    yuukoThoughts:
+      "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうですね。",
+  },
+  {
+    id: "article-003",
+    title: "量子コンピュータ研究で新たな誤り訂正手法",
+    source: "ITmedia NEWS",
+    timeAgo: "2時間前",
+    category: "テクノロジー",
+    categoryColor:
+      "border-purple-500 text-purple-600 bg-white",
+    isFavorite: false,
+    externalUrl: "https://example.com/articles/article-003",
+    yuukoExplanation:
+      "量子コンピュータは速さだけでなく、誤差に弱い点が課題です。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいです。",
+    highlightedTerms: [
+      {
+        id: "article-003-term-0",
+        term: "量子コンピュータ",
+        explanation:
+          "量子力学の性質を利用して計算を行う新しい計算機の考え方です。",
+      },
+      {
+        id: "article-003-term-1",
+        term: "誤り訂正",
+        explanation:
+          "計算中に起こる誤差を検知・補正して、正しい結果に近づけるための仕組みです。",
+      },
+      {
+        id: "article-003-term-2",
+        term: "研究成果",
+        explanation:
+          "学術研究や実験から得られた新しい知見や結果を指します。",
+      },
+    ],
+    keyPoints: [
+      "誤り訂正の計算コスト削減が主題",
+      "安定運用への実用面で前進があった",
+      "研究成果は今後の実装方式に影響する可能性がある",
+    ],
+    attentionPoint:
+      "速度の話題に見えても、実際には安定して正しく動かす工夫が中心です。",
+    yuukoThoughts:
+      "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいですね。",
+  },
 ];
 
-const mockYuukoComment = `ニュースを読むと
-世の中のことが
-もっとよくわかるよ〜！
-一緒に学んでこっ♪`;
+const toRelatedFallback = (article: ReaderArticleDetail): RelatedArticle => ({
+  id: article.id,
+  title: article.title,
+  source: article.source,
+  timeAgo: article.timeAgo,
+  isNew: true,
+  thumbnailType: toThumbnailType(article.category),
+});
 
-const mockYuukoSpeechBubble = `この記事を、わかりやすく
-まとめ直したよ〜！
-むずかしい言葉は、
-ぼくに聞いてねっ♪`;
+const getFallbackArticleById = (articleId?: string): ReaderArticleDetail =>
+  fallbackArticleCatalog.find((article) => article.id === articleId) ??
+  fallbackArticle;
 
-// ============================================
-// Sub Components
-// ============================================
+const getFallbackRelatedArticles = (articleId?: string): RelatedArticle[] => {
+  const relatedArticles = fallbackArticleCatalog
+    .filter((article) => article.id !== articleId)
+    .map(toRelatedFallback);
+
+  return relatedArticles.length > 0
+    ? relatedArticles
+    : fallbackArticleCatalog.slice(1).map(toRelatedFallback);
+};
+
+const fallbackYuukoComment = `記事を読むときは
+「何が便利になるのか」
+を探すとぐっと分かりやすくなります。
+一緒に見ていきましょう。`;
+
+const fallbackSpeechBubble = `この記事を、わかりやすく
+まとめてみました。
+気になる言葉も
+すぐに開けますよ。`;
+
+const defaultTermExplanation = (term: string) =>
+  `「${term}」の詳しい用語解説は次の段階で explain_selected_term に接続予定です。現時点では記事理解の補助キーワードとして表示しています。`;
+
+const toCategoryColor = (genre: string): string => {
+  if (genre.includes("AI")) {
+    return "border-blue-500 text-blue-600 bg-white";
+  }
+  if (genre.includes("ビジネス")) {
+    return "border-emerald-500 text-emerald-600 bg-white";
+  }
+  return "border-purple-500 text-purple-600 bg-white";
+};
+
+const toThumbnailType = (
+  genre: string
+): RelatedArticle["thumbnailType"] => {
+  if (genre.includes("AI")) {
+    return "ai";
+  }
+  if (genre.includes("ビジネス")) {
+    return "business";
+  }
+  return "quantum";
+};
+
+const buildSupportTerms = (
+  articleId: string,
+  keywordCandidates: string[]
+): SupportTerm[] => {
+  const normalizedKeywords =
+    keywordCandidates.length > 0
+      ? keywordCandidates
+      : fallbackSupportTerms.map((term) => term.term);
+
+  return normalizedKeywords.map((term, index) => ({
+    id: `${articleId}-term-${index}`,
+    term,
+    explanation: defaultTermExplanation(term),
+  }));
+};
+
+const mapTauriArticleToUi = (
+  article: TauriArticleDetail
+): ReaderArticleDetail => {
+  const highlightedTerms = buildSupportTerms(
+    article.articleId,
+    article.keywordCandidates
+  );
+
+  return {
+    id: article.articleId,
+    title: article.title,
+    source: article.sourceName,
+    timeAgo: article.publishedAtText,
+    category: article.genre,
+    categoryColor: toCategoryColor(article.genre),
+    isFavorite: article.isFavorite,
+    externalUrl: article.originalUrl,
+    yuukoExplanation:
+      article.yuukoExplanation ??
+      article.summary ??
+      fallbackArticle.yuukoExplanation,
+    highlightedTerms,
+    keyPoints:
+      article.focusPoints.length > 0
+        ? article.focusPoints
+        : fallbackArticle.keyPoints,
+    attentionPoint:
+      article.focusPoints[1] ??
+      article.summary ??
+      fallbackArticle.attentionPoint,
+    yuukoThoughts:
+      article.yuukoComment ?? article.summary ?? fallbackArticle.yuukoThoughts,
+  };
+};
+
+const mapSummaryToRelated = (
+  article: TauriArticleSummary
+): RelatedArticle => ({
+  id: article.articleId,
+  title: article.title,
+  source: article.sourceName,
+  timeAgo: article.publishedAtText,
+  isNew: article.readState === "unread",
+  thumbnailType: toThumbnailType(article.genre),
+});
 
 function PawIcon({ className }: { className?: string }) {
   return (
@@ -163,24 +351,28 @@ function PawIcon({ className }: { className?: string }) {
   );
 }
 
-function Breadcrumb() {
+function Breadcrumb({
+  onNavigate,
+}: {
+  onNavigate?: (screen: string) => void;
+}) {
   return (
-    <nav className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
+    <nav className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
       <button
-        className="hover:text-foreground transition-colors"
-        onClick={() => console.log("Navigate to home")}
+        className="transition-colors hover:text-foreground"
+        onClick={() => onNavigate?.("home")}
       >
         ホーム
       </button>
-      <ChevronRight className="w-4 h-4" />
+      <ChevronRight className="h-4 w-4" />
       <button
-        className="hover:text-foreground transition-colors"
-        onClick={() => console.log("Navigate to news")}
+        className="transition-colors hover:text-foreground"
+        onClick={() => onNavigate?.("news")}
       >
         ニュース
       </button>
-      <ChevronRight className="w-4 h-4" />
-      <span className="text-foreground">記事</span>
+      <ChevronRight className="h-4 w-4" />
+      <span className="text-foreground">記事詳細</span>
     </nav>
   );
 }
@@ -195,17 +387,17 @@ function TermPopup({
   onClose: () => void;
 }) {
   return (
-    <div className="absolute z-50 bg-white rounded-xl shadow-lg border border-border/50 p-4 w-72 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-      <div className="flex items-start justify-between mb-2">
-        <h4 className="font-semibold text-sm text-foreground">{term}とは？</h4>
+    <div className="absolute left-1/2 top-1/2 z-50 w-72 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
+      <div className="mb-2 flex items-start justify-between">
+        <h4 className="text-sm font-semibold text-foreground">{term}とは</h4>
         <button
-          className="text-muted-foreground hover:text-foreground transition-colors"
+          className="text-muted-foreground transition-colors hover:text-foreground"
           onClick={onClose}
         >
-          <X className="w-4 h-4" />
+          <X className="h-4 w-4" />
         </button>
       </div>
-      <p className="text-xs text-muted-foreground leading-relaxed">
+      <p className="text-xs leading-relaxed text-muted-foreground">
         {explanation}
       </p>
     </div>
@@ -219,7 +411,7 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
       icon: (
         <svg
           viewBox="0 0 64 64"
-          className="w-8 h-8 text-white/90"
+          className="h-8 w-8 text-white/90"
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
@@ -237,7 +429,7 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
       icon: (
         <svg
           viewBox="0 0 64 64"
-          className="w-8 h-8 text-white/90"
+          className="h-8 w-8 text-white/90"
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
@@ -253,7 +445,7 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
       icon: (
         <svg
           viewBox="0 0 64 64"
-          className="w-8 h-8 text-white/90"
+          className="h-8 w-8 text-white/90"
           fill="none"
           stroke="currentColor"
           strokeWidth="1.5"
@@ -271,7 +463,7 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
 
   return (
     <div
-      className={`w-14 h-14 rounded-lg bg-gradient-to-br ${config.gradient} flex items-center justify-center shrink-0`}
+      className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${config.gradient}`}
     >
       {config.icon}
     </div>
@@ -286,15 +478,15 @@ function YuukoCharacter() {
         width={192}
         height={192}
         alt="ゆうこ"
-        className="w-48 h-auto drop-shadow-lg animate-float"
-        onError={(e) => {
-          const target = e.target as HTMLImageElement;
+        className="h-auto w-48 animate-float drop-shadow-lg"
+        onError={(event) => {
+          const target = event.target as HTMLImageElement;
           target.style.display = "none";
           target.nextElementSibling?.classList.remove("hidden");
         }}
       />
-      <div className="hidden w-48 h-48 bg-gradient-to-b from-gray-800 to-gray-900 rounded-full flex items-center justify-center">
-        <PawIcon className="w-16 h-16 text-pink-300" />
+      <div className="hidden h-48 w-48 items-center justify-center rounded-full bg-gradient-to-b from-gray-800 to-gray-900">
+        <PawIcon className="h-16 w-16 text-pink-300" />
       </div>
     </div>
   );
@@ -302,70 +494,175 @@ function YuukoCharacter() {
 
 function YuukoSpeechBubbleRight({ message }: { message: string }) {
   return (
-    <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border-2 border-[var(--yuuko-green)]/30 max-w-[200px]">
-      <p className="text-xs text-foreground whitespace-pre-line leading-relaxed">
+    <div className="relative max-w-[200px] rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white px-4 py-3 shadow-md">
+      <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
         {message}
       </p>
-      <div className="flex justify-end mt-2">
-        <PawIcon className="w-4 h-4 text-[var(--yuuko-green)]" />
+      <div className="mt-2 flex justify-end">
+        <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]" />
       </div>
-      {/* Speech bubble tail pointing down-left */}
-      <div className="absolute -bottom-2 left-6 w-4 h-4 bg-white border-b-2 border-l-2 border-[var(--yuuko-green)]/30 transform rotate-[-45deg]" />
+      <div className="absolute -bottom-2 left-6 h-4 w-4 rotate-[-45deg] border-b-2 border-l-2 border-[var(--yuuko-green)]/30 bg-white" />
     </div>
   );
 }
 
-// ============================================
-// Main Component
-// ============================================
-
 export default function NewsReaderScreen({
+  articleId,
   onNavigate,
+  onOpenArticle,
 }: {
+  articleId?: string;
   onNavigate?: (screen: string) => void;
+  onOpenArticle?: (articleId: string) => void;
 }) {
   const [isAutoStart] = React.useState(true);
-  const [showTermPopup, setShowTermPopup] = React.useState(true);
-  const [selectedTerm, setSelectedTerm] = React.useState(
-    mockArticle.highlightedTerms[0]
+  const [article, setArticle] = React.useState<ReaderArticleDetail>(() =>
+    getFallbackArticleById(articleId)
   );
+  const [relatedArticles, setRelatedArticles] = React.useState<RelatedArticle[]>(
+    () => getFallbackRelatedArticles(articleId)
+  );
+  const [showTermPopup, setShowTermPopup] = React.useState(true);
+  const [selectedTerm, setSelectedTerm] = React.useState<SupportTerm | null>(
+    getFallbackArticleById(articleId).highlightedTerms[0] ?? null
+  );
+  const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
 
-  const handleNavigate = (id: string) => {
-    if (onNavigate) {
-      onNavigate(id);
-    }
+  const resolvedArticleId = articleId ?? fallbackArticle.id;
+  const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
+  const secondaryTerm =
+    article.highlightedTerms[1] ?? article.highlightedTerms[0] ?? primaryTerm;
+  const featuredRelatedArticle =
+    relatedArticles.find((item) => item.id !== article.id) ??
+    getFallbackRelatedArticles(resolvedArticleId)[0];
+  const previousArticleId =
+    relatedArticles.length > 0
+      ? relatedArticles[relatedArticles.length - 1]?.id ?? null
+      : null;
+  const nextArticleId = relatedArticles[0]?.id ?? null;
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadArticle = async () => {
+      try {
+        const detail = await getArticleDetail({ articleId: resolvedArticleId });
+        if (!active) {
+          return;
+        }
+
+        if (!detail) {
+          const fallbackDetail = getFallbackArticleById(resolvedArticleId);
+          setArticle(fallbackDetail);
+          setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
+          setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+          setLoadNotice(null);
+          return;
+        }
+
+        const mappedArticle = mapTauriArticleToUi(detail);
+        setArticle(mappedArticle);
+        setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
+        setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
+        setLoadNotice(null);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        const fallbackDetail = getFallbackArticleById(resolvedArticleId);
+        setArticle(fallbackDetail);
+        setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
+        setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+        setLoadNotice(
+          "記事詳細の取得に失敗したため、サンプル表示に切り替えました。"
+        );
+        console.warn("Failed to load article detail:", error);
+      }
+    };
+
+    void loadArticle();
+
+    return () => {
+      active = false;
+    };
+  }, [resolvedArticleId]);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadRelatedArticles = async () => {
+      try {
+        const summaries = await getRecommendedArticles({ limit: 5 });
+        if (!active || !summaries) {
+          setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+          return;
+        }
+
+        const mappedArticles = summaries
+          .map(mapSummaryToRelated)
+          .filter((item) => item.id !== resolvedArticleId);
+
+        if (mappedArticles.length > 0) {
+          setRelatedArticles(mappedArticles);
+          return;
+        }
+
+        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+        console.warn("Failed to load related articles:", error);
+      }
+    };
+
+    void loadRelatedArticles();
+
+    return () => {
+      active = false;
+    };
+  }, [resolvedArticleId]);
+
+  const handleNavigate = (screen: string) => {
+    onNavigate?.(screen);
   };
 
-  const handleGoBack = () => {
-    if (onNavigate) {
-      onNavigate("home");
+  const handleOpenExternal = () => {
+    if (!article.externalUrl) {
+      return;
     }
+
+    window.open(article.externalUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const openTerm = (term: SupportTerm) => {
+    setSelectedTerm(term);
+    setShowTermPopup(true);
   };
 
   return (
-    <div className="h-dvh w-full overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
-      <AppTitleBar className="bg-white border-border/50" />
+    <div className="flex h-dvh w-full flex-col overflow-hidden bg-[var(--yuuko-cream)]">
+      <AppTitleBar className="border-border/50 bg-white" />
 
-      {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar */}
-        <aside className="w-52 bg-white border-r border-border/50 flex flex-col shrink-0">
-          {/* Back to Home Button */}
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="flex w-52 shrink-0 flex-col border-r border-border/50 bg-white">
           <div className="p-3 pb-0">
             <Button
               variant="outline"
               size="sm"
-              className="w-full text-xs h-9 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
-              onClick={handleGoBack}
+              className="h-9 w-full justify-start gap-2 border-[var(--yuuko-green)] text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              onClick={() => handleNavigate("home")}
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="h-4 w-4" />
               ホームへ戻る
             </Button>
           </div>
 
-          {/* Navigation */}
-          <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
+          <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+            {navigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
                 label={item.label}
@@ -376,42 +673,40 @@ export default function NewsReaderScreen({
             ))}
           </nav>
 
-          {/* Yuuko's Comment Card */}
           <div className="px-3 pb-3">
-            <Card className="bg-white border border-[var(--yuuko-green)]/20 py-3">
+            <Card className="border border-[var(--yuuko-green)]/20 bg-white py-3">
               <CardContent className="p-3">
-                <div className="flex items-center gap-1.5 mb-2">
+                <div className="mb-2 flex items-center gap-1.5">
                   <span className="text-xs font-medium text-[var(--yuuko-green)]">
                     ゆうこの一言
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground whitespace-pre-line leading-relaxed">
-                  {mockYuukoComment}
+                <p className="whitespace-pre-line text-xs leading-relaxed text-muted-foreground">
+                  {fallbackYuukoComment}
                 </p>
-                <div className="flex justify-end mt-2">
-                  <PawIcon className="w-4 h-4 text-pink-300" />
+                <div className="mt-2 flex justify-end">
+                  <PawIcon className="h-4 w-4 text-pink-300" />
                 </div>
               </CardContent>
             </Card>
           </div>
 
-          {/* Auto Start & Exit */}
-          <div className="p-3 border-t border-border/50">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-muted-foreground">自動起動：</span>
+          <div className="border-t border-border/50 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">自動起動</span>
               <span
                 className={`text-xs font-medium ${isAutoStart ? "text-[var(--yuuko-green)]" : "text-muted-foreground"}`}
               >
                 {isAutoStart ? "ON" : "OFF"}
               </span>
               <span
-                className={`w-2 h-2 rounded-full ${isAutoStart ? "bg-[var(--yuuko-green)]" : "bg-muted-foreground"}`}
+                className={`h-2 w-2 rounded-full ${isAutoStart ? "bg-[var(--yuuko-green)]" : "bg-muted-foreground"}`}
               />
             </div>
             <Button
               variant="outline"
               size="sm"
-              className="w-full text-xs h-8"
+              className="h-8 w-full text-xs"
               onClick={() => console.log("Exit resident mode")}
             >
               常駐を終了する
@@ -419,121 +714,93 @@ export default function NewsReaderScreen({
           </div>
         </aside>
 
-        {/* Center Content */}
-        <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto p-6">
-            {/* Breadcrumb */}
-            <Breadcrumb />
+            <Breadcrumb onNavigate={onNavigate} />
 
-            {/* Article Header */}
-            <Card className="border-0 shadow-sm mb-4 py-4">
+            <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <h1 className="text-xl font-bold text-foreground mb-3">
-                  {mockArticle.title}
+                <h1 className="mb-3 text-xl font-bold text-foreground">
+                  {article.title}
                 </h1>
-                <div className="flex items-center flex-wrap gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Newspaper className="w-4 h-4" />
-                    <span>{mockArticle.source}</span>
+                    <Newspaper className="h-4 w-4" />
+                    <span>{article.source}</span>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <History className="w-4 h-4" />
-                    <span>{mockArticle.timeAgo}</span>
+                    <History className="h-4 w-4" />
+                    <span>{article.timeAgo}</span>
                   </div>
-                  <Badge
-                    variant="outline"
-                    className={mockArticle.categoryColor}
-                  >
-                    {mockArticle.category}
+                  <Badge variant="outline" className={article.categoryColor}>
+                    {article.category}
                   </Badge>
                   <div className="flex-1" />
                   <Button
                     variant="outline"
                     size="sm"
-                    className="text-xs h-8 gap-1.5"
+                    className="h-8 gap-1.5 text-xs"
                     onClick={() => console.log("Toggle favorite")}
                   >
                     <Star
-                      className={`w-4 h-4 ${mockArticle.isFavorite ? "fill-yellow-500 text-yellow-500" : ""}`}
+                      className={`h-4 w-4 ${article.isFavorite ? "fill-yellow-500 text-yellow-500" : ""}`}
                     />
                     お気に入り
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="text-xs h-8 gap-1.5"
-                    onClick={() =>
-                      console.log("Open external:", mockArticle.externalUrl)
-                    }
+                    className="h-8 gap-1.5 text-xs"
+                    onClick={handleOpenExternal}
                   >
                     外部記事を開く
-                    <ExternalLink className="w-3.5 h-3.5" />
+                    <ExternalLink className="h-3.5 w-3.5" />
                   </Button>
                 </div>
+                {loadNotice ? (
+                  <p className="mt-3 text-xs text-amber-700">{loadNotice}</p>
+                ) : null}
               </CardContent>
             </Card>
 
-            {/* Yuuko's Explanation */}
-            <Card className="border-0 shadow-sm mb-4 py-4">
+            <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <BookOpen className="w-5 h-5 text-[var(--yuuko-green)]" />
+                <div className="mb-3 flex items-center gap-2">
+                  <BookOpen className="h-5 w-5 text-[var(--yuuko-green)]" />
                   <h2 className="font-semibold text-foreground">
-                    ゆうこの再説明
+                    ゆうこの解説
                   </h2>
                 </div>
-                <p className="text-sm text-foreground leading-relaxed">
-                  AIが
-                  <button
-                    className="mx-1 px-1.5 py-0.5 bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] rounded font-medium"
-                    onClick={() => {
-                      setSelectedTerm(mockArticle.highlightedTerms[0]);
-                      setShowTermPopup(true);
-                    }}
-                  >
-                    コードの自動生成
-                  </button>
-                  <Badge
-                    variant="outline"
-                    className="mx-1 text-[10px] px-1.5 py-0 border-[var(--yuuko-green)] text-[var(--yuuko-green)] cursor-pointer hover:bg-[var(--yuuko-green-light)]"
-                    onClick={() => {
-                      setSelectedTerm(mockArticle.highlightedTerms[0]);
-                      setShowTermPopup(true);
-                    }}
-                  >
-                    解説
-                  </Badge>
-                  や
-                  <button
-                    className="mx-1 px-1.5 py-0.5 bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] rounded font-medium"
-                    onClick={() => {
-                      setSelectedTerm(mockArticle.highlightedTerms[1]);
-                      setShowTermPopup(true);
-                    }}
-                  >
-                    解説
-                  </button>
-                  レビューを支援し、開発のスピードと品質が大きく向上しています。
-                  単純作業をAIに任せることで、エンジニアは「考える仕事」に集中できるようになります。
-                  今後は、AIをうまく使いこなせる人が、より価値を発揮できる時代になりそうです。
+                <p className="text-sm leading-relaxed text-foreground">
+                  {article.yuukoExplanation}
                 </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[primaryTerm, secondaryTerm].map((term) => (
+                    <button
+                      key={term.id}
+                      className="rounded bg-[var(--yuuko-green-light)] px-2 py-1 text-xs font-medium text-[var(--yuuko-green)]"
+                      onClick={() => openTerm(term)}
+                    >
+                      {term.term}
+                    </button>
+                  ))}
+                </div>
               </CardContent>
             </Card>
 
-            {/* Key Points */}
-            <Card className="border-0 shadow-sm mb-4 py-4">
+            <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <Star className="w-5 h-5 text-yellow-500 fill-yellow-500" />
+                <div className="mb-3 flex items-center gap-2">
+                  <Star className="h-5 w-5 fill-yellow-500 text-yellow-500" />
                   <h2 className="font-semibold text-foreground">要点</h2>
                 </div>
                 <ul className="space-y-2">
-                  {mockArticle.keyPoints.map((point, index) => (
+                  {article.keyPoints.map((point, index) => (
                     <li
-                      key={index}
+                      key={`${article.id}-point-${index}`}
                       className="flex items-start gap-2 text-sm text-foreground"
                     >
-                      <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] mt-2 shrink-0" />
+                      <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--yuuko-green)]" />
                       <span>{point}</span>
                     </li>
                   ))}
@@ -541,135 +808,127 @@ export default function NewsReaderScreen({
               </CardContent>
             </Card>
 
-            {/* Attention Point */}
-            <Card className="border-0 shadow-sm mb-4 py-4">
+            <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <Gift className="w-5 h-5 text-red-500" />
+                <div className="mb-3 flex items-center gap-2">
+                  <Gift className="h-5 w-5 text-red-500" />
                   <h2 className="font-semibold text-foreground">注目ポイント</h2>
                 </div>
-                <p className="text-sm text-foreground leading-relaxed">
-                  {mockArticle.attentionPoint}
+                <p className="text-sm leading-relaxed text-foreground">
+                  {article.attentionPoint}
                 </p>
               </CardContent>
             </Card>
 
-            {/* Yuuko's Thoughts */}
-            <Card className="border-0 shadow-sm mb-4 py-4">
+            <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <Heart className="w-5 h-5 text-pink-500 fill-pink-500" />
+                <div className="mb-3 flex items-center gap-2">
+                  <Heart className="h-5 w-5 fill-pink-500 text-pink-500" />
                   <h2 className="font-semibold text-foreground">ゆうこの感想</h2>
                 </div>
-                <p className="text-sm text-foreground leading-relaxed">
-                  {mockArticle.yuukoThoughts}
+                <p className="text-sm leading-relaxed text-foreground">
+                  {article.yuukoThoughts}
                 </p>
               </CardContent>
             </Card>
 
-            {/* Related Article */}
-            <Card className="border-0 shadow-sm mb-4 py-3">
+            <Card className="mb-4 border-0 py-3 shadow-sm">
               <CardContent className="p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <Newspaper className="w-4 h-4 text-muted-foreground" />
+                <div className="mb-3 flex items-center gap-2">
+                  <Newspaper className="h-4 w-4 text-muted-foreground" />
                   <h3 className="text-sm font-medium text-muted-foreground">
                     関連記事
                   </h3>
                 </div>
-                <div className="flex items-center gap-3">
-                  <ThumbnailPlaceholder type={mockRelatedArticle.thumbnailType} />
-                  <div className="flex-1 min-w-0">
-                    <h4 className="font-medium text-sm text-foreground line-clamp-1 mb-1">
-                      {mockRelatedArticle.title}
+                <button
+                  className="flex w-full items-center gap-3 text-left"
+                  onClick={() => onOpenArticle?.(featuredRelatedArticle.id)}
+                >
+                  <ThumbnailPlaceholder type={featuredRelatedArticle.thumbnailType} />
+                  <div className="min-w-0 flex-1">
+                    <h4 className="mb-1 line-clamp-1 text-sm font-medium text-foreground">
+                      {featuredRelatedArticle.title}
                     </h4>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>{mockRelatedArticle.source}</span>
+                      <span>{featuredRelatedArticle.source}</span>
                       <span>・</span>
-                      <span>{mockRelatedArticle.timeAgo}</span>
+                      <span>{featuredRelatedArticle.timeAgo}</span>
                     </div>
                   </div>
-                  {mockRelatedArticle.isNew && (
-                    <Badge className="bg-red-500 text-white border-0 text-[10px] px-1.5 py-0 shrink-0">
+                  {featuredRelatedArticle.isNew ? (
+                    <Badge className="shrink-0 border-0 bg-red-500 px-1.5 py-0 text-[10px] text-white">
                       NEW
                     </Badge>
-                  )}
-                  <ChevronRight className="w-5 h-5 text-muted-foreground shrink-0" />
-                </div>
+                  ) : null}
+                  <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
+                </button>
               </CardContent>
             </Card>
 
-            {/* Prev/Next Buttons */}
-            <div className="flex items-center justify-end gap-3 mb-4">
+            <div className="mb-4 flex items-center justify-end gap-3">
               <Button
                 variant="outline"
                 size="sm"
-                className="text-xs h-8 gap-1.5"
-                onClick={() => console.log("Previous article")}
+                className="h-8 gap-1.5 text-xs"
+                disabled={!previousArticleId}
+                onClick={() => previousArticleId && onOpenArticle?.(previousArticleId)}
               >
-                <ChevronLeft className="w-4 h-4" />
+                <ChevronLeft className="h-4 w-4" />
                 前の記事
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                className="text-xs h-8 gap-1.5"
-                onClick={() => console.log("Next article")}
+                className="h-8 gap-1.5 text-xs"
+                disabled={!nextArticleId}
+                onClick={() => nextArticleId && onOpenArticle?.(nextArticleId)}
               >
                 次の記事
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
           </div>
 
-          {/* Term Popup */}
-          {showTermPopup && selectedTerm && (
+          {showTermPopup && selectedTerm ? (
             <TermPopup
               term={selectedTerm.term}
               explanation={selectedTerm.explanation}
               onClose={() => setShowTermPopup(false)}
             />
-          )}
+          ) : null}
         </main>
 
-        {/* Right Sidebar */}
-        <aside className="w-72 p-4 flex flex-col shrink-0 overflow-y-auto">
-          {/* Yuuko Speech Bubble */}
+        <aside className="flex w-72 shrink-0 flex-col overflow-y-auto p-4">
           <div className="mb-2">
-            <YuukoSpeechBubbleRight message={mockYuukoSpeechBubble} />
+            <YuukoSpeechBubbleRight
+              message={article.yuukoThoughts || fallbackSpeechBubble}
+            />
           </div>
 
-          {/* Yuuko Character */}
-          <div className="flex justify-center mb-4">
+          <div className="mb-4 flex justify-center">
             <YuukoCharacter />
           </div>
 
-          {/* Decorative paw prints */}
           <div className="absolute right-4 top-1/3 opacity-10">
-            <PawIcon className="w-6 h-6 text-[var(--yuuko-green)]" />
+            <PawIcon className="h-6 w-6 text-[var(--yuuko-green)]" />
           </div>
 
-          {/* Term Support Card */}
-          <Card className="border border-border/50 mt-auto py-3">
+          <Card className="mt-auto border border-border/50 py-3">
             <CardContent className="p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Search className="w-4 h-4 text-[var(--yuuko-green)]" />
+              <div className="mb-3 flex items-center gap-2">
+                <Search className="h-4 w-4 text-[var(--yuuko-green)]" />
                 <span className="text-sm font-medium text-[var(--yuuko-green)]">
                   用語サポート
                 </span>
               </div>
               <div className="space-y-2">
-                {mockSupportTerms.map((term) => (
-                  <div
-                    key={term.id}
-                    className="flex items-center justify-between"
-                  >
+                {article.highlightedTerms.map((term) => (
+                  <div key={term.id} className="flex items-center justify-between">
                     <span className="text-xs text-foreground">{term.term}</span>
                     <Badge
                       variant="outline"
-                      className="text-[10px] px-2 py-0 border-muted-foreground/30 text-muted-foreground cursor-pointer hover:border-[var(--yuuko-green)] hover:text-[var(--yuuko-green)]"
-                      onClick={() =>
-                        console.log("Explain term:", term.term)
-                      }
+                      className="cursor-pointer border-muted-foreground/30 px-2 py-0 text-[10px] text-muted-foreground hover:border-[var(--yuuko-green)] hover:text-[var(--yuuko-green)]"
+                      onClick={() => openTerm(term)}
                     >
                       解説
                     </Badge>
@@ -679,44 +938,42 @@ export default function NewsReaderScreen({
               <Button
                 variant="ghost"
                 size="sm"
-                className="w-full mt-3 text-xs h-8 text-[var(--yuuko-green)] hover:text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                className="mt-3 h-8 w-full text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] hover:text-[var(--yuuko-green)]"
                 onClick={() => console.log("View all related words")}
               >
                 すべての関連ワードを見る
-                <ChevronRight className="w-4 h-4 ml-1" />
+                <ChevronRight className="ml-1 h-4 w-4" />
               </Button>
             </CardContent>
           </Card>
         </aside>
       </div>
 
-      {/* Status Bar */}
-      <footer className="h-9 bg-white border-t border-border/50 flex items-center justify-between px-4 shrink-0">
+      <footer className="flex h-9 shrink-0 items-center justify-between border-t border-border/50 bg-white px-4">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <Bell className="w-4 h-4 text-muted-foreground" />
+            <Bell className="h-4 w-4 text-muted-foreground" />
             <span className="text-xs text-muted-foreground">お知らせ</span>
           </div>
           <span className="text-xs text-muted-foreground">|</span>
           <div className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]" />
+            <span className="h-1.5 w-1.5 rounded-full bg-[var(--yuuko-green)]" />
             <span className="text-xs text-foreground">
-              新しいニュースが3件届いてるよ！
+              記事詳細を表示しています
             </span>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <button
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            className="text-muted-foreground transition-colors hover:text-foreground"
             onClick={() => console.log("Help")}
           >
-            <HelpCircle className="w-4 h-4" />
+            <HelpCircle className="h-4 w-4" />
           </button>
-          <PawIcon className="w-4 h-4 text-[var(--yuuko-green)]" />
+          <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]" />
         </div>
       </footer>
 
-      {/* CSS for float animation */}
       <style jsx global>{`
         @keyframes float {
           0%,

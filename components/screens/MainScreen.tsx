@@ -84,7 +84,7 @@ const mockNavigationItems: NavigationItem[] = [
 
 const fallbackMockArticles: Article[] = [
   {
-    id: "1",
+    id: "article-001",
     category: "AI・テクノロジー",
     categoryColor: "bg-blue-500",
     title: "生成AIが変えるソフトウェア開発の未来",
@@ -97,7 +97,7 @@ const fallbackMockArticles: Article[] = [
     thumbnailType: "ai",
   },
   {
-    id: "2",
+    id: "article-002",
     category: "ビジネス",
     categoryColor: "bg-emerald-500",
     title: "国内スタートアップの資金調達、過去最高に",
@@ -110,7 +110,7 @@ const fallbackMockArticles: Article[] = [
     thumbnailType: "business",
   },
   {
-    id: "3",
+    id: "article-003",
     category: "テクノロジー",
     categoryColor: "bg-purple-500",
     title: "量子コンピュータの実用化に向けた新たな一歩",
@@ -415,8 +415,10 @@ function YuukoCharacter() {
 
 export default function MainScreen({
   onNavigate,
+  onOpenArticle,
 }: {
   onNavigate?: (screen: string) => void;
+  onOpenArticle?: (articleId: string) => void;
 }) {
   const [isAutoStart] = React.useState(true);
   const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
@@ -502,7 +504,11 @@ export default function MainScreen({
   };
 
   const handleArticleClick = (articleId: string) => {
-    void articleId;
+    if (onOpenArticle) {
+      onOpenArticle(articleId);
+      return;
+    }
+
     if (onNavigate) {
       onNavigate("news");
     }

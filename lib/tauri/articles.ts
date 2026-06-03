@@ -15,8 +15,27 @@ export type ArticleSummaryDto = {
   recommendationScore: number;
 };
 
+export type ArticleDetailDto = {
+  articleId: string;
+  title: string;
+  sourceName: string;
+  originalUrl: string;
+  publishedAtText: string;
+  genre: string;
+  summary?: string;
+  yuukoExplanation?: string;
+  focusPoints: string[];
+  yuukoComment?: string;
+  isFavorite: boolean;
+  keywordCandidates: string[];
+};
+
 export type GetRecommendedArticlesParams = {
   limit?: number;
+};
+
+export type GetArticleDetailParams = {
+  articleId: string;
 };
 
 export const getRecommendedArticles = async (
@@ -27,4 +46,14 @@ export const getRecommendedArticles = async (
   }
 
   return invoke<ArticleSummaryDto[]>("get_recommended_articles", { params });
+};
+
+export const getArticleDetail = async (
+  params: GetArticleDetailParams
+): Promise<ArticleDetailDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArticleDetailDto>("get_article_detail", { params });
 };

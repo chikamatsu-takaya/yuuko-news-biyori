@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("validation error: {0}")]
     Validation(String),
 
+    #[error("not found: {0}")]
+    NotFound(String),
+
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
@@ -36,6 +39,7 @@ impl AppError {
     fn code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "VALIDATION_ERROR",
+            Self::NotFound(_) => "NOT_FOUND_ERROR",
             Self::Io(_) => "IO_ERROR",
             Self::Json(_) => "JSON_ERROR",
         }

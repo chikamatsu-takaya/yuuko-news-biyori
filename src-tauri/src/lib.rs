@@ -54,6 +54,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::article_commands::get_recommended_articles,
+            commands::article_commands::get_article_detail,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,

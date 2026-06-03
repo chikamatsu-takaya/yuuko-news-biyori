@@ -24,6 +24,23 @@ pub struct ArticleSummaryDto {
     pub recommendation_score: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArticleDetailDto {
+    pub article_id: String,
+    pub title: String,
+    pub source_name: String,
+    pub original_url: String,
+    pub published_at_text: String,
+    pub genre: String,
+    pub summary: Option<String>,
+    pub yuuko_explanation: Option<String>,
+    pub focus_points: Vec<String>,
+    pub yuuko_comment: Option<String>,
+    pub is_favorite: bool,
+    pub keyword_candidates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GetRecommendedArticlesParams {
@@ -42,9 +59,28 @@ impl GetRecommendedArticlesParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetArticleDetailParams {
+    pub article_id: String,
+}
+
+impl GetArticleDetailParams {
+    pub fn validated_article_id(&self) -> Result<String, AppError> {
+        let article_id = self.article_id.trim();
+        if article_id.is_empty() {
+            return Err(AppError::Validation(
+                "articleId must not be empty".to_string(),
+            ));
+        }
+
+        Ok(article_id.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::GetRecommendedArticlesParams;
+    use super::{GetArticleDetailParams, GetRecommendedArticlesParams};
 
     #[test]
     fn normalized_limit_defaults_to_twenty() {
@@ -65,5 +101,23 @@ mod tests {
 
         let too_large = GetRecommendedArticlesParams { limit: Some(51) };
         assert!(too_large.normalized_limit().is_err());
+    }
+
+    #[test]
+    fn validated_article_id_trims_whitespace() {
+        let params = GetArticleDetailParams {
+            article_id: "  article-001  ".to_string(),
+        };
+
+        assert_eq!(params.validated_article_id().unwrap(), "article-001");
+    }
+
+    #[test]
+    fn validated_article_id_rejects_empty_value() {
+        let params = GetArticleDetailParams {
+            article_id: "   ".to_string(),
+        };
+
+        assert!(params.validated_article_id().is_err());
     }
 }
