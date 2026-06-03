@@ -1,5 +1,6 @@
 use crate::domain::article::{
-    ArticleDetailDto, ArticleSummaryDto, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ArticleDetailDto, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
+    GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -19,7 +20,7 @@ impl ArticleService {
         params: GetRecommendedArticlesParams,
     ) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let limit = params.normalized_limit()?;
-        Ok(self.repository.list_recommended(limit))
+        self.repository.list_recommended(limit)
     }
 
     pub fn get_article_detail(
@@ -28,5 +29,14 @@ impl ArticleService {
     ) -> Result<ArticleDetailDto, AppError> {
         let article_id = params.validated_article_id()?;
         self.repository.get_article_detail(&article_id)
+    }
+
+    pub fn update_article_favorite(
+        &self,
+        params: UpdateArticleFavoriteParams,
+    ) -> Result<FavoriteUpdateResult, AppError> {
+        let (article_id, is_favorite) = params.validated_inputs()?;
+        self.repository
+            .update_article_favorite(&article_id, is_favorite)
     }
 }

@@ -30,6 +30,7 @@ import {
 import {
   getArticleDetail,
   getRecommendedArticles,
+  updateArticleFavorite,
   type ArticleDetailDto as TauriArticleDetail,
   type ArticleSummaryDto as TauriArticleSummary,
 } from "@/lib/tauri/articles";
@@ -303,7 +304,7 @@ const buildSupportTerms = (
 };
 
 const buildFallbackDictionaryEntry = (
-  currentArticle: ReaderArticleDetail,
+  currentArticle: Pick<ReaderArticleDetail, "id" | "title">,
   term: SupportTerm
 ): TauriDictionaryEntry => ({
   entryId: `${currentArticle.id}-${term.id}`,
@@ -624,14 +625,22 @@ export default function NewsReaderScreen({
   const [selectedDictionaryEntry, setSelectedDictionaryEntry] =
     React.useState<TauriDictionaryEntry | null>(() =>
       selectedTerm
-        ? buildFallbackDictionaryEntry(getFallbackArticleById(articleId), selectedTerm)
+        ? buildFallbackDictionaryEntry(
+            {
+              id: getFallbackArticleById(articleId).id,
+              title: getFallbackArticleById(articleId).title,
+            },
+            selectedTerm
+          )
         : null
     );
   const [isExplainingTerm, setIsExplainingTerm] = React.useState(false);
   const [isSavingDictionaryEntry, setIsSavingDictionaryEntry] =
     React.useState(false);
+  const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -743,7 +752,13 @@ export default function NewsReaderScreen({
         return;
       }
 
-      const fallbackEntry = buildFallbackDictionaryEntry(article, selectedTerm);
+      const fallbackEntry = buildFallbackDictionaryEntry(
+        {
+          id: article.id,
+          title: article.title,
+        },
+        selectedTerm
+      );
       setSelectedDictionaryEntry(fallbackEntry);
       setIsExplainingTerm(true);
       setTermNotice(null);
@@ -779,7 +794,7 @@ export default function NewsReaderScreen({
     return () => {
       active = false;
     };
-  }, [article, selectedTerm, showTermPopup]);
+  }, [article.id, article.title, selectedTerm, showTermPopup]);
 
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
@@ -792,6 +807,41 @@ export default function NewsReaderScreen({
 
     window.open(article.externalUrl, "_blank", "noopener,noreferrer");
   };
+
+  const handleToggleFavorite = React.useCallback(async () => {
+    const previousFavorite = article.isFavorite;
+    const nextFavorite = !previousFavorite;
+
+    setIsUpdatingFavorite(true);
+    setFavoriteNotice(null);
+    setArticle((currentArticle) => ({
+      ...currentArticle,
+      isFavorite: nextFavorite,
+    }));
+
+    try {
+      const result = await updateArticleFavorite({
+        articleId: article.id,
+        isFavorite: nextFavorite,
+      });
+
+      setArticle((currentArticle) => ({
+        ...currentArticle,
+        isFavorite: result.isFavorite,
+      }));
+    } catch (error) {
+      setArticle((currentArticle) => ({
+        ...currentArticle,
+        isFavorite: previousFavorite,
+      }));
+      setFavoriteNotice(
+        "お気に入りの更新に失敗しました。時間をおいてもう一度お試しください。"
+      );
+      console.warn("Failed to update article favorite:", error);
+    } finally {
+      setIsUpdatingFavorite(false);
+    }
+  }, [article.id, article.isFavorite]);
 
   const handleSaveDictionaryEntry = React.useCallback(async () => {
     if (!selectedDictionaryEntry || selectedDictionaryEntry.isStarred) {
@@ -919,12 +969,13 @@ export default function NewsReaderScreen({
                     variant="outline"
                     size="sm"
                     className="h-8 gap-1.5 text-xs"
-                    onClick={() => console.log("Toggle favorite")}
+                    disabled={isUpdatingFavorite}
+                    onClick={handleToggleFavorite}
                   >
                     <Star
                       className={`h-4 w-4 ${article.isFavorite ? "fill-yellow-500 text-yellow-500" : ""}`}
                     />
-                    お気に入り
+                    {article.isFavorite ? "お気に入り済み" : "お気に入り"}
                   </Button>
                   <Button
                     variant="outline"
@@ -938,6 +989,9 @@ export default function NewsReaderScreen({
                 </div>
                 {loadNotice ? (
                   <p className="mt-3 text-xs text-amber-700">{loadNotice}</p>
+                ) : null}
+                {favoriteNotice ? (
+                  <p className="mt-2 text-xs text-amber-700">{favoriteNotice}</p>
                 ) : null}
               </CardContent>
             </Card>
