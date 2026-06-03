@@ -4,6 +4,7 @@ use crate::domain::article::{
     ArticleDetailDto, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
     GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
 };
+use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -56,6 +57,23 @@ pub async fn update_article_favorite(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join update-article-favorite task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn generate_article_summary(
+    state: State<'_, AppState>,
+    params: GenerateArticleSummaryParams,
+) -> CommandResult<GeneratedArticleSummaryDto> {
+    let summary_service = state.summary_service.clone();
+    tauri::async_runtime::spawn_blocking(move || summary_service.generate_article_summary(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join generate-article-summary task: {error}"),
             )
         })?
         .map_err(CommandError::from)

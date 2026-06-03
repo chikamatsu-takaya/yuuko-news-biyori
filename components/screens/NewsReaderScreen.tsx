@@ -28,10 +28,12 @@ import {
   X,
 } from "lucide-react";
 import {
+  generateArticleSummary,
   getArticleDetail,
   getRecommendedArticles,
   updateArticleFavorite,
   type ArticleDetailDto as TauriArticleDetail,
+  type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
   type ArticleSummaryDto as TauriArticleSummary,
 } from "@/lib/tauri/articles";
 import {
@@ -63,6 +65,7 @@ type ReaderArticleDetail = {
   categoryColor: string;
   isFavorite: boolean;
   externalUrl: string;
+  summary: string;
   yuukoExplanation: string;
   highlightedTerms: SupportTerm[];
   keyPoints: string[];
@@ -120,6 +123,8 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     categoryColor: "border-[var(--yuuko-green)] text-[var(--yuuko-green)] bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-001",
+    summary:
+      "生成AIを活用するスタートアップへの投資が再び活発化し、業務支援や自動化領域の案件に注目が集まっています。",
     yuukoExplanation:
       "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
     highlightedTerms: fallbackSupportTerms,
@@ -142,6 +147,8 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     categoryColor: "border-emerald-500 text-emerald-600 bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-002",
+    summary:
+      "国内SaaS企業が中堅企業向けの業務改善プログラムを発表し、導入支援と教育体制をセットで提供する方針を示しました。",
     yuukoExplanation:
       "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントです。現場で定着するかどうかが成果を大きく左右します。",
     highlightedTerms: [
@@ -183,6 +190,8 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     categoryColor: "border-purple-500 text-purple-600 bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-003",
+    summary:
+      "量子コンピュータの安定運用に向けて、従来より少ない負荷で誤りを検知・補正できる新手法が報告されました。",
     yuukoExplanation:
       "量子コンピュータは速さだけでなく、誤差に弱い点が課題です。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいです。",
     highlightedTerms: [
@@ -334,6 +343,7 @@ const mapTauriArticleToUi = (
     categoryColor: toCategoryColor(article.genre),
     isFavorite: article.isFavorite,
     externalUrl: article.originalUrl,
+    summary: article.summary ?? fallbackArticle.summary,
     yuukoExplanation:
       article.yuukoExplanation ??
       article.summary ??
@@ -602,6 +612,24 @@ function YuukoSpeechBubbleRight({ message }: { message: string }) {
   );
 }
 
+const applyGeneratedSummary = (
+  currentArticle: ReaderArticleDetail,
+  generatedSummary: TauriGeneratedArticleSummary
+): ReaderArticleDetail => ({
+  ...currentArticle,
+  summary: generatedSummary.summary,
+  yuukoExplanation: generatedSummary.yuukoExplanation,
+  keyPoints:
+    generatedSummary.focusPoints.length > 0
+      ? generatedSummary.focusPoints
+      : currentArticle.keyPoints,
+  attentionPoint:
+    generatedSummary.focusPoints[1] ??
+    generatedSummary.focusPoints[0] ??
+    generatedSummary.summary,
+  yuukoThoughts: generatedSummary.yuukoComment,
+});
+
 export default function NewsReaderScreen({
   articleId,
   onNavigate,
@@ -638,9 +666,11 @@ export default function NewsReaderScreen({
   const [isSavingDictionaryEntry, setIsSavingDictionaryEntry] =
     React.useState(false);
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
+  const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
+  const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -867,6 +897,35 @@ export default function NewsReaderScreen({
     }
   }, [selectedDictionaryEntry]);
 
+  const handleGenerateSummary = React.useCallback(async () => {
+    setIsGeneratingSummary(true);
+    setSummaryNotice(null);
+
+    try {
+      const generatedSummary = await generateArticleSummary({
+        articleId: article.id,
+      });
+
+      if (!generatedSummary) {
+        setSummaryNotice(
+          "要約生成はローカルプレビューでは未接続のため、既存の要約を表示しています。"
+        );
+        return;
+      }
+
+      setArticle((currentArticle) =>
+        applyGeneratedSummary(currentArticle, generatedSummary)
+      );
+    } catch (error) {
+      setSummaryNotice(
+        "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+      );
+      console.warn("Failed to generate article summary:", error);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  }, [article.id]);
+
   const openTerm = (term: SupportTerm) => {
     setSelectedTerm(term);
     setShowTermPopup(true);
@@ -992,6 +1051,39 @@ export default function NewsReaderScreen({
                 ) : null}
                 {favoriteNotice ? (
                   <p className="mt-2 text-xs text-amber-700">{favoriteNotice}</p>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            <Card className="mb-4 border-0 py-4 shadow-sm">
+              <CardContent className="p-5">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Newspaper className="h-5 w-5 text-[var(--yuuko-green)]" />
+                    <h2 className="font-semibold text-foreground">要約</h2>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs"
+                    disabled={isGeneratingSummary}
+                    onClick={handleGenerateSummary}
+                  >
+                    {isGeneratingSummary ? (
+                      <>
+                        <Spinner className="size-4" />
+                        更新中...
+                      </>
+                    ) : (
+                      "要約を更新"
+                    )}
+                  </Button>
+                </div>
+                <p className="text-sm leading-relaxed text-foreground">
+                  {article.summary}
+                </p>
+                {summaryNotice ? (
+                  <p className="mt-3 text-xs text-amber-700">{summaryNotice}</p>
                 ) : null}
               </CardContent>
             </Card>
