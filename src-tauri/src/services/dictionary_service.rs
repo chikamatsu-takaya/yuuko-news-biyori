@@ -1,4 +1,6 @@
-use crate::domain::dictionary::{DictionaryEntryDto, ExplainSelectedTermParams};
+use crate::domain::dictionary::{
+    DictionaryEntryDto, ExplainSelectedTermParams, SaveDictionaryEntryParams,
+};
 use crate::error::AppError;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 
@@ -19,5 +21,13 @@ impl DictionaryService {
         let (article_id, selected_text) = params.validated_inputs()?;
         self.repository
             .explain_selected_term(&article_id, &selected_text)
+    }
+
+    pub fn save_dictionary_entry(
+        &self,
+        params: SaveDictionaryEntryParams,
+    ) -> Result<DictionaryEntryDto, AppError> {
+        let entry = params.validated_entry()?;
+        self.repository.save_dictionary_entry(entry)
     }
 }

@@ -1,6 +1,6 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-01  
+最終更新: 2026-06-03
 対象ブランチ: `develop`  
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
@@ -50,7 +50,7 @@
   - [x] `get_article_detail`（2026-06-03）
   - [ ] `generate_article_summary`
   - [x] `explain_selected_term`（2026-06-03）
-  - [ ] `save_dictionary_entry`
+  - [x] `save_dictionary_entry`（2026-06-03）
   - [ ] `update_article_favorite`
   - [x] `get_yuuko_notification_state`（2026-06-01）
   - [x] `confirm_rank_up_reward`（2026-06-01）
@@ -86,3 +86,4 @@
 - [x] 2026-06-01: Test CI / Security CI / Secret Scan CI を追加
 - [x] 2026-06-03: `get_article_detail` 実装とNewsReaderScreen段階接続
 - [x] 2026-06-03: `explain_selected_term` 実装とNewsReaderScreen用語ポップアップ接続
+- [x] 2026-06-03: `save_dictionary_entry` 実装とNewsReaderScreen辞書保存ボタン接続

@@ -35,6 +35,7 @@ import {
 } from "@/lib/tauri/articles";
 import {
   explainSelectedTerm,
+  saveDictionaryEntry,
   type DictionaryEntryDto as TauriDictionaryEntry,
   type DictionaryEntryType,
 } from "@/lib/tauri/dictionary";
@@ -408,13 +409,17 @@ function TermPopup({
   term,
   dictionaryEntry,
   isLoading,
+  isSaving,
   notice,
+  onSave,
   onClose,
 }: {
   term: string;
   dictionaryEntry: TauriDictionaryEntry | null;
   isLoading: boolean;
+  isSaving: boolean;
   notice: string | null;
+  onSave: () => void;
   onClose: () => void;
 }) {
   return (
@@ -462,6 +467,28 @@ function TermPopup({
           <p className="text-xs leading-relaxed text-muted-foreground">
             {dictionaryEntry.detailExplanation}
           </p>
+          <div className="pt-1">
+            <Button
+              variant={dictionaryEntry.isStarred ? "secondary" : "outline"}
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              disabled={isLoading || isSaving || dictionaryEntry.isStarred}
+              onClick={onSave}
+            >
+              <Star
+                className={`h-4 w-4 ${
+                  dictionaryEntry.isStarred
+                    ? "fill-yellow-500 text-yellow-500"
+                    : ""
+                }`}
+              />
+              {dictionaryEntry.isStarred
+                ? "辞書保存済み"
+                : isSaving
+                  ? "保存中..."
+                  : "辞書に保存"}
+            </Button>
+          </div>
         </div>
       ) : (
         <p className="text-xs leading-relaxed text-muted-foreground">
@@ -601,6 +628,8 @@ export default function NewsReaderScreen({
         : null
     );
   const [isExplainingTerm, setIsExplainingTerm] = React.useState(false);
+  const [isSavingDictionaryEntry, setIsSavingDictionaryEntry] =
+    React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
 
@@ -709,6 +738,7 @@ export default function NewsReaderScreen({
       if (!selectedTerm || !showTermPopup) {
         setSelectedDictionaryEntry(null);
         setIsExplainingTerm(false);
+        setIsSavingDictionaryEntry(false);
         setTermNotice(null);
         return;
       }
@@ -762,6 +792,30 @@ export default function NewsReaderScreen({
 
     window.open(article.externalUrl, "_blank", "noopener,noreferrer");
   };
+
+  const handleSaveDictionaryEntry = React.useCallback(async () => {
+    if (!selectedDictionaryEntry || selectedDictionaryEntry.isStarred) {
+      return;
+    }
+
+    setIsSavingDictionaryEntry(true);
+    setTermNotice(null);
+
+    try {
+      const savedEntry = await saveDictionaryEntry({
+        entry: {
+          ...selectedDictionaryEntry,
+          isStarred: true,
+        },
+      });
+      setSelectedDictionaryEntry(savedEntry);
+    } catch (error) {
+      setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
+      console.warn("Failed to save dictionary entry:", error);
+    } finally {
+      setIsSavingDictionaryEntry(false);
+    }
+  }, [selectedDictionaryEntry]);
 
   const openTerm = (term: SupportTerm) => {
     setSelectedTerm(term);
@@ -1019,7 +1073,9 @@ export default function NewsReaderScreen({
               term={selectedTerm.term}
               dictionaryEntry={selectedDictionaryEntry}
               isLoading={isExplainingTerm}
+              isSaving={isSavingDictionaryEntry}
               notice={termNotice}
+              onSave={handleSaveDictionaryEntry}
               onClose={() => setShowTermPopup(false)}
             />
           ) : null}

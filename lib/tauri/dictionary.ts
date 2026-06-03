@@ -20,6 +20,10 @@ export type ExplainSelectedTermParams = {
   selectedText: string;
 };
 
+export type SaveDictionaryEntryParams = {
+  entry: DictionaryEntryDto;
+};
+
 export const explainSelectedTerm = async (
   params: ExplainSelectedTermParams
 ): Promise<DictionaryEntryDto | null> => {
@@ -28,4 +32,14 @@ export const explainSelectedTerm = async (
   }
 
   return invoke<DictionaryEntryDto>("explain_selected_term", { params });
+};
+
+export const saveDictionaryEntry = async (
+  params: SaveDictionaryEntryParams
+): Promise<DictionaryEntryDto> => {
+  if (!isTauriRuntime()) {
+    return params.entry;
+  }
+
+  return invoke<DictionaryEntryDto>("save_dictionary_entry", { params });
 };
