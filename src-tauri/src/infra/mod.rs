@@ -5,5 +5,6 @@
 //! 必ずこの層の検証を通すことを前提とする。
 
 pub mod allowlist;
+pub mod html_fetcher;
 pub mod rss_client;
 pub mod url_guard;
