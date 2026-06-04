@@ -1,11 +1,13 @@
 mod commands;
 mod domain;
 mod error;
+mod infra;
 mod paths;
 mod repositories;
 mod services;
 mod state;
 
+use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
@@ -27,6 +29,8 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);
             paths.ensure_storage_dirs()?;
+            NetworkAllowlist::initialize_default_if_missing(&paths.network_allowlist_path)?;
+            NetworkAllowlist::load(&paths.network_allowlist_path)?;
 
             let settings_repository = SettingsRepository::new(&paths);
             let settings_service = SettingsService::new(settings_repository);
