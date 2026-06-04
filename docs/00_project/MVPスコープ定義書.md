@@ -1,4 +1,4 @@
-# MVPスコープ定義書_Tauri v1
+# MVPスコープ定義書 v1
 
 ## 1. 文書目的
 本書は、AIニュースマスコットアプリ「ゆうこのニュース日和」の初期開発・社内発表に向けて、最小実用版（MVP: Minimum Viable Product）の範囲をTauri版の実装前提で定義するものである。
@@ -618,7 +618,8 @@ MVPでは、以下のTauri commandを優先する。
 | `get_article_detail` | ニュース詳細取得 | 高 |
 | `generate_article_summary` | 要約・ゆうこ解説・注目ポイント生成 | 高 |
 | `update_article_favorite` | お気に入り切替 | 中 |
-| `explain_selected_term` | 用語解説取得・辞書保存 | 高 |
+| `explain_selected_term` | 用語解説取得 | 高 |
+| `save_dictionary_entry` | 辞書エントリー保存（explain_selected_termと分離） | 高 |
 | `list_dictionary_entries` | 辞書一覧取得 | 中 |
 | `update_dictionary_memo` | 辞書メモ保存 | 中 |
 | `delete_dictionary_entry` | 辞書削除 | 中 |
@@ -626,6 +627,7 @@ MVPでは、以下のTauri commandを優先する。
 | `save_user_settings` | 設定保存 | 中 |
 | `get_friendship_state` | ランク状態取得 | 中 |
 | `get_yuuko_notification_state` | ゆうこ通知状態取得 | 高 |
+| `confirm_rank_up_reward` | ランクアップ報酬確認済み処理 | 中 |
 | `handle_yuuko_clicked` | ゆうこクリック処理 | 高 |
 | `dismiss_yuuko_notification` | ゆうこ通知を閉じる | 中 |
 
