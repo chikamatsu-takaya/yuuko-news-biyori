@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
@@ -23,12 +24,17 @@ import {
   ChevronRight,
   Sparkles,
   PlayCircle,
+  RefreshCw,
 } from "lucide-react";
 import {
   getRecommendedArticles,
   updateArticleFavorite,
   type ArticleSummaryDto as TauriArticleSummary,
 } from "@/lib/tauri/articles";
+import {
+  refreshNews,
+  type RefreshNewsResult as TauriRefreshNewsResult,
+} from "@/lib/tauri/news";
 import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
 
 // ============================================
@@ -67,6 +73,11 @@ type UserStats = {
   maxExp: number;
   starFragments: number;
   unclaimedRewards: number;
+};
+
+type RefreshMetricProps = {
+  label: string;
+  value: number;
 };
 
 // ============================================
@@ -187,6 +198,35 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   isFavorite: article.isFavorite,
   thumbnailType: toThumbnailType(article.genre),
 });
+
+const toRefreshErrorLabel = (kind: string): string => {
+  switch (kind) {
+    case "feed_url_rejected":
+      return "フィードURL拒否";
+    case "feed_fetch_failed":
+      return "フィード取得失敗";
+    case "article_url_rejected":
+      return "記事URL拒否";
+    case "article_fetch_failed":
+      return "記事取得失敗";
+    default:
+      return kind;
+  }
+};
+
+const summarizeRefreshErrors = (
+  result: TauriRefreshNewsResult
+): string | null => {
+  if (result.errors.length === 0) {
+    return null;
+  }
+
+  const kinds = Array.from(
+    new Set(result.errors.map((error) => toRefreshErrorLabel(error.kind)))
+  );
+
+  return `エラー ${result.errors.length} 件（${kinds.join(" / ")}）`;
+};
 
 // ============================================
 // Sub Components
@@ -379,6 +419,17 @@ function QuickAccessButton({
   );
 }
 
+function RefreshMetric({ label, value }: RefreshMetricProps) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-center">
+      <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="text-sm font-semibold text-foreground">{value}</div>
+    </div>
+  );
+}
+
 function YuukoSpeechBubble({ message }: { message: string }) {
   return (
     <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px]">
@@ -431,6 +482,10 @@ export default function MainScreen({
   const [favoriteSavingArticleId, setFavoriteSavingArticleId] =
     React.useState<string | null>(null);
   const [articleNotice, setArticleNotice] = React.useState<string | null>(null);
+  const [refreshNotice, setRefreshNotice] = React.useState<string | null>(null);
+  const [refreshResult, setRefreshResult] =
+    React.useState<TauriRefreshNewsResult | null>(null);
+  const [isRefreshingNews, setIsRefreshingNews] = React.useState(false);
   const [yuukoBalloonMessage, setYuukoBalloonMessage] =
     React.useState(fallbackYuukoMessage);
   const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
@@ -483,28 +538,27 @@ export default function MainScreen({
     };
   }, []);
 
-  React.useEffect(() => {
-    let active = true;
-
-    const loadRecommendedArticles = async () => {
-      try {
-        const recommendedArticles = await getRecommendedArticles({ limit: 10 });
-        if (!active || !recommendedArticles || recommendedArticles.length === 0) {
-          return;
-        }
-
-        setArticles(recommendedArticles.map(mapTauriArticleToUi));
-      } catch (error) {
-        console.warn("Failed to load recommended articles:", error);
+  const loadRecommendedArticles = React.useCallback(async (): Promise<boolean> => {
+    try {
+      const recommendedArticles = await getRecommendedArticles({ limit: 10 });
+      if (!recommendedArticles) {
+        return false;
       }
-    };
 
-    void loadRecommendedArticles();
+      if (recommendedArticles.length > 0) {
+        setArticles(recommendedArticles.map(mapTauriArticleToUi));
+      }
 
-    return () => {
-      active = false;
-    };
+      return true;
+    } catch (error) {
+      console.warn("Failed to load recommended articles:", error);
+      return false;
+    }
   }, []);
+
+  React.useEffect(() => {
+    void loadRecommendedArticles();
+  }, [loadRecommendedArticles]);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -568,6 +622,46 @@ export default function MainScreen({
     },
     [articles]
   );
+
+  const handleRefreshNews = React.useCallback(async () => {
+    setIsRefreshingNews(true);
+    setRefreshNotice(null);
+
+    try {
+      const result = await refreshNews();
+      if (!result) {
+        setRefreshResult(null);
+        setRefreshNotice(
+          "ニュース更新はTauriデスクトップ実行時にのみ利用できます。"
+        );
+        return;
+      }
+
+      setRefreshResult(result);
+      const reloaded = await loadRecommendedArticles();
+      if (!reloaded) {
+        setRefreshNotice(
+          "更新は完了しましたが、一覧の再読み込みはできませんでした。"
+        );
+        return;
+      }
+
+      if (result.errors.length === 0) {
+        setRefreshNotice("ニュースを更新しました。");
+        return;
+      }
+
+      setRefreshNotice("ニュース更新は完了しましたが、一部ソースでエラーがありました。");
+    } catch (error) {
+      setRefreshResult(null);
+      setRefreshNotice(
+        "ニュース更新に失敗しました。設定ファイルやネットワークを確認してください。"
+      );
+      console.warn("Failed to refresh news:", error);
+    } finally {
+      setIsRefreshingNews(false);
+    }
+  }, [loadRecommendedArticles]);
 
   return (
     <div className="h-dvh w-full overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
@@ -637,24 +731,89 @@ export default function MainScreen({
         <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
           {/* News Section */}
           <div className="p-6 pb-0">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-yellow-500" />
                 今日のおすすめニュース
               </h2>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs text-muted-foreground hover:text-foreground"
-                onClick={() => console.log("View all news")}
-              >
-                すべて見る
-                <ChevronRight className="w-4 h-4 ml-1" />
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => void handleRefreshNews()}
+                  disabled={isRefreshingNews}
+                >
+                  {isRefreshingNews ? (
+                    <Spinner className="size-4" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  {isRefreshingNews ? "更新中..." : "ニュースを更新"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => console.log("View all news")}
+                >
+                  すべて見る
+                  <ChevronRight className="w-4 h-4 ml-1" />
+                </Button>
+              </div>
             </div>
 
             {articleNotice ? (
               <p className="mb-3 text-xs text-amber-700">{articleNotice}</p>
+            ) : null}
+
+            {refreshNotice ? (
+              <p className="mb-3 text-xs text-[var(--yuuko-green)]">
+                {refreshNotice}
+              </p>
+            ) : null}
+
+            {refreshResult ? (
+              <Card className="mb-4 border border-[var(--yuuko-green)]/20 bg-white/90 py-0 shadow-none">
+                <CardContent className="flex flex-col gap-3 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        取得結果を反映しました
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {refreshResult.errors.length === 0
+                          ? "すべての対象ソースを処理できました。"
+                          : summarizeRefreshErrors(refreshResult)}
+                      </p>
+                    </div>
+                    <Badge
+                      className={
+                        refreshResult.errors.length === 0
+                          ? "border-0 bg-[var(--yuuko-green)] text-white"
+                          : "border-0 bg-amber-500 text-white"
+                      }
+                    >
+                      {refreshResult.errors.length === 0
+                        ? "更新成功"
+                        : "一部エラーあり"}
+                    </Badge>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <RefreshMetric
+                      label="sources"
+                      value={refreshResult.sourcesProcessed}
+                    />
+                    <RefreshMetric label="fetched" value={refreshResult.fetched} />
+                    <RefreshMetric label="saved" value={refreshResult.saved} />
+                    <RefreshMetric
+                      label="errors"
+                      value={refreshResult.errors.length}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
             ) : null}
 
             <div className="space-y-3">
