@@ -1,4 +1,5 @@
-//! RSS client for the news ingestion pipeline.
+//! Feed client for the news ingestion pipeline. Supports RSS 2.0 and Atom 1.0.
+//! フィード形式を自動判定し、RSS2.0/Atom を共通の取得・検証経路で扱う。
 //!
 //! Security boundary:
 //! - feed URLs must pass the slice 1 allowlist and scheme guard
@@ -15,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+use atom_syndication::{Entry as AtomEntry, Feed as AtomFeed};
 use reqwest::{header::LOCATION, redirect::Policy, Client, Response};
 use rss::{Channel, Guid, Item};
 use url::{Host, Url};
@@ -238,7 +240,148 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
     Ok(url)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedFormat {
+    Rss,
+    Atom,
+}
+
+/// フィードのルート要素から形式を判定する。RSS1.0(RDF)等は未対応で None を返す。
+fn detect_feed_format(feed_bytes: &[u8]) -> Option<FeedFormat> {
+    let text = String::from_utf8_lossy(feed_bytes);
+    let rss_at = find_root_tag(&text, "rss");
+    let feed_at = find_root_tag(&text, "feed");
+    match (rss_at, feed_at) {
+        (Some(rss_pos), Some(feed_pos)) => Some(if rss_pos <= feed_pos {
+            FeedFormat::Rss
+        } else {
+            FeedFormat::Atom
+        }),
+        (Some(_), None) => Some(FeedFormat::Rss),
+        (None, Some(_)) => Some(FeedFormat::Atom),
+        (None, None) => None,
+    }
+}
+
+/// 要素開始タグ `<tag` の位置を返す（直後が区切り文字のもののみ一致）。
+fn find_root_tag(text: &str, tag: &str) -> Option<usize> {
+    let needle = format!("<{tag}");
+    let mut from = 0;
+    while let Some(relative) = text[from..].find(&needle) {
+        let position = from + relative;
+        let next = text[position + needle.len()..].chars().next();
+        match next {
+            None | Some(' ') | Some('\t') | Some('\r') | Some('\n') | Some('>') | Some('/') => {
+                return Some(position);
+            }
+            _ => from = position + needle.len(),
+        }
+    }
+    None
+}
+
+/// フィードを解析して記事候補へ変換する。RSS 2.0 と Atom の両形式に対応する。
 fn parse_feed_items(
+    feed_bytes: &[u8],
+    feed_url: &Url,
+    allowlist: &NetworkAllowlist,
+) -> Result<Vec<RssItem>, AppError> {
+    match detect_feed_format(feed_bytes) {
+        Some(FeedFormat::Rss) => parse_rss_items(feed_bytes, feed_url, allowlist),
+        Some(FeedFormat::Atom) => parse_atom_items(feed_bytes, feed_url, allowlist),
+        None => Err(AppError::Parse(
+            "unsupported or unrecognized feed format (expected RSS 2.0 or Atom)".to_string(),
+        )),
+    }
+}
+
+fn parse_atom_items(
+    feed_bytes: &[u8],
+    feed_url: &Url,
+    allowlist: &NetworkAllowlist,
+) -> Result<Vec<RssItem>, AppError> {
+    let feed = AtomFeed::read_from(Cursor::new(feed_bytes))
+        .map_err(|error| AppError::Parse(format!("failed to parse Atom feed: {error}")))?;
+
+    let source_name = sanitize_plain_text(&feed.title().value)
+        .or_else(|| feed_url.host_str().and_then(sanitize_plain_text))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let mut results = Vec::new();
+    let mut seen_urls = HashSet::new();
+
+    for entry in feed.entries() {
+        if let Some(candidate) = map_atom_entry(entry, &source_name, allowlist)? {
+            if seen_urls.insert(candidate.article_url.clone()) {
+                results.push(candidate);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+fn map_atom_entry(
+    entry: &AtomEntry,
+    source_name: &str,
+    allowlist: &NetworkAllowlist,
+) -> Result<Option<RssItem>, AppError> {
+    let raw_article_url = match atom_entry_link(entry) {
+        Some(url) if !url.trim().is_empty() => url,
+        _ => return Ok(None),
+    };
+
+    let article_url = match validate_url(raw_article_url, UrlPurpose::Article, allowlist) {
+        Ok(url) => canonicalize_request_url(url)?.to_string(),
+        Err(AppError::Validation(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let title = sanitize_plain_text(&entry.title().value).unwrap_or_else(|| article_url.clone());
+
+    let summary = entry
+        .summary()
+        .map(|text| text.value.clone())
+        .or_else(|| entry.content().and_then(|content| content.value.clone()))
+        .as_deref()
+        .and_then(sanitize_html_fragment);
+
+    let published_at = entry.published().map(|datetime| {
+        datetime
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    });
+
+    Ok(Some(RssItem {
+        title,
+        article_url,
+        summary,
+        source_name: source_name.to_string(),
+        published_at,
+    }))
+}
+
+/// Atomエントリの記事URLを取り出す（rel="alternate" を優先、無ければ先頭link、最後にURL形式のid）。
+fn atom_entry_link(entry: &AtomEntry) -> Option<&str> {
+    entry
+        .links()
+        .iter()
+        .find(|link| link.rel() == "alternate")
+        .or_else(|| entry.links().first())
+        .map(|link| link.href())
+        .filter(|href| !href.trim().is_empty())
+        .or_else(|| {
+            let id = entry.id();
+            if id.starts_with("https://") || id.starts_with("http://") {
+                Some(id)
+            } else {
+                None
+            }
+        })
+}
+
+fn parse_rss_items(
     feed_bytes: &[u8],
     feed_url: &Url,
     allowlist: &NetworkAllowlist,
@@ -502,5 +645,65 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].article_url, "https://news.example.com/articles/42");
+    }
+
+    #[test]
+    fn detects_rss_and_atom_formats() {
+        assert_eq!(
+            detect_feed_format(
+                br#"<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>"#
+            ),
+            Some(FeedFormat::Rss)
+        );
+        assert_eq!(
+            detect_feed_format(
+                br#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>"#
+            ),
+            Some(FeedFormat::Atom)
+        );
+        assert_eq!(detect_feed_format(b"<html><body></body></html>"), None);
+    }
+
+    #[test]
+    fn parses_atom_feed_items_and_sanitizes_output() {
+        let feed_url = Url::parse("https://rss.example.com/atom.xml").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title> Example Atom </title>
+  <updated>2026-06-03T16:00:00Z</updated>
+  <entry>
+    <id>urn:example:atom-1</id>
+    <title> First Atom Story </title>
+    <link rel="alternate" href="https://news.example.com/articles/atom-1"/>
+    <summary type="html"><![CDATA[<p>Hello <b>atom</b>.</p>]]></summary>
+    <published>2026-06-03T15:11:06Z</published>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+  <entry>
+    <id>urn:example:rejected</id>
+    <title>Rejected by allowlist</title>
+    <link rel="alternate" href="https://evil.example.com/articles/2"/>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+</feed>"#,
+            &feed_url,
+            &allowlist(),
+        )
+        .expect("atom feed should parse");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "First Atom Story");
+        assert_eq!(
+            items[0].article_url,
+            "https://news.example.com/articles/atom-1"
+        );
+        assert_eq!(items[0].summary.as_deref(), Some("Hello atom."));
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("2026-06-03T15:11:06Z")
+        );
+        assert_eq!(items[0].source_name, "Example Atom");
     }
 }

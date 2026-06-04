@@ -30,3 +30,4 @@ rss = "2"
 scraper = "0.24"
 serde_yaml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+atom_syndication = "0.12"
