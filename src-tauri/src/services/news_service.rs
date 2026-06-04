@@ -319,20 +319,29 @@ fn utc_now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// フィードの pubDate（RFC2822）を UTC ISO に正規化する。
+/// フィードの公開日時を UTC ISO に正規化する。RSS の pubDate(RFC2822) と
+/// Atom の published(RFC3339/ISO8601) の両方に対応する。
 /// パースできない・存在しない場合は fetched_at（UTC）へフォールバックする。
 fn normalize_published_at(raw: Option<&str>, fallback_utc: &str) -> String {
-    match raw {
-        Some(value) => chrono::DateTime::parse_from_rfc2822(value.trim())
-            .map(|datetime| {
-                datetime
-                    .with_timezone(&chrono::Utc)
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string()
-            })
-            .unwrap_or_else(|_| fallback_utc.to_string()),
-        None => fallback_utc.to_string(),
+    let Some(value) = raw else {
+        return fallback_utc.to_string();
+    };
+    let trimmed = value.trim();
+
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc2822(trimmed) {
+        return to_utc_seconds(datetime);
     }
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return to_utc_seconds(datetime);
+    }
+    fallback_utc.to_string()
+}
+
+fn to_utc_seconds(datetime: chrono::DateTime<chrono::FixedOffset>) -> String {
+    datetime
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -419,6 +428,19 @@ mod tests {
         assert_eq!(
             normalize_published_at(None, "2026-06-04T00:00:00Z"),
             "2026-06-04T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn normalize_published_at_converts_iso8601_to_utc() {
+        // Atom の published（RFC3339/ISO8601）も UTC へ正規化する。
+        assert_eq!(
+            normalize_published_at(Some("2026-06-03T15:11:06Z"), "fallback"),
+            "2026-06-03T15:11:06Z"
+        );
+        assert_eq!(
+            normalize_published_at(Some("2026-06-04T10:00:00+09:00"), "fallback"),
+            "2026-06-04T01:00:00Z"
         );
     }
 }
