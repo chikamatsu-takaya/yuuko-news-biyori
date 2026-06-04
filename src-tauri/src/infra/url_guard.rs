@@ -34,7 +34,7 @@ impl UrlPurpose {
         }
     }
 
-    fn allowed_hosts<'a>(self, allowlist: &'a NetworkAllowlist) -> &'a [String] {
+    fn allowed_hosts(self, allowlist: &NetworkAllowlist) -> &[String] {
         match self {
             Self::Rss => &allowlist.allowed_rss_domains,
             Self::Article => &allowlist.allowed_article_domains,
@@ -426,9 +426,11 @@ mod tests {
 
     #[test]
     fn uses_purpose_specific_allowlist() {
-        let mut allowlist = NetworkAllowlist::default();
-        allowlist.allowed_ai_endpoints = vec!["generativelanguage.googleapis.com".to_string()];
-        allowlist.allowed_rss_domains = vec!["rss.example.com".to_string()];
+        let allowlist = NetworkAllowlist {
+            allowed_ai_endpoints: vec!["generativelanguage.googleapis.com".to_string()],
+            allowed_rss_domains: vec!["rss.example.com".to_string()],
+            ..NetworkAllowlist::default()
+        };
 
         validate_url(
             "https://generativelanguage.googleapis.com/v1beta/models",
