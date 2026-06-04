@@ -36,6 +36,7 @@ pub fn run() {
             let settings_service = SettingsService::new(settings_repository);
             settings_service.initialize_default_if_missing()?;
             let article_repository = ArticleRepository::new(&paths);
+            article_repository.initialize_default_if_missing()?;
             let article_service = ArticleService::new(article_repository.clone());
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let summary_service = SummaryService::new(
