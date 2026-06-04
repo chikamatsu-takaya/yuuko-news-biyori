@@ -16,6 +16,7 @@ use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
 use services::dictionary_service::DictionaryService;
+use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
 use services::settings_service::SettingsService;
@@ -47,6 +48,11 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 RecommendationService::new(),
             );
+            let news_scheduler = NewsScheduler::new(
+                &paths,
+                news_service.clone(),
+                SettingsRepository::new(&paths),
+            );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let summary_service = SummaryService::new(
                 AiProviderService::new(),
@@ -65,6 +71,9 @@ pub fn run() {
                 summary_service,
                 yuuko_service,
             });
+
+            // 低頻度チェック方式の定期取得（起動時＋日付変更）を専用スレッドで開始する。
+            news_scheduler.start();
 
             log::info!(
                 "Backend initialized. storage_root={}",
