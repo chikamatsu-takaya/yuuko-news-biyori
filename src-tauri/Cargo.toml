@@ -25,3 +25,5 @@ tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 thiserror = "1.0"
 url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rss = "2"
