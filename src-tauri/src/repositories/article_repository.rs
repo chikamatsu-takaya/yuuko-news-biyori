@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult,
+    ArticleDetailDto, ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult, FetchedArticle,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -85,6 +86,34 @@ impl ArticleRepository {
             article_id: article_id.to_string(),
             is_favorite,
         })
+    }
+
+    /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
+    pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
+        Ok(self
+            .load_article_records()?
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect())
+    }
+
+    /// 取得済みの新規記事を保存する（内部Rust API・Tauri commandとして公開しない）。
+    /// 既存 article_id はスキップして重複排除し、新規保存できた件数を返す。
+    pub fn save_fetched_articles(&self, articles: Vec<FetchedArticle>) -> Result<usize, AppError> {
+        let mut existing = self.existing_article_ids()?;
+        let mut saved = 0usize;
+
+        for article in articles {
+            // 同一 article_id は新規保存しない（既存記事の上書きを避ける）。
+            if !existing.insert(article.article_id.clone()) {
+                continue;
+            }
+            let record = PersistedArticleRecord::from_fetched(article);
+            self.save_article_record(&record)?;
+            saved += 1;
+        }
+
+        Ok(saved)
     }
 
     fn find_article_record(&self, article_id: &str) -> Result<PersistedArticleRecord, AppError> {
@@ -285,6 +314,47 @@ impl PersistedArticleRecord {
             yuuko_comment: sections.yuuko_comment,
             keyword_candidates: sections.keyword_candidates,
         })
+    }
+
+    /// 取得パイプラインの `FetchedArticle` から永続化レコードを構築する。
+    /// AI要約前の段階なので summary 系は空、status は取得・抽出済みを反映する。
+    fn from_fetched(article: FetchedArticle) -> Self {
+        let source_key = build_source_key(&article.source_name);
+        let html_extracted = article.excerpt.is_some();
+        Self {
+            version: 1,
+            article_id: article.article_id,
+            title: article.title,
+            source_name: article.source_name,
+            source_key,
+            original_url: article.original_url,
+            fetched_at: article.fetched_at,
+            published_at_text: article.published_at_text,
+            genre: article.genre,
+            tags: article.tags,
+            status: PersistedArticleStatus {
+                fetched: true,
+                html_extracted,
+                markdown_generated: true,
+                summarized: false,
+                recommended: true,
+                introduced_by_yuuko: false,
+                archived: false,
+            },
+            read_state: article.read_state,
+            favorite: false,
+            is_archived: false,
+            recommendation_score: article.recommendation_score,
+            summary_generated_at: None,
+            ai_provider: None,
+            content_hash: None,
+            excerpt: article.excerpt,
+            summary: None,
+            yuuko_explanation: None,
+            focus_points: Vec::new(),
+            yuuko_comment: None,
+            keyword_candidates: Vec::new(),
+        }
     }
 
     fn to_summary_dto(&self, is_favorite: bool) -> ArticleSummaryDto {

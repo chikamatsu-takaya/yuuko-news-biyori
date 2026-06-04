@@ -48,6 +48,25 @@ pub struct FavoriteUpdateResult {
     pub is_favorite: bool,
 }
 
+/// 取得パイプライン（NewsService）が新規記事を保存する際の入力。
+/// `PersistedArticleRecord` は repository 内部型のため、保存用の公開入力として用意する。
+/// この型は内部Rust APIでのみ使用し、Tauri command では公開しない。
+#[derive(Debug, Clone)]
+pub struct FetchedArticle {
+    pub article_id: String,
+    pub title: String,
+    pub source_name: String,
+    pub original_url: String,
+    /// 取得時刻（UTC・RFC3339）。
+    pub fetched_at: String,
+    pub published_at_text: String,
+    pub genre: String,
+    pub tags: Vec<String>,
+    pub excerpt: Option<String>,
+    pub recommendation_score: f32,
+    pub read_state: ArticleReadState,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GetRecommendedArticlesParams {
