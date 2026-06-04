@@ -1,6 +1,6 @@
 //! Feed client for the news ingestion pipeline. Supports RSS 2.0 and Atom 1.0.
-//! フィード形式を自動判定し、RSS2.0/Atom を共通の取得・検証経路で扱う。
-//!
+//! Detects the feed format automatically and routes RSS 2.0 and Atom
+//! through the same fetch, validation, and parsing pipeline.
 //! Security boundary:
 //! - feed URLs must pass the slice 1 allowlist and scheme guard
 //! - resolved IPs must stay on public addresses before connecting
@@ -246,7 +246,8 @@ enum FeedFormat {
     Atom,
 }
 
-/// フィードのルート要素から形式を判定する。RSS1.0(RDF)等は未対応で None を返す。
+/// Detects the feed format from the root element.
+/// Unsupported formats such as RSS 1.0 (RDF) return `None`.
 fn detect_feed_format(feed_bytes: &[u8]) -> Option<FeedFormat> {
     let text = String::from_utf8_lossy(feed_bytes);
     let rss_at = find_root_tag(&text, "rss");
@@ -263,7 +264,8 @@ fn detect_feed_format(feed_bytes: &[u8]) -> Option<FeedFormat> {
     }
 }
 
-/// 要素開始タグ `<tag` の位置を返す（直後が区切り文字のもののみ一致）。
+/// Returns the position of the opening `<tag` token when it is followed by a
+/// delimiter, so similarly named elements do not match by accident.
 fn find_root_tag(text: &str, tag: &str) -> Option<usize> {
     let needle = format!("<{tag}");
     let mut from = 0;
@@ -280,7 +282,8 @@ fn find_root_tag(text: &str, tag: &str) -> Option<usize> {
     None
 }
 
-/// フィードを解析して記事候補へ変換する。RSS 2.0 と Atom の両形式に対応する。
+/// Parses a feed payload into sanitized article candidates.
+/// Supports both RSS 2.0 and Atom.
 fn parse_feed_items(
     feed_bytes: &[u8],
     feed_url: &Url,
@@ -362,19 +365,37 @@ fn map_atom_entry(
     }))
 }
 
-/// Atomエントリの記事URLを取り出す（rel="alternate" を優先、無ければ先頭link、最後にURL形式のid）。
+/// Extracts the article URL from an Atom entry.
+///
+/// Priority:
+/// 1. `rel="alternate"`
+/// 2. the first link whose `rel` is empty or omitted
+/// 3. a URL-shaped `id`, but only when the entry has no `<link>` elements
+///
+/// `rel="self"` is never treated as an article URL.
 fn atom_entry_link(entry: &AtomEntry) -> Option<&str> {
-    entry
-        .links()
+    let links = entry.links();
+
+    links
         .iter()
         .find(|link| link.rel() == "alternate")
-        .or_else(|| entry.links().first())
         .map(|link| link.href())
         .filter(|href| !href.trim().is_empty())
         .or_else(|| {
-            let id = entry.id();
-            if id.starts_with("https://") || id.starts_with("http://") {
-                Some(id)
+            links
+                .iter()
+                .find(|link| link.rel().trim().is_empty())
+                .map(|link| link.href())
+                .filter(|href| !href.trim().is_empty())
+        })
+        .or_else(|| {
+            if links.is_empty() {
+                let id = entry.id();
+                if id.starts_with("https://") || id.starts_with("http://") {
+                    Some(id)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -705,5 +726,63 @@ mod tests {
             Some("2026-06-03T15:11:06Z")
         );
         assert_eq!(items[0].source_name, "Example Atom");
+    }
+
+    #[test]
+    fn atom_link_fallback_skips_self_and_accepts_empty_rel() {
+        let feed_url = Url::parse("https://rss.example.com/atom.xml").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>Example Atom</title>
+  <updated>2026-06-03T16:00:00Z</updated>
+  <entry>
+    <id>urn:example:alternate-wins</id>
+    <title>Alternate wins</title>
+    <link rel="self" href="https://rss.example.com/entries/alternate-wins.xml"/>
+    <link rel="alternate" href="https://news.example.com/articles/alternate-wins"/>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+  <entry>
+    <id>urn:example:empty-rel</id>
+    <title>Empty rel fallback</title>
+    <link rel="" href="https://news.example.com/articles/empty-rel"/>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+  <entry>
+    <id>https://news.example.com/articles/self-only-id</id>
+    <title>Self only should skip</title>
+    <link rel="self" href="https://rss.example.com/entries/self-only.xml"/>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+  <entry>
+    <id>https://news.example.com/articles/id-only</id>
+    <title>ID only fallback</title>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+</feed>"#,
+            &feed_url,
+            &allowlist(),
+        )
+        .expect("atom feed should parse");
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0].article_url,
+            "https://news.example.com/articles/alternate-wins"
+        );
+        assert_eq!(
+            items[1].article_url,
+            "https://news.example.com/articles/empty-rel"
+        );
+        assert_eq!(
+            items[2].article_url,
+            "https://news.example.com/articles/id-only"
+        );
+        assert!(items.iter().all(|item| {
+            item.article_url != "https://rss.example.com/entries/self-only.xml"
+                && item.article_url != "https://news.example.com/articles/self-only-id"
+        }));
     }
 }
