@@ -16,6 +16,8 @@ use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
 use services::dictionary_service::DictionaryService;
+use services::news_service::{NewsService, NewsSourcesConfig};
+use services::recommendation_service::RecommendationService;
 use services::settings_service::SettingsService;
 use services::summary_service::SummaryService;
 use services::yuuko_service::YuukoService;
@@ -31,6 +33,7 @@ pub fn run() {
             paths.ensure_storage_dirs()?;
             NetworkAllowlist::initialize_default_if_missing(&paths.network_allowlist_path)?;
             NetworkAllowlist::load(&paths.network_allowlist_path)?;
+            NewsSourcesConfig::initialize_default_if_missing(&paths.news_sources_path)?;
 
             let settings_repository = SettingsRepository::new(&paths);
             let settings_service = SettingsService::new(settings_repository);
@@ -38,6 +41,12 @@ pub fn run() {
             let article_repository = ArticleRepository::new(&paths);
             article_repository.initialize_default_if_missing()?;
             let article_service = ArticleService::new(article_repository.clone());
+            let news_service = NewsService::new(
+                &paths,
+                article_repository.clone(),
+                SettingsRepository::new(&paths),
+                RecommendationService::new(),
+            );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let summary_service = SummaryService::new(
                 AiProviderService::new(),
@@ -51,6 +60,7 @@ pub fn run() {
             app.manage(AppState {
                 article_service,
                 dictionary_service,
+                news_service,
                 settings_service,
                 summary_service,
                 yuuko_service,
@@ -75,6 +85,7 @@ pub fn run() {
             commands::article_commands::get_article_detail,
             commands::article_commands::update_article_favorite,
             commands::article_commands::generate_article_summary,
+            commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
             commands::dictionary_commands::save_dictionary_entry,
