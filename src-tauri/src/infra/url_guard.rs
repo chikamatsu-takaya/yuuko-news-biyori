@@ -11,7 +11,7 @@
 //!   redirect following.
 #![allow(dead_code)]
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use url::{Host, Url};
 
@@ -159,7 +159,7 @@ fn validate_host(
             }
         }
         NormalizedHost::Ipv4(ip) => {
-            if is_disallowed_ipv4(*ip) {
+            if is_disallowed_ip_addr(IpAddr::V4(*ip)) {
                 return Err(AppError::Validation(format!(
                     "{} URL host '{}' is not allowed",
                     purpose.label(),
@@ -168,7 +168,7 @@ fn validate_host(
             }
         }
         NormalizedHost::Ipv6(ip) => {
-            if is_disallowed_ipv6(*ip) {
+            if is_disallowed_ip_addr(IpAddr::V6(*ip)) {
                 return Err(AppError::Validation(format!(
                     "{} URL host '{}' is not allowed",
                     purpose.label(),
@@ -242,6 +242,13 @@ fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
 
 fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
     ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_unspecified()
+}
+
+pub(crate) fn is_disallowed_ip_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => is_disallowed_ipv4(ipv4),
+        IpAddr::V6(ipv6) => is_disallowed_ipv6(ipv6),
+    }
 }
 
 #[cfg(test)]
