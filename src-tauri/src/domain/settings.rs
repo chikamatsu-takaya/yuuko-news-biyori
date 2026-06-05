@@ -231,12 +231,15 @@ pub struct UserProfileSettings {
     pub preferred_name: String,
 }
 
+/// ニュース関連設定。
+/// 取得元（フィードURL）は `config/news_sources.json`（許可リスト連動・破損時 fail-close）で
+/// 一元管理するため、ここには持たない。旧 `sources` フィールドが残る settings.json も
+/// serde が未知フィールドとして無視して読み込める（後方互換）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct NewsSettings {
     pub categories: Vec<String>,
-    pub sources: Vec<String>,
     pub fetch_on_startup: bool,
     pub fetch_at_midnight: bool,
     pub max_daily_recommendations: u32,
@@ -246,7 +249,6 @@ impl Default for NewsSettings {
     fn default() -> Self {
         Self {
             categories: vec!["AI".to_string(), "IT".to_string()],
-            sources: vec![],
             fetch_on_startup: true,
             fetch_at_midnight: true,
             max_daily_recommendations: 10,
@@ -379,4 +381,27 @@ fn validate_time(value: &str) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_legacy_settings_with_removed_news_sources_field() {
+        // 旧 settings.json に残る news.sources は、未知フィールドとして無視して
+        // 読み込めること（後方互換）。
+        let legacy = r#"{
+            "version": 1,
+            "news": {
+                "categories": ["AI"],
+                "sources": ["https://old.example.com/feed"],
+                "fetchOnStartup": true
+            }
+        }"#;
+        let parsed: PersistedSettings =
+            serde_json::from_str(legacy).expect("legacy settings should still load");
+        assert_eq!(parsed.news.categories, vec!["AI".to_string()]);
+        assert!(parsed.news.fetch_on_startup);
+    }
 }
