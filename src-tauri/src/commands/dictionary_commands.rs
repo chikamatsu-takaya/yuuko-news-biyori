@@ -1,8 +1,9 @@
 use tauri::State;
 
 use crate::domain::dictionary::{
-    DictionaryEntryDto, DictionaryEntryListItemDto, ExplainSelectedTermParams,
-    ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+    DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryListItemDto,
+    ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+    UpdateDictionaryMemoParams,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -56,6 +57,40 @@ pub async fn save_dictionary_entry(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join save-dictionary-entry task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn update_dictionary_memo(
+    state: State<'_, AppState>,
+    params: UpdateDictionaryMemoParams,
+) -> CommandResult<DictionaryEntryListItemDto> {
+    let dictionary_service = state.dictionary_service.clone();
+    tauri::async_runtime::spawn_blocking(move || dictionary_service.update_dictionary_memo(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join update-dictionary-memo task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn delete_dictionary_entry(
+    state: State<'_, AppState>,
+    params: DeleteDictionaryEntryParams,
+) -> CommandResult<String> {
+    let dictionary_service = state.dictionary_service.clone();
+    tauri::async_runtime::spawn_blocking(move || dictionary_service.delete_dictionary_entry(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join delete-dictionary-entry task: {error}"),
             )
         })?
         .map_err(CommandError::from)
