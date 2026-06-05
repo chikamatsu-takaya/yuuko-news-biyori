@@ -74,7 +74,7 @@ impl NewsSourcesConfig {
         }
 
         let raw = std::fs::read_to_string(path)?;
-        serde_json::from_str::<Self>(&raw).map_err(|error| {
+        serde_json::from_str::<Self>(crate::util::strip_utf8_bom(&raw)).map_err(|error| {
             AppError::Validation(format!(
                 "news sources config is corrupted; refusing to fetch (fail-close): {error}"
             ))
@@ -442,5 +442,22 @@ mod tests {
             normalize_published_at(Some("2026-06-04T10:00:00+09:00"), "fallback"),
             "2026-06-04T01:00:00Z"
         );
+    }
+
+    #[test]
+    fn news_sources_load_tolerates_utf8_bom() {
+        let path = unique_temp_path();
+        let config = NewsSourcesConfig {
+            version: 1,
+            sources: vec![NewsSource {
+                url: "https://www.publickey1.jp/atom.xml".to_string(),
+                genre: "テクノロジー".to_string(),
+            }],
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, format!("\u{feff}{json}")).unwrap();
+        let loaded = NewsSourcesConfig::load(&path).expect("BOM-prefixed news sources should load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded, config);
     }
 }

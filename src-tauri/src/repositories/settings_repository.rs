@@ -16,6 +16,11 @@ impl SettingsRepository {
         }
     }
 
+    #[cfg(test)]
+    fn with_path(settings_path: PathBuf) -> Self {
+        Self { settings_path }
+    }
+
     pub fn load_or_default(&self) -> Result<PersistedSettings, AppError> {
         self.restore_backup_if_primary_missing();
 
@@ -24,7 +29,8 @@ impl SettingsRepository {
         }
 
         let raw = std::fs::read_to_string(&self.settings_path)?;
-        let settings = serde_json::from_str::<PersistedSettings>(&raw)?;
+        let settings =
+            serde_json::from_str::<PersistedSettings>(crate::util::strip_utf8_bom(&raw))?;
         Ok(settings)
     }
 
@@ -91,5 +97,47 @@ impl SettingsRepository {
         if let Err(error) = std::fs::rename(&backup_path, &self.settings_path) {
             log::error!("Failed to restore settings backup: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn unique_settings_path() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "yuuko_settings_test_{}_{}.json",
+            std::process::id(),
+            n
+        ))
+    }
+
+    #[test]
+    fn load_or_default_tolerates_utf8_bom() {
+        // 手編集で付くBOM付き設定JSONも読めること（起動ブロックを防ぐ）。
+        let path = unique_settings_path();
+        let json = serde_json::to_string_pretty(&PersistedSettings::default()).unwrap();
+        std::fs::write(&path, format!("\u{feff}{json}")).unwrap();
+        let repo = SettingsRepository::with_path(path.clone());
+        let loaded = repo
+            .load_or_default()
+            .expect("BOM-prefixed settings should load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.version, PersistedSettings::default().version);
+    }
+
+    #[test]
+    fn load_or_default_still_errors_on_corrupt_json() {
+        // BOM以外の破損は現状どおりエラー（黙ってデフォルトに戻さない）。
+        let path = unique_settings_path();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        let repo = SettingsRepository::with_path(path.clone());
+        let result = repo.load_or_default();
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err());
     }
 }
