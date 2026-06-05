@@ -2,7 +2,7 @@
 //!
 //! - provider が `Gemini` かつ環境変数 `GEMINI_API_KEY` が設定されている場合のみ実AI（GeminiClient）を呼ぶ。
 //! - APIキーは **Rust側でのみ** 読み、フロントへ渡さない・ログに出さない。
-//! - キー未設定／他プロバイダ／の場合は MockProvider へフォールバックする。
+//! - キー未設定／他プロバイダ／Gemini呼び出し失敗時は MockProvider へフォールバックする（安全側）。
 //! - 送信内容は要約・再説明に必要な最小限（指示＋入力本文のみ）に絞る。
 
 use crate::domain::settings::{AiProvider, ExplanationLevel};
@@ -38,15 +38,24 @@ impl AiProviderService {
         }
 
         // Gemini かつ APIキーが設定されている場合のみ実AIを呼ぶ。
-        // それ以外（キー未設定・他プロバイダ）は mock フォールバック。
+        // それ以外（キー未設定・他プロバイダ・実AI呼び出し失敗）は mock フォールバック。
         if provider == AiProvider::Gemini {
             if let Some(api_key) = resolve_gemini_api_key() {
                 let prompt = build_prompt(&request, explanation_level);
-                let text = self.gemini_client.generate(&api_key, &prompt)?;
-                return Ok(AiResponse { text });
+                match self.gemini_client.generate(&api_key, &prompt) {
+                    Ok(text) => return Ok(AiResponse { text }),
+                    // 通信・解析失敗時はアプリを止めず mock へフォールバック（CLAUDE.md §10「安全側へ倒す」）。
+                    // 失敗理由は調査用にログへ残す。APIキーは generate 側で URL・ログに出さない設計。
+                    Err(error) => {
+                        log::warn!(
+                            "Gemini request failed; falling back to the mock provider: {error}"
+                        );
+                    }
+                }
+            } else {
+                // キーはログに出さない。未設定の事実のみ記録する。
+                log::info!("GEMINI_API_KEY is not set; falling back to the mock provider");
             }
-            // キーはログに出さない。未設定の事実のみ記録する。
-            log::info!("GEMINI_API_KEY is not set; falling back to the mock provider");
         }
 
         Ok(AiResponse {
