@@ -17,7 +17,7 @@
 - ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
 - 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
 - Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- P0（設定JSONのBOM耐性）・P1（設定責務整理）まで完了。次は P1（MVPソース導入手順の文書化）→ P1.5（機能の波: Gemini / 友情ランク / 未配線コマンド）
+- P0・P1（設定責務整理 / ソース導入手順）まで完了。次は P1.5（機能の波: Gemini / 友情ランク / 未配線コマンド）
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -83,7 +83,7 @@
 - [ ] `news_sources.json` / `network_allowlist.json` の設定導線整備
 - [x] 設定JSONのUTF-8 BOM耐性追加（PR #33 / `8f87081`）
 - [x] `settings.news.sources` と `config/news_sources.json` の責務整理（PR #34 / `2aa8016`）
-- [ ] MVP用ニュースソース候補の採用方針確定
+- [x] MVP用ニュースソース候補の採用方針確定（Publickey採用 / PR #35）
 - [ ] 媒体ToSとAI要約の運用方針をMVP/公開版で分けて明文化
 
 ## 7. セキュリティ・ネットワーク境界
@@ -113,11 +113,11 @@
 - [x] `settings.news.sources` の扱いを整理 → **削除**（未使用・非露出。旧JSONは serde 無視で後方互換）
 - [x] 設計書と実装の責務を同期（データ設計書 §8.2 から `sources` 除去＋取得元の管理先を注記）
 
-### P1: MVP用ニュースソース導入手順
-- [ ] 採用候補を2〜4件に絞る
-- [ ] allowlist候補を確定
-- [ ] app-data配置手順をドキュメント化
-- [ ] deny-by-defaultを維持したまま、検証用設定を扱いやすくする
+### P1: MVP用ニュースソース導入手順 ✅ 完了（PR #35）
+- [x] 採用候補を2〜4件に絞る（Publickey を採用。他はToS制約等で見送り）
+- [x] allowlist候補を確定（`www.publickey1.jp`）
+- [x] app-data配置手順をドキュメント化（`docs/01_setup/ニュースソース設定手順.md`）
+- [x] deny-by-defaultを維持したまま、検証用設定を扱いやすくする
 
 ### P1.5: MVP機能の波（実AI・継続要素）
 ニュース基盤の安定化（上記P0/P1）後に着手する。MVP価値の中核だが当初リスト漏れだったため追加。
@@ -165,3 +165,4 @@
 - [x] 2026-06-05: PlaywrightによるUI確認E2E基盤を追加
 - [x] 2026-06-05: 設定JSONのUTF-8 BOM耐性を追加（PR #33）
 - [x] 2026-06-05: ニュース取得元を `news_sources.json` に一本化し `settings.news.sources` を削除（PR #34）
+- [x] 2026-06-05: 検証用ニュースソース設定手順を追加（Publickey採用 / PR #35）
