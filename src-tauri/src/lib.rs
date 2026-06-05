@@ -105,7 +105,10 @@ pub fn run() {
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,
             commands::yuuko_commands::get_yuuko_notification_state,
-            commands::yuuko_commands::confirm_rank_up_reward
+            commands::yuuko_commands::confirm_rank_up_reward,
+            commands::yuuko_commands::dismiss_yuuko_notification,
+            commands::yuuko_commands::handle_yuuko_clicked,
+            commands::yuuko_commands::get_friendship_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
