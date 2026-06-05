@@ -56,7 +56,7 @@ pub fn run() {
             );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let summary_service = SummaryService::new(
-                AiProviderService::new(),
+                AiProviderService::new(&paths),
                 article_repository,
                 SettingsRepository::new(&paths),
             );
