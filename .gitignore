@@ -31,6 +31,8 @@ dist-ssr/
 out/
 build/
 *.tsbuildinfo
+playwright-report/
+test-results/
 
 # Tauri / Rust
 src-tauri/target/
