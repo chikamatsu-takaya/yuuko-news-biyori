@@ -123,7 +123,7 @@
 ニュース基盤の安定化（上記P0/P1）後に着手する。MVP価値の中核だが当初リスト漏れだったため追加。
 - [ ] Gemini連携（実AIプロバイダ）— 現状はmockのみ。APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
 - [ ] 友情ランク簡易完成 — `get_friendship_state` / ポイント加算 / RankUpDialog 配線（`confirm_rank_up_reward` は実装済み）
-- [ ] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry` / `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`
+- [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 レビュー中）
 
 ### P2: Playwright UI E2EのCI導入
 - [ ] CIで `pnpm exec playwright install chromium` を実行
@@ -166,3 +166,5 @@
 - [x] 2026-06-05: 設定JSONのUTF-8 BOM耐性を追加（PR #33）
 - [x] 2026-06-05: ニュース取得元を `news_sources.json` に一本化し `settings.news.sources` を削除（PR #34）
 - [x] 2026-06-05: 検証用ニュースソース設定手順を追加（Publickey採用 / PR #35）
+- [x] 2026-06-05: 辞書コマンド update_dictionary_memo / delete_dictionary_entry を配線（PR #36）
+- [x] 2026-06-05: ゆうこ/友情コマンド dismiss / click / get_friendship_state(読取専用) を配線（PR #37）
