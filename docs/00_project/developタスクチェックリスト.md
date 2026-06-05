@@ -12,12 +12,13 @@
 - ブロック中は `（Blocked: 理由）` を追記する
 
 ## 2. 現在地サマリー
-- `develop` は PR #33 まで反映済み（#34 レビュー中）
+- `develop` は PR #39 まで反映済み（Gemini連携 #38・Claude Codeレビュー基盤 #39 を含む）
 - 主要画面、Tauri command、ニュース取得パイプライン、手動更新UI、UI E2E基盤まで到達
 - ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
 - 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
 - Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- P0・P1（設定責務整理 / ソース導入手順）まで完了。次は P1.5（機能の波: Gemini / 友情ランク / 未配線コマンド）
+- P0・P1 と P1.5 の一部（Gemini連携 #38 / 辞書・ゆうこ・友情コマンド配線 #36 #37）まで完了。次は P1.5 残り（Gemini堅牢化フォロー / 友情ランク簡易完成）
+- リポジトリを public 化し、GitHub Actions CI（lint/test/clippy/audit/secret-scan）が無料で稼働。Claude Code の `@claude` レビュー基盤も追加済み（#39）
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -121,11 +122,18 @@
 
 ### P1.5: MVP機能の波（実AI・継続要素）
 ニュース基盤の安定化（上記P0/P1）後に着手する。MVP価値の中核だが当初リスト漏れだったため追加。
-- [ ] Gemini連携（実AIプロバイダ）— 現状はmockのみ。APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
+- [x] Gemini連携（実AIプロバイダ）（PR #38）— APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
 - [ ] 友情ランク簡易完成 — `get_friendship_state` / ポイント加算 / RankUpDialog 配線（`confirm_rank_up_reward` は実装済み）
-- [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 レビュー中）
+- [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 merged）
 
-### P2: Playwright UI E2EのCI導入
+### P1.5: Gemini堅牢化・運用（#38後フォロー / 次の着手対象）
+実AI（#38）を「安心して使える」状態にするための小さめフォロー群。
+- [ ] Gemini通信失敗時のmockフォールバック（CLAUDE.md §10「安全側へ倒す」準拠。現状は失敗で要約コマンドがエラー）
+- [ ] GeminiモデルID更新/設定化（`gemini-1.5-flash` ハードコード → 現行モデルへ更新 or 設定可能化）
+- [ ] 実APIキーでの疎通確認（要約更新が実APIで通るか）
+- [ ] 生成要約のMarkdown保存方針の決定（保存する/しない → 必要なら実装。データ設計に波及）
+
+### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
 - [ ] まず任意チェックとして追加
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -168,3 +176,6 @@
 - [x] 2026-06-05: 検証用ニュースソース設定手順を追加（Publickey採用 / PR #35）
 - [x] 2026-06-05: 辞書コマンド update_dictionary_memo / delete_dictionary_entry を配線（PR #36）
 - [x] 2026-06-05: ゆうこ/友情コマンド dismiss / click / get_friendship_state(読取専用) を配線（PR #37）
+- [x] 2026-06-05: Gemini連携（実AIプロバイダ）を追加（PR #38）
+- [x] 2026-06-05: リポジトリを public 化し GitHub Actions CI を復旧（無料ランナー）
+- [x] 2026-06-05: Claude Code による @claude 起動式PRレビューCIを追加（PR #39）
