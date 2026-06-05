@@ -36,6 +36,7 @@ pub struct DictionaryEntryListItemDto {
     pub related_article_id: Option<String>,
     pub related_article_title: Option<String>,
     pub last_viewed_at_text: Option<String>,
+    pub memo: Option<String>,
     pub is_starred: bool,
 }
 
@@ -172,6 +173,57 @@ impl SaveDictionaryEntryParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDictionaryMemoParams {
+    pub entry_id: String,
+    pub memo: String,
+}
+
+impl UpdateDictionaryMemoParams {
+    /// entryId を検証し、memo を整形して返す（空文字はメモ削除＝None）。
+    pub fn validated(&self) -> Result<(String, Option<String>), AppError> {
+        let entry_id = self.entry_id.trim();
+        if entry_id.is_empty() {
+            return Err(AppError::Validation(
+                "entryId must not be empty".to_string(),
+            ));
+        }
+
+        let memo = self.memo.trim();
+        if memo.chars().count() > 1000 {
+            return Err(AppError::Validation(
+                "memo must be 1000 characters or fewer".to_string(),
+            ));
+        }
+
+        let memo = if memo.is_empty() {
+            None
+        } else {
+            Some(memo.to_string())
+        };
+        Ok((entry_id.to_string(), memo))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteDictionaryEntryParams {
+    pub entry_id: String,
+}
+
+impl DeleteDictionaryEntryParams {
+    pub fn validated_entry_id(&self) -> Result<String, AppError> {
+        let entry_id = self.entry_id.trim();
+        if entry_id.is_empty() {
+            return Err(AppError::Validation(
+                "entryId must not be empty".to_string(),
+            ));
+        }
+        Ok(entry_id.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PersistedDictionaryStore {
@@ -285,6 +337,7 @@ impl PersistedDictionaryEntry {
                 .last_referenced_at
                 .clone()
                 .or_else(|| Some(self.created_at.clone())),
+            memo: self.memo.clone(),
             is_starred: self.favorite,
         }
     }
@@ -297,8 +350,9 @@ pub fn normalize_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DictionaryEntryDto, DictionaryEntryType, ExplainSelectedTermParams,
-        ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+        DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryType,
+        ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+        UpdateDictionaryMemoParams,
     };
 
     #[test]
@@ -388,5 +442,52 @@ mod tests {
         };
 
         assert!(params.validated_entry().is_err());
+    }
+
+    #[test]
+    fn update_memo_params_validate_and_trim() {
+        let params = UpdateDictionaryMemoParams {
+            entry_id: " entry-1 ".to_string(),
+            memo: "  あとで読む  ".to_string(),
+        };
+        let (entry_id, memo) = params.validated().unwrap();
+        assert_eq!(entry_id, "entry-1");
+        assert_eq!(memo.as_deref(), Some("あとで読む"));
+    }
+
+    #[test]
+    fn update_memo_params_empty_memo_clears() {
+        let params = UpdateDictionaryMemoParams {
+            entry_id: "entry-1".to_string(),
+            memo: "   ".to_string(),
+        };
+        let (_, memo) = params.validated().unwrap();
+        assert!(memo.is_none());
+    }
+
+    #[test]
+    fn update_memo_params_reject_empty_entry_id() {
+        let params = UpdateDictionaryMemoParams {
+            entry_id: " ".to_string(),
+            memo: "x".to_string(),
+        };
+        assert!(params.validated().is_err());
+    }
+
+    #[test]
+    fn delete_params_validate_and_reject_empty() {
+        assert_eq!(
+            DeleteDictionaryEntryParams {
+                entry_id: " entry-1 ".to_string(),
+            }
+            .validated_entry_id()
+            .unwrap(),
+            "entry-1"
+        );
+        assert!(DeleteDictionaryEntryParams {
+            entry_id: " ".to_string(),
+        }
+        .validated_entry_id()
+        .is_err());
     }
 }

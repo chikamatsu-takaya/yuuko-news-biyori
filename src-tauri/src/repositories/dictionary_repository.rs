@@ -92,6 +92,38 @@ impl DictionaryRepository {
             .collect())
     }
 
+    pub fn update_dictionary_memo(
+        &self,
+        entry_id: &str,
+        memo: Option<String>,
+    ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let mut store = self.load_store_or_default()?;
+        let entry = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.dictionary_id == entry_id)
+            .ok_or_else(|| AppError::NotFound(format!("dictionary entry not found: {entry_id}")))?;
+        entry.memo = memo;
+        let updated = entry.to_list_item_dto();
+        self.save_store(&store)?;
+        Ok(updated)
+    }
+
+    pub fn delete_dictionary_entry(&self, entry_id: &str) -> Result<String, AppError> {
+        let mut store = self.load_store_or_default()?;
+        let before = store.entries.len();
+        store
+            .entries
+            .retain(|entry| entry.dictionary_id != entry_id);
+        if store.entries.len() == before {
+            return Err(AppError::NotFound(format!(
+                "dictionary entry not found: {entry_id}"
+            )));
+        }
+        self.save_store(&store)?;
+        Ok(entry_id.to_string())
+    }
+
     fn find_saved_entry(
         &self,
         article_id: &str,
@@ -566,5 +598,70 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key_text, "生成AI");
+    }
+
+    #[test]
+    fn update_dictionary_memo_sets_and_returns_memo() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let updated = context
+            .repository
+            .update_dictionary_memo(
+                "entry-article-001-generated-ai",
+                Some("あとで読む".to_string()),
+            )
+            .unwrap();
+        assert_eq!(updated.memo.as_deref(), Some("あとで読む"));
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(None, None, false)
+            .unwrap();
+        assert_eq!(entries[0].memo.as_deref(), Some("あとで読む"));
+    }
+
+    #[test]
+    fn update_dictionary_memo_rejects_unknown_entry() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .update_dictionary_memo("entry-unknown", Some("x".to_string()))
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
+    }
+
+    #[test]
+    fn delete_dictionary_entry_removes_entry() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let deleted = context
+            .repository
+            .delete_dictionary_entry("entry-article-001-generated-ai")
+            .unwrap();
+        assert_eq!(deleted, "entry-article-001-generated-ai");
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(None, None, false)
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn delete_dictionary_entry_rejects_unknown_entry() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .delete_dictionary_entry("entry-unknown")
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
     }
 }
