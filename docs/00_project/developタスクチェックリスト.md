@@ -12,12 +12,12 @@
 - ブロック中は `（Blocked: 理由）` を追記する
 
 ## 2. 現在地サマリー
-- `develop` は PR #32 まで反映済み
+- `develop` は PR #33 まで反映済み（#34 レビュー中）
 - 主要画面、Tauri command、ニュース取得パイプライン、手動更新UI、UI E2E基盤まで到達
 - ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
 - 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
 - Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- 直近の最優先課題は、Windows手編集時に起きやすい設定JSONのUTF-8 BOM耐性追加
+- P0（設定JSONのBOM耐性）・P1（設定責務整理）まで完了。次は P1（MVPソース導入手順の文書化）→ P1.5（機能の波: Gemini / 友情ランク / 未配線コマンド）
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -81,8 +81,8 @@
 - [x] FeedClientのRSS2.0/Atom両対応（PR #29 / `b2bb03b`, `484c4bb`）
 - [x] Publickey Atomフィードのローカル疎通確認（取得15件 / 保存15件 / errors 0）
 - [ ] `news_sources.json` / `network_allowlist.json` の設定導線整備
-- [ ] 設定JSONのUTF-8 BOM耐性追加
-- [ ] `settings.news.sources` と `config/news_sources.json` の責務整理
+- [x] 設定JSONのUTF-8 BOM耐性追加（PR #33 / `8f87081`）
+- [x] `settings.news.sources` と `config/news_sources.json` の責務整理（PR #34 / `2aa8016`）
 - [ ] MVP用ニュースソース候補の採用方針確定
 - [ ] 媒体ToSとAI要約の運用方針をMVP/公開版で分けて明文化
 
@@ -95,24 +95,23 @@
 - [x] リダイレクトは自動追従せず、各 `Location` を検証
 - [x] `fetch_any_url` 相当の公開Tauri commandを作らない方針を維持
 - [x] allowlist破損時は fail-close
-- [ ] UTF-8 BOM付きJSONのみ許容し、それ以外の破損は fail-close 維持
+- [x] UTF-8 BOM付きJSONのみ許容し、それ以外の破損は fail-close 維持（PR #33）
 - [ ] ソース追加・変更時の運用手順をドキュメント化
 
 ## 8. 次にやるべき優先タスク
 
-### P0: 設定JSONのUTF-8 BOM耐性追加
-- [ ] `NetworkAllowlist::load` がUTF-8 BOM付きJSONを読めるようにする
-- [ ] `NewsSourcesConfig::load` がUTF-8 BOM付きJSONを読めるようにする
-- [ ] BOM以外の壊れたJSONは fail-close のままにする（セキュリティ境界の方針は維持）
-- [ ] `settings.json` への横展開は現状の load 仕様を確認してから判断（BOMのみ許容・破損挙動は現状維持）
-- [ ] 単体テストを追加
-- [ ] `cargo fmt` / `cargo test` / `cargo clippy -D warnings` を通す
+### P0: 設定JSONのUTF-8 BOM耐性追加 ✅ 完了（PR #33 / `8f87081`）
+- [x] `NetworkAllowlist::load` がUTF-8 BOM付きJSONを読めるようにする
+- [x] `NewsSourcesConfig::load` がUTF-8 BOM付きJSONを読めるようにする
+- [x] BOM以外の壊れたJSONは fail-close のままにする（セキュリティ境界の方針は維持）
+- [x] `settings.json` への横展開（共有ヘルパ `util::strip_utf8_bom`・BOMのみ許容・破損挙動は現状維持）
+- [x] 単体テストを追加
+- [x] `cargo fmt` / `cargo test` / `cargo clippy -D warnings` を通す
 
-### P1: ニュース取得設定の責務整理
-- [ ] `config/news_sources.json` を取得元の唯一の正とするか決定
-- [ ] `settings.news.sources` の扱いを整理（削除 / 同期 / UI用表示のどれか）
-  - 削除する場合は UI・設計書・既存互換への影響を確認してから
-- [ ] 設計書と実装の責務を同期
+### P1: ニュース取得設定の責務整理 ✅ 完了（PR #34 / `2aa8016`）
+- [x] `config/news_sources.json` を取得元の唯一の正とする（決定）
+- [x] `settings.news.sources` の扱いを整理 → **削除**（未使用・非露出。旧JSONは serde 無視で後方互換）
+- [x] 設計書と実装の責務を同期（データ設計書 §8.2 から `sources` 除去＋取得元の管理先を注記）
 
 ### P1: MVP用ニュースソース導入手順
 - [ ] 採用候補を2〜4件に絞る
@@ -164,3 +163,5 @@
 - [x] 2026-06-04: Tauri npm/Rust crate のバージョン整合を修正
 - [x] 2026-06-04: ホーム画面にニュース手動更新UIを追加
 - [x] 2026-06-05: PlaywrightによるUI確認E2E基盤を追加
+- [x] 2026-06-05: 設定JSONのUTF-8 BOM耐性を追加（PR #33）
+- [x] 2026-06-05: ニュース取得元を `news_sources.json` に一本化し `settings.news.sources` を削除（PR #34）
