@@ -6,6 +6,8 @@
 //! - APIキーは引数で受け取り、ヘッダ `x-goog-api-key` にのみ使用する。
 //!   URL・ログ・エラーメッセージには載せない。
 //! - リダイレクトは無効。送信内容は与えられたプロンプト本文のみ（最小化は呼び出し側の責務）。
+//! - モデルIDは既定 `gemini-2.5-flash`。環境変数 `GEMINI_MODEL` で上書き可（Rust側のみ・安全な文字種のみ許容）。
+//!   モデルはURLの**パス**に入るだけで、接続先ホストは固定（許可リスト検証）から変わらない。
 //!
 //! 固定の信頼済みエンドポイントのため、RSS/HTML取得のような攻撃者制御URLは存在しない。
 //! よって本クライアントは許可リスト検証＋リダイレクト無効で足り、DNS再解決ガードは課さない。
@@ -22,7 +24,10 @@ use super::url_guard::{validate_url, UrlPurpose};
 use crate::error::AppError;
 use crate::paths::AppPaths;
 
-const GEMINI_MODEL: &str = "gemini-1.5-flash";
+/// 既定のGeminiモデル。`gemini-1.5-flash` は廃止済みのため、現行の price-performance モデルを既定とする。
+const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
+/// モデルIDを上書きする環境変数（任意）。Rust側でのみ読む。
+const GEMINI_MODEL_ENV: &str = "GEMINI_MODEL";
 const GEMINI_ENDPOINT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -44,8 +49,10 @@ impl GeminiClient {
     /// `api_key` はヘッダにのみ使用し、ログ・エラー文には出さない。
     pub fn generate(&self, api_key: &str, prompt: &str) -> Result<String, AppError> {
         let allowlist = NetworkAllowlist::load(&self.allowlist_path)?;
-        let endpoint = format!("{GEMINI_ENDPOINT_BASE}/{GEMINI_MODEL}:generateContent");
-        // 固定エンドポイントを許可リスト(AiEndpoint)で検証する（任意URLは扱わない）。
+        // モデルIDは既定または GEMINI_MODEL（安全な文字種のみ）。接続先ホストは固定のため変わらない。
+        let model = resolve_model();
+        let endpoint = format!("{GEMINI_ENDPOINT_BASE}/{model}:generateContent");
+        // 接続先ホストを許可リスト(AiEndpoint)で検証する（任意URLは扱わない）。
         let url = validate_url(&endpoint, UrlPurpose::AiEndpoint, &allowlist)?;
 
         let client = Client::builder()
@@ -84,6 +91,32 @@ fn build_request_body(prompt: &str) -> Value {
             "parts": [{ "text": prompt }]
         }]
     })
+}
+
+/// 使用するGeminiモデルIDを決める。`GEMINI_MODEL`（任意）が安全な文字種なら採用し、
+/// 未設定・不正値なら既定 `DEFAULT_GEMINI_MODEL` を使う。
+/// モデルIDはURLパスに入るため、ホスト偽装やパス細工を防ぐ目的で文字種を制限する。
+fn resolve_model() -> String {
+    let Ok(value) = std::env::var(GEMINI_MODEL_ENV) else {
+        return DEFAULT_GEMINI_MODEL.to_string();
+    };
+    let trimmed = value.trim();
+    if is_valid_model_id(trimmed) {
+        trimmed.to_string()
+    } else {
+        // 不正値はログに残し（モデル名は秘密ではない）、既定へフォールバックする。
+        log::warn!("GEMINI_MODEL is set but is not a valid model id; using the default model");
+        DEFAULT_GEMINI_MODEL.to_string()
+    }
+}
+
+/// モデルIDとして許容する文字種（英数・`.`・`-`・`_`）か判定する。
+/// 空文字や `/` `@` `:` 空白などを弾き、エンドポイントURLのパス以外へ影響しないことを保証する。
+fn is_valid_model_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// Gemini応答から生成テキスト（最初の candidate）を取り出す。
@@ -131,5 +164,20 @@ mod tests {
     fn parse_generated_text_errors_when_missing() {
         let body = json!({ "candidates": [] });
         assert!(parse_generated_text(&body).is_err());
+    }
+
+    #[test]
+    fn is_valid_model_id_accepts_expected_ids() {
+        assert!(is_valid_model_id("gemini-2.5-flash"));
+        assert!(is_valid_model_id("gemini-2.0-flash-001"));
+        assert!(is_valid_model_id(DEFAULT_GEMINI_MODEL));
+    }
+
+    #[test]
+    fn is_valid_model_id_rejects_unsafe_values() {
+        assert!(!is_valid_model_id("")); // 空文字
+        assert!(!is_valid_model_id("models/gemini-2.5-flash")); // スラッシュ不可
+        assert!(!is_valid_model_id("evil@host")); // @ 不可
+        assert!(!is_valid_model_id("a b")); // 空白不可
     }
 }
