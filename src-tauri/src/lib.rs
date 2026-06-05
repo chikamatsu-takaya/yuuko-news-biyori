@@ -6,6 +6,7 @@ mod paths;
 mod repositories;
 mod services;
 mod state;
+mod util;
 
 use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
