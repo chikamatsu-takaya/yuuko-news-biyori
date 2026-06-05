@@ -269,6 +269,68 @@ chore: Tauriアプリ基盤を追加
 
 ---
 
+## Claude Code によるPRレビュー（@claude メンション起動）
+
+Pull Request 上で `@claude` とメンションすると、Claude Code がコードレビュー（バグ検出・セキュリティ・パフォーマンス・影響範囲・リグレッション観点）を行い、PRへ日本語でコメントします。
+ワークフロー定義は `.github/workflows/claude-code-review.yml`、レビュー方針は `REVIEW.md` を参照してください。
+
+### 起動方法
+
+PRのコメント欄、またはコード行へのレビューコメントで、本文に `@claude` を含めて投稿します。
+
+```text
+@claude このPRをレビューして
+@claude セキュリティ観点で重点的に見て
+@claude この変更のリグレッションリスクは？
+```
+
+- **PR上のコメントだけ**で起動します（通常のissueコメントでは起動しません）。
+- `@claude` を含まないコメントでは起動しません（job自体が走りません）。
+
+### 必要な GitHub Secrets
+
+| Secret 名 | 用途 | 必須 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic API 認証キー（[console.anthropic.com](https://console.anthropic.com) で取得） | 必須 |
+
+- 登録場所: リポジトリ **Settings → Secrets and variables → Actions**。
+- 未設定の場合、ワークフローは冒頭で「ANTHROPIC_API_KEY が未設定」と**明示して失敗**します（鍵の値はログに出しません）。
+- GitHub操作は標準の `GITHUB_TOKEN` を使うため、追加Secretは不要です。
+- （任意）コメント主体を Claude 表示にしたい場合は [Claude GitHub App](https://github.com/apps/claude) を導入できます。未導入でも `github-actions[bot]` として動作します。
+- Claude の Pro/Max サブスクリプションを使う場合は、`anthropic_api_key` の代わりに `claude_code_oauth_token`（Secret）方式へ切り替え可能です。
+
+### 課金・クレジット消費の注意
+
+このレビューは**実行のたびに費用が発生し得ます**。
+
+- **Anthropic API**：プロンプト＋応答のトークン量に応じて課金されます（`ANTHROPIC_API_KEY` の請求先）。
+- **GitHub Actions**：GitHubホストランナーの実行時間が Actions 分を消費します（private リポジトリは無料枠あり）。
+- コスト対策として本ワークフローには、`@claude` 起動限定・`--max-turns 20` 上限・`timeout-minutes: 20`・同一PRの多重起動抑制（concurrency）を入れています。費用を抑えたい場合は `--max-turns` を下げてください。
+
+### なぜ「全PR自動実行」ではなく「手動起動」なのか
+
+- 全PRで自動実行すると、レビュー不要な小さな変更でも毎回 API 課金・Actions 分を消費します。
+- 会社・チーム利用ではコストが累積しやすいため、**必要な時だけ `@claude` で呼ぶ**手動起動を既定にしています。
+- 既存CI（lint / test / clippy / audit / secret-scan）は従来どおり全PRで自動実行され、本機能はそれと**別トリガー（コメント）**のため干渉しません。
+
+### 将来、PR作成時の自動レビューへ切り替える場合の変更ポイント
+
+`.github/workflows/claude-code-review.yml` を以下のように変更します（別ファイルとして追加してもよい）。
+
+1. **トリガー変更**：`on:` を `issue_comment` / `pull_request_review_comment` から `pull_request:`（`types: [opened, synchronize]`）へ変更／追記。
+2. **`if:` 条件変更**：`@claude` 判定を外し、必要なら対象ブランチ・`paths:` で絞る。
+3. **`prompt` を明示**：自動実行（automationモード）では `@claude` メンションが無いため、`prompt:` にレビュー指示（または `code-review` スキル）を渡す。
+   ```yaml
+   with:
+     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+     prompt: "このPRの差分を REVIEW.md の方針でレビューし、日本語でコメントしてください。"
+   ```
+4. **コスト再確認**：自動化は実行回数が増えるため、`paths:` 絞り込み・`concurrency` の `cancel-in-progress: true` 化・`--max-turns` 引き下げを検討。
+
+> 補足: 公式にはトリガー不要で毎PRレビューする «GitHub Code Review» 機能も提供されています。常時自動運用へ寄せる場合はそちらも選択肢です。
+
+---
+
 ## セキュリティ上の注意
 
 以下はGitに含めないでください。
