@@ -126,11 +126,11 @@
 - [ ] 友情ランク簡易完成 — `get_friendship_state` / ポイント加算 / RankUpDialog 配線（`confirm_rank_up_reward` は実装済み）
 - [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 merged）
 
-### P1.5: Gemini堅牢化・運用（#38後フォロー / 次の着手対象）
+### P1.5: Gemini堅牢化・運用（#38後フォロー）
 実AI（#38）を「安心して使える」状態にするための小さめフォロー群。
-- [ ] Gemini通信失敗時のmockフォールバック（CLAUDE.md §10「安全側へ倒す」準拠。現状は失敗で要約コマンドがエラー）
-- [ ] GeminiモデルID更新/設定化（`gemini-1.5-flash` ハードコード → 現行モデルへ更新 or 設定可能化）
-- [ ] 実APIキーでの疎通確認（要約更新が実APIで通るか）
+- [x] Gemini通信失敗時のmockフォールバック（PR #41。CLAUDE.md §10「安全側へ倒す」準拠）
+- [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
+- [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
 - [ ] 生成要約のMarkdown保存方針の決定（保存する/しない → 必要なら実装。データ設計に波及）
 
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
@@ -179,3 +179,6 @@
 - [x] 2026-06-05: Gemini連携（実AIプロバイダ）を追加（PR #38）
 - [x] 2026-06-05: リポジトリを public 化し GitHub Actions CI を復旧（無料ランナー）
 - [x] 2026-06-05: Claude Code による @claude 起動式PRレビューCIを追加（PR #39）
+- [x] 2026-06-05: チェックリストを #36-#39 同期（PR #40）
+- [x] 2026-06-05: Gemini堅牢化（失敗時mockフォールバック＋モデルID更新/設定化）（PR #41）
+- [x] 2026-06-05: 実APIキーでGemini疎通確認（`gemini-2.5-flash` 200応答 / `#[ignore]` スモークテスト追加）

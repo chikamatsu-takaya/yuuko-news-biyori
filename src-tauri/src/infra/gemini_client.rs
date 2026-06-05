@@ -180,4 +180,35 @@ mod tests {
         assert!(!is_valid_model_id("evil@host")); // @ 不可
         assert!(!is_valid_model_id("a b")); // 空白不可
     }
+
+    /// 実APIキーでの疎通スモーク（B-3）。通常CI/`cargo test` では #[ignore] により実行しない。
+    /// 実行例: GEMINI_API_KEY を設定し
+    ///   `cargo test --manifest-path src-tauri/Cargo.toml gemini_live -- --ignored --nocapture`
+    /// ネットワークと実APIキーが必要。APIキーは環境変数からのみ読み、出力には出さない。
+    #[test]
+    #[ignore = "live: requires GEMINI_API_KEY and network; run with --ignored"]
+    fn gemini_live_smoke_generates_text() {
+        let raw = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+        let key = raw.trim();
+        assert!(
+            !key.is_empty(),
+            "set GEMINI_API_KEY to run this live smoke test"
+        );
+
+        // 一時ディレクトリに既定の許可リスト（generativelanguage.googleapis.com を含む）を用意する。
+        let dir = std::env::temp_dir().join("yuuko_news_gemini_live_smoke");
+        let paths = AppPaths::new(dir);
+        paths.ensure_storage_dirs().expect("ensure storage dirs");
+        NetworkAllowlist::initialize_default_if_missing(&paths.network_allowlist_path)
+            .expect("init default allowlist");
+
+        let client = GeminiClient::new(&paths);
+        let text = client
+            .generate(key, "「接続確認OK」とだけ日本語で短く返してください。")
+            .expect("Gemini live request should succeed");
+
+        assert!(!text.trim().is_empty(), "response must not be empty");
+        // 応答のみ表示（APIキーは出さない）。
+        println!("--- Gemini live response ---\n{text}\n----------------------------");
+    }
 }
