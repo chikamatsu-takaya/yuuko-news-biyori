@@ -1,6 +1,6 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-05
+最終更新: 2026-06-08
 対象ブランチ: `develop`
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
@@ -12,13 +12,13 @@
 - ブロック中は `（Blocked: 理由）` を追記する
 
 ## 2. 現在地サマリー
-- `develop` は PR #39 まで反映済み（Gemini連携 #38・Claude Codeレビュー基盤 #39 を含む）
-- 主要画面、Tauri command、ニュース取得パイプライン、手動更新UI、UI E2E基盤まで到達
-- ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
-- 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
-- Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- P0・P1 と P1.5 の一部（Gemini連携 #38 / 辞書・ゆうこ・友情コマンド配線 #36 #37）まで完了。次は P1.5 残り（Gemini堅牢化フォロー / 友情ランク簡易完成）
-- リポジトリを public 化し、GitHub Actions CI（lint/test/clippy/audit/secret-scan）が無料で稼働。Claude Code の `@claude` レビュー基盤も追加済み（#39）
+- `develop` は **PR #49 まで反映済み（open PR なし）**
+- 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達
+- **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**
+- **CI Claude: `@claude` PRレビューが OAuth(サブスク)認証で稼働(#39/#47/#48)。public向けに投稿者権限ゲート済み(#49)**
+- ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能。製品デフォルトは deny-by-default 維持
+- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了
+- **次の最優先（残るMVP中核）= 友情ランク簡易完成（P1.5）**。以降：アーカイブ退避の起点決定 → フロントUX整備(#46起票) → 運用/公開対応 → 品質基盤
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -136,6 +136,7 @@
 - [ ] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 は「1か月→月次ZIP（お気に入り除外）」。記憶の「4〜7日」案と要reconcile（4-7日採用時は §14 改訂）
 
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
+（補足：E2Eのテストカバレッジはチーム PR #45 で拡充済み。残りは下記のCI統合のみ。）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
 - [ ] まず任意チェックとして追加
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -197,3 +198,9 @@
 - [x] 2026-06-05: Gemini堅牢化（失敗時mockフォールバック＋モデルID更新/設定化）（PR #41）
 - [x] 2026-06-05: 実APIキーでGemini疎通確認（`gemini-2.5-flash` 200応答 / `#[ignore]` スモークテスト追加）
 - [x] 2026-06-05: B-4 生成要約のMarkdown保存方針を決定（保存する。退避起点/粒度は別途）
+- [x] 2026-06-08: 生成要約のMarkdown永続化を実装（PR #44）
+- [x] 2026-06-08: Playwright UI E2E の画面カバレッジ拡充（チーム / PR #45）
+- [x] 2026-06-08: フロントUX課題3件（ホーム/遷移/用語範囲選択）をチェックリストに起票（PR #46）
+- [x] 2026-06-08: @claudeレビュー認証を OAuth(サブスク)方式へ切替（PR #47）
+- [x] 2026-06-08: @claudeレビューに checkout 追加＋contents:write 化で稼働（PR #48）
+- [x] 2026-06-08: @claudeレビューを信頼ユーザー限定（public向け権限ゲート / PR #49）
