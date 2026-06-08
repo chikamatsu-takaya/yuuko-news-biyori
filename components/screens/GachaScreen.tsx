@@ -244,9 +244,10 @@ function YuukoCharacter() {
     <div className="relative">
       <Image
         src="/assets/yuuko.png"
-        width={224}
-        height={224}
+        width={963}
+        height={1174}
         alt="ゆうこ"
+        priority
         className="w-56 h-auto drop-shadow-lg"
         style={{
           animation: "float 3s ease-in-out infinite",
@@ -468,7 +469,7 @@ export default function GachaScreen({
           {/* Main Gacha Area - Grid Layout */}
           <div className="flex-1 px-4 pb-4 overflow-x-auto">
             <div
-              className="grid grid-cols-[180px_minmax(420px,1fr)_240px] gap-4 h-full min-w-[920px]"
+              className="flex flex-col lg:grid lg:grid-cols-[180px_minmax(420px,1fr)_240px] gap-4 h-full lg:min-w-[920px]"
               style={{ minHeight: "400px" }}
             >
               {/* Left: Pickup */}

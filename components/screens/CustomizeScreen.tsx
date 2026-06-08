@@ -477,9 +477,9 @@ export default function CustomizeScreen({
                     <Image
                       src="/assets/yuuko.png"
                       alt="ゆうこ"
-                      width={180}
-                      height={200}
-                      className="drop-shadow-lg animate-[float_3s_ease-in-out_infinite]"
+                      width={963}
+                      height={1174}
+                      className="w-[180px] h-auto drop-shadow-lg animate-[float_3s_ease-in-out_infinite]"
                       style={{
                         animation: "float 3s ease-in-out infinite",
                       }}
