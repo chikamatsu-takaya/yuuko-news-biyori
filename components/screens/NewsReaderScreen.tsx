@@ -678,6 +678,7 @@ export default function NewsReaderScreen({
     open: boolean;
     newRank: number;
   }>({ open: false, newRank: 0 });
+  const isMountedRef = React.useRef(true);
   // 同一記事の open / 同一用語の解説で重複加算しないためのセッション内ガード。
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
@@ -694,6 +695,13 @@ export default function NewsReaderScreen({
       ? relatedArticles[relatedArticles.length - 1]?.id ?? null
       : null;
   const nextArticleId = relatedArticles[0]?.id ?? null;
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     let active = true;
@@ -945,6 +953,10 @@ export default function NewsReaderScreen({
         articleId: article.id,
       });
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       if (!generatedSummary) {
         setSummaryNotice(
           "要約生成はローカルプレビューでは未接続のため、既存の要約を表示しています。"
@@ -956,10 +968,10 @@ export default function NewsReaderScreen({
         applyGeneratedSummary(currentArticle, generatedSummary)
       );
 
-      // 再説明（要約）を生成・閲覧したので友情ポイントを加算する。
+      // Intentional: each explicit summary refresh can count; Rust enforces the daily cap.
       void recordFriendshipEvent("explanation_viewed")
         .then((result) => {
-          if (result?.rankedUp) {
+          if (isMountedRef.current && result?.rankedUp) {
             setRankUpState({ open: true, newRank: result.newRank });
           }
         })
@@ -967,12 +979,16 @@ export default function NewsReaderScreen({
           console.warn("Failed to record friendship event:", eventError);
         });
     } catch (error) {
-      setSummaryNotice(
-        "要約生成に失敗しました。時間をおいてもう一度お試しください。"
-      );
+      if (isMountedRef.current) {
+        setSummaryNotice(
+          "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+        );
+      }
       console.warn("Failed to generate article summary:", error);
     } finally {
-      setIsGeneratingSummary(false);
+      if (isMountedRef.current) {
+        setIsGeneratingSummary(false);
+      }
     }
   }, [article.id]);
 
