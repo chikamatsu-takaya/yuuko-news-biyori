@@ -10,6 +10,7 @@ pub const NEWS_REFRESH_STATE_RELATIVE_PATH: &str = "state/news_refresh_state.jso
 pub const DICTIONARY_RELATIVE_PATH: &str = "dictionary/entries.json";
 pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
+pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -17,6 +18,7 @@ pub struct AppPaths {
     pub article_favorites_path: PathBuf,
     pub article_news_dir: PathBuf,
     pub dictionary_path: PathBuf,
+    pub friendship_path: PathBuf,
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
     pub news_sources_path: PathBuf,
@@ -29,6 +31,7 @@ impl AppPaths {
         let article_favorites_path = app_data_dir.join(ARTICLE_FAVORITES_RELATIVE_PATH);
         let article_news_dir = app_data_dir.join(ARTICLE_NEWS_RELATIVE_DIR);
         let dictionary_path = app_data_dir.join(DICTIONARY_RELATIVE_PATH);
+        let friendship_path = app_data_dir.join(FRIENDSHIP_RELATIVE_PATH);
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
         let news_sources_path = app_data_dir.join(NEWS_SOURCES_RELATIVE_PATH);
@@ -39,6 +42,7 @@ impl AppPaths {
             article_favorites_path,
             article_news_dir,
             dictionary_path,
+            friendship_path,
             network_allowlist_path,
             news_refresh_state_path,
             news_sources_path,
@@ -51,6 +55,7 @@ impl AppPaths {
         ensure_parent_dir(&self.article_favorites_path)?;
         std::fs::create_dir_all(&self.article_news_dir)?;
         ensure_parent_dir(&self.dictionary_path)?;
+        ensure_parent_dir(&self.friendship_path)?;
         ensure_parent_dir(&self.network_allowlist_path)?;
         ensure_parent_dir(&self.news_refresh_state_path)?;
         ensure_parent_dir(&self.news_sources_path)?;

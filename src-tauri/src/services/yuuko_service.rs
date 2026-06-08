@@ -1,4 +1,3 @@
-use crate::domain::friendship::FriendshipStateDto;
 use crate::domain::yuuko::{
     ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, YuukoNotificationState,
     YuukoResidentState,
@@ -75,12 +74,6 @@ impl YuukoService {
             self.yuuko_state_repository.save(&state)?;
         }
         Ok(state.to_notification_state())
-    }
-
-    /// 友情ランク状態を返す（読み取り専用の最小実装）。
-    /// 永続化・ポイント加算・ランクアップ判定は後続PRで実装するため、現状は既定値を返す。
-    pub fn get_friendship_state(&self) -> Result<FriendshipStateDto, AppError> {
-        Ok(FriendshipStateDto::default())
     }
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
