@@ -12,6 +12,9 @@ use crate::infra::gemini_client::GeminiClient;
 use crate::paths::AppPaths;
 
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
+/// 永続化メタ（ai_provider）用：実際に応答を生成したプロバイダ名。
+const PROVIDER_GEMINI: &str = "gemini";
+const PROVIDER_MOCK: &str = "mock";
 
 #[derive(Debug, Clone)]
 pub struct AiProviderService {
@@ -43,7 +46,12 @@ impl AiProviderService {
             if let Some(api_key) = resolve_gemini_api_key() {
                 let prompt = build_prompt(&request, explanation_level);
                 match self.gemini_client.generate(&api_key, &prompt) {
-                    Ok(text) => return Ok(AiResponse { text }),
+                    Ok(text) => {
+                        return Ok(AiResponse {
+                            text,
+                            provider: PROVIDER_GEMINI.to_string(),
+                        })
+                    }
                     // 通信・解析失敗時はアプリを止めず mock へフォールバック（CLAUDE.md §10「安全側へ倒す」）。
                     // 失敗理由は調査用にログへ残す。APIキーは generate 側で URL・ログに出さない設計。
                     Err(error) => {
@@ -60,6 +68,7 @@ impl AiProviderService {
 
         Ok(AiResponse {
             text: self.mock_response(request, provider, explanation_level),
+            provider: PROVIDER_MOCK.to_string(),
         })
     }
 

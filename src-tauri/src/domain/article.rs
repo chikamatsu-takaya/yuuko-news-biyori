@@ -34,6 +34,8 @@ pub struct ArticleDetailDto {
     pub published_at_text: String,
     pub genre: String,
     pub summary: Option<String>,
+    /// 元の本文抜粋。AI要約の種・再生成の基にする（表示は summary を優先）。
+    pub excerpt: Option<String>,
     pub yuuko_explanation: Option<String>,
     pub focus_points: Vec<String>,
     pub yuuko_comment: Option<String>,
@@ -65,6 +67,20 @@ pub struct FetchedArticle {
     pub excerpt: Option<String>,
     pub recommendation_score: f32,
     pub read_state: ArticleReadState,
+}
+
+/// 生成済み要約を記事Markdownへ永続化する際の入力（内部Rust API・Tauri commandでは公開しない）。
+/// B-4決定: 生成要約は記事Markdownへ保存し、再表示はキャッシュ／更新は明示再生成とする。
+#[derive(Debug, Clone)]
+pub struct ArticleSummaryUpdate {
+    pub summary: String,
+    pub yuuko_explanation: String,
+    pub focus_points: Vec<String>,
+    pub yuuko_comment: String,
+    /// 実際に生成に使ったプロバイダ（"gemini" / "mock"）。
+    pub ai_provider: String,
+    /// 生成時刻（UTC・RFC3339）。
+    pub generated_at: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

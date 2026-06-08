@@ -1,4 +1,4 @@
-use crate::domain::article::ArticleDetailDto;
+use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate};
 use crate::domain::settings::ExplanationLevel;
 use crate::domain::summary::{AiRequest, GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::AppError;
@@ -43,18 +43,18 @@ impl SummaryService {
             build_yuuko_explanation_seed(&article, explanation_level, &focus_points);
         let yuuko_comment_seed = build_yuuko_comment_seed(&article, explanation_level);
 
-        let summary = self
-            .ai_provider_service
-            .request_text(
-                AiRequest {
-                    prompt_id: "summary_v1".to_string(),
-                    input_text: summary_seed,
-                    context: Some(article.title.clone()),
-                },
-                provider,
-                explanation_level,
-            )?
-            .text;
+        let summary_response = self.ai_provider_service.request_text(
+            AiRequest {
+                prompt_id: "summary_v1".to_string(),
+                input_text: summary_seed,
+                context: Some(article.title.clone()),
+            },
+            provider,
+            explanation_level,
+        )?;
+        // 永続化メタ用に、実際に要約を生成したプロバイダ（gemini/mock）を控える。
+        let effective_provider = summary_response.provider;
+        let summary = summary_response.text;
 
         let yuuko_explanation = self
             .ai_provider_service
@@ -81,6 +81,23 @@ impl SummaryService {
                 explanation_level,
             )?
             .text;
+
+        // B-4: 生成要約を記事Markdownへ永続化（再表示はキャッシュ・更新は明示再生成）。
+        // 保存失敗でもアプリは止めず、生成結果は返す（警告ログのみ）。CLAUDE.md §10「安全側へ倒す」。
+        let persist_result = self.article_repository.update_article_summary(
+            &article_id,
+            ArticleSummaryUpdate {
+                summary: summary.clone(),
+                yuuko_explanation: yuuko_explanation.clone(),
+                focus_points: focus_points.clone(),
+                yuuko_comment: yuuko_comment.clone(),
+                ai_provider: effective_provider,
+                generated_at: current_utc_timestamp(),
+            },
+        );
+        if let Err(error) = persist_result {
+            log::warn!("failed to persist generated summary for {article_id}: {error}");
+        }
 
         Ok(GeneratedArticleSummaryDto {
             article_id,
@@ -129,8 +146,10 @@ fn build_summary_seed(
         .get(1)
         .cloned()
         .unwrap_or_else(|| "背景の変化".to_string());
+    // 再生成時に AI要約を種にして膨張しないよう、種の基は元の本文抜粋(excerpt)とする。
+    // excerpt が無い記事はタイトルベースの控えめな文にフォールバックする。
     let base_summary = article
-        .summary
+        .excerpt
         .clone()
         .unwrap_or_else(|| format!("{title} に関する記事です。"));
 
@@ -192,4 +211,10 @@ fn build_yuuko_comment_seed(
             "{title}の話題は専門的に見えても、実際には現場でどう役立つかまでつながると理解しやすいですね。"
         ),
     }
+}
+
+/// 要約生成時刻（UTC・"YYYY-MM-DDThh:mm:ssZ"）。保存メタ summary_generated_at に使う。
+/// news_service の取得時刻と同じ形式に揃える。
+fn current_utc_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
