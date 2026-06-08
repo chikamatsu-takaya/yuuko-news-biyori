@@ -479,7 +479,6 @@ export default function CustomizeScreen({
                       alt="ゆうこ"
                       width={963}
                       height={1174}
-                      priority
                       className="w-[180px] h-auto drop-shadow-lg animate-[float_3s_ease-in-out_infinite]"
                       style={{
                         animation: "float 3s ease-in-out infinite",
