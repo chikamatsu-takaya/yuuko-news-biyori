@@ -12,11 +12,13 @@ use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
+use repositories::friendship_repository::FriendshipRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
 use services::dictionary_service::DictionaryService;
+use services::friendship_service::FriendshipService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
@@ -55,6 +57,8 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
+            let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
+            friendship_service.initialize_default_if_missing()?;
             let summary_service = SummaryService::new(
                 AiProviderService::new(&paths),
                 article_repository,
@@ -67,6 +71,7 @@ pub fn run() {
             app.manage(AppState {
                 article_service,
                 dictionary_service,
+                friendship_service,
                 news_service,
                 settings_service,
                 summary_service,
@@ -108,7 +113,8 @@ pub fn run() {
             commands::yuuko_commands::confirm_rank_up_reward,
             commands::yuuko_commands::dismiss_yuuko_notification,
             commands::yuuko_commands::handle_yuuko_clicked,
-            commands::yuuko_commands::get_friendship_state
+            commands::friendship_commands::get_friendship_state,
+            commands::friendship_commands::record_friendship_event
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
