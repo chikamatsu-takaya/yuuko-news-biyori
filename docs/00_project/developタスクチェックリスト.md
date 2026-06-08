@@ -1,6 +1,6 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-05
+最終更新: 2026-06-08
 対象ブランチ: `develop`
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
@@ -12,13 +12,13 @@
 - ブロック中は `（Blocked: 理由）` を追記する
 
 ## 2. 現在地サマリー
-- `develop` は PR #39 まで反映済み（Gemini連携 #38・Claude Codeレビュー基盤 #39 を含む）
-- 主要画面、Tauri command、ニュース取得パイプライン、手動更新UI、UI E2E基盤まで到達
-- ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
-- 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
-- Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- P0・P1 と P1.5 の一部（Gemini連携 #38 / 辞書・ゆうこ・友情コマンド配線 #36 #37）まで完了。次は P1.5 残り（Gemini堅牢化フォロー / 友情ランク簡易完成）
-- リポジトリを public 化し、GitHub Actions CI（lint/test/clippy/audit/secret-scan）が無料で稼働。Claude Code の `@claude` レビュー基盤も追加済み（#39）
+- `develop` は **PR #49 まで反映済み（open PR なし）**
+- 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達
+- **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**
+- **CI Claude: `@claude` PRレビューが OAuth(サブスク)認証で稼働(#39/#47/#48)。public向けに投稿者権限ゲート済み(#49)**
+- ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能。製品デフォルトは deny-by-default 維持
+- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了
+- **次の最優先（残るMVP中核）= 友情ランク簡易完成（P1.5）**。以降：アーカイブ退避の起点決定 → フロントUX整備(#46起票) → 運用/公開対応 → 品質基盤
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -132,10 +132,11 @@
 - [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
 - [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
 - [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
-- [ ] （B-4後続・実装）要約のMarkdown永続化：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存し、再表示はキャッシュ・更新は明示再生成
+- [x] （B-4後続・実装）要約のMarkdown永続化（PR #44）：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存。再表示はキャッシュ・更新は明示再生成。種は元 excerpt から作り再生成膨張を防止
 - [ ] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 は「1か月→月次ZIP（お気に入り除外）」。記憶の「4〜7日」案と要reconcile（4-7日採用時は §14 改訂）
 
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
+（補足：E2Eのテストカバレッジはチーム PR #45 で拡充済み。残りは下記のCI統合のみ。）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
 - [ ] まず任意チェックとして追加
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -144,6 +145,18 @@
 - [ ] `yuuko.png` のLCP警告対応
 - [ ] `yuuko.png` の画像比率警告対応
 - [ ] 主要画面の余白・スクロール・文字はみ出しをPlaywrightスクリーンショットで確認
+
+### P2: フロントUX・画面構成の整備（動作確認で判明 / 根本整備後に着手）
+バックエンドの根本整備が落ち着き次第着手する。機能根本ではなくフロント改修主体のため後回し可。
+- [ ] **ホーム画面のレイアウト修正**：おすすめニュースが画面全体に縦羅列され、設計で必須の「ゆうこ本体（中央下寄り）」が見えない状態。
+  - 想定（画面詳細設計書 §5）：左〜中央におすすめカード一覧、ゆうこは**中央下寄りに常在**、右/上に状態表示。「ゆうこが画面内に存在する」は必須要件。
+  - 要すり合わせ：おすすめ表示件数（設計は「**10件前後**」／ユーザー想定は「ゆうこ厳選**3件程度**」）。件数方針を決めてからレイアウト調整。
+- [ ] **ニュース閲覧への遷移整理**：サイドバー「ニュースを見る」／ホーム「すべてを見る」押下で、いきなり記事詳細（ニュース閲覧画面）へ遷移している（`app/page.tsx` は news=NewsReaderScreen 直行・一覧を挟まない）。
+  - 想定：**一覧を経由してから**個別記事の詳細へ、という自然な遷移にする。
+  - 要決定：遷移先の一覧をどれにするか（メインのおすすめ一覧／ニュース履歴／新規ニュース一覧画面）。※設計の画面一覧(§4)に専用「ニュース一覧画面」は無く、メインのおすすめ一覧＋ニュース履歴で一覧を担う前提。
+- [ ] **用語解説を「範囲選択ベース」に作り直す**：現状は事前用意の候補語（`highlightedTerms` / `keyword_candidates` / fallback）をクリックする方式で、本文を範囲選択して解説する導線が無い。
+  - 想定（画面詳細設計書 §6：用語解説導線＝「**範囲選択後表示**」／「文字列選択→解説ボタン表示→解説ポップアップ」）：本文の任意文字列を範囲選択 → 解説ボタン表示 → 押下で選択範囲をゆうこが解説。
+  - 補足：Rust側 `explain_selected_term` は `selectedText` を受け取れる（**バックエンド対応済み**）。フロントで選択取得（`window.getSelection` 等）→ ボタン表示 → `selectedText` 受け渡しを実装すればよい。
 
 ## 9. 作業テンプレート
 以下をコピーして追加する:
@@ -185,3 +198,9 @@
 - [x] 2026-06-05: Gemini堅牢化（失敗時mockフォールバック＋モデルID更新/設定化）（PR #41）
 - [x] 2026-06-05: 実APIキーでGemini疎通確認（`gemini-2.5-flash` 200応答 / `#[ignore]` スモークテスト追加）
 - [x] 2026-06-05: B-4 生成要約のMarkdown保存方針を決定（保存する。退避起点/粒度は別途）
+- [x] 2026-06-08: 生成要約のMarkdown永続化を実装（PR #44）
+- [x] 2026-06-08: Playwright UI E2E の画面カバレッジ拡充（チーム / PR #45）
+- [x] 2026-06-08: フロントUX課題3件（ホーム/遷移/用語範囲選択）をチェックリストに起票（PR #46）
+- [x] 2026-06-08: @claudeレビュー認証を OAuth(サブスク)方式へ切替（PR #47）
+- [x] 2026-06-08: @claudeレビューに checkout 追加＋contents:write 化で稼働（PR #48）
+- [x] 2026-06-08: @claudeレビューを信頼ユーザー限定（public向け権限ゲート / PR #49）

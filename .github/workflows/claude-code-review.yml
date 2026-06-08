@@ -4,11 +4,12 @@
 #
 # 方針:
 #  - 全PRでの常時自動実行はしない。PR上のコメントで `@claude` とメンションされた時だけ実行する。
-#    （Anthropic API のトークン課金・GitHub Actions 分の消費を抑えるため。会社利用前提のコスト最適化）
+#    （サブスク枠/レート制限・GitHub Actions 分の消費を抑えるため。コスト最適化）
 #  - 既存CI（ci.yml / test-ci.yml / security-ci.yml / secret-scan.yml）とはトリガーが異なる独立ファイル。
 #    既存CIは pull_request / push で発火し、本ファイルは issue_comment / pull_request_review_comment で発火する。
 #    → 互いに干渉しない。
-#  - API キーはコードに書かず、リポジトリ Secret `ANTHROPIC_API_KEY` を参照する。
+#  - 認証は Claude サブスク(Pro/Max)の OAuth トークン。リポジトリ Secret `CLAUDE_CODE_OAUTH_TOKEN` を参照する
+#    （コードに書かない・`claude setup-token` で生成。従量APIキーではなくサブスク枠で動作）。
 #
 # 起動方法:
 #   PR画面のコメント欄、またはコード行へのレビューコメントで
@@ -24,12 +25,13 @@ on:
   pull_request_review_comment:
     types: [created]
 
-# 最小権限。レビュー（コメント投稿）に必要なものだけを付与する。
+# @claude 応答(tagモード)に必要な権限（公式 examples/claude.yml 準拠）。
 permissions:
-  contents: read # 差分・ファイルの読み取りのみ。コードは変更しないため write は付与しない。
+  contents: write # tagモードは作業ブランチ claude/pr-* を作成・操作するため write が必要（read だと git 処理が失敗する）。
   pull-requests: write # PR へレビュー結果コメントを投稿するため。
   issues: write # issue_comment 経由でのコメント投稿に必要。
-  id-token: write # claude-code-action(v1) の OIDC 短期トークン発行用。直APIキー認証のみなら必須ではないが、公式推奨に合わせ付与。
+  id-token: write # claude-code-action(v1) のトークン取得用。
+  actions: read # CI結果の参照用（公式例準拠・任意）。
 
 # 同一PRでの多重起動を防ぎ、無駄な実行（課金）を抑える（コスト対策）。
 concurrency:
@@ -38,36 +40,50 @@ concurrency:
 
 jobs:
   claude-review:
-    # 二重ガードで誤発火と無駄な課金を防ぐ:
-    #   (1) PR上のコメントに限定（issue_comment は通常issueにも飛ぶので、pull_request の有無で判定）
-    #   (2) コメント本文に `@claude` を含む場合のみ
-    # → 通常issue / `@claude` 無しのコメントでは job 自体が起動しない。
+    # 三重ガードで誤発火・無駄な課金・第三者起動を防ぐ:
+    #   (1) コメント投稿者が OWNER / MEMBER / COLLABORATOR（信頼レベル）であること。
+    #       ※public リポジトリでは誰でも `@claude` と書けるため、権限の無い第三者が
+    #         contents:write ＋ OAuthトークンを持つジョブを起動するのを防ぐ（セキュリティ要件）。
+    #   (2) PR上のコメントに限定（issue_comment は通常issueにも飛ぶので、pull_request の有無で判定）。
+    #   (3) コメント本文に `@claude` を含む場合のみ。
     if: |
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@claude'))
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR') &&
+      (
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request != null &&
+         contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+         contains(github.event.comment.body, '@claude'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 20 # 暴走防止のハードキャップ（コスト対策）。
 
     steps:
-      # Secret 未設定を、原因が分かる形で即座に失敗させる（鍵の値はログに出さない）。
-      - name: Verify ANTHROPIC_API_KEY secret is set
+      # Secret 未設定を、原因が分かる形で即座に失敗させる（トークンの値はログに出さない）。
+      - name: Verify CLAUDE_CODE_OAUTH_TOKEN secret is set
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          if [ -z "${ANTHROPIC_API_KEY}" ]; then
-            echo "::error title=ANTHROPIC_API_KEY is not configured::リポジトリSecret 'ANTHROPIC_API_KEY' が未設定です。Settings > Secrets and variables > Actions で登録してください。"
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+            echo "::error title=CLAUDE_CODE_OAUTH_TOKEN is not configured::リポジトリSecret 'CLAUDE_CODE_OAUTH_TOKEN' が未設定です。Claude Code CLI の 'claude setup-token'（Pro/Max）で生成し、Settings > Secrets and variables > Actions で登録してください。"
             exit 1
           fi
-          echo "ANTHROPIC_API_KEY is configured."
+          echo "CLAUDE_CODE_OAUTH_TOKEN is configured."
+
+      # tagモード(@claude応答)は作業リポジトリ(.git)を必要とする。浅いチェックアウトで足りる（公式例準拠）。
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Run Claude Code review
         uses: anthropics/claude-code-action@v1
         with:
-          # 認証: Anthropic 直APIキー（Secret 参照。コードには書かない）。
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 認証: Claude サブスク(Pro/Max)の OAuth トークン（Secret 参照。コードには書かない）。
+          # 従量APIキーではなくサブスク枠で動く。`claude setup-token` で生成したトークンを使う。
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # GitHub 操作用トークン。既定の GITHUB_TOKEN を上の permissions 範囲で使用する。
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # prompt は指定しない＝`@claude` メンションに応答する tag モード（ユーザーのコメント内容で動く）。
