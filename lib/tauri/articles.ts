@@ -23,6 +23,7 @@ export type ArticleDetailDto = {
   publishedAtText: string;
   genre: string;
   summary?: string;
+  excerpt?: string;
   yuukoExplanation?: string;
   focusPoints: string[];
   yuukoComment?: string;
