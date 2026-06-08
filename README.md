@@ -291,19 +291,21 @@ PRのコメント欄、またはコード行へのレビューコメントで、
 
 | Secret 名 | 用途 | 必須 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic API 認証キー（[console.anthropic.com](https://console.anthropic.com) で取得） | 必須 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude サブスク(Pro/Max)の OAuth トークン。Claude Code CLI の `claude setup-token` で生成 | 必須 |
 
 - 登録場所: リポジトリ **Settings → Secrets and variables → Actions**。
-- 未設定の場合、ワークフローは冒頭で「ANTHROPIC_API_KEY が未設定」と**明示して失敗**します（鍵の値はログに出しません）。
+- 認証は **Claude サブスクリプション(Pro/Max)** を使う（従量課金のAPIキーではなく、サブスク枠で動作）。トークンは `pnpm dlx @anthropic-ai/claude-code setup-token` 等で生成できる。
+- 未設定の場合、ワークフローは冒頭で「CLAUDE_CODE_OAUTH_TOKEN が未設定」と**明示して失敗**します（トークンの値はログに出しません）。
 - GitHub操作は標準の `GITHUB_TOKEN` を使うため、追加Secretは不要です。
 - （任意）コメント主体を Claude 表示にしたい場合は [Claude GitHub App](https://github.com/apps/claude) を導入できます。未導入でも `github-actions[bot]` として動作します。
-- Claude の Pro/Max サブスクリプションを使う場合は、`anthropic_api_key` の代わりに `claude_code_oauth_token`（Secret）方式へ切り替え可能です。
+- 従量課金の API キー方式に戻す場合は、`claude_code_oauth_token` の代わりに `anthropic_api_key`（Secret `ANTHROPIC_API_KEY`）を使う。
+- ⚠️ OAuthトークンは**個人の Pro/Max サブスクに紐づき**、CIの `@claude` はその枠・レート制限を消費します。チーム共有CIでの自動利用が各プラン規約の範囲かは Anthropic の利用規約をご確認ください。
 
 ### 課金・クレジット消費の注意
 
 このレビューは**実行のたびに費用が発生し得ます**。
 
-- **Anthropic API**：プロンプト＋応答のトークン量に応じて課金されます（`ANTHROPIC_API_KEY` の請求先）。
+- **Claude サブスク(Pro/Max)**：本ワークフローは OAuth トークン方式のため、従量のAPI課金ではなく**サブスクの利用枠・レート制限**を消費します（トークン所有者の契約に紐づく）。
 - **GitHub Actions**：GitHubホストランナーの実行時間が Actions 分を消費します（private リポジトリは無料枠あり）。
 - コスト対策として本ワークフローには、`@claude` 起動限定・`--max-turns 20` 上限・`timeout-minutes: 20`・同一PRの多重起動抑制（concurrency）を入れています。費用を抑えたい場合は `--max-turns` を下げてください。
 
@@ -322,7 +324,7 @@ PRのコメント欄、またはコード行へのレビューコメントで、
 3. **`prompt` を明示**：自動実行（automationモード）では `@claude` メンションが無いため、`prompt:` にレビュー指示（または `code-review` スキル）を渡す。
    ```yaml
    with:
-     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+     claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
      prompt: "このPRの差分を REVIEW.md の方針でレビューし、日本語でコメントしてください。"
    ```
 4. **コスト再確認**：自動化は実行回数が増えるため、`paths:` 絞り込み・`concurrency` の `cancel-in-progress: true` 化・`--max-turns` 引き下げを検討。
