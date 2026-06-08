@@ -131,7 +131,9 @@
 - [x] Gemini通信失敗時のmockフォールバック（PR #41。CLAUDE.md §10「安全側へ倒す」準拠）
 - [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
 - [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
-- [ ] 生成要約のMarkdown保存方針の決定（保存する/しない → 必要なら実装。データ設計に波及）
+- [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
+- [ ] （B-4後続・実装）要約のMarkdown永続化：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存し、再表示はキャッシュ・更新は明示再生成
+- [ ] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 は「1か月→月次ZIP（お気に入り除外）」。記憶の「4〜7日」案と要reconcile（4-7日採用時は §14 改訂）
 
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
@@ -182,3 +184,4 @@
 - [x] 2026-06-05: チェックリストを #36-#39 同期（PR #40）
 - [x] 2026-06-05: Gemini堅牢化（失敗時mockフォールバック＋モデルID更新/設定化）（PR #41）
 - [x] 2026-06-05: 実APIキーでGemini疎通確認（`gemini-2.5-flash` 200応答 / `#[ignore]` スモークテスト追加）
+- [x] 2026-06-05: B-4 生成要約のMarkdown保存方針を決定（保存する。退避起点/粒度は別途）
