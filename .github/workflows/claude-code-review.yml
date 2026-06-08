@@ -25,12 +25,13 @@ on:
   pull_request_review_comment:
     types: [created]
 
-# 最小権限。レビュー（コメント投稿）に必要なものだけを付与する。
+# @claude 応答(tagモード)に必要な権限（公式 examples/claude.yml 準拠）。
 permissions:
-  contents: read # 差分・ファイルの読み取りのみ。コードは変更しないため write は付与しない。
+  contents: write # tagモードは作業ブランチ claude/pr-* を作成・操作するため write が必要（read だと git 処理が失敗する）。
   pull-requests: write # PR へレビュー結果コメントを投稿するため。
   issues: write # issue_comment 経由でのコメント投稿に必要。
-  id-token: write # claude-code-action(v1) の OIDC 短期トークン発行用。直APIキー認証のみなら必須ではないが、公式推奨に合わせ付与。
+  id-token: write # claude-code-action(v1) のトークン取得用。
+  actions: read # CI結果の参照用（公式例準拠・任意）。
 
 # 同一PRでの多重起動を防ぎ、無駄な実行（課金）を抑える（コスト対策）。
 concurrency:
@@ -63,6 +64,12 @@ jobs:
             exit 1
           fi
           echo "CLAUDE_CODE_OAUTH_TOKEN is configured."
+
+      # tagモード(@claude応答)は作業リポジトリ(.git)を必要とする。浅いチェックアウトで足りる（公式例準拠）。
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Run Claude Code review
         uses: anthropics/claude-code-action@v1
