@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult, FetchedArticle,
+    ArticleDetailDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
+    FavoriteUpdateResult, FetchedArticle,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -86,6 +87,26 @@ impl ArticleRepository {
             article_id: article_id.to_string(),
             is_favorite,
         })
+    }
+
+    /// 生成済み要約を記事Markdownへ永続化する（B-4）。
+    /// 既存記事をロードして要約系フィールド＋メタ（summarized / summary_generated_at / ai_provider）を
+    /// 更新し Markdownへ保存する。再表示は get_article_detail がこの保存値を返す（=キャッシュ）。
+    pub fn update_article_summary(
+        &self,
+        article_id: &str,
+        update: ArticleSummaryUpdate,
+    ) -> Result<(), AppError> {
+        let mut article = self.find_article_record(article_id)?;
+        article.summary = Some(update.summary);
+        article.yuuko_explanation = Some(update.yuuko_explanation);
+        article.focus_points = update.focus_points;
+        article.yuuko_comment = Some(update.yuuko_comment);
+        article.status.summarized = true;
+        article.summary_generated_at = Some(update.generated_at);
+        article.ai_provider = Some(update.ai_provider);
+        self.save_article_record(&article)?;
+        Ok(())
     }
 
     /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
@@ -380,6 +401,7 @@ impl PersistedArticleRecord {
             published_at_text: self.published_at_text.clone(),
             genre: self.genre.clone(),
             summary: self.summary.clone().or_else(|| self.excerpt.clone()),
+            excerpt: self.excerpt.clone(),
             yuuko_explanation: self.yuuko_explanation.clone(),
             focus_points: self.focus_points.clone(),
             yuuko_comment: self.yuuko_comment.clone(),
@@ -1049,7 +1071,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{month_bucket_from_text, ArticleRepository, PersistedArticleRecord};
+    use super::{
+        month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate, PersistedArticleRecord,
+    };
 
     struct TestRepositoryContext {
         repository: ArticleRepository,
@@ -1172,6 +1196,50 @@ mod tests {
             .get_article_detail("article-001")
             .unwrap();
         assert!(detail.is_favorite);
+    }
+
+    #[test]
+    fn update_article_summary_persists_into_markdown() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+
+        let update = ArticleSummaryUpdate {
+            summary: "新しいAI要約テキスト".to_string(),
+            yuuko_explanation: "新しい再説明".to_string(),
+            focus_points: vec!["観点A".to_string(), "観点B".to_string()],
+            yuuko_comment: "新しい一言".to_string(),
+            ai_provider: "gemini".to_string(),
+            generated_at: "2026-06-08T00:00:00Z".to_string(),
+        };
+        context
+            .repository
+            .update_article_summary("article-002", update)
+            .unwrap();
+
+        // 再表示（DTO）で保存値がキャッシュとして返ることを確認。
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert_eq!(detail.summary.as_deref(), Some("新しいAI要約テキスト"));
+        assert_eq!(detail.yuuko_explanation.as_deref(), Some("新しい再説明"));
+        assert_eq!(detail.yuuko_comment.as_deref(), Some("新しい一言"));
+        assert_eq!(
+            detail.focus_points,
+            vec!["観点A".to_string(), "観点B".to_string()]
+        );
+
+        // front matter のメタ情報も永続化されていることを確認。
+        let record = context
+            .repository
+            .find_article_record("article-002")
+            .unwrap();
+        assert!(record.status.summarized);
+        assert_eq!(record.ai_provider.as_deref(), Some("gemini"));
+        assert_eq!(
+            record.summary_generated_at.as_deref(),
+            Some("2026-06-08T00:00:00Z")
+        );
     }
 
     #[test]

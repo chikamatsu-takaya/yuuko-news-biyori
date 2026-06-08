@@ -12,12 +12,13 @@
 - ブロック中は `（Blocked: 理由）` を追記する
 
 ## 2. 現在地サマリー
-- `develop` は PR #33 まで反映済み（#34 レビュー中）
+- `develop` は PR #39 まで反映済み（Gemini連携 #38・Claude Codeレビュー基盤 #39 を含む）
 - 主要画面、Tauri command、ニュース取得パイプライン、手動更新UI、UI E2E基盤まで到達
 - ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能
 - 製品デフォルトは deny-by-default を維持しており、外部ニュースソースはまだ焼き込んでいない
 - Playwright UI E2E は追加済みだが、`review:quick` / `review:strict` / GitHub Actions 必須CIにはまだ組み込んでいない
-- P0・P1（設定責務整理 / ソース導入手順）まで完了。次は P1.5（機能の波: Gemini / 友情ランク / 未配線コマンド）
+- P0・P1 と P1.5 の一部（Gemini連携 #38 / 辞書・ゆうこ・友情コマンド配線 #36 #37）まで完了。次は P1.5 残り（Gemini堅牢化フォロー / 友情ランク簡易完成）
+- リポジトリを public 化し、GitHub Actions CI（lint/test/clippy/audit/secret-scan）が無料で稼働。Claude Code の `@claude` レビュー基盤も追加済み（#39）
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -121,11 +122,20 @@
 
 ### P1.5: MVP機能の波（実AI・継続要素）
 ニュース基盤の安定化（上記P0/P1）後に着手する。MVP価値の中核だが当初リスト漏れだったため追加。
-- [ ] Gemini連携（実AIプロバイダ）— 現状はmockのみ。APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
+- [x] Gemini連携（実AIプロバイダ）（PR #38）— APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
 - [ ] 友情ランク簡易完成 — `get_friendship_state` / ポイント加算 / RankUpDialog 配線（`confirm_rank_up_reward` は実装済み）
-- [ ] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry` / `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`
+- [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 merged）
 
-### P2: Playwright UI E2EのCI導入
+### P1.5: Gemini堅牢化・運用（#38後フォロー）
+実AI（#38）を「安心して使える」状態にするための小さめフォロー群。
+- [x] Gemini通信失敗時のmockフォールバック（PR #41。CLAUDE.md §10「安全側へ倒す」準拠）
+- [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
+- [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
+- [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
+- [ ] （B-4後続・実装）要約のMarkdown永続化：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存し、再表示はキャッシュ・更新は明示再生成
+- [ ] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 は「1か月→月次ZIP（お気に入り除外）」。記憶の「4〜7日」案と要reconcile（4-7日採用時は §14 改訂）
+
+### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
 - [ ] まず任意チェックとして追加
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -166,3 +176,12 @@
 - [x] 2026-06-05: 設定JSONのUTF-8 BOM耐性を追加（PR #33）
 - [x] 2026-06-05: ニュース取得元を `news_sources.json` に一本化し `settings.news.sources` を削除（PR #34）
 - [x] 2026-06-05: 検証用ニュースソース設定手順を追加（Publickey採用 / PR #35）
+- [x] 2026-06-05: 辞書コマンド update_dictionary_memo / delete_dictionary_entry を配線（PR #36）
+- [x] 2026-06-05: ゆうこ/友情コマンド dismiss / click / get_friendship_state(読取専用) を配線（PR #37）
+- [x] 2026-06-05: Gemini連携（実AIプロバイダ）を追加（PR #38）
+- [x] 2026-06-05: リポジトリを public 化し GitHub Actions CI を復旧（無料ランナー）
+- [x] 2026-06-05: Claude Code による @claude 起動式PRレビューCIを追加（PR #39）
+- [x] 2026-06-05: チェックリストを #36-#39 同期（PR #40）
+- [x] 2026-06-05: Gemini堅牢化（失敗時mockフォールバック＋モデルID更新/設定化）（PR #41）
+- [x] 2026-06-05: 実APIキーでGemini疎通確認（`gemini-2.5-flash` 200応答 / `#[ignore]` スモークテスト追加）
+- [x] 2026-06-05: B-4 生成要約のMarkdown保存方針を決定（保存する。退避起点/粒度は別途）

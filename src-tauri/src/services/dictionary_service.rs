@@ -1,6 +1,7 @@
 use crate::domain::dictionary::{
-    DictionaryEntryDto, DictionaryEntryListItemDto, ExplainSelectedTermParams,
-    ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+    DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryListItemDto,
+    ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+    UpdateDictionaryMemoParams,
 };
 use crate::error::AppError;
 use crate::repositories::dictionary_repository::DictionaryRepository;
@@ -39,5 +40,21 @@ impl DictionaryService {
     ) -> Result<DictionaryEntryDto, AppError> {
         let entry = params.validated_entry()?;
         self.repository.save_dictionary_entry(entry)
+    }
+
+    pub fn update_dictionary_memo(
+        &self,
+        params: UpdateDictionaryMemoParams,
+    ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let (entry_id, memo) = params.validated()?;
+        self.repository.update_dictionary_memo(&entry_id, memo)
+    }
+
+    pub fn delete_dictionary_entry(
+        &self,
+        params: DeleteDictionaryEntryParams,
+    ) -> Result<String, AppError> {
+        let entry_id = params.validated_entry_id()?;
+        self.repository.delete_dictionary_entry(&entry_id)
     }
 }

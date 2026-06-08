@@ -56,7 +56,7 @@ pub fn run() {
             );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let summary_service = SummaryService::new(
-                AiProviderService::new(),
+                AiProviderService::new(&paths),
                 article_repository,
                 SettingsRepository::new(&paths),
             );
@@ -99,11 +99,16 @@ pub fn run() {
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
             commands::dictionary_commands::save_dictionary_entry,
+            commands::dictionary_commands::update_dictionary_memo,
+            commands::dictionary_commands::delete_dictionary_entry,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,
             commands::yuuko_commands::get_yuuko_notification_state,
-            commands::yuuko_commands::confirm_rank_up_reward
+            commands::yuuko_commands::confirm_rank_up_reward,
+            commands::yuuko_commands::dismiss_yuuko_notification,
+            commands::yuuko_commands::handle_yuuko_clicked,
+            commands::yuuko_commands::get_friendship_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,3 +1,4 @@
+use crate::domain::friendship::FriendshipStateDto;
 use crate::domain::yuuko::{
     ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, YuukoNotificationState,
     YuukoResidentState,
@@ -57,6 +58,29 @@ impl YuukoService {
         let result = state.confirm_rank_up_reward(&params.reward_ids)?;
         self.yuuko_state_repository.save(&state)?;
         Ok(result)
+    }
+
+    /// ゆうこの通知を閉じる（最小実装）。pending 報酬は保持する。
+    pub fn dismiss_yuuko_notification(&self) -> Result<YuukoNotificationState, AppError> {
+        let mut state = self.yuuko_state_repository.load_or_default()?;
+        state.dismiss_notification();
+        self.yuuko_state_repository.save(&state)?;
+        Ok(state.to_notification_state())
+    }
+
+    /// ゆうこクリックの2段階遷移（最小実装）。遷移が起きた場合のみ保存する。
+    pub fn handle_yuuko_clicked(&self) -> Result<YuukoNotificationState, AppError> {
+        let mut state = self.yuuko_state_repository.load_or_default()?;
+        if state.handle_click() {
+            self.yuuko_state_repository.save(&state)?;
+        }
+        Ok(state.to_notification_state())
+    }
+
+    /// 友情ランク状態を返す（読み取り専用の最小実装）。
+    /// 永続化・ポイント加算・ランクアップ判定は後続PRで実装するため、現状は既定値を返す。
+    pub fn get_friendship_state(&self) -> Result<FriendshipStateDto, AppError> {
+        Ok(FriendshipStateDto::default())
     }
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {

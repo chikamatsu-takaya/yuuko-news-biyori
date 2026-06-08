@@ -1,0 +1,78 @@
+# .github/workflows/claude-code-review.yml
+#
+# Claude Code による Pull Request レビュー（手動起動式 / `@claude` メンション起動）。
+#
+# 方針:
+#  - 全PRでの常時自動実行はしない。PR上のコメントで `@claude` とメンションされた時だけ実行する。
+#    （Anthropic API のトークン課金・GitHub Actions 分の消費を抑えるため。会社利用前提のコスト最適化）
+#  - 既存CI（ci.yml / test-ci.yml / security-ci.yml / secret-scan.yml）とはトリガーが異なる独立ファイル。
+#    既存CIは pull_request / push で発火し、本ファイルは issue_comment / pull_request_review_comment で発火する。
+#    → 互いに干渉しない。
+#  - API キーはコードに書かず、リポジトリ Secret `ANTHROPIC_API_KEY` を参照する。
+#
+# 起動方法:
+#   PR画面のコメント欄、またはコード行へのレビューコメントで
+#   `@claude このPRをレビューして` のように書く。
+
+name: Claude Code Review
+
+on:
+  # PR下部のコメント欄（通常コメント）。※通常issueにも飛ぶため、下の if: でPR限定する。
+  issue_comment:
+    types: [created]
+  # PRのコード行に付ける「レビューコメント」。これは常にPR上で発生する。
+  pull_request_review_comment:
+    types: [created]
+
+# 最小権限。レビュー（コメント投稿）に必要なものだけを付与する。
+permissions:
+  contents: read # 差分・ファイルの読み取りのみ。コードは変更しないため write は付与しない。
+  pull-requests: write # PR へレビュー結果コメントを投稿するため。
+  issues: write # issue_comment 経由でのコメント投稿に必要。
+  id-token: write # claude-code-action(v1) の OIDC 短期トークン発行用。直APIキー認証のみなら必須ではないが、公式推奨に合わせ付与。
+
+# 同一PRでの多重起動を防ぎ、無駄な実行（課金）を抑える（コスト対策）。
+concurrency:
+  group: claude-review-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude-review:
+    # 二重ガードで誤発火と無駄な課金を防ぐ:
+    #   (1) PR上のコメントに限定（issue_comment は通常issueにも飛ぶので、pull_request の有無で判定）
+    #   (2) コメント本文に `@claude` を含む場合のみ
+    # → 通常issue / `@claude` 無しのコメントでは job 自体が起動しない。
+    if: |
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # 暴走防止のハードキャップ（コスト対策）。
+
+    steps:
+      # Secret 未設定を、原因が分かる形で即座に失敗させる（鍵の値はログに出さない）。
+      - name: Verify ANTHROPIC_API_KEY secret is set
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error title=ANTHROPIC_API_KEY is not configured::リポジトリSecret 'ANTHROPIC_API_KEY' が未設定です。Settings > Secrets and variables > Actions で登録してください。"
+            exit 1
+          fi
+          echo "ANTHROPIC_API_KEY is configured."
+
+      - name: Run Claude Code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          # 認証: Anthropic 直APIキー（Secret 参照。コードには書かない）。
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # GitHub 操作用トークン。既定の GITHUB_TOKEN を上の permissions 範囲で使用する。
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # prompt は指定しない＝`@claude` メンションに応答する tag モード（ユーザーのコメント内容で動く）。
+          # レビュー方針は REVIEW.md ＋ 下記システムプロンプトで与える。
+          # --max-turns はコストの主ダイヤル（下げるほど安価・浅い、上げるほど高価・網羅的）。
+          claude_args: |
+            --max-turns 20
+            --append-system-prompt "あなたは本リポジトリのPRレビュアーです。必ず日本語でレビューしてください。まずリポジトリ直下の REVIEW.md を読み、その方針に従ってください（プロジェクト規約 CLAUDE.md も尊重）。重点的に確認する観点は、ロジックバグ・既存仕様との不整合・セキュリティ上の問題・パフォーマンス上の懸念・例外処理や境界値の不足・テスト不足・DB/API/画面項目への影響範囲・リグレッションリスクです。一方で、フォーマットのみの指摘、lintやformatterで自動検出できる事項、重大度の低い好みの問題は指摘しないでください。実害のある指摘を優先し、各指摘には該当ファイルと行・理由・修正案を簡潔に添えてください。指摘が無い観点はその旨だけ短く述べ、冗長な要約は避けてください。"
