@@ -40,16 +40,23 @@ concurrency:
 
 jobs:
   claude-review:
-    # 二重ガードで誤発火と無駄な課金を防ぐ:
-    #   (1) PR上のコメントに限定（issue_comment は通常issueにも飛ぶので、pull_request の有無で判定）
-    #   (2) コメント本文に `@claude` を含む場合のみ
-    # → 通常issue / `@claude` 無しのコメントでは job 自体が起動しない。
+    # 三重ガードで誤発火・無駄な課金・第三者起動を防ぐ:
+    #   (1) コメント投稿者が OWNER / MEMBER / COLLABORATOR（信頼レベル）であること。
+    #       ※public リポジトリでは誰でも `@claude` と書けるため、権限の無い第三者が
+    #         contents:write ＋ OAuthトークンを持つジョブを起動するのを防ぐ（セキュリティ要件）。
+    #   (2) PR上のコメントに限定（issue_comment は通常issueにも飛ぶので、pull_request の有無で判定）。
+    #   (3) コメント本文に `@claude` を含む場合のみ。
     if: |
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@claude'))
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR') &&
+      (
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request != null &&
+         contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+         contains(github.event.comment.body, '@claude'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 20 # 暴走防止のハードキャップ（コスト対策）。
 
