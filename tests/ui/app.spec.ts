@@ -27,32 +27,44 @@ const majorScreens = [
   {
     id: "news",
     navName: "ニュースを見る",
+    expectedHeading: "E2Eテスト用ニュース", // NewsReaderScreen displays article title as heading
     expectedText: "E2Eテスト用ニュース",
+    criticalButtons: ["ホームへ戻る", "要約を更新"],
   },
   {
     id: "dictionary",
     navName: "ゆうこ辞書",
+    expectedHeading: "ゆうこ辞書",
     expectedText: "E2E用語",
+    criticalButtons: ["ホームへ戻る"],
   },
   {
     id: "history",
     navName: "ニュース履歴",
+    expectedHeading: "ニュース履歴",
     expectedText: "ニュース履歴",
+    criticalButtons: ["ホームへ戻る", "絞り込み"],
   },
   {
     id: "customize",
     navName: "カスタマイズ",
+    expectedHeading: "ゆうこカスタマイズ",
     expectedText: "カスタマイズ",
+    criticalButtons: ["ホームへ戻る", "保存する", "ランダムに着せる"],
   },
   {
     id: "gacha",
     navName: "ガチャ",
+    expectedHeading: "ゆうこガチャ",
     expectedText: "ガチャ",
+    criticalButtons: ["ホームへ戻る", "まわす"], // Partial match for "1回まわす" and "10回まわす"
   },
   {
     id: "settings",
     navName: "設定",
+    expectedHeading: "設定",
     expectedText: "設定",
+    criticalButtons: ["ホームへ戻る", "保存する", "キャンセル"],
   },
 ] as const;
 
@@ -80,7 +92,7 @@ test("home screen renders and primary controls are hittable", async ({
 });
 
 for (const screen of majorScreens) {
-  test(`opens ${screen.id} screen from the home navigation`, async ({
+  test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
   }, testInfo) => {
     await openHome(page);
@@ -91,8 +103,22 @@ for (const screen of majorScreens) {
       .getByRole("button", { name: screen.navName, exact: true })
       .click();
 
+    // Verify heading
+    await expect(page.getByRole("heading", { name: screen.expectedHeading }).first())
+      .toBeVisible();
+
+    // Verify specific expected text
     await expect(page.locator("main").getByText(screen.expectedText).first())
       .toBeVisible();
+
+    // Verify critical buttons are visible and clickable
+    for (const buttonName of screen.criticalButtons) {
+      // Use non-exact match for gacha buttons or other complex names
+      const button = page.getByRole("button", { name: buttonName, exact: screen.id !== "gacha" });
+      await expect(button.first()).toBeVisible();
+      await expect(button.first()).toBeEnabled();
+    }
+
     await expectVisibleInteractiveHitTargets(page, screen.id);
     await captureScreen(page, testInfo, screen.id);
   });
