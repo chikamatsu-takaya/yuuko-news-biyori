@@ -760,9 +760,10 @@ export default function SettingsScreen({
             </div>
             <Image
               src="/assets/yuuko.png"
-              width={192}
-              height={192}
+              width={963}
+              height={1174}
               alt="ゆうこ"
+              priority
               className="w-48 h-auto object-contain animate-[float_3s_ease-in-out_infinite]"
               onError={(e) => {
                 const target = e.target as HTMLImageElement;
