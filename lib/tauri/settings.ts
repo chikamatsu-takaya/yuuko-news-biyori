@@ -55,3 +55,13 @@ export const saveUserSettings = async (
 
   return invoke<CommandOk>("save_user_settings", { params: { settings } });
 };
+
+// 設定を既定値へ初期化する。破壊的操作のため呼び出し側で確認を挟む（画面詳細設計書 SCR-003 §7.6）。
+// 非Tauri（ブラウザプレビュー）では null を返し、画面側はローカル表示のみ初期化する。
+export const resetUserSettings = async (): Promise<UserSettingsDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<UserSettingsDto>("reset_user_settings");
+};

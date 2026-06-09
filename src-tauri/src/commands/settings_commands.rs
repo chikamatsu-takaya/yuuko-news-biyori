@@ -39,6 +39,21 @@ pub async fn save_user_settings(
     Ok(CommandOk { ok: true })
 }
 
+/// 設定を既定値へ初期化する。破壊的操作のためReact側で確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
+#[tauri::command]
+pub async fn reset_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
+    let settings_service = state.settings_service.clone();
+    tauri::async_runtime::spawn_blocking(move || settings_service.reset_user_settings())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join settings task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveUserSettingsParams {

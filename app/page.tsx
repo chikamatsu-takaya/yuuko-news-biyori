@@ -71,7 +71,12 @@ export default function Page() {
   }
 
   if (currentScreen === "history") {
-    return <NewsHistoryScreen onNavigate={handleNavigate} />;
+    return (
+      <NewsHistoryScreen
+        onNavigate={handleNavigate}
+        onOpenArticle={handleOpenArticle}
+      />
+    );
   }
 
   if (currentScreen === "settings") {

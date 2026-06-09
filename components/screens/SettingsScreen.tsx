@@ -37,8 +37,19 @@ import { Progress } from "@/components/ui/progress";
 import {
   getUserSettings,
   saveUserSettings,
+  resetUserSettings,
   type UserSettingsDto,
 } from "@/lib/tauri/settings";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // Types
 type NotificationSettings = {
@@ -284,6 +295,9 @@ export default function SettingsScreen({
   const [backendSettings, setBackendSettings] =
     React.useState<UserSettingsDto | null>(null);
   const [activeMenu, setActiveMenu] = React.useState("notification");
+  const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  // リセット失敗時のユーザー向けフィードバック（CLAUDE.md §10.1）。
+  const [resetError, setResetError] = React.useState<string | null>(null);
 
   const handleNavigate = (screen: string) => {
     if (onNavigate) {
@@ -370,21 +384,26 @@ export default function SettingsScreen({
     setSettings(rollback);
   };
 
-  const handleResetToDefault = () => {
-    console.log("Reset to default");
-    setSettings(mockSettings);
-  };
-
-  const handleClearCache = () => {
-    console.log("Clear cache");
-  };
-
-  const handleExportDictionary = () => {
-    console.log("Export dictionary data");
-  };
-
-  const handleManageArchive = () => {
-    console.log("Manage archive");
+  // リセットは破壊的操作のため確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
+  // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
+  const handleConfirmReset = async () => {
+    setResetError(null);
+    try {
+      const dto = await resetUserSettings();
+      if (dto) {
+        setBackendSettings(dto);
+        setSettings(mapSettingsFromDto(mockSettings, dto));
+      } else {
+        // 非Tauri（プレビュー）時は表示のみ初期化する。
+        setSettings(mockSettings);
+      }
+    } catch (error) {
+      // 破壊的操作のため、失敗は黙殺せずユーザーへ伝える（CLAUDE.md §10.1/§10.2）。
+      console.error("Failed to reset settings via tauri command:", error);
+      setResetError("設定の初期化に失敗しました。時間をおいて再試行してください。");
+    } finally {
+      setResetDialogOpen(false);
+    }
   };
 
   const storagePercentage =
@@ -456,11 +475,22 @@ export default function SettingsScreen({
             <Button
               variant="ghost"
               className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground text-sm"
-              onClick={handleResetToDefault}
+              onClick={() => {
+                setResetError(null);
+                setResetDialogOpen(true);
+              }}
             >
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
             </Button>
+            {resetError && (
+              <p
+                role="alert"
+                className="mt-2 text-xs text-destructive leading-relaxed"
+              >
+                {resetError}
+              </p>
+            )}
           </div>
         </aside>
 
@@ -793,30 +823,37 @@ export default function SettingsScreen({
                 <Progress value={storagePercentage} className="h-2" />
               </div>
               <div className="space-y-2">
+                {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  onClick={handleClearCache}
+                  disabled
+                  aria-disabled
                 >
                   <Trash2 className="w-4 h-4" />
-                  キャッシュを削除
+                  キャッシュを削除（準備中）
                 </Button>
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  onClick={handleExportDictionary}
+                  disabled
+                  aria-disabled
                 >
                   <Download className="w-4 h-4" />
-                  辞書データをエクスポート
+                  辞書データをエクスポート（準備中）
                 </Button>
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  onClick={handleManageArchive}
+                  disabled
+                  aria-disabled
                 >
                   <Archive className="w-4 h-4" />
-                  アーカイブを管理
+                  アーカイブを管理（準備中）
                 </Button>
+                <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
+                  「準備中」の機能は今後のアップデートで対応予定です。
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -848,6 +885,24 @@ export default function SettingsScreen({
           </Button>
         </div>
       </footer>
+
+      {/* リセット確認（破壊的操作・画面詳細設計書 SCR-003 §7.6） */}
+      <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>設定を初期状態に戻しますか？</AlertDialogTitle>
+            <AlertDialogDescription>
+              通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmReset}>
+              初期状態に戻す
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <style jsx>{`
         @keyframes float {

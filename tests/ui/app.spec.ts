@@ -144,6 +144,19 @@ async function installTauriMocks(page: Page) {
       readState: "unread",
       recommendationScore: 0.92,
     };
+    const articleHistoryItem = {
+      articleId: "e2e-article-1",
+      title: "E2Eテスト用ニュース",
+      sourceName: "E2E News",
+      publishedAtText: "2026-06-05T00:00:00Z",
+      fetchedAt: "2026-06-05T00:10:00Z",
+      genre: "AI・テクノロジー",
+      summary: "UI確認用のモックニュースです。",
+      isFavorite: false,
+      readState: "unread",
+      isArchived: false,
+      recommendationScore: 0.92,
+    };
     const dictionaryEntry = {
       entryId: "entry-e2e",
       keyText: "E2E用語",
@@ -180,6 +193,8 @@ async function installTauriMocks(page: Page) {
         switch (cmd) {
           case "get_recommended_articles":
             return [articleSummary];
+          case "list_article_history":
+            return [articleHistoryItem];
           case "get_article_detail":
             return {
               ...articleSummary,
@@ -229,6 +244,13 @@ async function installTauriMocks(page: Page) {
               ok: true,
               confirmedRewardIds: params.rewardIds ?? [],
               remainingPendingRewardIds: [],
+            };
+          case "record_friendship_event":
+            return {
+              eventType: params.eventType,
+              earnedPoint: 0,
+              rankedUp: false,
+              newRank: null,
             };
           default:
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);

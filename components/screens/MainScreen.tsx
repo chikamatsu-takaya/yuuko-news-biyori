@@ -730,93 +730,95 @@ export default function MainScreen({
         {/* Center Content */}
         <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
           {/* News Section */}
-          <div className="p-6 pb-0">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-yellow-500" />
-                今日のおすすめニュース
-              </h2>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs"
-                  onClick={() => void handleRefreshNews()}
-                  disabled={isRefreshingNews}
-                >
-                  {isRefreshingNews ? (
-                    <Spinner className="size-4" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4" />
-                  )}
-                  {isRefreshingNews ? "更新中..." : "ニュースを更新"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => console.log("View all news")}
-                >
-                  すべて見る
-                  <ChevronRight className="w-4 h-4 ml-1" />
-                </Button>
+          <div className="flex-1 min-h-0 flex flex-col p-6 pb-0">
+            <div className="shrink-0">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-yellow-500" />
+                  今日のおすすめニュース
+                </h2>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs"
+                    onClick={() => void handleRefreshNews()}
+                    disabled={isRefreshingNews}
+                  >
+                    {isRefreshingNews ? (
+                      <Spinner className="size-4" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                    {isRefreshingNews ? "更新中..." : "ニュースを更新"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => console.log("View all news")}
+                  >
+                    すべて見る
+                    <ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
+                </div>
               </div>
+
+              {articleNotice ? (
+                <p className="mb-3 text-xs text-amber-700">{articleNotice}</p>
+              ) : null}
+
+              {refreshNotice ? (
+                <p className="mb-3 text-xs text-[var(--yuuko-green)]">
+                  {refreshNotice}
+                </p>
+              ) : null}
+
+              {refreshResult ? (
+                <Card className="mb-4 border border-[var(--yuuko-green)]/20 bg-white/90 py-0 shadow-none">
+                  <CardContent className="flex flex-col gap-3 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">
+                          取得結果を反映しました
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {refreshResult.errors.length === 0
+                            ? "すべての対象ソースを処理できました。"
+                            : summarizeRefreshErrors(refreshResult)}
+                        </p>
+                      </div>
+                      <Badge
+                        className={
+                          refreshResult.errors.length === 0
+                            ? "border-0 bg-[var(--yuuko-green)] text-white"
+                            : "border-0 bg-amber-500 text-white"
+                        }
+                      >
+                        {refreshResult.errors.length === 0
+                          ? "更新成功"
+                          : "一部エラーあり"}
+                      </Badge>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <RefreshMetric
+                        label="sources"
+                        value={refreshResult.sourcesProcessed}
+                      />
+                      <RefreshMetric label="fetched" value={refreshResult.fetched} />
+                      <RefreshMetric label="saved" value={refreshResult.saved} />
+                      <RefreshMetric
+                        label="errors"
+                        value={refreshResult.errors.length}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
             </div>
 
-            {articleNotice ? (
-              <p className="mb-3 text-xs text-amber-700">{articleNotice}</p>
-            ) : null}
-
-            {refreshNotice ? (
-              <p className="mb-3 text-xs text-[var(--yuuko-green)]">
-                {refreshNotice}
-              </p>
-            ) : null}
-
-            {refreshResult ? (
-              <Card className="mb-4 border border-[var(--yuuko-green)]/20 bg-white/90 py-0 shadow-none">
-                <CardContent className="flex flex-col gap-3 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">
-                        取得結果を反映しました
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {refreshResult.errors.length === 0
-                          ? "すべての対象ソースを処理できました。"
-                          : summarizeRefreshErrors(refreshResult)}
-                      </p>
-                    </div>
-                    <Badge
-                      className={
-                        refreshResult.errors.length === 0
-                          ? "border-0 bg-[var(--yuuko-green)] text-white"
-                          : "border-0 bg-amber-500 text-white"
-                      }
-                    >
-                      {refreshResult.errors.length === 0
-                        ? "更新成功"
-                        : "一部エラーあり"}
-                    </Badge>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    <RefreshMetric
-                      label="sources"
-                      value={refreshResult.sourcesProcessed}
-                    />
-                    <RefreshMetric label="fetched" value={refreshResult.fetched} />
-                    <RefreshMetric label="saved" value={refreshResult.saved} />
-                    <RefreshMetric
-                      label="errors"
-                      value={refreshResult.errors.length}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-            ) : null}
-
-            <div className="space-y-3">
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
               {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
@@ -830,7 +832,7 @@ export default function MainScreen({
           </div>
 
           {/* Yuuko Character Area */}
-          <div className="flex-1 relative flex items-end justify-center pb-4">
+          <div className="shrink-0 relative flex items-end justify-center pb-4 pt-2">
             <div className="flex items-end gap-2">
               <YuukoSpeechBubble message={yuukoBalloonMessage} />
               <YuukoCharacter />
