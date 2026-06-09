@@ -382,20 +382,21 @@ export default function CustomizeScreen({
             </p>
 
             {/* Tabs */}
-            <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+            <div className="flex gap-1 mb-4 overflow-x-auto pb-1" role="tablist">
               {tabItems.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = customizeState.activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
+                    role="tab"
+                    aria-selected={isActive}
                     className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0 ${
                       isActive
                         ? "bg-[var(--yuuko-green)] text-white"
                         : "bg-white text-muted-foreground hover:bg-muted border border-border"
                     }`}
                     onClick={() => handleTabChange(tab.id)}
-                    aria-pressed={isActive}
                   >
                     <Icon className="w-4 h-4" aria-hidden="true" />
                     {tab.label}
