@@ -187,6 +187,7 @@ function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
           className={`w-3 h-3 ${
             i < rating ? "text-yellow-500 fill-yellow-500" : "text-gray-300"
           }`}
+          aria-hidden="true"
         />
       ))}
     </div>
@@ -195,7 +196,7 @@ function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
 
 function GachaMachine() {
   return (
-    <div className="relative w-24 h-36">
+    <div className="relative w-24 h-36" aria-hidden="true">
       {/* Machine body */}
       <div className="absolute bottom-0 w-full h-24 bg-gradient-to-b from-[var(--yuuko-green)] to-emerald-600 rounded-xl shadow-lg">
         {/* Glass dome */}
@@ -223,7 +224,7 @@ function FloatingCapsule({ color, className, size = "md" }: { color: string; cla
     lg: "w-16 h-16"
   };
   return (
-    <div className={`absolute ${className}`}>
+    <div className={`absolute ${className}`} aria-hidden="true">
       <div className={`${sizes[size]} rounded-full ${color} opacity-50 shadow-lg`} />
     </div>
   );
@@ -231,7 +232,7 @@ function FloatingCapsule({ color, className, size = "md" }: { color: string; cla
 
 function Sparkle({ className }: { className?: string }) {
   return (
-    <div className={`absolute ${className}`}>
+    <div className={`absolute ${className}`} aria-hidden="true">
       <svg viewBox="0 0 24 24" className="w-5 h-5 text-yellow-400 fill-yellow-400 opacity-60">
         <path d="M12 0L14.59 9.41L24 12L14.59 14.59L12 24L9.41 14.59L0 12L9.41 9.41L12 0Z" />
       </svg>
@@ -384,7 +385,7 @@ export default function GachaScreen({
                   わくわくっ♪
                 </p>
                 <div className="flex justify-end mt-1">
-                  <PawIcon className="w-4 h-4 text-pink-300" />
+                  <PawIcon className="w-4 h-4 text-pink-300" aria-hidden="true" />
                 </div>
               </CardContent>
             </Card>
@@ -394,7 +395,7 @@ export default function GachaScreen({
           <div className="p-3 border-t border-border space-y-2">
             <div className="flex items-center gap-2 text-xs">
               <span className="text-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]"></span>
+              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true"></span>
             </div>
             <Button
               variant="outline"
@@ -413,14 +414,14 @@ export default function GachaScreen({
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>ホーム</span>
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="w-3 h-3" aria-hidden="true" />
               <span className="text-foreground">ガチャ</span>
             </div>
 
             {/* Star Fragments & Actions */}
             <div className="flex items-center gap-3">
               <Card className="py-2 px-4 flex items-center gap-3 border-yellow-300 bg-gradient-to-r from-yellow-50 to-orange-50">
-                <Star className="w-6 h-6 text-yellow-500 fill-yellow-500" />
+                <Star className="w-6 h-6 text-yellow-500 fill-yellow-500" aria-hidden="true" />
                 <div className="flex flex-col">
                   <span className="text-[10px] text-muted-foreground">流れ星のかけら</span>
                   <div className="flex items-center gap-2">
@@ -428,8 +429,9 @@ export default function GachaScreen({
                     <button
                       className="w-5 h-5 rounded-full bg-[var(--yuuko-green)] text-white flex items-center justify-center hover:bg-[var(--yuuko-green)]/90 transition-colors"
                       onClick={handlePurchaseFragments}
+                      aria-label="かけらを増やす"
                     >
-                      <Plus className="w-3 h-3" />
+                      <Plus className="w-3 h-3" aria-hidden="true" />
                     </button>
                   </div>
                 </div>
@@ -440,7 +442,7 @@ export default function GachaScreen({
                 className="gap-1.5 text-xs h-9"
                 onClick={handlePurchaseFragments}
               >
-                <ShoppingCart className="w-4 h-4" />
+                <ShoppingCart className="w-4 h-4" aria-hidden="true" />
                 かけらを購入
               </Button>
               <Button
@@ -449,7 +451,7 @@ export default function GachaScreen({
                 className="gap-1.5 text-xs h-9"
                 onClick={handleViewGachaHistory}
               >
-                <History className="w-4 h-4" />
+                <History className="w-4 h-4" aria-hidden="true" />
                 ガチャ履歴
               </Button>
             </div>
@@ -458,7 +460,7 @@ export default function GachaScreen({
           {/* Title */}
           <div className="px-4">
             <div className="flex items-center gap-2 mb-1">
-              <PawIcon className="w-7 h-7 text-[var(--yuuko-green)]" />
+              <PawIcon className="w-7 h-7 text-[var(--yuuko-green)]" aria-hidden="true" />
               <h1 className="text-2xl font-bold text-foreground">ゆうこガチャ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-4">
@@ -479,7 +481,7 @@ export default function GachaScreen({
                     ピックアップ中！
                   </div>
                   <CardContent className="p-4">
-                    <div className="w-full aspect-square rounded-lg bg-gradient-to-br from-[var(--yuuko-green)] to-emerald-400 mb-3 flex items-center justify-center shadow-inner">
+                    <div className="w-full aspect-square rounded-lg bg-gradient-to-br from-[var(--yuuko-green)] to-emerald-400 mb-3 flex items-center justify-center shadow-inner" aria-hidden="true">
                       <svg viewBox="0 0 24 24" className="w-16 h-16 text-white/90" fill="currentColor">
                         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
                       </svg>
@@ -497,7 +499,7 @@ export default function GachaScreen({
               <Card className="overflow-hidden relative">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Background decorations */}
-                  <div className="absolute inset-0 overflow-hidden">
+                  <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
                     {/* Paw print pattern */}
                     <div className="absolute top-8 left-12 text-[var(--yuuko-green)]/10">
                       <PawIcon className="w-10 h-10" />
@@ -574,7 +576,7 @@ export default function GachaScreen({
                           <span className="flex flex-col items-center gap-0.5">
                             <span>{btn.label}</span>
                             <span className="flex items-center gap-1 text-sm font-medium">
-                              <Star className={`w-4 h-4 ${btn.id === "ten" ? "text-yellow-300 fill-yellow-300" : "text-yellow-500 fill-yellow-500"}`} />
+                              <Star className={`w-4 h-4 ${btn.id === "ten" ? "text-yellow-300 fill-yellow-300" : "text-yellow-500 fill-yellow-500"}`} aria-hidden="true" />
                               {btn.cost.toLocaleString()}
                             </span>
                           </span>
@@ -711,7 +713,7 @@ export default function GachaScreen({
               <CardHeader className="p-4 pb-2">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base font-medium flex items-center gap-2">
-                    <Sparkles className="w-5 h-5 text-[var(--yuuko-green)]" />
+                    <Sparkles className="w-5 h-5 text-[var(--yuuko-green)]" aria-hidden="true" />
                     新しく解放されたアイテム
                   </CardTitle>
                   <button
@@ -719,7 +721,7 @@ export default function GachaScreen({
                     onClick={handleViewAllNewItems}
                   >
                     すべて見る
-                    <ChevronRight className="w-3 h-3" />
+                    <ChevronRight className="w-3 h-3" aria-hidden="true" />
                   </button>
                 </div>
               </CardHeader>
@@ -731,11 +733,11 @@ export default function GachaScreen({
                       className="shrink-0 w-24 p-3 rounded-xl border border-border bg-white hover:shadow-md transition-shadow cursor-pointer relative"
                     >
                       {item.isNew && (
-                        <Badge className="absolute -top-2 -left-2 bg-red-500 text-white text-[10px] px-2 py-0.5">
+                        <Badge className="absolute -top-2 -left-2 bg-red-500 text-white text-[10px] px-2 py-0.5" aria-hidden="true">
                           NEW
                         </Badge>
                       )}
-                      <div className="flex justify-center mb-2">
+                      <div className="flex justify-center mb-2" aria-hidden="true">
                         {item.icon}
                       </div>
                       <p className="text-xs text-center text-foreground truncate">{item.name}</p>
@@ -751,18 +753,21 @@ export default function GachaScreen({
       {/* Bottom Status Bar */}
       <footer className="h-8 bg-white border-t border-border flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-2">
-          <Bell className="w-3.5 h-3.5 text-muted-foreground" />
+          <Bell className="w-3.5 h-3.5 text-muted-foreground" aria-hidden="true" />
           <span className="text-xs text-muted-foreground">お知らせ</span>
           <span className="text-xs text-[var(--yuuko-green)]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" />
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" aria-hidden="true" />
             新しいニュースが3件届いてるよ！
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <button className="text-muted-foreground hover:text-foreground transition-colors">
+          <button
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="ヘルプ"
+          >
             <HelpCircle className="w-4 h-4" />
           </button>
-          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
+          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center" aria-hidden="true">
             <PawIcon className="w-4 h-4 text-white" />
           </div>
         </div>
