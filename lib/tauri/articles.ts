@@ -15,6 +15,27 @@ export type ArticleSummaryDto = {
   recommendationScore: number;
 };
 
+export type ArticleHistoryFilter =
+  | "all"
+  | "unread"
+  | "read"
+  | "favorite"
+  | "archived";
+
+export type ArticleHistoryItemDto = {
+  articleId: string;
+  title: string;
+  sourceName: string;
+  publishedAtText: string;
+  fetchedAt: string;
+  genre: string;
+  summary?: string;
+  isFavorite: boolean;
+  readState: ArticleReadState;
+  isArchived: boolean;
+  recommendationScore: number;
+};
+
 export type ArticleDetailDto = {
   articleId: string;
   title: string;
@@ -33,6 +54,11 @@ export type ArticleDetailDto = {
 
 export type GetRecommendedArticlesParams = {
   limit?: number;
+};
+
+export type ListArticleHistoryParams = {
+  limit?: number;
+  filter?: ArticleHistoryFilter;
 };
 
 export type GetArticleDetailParams = {
@@ -69,6 +95,16 @@ export const getRecommendedArticles = async (
   }
 
   return invoke<ArticleSummaryDto[]>("get_recommended_articles", { params });
+};
+
+export const listArticleHistory = async (
+  params: ListArticleHistoryParams = {}
+): Promise<ArticleHistoryItemDto[] | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArticleHistoryItemDto[]>("list_article_history", { params });
 };
 
 export const getArticleDetail = async (

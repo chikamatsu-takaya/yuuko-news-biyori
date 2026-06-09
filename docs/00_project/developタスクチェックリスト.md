@@ -7,33 +7,33 @@
 ## 0. 今日見る場所
 
 ### Now
-- [ ] ニュースソース設定導線を整備する
-  - Priority: P1
-  - Status: Review
-  - Owner: @codex
-  - Branch: `codex/dev-news-source-setup`
-  - Issue/PR: #54
-  - Done when:
-    - 開発者がPublickey検証設定を安全にapp-dataへ作成できる
-    - 製品デフォルトのdeny-by-defaultは維持される
-    - 手作業手順とコマンド手順の関係がdocsに明記されている
-  - Notes:
-    - 候補1として実装済み。PR作成前のローカルレビュー段階
-    - 製品初期値へPublickeyを焼き込まない
-
-### Next
 - [ ] ニュース履歴画面を実データへ接続する
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: @codex
+  - Branch: `codex/article-history-backend`
   - Issue/PR: 未定
   - Done when:
     - `NewsHistoryScreen` が `mockHistoryItems` ではなく保存済み記事一覧を表示できる
     - 既読/未読・お気に入り・アーカイブ表示の最低限フィルタがTauri command経由で動く
     - 記事選択からニュース閲覧画面へ再閲覧できる
   - Notes:
-    - ニュースソース設定導線の後に着手する候補。設計書突き合わせで追加したMVP残件の先頭
+    - このブランチではメンバーのフロント修正と競合しにくいよう、まずバックエンドAPI/DTOとTauriラッパーを整備する
+
+### Next
+- [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
+  - Priority: P1.5
+  - Status: Next
+  - Owner: 未定
+  - Branch: 未作成
+  - Issue/PR: 未定
+  - Done when:
+    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある
+    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ
+    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される
+    - ★付与/解除がユーザー操作から永続化される
+  - Notes:
+    - ニュース履歴実データ化の次候補。フロント修正中メンバーの担当範囲と重なる場合は後ろへ回す
 
 ### Blocked / 要判断
 - [ ] アーカイブ退避の起点・粒度を決める
@@ -75,18 +75,18 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #53 まで反映済み**（タスク進捗ダッシュボードまで到達）。open PRなし。
+- `develop` は **PR #54 まで反映済み**（検証用ニュースソース設定導線まで到達）。open PRなし。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
 - **CI Claude: `@claude` PRレビューが OAuth(サブスク)認証で稼働(#39/#47/#48)。public向けに投稿者権限ゲート済み(#49)**。
-- ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
+- ニュース取得は `pnpm run setup:dev-news-source` で検証用 `news_sources.json` / `network_allowlist.json` を app-data に作成すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
 - リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了。
 - **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
 - **UI画像警告対応は完了(#50)**。`yuuko.png` のLCP/画像比率警告とGachaScreenのモバイル崩れを修正済み。
-- **現在の作業: ニュースソース設定導線（`codex/dev-news-source-setup` / PR #54）**。開発者がPublickey検証設定を安全にapp-dataへ作成できる導線を実装済み、レビュー中。
+- **ニュースソース設定導線は完了(#54)**。既存設定の部分書き込み防止・dry-run conflict表示・手順書更新まで反映済み。
 - **設計書突き合わせ結果**: ニュース履歴実データ化、辞書メモ/削除UI、ゆうこ通知プレビュー、設定画面の未実装操作、正式identifier、権限/ログ/性能点検を追加追跡。
-- **次の優先順**: ニュースソース設定導線 → 設計書突き合わせで追加したP1.5残件（履歴/辞書/通知/設定） → アーカイブ退避方針決定 → Playwright CI任意チェック → フロントUX整備(#46起票)。
+- **次の優先順**: ニュース履歴画面の実データ接続（まずバックエンドAPI/DTO整備） → 辞書メモ/削除UI → ゆうこ通知プレビュー → 設定画面未実装操作 → アーカイブ退避方針決定 → Playwright CI任意チェック → フロントUX整備(#46起票)。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -209,9 +209,9 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] 起動時・日付変更時の低頻度ニュース取得スケジューラ（PR #28 / `5a53d6a`）
 - [x] FeedClientのRSS2.0/Atom両対応（PR #29 / `b2bb03b`, `484c4bb`）
 - [x] Publickey Atomフィードのローカル疎通確認（取得15件 / 保存15件 / errors 0）
-- [ ] `news_sources.json` / `network_allowlist.json` の設定導線整備
+- [x] `news_sources.json` / `network_allowlist.json` の設定導線整備（PR #54）
   - Priority: P1
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
   - Issue/PR: #54
@@ -242,9 +242,9 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] `fetch_any_url` 相当の公開Tauri commandを作らない方針を維持
 - [x] allowlist破損時は fail-close
 - [x] UTF-8 BOM付きJSONのみ許容し、それ以外の破損は fail-close 維持（PR #33）
-- [ ] ソース追加・変更時の運用手順をドキュメント化
+- [x] ソース追加・変更時の運用手順をドキュメント化（PR #54）
   - Priority: P1
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
   - Issue/PR: #54
@@ -254,10 +254,10 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ## 8. 次にやるべき優先タスク
 
-### P1: ニュースソース設定導線（実装済み・PR #54レビュー中）
-- [ ] 開発者向けに検証用ニュースソース設定を作成する導線を用意する
+### P1: ニュースソース設定導線 ✅ 完了（PR #54）
+- [x] 開発者向けに検証用ニュースソース設定を作成する導線を用意する
   - Priority: P1
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
   - Issue/PR: #54
@@ -269,7 +269,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - フロント修正中メンバーと競合しにくいバックエンド/運用寄りタスク
     - Tauri commandで任意設定書き込み口を公開しない
-    - このチェックリスト同期分は、候補1完了PRに含める
+    - 既存設定差分がある場合は部分書き込みせず停止。`--dry-run` では `would-conflict` を表示する
 
 ### P1: タスク進捗ダッシュボード ✅ 完了（PR #53 / `cb32965`）
 - [x] Markdown正本を読み込むHTMLダッシュボードを追加する
@@ -332,9 +332,9 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。
 - [ ] ニュース履歴画面を実データへ接続する
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: @codex
+  - Branch: `codex/article-history-backend`
   - Issue/PR: 未定
   - Done when:
     - `NewsHistoryScreen` が `mockHistoryItems` ではなく保存済み記事一覧を表示できる
@@ -342,6 +342,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 記事選択からニュース閲覧画面へ再閲覧できる
   - Notes:
     - 根拠: MVPスコープ §6.2 / 画面詳細設計書 SCR-005。現状は画面土台あり・mock中心
+    - このPRではバックエンドAPI/DTO整備までを先行し、画面接続はフロント修正中メンバーとの競合を見て後続で実施する
 - [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
   - Priority: P1.5
   - Status: Next
@@ -631,3 +632,4 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-08: UI画像警告対応（`yuuko.png` LCP/画像比率・GachaScreenモバイル崩れ / PR #50）
 - [x] 2026-06-08: 友情ランク簡易完成（ポイント加算・ランクアップ・RankUpDialog / PR #52）
 - [x] 2026-06-09: タスク進捗ダッシュボードを追加（Markdown正本のHTMLビュー / PR #53）
+- [x] 2026-06-09: 検証用ニュースソース設定導線を追加（`setup:dev-news-source` / PR #54）

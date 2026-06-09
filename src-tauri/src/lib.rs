@@ -97,6 +97,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::article_commands::get_recommended_articles,
+            commands::article_commands::list_article_history,
             commands::article_commands::get_article_detail,
             commands::article_commands::update_article_favorite,
             commands::article_commands::generate_article_summary,
