@@ -17,7 +17,7 @@ impl SettingsRepository {
     }
 
     #[cfg(test)]
-    fn with_path(settings_path: PathBuf) -> Self {
+    pub(crate) fn with_path(settings_path: PathBuf) -> Self {
         Self { settings_path }
     }
 
