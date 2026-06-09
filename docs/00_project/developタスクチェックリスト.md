@@ -12,7 +12,7 @@
   - Status: Review
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
-  - Issue/PR: 未定
+  - Issue/PR: #54
   - Done when:
     - 開発者がPublickey検証設定を安全にapp-dataへ作成できる
     - 製品デフォルトのdeny-by-defaultは維持される
@@ -84,7 +84,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了。
 - **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
 - **UI画像警告対応は完了(#50)**。`yuuko.png` のLCP/画像比率警告とGachaScreenのモバイル崩れを修正済み。
-- **現在の作業: ニュースソース設定導線（`codex/dev-news-source-setup`）**。開発者がPublickey検証設定を安全にapp-dataへ作成できる導線を実装済み、PR準備前。
+- **現在の作業: ニュースソース設定導線（`codex/dev-news-source-setup` / PR #54）**。開発者がPublickey検証設定を安全にapp-dataへ作成できる導線を実装済み、レビュー中。
 - **設計書突き合わせ結果**: ニュース履歴実データ化、辞書メモ/削除UI、ゆうこ通知プレビュー、設定画面の未実装操作、正式identifier、権限/ログ/性能点検を追加追跡。
 - **次の優先順**: ニュースソース設定導線 → 設計書突き合わせで追加したP1.5残件（履歴/辞書/通知/設定） → アーカイブ退避方針決定 → Playwright CI任意チェック → フロントUX整備(#46起票)。
 
@@ -214,7 +214,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Status: Review
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
-  - Issue/PR: 未定
+  - Issue/PR: #54
   - Done when:
     - 開発者が検証用ニュースソース設定をコマンドで作成できる
     - 製品デフォルトのdeny-by-defaultは維持される
@@ -247,20 +247,20 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Status: Review
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
-  - Issue/PR: 未定
+  - Issue/PR: #54
   - Done when:
     - 追加候補の調査、allowlist更新、ローカル疎通確認、PRレビュー観点が一連の手順になっている
     - セキュリティ境界（URL/スキーム/DNS/リダイレクト検証）を崩さない注意点が明記されている
 
 ## 8. 次にやるべき優先タスク
 
-### P1: ニュースソース設定導線（実装済み・PR準備前）
+### P1: ニュースソース設定導線（実装済み・PR #54レビュー中）
 - [ ] 開発者向けに検証用ニュースソース設定を作成する導線を用意する
   - Priority: P1
   - Status: Review
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
-  - Issue/PR: 未定
+  - Issue/PR: #54
   - Done when:
     - Publickey検証用の `news_sources.json` / `network_allowlist.json` を安全にapp-dataへ作成できる
     - 製品デフォルトのdeny-by-defaultは維持されている
