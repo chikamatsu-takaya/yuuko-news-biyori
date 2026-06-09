@@ -180,7 +180,11 @@ function PawIcon({ className }: { className?: string }) {
 
 function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
   return (
-    <div className="flex gap-0.5">
+    <div
+      className="flex gap-0.5"
+      role="img"
+      aria-label={`レアリティ ${rating}つ星（最大${max}つ）`}
+    >
       {Array.from({ length: max }).map((_, i) => (
         <Star
           key={i}
