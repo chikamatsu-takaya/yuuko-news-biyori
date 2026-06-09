@@ -693,7 +693,9 @@ export default function NewsHistoryScreen({
                   onClick={() => setSelectedItemId(item.id)}
                 />
               ))
-            ) : (
+            ) : loadNotice ? null : (
+              // loadNotice（0件案内・エラー・mock案内）が出ている時は重複を避け、
+              // 純粋にクライアント側フィルタで0件の時だけ「見直して」を表示する。
               <Card className="border-0 shadow-sm py-6">
                 <CardContent className="p-4 text-center text-sm text-muted-foreground">
                   表示できる履歴がありません。検索条件やフィルタを見直してください。
