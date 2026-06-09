@@ -834,7 +834,6 @@ fn compare_history_records(
     right
         .fetched_at
         .cmp(&left.fetched_at)
-        .then_with(|| right.published_at_text.cmp(&left.published_at_text))
         .then_with(|| left.article_id.cmp(&right.article_id))
 }
 
@@ -846,6 +845,7 @@ fn matches_history_filter(
     match filter {
         ArticleHistoryFilter::All => true,
         ArticleHistoryFilter::Unread => article.read_state == ArticleReadState::Unread,
+        // Previewed は軽量プレビューを見た状態なので、履歴UIでは既読側へまとめる。
         ArticleHistoryFilter::Read => article.read_state != ArticleReadState::Unread,
         ArticleHistoryFilter::Favorite => is_favorite,
         ArticleHistoryFilter::Archived => article.is_archived,
@@ -1217,6 +1217,34 @@ mod tests {
         assert_eq!(articles[0].article_id, "article-001");
         assert!(articles[0].fetched_at >= articles[1].fetched_at);
         assert!(articles[1].fetched_at >= articles[2].fetched_at);
+    }
+
+    #[test]
+    fn list_history_uses_article_id_when_fetched_at_is_equal() {
+        let context = TestRepositoryContext::new();
+        let common_fetched_at = "2026-06-05T10:00:00+09:00".to_string();
+        let article_b = PersistedArticleRecord {
+            article_id: "article-b".to_string(),
+            fetched_at: common_fetched_at.clone(),
+            published_at_text: "5分前".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let article_a = PersistedArticleRecord {
+            article_id: "article-a".to_string(),
+            fetched_at: common_fetched_at,
+            published_at_text: "1時間前".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&article_b).unwrap();
+        context.repository.save_article_record(&article_a).unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+
+        assert_eq!(articles[0].article_id, "article-a");
+        assert_eq!(articles[1].article_id, "article-b");
     }
 
     #[test]
