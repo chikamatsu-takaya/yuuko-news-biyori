@@ -215,6 +215,7 @@ function DecoItemCard({
       }`}
       onClick={() => item.unlocked && onSelect(item.id)}
       disabled={!item.unlocked}
+      aria-pressed={isSelected}
     >
       {item.icon}
       <div className="flex-1 text-left">
@@ -230,12 +231,12 @@ function DecoItemCard({
         </div>
         {item.unlockCondition && (
           <div className="flex items-center gap-1 text-xs text-muted-foreground mt-0.5">
-            <Lock className="w-3 h-3" />
+            <Lock className="w-3 h-3" aria-hidden="true" />
             <span>{item.unlockCondition}</span>
           </div>
         )}
       </div>
-      {!item.unlocked && <Lock className="w-4 h-4 text-muted-foreground" />}
+      {!item.unlocked && <Lock className="w-4 h-4 text-muted-foreground" aria-hidden="true" />}
     </button>
   );
 }
@@ -324,7 +325,7 @@ export default function CustomizeScreen({
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
                 <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
-                  <MessageCircle className="w-3 h-3" />
+                  <MessageCircle className="w-3 h-3" aria-hidden="true" />
                   ゆうこの一言
                 </CardTitle>
               </CardHeader>
@@ -339,7 +340,7 @@ export default function CustomizeScreen({
                   いっしょに考えよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]">🐾</span>
+                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -349,7 +350,7 @@ export default function CustomizeScreen({
           <div className="p-3 border-t border-border space-y-2">
             <div className="flex items-center gap-2 text-xs">
               <span className="text-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]"></span>
+              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true"></span>
             </div>
             <Button
               variant="outline"
@@ -367,13 +368,13 @@ export default function CustomizeScreen({
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
               <span>ホーム</span>
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="w-3 h-3" aria-hidden="true" />
               <span className="text-foreground">カスタマイズ</span>
             </div>
 
             {/* Title */}
             <div className="flex items-center gap-2 mb-1">
-              <Sparkles className="w-6 h-6 text-[var(--yuuko-green)]" />
+              <Sparkles className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
               <h1 className="text-xl font-bold text-foreground">ゆうこカスタマイズ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-4">
@@ -381,13 +382,15 @@ export default function CustomizeScreen({
             </p>
 
             {/* Tabs */}
-            <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+            <div className="flex gap-1 mb-4 overflow-x-auto pb-1" role="tablist">
               {tabItems.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = customizeState.activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
+                    role="tab"
+                    aria-selected={isActive}
                     className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0 ${
                       isActive
                         ? "bg-[var(--yuuko-green)] text-white"
@@ -395,7 +398,7 @@ export default function CustomizeScreen({
                     }`}
                     onClick={() => handleTabChange(tab.id)}
                   >
-                    <Icon className="w-4 h-4" />
+                    <Icon className="w-4 h-4" aria-hidden="true" />
                     {tab.label}
                   </button>
                 );
@@ -411,7 +414,10 @@ export default function CustomizeScreen({
                     <CardTitle className="text-sm font-medium">デコアイテム</CardTitle>
                     <div className="flex items-center gap-1 text-xs text-muted-foreground">
                       <span>並び替え：</span>
-                      <select className="bg-transparent border-none text-xs focus:outline-none cursor-pointer">
+                      <select
+                        className="bg-transparent border-none text-xs focus:outline-none cursor-pointer"
+                        aria-label="デコアイテムの並び替え"
+                      >
                         <option>新しい順</option>
                       </select>
                     </div>
@@ -432,7 +438,7 @@ export default function CustomizeScreen({
                     onClick={handleViewAllDeco}
                   >
                     すべてのデコを見る
-                    <ChevronRight className="w-4 h-4 ml-1" />
+                    <ChevronRight className="w-4 h-4 ml-1" aria-hidden="true" />
                   </Button>
                 </CardContent>
               </Card>
@@ -441,7 +447,7 @@ export default function CustomizeScreen({
               <Card className="flex-1 overflow-hidden">
                 <div className="relative h-80 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Room Background Elements */}
-                  <div className="absolute inset-0 overflow-hidden">
+                  <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
                     {/* Window */}
                     <div className="absolute top-4 right-8 w-16 h-20 bg-sky-200 rounded-lg border-4 border-amber-100 shadow-inner">
                       <div className="absolute inset-2 bg-sky-300/50 rounded" />
@@ -468,7 +474,7 @@ export default function CustomizeScreen({
                     className="absolute top-3 right-3 text-xs bg-white/80 hover:bg-white"
                     onClick={handlePreview}
                   >
-                    <Eye className="w-3 h-3 mr-1" />
+                    <Eye className="w-3 h-3 mr-1" aria-hidden="true" />
                     プレビュー
                   </Button>
 
@@ -650,8 +656,9 @@ export default function CustomizeScreen({
                     onChange={(e) => setDisplayName(e.target.value.slice(0, 10))}
                     className="pr-8 text-sm"
                     maxLength={10}
+                    aria-label="呼び名の設定"
                   />
-                  <Pencil className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <Pencil className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1">最大10文字まで</p>
               </CardContent>
@@ -661,7 +668,7 @@ export default function CustomizeScreen({
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/50">
               <CardHeader className="p-3 pb-1">
                 <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
-                  <Heart className="w-3 h-3 fill-[var(--yuuko-green)]" />
+                  <Heart className="w-3 h-3 fill-[var(--yuuko-green)]" aria-hidden="true" />
                   ゆうこのおはなし
                 </CardTitle>
               </CardHeader>
@@ -674,7 +681,7 @@ export default function CustomizeScreen({
                   ありがとう！うれしいよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]">🐾</span>
+                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -683,7 +690,7 @@ export default function CustomizeScreen({
             <Card className="border-border">
               <CardHeader className="p-3 pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-1">
-                  <Sparkles className="w-4 h-4 text-yellow-500" />
+                  <Sparkles className="w-4 h-4 text-yellow-500" aria-hidden="true" />
                   なかよしランク
                 </CardTitle>
               </CardHeader>
@@ -697,14 +704,14 @@ export default function CustomizeScreen({
                 <div className="text-[10px] text-muted-foreground mb-1">
                   つぎのランクまで {customizeState.currentPoints} / {customizeState.nextRankPoints}
                 </div>
-                <Progress value={progressPercent} className="h-2 mb-3" />
+                <Progress value={progressPercent} className="h-2 mb-3" aria-label="ランク進捗" />
                 <Button
                   variant="outline"
                   size="sm"
                   className="w-full text-xs"
                   onClick={handleCheckRankRewards}
                 >
-                  <Gift className="w-3 h-3 mr-1" />
+                  <Gift className="w-3 h-3 mr-1" aria-hidden="true" />
                   ランク報酬を確認する
                 </Button>
               </CardContent>

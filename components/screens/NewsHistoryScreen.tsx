@@ -205,30 +205,30 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
 
   const icons: Record<string, React.ReactNode> = {
     ai: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <circle cx="12" cy="12" r="3" />
         <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
     ),
     energy: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
       </svg>
     ),
     mobile: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <rect x="5" y="2" width="14" height="20" rx="2" />
         <circle cx="12" cy="18" r="1" />
       </svg>
     ),
     business: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <path d="M3 3v18h18" />
         <path d="M7 16l4-4 4 4 5-6" />
       </svg>
     ),
     robot: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <rect x="4" y="8" width="16" height="12" rx="2" />
         <circle cx="9" cy="14" r="2" />
         <circle cx="15" cy="14" r="2" />
@@ -236,14 +236,14 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
       </svg>
     ),
     space: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <circle cx="12" cy="12" r="10" />
         <ellipse cx="12" cy="12" rx="10" ry="4" />
         <path d="M12 2a15 15 0 010 20M12 2a15 15 0 000 20" />
       </svg>
     ),
     lifestyle: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3" />
       </svg>
     ),
@@ -252,6 +252,7 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
   return (
     <div
       className={`w-16 h-16 rounded-lg bg-gradient-to-br ${thumbnailStyles[type]} flex items-center justify-center flex-shrink-0`}
+      aria-hidden="true"
     >
       {icons[type]}
     </div>
@@ -277,8 +278,9 @@ function FilterChipButton({
           : "bg-white text-muted-foreground border-border hover:border-[var(--yuuko-green)]/50"
       }`}
       onClick={onClick}
+      aria-pressed={isActive}
     >
-      {Icon && <Icon className="w-4 h-4" />}
+      {Icon && <Icon className="w-4 h-4" aria-hidden="true" />}
       <span>{chip.label}</span>
     </button>
   );
@@ -424,7 +426,7 @@ export default function NewsHistoryScreen({
                 見つけてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]">🐾</span>
+                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
               </div>
             </CardContent>
           </Card>
@@ -433,7 +435,7 @@ export default function NewsHistoryScreen({
           <div className="mt-4 space-y-2">
             <div className="flex items-center gap-2 text-sm">
               <span className="text-muted-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" />
+              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true" />
             </div>
             <Button variant="outline" size="sm" className="w-full text-xs">
               常駐を終了する
@@ -446,29 +448,30 @@ export default function NewsHistoryScreen({
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
             <span className="hover:text-[var(--yuuko-green)] cursor-pointer">ホーム</span>
-            <span>&gt;</span>
+            <span aria-hidden="true">&gt;</span>
             <span className="text-foreground">ニュース履歴</span>
           </div>
 
           {/* Title */}
           <div className="flex items-center gap-2 mb-4">
-            <Clock className="w-6 h-6 text-[var(--yuuko-green)]" />
+            <Clock className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
             <h1 className="text-xl font-bold text-foreground">ニュース履歴</h1>
           </div>
 
           {/* Search */}
           <div className="flex items-center gap-2 mb-3">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
               <Input
                 placeholder="キーワードで検索（記事タイトル・本文など）"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9 bg-white"
+                aria-label="ニュース履歴を検索"
               />
             </div>
             <Button variant="outline" className="gap-2">
-              <Filter className="w-4 h-4" />
+              <Filter className="w-4 h-4" aria-hidden="true" />
               絞り込み
             </Button>
           </div>
@@ -513,7 +516,7 @@ export default function NewsHistoryScreen({
                 もう一度見てみよっ♪
               </p>
               <div className="flex justify-end">
-                <span className="text-[var(--yuuko-green)]">🐾</span>
+                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
               </div>
             </CardContent>
           </Card>
@@ -570,7 +573,7 @@ export default function NewsHistoryScreen({
 
                 {/* Source & Date */}
                 <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-2">
-                  <Newspaper className="w-3 h-3" />
+                  <Newspaper className="w-3 h-3" aria-hidden="true" />
                   <span>{selectedItem.source}</span>
                   <span>・</span>
                   <span>{selectedItem.datetime}</span>
@@ -581,7 +584,7 @@ export default function NewsHistoryScreen({
                   {selectedItem.description}
                 </p>
 
-                <div className="border-t border-border my-2" />
+                <div className="border-t border-border my-2" aria-hidden="true" />
 
                 {/* Action Buttons */}
                 <div className="space-y-2 mt-auto">
@@ -589,7 +592,7 @@ export default function NewsHistoryScreen({
                     className="w-full bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
                     onClick={() => console.log("もう一度見る:", selectedItem.id)}
                   >
-                    <RotateCcw className="w-4 h-4" />
+                    <RotateCcw className="w-4 h-4" aria-hidden="true" />
                     もう一度見る
                   </Button>
                   <Button
@@ -597,7 +600,7 @@ export default function NewsHistoryScreen({
                     className="w-full gap-2"
                     onClick={() => console.log("お気に入り解除:", selectedItem.id)}
                   >
-                    <Star className="w-4 h-4" />
+                    <Star className="w-4 h-4" aria-hidden="true" />
                     お気に入り解除
                   </Button>
                   <Button
@@ -605,7 +608,7 @@ export default function NewsHistoryScreen({
                     className="w-full gap-2"
                     onClick={() => console.log("アーカイブを展開:", selectedItem.id)}
                   >
-                    <FolderOpen className="w-4 h-4" />
+                    <FolderOpen className="w-4 h-4" aria-hidden="true" />
                     アーカイブを展開
                   </Button>
                   <Button
@@ -613,7 +616,7 @@ export default function NewsHistoryScreen({
                     className="w-full gap-2"
                     onClick={() => console.log("記事をシェア:", selectedItem.id)}
                   >
-                    <Share2 className="w-4 h-4" />
+                    <Share2 className="w-4 h-4" aria-hidden="true" />
                     記事をシェア
                   </Button>
                 </div>
@@ -626,15 +629,20 @@ export default function NewsHistoryScreen({
       {/* Status Bar */}
       <footer className="h-8 bg-white border-t border-border flex items-center justify-between px-4 text-xs text-muted-foreground flex-shrink-0">
         <div className="flex items-center gap-2">
-          <Bell className="w-3.5 h-3.5" />
+          <Bell className="w-3.5 h-3.5" aria-hidden="true" />
           <span>お知らせ</span>
-          <span className="mx-1">|</span>
-          <span className="text-[var(--yuuko-green)]">●</span>
+          <span className="mx-1" aria-hidden="true">|</span>
+          <span className="text-[var(--yuuko-green)]" aria-hidden="true">●</span>
           <span>履歴から3件、お気に入り登録されています！</span>
         </div>
         <div className="flex items-center gap-3">
-          <HelpCircle className="w-4 h-4 cursor-pointer hover:text-foreground" />
-          <span className="text-[var(--yuuko-green)]">🐾</span>
+          <button
+            className="hover:text-foreground transition-colors"
+            aria-label="ヘルプ"
+          >
+            <HelpCircle className="w-4 h-4" />
+          </button>
+          <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
         </div>
       </footer>
 
