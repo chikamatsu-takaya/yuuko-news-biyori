@@ -107,17 +107,20 @@ export function buildSetupPlan(options = {}) {
 
 export function runSetup(options = {}) {
   const plan = buildSetupPlan(options);
-  const results = [];
+  const assessments = plan.files.map((file) => assessJsonWrite(file, options));
+  const conflict = assessments.find((assessment) => assessment.action === "conflict");
+  if (conflict && !options.dryRun) {
+    throw createConflictError(conflict.file.name);
+  }
 
   if (!options.dryRun) {
     mkdirSync(plan.configDir, { recursive: true });
   }
 
-  for (const file of plan.files) {
-    results.push(writeJsonIfSafe(file, options));
-  }
-
-  return { ...plan, results };
+  return {
+    ...plan,
+    results: assessments.map((assessment) => writeJsonIfSafe(assessment, options)),
+  };
 }
 
 export function formatSummary(result) {
@@ -134,38 +137,81 @@ export function formatSummary(result) {
   return lines.join("\n");
 }
 
-function writeJsonIfSafe(file, options) {
+function assessJsonWrite(file, options) {
   const nextContent = `${JSON.stringify(file.payload, null, 2)}\n`;
 
   if (!existsSync(file.path)) {
-    if (!options.dryRun) {
-      writeFileSync(file.path, nextContent, "utf8");
-    }
     return {
-      status: options.dryRun ? "would-create" : "created",
-      path: file.path,
+      action: "create",
+      file,
+      nextContent,
     };
   }
 
   const current = readFileSync(file.path, "utf8");
   if (isSameJson(current, nextContent)) {
-    return { status: "unchanged", path: file.path };
+    return {
+      action: "unchanged",
+      file,
+      nextContent,
+    };
   }
 
   if (!options.force) {
-    throw new Error(
-      `${file.name} already exists with different content. ` +
-        "Refusing to overwrite it. Use --force after confirming the diff.",
-    );
+    return {
+      action: "conflict",
+      file,
+      nextContent,
+    };
   }
 
-  if (!options.dryRun) {
-    writeFileSync(file.path, nextContent, "utf8");
-  }
   return {
-    status: options.dryRun ? "would-overwrite" : "overwritten",
-    path: file.path,
+    action: "overwrite",
+    file,
+    nextContent,
   };
+}
+
+function writeJsonIfSafe(assessment, options) {
+  if (options.dryRun) {
+    return {
+      status: dryRunStatusFor(assessment.action),
+      path: assessment.file.path,
+    };
+  }
+
+  if (assessment.action === "create" || assessment.action === "overwrite") {
+    writeFileSync(assessment.file.path, assessment.nextContent, "utf8");
+  }
+
+  return {
+    status: writeStatusFor(assessment.action),
+    path: assessment.file.path,
+  };
+}
+
+function dryRunStatusFor(action) {
+  return {
+    create: "would-create",
+    unchanged: "unchanged",
+    conflict: "would-conflict",
+    overwrite: "would-overwrite",
+  }[action];
+}
+
+function writeStatusFor(action) {
+  return {
+    create: "created",
+    unchanged: "unchanged",
+    overwrite: "overwritten",
+  }[action];
+}
+
+function createConflictError(fileName) {
+  return new Error(
+    `${fileName} already exists with different content. ` +
+      "Refusing to overwrite it. Use --force after confirming the diff.",
+  );
 }
 
 function isSameJson(current, nextContent) {

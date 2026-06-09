@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -55,6 +55,29 @@ test("refuses to overwrite an existing different config without --force", () => 
   }
 });
 
+test("does not write any file when a later config file would conflict", () => {
+  const appDataDir = mkdtempSync(join(tmpdir(), "yuuko-news-source-test-"));
+  try {
+    const configDir = join(appDataDir, "config");
+    const newsSourcesPath = join(configDir, "news_sources.json");
+    const allowlistPath = join(configDir, "network_allowlist.json");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(allowlistPath, JSON.stringify({ version: 1, allowedRssDomains: [] }), "utf8");
+
+    assert.throws(
+      () => runSetup({ appDataDir }),
+      /already exists with different content/,
+    );
+    assert.equal(existsSync(newsSourcesPath), false);
+    assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), {
+      version: 1,
+      allowedRssDomains: [],
+    });
+  } finally {
+    rmSync(appDataDir, { recursive: true, force: true });
+  }
+});
+
 test("overwrites existing different config only when force is explicit", () => {
   const appDataDir = mkdtempSync(join(tmpdir(), "yuuko-news-source-test-"));
   try {
@@ -68,6 +91,25 @@ test("overwrites existing different config only when force is explicit", () => {
       ["overwritten", "unchanged"],
     );
     assert.equal(JSON.parse(readFileSync(newsSourcesPath, "utf8")).sources.length, 1);
+  } finally {
+    rmSync(appDataDir, { recursive: true, force: true });
+  }
+});
+
+test("dry-run reports conflicts without writing or throwing", () => {
+  const appDataDir = mkdtempSync(join(tmpdir(), "yuuko-news-source-test-"));
+  try {
+    const configDir = join(appDataDir, "config");
+    const allowlistPath = join(configDir, "network_allowlist.json");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(allowlistPath, JSON.stringify({ version: 1, allowedRssDomains: [] }), "utf8");
+
+    const result = runSetup({ appDataDir, dryRun: true });
+    assert.deepEqual(
+      result.results.map((entry) => entry.status),
+      ["would-create", "would-conflict"],
+    );
+    assert.equal(existsSync(join(configDir, "news_sources.json")), false);
   } finally {
     rmSync(appDataDir, { recursive: true, force: true });
   }
