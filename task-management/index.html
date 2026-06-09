@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>develop Task Dashboard</title>
+    <link rel="stylesheet" href="./task-dashboard.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Markdown driven dashboard</p>
+          <h1>develop タスク進捗ダッシュボード</h1>
+          <p class="hero-copy">
+            正本は <code>docs/00_project/developタスクチェックリスト.md</code> のまま、
+            今日見るべき進捗をコンパクトに確認します。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="reloadButton" type="button" class="button primary">再読み込み</button>
+          <a
+            class="button"
+            href="../docs/00_project/developタスクチェックリスト.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Markdownを開く
+          </a>
+        </div>
+      </header>
+
+      <section class="notice" aria-label="読み込み案内">
+        <strong>読み込み案内:</strong>
+        Markdownを読み込めない場合は、リポジトリルートで
+        <code>node task-management/serve-dashboard.mjs</code> を実行し、
+        <code>http://localhost:8080/task-management/</code> から開いてください。
+      </section>
+
+      <section id="loadState" class="load-state" aria-live="polite">
+        Markdownを読み込んでいます...
+      </section>
+
+      <section id="overview" class="panel overview-panel" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Overview</p>
+            <h2>ダッシュボード概要</h2>
+          </div>
+          <span id="sourcePath" class="source-path"></span>
+        </div>
+
+        <div id="summaryStats" class="stats-grid"></div>
+
+        <div class="overall-progress">
+          <div class="progress-header">
+            <span>全体進捗</span>
+            <strong id="overallProgressLabel">0%</strong>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div id="overallProgressBar" class="progress-fill"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="focusSection" class="focus-grid" hidden></section>
+
+      <section id="qualityGateSection" class="panel" hidden></section>
+
+      <section id="categoryProgressSection" class="panel" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Categories</p>
+            <h2>大分類ごとの進捗</h2>
+          </div>
+        </div>
+        <div id="categoryProgressList" class="category-progress-list"></div>
+      </section>
+
+      <section id="taskListSection" class="panel" hidden>
+        <div class="section-heading task-heading">
+          <div>
+            <p class="eyebrow">Tasks</p>
+            <h2>大分類 / 中分類 / 小分類</h2>
+          </div>
+          <div class="task-actions">
+            <button id="expandAllButton" type="button" class="button compact">すべて開く</button>
+            <button id="collapseAllButton" type="button" class="button compact">すべて閉じる</button>
+            <label class="toggle">
+              <input id="showCompletedToggle" type="checkbox" />
+              <span>完了済みを表示</span>
+            </label>
+          </div>
+        </div>
+        <div id="taskTree" class="task-tree"></div>
+      </section>
+    </main>
+
+    <script src="./task-dashboard.js" defer></script>
+  </body>
+</html>
