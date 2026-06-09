@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
-    FavoriteUpdateResult, FetchedArticle,
+    ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
+    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -57,6 +57,26 @@ impl ArticleRepository {
             .into_iter()
             .map(|article| {
                 article.to_summary_dto(is_effectively_favorite(&article, &favorite_store))
+            })
+            .take(limit)
+            .collect())
+    }
+
+    pub fn list_history(
+        &self,
+        filter: ArticleHistoryFilter,
+        limit: usize,
+    ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let mut articles = self.load_article_records()?;
+        articles.sort_by(compare_history_records);
+
+        Ok(articles
+            .into_iter()
+            .filter_map(|article| {
+                let is_favorite = is_effectively_favorite(&article, &favorite_store);
+                matches_history_filter(&article, is_favorite, &filter)
+                    .then(|| article.to_history_item_dto(is_favorite))
             })
             .take(limit)
             .collect())
@@ -388,6 +408,22 @@ impl PersistedArticleRecord {
             summary: self.summary.clone().or_else(|| self.excerpt.clone()),
             is_favorite,
             read_state: self.read_state.clone(),
+            recommendation_score: self.recommendation_score,
+        }
+    }
+
+    fn to_history_item_dto(&self, is_favorite: bool) -> ArticleHistoryItemDto {
+        ArticleHistoryItemDto {
+            article_id: self.article_id.clone(),
+            title: self.title.clone(),
+            source_name: self.source_name.clone(),
+            published_at_text: self.published_at_text.clone(),
+            fetched_at: self.fetched_at.clone(),
+            genre: self.genre.clone(),
+            summary: self.summary.clone().or_else(|| self.excerpt.clone()),
+            is_favorite,
+            read_state: self.read_state.clone(),
+            is_archived: self.is_archived,
             recommendation_score: self.recommendation_score,
         }
     }
@@ -791,6 +827,31 @@ fn compare_article_records(
         .then_with(|| left.article_id.cmp(&right.article_id))
 }
 
+fn compare_history_records(
+    left: &PersistedArticleRecord,
+    right: &PersistedArticleRecord,
+) -> Ordering {
+    right
+        .fetched_at
+        .cmp(&left.fetched_at)
+        .then_with(|| left.article_id.cmp(&right.article_id))
+}
+
+fn matches_history_filter(
+    article: &PersistedArticleRecord,
+    is_favorite: bool,
+    filter: &ArticleHistoryFilter,
+) -> bool {
+    match filter {
+        ArticleHistoryFilter::All => true,
+        ArticleHistoryFilter::Unread => article.read_state == ArticleReadState::Unread,
+        // Previewed は軽量プレビューを見た状態なので、履歴UIでは既読側へまとめる。
+        ArticleHistoryFilter::Read => article.read_state != ArticleReadState::Unread,
+        ArticleHistoryFilter::Favorite => is_favorite,
+        ArticleHistoryFilter::Archived => article.is_archived,
+    }
+}
+
 fn is_effectively_favorite(
     article: &PersistedArticleRecord,
     favorite_store: &ArticleFavoriteStore,
@@ -1071,6 +1132,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::domain::article::{ArticleHistoryFilter, ArticleReadState};
+
     use super::{
         month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate, PersistedArticleRecord,
     };
@@ -1138,6 +1201,130 @@ mod tests {
         let articles = context.repository.list_recommended(3).unwrap();
         assert!(articles[0].recommendation_score >= articles[1].recommendation_score);
         assert!(articles[1].recommendation_score >= articles[2].recommendation_score);
+    }
+
+    #[test]
+    fn list_history_returns_articles_by_fetched_at_desc() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 3)
+            .unwrap();
+
+        assert_eq!(articles.len(), 3);
+        assert_eq!(articles[0].article_id, "article-001");
+        assert!(articles[0].fetched_at >= articles[1].fetched_at);
+        assert!(articles[1].fetched_at >= articles[2].fetched_at);
+    }
+
+    #[test]
+    fn list_history_uses_article_id_when_fetched_at_is_equal() {
+        let context = TestRepositoryContext::new();
+        let common_fetched_at = "2026-06-05T10:00:00+09:00".to_string();
+        let article_b = PersistedArticleRecord {
+            article_id: "article-b".to_string(),
+            fetched_at: common_fetched_at.clone(),
+            published_at_text: "5分前".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let article_a = PersistedArticleRecord {
+            article_id: "article-a".to_string(),
+            fetched_at: common_fetched_at,
+            published_at_text: "1時間前".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&article_b).unwrap();
+        context.repository.save_article_record(&article_a).unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+
+        assert_eq!(articles[0].article_id, "article-a");
+        assert_eq!(articles[1].article_id, "article-b");
+    }
+
+    #[test]
+    fn list_history_respects_limit() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 2)
+            .unwrap();
+
+        assert_eq!(articles.len(), 2);
+    }
+
+    #[test]
+    fn list_history_filters_read_state() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+
+        let unread_articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::Unread, 10)
+            .unwrap();
+        assert!(!unread_articles.is_empty());
+        assert!(unread_articles
+            .iter()
+            .all(|article| article.read_state == ArticleReadState::Unread));
+
+        let read_articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::Read, 10)
+            .unwrap();
+        assert!(!read_articles.is_empty());
+        assert!(read_articles
+            .iter()
+            .all(|article| article.read_state != ArticleReadState::Unread));
+    }
+
+    #[test]
+    fn list_history_filters_favorites() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        context
+            .repository
+            .update_article_favorite("article-002", true)
+            .unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::Favorite, 10)
+            .unwrap();
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].article_id, "article-002");
+        assert!(articles[0].is_favorite);
+    }
+
+    #[test]
+    fn list_history_filters_archived_articles() {
+        let context = TestRepositoryContext::new();
+        let archived_article = PersistedArticleRecord {
+            article_id: "article-archived".to_string(),
+            fetched_at: "2026-06-05T10:00:00+09:00".to_string(),
+            is_archived: true,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&archived_article)
+            .unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::Archived, 10)
+            .unwrap();
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].article_id, "article-archived");
+        assert!(articles[0].is_archived);
     }
 
     #[test]
