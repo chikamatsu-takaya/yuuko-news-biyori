@@ -26,6 +26,22 @@ pub struct ArticleSummaryDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArticleHistoryItemDto {
+    pub article_id: String,
+    pub title: String,
+    pub source_name: String,
+    pub published_at_text: String,
+    pub fetched_at: String,
+    pub genre: String,
+    pub summary: Option<String>,
+    pub is_favorite: bool,
+    pub read_state: ArticleReadState,
+    pub is_archived: bool,
+    pub recommendation_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArticleDetailDto {
     pub article_id: String,
     pub title: String,
@@ -101,6 +117,40 @@ impl GetRecommendedArticlesParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArticleHistoryFilter {
+    #[default]
+    All,
+    Unread,
+    Read,
+    Favorite,
+    Archived,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListArticleHistoryParams {
+    pub limit: Option<u32>,
+    pub filter: Option<ArticleHistoryFilter>,
+}
+
+impl ListArticleHistoryParams {
+    pub fn normalized_limit(&self) -> Result<usize, AppError> {
+        let limit = self.limit.unwrap_or(100);
+        if limit == 0 || limit > 200 {
+            return Err(AppError::Validation(
+                "limit must be between 1 and 200".to_string(),
+            ));
+        }
+        Ok(limit as usize)
+    }
+
+    pub fn normalized_filter(&self) -> ArticleHistoryFilter {
+        self.filter.clone().unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetArticleDetailParams {
@@ -143,7 +193,8 @@ impl UpdateArticleFavoriteParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        GetArticleDetailParams, GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
+        ArticleHistoryFilter, GetArticleDetailParams, GetRecommendedArticlesParams,
+        ListArticleHistoryParams, UpdateArticleFavoriteParams,
     };
 
     #[test]
@@ -165,6 +216,37 @@ mod tests {
 
         let too_large = GetRecommendedArticlesParams { limit: Some(51) };
         assert!(too_large.normalized_limit().is_err());
+    }
+
+    #[test]
+    fn history_limit_defaults_to_one_hundred() {
+        let params = ListArticleHistoryParams::default();
+        assert_eq!(params.normalized_limit().unwrap(), 100);
+    }
+
+    #[test]
+    fn history_limit_rejects_out_of_range_values() {
+        let zero = ListArticleHistoryParams {
+            limit: Some(0),
+            filter: None,
+        };
+        assert!(zero.normalized_limit().is_err());
+
+        let too_large = ListArticleHistoryParams {
+            limit: Some(201),
+            filter: None,
+        };
+        assert!(too_large.normalized_limit().is_err());
+    }
+
+    #[test]
+    fn history_filter_defaults_to_all() {
+        let params = ListArticleHistoryParams {
+            limit: None,
+            filter: None,
+        };
+
+        assert_eq!(params.normalized_filter(), ArticleHistoryFilter::All);
     }
 
     #[test]

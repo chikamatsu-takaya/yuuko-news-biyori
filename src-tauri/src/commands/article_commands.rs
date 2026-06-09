@@ -1,8 +1,9 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
-    GetRecommendedArticlesParams, UpdateArticleFavoriteParams,
+    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
+    GetArticleDetailParams, GetRecommendedArticlesParams, ListArticleHistoryParams,
+    UpdateArticleFavoriteParams,
 };
 use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
@@ -23,6 +24,26 @@ pub async fn get_recommended_articles(
         CommandError::new(
             "JOIN_ERROR",
             format!("failed to join recommended-articles task: {error}"),
+        )
+    })?
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn list_article_history(
+    state: State<'_, AppState>,
+    params: Option<ListArticleHistoryParams>,
+) -> CommandResult<Vec<ArticleHistoryItemDto>> {
+    let article_service = state.article_service.clone();
+    let normalized_params = params.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        article_service.list_article_history(normalized_params)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "JOIN_ERROR",
+            format!("failed to join article-history task: {error}"),
         )
     })?
     .map_err(CommandError::from)
