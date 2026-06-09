@@ -42,6 +42,8 @@ import {
   type DictionaryEntryDto as TauriDictionaryEntry,
   type DictionaryEntryType,
 } from "@/lib/tauri/dictionary";
+import { recordFriendshipEvent } from "@/lib/tauri/yuuko";
+import { RankUpDialog } from "@/components/dialogs/RankUpDialog";
 
 type NavigationItem = {
   id: string;
@@ -671,6 +673,15 @@ export default function NewsReaderScreen({
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
+  // 友情ランクアップ演出（ranked_up=true の時に表示）。
+  const [rankUpState, setRankUpState] = React.useState<{
+    open: boolean;
+    newRank: number;
+  }>({ open: false, newRank: 0 });
+  const isMountedRef = React.useRef(true);
+  // 同一記事の open / 同一用語の解説で重複加算しないためのセッション内ガード。
+  const recordedOpensRef = React.useRef<Set<string>>(new Set());
+  const recordedTermsRef = React.useRef<Set<string>>(new Set());
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -684,6 +695,13 @@ export default function NewsReaderScreen({
       ? relatedArticles[relatedArticles.length - 1]?.id ?? null
       : null;
   const nextArticleId = relatedArticles[0]?.id ?? null;
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     let active = true;
@@ -709,6 +727,20 @@ export default function NewsReaderScreen({
         setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
         setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
         setLoadNotice(null);
+
+        // 実データの記事を開いたら友情ポイントを加算（同一記事はセッション内で1回だけ）。
+        if (!recordedOpensRef.current.has(resolvedArticleId)) {
+          recordedOpensRef.current.add(resolvedArticleId);
+          void recordFriendshipEvent("news_detail_opened")
+            .then((result) => {
+              if (active && result?.rankedUp) {
+                setRankUpState({ open: true, newRank: result.newRank });
+              }
+            })
+            .catch((eventError) => {
+              console.warn("Failed to record friendship event:", eventError);
+            });
+        }
       } catch (error) {
         if (!active) {
           return;
@@ -804,6 +836,21 @@ export default function NewsReaderScreen({
         }
 
         setSelectedDictionaryEntry(entry ?? fallbackEntry);
+
+        // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
+        const termKey = `${article.id}::${selectedTerm.term}`;
+        if (entry && !recordedTermsRef.current.has(termKey)) {
+          recordedTermsRef.current.add(termKey);
+          void recordFriendshipEvent("term_explained")
+            .then((result) => {
+              if (active && result?.rankedUp) {
+                setRankUpState({ open: true, newRank: result.newRank });
+              }
+            })
+            .catch((eventError) => {
+              console.warn("Failed to record friendship event:", eventError);
+            });
+        }
       } catch (error) {
         if (!active) {
           return;
@@ -906,6 +953,10 @@ export default function NewsReaderScreen({
         articleId: article.id,
       });
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       if (!generatedSummary) {
         setSummaryNotice(
           "要約生成はローカルプレビューでは未接続のため、既存の要約を表示しています。"
@@ -916,13 +967,28 @@ export default function NewsReaderScreen({
       setArticle((currentArticle) =>
         applyGeneratedSummary(currentArticle, generatedSummary)
       );
+
+      // Intentional: each explicit summary refresh can count; Rust enforces the daily cap.
+      void recordFriendshipEvent("explanation_viewed")
+        .then((result) => {
+          if (isMountedRef.current && result?.rankedUp) {
+            setRankUpState({ open: true, newRank: result.newRank });
+          }
+        })
+        .catch((eventError) => {
+          console.warn("Failed to record friendship event:", eventError);
+        });
     } catch (error) {
-      setSummaryNotice(
-        "要約生成に失敗しました。時間をおいてもう一度お試しください。"
-      );
+      if (isMountedRef.current) {
+        setSummaryNotice(
+          "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+        );
+      }
       console.warn("Failed to generate article summary:", error);
     } finally {
-      setIsGeneratingSummary(false);
+      if (isMountedRef.current) {
+        setIsGeneratingSummary(false);
+      }
     }
   }, [article.id]);
 
@@ -933,6 +999,11 @@ export default function NewsReaderScreen({
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-[var(--yuuko-cream)]">
+      <RankUpDialog
+        open={rankUpState.open}
+        newRank={rankUpState.newRank}
+        onClose={() => setRankUpState((current) => ({ ...current, open: false }))}
+      />
       <AppTitleBar className="border-border/50 bg-white" />
 
       <div className="flex flex-1 overflow-hidden">

@@ -1,6 +1,7 @@
 pub mod ai_provider_service;
 pub mod article_service;
 pub mod dictionary_service;
+pub mod friendship_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod recommendation_service;
