@@ -103,6 +103,11 @@ impl YuukoService {
             return Ok(notification_result(false, "reward_pending", &state));
         }
 
+        // 既にアクティブな通知（ユーザー未対応）が出ている場合は上書きしない（再起動後も潰さない）。
+        if state.has_active_notification() {
+            return Ok(notification_result(false, "already_active", &state));
+        }
+
         let now = Utc::now();
         match state.can_notify(now, settings.notification.max_per_day) {
             NotificationGate::DailyLimitReached => {

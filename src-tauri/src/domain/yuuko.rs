@@ -207,6 +207,11 @@ impl PersistedYuukoState {
     /// pending な reward_notification と confirmed_reward_ids は保持する
     /// （報酬確認は confirm_rank_up_reward が担当するため、ここでは消さない）。
     pub fn dismiss_notification(&mut self, now: DateTime<Utc>) {
+        // アクティブな通知が無い状態（Waiting等）での誤呼び出しは no-op。
+        // 不要なクールダウンで通知が長時間ブロックされるのを防ぐ。
+        if !self.has_active_notification() {
+            return;
+        }
         self.clear_active_notification();
         self.cooldown_until = Some(format_timestamp(
             now + Duration::minutes(DISMISS_COOLDOWN_MINUTES),
@@ -216,10 +221,25 @@ impl PersistedYuukoState {
     /// 無操作タイムアウト（無視）。閉じるより長い再通知抑制を設定する（設計書 §6.2/§10.6）。
     /// reward は保持する。フロントの自動退場タイマーから呼ぶ想定（Rustはタイマーを持たない）。
     pub fn mark_ignored(&mut self, now: DateTime<Utc>) {
+        // アクティブな通知が無ければ no-op（誤クールダウン防止）。
+        if !self.has_active_notification() {
+            return;
+        }
         self.clear_active_notification();
         self.cooldown_until = Some(format_timestamp(
             now + Duration::minutes(IGNORE_COOLDOWN_MINUTES),
         ));
+    }
+
+    /// ニュース通知（紹介）が表示中でユーザー操作待ちかどうか。
+    /// reward 通知（RewardNotifying）は confirm_rank_up_reward が扱うため含めない。
+    pub fn has_active_notification(&self) -> bool {
+        matches!(
+            self.state,
+            YuukoResidentState::Appearing
+                | YuukoResidentState::BalloonVisible
+                | YuukoResidentState::PreviewVisible
+        )
     }
 
     /// アクティブな通知表示をクリアして待機へ戻す（reward は保持）。
@@ -352,7 +372,7 @@ pub struct ConfirmRankUpRewardResult {
 #[serde(rename_all = "camelCase")]
 pub struct RequestYuukoNotificationResult {
     pub notified: bool,
-    /// "notified" / "disabled" / "reward_pending" / "daily_limit" / "cooling_down" / "no_candidate"
+    /// "notified" / "disabled" / "reward_pending" / "already_active" / "daily_limit" / "cooling_down" / "no_candidate"
     pub reason: String,
     pub state: YuukoNotificationState,
 }
@@ -541,5 +561,21 @@ mod tests {
             state.can_notify(after_dismiss_window, 3),
             NotificationGate::CoolingDown
         );
+    }
+
+    #[test]
+    fn dismiss_and_ignore_are_noop_without_active_notification() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        // 既定は Waiting（アクティブ通知なし）。
+        let mut state = PersistedYuukoState::default();
+        assert!(!state.has_active_notification());
+
+        state.dismiss_notification(now);
+        assert!(state.cooldown_until.is_none());
+        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
+
+        state.mark_ignored(now);
+        assert!(state.cooldown_until.is_none());
+        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
     }
 }

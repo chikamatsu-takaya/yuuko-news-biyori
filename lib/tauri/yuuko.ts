@@ -78,10 +78,19 @@ export const confirmRankUpReward = async (
   return invoke<ConfirmRankUpRewardResult>("confirm_rank_up_reward", { params });
 };
 
+/** request_yuuko_notification の結果理由（Rust側と一致）。 */
+export type NotificationReason =
+  | "notified"
+  | "disabled"
+  | "reward_pending"
+  | "already_active"
+  | "daily_limit"
+  | "cooling_down"
+  | "no_candidate";
+
 export type RequestYuukoNotificationResult = {
   notified: boolean;
-  /** "notified" / "disabled" / "reward_pending" / "daily_limit" / "cooling_down" / "no_candidate" */
-  reason: string;
+  reason: NotificationReason;
   state: YuukoNotificationState;
 };
 
