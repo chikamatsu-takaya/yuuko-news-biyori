@@ -408,30 +408,41 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ### P1.5: リリース前セキュリティ・運用品質点検
 セキュリティ詳細設計書のMVPチェックリストと、常駐アプリとしての運用要件から追加。新機能ではなく、公開/社内配布前の仕上げ確認。
-- [ ] Tauri capability / CSP / 権限設定を棚卸しする
+- [x] Tauri capability / CSP / 権限設定を棚卸しする
   - Priority: P1.5
-  - Status: Todo
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/release-security-review`
+  - Issue/PR: 本PR
+  - Done when:
+    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み ✅（capabilityは `core:default` のみ＝最小。CSPは未設定→制限的CSPを提案・後続で適用）
+    - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている ✅（`tauri-plugin-log` のみ・デバッグビルド限定）
+    - 任意ファイル操作/任意URL取得の公開口がないことを再確認している ✅（全commandドメイン限定・汎用口なし）
+  - Notes:
+    - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
+- [ ] CSPを設定する（制限的CSP・要 `tauri dev` 検証）
+  - Priority: P1.5
+  - Status: Next
   - Owner: 未定
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
-    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み
-    - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている
-    - 任意ファイル操作/任意URL取得の公開口がないことを再確認している
+    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（提案値は点検結果 §6）
+    - `pnpm tauri dev` で全画面の描画とコンソールのCSP違反なしを確認している
   - Notes:
-    - 根拠: セキュリティ詳細設計書 §19.5 / §17.1
-- [ ] ログ・AI送信データ・秘密情報の最終点検を行う
+    - webview実機検証が必要なため点検PRから分離（未検証のまま配布しない＝安全側）。提案値・検証手順は点検結果 §6
+- [x] ログ・AI送信データ・秘密情報の最終点検を行う
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/release-security-review`
+  - Issue/PR: 本PR
   - Done when:
-    - APIキー、本文全文、選択文字列全文、実ユーザーデータがログに出ないことを確認している
-    - Gemini送信対象がタイトル/概要/抽出抜粋中心の最小データであることを説明できる
-    - gitleaks等の秘密情報スキャン結果をPRまたはチェックリストに残している
+    - APIキー、本文全文、選択文字列全文、実ユーザーデータがログに出ないことを確認している ✅（全 `log::*` レビュー済み。I/O失敗・URL拒否・モデル検証・「キー未設定」のみ）
+    - Gemini送信対象がタイトル/概要/抽出抜粋中心の最小データであることを説明できる ✅（`build_prompt` は指示＋input_textのみ・context非送信を単体テストで担保）
+    - gitleaks等の秘密情報スキャン結果をPRまたはチェックリストに残している ✅（gitleaks `secret-scan.yml` 稼働＋手動grep 0件・cargo-audit `security-ci.yml` 稼働）
   - Notes:
-    - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4
+    - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [ ] 軽量常駐の性能確認観点を決め、最低限の測定を行う
   - Priority: P1.5
   - Status: Todo
@@ -649,3 +660,6 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-09: 設定アクション方針整理＋リセット実装（`reset_user_settings`・後回し操作の非活性「準備中」化 / PR #59）
 - [x] 2026-06-09: GachaScreen初期レイアウト修正（フロント・メンバー / PR #60）
 - [x] 2026-06-09: ゆうこ通知バックエンド強化（クールタイム/日次回数/紹介済み/選定トリガー / PR #61）
+- [x] 2026-06-09: タスクチェックリストを #55–#61 反映で同期（PR #62）
+- [x] 2026-06-09: 正式 Tauri identifier を `jp.star-system.yuuko-news` に確定（PR #63）
+- [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / 本PR）
