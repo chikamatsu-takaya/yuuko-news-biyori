@@ -9,6 +9,11 @@ import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
+  listArticleHistory,
+  type ArticleHistoryFilter,
+  type ArticleHistoryItemDto,
+} from "@/lib/tauri/articles";
+import {
   Home,
   Newspaper,
   Clock,
@@ -24,7 +29,6 @@ import {
   CheckCircle,
   Star,
   Archive,
-  ChevronDown,
   Bell,
   HelpCircle,
   RotateCcw,
@@ -34,13 +38,7 @@ import {
 
 // Types
 type ReadState = "read" | "unread";
-type NewsCategory =
-  | "AI・テクノロジー"
-  | "環境・エネルギー"
-  | "モバイル"
-  | "ビジネス"
-  | "宇宙"
-  | "ライフスタイル";
+type NewsCategory = string;
 
 interface HistoryItem {
   id: string;
@@ -181,15 +179,90 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings, isActive: false },
 ];
 
-const mockFilterChips: FilterChip[] = [
+const filterChips: FilterChip[] = [
   { id: "all", label: "すべて", icon: List },
   { id: "unread", label: "未読", icon: Circle },
   { id: "read", label: "既読", icon: CheckCircle },
   { id: "favorite", label: "お気に入り", icon: Star },
-  { id: "archive", label: "アーカイブ", icon: Archive },
-  { id: "ai-tech", label: "AI・テクノロジー" },
-  { id: "date", label: "日付順", icon: ChevronDown },
+  { id: "archived", label: "アーカイブ", icon: Archive },
 ];
+
+const historyFilterIds: ArticleHistoryFilter[] = [
+  "all",
+  "unread",
+  "read",
+  "favorite",
+  "archived",
+];
+
+const isHistoryFilter = (value: string): value is ArticleHistoryFilter =>
+  historyFilterIds.includes(value as ArticleHistoryFilter);
+
+const toReadState = (readState: ArticleHistoryItemDto["readState"]): ReadState =>
+  readState === "unread" ? "unread" : "read";
+
+const toThumbnailType = (genre: string): HistoryItem["thumbnailType"] => {
+  if (genre.includes("AI")) {
+    return "ai";
+  }
+  if (genre.includes("エネルギー") || genre.includes("環境")) {
+    return "energy";
+  }
+  if (genre.includes("モバイル") || genre.includes("スマホ")) {
+    return "mobile";
+  }
+  if (genre.includes("ビジネス")) {
+    return "business";
+  }
+  if (genre.includes("宇宙")) {
+    return "space";
+  }
+  return "lifestyle";
+};
+
+const mapTauriHistoryItemToUi = (
+  article: ArticleHistoryItemDto
+): HistoryItem => {
+  const readState = toReadState(article.readState);
+
+  return {
+    id: article.articleId,
+    title: article.title,
+    source: article.sourceName,
+    datetime: article.publishedAtText || article.fetchedAt,
+    description:
+      article.summary ??
+      "概要はまだありません。記事を開くと保存済みの内容を確認できます。",
+    readState,
+    isFavorite: article.isFavorite,
+    isNew: readState === "unread",
+    isArchived: article.isArchived,
+    category: article.genre || "未分類",
+    thumbnailType: toThumbnailType(article.genre),
+  };
+};
+
+const matchesHistoryFilter = (
+  item: HistoryItem,
+  filter: ArticleHistoryFilter
+): boolean => {
+  switch (filter) {
+    case "unread":
+      return item.readState === "unread";
+    case "read":
+      return item.readState === "read";
+    case "favorite":
+      return item.isFavorite;
+    case "archived":
+      return item.isArchived;
+    case "all":
+    default:
+      return true;
+  }
+};
+
+const getFallbackHistoryItems = (filter: ArticleHistoryFilter): HistoryItem[] =>
+  mockHistoryItems.filter((item) => matchesHistoryFilter(item, filter));
 
 // Thumbnail component
 function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
@@ -352,14 +425,99 @@ function HistoryItemCard({
 // Main Component
 export default function NewsHistoryScreen({
   onNavigate,
+  onOpenArticle,
 }: {
   onNavigate?: (screen: string) => void;
+  onOpenArticle?: (articleId: string) => void;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
-  const [activeFilter, setActiveFilter] = React.useState("all");
-  const [selectedItemId, setSelectedItemId] = React.useState("1");
+  const [activeFilter, setActiveFilter] =
+    React.useState<ArticleHistoryFilter>("all");
+  const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
+  const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
 
-  const selectedItem = mockHistoryItems.find((item) => item.id === selectedItemId);
+  const visibleHistoryItems = React.useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return historyItems;
+    }
+
+    return historyItems.filter((item) =>
+      [item.title, item.source, item.description, item.category].some((value) =>
+        value.toLowerCase().includes(normalizedQuery)
+      )
+    );
+  }, [historyItems, searchQuery]);
+
+  const selectedItem =
+    visibleHistoryItems.find((item) => item.id === selectedItemId) ??
+    visibleHistoryItems[0] ??
+    null;
+
+  const loadHistoryItems = React.useCallback(async () => {
+    setIsLoading(true);
+    setLoadNotice(null);
+
+    try {
+      const articles = await listArticleHistory({
+        filter: activeFilter,
+        limit: 200,
+      });
+
+      if (!articles) {
+        const fallbackItems = getFallbackHistoryItems(activeFilter);
+        setHistoryItems(fallbackItems);
+        setLoadNotice(
+          "ブラウザ単体プレビューのため、サンプル履歴を表示しています。"
+        );
+        setSelectedItemId((currentId) =>
+          fallbackItems.some((item) => item.id === currentId)
+            ? currentId
+            : fallbackItems[0]?.id ?? null
+        );
+        return;
+      }
+
+      const mappedItems = articles.map(mapTauriHistoryItemToUi);
+      setHistoryItems(mappedItems);
+      setLoadNotice(
+        mappedItems.length === 0
+          ? "この条件に一致する保存済み記事はまだありません。"
+          : null
+      );
+      setSelectedItemId((currentId) =>
+        mappedItems.some((item) => item.id === currentId)
+          ? currentId
+          : mappedItems[0]?.id ?? null
+      );
+    } catch (error) {
+      setHistoryItems([]);
+      setSelectedItemId(null);
+      setLoadNotice(
+        "ニュース履歴の読み込みに失敗しました。少し時間を置いて再度お試しください。"
+      );
+      console.warn("Failed to load article history:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [activeFilter]);
+
+  React.useEffect(() => {
+    void loadHistoryItems();
+  }, [loadHistoryItems]);
+
+  React.useEffect(() => {
+    if (
+      selectedItemId &&
+      visibleHistoryItems.some((item) => item.id === selectedItemId)
+    ) {
+      return;
+    }
+
+    setSelectedItemId(visibleHistoryItems[0]?.id ?? null);
+  }, [selectedItemId, visibleHistoryItems]);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -367,16 +525,36 @@ export default function NewsHistoryScreen({
     }
   };
 
+  const handleOpenSelectedArticle = () => {
+    if (!selectedItem) {
+      return;
+    }
+
+    if (onOpenArticle) {
+      onOpenArticle(selectedItem.id);
+      return;
+    }
+
+    onNavigate?.("news");
+  };
+
   const getCategoryColor = (category: NewsCategory) => {
-    const colors: Record<NewsCategory, string> = {
-      "AI・テクノロジー": "bg-[var(--yuuko-green)] text-white",
-      "環境・エネルギー": "bg-teal-500 text-white",
-      モバイル: "bg-purple-500 text-white",
-      ビジネス: "bg-emerald-500 text-white",
-      宇宙: "bg-indigo-500 text-white",
-      ライフスタイル: "bg-orange-500 text-white",
-    };
-    return colors[category];
+    if (category.includes("AI")) {
+      return "bg-[var(--yuuko-green)] text-white";
+    }
+    if (category.includes("エネルギー") || category.includes("環境")) {
+      return "bg-teal-500 text-white";
+    }
+    if (category.includes("モバイル") || category.includes("スマホ")) {
+      return "bg-purple-500 text-white";
+    }
+    if (category.includes("ビジネス")) {
+      return "bg-emerald-500 text-white";
+    }
+    if (category.includes("宇宙")) {
+      return "bg-indigo-500 text-white";
+    }
+    return "bg-orange-500 text-white";
   };
 
   return (
@@ -475,26 +653,50 @@ export default function NewsHistoryScreen({
 
           {/* Filter Chips */}
           <div className="flex items-center gap-2 mb-4 flex-wrap">
-            {mockFilterChips.map((chip) => (
+            {filterChips.map((chip) => (
               <FilterChipButton
                 key={chip.id}
                 chip={chip}
                 isActive={activeFilter === chip.id}
-                onClick={() => setActiveFilter(chip.id)}
+                onClick={() => {
+                  if (isHistoryFilter(chip.id)) {
+                    setActiveFilter(chip.id);
+                  }
+                }}
               />
             ))}
           </div>
 
+          {loadNotice && (
+            <div className="mb-3 rounded-lg border border-[var(--yuuko-green)]/30 bg-white px-3 py-2 text-xs text-muted-foreground">
+              {loadNotice}
+            </div>
+          )}
+
           {/* History List */}
           <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-            {mockHistoryItems.map((item) => (
-              <HistoryItemCard
-                key={item.id}
-                item={item}
-                isSelected={selectedItemId === item.id}
-                onClick={() => setSelectedItemId(item.id)}
-              />
-            ))}
+            {isLoading ? (
+              <Card className="border-0 shadow-sm py-6">
+                <CardContent className="p-4 text-center text-sm text-muted-foreground">
+                  ニュース履歴を読み込んでいます...
+                </CardContent>
+              </Card>
+            ) : visibleHistoryItems.length > 0 ? (
+              visibleHistoryItems.map((item) => (
+                <HistoryItemCard
+                  key={item.id}
+                  item={item}
+                  isSelected={selectedItem?.id === item.id}
+                  onClick={() => setSelectedItemId(item.id)}
+                />
+              ))
+            ) : (
+              <Card className="border-0 shadow-sm py-6">
+                <CardContent className="p-4 text-center text-sm text-muted-foreground">
+                  表示できる履歴がありません。検索条件やフィルタを見直してください。
+                </CardContent>
+              </Card>
+            )}
           </div>
         </main>
 
@@ -587,7 +789,7 @@ export default function NewsHistoryScreen({
                 <div className="space-y-2 mt-auto">
                   <Button
                     className="w-full bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
-                    onClick={() => console.log("もう一度見る:", selectedItem.id)}
+                    onClick={handleOpenSelectedArticle}
                   >
                     <RotateCcw className="w-4 h-4" />
                     もう一度見る
@@ -630,7 +832,10 @@ export default function NewsHistoryScreen({
           <span>お知らせ</span>
           <span className="mx-1">|</span>
           <span className="text-[var(--yuuko-green)]">●</span>
-          <span>履歴から3件、お気に入り登録されています！</span>
+          <span>
+            {visibleHistoryItems.length}件を表示中 / 保存済み履歴
+            {historyItems.length}件
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <HelpCircle className="w-4 h-4 cursor-pointer hover:text-foreground" />

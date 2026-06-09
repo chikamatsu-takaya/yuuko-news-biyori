@@ -180,6 +180,14 @@ async function installTauriMocks(page: Page) {
         switch (cmd) {
           case "get_recommended_articles":
             return [articleSummary];
+          case "list_article_history":
+            return [
+              {
+                ...articleSummary,
+                fetchedAt: "2026-06-05T00:10:00Z",
+                isArchived: false,
+              },
+            ];
           case "get_article_detail":
             return {
               ...articleSummary,
@@ -229,6 +237,13 @@ async function installTauriMocks(page: Page) {
               ok: true,
               confirmedRewardIds: params.rewardIds ?? [],
               remainingPendingRewardIds: [],
+            };
+          case "record_friendship_event":
+            return {
+              eventType: params.eventType,
+              earnedPoint: 0,
+              rankedUp: false,
+              newRank: null,
             };
           default:
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);
