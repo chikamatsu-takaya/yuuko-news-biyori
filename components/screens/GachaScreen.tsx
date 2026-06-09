@@ -77,13 +77,6 @@ interface RecentResult {
   rarity: number;
 }
 
-interface NewItem {
-  id: string;
-  name: string;
-  icon: React.ReactNode;
-  isNew: boolean;
-}
-
 interface NavigationItem {
   id: string;
   label: string;
@@ -134,17 +127,6 @@ const mockRecentResults: RecentResult[] = [
   { time: "12:32", name: "ひまわりバッジ", icon: <div className="w-5 h-5 rounded bg-yellow-400" />, rarity: 2 },
   { time: "12:31", name: "やさしい（口調）", icon: <div className="w-5 h-5 rounded bg-pink-300" />, rarity: 3 },
   { time: "12:30", name: "おしえてくれる（性格）", icon: <div className="w-5 h-5 rounded bg-purple-300" />, rarity: 3 },
-];
-
-const mockNewItems: NewItem[] = [
-  { id: "forest_walk", name: "森のおさんぽ", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-green-400 to-emerald-500" />, isNew: true },
-  { id: "star_balloon", name: "キラキラ星ふきだし", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-yellow-300 to-orange-400" />, isNew: false },
-  { id: "mushroom_beret", name: "きのこベレー", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-red-400 to-red-600" />, isNew: false },
-  { id: "star_collar", name: "星の首輪", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-blue-300 to-blue-500" />, isNew: false },
-  { id: "clover_badge", name: "クローバーバッジ", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-green-300 to-green-500" />, isNew: false },
-  { id: "tone_item", name: "口調", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-pink-300 to-pink-500" />, isNew: false },
-  { id: "expression_item", name: "表情", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-purple-300 to-purple-500" />, isNew: false },
-  { id: "yuuko_chan", name: "ゆうこちゃん", icon: <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-amber-200 to-amber-400 flex items-center justify-center text-xs font-bold text-amber-800">ゆうこ</div>, isNew: false },
 ];
 
 const mockNavigationItems: NavigationItem[] = [
@@ -253,7 +235,7 @@ function YuukoCharacter() {
         height={1174}
         alt="ゆうこ"
         priority
-        className="w-56 h-auto drop-shadow-lg"
+        className="w-auto h-[clamp(180px,34vh,380px)] drop-shadow-lg"
         style={{
           animation: "float 3s ease-in-out infinite",
         }}
@@ -265,9 +247,9 @@ function YuukoCharacter() {
         }}
       />
       {/* Fallback placeholder */}
-      <div className="hidden w-56 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
-        <div className="w-36 h-36 bg-gray-700 rounded-full flex items-center justify-center mb-2">
-          <PawIcon className="w-20 h-20 text-pink-300" />
+      <div className="hidden w-52 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
+        <div className="w-28 h-28 bg-gray-700 rounded-full flex items-center justify-center mb-2">
+          <PawIcon className="w-16 h-16 text-pink-300" />
         </div>
         <span className="text-white text-base font-medium">ゆうこ</span>
       </div>
@@ -289,7 +271,6 @@ export default function GachaScreen({
   const [gachaButtons] = React.useState<GachaButtonConfig[]>(mockGachaButtons);
   const [lineup] = React.useState<LineupItem[]>(mockLineup);
   const [recentResults] = React.useState<RecentResult[]>(mockRecentResults);
-  const [newItems] = React.useState<NewItem[]>(mockNewItems);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -319,10 +300,6 @@ export default function GachaScreen({
 
   const handleViewAllResults = () => {
     console.log("View all results clicked");
-  };
-
-  const handleViewAllNewItems = () => {
-    console.log("View all new items clicked");
   };
 
   const progressPercent = (gachaState.currentPoints / gachaState.nextRankPoints) * 100;
@@ -412,9 +389,9 @@ export default function GachaScreen({
         </aside>
 
         {/* Center Content */}
-        <main className="flex-1 min-w-0 flex flex-col overflow-y-auto">
+        <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
           {/* Top Bar */}
-          <div className="flex items-center justify-between p-4 pb-2">
+          <div className="flex items-center justify-between p-4 pb-2 shrink-0">
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>ホーム</span>
@@ -462,24 +439,23 @@ export default function GachaScreen({
           </div>
 
           {/* Title */}
-          <div className="px-4">
+          <div className="px-4 shrink-0">
             <div className="flex items-center gap-2 mb-1">
               <PawIcon className="w-7 h-7 text-[var(--yuuko-green)]" aria-hidden="true" />
               <h1 className="text-2xl font-bold text-foreground">ゆうこガチャ</h1>
             </div>
-            <p className="text-sm text-muted-foreground mb-4">
+            <p className="text-sm text-muted-foreground mb-2">
               流れ星のかけらで、ゆうこのデコやテーマを集めよう！
             </p>
           </div>
 
           {/* Main Gacha Area - Grid Layout */}
-          <div className="flex-1 px-4 pb-4 overflow-x-auto">
+          <div className="flex-1 min-h-0 px-4 pb-2 overflow-x-auto">
             <div
               className="flex flex-col lg:grid lg:grid-cols-[180px_minmax(420px,1fr)_240px] gap-4 h-full lg:min-w-[920px]"
-              style={{ minHeight: "400px" }}
             >
               {/* Left: Pickup */}
-              <div className="space-y-4">
+              <div className="space-y-4 h-full overflow-y-auto pr-1">
                 <Card className="border-yellow-400 bg-gradient-to-br from-yellow-50 to-orange-50 overflow-hidden">
                   <div className="bg-gradient-to-r from-yellow-400 to-orange-400 text-white text-xs font-bold py-1.5 px-3 text-center">
                     ピックアップ中！
@@ -500,7 +476,7 @@ export default function GachaScreen({
               </div>
 
               {/* Center: Gacha Animation Area */}
-              <Card className="overflow-hidden relative">
+              <Card className="overflow-hidden relative h-full">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Background decorations */}
                   <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
@@ -549,18 +525,18 @@ export default function GachaScreen({
                   </div>
 
                   {/* Gacha Machine */}
-                  <div className="absolute bottom-24 left-12">
+                  <div className="absolute bottom-20 left-12">
                     <GachaMachine />
                   </div>
 
                   {/* Yuuko Character */}
-                  <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
+                  <div className="absolute bottom-16 left-1/2 -translate-x-1/2">
                     <YuukoCharacter />
                   </div>
                 </div>
 
                 {/* Gacha Buttons */}
-                <div className="absolute bottom-0 left-0 right-0 p-5 bg-gradient-to-t from-white via-white/95 to-transparent">
+                <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-white via-white/95 to-transparent">
                   <div className="flex items-center justify-center gap-6">
                     {gachaButtons.map((btn) => (
                       <div key={btn.id} className="relative">
@@ -588,7 +564,7 @@ export default function GachaScreen({
                       </div>
                     ))}
                   </div>
-                  <div className="flex items-center justify-between mt-3 px-4">
+                  <div className="flex items-center justify-between mt-2 px-4">
                     <div className="text-xs text-muted-foreground">
                       <span className="text-[var(--yuuko-green)] font-medium">{gachaState.dailyDiscountText}</span>
                       <br />
@@ -607,9 +583,9 @@ export default function GachaScreen({
               </Card>
 
               {/* Right: Lineup & History */}
-              <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-4 h-full overflow-y-auto pr-1">
                 {/* Lineup */}
-                <Card className="flex-1 overflow-hidden flex flex-col">
+                <Card className="shrink-0 overflow-hidden flex flex-col">
                   <CardHeader className="p-3 pb-2 shrink-0">
                     <div className="flex items-center justify-between">
                       <CardTitle className="text-sm font-medium">排出ラインナップ</CardTitle>
@@ -618,7 +594,7 @@ export default function GachaScreen({
                       </Button>
                     </div>
                   </CardHeader>
-                  <CardContent className="p-3 pt-0 flex-1 overflow-y-auto">
+                  <CardContent className="p-3 pt-0 flex-1">
                     <div className="space-y-2">
                       {lineup.map((item) => (
                         <div
@@ -669,10 +645,10 @@ export default function GachaScreen({
           </div>
 
           {/* Bottom Section */}
-          <div className="px-4 pb-4 space-y-4 shrink-0">
+          <div className="px-4 pb-2 space-y-2 shrink-0">
             {/* Rank Bonus Card */}
-            <Card className="bg-gradient-to-r from-[var(--yuuko-green-light)] to-white border-[var(--yuuko-green)]/20">
-              <CardContent className="p-4 flex items-center gap-6">
+            <Card className="bg-gradient-to-r from-[var(--yuuko-green-light)] to-white border-[var(--yuuko-green)]/20 shadow-none">
+              <CardContent className="p-3 flex items-center gap-6">
                 <div className="flex items-center gap-4 shrink-0">
                   <div className="w-12 h-12 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
                     <Clover className="w-6 h-6 text-white" />
@@ -708,47 +684,6 @@ export default function GachaScreen({
                     <Gift className="w-4 h-4" />
                     ランク報酬を確認する
                   </Button>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* New Items */}
-            <Card>
-              <CardHeader className="p-4 pb-2">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-base font-medium flex items-center gap-2">
-                    <Sparkles className="w-5 h-5 text-[var(--yuuko-green)]" aria-hidden="true" />
-                    新しく解放されたアイテム
-                  </CardTitle>
-                  <button
-                    className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-0.5"
-                    onClick={handleViewAllNewItems}
-                  >
-                    すべて見る
-                    <ChevronRight className="w-3 h-3" aria-hidden="true" />
-                  </button>
-                </div>
-              </CardHeader>
-              <CardContent className="p-4 pt-2">
-                <div className="flex gap-3 overflow-x-auto pb-2" role="list">
-                  {newItems.map((item) => (
-                    <div
-                      key={item.id}
-                      className="shrink-0 w-24 p-3 rounded-xl border border-border bg-white hover:shadow-md transition-shadow cursor-pointer relative"
-                      role="listitem"
-                      aria-label={`${item.name}${item.isNew ? "（新着）" : ""}`}
-                    >
-                      {item.isNew && (
-                        <Badge className="absolute -top-2 -left-2 bg-red-500 text-white text-[10px] px-2 py-0.5" aria-hidden="true">
-                          NEW
-                        </Badge>
-                      )}
-                      <div className="flex justify-center mb-2" aria-hidden="true">
-                        {item.icon}
-                      </div>
-                      <p className="text-xs text-center text-foreground truncate" aria-hidden="true">{item.name}</p>
-                    </div>
-                  ))}
                 </div>
               </CardContent>
             </Card>
