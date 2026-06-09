@@ -393,18 +393,18 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: 画面詳細設計書 SCR-003。仕分け結果: **リセット=実装**（確認ダイアログ＋`reset_user_settings`で既定値へ。破壊的操作なので§7.6準拠で確認必須）/ **AI接続テスト=後続**（net-new UI+command・Geminiは鍵設定時のみ＆mock自動fallback済みのため優先度中）/ **キャッシュ削除・辞書エクスポート・アーカイブ管理=後回し（非活性＋準備中表示）**（アーカイブは#57で実ZIP後回し決定済み）
     - 別タスク化推奨: 設定の多くがDTO未連携で未永続化（ゆうこ表示/解説詳しさ/用語レベル/長文自動候補/優先モード/通知頻度/ゲーム中抑制/ストレージ表示mock）。`UserSettings` DTO拡張は本PRと分離
-- [ ] 正式Tauri identifierとapp-data移行方針を決める
+- [x] 正式Tauri identifierとapp-data移行方針を決める（→ `jp.star-system.yuuko-news`）
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/official-identifier`
+  - Issue/PR: 本PR
   - Done when:
-    - `src-tauri/tauri.conf.json` の `identifier` が `com.tauri.dev` から正式値へ変更されている
-    - 開発中app-data（`com.tauri.dev`）から正式identifier配下への扱いがdocsに明記されている
-    - ニュースソース設定手順書の保存先説明も正式identifier前提に更新されている
+    - `src-tauri/tauri.conf.json` の `identifier` が `com.tauri.dev` から正式値へ変更されている ✅（`jp.star-system.yuuko-news`）
+    - 開発中app-data（`com.tauri.dev`）から正式identifier配下への扱いがdocsに明記されている ✅（手順書 §2 に移行注記）
+    - ニュースソース設定手順書の保存先説明も正式identifier前提に更新されている ✅
   - Notes:
-    - 根拠: `docs/01_setup/ニュースソース設定手順.md` と現行 `tauri.conf.json`。配布前に決めないと各メンバーの設定パスがずれる
+    - 決定: `jp.star-system.yuuko-news`（会社ドメイン star-system.jp の逆DNS＋製品名）。app-dataは `%APPDATA%\jp.star-system.yuuko-news\`。旧 `com.tauri.dev` 配下の検証データは自動移行されないため再 setup か手動移動が必要。`setup-dev-news-source.mjs` は conf から動的読込で自動追従、`test/dev-news-source-setup.test.mjs` の固定アサートも更新
 
 ### P1.5: リリース前セキュリティ・運用品質点検
 セキュリティ詳細設計書のMVPチェックリストと、常駐アプリとしての運用要件から追加。新機能ではなく、公開/社内配布前の仕上げ確認。
