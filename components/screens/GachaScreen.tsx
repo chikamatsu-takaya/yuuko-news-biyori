@@ -726,11 +726,13 @@ export default function GachaScreen({
                 </div>
               </CardHeader>
               <CardContent className="p-4 pt-2">
-                <div className="flex gap-3 overflow-x-auto pb-2">
+                <div className="flex gap-3 overflow-x-auto pb-2" role="list">
                   {newItems.map((item) => (
                     <div
                       key={item.id}
                       className="shrink-0 w-24 p-3 rounded-xl border border-border bg-white hover:shadow-md transition-shadow cursor-pointer relative"
+                      role="listitem"
+                      aria-label={`${item.name}${item.isNew ? "（新着）" : ""}`}
                     >
                       {item.isNew && (
                         <Badge className="absolute -top-2 -left-2 bg-red-500 text-white text-[10px] px-2 py-0.5" aria-hidden="true">
@@ -740,7 +742,7 @@ export default function GachaScreen({
                       <div className="flex justify-center mb-2" aria-hidden="true">
                         {item.icon}
                       </div>
-                      <p className="text-xs text-center text-foreground truncate">{item.name}</p>
+                      <p className="text-xs text-center text-foreground truncate" aria-hidden="true">{item.name}</p>
                     </div>
                   ))}
                 </div>
