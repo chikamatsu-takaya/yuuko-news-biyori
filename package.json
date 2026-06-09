@@ -20,6 +20,7 @@
     "review:quick": "pnpm run check:frontend && pnpm run check:rust && pnpm run check:rust:test",
     "review:strict": "pnpm run review:quick && pnpm run build && pnpm run check:rust:fmt && pnpm run check:rust:clippy",
     "review": "pnpm run review:strict",
+    "setup:dev-news-source": "node scripts/setup-dev-news-source.mjs",
     "hooks:install": "git config --local core.hooksPath .githooks"
   },
   "dependencies": {

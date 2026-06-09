@@ -1,38 +1,39 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-08
+最終更新: 2026-06-09
 対象ブランチ: `develop`
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
 ## 0. 今日見る場所
 
 ### Now
-- [ ] タスク進捗ダッシュボードの導入PRを完成させる
-  - Priority: P1
-  - Status: Doing
-  - Owner: @codex
-  - Branch: `codex/task-dashboard`
-  - Issue/PR: 未作成
-  - Done when:
-    - `task-management/` のHTMLビューが追加され、Markdown正本を読み込める
-    - チェックリストにHTMLビュー互換の属性ルールが追加される
-    - Node起動手順・表示確認・lint確認が完了している
-  - Notes:
-    - HTML/JS/CSSは表示専用。正本はこのMarkdownから動かさない
-    - 初期表示は折りたたみ中心にし、日次確認のスクロール量を抑える
-
-### Next
 - [ ] ニュースソース設定導線を整備する
   - Priority: P1
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/dev-news-source-setup`
+  - Issue/PR: #54
+  - Done when:
+    - 開発者がPublickey検証設定を安全にapp-dataへ作成できる
+    - 製品デフォルトのdeny-by-defaultは維持される
+    - 手作業手順とコマンド手順の関係がdocsに明記されている
+  - Notes:
+    - 候補1として実装済み。PR作成前のローカルレビュー段階
+    - 製品初期値へPublickeyを焼き込まない
+
+### Next
+- [ ] ニュース履歴画面を実データへ接続する
+  - Priority: P1.5
   - Status: Next
   - Owner: 未定
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
-    - 開発者がPublickey検証設定を安全にapp-dataへ作成できる
-    - 製品デフォルトのdeny-by-defaultは維持される
+    - `NewsHistoryScreen` が `mockHistoryItems` ではなく保存済み記事一覧を表示できる
+    - 既読/未読・お気に入り・アーカイブ表示の最低限フィルタがTauri command経由で動く
+    - 記事選択からニュース閲覧画面へ再閲覧できる
   - Notes:
-    - まずは開発用コマンド/スクリプト案が有力。製品初期値へ焼き込まない
+    - ニュースソース設定導線の後に着手する候補。設計書突き合わせで追加したMVP残件の先頭
 
 ### Blocked / 要判断
 - [ ] アーカイブ退避の起点・粒度を決める
@@ -74,16 +75,18 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #52 まで反映済み**（友情ランク簡易完成まで到達）。
+- `develop` は **PR #53 まで反映済み**（タスク進捗ダッシュボードまで到達）。open PRなし。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
 - **CI Claude: `@claude` PRレビューが OAuth(サブスク)認証で稼働(#39/#47/#48)。public向けに投稿者権限ゲート済み(#49)**。
 - ニュース取得は `news_sources.json` / `network_allowlist.json` を app-data に手動配置すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
 - リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了。
-- **現在の作業: タスク進捗ダッシュボード追加（`codex/task-dashboard`）**。Markdown正本を維持しつつ、日次確認用のHTMLビューを追加する。
+- **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
+- **UI画像警告対応は完了(#50)**。`yuuko.png` のLCP/画像比率警告とGachaScreenのモバイル崩れを修正済み。
+- **現在の作業: ニュースソース設定導線（`codex/dev-news-source-setup` / PR #54）**。開発者がPublickey検証設定を安全にapp-dataへ作成できる導線を実装済み、レビュー中。
 - **設計書突き合わせ結果**: ニュース履歴実データ化、辞書メモ/削除UI、ゆうこ通知プレビュー、設定画面の未実装操作、正式identifier、権限/ログ/性能点検を追加追跡。
-- **次の優先順**: ダッシュボードPR完了 → ニュースソース設定導線 → 設計書突き合わせで追加したP1.5残件（履歴/辞書/通知/設定） → アーカイブ退避方針決定 → Playwright CI任意チェック → フロントUX整備(#46起票)。
+- **次の優先順**: ニュースソース設定導線 → 設計書突き合わせで追加したP1.5残件（履歴/辞書/通知/設定） → アーカイブ退避方針決定 → Playwright CI任意チェック → フロントUX整備(#46起票)。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -165,12 +168,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Done when:
     - Playwrightスクリーンショットで主要画面のはみ出し・潰れが確認されていない
     - PC幅での日常利用に支障がない
-- [ ] `yuuko.png` のNext.js警告対応（LCP / 画像比率）
+- [x] `yuuko.png` のNext.js警告対応（LCP / 画像比率 / PR #50）
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
+  - Status: Done
+  - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
-  - Issue/PR: 未定
+  - Issue/PR: #50
   - Done when:
     - Next.jsのLCP/画像比率警告が解消されている
     - 表示崩れや不要な画像伸縮がない
@@ -208,10 +211,10 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] Publickey Atomフィードのローカル疎通確認（取得15件 / 保存15件 / errors 0）
 - [ ] `news_sources.json` / `network_allowlist.json` の設定導線整備
   - Priority: P1
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/dev-news-source-setup`
+  - Issue/PR: #54
   - Done when:
     - 開発者が検証用ニュースソース設定をコマンドで作成できる
     - 製品デフォルトのdeny-by-defaultは維持される
@@ -241,23 +244,40 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] UTF-8 BOM付きJSONのみ許容し、それ以外の破損は fail-close 維持（PR #33）
 - [ ] ソース追加・変更時の運用手順をドキュメント化
   - Priority: P1
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/dev-news-source-setup`
+  - Issue/PR: #54
   - Done when:
     - 追加候補の調査、allowlist更新、ローカル疎通確認、PRレビュー観点が一連の手順になっている
     - セキュリティ境界（URL/スキーム/DNS/リダイレクト検証）を崩さない注意点が明記されている
 
 ## 8. 次にやるべき優先タスク
 
-### P1: タスク進捗ダッシュボード（このPR）
-- [ ] Markdown正本を読み込むHTMLダッシュボードを追加する
+### P1: ニュースソース設定導線（実装済み・PR #54レビュー中）
+- [ ] 開発者向けに検証用ニュースソース設定を作成する導線を用意する
   - Priority: P1
-  - Status: Doing
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/dev-news-source-setup`
+  - Issue/PR: #54
+  - Done when:
+    - Publickey検証用の `news_sources.json` / `network_allowlist.json` を安全にapp-dataへ作成できる
+    - 製品デフォルトのdeny-by-defaultは維持されている
+    - 実行対象パス・上書き挙動・失敗時の扱いが明確になっている
+    - 既存の `docs/01_setup/ニュースソース設定手順.md` とチェックリストが同期されている
+  - Notes:
+    - フロント修正中メンバーと競合しにくいバックエンド/運用寄りタスク
+    - Tauri commandで任意設定書き込み口を公開しない
+    - このチェックリスト同期分は、候補1完了PRに含める
+
+### P1: タスク進捗ダッシュボード ✅ 完了（PR #53 / `cb32965`）
+- [x] Markdown正本を読み込むHTMLダッシュボードを追加する
+  - Priority: P1
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/task-dashboard`
-  - Issue/PR: 未作成
+  - Issue/PR: #53
   - Done when:
     - `task-management/index.html` / `task-dashboard.js` / `task-dashboard.css` が追加されている
     - `developタスクチェックリスト.md` をfetchして表示できる
@@ -504,20 +524,20 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - 実行時間・flake率・チーム運用負荷を見て、必須化するかが決まっている
 
 ### P2: UI警告・見た目微修正
-- [ ] `yuuko.png` のLCP警告対応
+- [x] `yuuko.png` のLCP警告対応（PR #50）
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
+  - Status: Done
+  - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
-  - Issue/PR: 未定
+  - Issue/PR: #50
   - Done when:
     - Next.jsのLCP警告が解消されている
-- [ ] `yuuko.png` の画像比率警告対応
+- [x] `yuuko.png` の画像比率警告対応（PR #50）
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
+  - Status: Done
+  - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
-  - Issue/PR: 未定
+  - Issue/PR: #50
   - Done when:
     - 画像の縦横比が崩れず、Next.js警告が出ない
 - [ ] 主要画面の余白・スクロール・文字はみ出しをPlaywrightスクリーンショットで確認
@@ -607,5 +627,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-08: フロントUX課題3件（ホーム/遷移/用語範囲選択）をチェックリストに起票（PR #46）
 - [x] 2026-06-08: @claudeレビュー認証を OAuth(サブスク)方式へ切替（PR #47）
 - [x] 2026-06-08: @claudeレビューに checkout 追加＋contents:write 化で稼働（PR #48）
-- [x] 2026-06-08: @claudeレビューを信頼ユーザー限定（public向け権限ゲート / PR #49)
+- [x] 2026-06-08: @claudeレビューを信頼ユーザー限定（public向け権限ゲート / PR #49）
+- [x] 2026-06-08: UI画像警告対応（`yuuko.png` LCP/画像比率・GachaScreenモバイル崩れ / PR #50）
 - [x] 2026-06-08: 友情ランク簡易完成（ポイント加算・ランクアップ・RankUpDialog / PR #52）
+- [x] 2026-06-09: タスク進捗ダッシュボードを追加（Markdown正本のHTMLビュー / PR #53）
