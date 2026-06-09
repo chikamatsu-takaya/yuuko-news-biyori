@@ -1,7 +1,18 @@
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::article::ArticleSummaryDto;
+use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
 use crate::error::AppError;
+
+/// 通知ゲートの時間しきい値（分）。設計書 §6.2「通知頻度制御」。将来は設定化可能とする。
+const MIN_COOLTIME_MINUTES: i64 = 60; // 前回通知からの最短間隔
+const DISMISS_COOLDOWN_MINUTES: i64 = 120; // ユーザーが閉じた後の再通知抑制
+const IGNORE_COOLDOWN_MINUTES: i64 = 180; // 無操作（無視）後の再通知抑制
+/// 紹介済みIDの保持上限（FIFO）。状態ファイルの肥大化を防ぐ。
+const INTRODUCED_HISTORY_CAP: usize = 500;
+/// 保存用タイムスタンプ形式（UTC）。news / friendship / summary と統一。
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+const DATE_FORMAT: &str = "%Y-%m-%d";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "PascalCase")]
@@ -40,6 +51,23 @@ pub struct RewardNotificationState {
     pub message: String,
 }
 
+/// 当日の通知回数（日次上限判定用）。日付が変わると count をリセットする。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyNotificationCount {
+    pub date: String,
+    pub count: u32,
+}
+
+/// 通知ゲートの判定結果（内部用・非永続）。設計書 §4.3/§5.2 のMVP抑制条件に対応。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationGate {
+    Allowed,
+    DailyLimitReached,
+    CoolingDown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +79,14 @@ pub struct PersistedYuukoState {
     pub current_article_id: Option<String>,
     pub reward_notification: Option<RewardNotificationState>,
     pub confirmed_reward_ids: Vec<String>,
+    /// 前回通知時刻（UTC・RFC3339）。最短クールタイム判定の基点。
+    pub last_notified_at: Option<String>,
+    /// 再通知抑制の終端時刻（UTC・RFC3339）。閉じる/無視で設定する。
+    pub cooldown_until: Option<String>,
+    /// 当日の通知回数（日次上限判定用）。
+    pub daily_notification: DailyNotificationCount,
+    /// ゆうこが紹介済みの記事ID（FIFO・上限キャップ）。再紹介の抑止に使う。
+    pub introduced_article_ids: Vec<String>,
 }
 
 impl Default for PersistedYuukoState {
@@ -63,6 +99,10 @@ impl Default for PersistedYuukoState {
             current_article_id: None,
             reward_notification: None,
             confirmed_reward_ids: Vec::new(),
+            last_notified_at: None,
+            cooldown_until: None,
+            daily_notification: DailyNotificationCount::default(),
+            introduced_article_ids: Vec::new(),
         }
     }
 }
@@ -162,14 +202,117 @@ impl PersistedYuukoState {
         })
     }
 
-    /// 通知を閉じる（最小実装）。balloon / preview / current_article をクリアし Waiting に戻す。
+    /// 通知を閉じる。balloon / preview / current_article をクリアし Waiting に戻し、
+    /// 再通知抑制（クールタイム）を設定する（設計書 §6.2/§10.6「閉じる→クールタイム設定」）。
     /// pending な reward_notification と confirmed_reward_ids は保持する
     /// （報酬確認は confirm_rank_up_reward が担当するため、ここでは消さない）。
-    pub fn dismiss_notification(&mut self) {
+    pub fn dismiss_notification(&mut self, now: DateTime<Utc>) {
+        self.clear_active_notification();
+        self.cooldown_until = Some(format_timestamp(
+            now + Duration::minutes(DISMISS_COOLDOWN_MINUTES),
+        ));
+    }
+
+    /// 無操作タイムアウト（無視）。閉じるより長い再通知抑制を設定する（設計書 §6.2/§10.6）。
+    /// reward は保持する。フロントの自動退場タイマーから呼ぶ想定（Rustはタイマーを持たない）。
+    pub fn mark_ignored(&mut self, now: DateTime<Utc>) {
+        self.clear_active_notification();
+        self.cooldown_until = Some(format_timestamp(
+            now + Duration::minutes(IGNORE_COOLDOWN_MINUTES),
+        ));
+    }
+
+    /// アクティブな通知表示をクリアして待機へ戻す（reward は保持）。
+    fn clear_active_notification(&mut self) {
         self.balloon_text = None;
         self.preview_article = None;
         self.current_article_id = None;
         self.state = YuukoResidentState::Waiting;
+    }
+
+    /// ゆうこが紹介済みの記事か。
+    pub fn is_introduced(&self, article_id: &str) -> bool {
+        self.introduced_article_ids
+            .iter()
+            .any(|id| id == article_id)
+    }
+
+    /// 紹介候補の適格判定: 未紹介かつ非お気に入り（設計書 §12.4 お気に入りは紹介不要）。
+    fn is_eligible_candidate(&self, article: &ArticleSummaryDto) -> bool {
+        !article.is_favorite && !self.is_introduced(&article.article_id)
+    }
+
+    /// 通知を出してよいか判定する（設計書 §4.3/§5.2 のMVP抑制条件）。
+    /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
+    /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
+    pub fn can_notify(&self, now: DateTime<Utc>, max_per_day: u32) -> NotificationGate {
+        let today = now.format(DATE_FORMAT).to_string();
+        let used_today = if self.daily_notification.date == today {
+            self.daily_notification.count
+        } else {
+            0
+        };
+        if used_today >= max_per_day {
+            return NotificationGate::DailyLimitReached;
+        }
+
+        if let Some(until) = self.cooldown_until.as_deref().and_then(parse_timestamp) {
+            if now < until {
+                return NotificationGate::CoolingDown;
+            }
+        }
+
+        if let Some(last) = self.last_notified_at.as_deref().and_then(parse_timestamp) {
+            if now < last + Duration::minutes(MIN_COOLTIME_MINUTES) {
+                return NotificationGate::CoolingDown;
+            }
+        }
+
+        NotificationGate::Allowed
+    }
+
+    /// おすすめ候補（スコア順）から紹介する1件を選ぶ。未紹介・非お気に入りを対象に未読を優先する
+    /// （設計書 §12.2/§12.4）。候補が無ければ None。
+    pub fn pick_introducible(&self, candidates: &[ArticleSummaryDto]) -> Option<ArticleSummaryDto> {
+        if let Some(article) = candidates
+            .iter()
+            .find(|&a| a.read_state == ArticleReadState::Unread && self.is_eligible_candidate(a))
+        {
+            return Some(article.clone());
+        }
+
+        candidates
+            .iter()
+            .find(|&a| self.is_eligible_candidate(a))
+            .cloned()
+    }
+
+    /// 選んだ記事を「ゆうこが紹介中」の状態にし、通知回数・クールタイム基点・紹介済みを記録する。
+    /// 日付が変わっていれば日次カウントをリセットしてから加算する。
+    pub fn mark_notified(&mut self, now: DateTime<Utc>, article: ArticleSummaryDto) {
+        let today = now.format(DATE_FORMAT).to_string();
+        if self.daily_notification.date != today {
+            self.daily_notification.date = today;
+            self.daily_notification.count = 0;
+        }
+        self.daily_notification.count = self.daily_notification.count.saturating_add(1);
+        self.last_notified_at = Some(format_timestamp(now));
+
+        if !self.is_introduced(&article.article_id) {
+            self.introduced_article_ids.push(article.article_id.clone());
+            if self.introduced_article_ids.len() > INTRODUCED_HISTORY_CAP {
+                let overflow = self.introduced_article_ids.len() - INTRODUCED_HISTORY_CAP;
+                self.introduced_article_ids.drain(0..overflow);
+            }
+        }
+
+        self.balloon_text = Some(format!(
+            "気になるニュースを見つけたよ。「{}」",
+            article.title
+        ));
+        self.current_article_id = Some(article.article_id.clone());
+        self.preview_article = Some(article);
+        self.state = YuukoResidentState::BalloonVisible;
     }
 
     /// 2段階クリックの最小遷移。操作対象（preview_article / current_article_id）が
@@ -204,9 +347,52 @@ pub struct ConfirmRankUpRewardResult {
     pub remaining_pending_reward_ids: Vec<String>,
 }
 
+/// `request_yuuko_notification` の結果。通知が出たか・理由・最新状態を返す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestYuukoNotificationResult {
+    pub notified: bool,
+    /// "notified" / "disabled" / "reward_pending" / "daily_limit" / "cooling_down" / "no_candidate"
+    pub reason: String,
+    pub state: YuukoNotificationState,
+}
+
+/// 保存用タイムスタンプ文字列を生成する（UTC・他サービスと同形式）。
+fn format_timestamp(value: DateTime<Utc>) -> String {
+    value.format(TIMESTAMP_FORMAT).to_string()
+}
+
+/// 保存済みRFC3339文字列を UTC DateTime へ復元する。
+/// パース不能ならその制約は無視（fail-open）し、恒久的に通知が止まらないようにする。
+fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn article(
+        id: &str,
+        read_state: ArticleReadState,
+        is_favorite: bool,
+        score: f32,
+    ) -> ArticleSummaryDto {
+        ArticleSummaryDto {
+            article_id: id.to_string(),
+            title: format!("記事 {id}"),
+            source_name: "Example".to_string(),
+            published_at_text: "2026-06-09".to_string(),
+            genre: "AI".to_string(),
+            summary: None,
+            is_favorite,
+            read_state,
+            recommendation_score: score,
+        }
+    }
 
     fn state_with_notification() -> PersistedYuukoState {
         PersistedYuukoState {
@@ -222,13 +408,15 @@ mod tests {
                 message: "ランクアップ！".to_string(),
             }),
             confirmed_reward_ids: vec!["reward-0".to_string()],
+            ..PersistedYuukoState::default()
         }
     }
 
     #[test]
-    fn dismiss_clears_active_notification_but_keeps_rewards() {
+    fn dismiss_clears_active_notification_keeps_rewards_and_sets_cooldown() {
         let mut state = state_with_notification();
-        state.dismiss_notification();
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        state.dismiss_notification(now);
 
         assert_eq!(state.state, YuukoResidentState::Waiting);
         assert!(state.balloon_text.is_none());
@@ -237,6 +425,9 @@ mod tests {
         // 報酬は維持（confirm_rank_up_reward が担当）
         assert!(state.reward_notification.is_some());
         assert_eq!(state.confirmed_reward_ids, vec!["reward-0".to_string()]);
+        // 閉じた後は再通知抑制（クールダウン）が設定される。
+        assert!(state.cooldown_until.is_some());
+        assert_eq!(state.can_notify(now, 3), NotificationGate::CoolingDown);
     }
 
     #[test]
@@ -261,5 +452,94 @@ mod tests {
         // 再クリック → 確定（退場）
         assert!(state.handle_click());
         assert_eq!(state.state, YuukoResidentState::Leaving);
+    }
+
+    #[test]
+    fn can_notify_blocks_when_daily_limit_reached_and_resets_next_day() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 3,
+            },
+            ..PersistedYuukoState::default()
+        };
+        assert_eq!(
+            state.can_notify(now, 3),
+            NotificationGate::DailyLimitReached
+        );
+        // 翌日は日次カウントがリセットされ通知可能。
+        let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
+        assert_eq!(state.can_notify(tomorrow, 3), NotificationGate::Allowed);
+    }
+
+    #[test]
+    fn can_notify_respects_min_cooltime() {
+        let base = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_notified(base, article("a1", ArticleReadState::Unread, false, 0.9));
+        // 直後はクールタイム中。
+        assert_eq!(state.can_notify(base, 3), NotificationGate::CoolingDown);
+        // 最短クールタイム経過後は通知可能。
+        let after = base + Duration::minutes(MIN_COOLTIME_MINUTES);
+        assert_eq!(state.can_notify(after, 3), NotificationGate::Allowed);
+    }
+
+    #[test]
+    fn mark_notified_records_count_cooltime_and_introduced() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_notified(now, article("a1", ArticleReadState::Unread, false, 0.9));
+
+        assert_eq!(state.daily_notification.count, 1);
+        assert_eq!(state.daily_notification.date, "2026-06-09");
+        assert!(state.last_notified_at.is_some());
+        assert!(state.is_introduced("a1"));
+        assert_eq!(state.current_article_id.as_deref(), Some("a1"));
+        assert_eq!(state.state, YuukoResidentState::BalloonVisible);
+        assert!(state.preview_article.is_some());
+    }
+
+    #[test]
+    fn pick_introducible_prefers_unread_and_skips_introduced_and_favorite() {
+        let state = PersistedYuukoState {
+            introduced_article_ids: vec!["a1".to_string()],
+            ..PersistedYuukoState::default()
+        };
+        let candidates = vec![
+            article("a1", ArticleReadState::Unread, false, 0.95), // 紹介済み → 除外
+            article("a2", ArticleReadState::DetailViewed, false, 0.90), // 既読
+            article("a3", ArticleReadState::Unread, true, 0.85),  // お気に入り → 除外
+            article("a4", ArticleReadState::Unread, false, 0.80), // ← 未読・適格で最優先
+        ];
+        let chosen = state.pick_introducible(&candidates).unwrap();
+        assert_eq!(chosen.article_id, "a4");
+    }
+
+    #[test]
+    fn pick_introducible_falls_back_to_read_when_no_unread() {
+        let state = PersistedYuukoState::default();
+        let candidates = vec![
+            article("a1", ArticleReadState::DetailViewed, false, 0.90),
+            article("a2", ArticleReadState::Previewed, true, 0.80), // お気に入り → 除外
+        ];
+        let chosen = state.pick_introducible(&candidates).unwrap();
+        assert_eq!(chosen.article_id, "a1");
+    }
+
+    #[test]
+    fn mark_ignored_keeps_reward_and_sets_longer_cooldown() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let mut state = state_with_notification();
+        state.mark_ignored(now);
+
+        assert_eq!(state.state, YuukoResidentState::Waiting);
+        assert!(state.reward_notification.is_some()); // reward は保持
+                                                      // 無視のクールダウンは閉じる(120分)より長い。120分後でもまだ抑制中。
+        let after_dismiss_window = now + Duration::minutes(DISMISS_COOLDOWN_MINUTES);
+        assert_eq!(
+            state.can_notify(after_dismiss_window, 3),
+            NotificationGate::CoolingDown
+        );
     }
 }
