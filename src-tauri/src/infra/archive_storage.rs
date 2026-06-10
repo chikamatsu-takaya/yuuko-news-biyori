@@ -43,11 +43,13 @@ pub fn write_verified_zip(zip_path: &Path, entries: &[ArchiveEntry]) -> Result<u
         return Err(error);
     }
 
-    if zip_path.exists() {
-        std::fs::remove_file(zip_path)?;
-    }
-    std::fs::rename(&temp_path, zip_path)?;
-    Ok(std::fs::metadata(zip_path)?.len())
+    let size_bytes = std::fs::metadata(&temp_path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+        })?
+        .len();
+    promote_verified_zip(&temp_path, zip_path)?;
+    Ok(size_bytes)
 }
 
 fn write_zip(path: &Path, entries: &[ArchiveEntry]) -> Result<(), AppError> {
@@ -74,6 +76,50 @@ fn write_zip(path: &Path, entries: &[ArchiveEntry]) -> Result<(), AppError> {
         .finish()
         .map_err(|error| AppError::Archive(format!("failed to finalize zip: {error}")))?;
     Ok(())
+}
+
+fn promote_verified_zip(temp_path: &Path, zip_path: &Path) -> Result<(), AppError> {
+    let backup_path = zip_path.with_extension("zip.bak");
+    let had_existing = zip_path.exists();
+
+    if had_existing {
+        if backup_path.exists() {
+            if let Err(error) = std::fs::remove_file(&backup_path) {
+                let _ = std::fs::remove_file(temp_path);
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = std::fs::rename(zip_path, &backup_path) {
+            let _ = std::fs::remove_file(temp_path);
+            return Err(error.into());
+        }
+    }
+
+    match std::fs::rename(temp_path, zip_path) {
+        Ok(()) => {
+            if had_existing && backup_path.exists() {
+                if let Err(error) = std::fs::remove_file(&backup_path) {
+                    log::warn!("Failed to remove archive zip backup: {error}");
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            log::error!("Failed to promote temporary archive zip: {error}");
+
+            if had_existing && backup_path.exists() {
+                if let Err(restore_error) = std::fs::rename(&backup_path, zip_path) {
+                    log::error!("Failed to restore archive zip backup: {restore_error}");
+                }
+            }
+
+            if temp_path.exists() {
+                let _ = std::fs::remove_file(temp_path);
+            }
+
+            Err(error.into())
+        }
+    }
 }
 
 /// ZIPを再オープンし、エントリ数と名前が期待どおりで、各内容が読み出せることを確認する。
@@ -173,6 +219,37 @@ mod tests {
         let dir = temp_dir("empty");
         let result = write_verified_zip(&dir.join("empty.zip"), &[]);
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_verified_zip_replaces_existing_zip_without_leaving_temp_or_backup() {
+        let dir = temp_dir("replace");
+        let zip_path = dir.join("2026-05.zip");
+        let first_entries = vec![ArchiveEntry {
+            name: "old.md".to_string(),
+            contents: b"old".to_vec(),
+        }];
+        let second_entries = vec![ArchiveEntry {
+            name: "new.md".to_string(),
+            contents: b"new".to_vec(),
+        }];
+
+        write_verified_zip(&zip_path, &first_entries).unwrap();
+        write_verified_zip(&zip_path, &second_entries).unwrap();
+
+        assert!(!zip_path.with_extension("zip.tmp").exists());
+        assert!(!zip_path.with_extension("zip.bak").exists());
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 1);
+        assert!(archive.by_name("old.md").is_err());
+        let mut entry = archive.by_name("new.md").unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "new");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -169,14 +169,13 @@ impl ArticleRepository {
             let entries: Vec<crate::infra::archive_storage::ArchiveEntry> = month_records
                 .iter()
                 .map(|record| {
-                    serialize_article_markdown(record).map(|markdown| {
-                        crate::infra::archive_storage::ArchiveEntry {
-                            name: format!("{}.md", record.article_id),
-                            contents: markdown.into_bytes(),
-                        }
+                    let markdown = serialize_article_markdown(record)?;
+                    Ok(crate::infra::archive_storage::ArchiveEntry {
+                        name: archive_entry_name(&record.article_id)?,
+                        contents: markdown.into_bytes(),
                     })
                 })
-                .collect::<Result<_, _>>()?;
+                .collect::<Result<Vec<_>, AppError>>()?;
             let article_count = entries.len();
 
             let month_label = format_month_label(&bucket);
@@ -193,18 +192,26 @@ impl ArticleRepository {
                 size_bytes,
             };
 
-            // 月ごとにindexへ反映しておく。後続月で失敗しても、成功済みZIPを孤立させないため。
-            if let Err(error) = self.update_archive_index(now, std::slice::from_ref(&zip_info)) {
-                let _ = std::fs::remove_file(&zip_path);
-                return Err(error);
-            }
-
             // 検証成功後に archived 印を付ける（非破壊：元.mdは残す）。
+            let mut saved_originals = Vec::new();
             for mut record in month_records {
+                let original = record.clone();
                 record.is_archived = true;
                 record.status.archived = true;
-                self.save_article_record(&record)?;
+                if let Err(error) = self.save_article_record(&record) {
+                    self.rollback_archived_records(&saved_originals);
+                    let _ = std::fs::remove_file(&zip_path);
+                    return Err(error);
+                }
+                saved_originals.push(original);
                 archived_article_count += 1;
+            }
+
+            // 月ごとにindexへ反映しておく。後続月で失敗しても、成功済みZIPを孤立させないため。
+            if let Err(error) = self.update_archive_index(now, std::slice::from_ref(&zip_info)) {
+                self.rollback_archived_records(&saved_originals);
+                let _ = std::fs::remove_file(&zip_path);
+                return Err(error);
             }
 
             zip_files.push(zip_info);
@@ -251,6 +258,17 @@ impl ArticleRepository {
         }
         let payload = serde_json::to_vec_pretty(&index)?;
         atomic_write(&self.archive_index_path, &payload, "archive index")
+    }
+
+    fn rollback_archived_records(&self, originals: &[PersistedArticleRecord]) {
+        for record in originals {
+            if let Err(error) = self.save_article_record(record) {
+                log::error!(
+                    "Failed to rollback archived article state for {}: {error}",
+                    record.article_id
+                );
+            }
+        }
     }
 
     pub fn update_article_favorite(
@@ -1024,6 +1042,20 @@ fn is_effectively_favorite(
     article.favorite || favorite_store.contains(&article.article_id)
 }
 
+fn archive_entry_name(article_id: &str) -> Result<String, AppError> {
+    if article_id.is_empty()
+        || !article_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(AppError::Archive(format!(
+            "unsafe article id for archive entry: {article_id}"
+        )));
+    }
+
+    Ok(format!("{article_id}.md"))
+}
+
 /// 月バケット "YYYYMM" を表示用ラベル "YYYY-MM" へ変換する（アーカイブZIP名・index 用）。
 /// 6桁数字でなければそのまま返す（"unknown" 等）。
 fn format_month_label(bucket: &str) -> String {
@@ -1332,7 +1364,8 @@ mod tests {
     use crate::domain::article::{ArticleHistoryFilter, ArticleReadState};
 
     use super::{
-        month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate, PersistedArticleRecord,
+        archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
+        PersistedArticleRecord,
     };
 
     struct TestRepositoryContext {
@@ -1633,6 +1666,61 @@ mod tests {
 
         let june_record = context.repository.find_article_record("old-june").unwrap();
         assert!(!june_record.is_archived);
+    }
+
+    #[test]
+    fn archive_candidates_rolls_back_archived_marks_when_save_fails() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_a).unwrap();
+        context.repository.save_article_record(&old_b).unwrap();
+
+        // 2件目保存時の atomic_write を失敗させ、1件目だけ archived 済みで残らないことを確認する。
+        std::fs::create_dir_all(context.news_dir.join("202605").join("old-b.md.tmp")).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let result = context.repository.archive_candidates(now);
+        assert!(result.is_err());
+
+        let old_a_after = context.repository.find_article_record("old-a").unwrap();
+        let old_b_after = context.repository.find_article_record("old-b").unwrap();
+        assert!(!old_a_after.is_archived);
+        assert!(!old_a_after.status.archived);
+        assert!(!old_b_after.is_archived);
+        assert!(!old_b_after.status.archived);
+
+        let archive_dir = context.root_dir.join("archive");
+        assert!(!archive_dir.join("2026-05.zip").exists());
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert!(index.archives.is_empty());
+    }
+
+    #[test]
+    fn archive_entry_name_rejects_path_like_article_ids() {
+        assert_eq!(
+            archive_entry_name("news_0123-abcd").unwrap(),
+            "news_0123-abcd.md"
+        );
+        assert!(archive_entry_name("../evil").is_err());
+        assert!(archive_entry_name("evil/name").is_err());
+        assert!(archive_entry_name("").is_err());
     }
 
     #[test]
