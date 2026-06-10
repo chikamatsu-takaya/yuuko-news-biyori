@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
@@ -79,6 +80,32 @@ impl ArticleRepository {
                     .then(|| article.to_history_item_dto(is_favorite))
             })
             .take(limit)
+            .collect())
+    }
+
+    /// アーカイブ退避候補（お気に入りでない・archivedでない・取得から約1か月以上経過）を
+    /// 全件走査して返す（データ設計書 §14）。`list_history` と違い件数制限を設けない
+    /// （古い記事ほど候補になるため、最近N件では取りこぼす）。実ZIP圧縮は後続。
+    pub fn list_archive_candidates(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let mut articles = self.load_article_records()?;
+        articles.sort_by(compare_history_records);
+
+        Ok(articles
+            .into_iter()
+            .filter_map(|article| {
+                let is_favorite = is_effectively_favorite(&article, &favorite_store);
+                crate::domain::article::is_archive_candidate(
+                    &article.fetched_at,
+                    is_favorite,
+                    article.is_archived,
+                    now,
+                )
+                .then(|| article.to_history_item_dto(is_favorite))
+            })
             .collect())
     }
 
@@ -1245,6 +1272,56 @@ mod tests {
 
         assert_eq!(articles[0].article_id, "article-a");
         assert_eq!(articles[1].article_id, "article-b");
+    }
+
+    #[test]
+    fn list_archive_candidates_returns_only_old_non_favorite_non_archived() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        // 古い・非お気に入り・非archived → 候補
+        let old_plain = PersistedArticleRecord {
+            article_id: "old-plain".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        // 古い・お気に入り → 除外
+        let old_favorite = PersistedArticleRecord {
+            article_id: "old-favorite".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            favorite: true,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        // 古い・archived → 除外
+        let old_archived = PersistedArticleRecord {
+            article_id: "old-archived".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: true,
+            ..super::seed_articles().remove(0)
+        };
+        // 最近 → 除外
+        let recent = PersistedArticleRecord {
+            article_id: "recent".to_string(),
+            fetched_at: "2026-07-10T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        for record in [&old_plain, &old_favorite, &old_archived, &recent] {
+            context.repository.save_article_record(record).unwrap();
+        }
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let candidates = context.repository.list_archive_candidates(now).unwrap();
+        let ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.article_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["old-plain"]);
     }
 
     #[test]

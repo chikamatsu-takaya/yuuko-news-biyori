@@ -99,3 +99,21 @@ pub async fn generate_article_summary(
         })?
         .map_err(CommandError::from)
 }
+
+/// アーカイブ退避候補（取得から約1か月超・非お気に入り・非archived）を返す read-only command。
+/// 選定・判定はRust側。実ZIP圧縮とUI配線は後続。
+#[tauri::command]
+pub async fn get_archive_candidates(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ArticleHistoryItemDto>> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.list_archive_candidates())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join archive-candidates task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}

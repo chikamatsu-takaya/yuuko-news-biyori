@@ -1,6 +1,36 @@
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+
+/// アーカイブ退避候補とみなす経過日数（約1か月）。データ設計書 §14.2「1か月以上前」。
+/// ここでは「退避候補かどうか」の判定のみを担い、月次ZIPの実圧縮は後続で実装する。
+pub const ARCHIVE_AGE_DAYS: i64 = 30;
+
+/// 記事がアーカイブ退避候補かを判定する（純粋関数・I/Oなし）。
+/// 条件（データ設計書 §14.2/§14.3）: お気に入りでない・アーカイブ済みでない・取得から約1か月以上経過。
+/// `fetched_at` がRFC3339として解釈できない場合は安全側に倒し、候補にしない。
+pub fn is_archive_candidate(
+    fetched_at: &str,
+    favorite: bool,
+    is_archived: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    if favorite || is_archived {
+        return false;
+    }
+    match parse_rfc3339_utc(fetched_at) {
+        Some(fetched) => fetched <= now - Duration::days(ARCHIVE_AGE_DAYS),
+        None => false,
+    }
+}
+
+/// RFC3339文字列を UTC の `DateTime` へ変換する。解釈不能なら `None`。
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|datetime| datetime.with_timezone(&Utc))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -193,9 +223,10 @@ impl UpdateArticleFavoriteParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArticleHistoryFilter, GetArticleDetailParams, GetRecommendedArticlesParams,
-        ListArticleHistoryParams, UpdateArticleFavoriteParams,
+        is_archive_candidate, ArticleHistoryFilter, GetArticleDetailParams,
+        GetRecommendedArticlesParams, ListArticleHistoryParams, UpdateArticleFavoriteParams,
     };
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn normalized_limit_defaults_to_twenty() {
@@ -287,5 +318,73 @@ mod tests {
         };
 
         assert!(params.validated_inputs().is_err());
+    }
+
+    #[test]
+    fn is_archive_candidate_true_for_old_plain_article() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        // 約2か月前・非お気に入り・非archived
+        assert!(is_archive_candidate(
+            "2026-05-10T09:00:00Z",
+            false,
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn is_archive_candidate_false_for_recent_article() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        // 5日前は候補でない
+        assert!(!is_archive_candidate(
+            "2026-07-10T09:00:00Z",
+            false,
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn is_archive_candidate_false_when_favorite_or_archived() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        // 古くてもお気に入りは除外
+        assert!(!is_archive_candidate(
+            "2026-01-01T00:00:00Z",
+            true,
+            false,
+            now
+        ));
+        // 古くてもarchived済みは除外
+        assert!(!is_archive_candidate(
+            "2026-01-01T00:00:00Z",
+            false,
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn is_archive_candidate_boundary_at_thirty_days() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        // ちょうど30日前は候補（<=）
+        assert!(is_archive_candidate(
+            "2026-06-15T00:00:00Z",
+            false,
+            false,
+            now
+        ));
+        // 29日前は候補でない
+        assert!(!is_archive_candidate(
+            "2026-06-16T00:00:00Z",
+            false,
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn is_archive_candidate_false_for_unparseable_fetched_at() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        assert!(!is_archive_candidate("not-a-date", false, false, now));
     }
 }

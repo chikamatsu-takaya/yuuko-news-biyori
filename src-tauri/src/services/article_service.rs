@@ -49,4 +49,10 @@ impl ArticleService {
         self.repository
             .update_article_favorite(&article_id, is_favorite)
     }
+
+    /// アーカイブ退避候補を返す（read-only）。判定の基準時刻は現在UTC。
+    /// 実ZIP圧縮は後続のため、ここでは候補の列挙のみを行う。
+    pub fn list_archive_candidates(&self) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
+        self.repository.list_archive_candidates(chrono::Utc::now())
+    }
 }
