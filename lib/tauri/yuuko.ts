@@ -78,6 +78,65 @@ export const confirmRankUpReward = async (
   return invoke<ConfirmRankUpRewardResult>("confirm_rank_up_reward", { params });
 };
 
+/** request_yuuko_notification の結果理由（Rust側と一致）。 */
+export type NotificationReason =
+  | "notified"
+  | "disabled"
+  | "reward_pending"
+  | "already_active"
+  | "daily_limit"
+  | "cooling_down"
+  | "no_candidate";
+
+export type RequestYuukoNotificationResult = {
+  notified: boolean;
+  reason: NotificationReason;
+  state: YuukoNotificationState;
+};
+
+/** ゆうこの通知を閉じる（Rust側でクールタイム設定・報酬は保持）。非Tauriは null。 */
+export const dismissYuukoNotification =
+  async (): Promise<YuukoNotificationState | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<YuukoNotificationState>("dismiss_yuuko_notification");
+  };
+
+/** ゆうこクリックの2段階遷移（1回目=軽量プレビュー、2回目=確定）。非Tauriは null。 */
+export const handleYuukoClicked =
+  async (): Promise<YuukoNotificationState | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<YuukoNotificationState>("handle_yuuko_clicked");
+  };
+
+/**
+ * ゆうこにニュース通知を出させる。抑制条件（日次上限・クールタイム等）と候補選定は Rust 側。
+ * 通知が出たか・理由・最新状態を返す。非Tauriは null。
+ */
+export const requestYuukoNotification =
+  async (): Promise<RequestYuukoNotificationResult | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<RequestYuukoNotificationResult>("request_yuuko_notification");
+  };
+
+/** 無操作タイムアウト（無視）を記録する。自動退場タイマー側から呼ぶ。非Tauriは null。 */
+export const markYuukoIgnored =
+  async (): Promise<YuukoNotificationState | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<YuukoNotificationState>("mark_yuuko_ignored");
+  };
+
 // --- 友情ランク（friendship） ---
 
 export type FriendshipState = {

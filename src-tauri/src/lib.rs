@@ -65,8 +65,11 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             let yuuko_state_repository = YuukoStateRepository::new(&paths);
-            let yuuko_service =
-                YuukoService::new(SettingsRepository::new(&paths), yuuko_state_repository);
+            let yuuko_service = YuukoService::new(
+                SettingsRepository::new(&paths),
+                yuuko_state_repository,
+                article_service.clone(),
+            );
             yuuko_service.initialize_default_if_missing()?;
             app.manage(AppState {
                 article_service,
@@ -101,6 +104,7 @@ pub fn run() {
             commands::article_commands::get_article_detail,
             commands::article_commands::update_article_favorite,
             commands::article_commands::generate_article_summary,
+            commands::article_commands::get_archive_candidates,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
@@ -116,6 +120,8 @@ pub fn run() {
             commands::yuuko_commands::confirm_rank_up_reward,
             commands::yuuko_commands::dismiss_yuuko_notification,
             commands::yuuko_commands::handle_yuuko_clicked,
+            commands::yuuko_commands::request_yuuko_notification,
+            commands::yuuko_commands::mark_yuuko_ignored,
             commands::friendship_commands::get_friendship_state,
             commands::friendship_commands::record_friendship_event
         ])

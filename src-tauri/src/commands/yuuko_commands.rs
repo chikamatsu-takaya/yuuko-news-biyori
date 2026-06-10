@@ -1,7 +1,8 @@
 use tauri::State;
 
 use crate::domain::yuuko::{
-    ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, YuukoNotificationState,
+    ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, RequestYuukoNotificationResult,
+    YuukoNotificationState,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -66,6 +67,40 @@ pub async fn handle_yuuko_clicked(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join handle-yuuko-clicked task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// ゆうこにニュース通知を出させる（抑制条件・候補選定はRust側）。結果に notified/reason/state を返す。
+#[tauri::command]
+pub async fn request_yuuko_notification(
+    state: State<'_, AppState>,
+) -> CommandResult<RequestYuukoNotificationResult> {
+    let yuuko_service = state.yuuko_service.clone();
+    tauri::async_runtime::spawn_blocking(move || yuuko_service.request_yuuko_notification())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join request-yuuko-notification task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 無操作タイムアウト（無視）を記録する。フロントの自動退場タイマーから呼ぶ。
+#[tauri::command]
+pub async fn mark_yuuko_ignored(
+    state: State<'_, AppState>,
+) -> CommandResult<YuukoNotificationState> {
+    let yuuko_service = state.yuuko_service.clone();
+    tauri::async_runtime::spawn_blocking(move || yuuko_service.mark_yuuko_ignored())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join mark-yuuko-ignored task: {error}"),
             )
         })?
         .map_err(CommandError::from)

@@ -11,7 +11,7 @@ test("creates Publickey development config files under the provided app-data dir
   try {
     const result = runSetup({ appDataDir });
 
-    assert.equal(result.identifier, "com.tauri.dev");
+    assert.equal(result.identifier, "jp.star-system.yuuko-news");
     assert.deepEqual(
       result.results.map((entry) => entry.status),
       ["created", "created"],

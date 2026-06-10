@@ -75,7 +75,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #56 まで反映済み**（ニュース履歴の実データ接続まで到達）。open PRなし。
+- `develop` は **PR #61 まで反映済み**（ゆうこ通知バックエンド強化まで）。open PRなし。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
@@ -87,9 +87,13 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - **ニュースソース設定導線は完了(#54)**。既存設定の部分書き込み防止・dry-run conflict表示・手順書更新まで反映済み。
 - **アクセシビリティラベル対応は完了(#55)**。主要操作のa11yラベルを追加。
 - **ニュース履歴の実データ接続は完了(#56)**。`NewsHistoryScreen` が保存済み記事をフィルタ付きで表示し、再閲覧導線まで動作。
-- **アーカイブ退避方針を確定（本PR）**: 「1か月経過→月単位ZIP・お気に入り除外」をデータ設計書 §14 準拠で採用（「4〜7日」案は不採用）。実ZIP圧縮はMVP後回し。
-- **設計書突き合わせ結果**: 辞書メモ/削除UI、ゆうこ通知プレビュー、設定画面の未実装操作、正式identifier、権限/ログ/性能点検を追加追跡（ニュース履歴は#56で完了）。
-- **次の優先順（バックエンド先行方針）**: アーカイブ退避方針確定（本PR・完了） → 設定画面の未実装操作の方針整理（候補4） → ゆうこ通知バックエンド強化（候補3） → 辞書メモ/削除UI配線 → フロントUX整備(#46) → Playwright CI任意チェック。
+- **アーカイブ退避方針を確定(#57)**: 「1か月経過→月単位ZIP・お気に入り除外」をデータ設計書 §14 準拠で採用（「4〜7日」案は不採用）。実ZIP圧縮はMVP後回し。
+- **設定アクション方針整理＋リセット実装は完了(#59)**: リセット=確認ダイアログ＋`reset_user_settings`、後回し3操作（キャッシュ削除/辞書export/アーカイブ管理）は非活性「準備中」、AI接続テストは後続。
+- **ゆうこ通知バックエンド強化は完了(#61)**: クールタイム(60/120/180分)・日次上限・紹介済みFIFO・`request_yuuko_notification`（選定＋ゲート。アクティブ通知/報酬pending時は上書きしない）・dismiss/handle/ignore/markIgnoredのTSラッパー。画面接続は#46（メンバー担当）。
+- **GachaScreen初期レイアウト修正は完了(#60)**（フロント・メンバー担当）。
+- **設計書突き合わせ結果**: 設定画面の未実装操作(#59完了)、ゆうこ通知(#61バックエンド完了・画面接続#46)、辞書メモ/削除UI、正式identifier、権限/ログ/性能点検を追加追跡。
+- **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、辞書メモ/削除UI配線、Mock依存置換、失敗時UI統一、余白微修正、GachaScreen）は**メンバー担当**。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
+- **次の優先順（非フロント）**: 正式identifier決定 → リリース前セキュリティ点検（capability/CSP/権限・ログ/秘密情報）→ 軽量常駐の性能確認 → アーカイブ実ZIP実装(#57後続) → 媒体ToS/AI要約 運用方針明文化 → おすすめ判定の重み調整 → Playwright UI E2EのCI導入。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -363,19 +367,19 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36で実装済み、フロント配線が未了
 - [ ] ゆうこ通知・軽量プレビューの操作結果をフロントへ接続する
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Doing
+  - Owner: バックエンド=@claude（#61完了）/ フロント=メンバー（#46）
+  - Branch: `feature/yuuko-notification-state`（マージ済み）
+  - Issue/PR: #61（候補3バックエンド・完了）／ 残り画面接続は #46
   - Done when:
-    - `dismiss_yuuko_notification` / `handle_yuuko_clicked` のTypeScriptラッパーがある
-    - 閉じる・無視・詳しく見る・再クリックがRust側状態へ反映される
-    - 軽量プレビューからメイン画面またはニュース閲覧画面へ遷移できる
-    - 簡易クールタイム・日次通知回数・紹介済み管理がRust側状態へ反映される
-    - `confirm_yuuko_preview_opened` 相当を追加するか、既存commandで代替するかが決まっている
-    - 連打で多重遷移しないことをUI E2Eまたは単体テストで確認している
+    - `dismiss_yuuko_notification` / `handle_yuuko_clicked` のTypeScriptラッパーがある ✅（+ `request_yuuko_notification` / `mark_yuuko_ignored` も追加）
+    - 閉じる・無視・詳しく見る・再クリックがRust側状態へ反映される ✅（Rust側command完備。画面イベント配線は#46）
+    - 軽量プレビューからメイン画面またはニュース閲覧画面へ遷移できる ⬜（フロント#46）
+    - 簡易クールタイム・日次通知回数・紹介済み管理がRust側状態へ反映される ✅（候補3で実装）
+    - `confirm_yuuko_preview_opened` 相当を追加するか、既存commandで代替するかが決まっている ✅（handle_click の1stクリックを preview-opened として再利用＝新command不要に決定）
+    - 連打で多重遷移しないことをUI E2Eまたは単体テストで確認している ⬜（フロント#46。Rust側はドメイン単体テストで担保）
   - Notes:
-    - 根拠: ゆうこ登場・通知挙動詳細設計書 §10 / §17。RustコマンドはPR #37で最小実装済み
+    - 根拠: ゆうこ登場・通知挙動詳細設計書 §4-§6/§10/§12。**候補3（本PR）でバックエンド強化**: クールタイム(60分)/閉じる(120分)/無視(180分)、日次上限=settings.notification.maxPerDay、紹介済みFIFO、`request_yuuko_notification`（未紹介・未読・スコア順で選定＋ゲート）、報酬pending時は通知で上書きしない。残りの画面遷移・連打防止はフロント#46
 - [x] 設定画面の未実装操作を整理し、実装または明示的に無効化する
   - Priority: P1.5
   - Status: Done
@@ -389,45 +393,56 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: 画面詳細設計書 SCR-003。仕分け結果: **リセット=実装**（確認ダイアログ＋`reset_user_settings`で既定値へ。破壊的操作なので§7.6準拠で確認必須）/ **AI接続テスト=後続**（net-new UI+command・Geminiは鍵設定時のみ＆mock自動fallback済みのため優先度中）/ **キャッシュ削除・辞書エクスポート・アーカイブ管理=後回し（非活性＋準備中表示）**（アーカイブは#57で実ZIP後回し決定済み）
     - 別タスク化推奨: 設定の多くがDTO未連携で未永続化（ゆうこ表示/解説詳しさ/用語レベル/長文自動候補/優先モード/通知頻度/ゲーム中抑制/ストレージ表示mock）。`UserSettings` DTO拡張は本PRと分離
-- [ ] 正式Tauri identifierとapp-data移行方針を決める
+- [x] 正式Tauri identifierとapp-data移行方針を決める（→ `jp.star-system.yuuko-news`）
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/official-identifier`
+  - Issue/PR: 本PR
   - Done when:
-    - `src-tauri/tauri.conf.json` の `identifier` が `com.tauri.dev` から正式値へ変更されている
-    - 開発中app-data（`com.tauri.dev`）から正式identifier配下への扱いがdocsに明記されている
-    - ニュースソース設定手順書の保存先説明も正式identifier前提に更新されている
+    - `src-tauri/tauri.conf.json` の `identifier` が `com.tauri.dev` から正式値へ変更されている ✅（`jp.star-system.yuuko-news`）
+    - 開発中app-data（`com.tauri.dev`）から正式identifier配下への扱いがdocsに明記されている ✅（手順書 §2 に移行注記）
+    - ニュースソース設定手順書の保存先説明も正式identifier前提に更新されている ✅
   - Notes:
-    - 根拠: `docs/01_setup/ニュースソース設定手順.md` と現行 `tauri.conf.json`。配布前に決めないと各メンバーの設定パスがずれる
+    - 決定: `jp.star-system.yuuko-news`（会社ドメイン star-system.jp の逆DNS＋製品名）。app-dataは `%APPDATA%\jp.star-system.yuuko-news\`。旧 `com.tauri.dev` 配下の検証データは自動移行されないため再 setup か手動移動が必要。`setup-dev-news-source.mjs` は conf から動的読込で自動追従、`test/dev-news-source-setup.test.mjs` の固定アサートも更新
 
 ### P1.5: リリース前セキュリティ・運用品質点検
 セキュリティ詳細設計書のMVPチェックリストと、常駐アプリとしての運用要件から追加。新機能ではなく、公開/社内配布前の仕上げ確認。
-- [ ] Tauri capability / CSP / 権限設定を棚卸しする
+- [x] Tauri capability / CSP / 権限設定を棚卸しする
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/release-security-review`
+  - Issue/PR: 本PR
   - Done when:
-    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み
-    - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている
-    - 任意ファイル操作/任意URL取得の公開口がないことを再確認している
+    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み ✅（capabilityは `core:default` のみ＝最小。CSPは未設定→制限的CSPを提案・後続で適用）
+    - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている ✅（`tauri-plugin-log` のみ・デバッグビルド限定）
+    - 任意ファイル操作/任意URL取得の公開口がないことを再確認している ✅（全commandドメイン限定・汎用口なし）
   - Notes:
-    - 根拠: セキュリティ詳細設計書 §19.5 / §17.1
-- [ ] ログ・AI送信データ・秘密情報の最終点検を行う
+    - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
+- [ ] CSPを設定する（制限的CSP・要 実機検証）
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Doing
+  - Owner: @claude（適用）/ 検証=アプリを動かせる担当
+  - Branch: `chore/set-csp`
+  - Issue/PR: 本PR
   - Done when:
-    - APIキー、本文全文、選択文字列全文、実ユーザーデータがログに出ないことを確認している
-    - Gemini送信対象がタイトル/概要/抽出抜粋中心の最小データであることを説明できる
-    - gitleaks等の秘密情報スキャン結果をPRまたはチェックリストに残している
+    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（点検結果 §6）✅（本PRで適用。script/style は static export 制約で `'unsafe-inline'`）
+    - 実機（`tauri build` のバンドル、または `devCsp` を設定した `tauri dev`）で全画面の描画とコンソールのCSP違反なしを確認している ⬜（要・人による目視）
   - Notes:
-    - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4
+    - 本PRはCSP適用まで。**本番CSPは `tauri build` で目視検証**（dev server は本番cspが当たらない場合あり）。検証で問題が出たら適用値を調整。手順は点検結果 §6
+- [x] ログ・AI送信データ・秘密情報の最終点検を行う
+  - Priority: P1.5
+  - Status: Done
+  - Owner: @claude
+  - Branch: `chore/release-security-review`
+  - Issue/PR: 本PR
+  - Done when:
+    - APIキー、本文全文、選択文字列全文、実ユーザーデータがログに出ないことを確認している ✅（全 `log::*` レビュー済み。I/O失敗・URL拒否・モデル検証・「キー未設定」のみ）
+    - Gemini送信対象がタイトル/概要/抽出抜粋中心の最小データであることを説明できる ✅（`build_prompt` は指示＋input_textのみ・context非送信を単体テストで担保）
+    - gitleaks等の秘密情報スキャン結果をPRまたはチェックリストに残している ✅（gitleaks `secret-scan.yml` 稼働＋手動grep 0件・cargo-audit `security-ci.yml` 稼働）
+  - Notes:
+    - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [ ] 軽量常駐の性能確認観点を決め、最低限の測定を行う
   - Priority: P1.5
   - Status: Todo
@@ -639,3 +654,12 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-08: 友情ランク簡易完成（ポイント加算・ランクアップ・RankUpDialog / PR #52）
 - [x] 2026-06-09: タスク進捗ダッシュボードを追加（Markdown正本のHTMLビュー / PR #53）
 - [x] 2026-06-09: 検証用ニュースソース設定導線を追加（`setup:dev-news-source` / PR #54）
+- [x] 2026-06-09: アクセシビリティラベルを追加（PR #55）
+- [x] 2026-06-09: ニュース履歴画面を実データへ接続（フィルタ・再閲覧導線 / PR #56）
+- [x] 2026-06-09: アーカイブ退避方針を「1か月→月次ZIP」で確定（データ設計書 §14 / PR #57）
+- [x] 2026-06-09: 設定アクション方針整理＋リセット実装（`reset_user_settings`・後回し操作の非活性「準備中」化 / PR #59）
+- [x] 2026-06-09: GachaScreen初期レイアウト修正（フロント・メンバー / PR #60）
+- [x] 2026-06-09: ゆうこ通知バックエンド強化（クールタイム/日次回数/紹介済み/選定トリガー / PR #61）
+- [x] 2026-06-09: タスクチェックリストを #55–#61 反映で同期（PR #62）
+- [x] 2026-06-09: 正式 Tauri identifier を `jp.star-system.yuuko-news` に確定（PR #63）
+- [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / 本PR）
