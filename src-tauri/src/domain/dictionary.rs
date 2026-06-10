@@ -208,6 +208,25 @@ impl UpdateDictionaryMemoParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateDictionaryFavoriteParams {
+    pub entry_id: String,
+    pub is_starred: bool,
+}
+
+impl UpdateDictionaryFavoriteParams {
+    pub fn validated(&self) -> Result<(String, bool), AppError> {
+        let entry_id = self.entry_id.trim();
+        if entry_id.is_empty() {
+            return Err(AppError::Validation(
+                "entryId must not be empty".to_string(),
+            ));
+        }
+        Ok((entry_id.to_string(), self.is_starred))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteDictionaryEntryParams {
     pub entry_id: String,
 }

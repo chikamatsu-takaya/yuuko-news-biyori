@@ -3,7 +3,7 @@ use tauri::State;
 use crate::domain::dictionary::{
     DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryListItemDto,
     ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
-    UpdateDictionaryMemoParams,
+    UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -77,6 +77,25 @@ pub async fn update_dictionary_memo(
             )
         })?
         .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn update_dictionary_favorite(
+    state: State<'_, AppState>,
+    params: UpdateDictionaryFavoriteParams,
+) -> CommandResult<DictionaryEntryListItemDto> {
+    let dictionary_service = state.dictionary_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        dictionary_service.update_dictionary_favorite(params)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "JOIN_ERROR",
+            format!("failed to join update-dictionary-favorite task: {error}"),
+        )
+    })?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

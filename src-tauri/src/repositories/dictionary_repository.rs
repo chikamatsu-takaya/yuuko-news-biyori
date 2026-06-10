@@ -109,6 +109,23 @@ impl DictionaryRepository {
         Ok(updated)
     }
 
+    pub fn update_dictionary_favorite(
+        &self,
+        entry_id: &str,
+        is_starred: bool,
+    ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let mut store = self.load_store_or_default()?;
+        let entry = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.dictionary_id == entry_id)
+            .ok_or_else(|| AppError::NotFound(format!("dictionary entry not found: {entry_id}")))?;
+        entry.favorite = is_starred;
+        let updated = entry.to_list_item_dto();
+        self.save_store(&store)?;
+        Ok(updated)
+    }
+
     pub fn delete_dictionary_entry(&self, entry_id: &str) -> Result<String, AppError> {
         let mut store = self.load_store_or_default()?;
         let before = store.entries.len();
