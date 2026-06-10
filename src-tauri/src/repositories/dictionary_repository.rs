@@ -642,11 +642,42 @@ mod tests {
     }
 
     #[test]
-    fn update_dictionary_memo_rejects_unknown_entry() {
+    fn update_dictionary_memo_reject_unknown_entry() {
         let context = TestRepositoryContext::new();
         let error = context
             .repository
             .update_dictionary_memo("entry-unknown", Some("x".to_string()))
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
+    }
+
+    #[test]
+    fn update_dictionary_favorite_sets_and_returns_favorite() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let updated = context
+            .repository
+            .update_dictionary_favorite("entry-article-001-generated-ai", false)
+            .unwrap();
+        assert!(!updated.is_starred);
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(None, None, false)
+            .unwrap();
+        assert!(!entries[0].is_starred);
+    }
+
+    #[test]
+    fn update_dictionary_favorite_rejects_unknown_entry() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .update_dictionary_favorite("entry-unknown", true)
             .unwrap_err();
         assert!(error.to_string().contains("dictionary entry not found"));
     }
