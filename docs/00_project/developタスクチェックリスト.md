@@ -7,48 +7,46 @@
 ## 0. 今日見る場所
 
 ### Now
-- [ ] Playwright UI E2Eを任意実行できるCI導線を追加する
-  - Priority: P2
-  - Status: Review
-  - Owner: @codex
-  - Branch: `codex/playwright-ui-e2e-ci`
-  - Issue/PR: 本PR
-  - Done when:
-    - PRコメント本文を `/e2e` だけにして投稿すると、PR headに対してChromium UI E2Eが動く ✅
-    - Actions画面からブランチまたはPR番号を指定して手動実行できる ✅
-    - 失敗時もPlaywright report・スクリーンショット・traceをartifactで確認できる ✅
-    - PRコード実行ジョブに書き込み権限やSecretを渡さない ✅
-    - `review:quick` / `review:strict` と既存必須CIへは未組み込みである ✅
-  - Notes:
-    - コメント起動は `OWNER` / `MEMBER` / `COLLABORATOR` に限定。結果コメントは、PRコードを実行しない別ジョブから投稿する
-
-### Next
-- [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
+- [ ] 軽量常駐の性能確認観点を決め、最低限の測定を行う
   - Priority: P1.5
   - Status: Next
   - Owner: 未定
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
-    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある
-    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ
-    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される
-    - ★付与/解除がユーザー操作から永続化される
+    - 起動時間、待機時CPU、メモリ、通信頻度の確認方法が決まっている
+    - 起動時＋日付変更時のニュース取得が過剰通信になっていないことを確認している
+    - 常駐ゆうこ/メイン画面表示時の負荷差を簡単に説明できる
   - Notes:
-    - ニュース履歴実データ化の次候補。フロント修正中メンバーの担当範囲と重なる場合は後ろへ回す
+    - フロント修正中メンバーと競合しにくい、非フロントの次候補
+
+### Next
+- [ ] 月次ZIPアーカイブ増分2（元Markdown削除・ZIP再閲覧・自動実行）を設計する
+  - Priority: P1.5
+  - Status: Next
+  - Owner: 未定
+  - Branch: 未作成
+  - Issue/PR: 未定
+  - Done when:
+    - ZIPと`archive_index.json`の整合確認後にだけ元Markdownを削除する失敗時設計が決まっている
+    - 履歴画面からZIP内記事を安全に再閲覧する方法が決まっている
+    - 自動実行のタイミングと、再実行時の冪等性が決まっている
+  - Notes:
+    - 増分1（非破壊ZIP作成・index更新・archived印）はPR #68で完了。データ削除を伴うため、実装前レビューを重視する
 
 ### Blocked / 要判断
-- [x] アーカイブ退避の起点・粒度を決める（→ 1か月→月次ZIPで確定）
+- [ ] 本番CSPをTauri実機で検証する
   - Priority: P1.5
-  - Status: Done
-  - Owner: @claude
-  - Branch: `docs/archive-retention-policy`
-  - Issue/PR: 本PR
+  - Status: Blocked
+  - Owner: アプリを起動できる担当
+  - Branch: 未作成
+  - Issue/PR: #65（設定適用）
   - Done when:
-    - データ設計書 §14 の「1か月→月次ZIP」案と、記憶にある「4〜7日」案のどちらを採用するか決まっている ✅（§14準拠で1か月→月次ZIPを採用）
-    - 採用方針がデータ設計書とこのチェックリストに反映されている ✅（データ設計書 §14 決定ノート）
+    - `tauri build`、または本番相当CSPを有効にした`tauri dev`で主要画面が表示できる
+    - ブラウザコンソールとTauriログにCSP違反が出ていない
+    - 問題があればCSPを必要最小限の範囲で調整している
   - Notes:
-    - 決定: 1か月経過→月単位ZIP、お気に入り/再展開中/エラー記事は除外。「4〜7日」案は資料矛盾＋履歴UX劣化で不採用。実ZIP圧縮はMVP後回し（archiveStateと導線の余地のみ維持）。現在ブロック項目なし
+    - CSP設定自体はPR #65で反映済み。Windows/Tauri実機による人の目視確認待ち
 
 ## 1. 使い方
 - このMarkdownをタスク管理の唯一の正本とする。HTMLビューやスプレッドシートは表示・共有用であり、正本にはしない。
@@ -77,25 +75,26 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #72 まで反映済み**（媒体ToS/AI要約方針・おすすめ判定調整を含む）。Playwright UI E2E任意CIを本PRで整備中。
+- `develop` は **PR #74 まで反映済み**。open PRなし。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
 - **AI PRレビュー**: `@claude` PRレビューは OAuth(サブスク)認証で稼働(#39/#47/#48)し、public向け権限ゲート済み(#49)。Codexレビューは方式A（Codex cloud / `@codex review` / APIキー不要）の導線と日本語レビュー指針まで完了(#69/#70)。
 - ニュース取得は `pnpm run setup:dev-news-source` で検証用 `news_sources.json` / `network_allowlist.json` を app-data に作成すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
-- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)済みで、コメント/手動起動の任意CIを本PRで整備中。必須CIへの組み込みは未実施。
+- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2Eはカバレッジ拡充(#45)＋コメント/手動起動の任意CI(#73)＋結果コメント権限修正(#74)まで完了。PR #74でChromium 7件・artifact保存・PR結果コメントの実動作を確認済み。必須CIへの組み込みは未実施。
 - **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
 - **UI画像警告対応は完了(#50)**。`yuuko.png` のLCP/画像比率警告とGachaScreenのモバイル崩れを修正済み。
 - **ニュースソース設定導線は完了(#54)**。既存設定の部分書き込み防止・dry-run conflict表示・手順書更新まで反映済み。
 - **アクセシビリティラベル対応は完了(#55)**。主要操作のa11yラベルを追加。
 - **ニュース履歴の実データ接続は完了(#56)**。`NewsHistoryScreen` が保存済み記事をフィルタ付きで表示し、再閲覧導線まで動作。
-- **アーカイブ退避方針を確定(#57)**: 「1か月経過→月単位ZIP・お気に入り除外」をデータ設計書 §14 準拠で採用（「4〜7日」案は不採用）。実ZIP圧縮はMVP後回し。
+- **フロント操作の補強は完了(#58/#67)**。MainScreenのニュース一覧スクロールと、ゆうこ辞書のメモ編集・削除・★操作を実データへ接続済み。
+- **アーカイブ退避方針を確定(#57)し、増分1を実装(#68)**: 「1か月経過→月単位ZIP・お気に入り除外」で、非破壊ZIP作成・検証・index更新・archived印まで完了。元Markdown削除・ZIP再閲覧・自動化は増分2として未着手。
 - **設定アクション方針整理＋リセット実装は完了(#59)**: リセット=確認ダイアログ＋`reset_user_settings`、後回し3操作（キャッシュ削除/辞書export/アーカイブ管理）は非活性「準備中」、AI接続テストは後続。
 - **ゆうこ通知バックエンド強化は完了(#61)**: クールタイム(60/120/180分)・日次上限・紹介済みFIFO・`request_yuuko_notification`（選定＋ゲート。アクティブ通知/報酬pending時は上書きしない）・dismiss/handle/ignore/markIgnoredのTSラッパー。画面接続は#46（メンバー担当）。
 - **GachaScreen初期レイアウト修正は完了(#60)**（フロント・メンバー担当）。
 - **設計書突き合わせ結果**: 設定画面の未実装操作(#59完了)、ゆうこ通知(#61バックエンド完了・画面接続#46)、辞書メモ/削除UI、正式identifier、権限/ログ/性能点検を追加追跡。
-- **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、辞書メモ/削除UI配線、Mock依存置換、失敗時UI統一、余白微修正、GachaScreen）は**メンバー担当**。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
-- **次の優先順（非フロント）**: Playwright UI E2Eの任意CI導入（本PR）→ 軽量常駐の性能確認 → アーカイブ増分2（元.md削除＋ZIP再閲覧＋自動化）。Codex導線(#69/#70)・媒体ToS/AI要約方針(#71)・おすすめ判定調整(#72)は完了。
+- **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、Mock依存置換、失敗時UI統一、余白微修正）は**メンバー担当**。辞書メモ/削除/★操作は#67で完了。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
+- **次の優先順（非フロント）**: 軽量常駐の性能確認 → アーカイブ増分2（元Markdown削除＋ZIP再閲覧＋自動化）→ Playwright E2Eの必須化要否判断。Codex導線(#69/#70)・媒体ToS/AI要約方針(#71)・おすすめ判定調整(#72)・任意E2E CI(#73/#74)は完了。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -118,20 +117,20 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Issue/PR: 未定
   - Done when:
     - Playwrightの実行時間と安定性を確認したうえで、review scriptへの組み込み可否が決まっている
-- [ ] Playwright Chromium install をCI手順へ追加（`pnpm exec playwright install --with-deps chromium`）
+- [x] Playwright Chromium install をCI手順へ追加（`pnpm exec playwright install --with-deps chromium` / PR #73）
   - Priority: P2
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
-  - Issue/PR: 本PR
+  - Issue/PR: #73
   - Done when:
     - CI上でChromiumが確実に準備され、UI E2Eを任意チェックとして実行できる
-- [ ] GitHub ActionsでUI E2Eを任意チェックとして追加
+- [x] GitHub ActionsでUI E2Eを任意チェックとして追加（PR #73 / #74）
   - Priority: P2
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
-  - Issue/PR: 本PR
+  - Issue/PR: #73 / #74
   - Done when:
     - PR上でUI E2Eの結果を確認できる
     - 失敗時も既存必須CIを不必要に塞がない運用になっている
@@ -150,6 +149,8 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] 記事一覧・記事詳細・辞書・お気に入り・要約生成の段階接続
 - [x] ホーム画面にニュース手動更新UIを追加（PR #31 / `c57115f`）
 - [x] PlaywrightによるUI確認E2E基盤を追加（PR #32 / `3c0b7ac`）
+- [x] MainScreenのニュース一覧スクロールを修正（PR #58）
+- [x] ゆうこ辞書のメモ編集・削除・★操作を実データへ接続（PR #67）
 - [ ] Mockデータ依存箇所を段階的に置換
   - Priority: P2
   - Status: Todo
@@ -203,6 +204,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] `get_yuuko_notification_state`
 - [x] `confirm_rank_up_reward`
 - [x] `refresh_news`
+- [x] `archive_old_articles`（月次ZIP増分1・非破壊 / PR #68）
 - [x] Tauri npm/Rust crate のバージョン整合（PR #30 / `f16ba0d`）
 - [x] 辞書メモ更新・辞書削除コマンド（`update_dictionary_memo` / `delete_dictionary_entry`、PR #36）
 - [x] ゆうこ通知操作コマンド（`dismiss_yuuko_notification` / `handle_yuuko_clicked`、PR #37）
@@ -236,7 +238,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Status: Done
   - Owner: @claude
   - Branch: `docs/media-tos-ai-policy`
-  - Issue/PR: 本PR
+  - Issue/PR: #71
   - Done when:
     - MVP検証用と公開版で、保存・要約・表示範囲の違いが説明されている ✅（`docs/01_setup/媒体ToS・AI要約運用方針.md` §3）
     - ニュースソース追加時の確認観点にToS/AI要約可否が含まれている ✅（同 §4 チェックリスト）
@@ -334,12 +336,41 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Status: Done
   - Owner: @claude
   - Branch: `docs/archive-retention-policy`
-  - Issue/PR: 本PR
+  - Issue/PR: #57
   - Done when:
     - 退避起点と粒度が決まり、データ設計書と実装タスクに反映されている ✅（データ設計書 §14 決定ノート）
     - お気に入り・再表示・容量上限の扱いが明確になっている ✅（お気に入りは常に除外／直近1か月は履歴で参照可／1日10件前後で容量懸念は小）
   - Notes:
-    - 実ZIP圧縮の実装はMVP後回し（後続タスク化）。保管期間・圧縮ルールは将来設定可能として残す
+    - 増分1の実ZIP圧縮はPR #68で完了。元Markdown削除・ZIP再閲覧・自動実行は増分2として後続
+- [x] アーカイブ退避候補の選定ロジックを追加（PR #66）
+  - Priority: P1.5
+  - Status: Done
+  - Owner: @claude
+  - Branch: `feature/archive-candidates`
+  - Issue/PR: #66
+  - Done when:
+    - 1か月経過・お気に入り除外・既存アーカイブ除外の候補判定がRust側にある ✅
+    - 境界値と除外条件の単体テストがある ✅
+- [x] 月次ZIPアーカイブ増分1を実装（PR #68）
+  - Priority: P1.5
+  - Status: Done
+  - Owner: @claude / @codex（レビュー修正）
+  - Branch: `feature/archive-zip`
+  - Issue/PR: #68
+  - Done when:
+    - 月単位ZIPを作成・検証し、`archive_index.json`を更新できる ✅
+    - 成功記事だけにarchived印を付け、元Markdownを保持する非破壊設計になっている ✅
+    - 複数月・途中失敗・同月再実行時の整合性をテストしている ✅
+- [ ] 月次ZIPアーカイブ増分2（元Markdown削除・ZIP再閲覧・自動実行）
+  - Priority: P1.5
+  - Status: Next
+  - Owner: 未定
+  - Branch: 未作成
+  - Issue/PR: 未定
+  - Done when:
+    - ZIPとindexの整合確認後にだけ元Markdownを削除する
+    - ZIP内記事を安全に再閲覧できる
+    - 自動実行のタイミングと再実行時の冪等性がテストされている
 
 ### P1.5: 設計書突き合わせで追加したMVP残件（2026-06-08確認）
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。
@@ -356,19 +387,19 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: MVPスコープ §6.2 / 画面詳細設計書 SCR-005
     - PR #56 でマージ済み（status barの実データ件数表示・空/エラー時文言の整理を含む）
-- [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
+- [x] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する（PR #67）
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: メンバー
+  - Branch: `feature/dictionary-actions-ui`
+  - Issue/PR: #67
   - Done when:
-    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある
-    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ
-    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される
-    - ★付与/解除がユーザー操作から永続化される（既存保存コマンド流用 or 専用command追加のどちらかで実装）
+    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある ✅
+    - `DictionaryScreen` のメモ編集・削除がRust commandを呼ぶ ✅
+    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される ✅
+    - ★付与/解除がユーザー操作から永続化される ✅
   - Notes:
-    - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36で実装済み、フロント配線が未了
+    - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36、フロント配線はPR #67で完了
 - [ ] ゆうこ通知・軽量プレビューの操作結果をフロントへ接続する
   - Priority: P1.5
   - Status: Doing
@@ -383,26 +414,26 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - `confirm_yuuko_preview_opened` 相当を追加するか、既存commandで代替するかが決まっている ✅（handle_click の1stクリックを preview-opened として再利用＝新command不要に決定）
     - 連打で多重遷移しないことをUI E2Eまたは単体テストで確認している ⬜（フロント#46。Rust側はドメイン単体テストで担保）
   - Notes:
-    - 根拠: ゆうこ登場・通知挙動詳細設計書 §4-§6/§10/§12。**候補3（本PR）でバックエンド強化**: クールタイム(60分)/閉じる(120分)/無視(180分)、日次上限=settings.notification.maxPerDay、紹介済みFIFO、`request_yuuko_notification`（未紹介・未読・スコア順で選定＋ゲート）、報酬pending時は通知で上書きしない。残りの画面遷移・連打防止はフロント#46
+    - 根拠: ゆうこ登場・通知挙動詳細設計書 §4-§6/§10/§12。**PR #61でバックエンド強化**: クールタイム(60分)/閉じる(120分)/無視(180分)、日次上限=settings.notification.maxPerDay、紹介済みFIFO、`request_yuuko_notification`（未紹介・未読・スコア順で選定＋ゲート）、報酬pending時は通知で上書きしない。残りの画面遷移・連打防止はフロント#46
 - [x] 設定画面の未実装操作を整理し、実装または明示的に無効化する
   - Priority: P1.5
   - Status: Done
   - Owner: @claude
   - Branch: `feature/settings-backend-actions`
-  - Issue/PR: 本PR
+  - Issue/PR: #59
   - Done when:
     - AI接続テスト、リセット、キャッシュ削除、辞書エクスポート、アーカイブ管理の各ボタンについて実装/後回し/非活性表示が決まっている ✅
     - 実装する操作はRust側commandへ寄せ、React側にファイル操作や外部通信を持たせていない ✅（`reset_user_settings` をRust側に追加。Reactは結果DTOの反映のみ）
     - 後回しにする操作はユーザーに誤解されない表示になっている ✅（キャッシュ削除/辞書export/アーカイブ管理を非活性＋「準備中」表示）
   - Notes:
-    - 根拠: 画面詳細設計書 SCR-003。仕分け結果: **リセット=実装**（確認ダイアログ＋`reset_user_settings`で既定値へ。破壊的操作なので§7.6準拠で確認必須）/ **AI接続テスト=後続**（net-new UI+command・Geminiは鍵設定時のみ＆mock自動fallback済みのため優先度中）/ **キャッシュ削除・辞書エクスポート・アーカイブ管理=後回し（非活性＋準備中表示）**（アーカイブは#57で実ZIP後回し決定済み）
-    - 別タスク化推奨: 設定の多くがDTO未連携で未永続化（ゆうこ表示/解説詳しさ/用語レベル/長文自動候補/優先モード/通知頻度/ゲーム中抑制/ストレージ表示mock）。`UserSettings` DTO拡張は本PRと分離
+    - 根拠: 画面詳細設計書 SCR-003。仕分け結果: **リセット=実装**（確認ダイアログ＋`reset_user_settings`で既定値へ。破壊的操作なので§7.6準拠で確認必須）/ **AI接続テスト=後続**（net-new UI+command・Geminiは鍵設定時のみ＆mock自動fallback済みのため優先度中）/ **キャッシュ削除・辞書エクスポート・アーカイブ管理=後回し（非活性＋準備中表示）**（アーカイブ増分1は#68で完了、管理UIは後続）
+    - 別タスク化推奨: 設定の多くがDTO未連携で未永続化（ゆうこ表示/解説詳しさ/用語レベル/長文自動候補/優先モード/通知頻度/ゲーム中抑制/ストレージ表示mock）。`UserSettings` DTO拡張はPR #59と分離
 - [x] 正式Tauri identifierとapp-data移行方針を決める（→ `jp.star-system.yuuko-news`）
   - Priority: P1.5
   - Status: Done
   - Owner: @claude
   - Branch: `chore/official-identifier`
-  - Issue/PR: 本PR
+  - Issue/PR: #63
   - Done when:
     - `src-tauri/tauri.conf.json` の `identifier` が `com.tauri.dev` から正式値へ変更されている ✅（`jp.star-system.yuuko-news`）
     - 開発中app-data（`com.tauri.dev`）から正式identifier配下への扱いがdocsに明記されている ✅（手順書 §2 に移行注記）
@@ -417,7 +448,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Status: Done
   - Owner: @claude
   - Branch: `chore/release-security-review`
-  - Issue/PR: 本PR
+  - Issue/PR: #64
   - Done when:
     - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み ✅（capabilityは `core:default` のみ＝最小。CSPは未設定→制限的CSPを提案・後続で適用）
     - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている ✅（`tauri-plugin-log` のみ・デバッグビルド限定）
@@ -426,21 +457,21 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [ ] CSPを設定する（制限的CSP・要 実機検証）
   - Priority: P1.5
-  - Status: Doing
+  - Status: Blocked
   - Owner: @claude（適用）/ 検証=アプリを動かせる担当
   - Branch: `chore/set-csp`
-  - Issue/PR: 本PR
+  - Issue/PR: #65
   - Done when:
-    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（点検結果 §6）✅（本PRで適用。script/style は static export 制約で `'unsafe-inline'`）
+    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（点検結果 §6）✅（PR #65で適用。script/style は static export 制約で `'unsafe-inline'`）
     - 実機（`tauri build` のバンドル、または `devCsp` を設定した `tauri dev`）で全画面の描画とコンソールのCSP違反なしを確認している ⬜（要・人による目視）
   - Notes:
-    - 本PRはCSP適用まで。**本番CSPは `tauri build` で目視検証**（dev server は本番cspが当たらない場合あり）。検証で問題が出たら適用値を調整。手順は点検結果 §6
+    - PR #65はCSP適用まで。**本番CSPは `tauri build` で目視検証**（dev server は本番cspが当たらない場合あり）。検証で問題が出たら適用値を調整。手順は点検結果 §6
 - [x] ログ・AI送信データ・秘密情報の最終点検を行う
   - Priority: P1.5
   - Status: Done
   - Owner: @claude
   - Branch: `chore/release-security-review`
-  - Issue/PR: 本PR
+  - Issue/PR: #64
   - Done when:
     - APIキー、本文全文、選択文字列全文、実ユーザーデータがログに出ないことを確認している ✅（全 `log::*` レビュー済み。I/O失敗・URL拒否・モデル検証・「キー未設定」のみ）
     - Gemini送信対象がタイトル/概要/抽出抜粋中心の最小データであることを説明できる ✅（`build_prompt` は指示＋input_textのみ・context非送信を単体テストで担保）
@@ -449,7 +480,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [ ] 軽量常駐の性能確認観点を決め、最低限の測定を行う
   - Priority: P1.5
-  - Status: Todo
+  - Status: Next
   - Owner: 未定
   - Branch: 未作成
   - Issue/PR: 未定
@@ -515,7 +546,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
   - Status: Done
   - Owner: @claude
   - Branch: `feature/recommendation-tuning`
-  - Issue/PR: 本PR
+  - Issue/PR: #72
   - Done when:
     - 重要度キーワード/驚き要素キーワードの初期候補が整理されている ✅（`おすすめ判定ポリシー.md` §3 ＋ `INITIAL_IMPORTANT_KEYWORDS` / `SURPRISE_TERMS`）
     - `RecommendationService` の重み調整をどの資料・設定で管理するか決まっている ✅（同 §4: MVPはRust定数＋本docを正、将来は設定化/傾向メモ）
@@ -523,21 +554,21 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
   - Notes:
     - 新規 `docs/02_design/おすすめ判定ポリシー.md`。あわせて NewsService が `important_keywords` を空→初期候補に配線し keyword_match が実発火するよう修正
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
-（補足：E2Eのテストカバレッジはチーム PR #45 で拡充済み。残りは下記のCI統合のみ。）
-- [ ] CIで `pnpm exec playwright install --with-deps chromium` を実行
+（補足：E2EのテストカバレッジはPR #45、任意CIはPR #73/#74で完了。残りは必須化の要否判断のみ。）
+- [x] CIで `pnpm exec playwright install --with-deps chromium` を実行（PR #73）
   - Priority: P2
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
-  - Issue/PR: 本PR
+  - Issue/PR: #73
   - Done when:
     - GitHub Actions上でPlaywrightブラウザが安定してインストールされる
-- [ ] まず任意チェックとして追加
+- [x] まず任意チェックとして追加（PR #73 / #74）
   - Priority: P2
-  - Status: Review
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
-  - Issue/PR: 本PR
+  - Issue/PR: #73 / #74
   - Done when:
     - PR上でUI E2E結果を確認でき、失敗時の運用が明確になっている
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -661,13 +692,19 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-09: アクセシビリティラベルを追加（PR #55）
 - [x] 2026-06-09: ニュース履歴画面を実データへ接続（フィルタ・再閲覧導線 / PR #56）
 - [x] 2026-06-09: アーカイブ退避方針を「1か月→月次ZIP」で確定（データ設計書 §14 / PR #57）
+- [x] 2026-06-09: MainScreenのニュース一覧スクロールを修正（PR #58）
 - [x] 2026-06-09: 設定アクション方針整理＋リセット実装（`reset_user_settings`・後回し操作の非活性「準備中」化 / PR #59）
 - [x] 2026-06-09: GachaScreen初期レイアウト修正（フロント・メンバー / PR #60）
 - [x] 2026-06-09: ゆうこ通知バックエンド強化（クールタイム/日次回数/紹介済み/選定トリガー / PR #61）
 - [x] 2026-06-09: タスクチェックリストを #55–#61 反映で同期（PR #62）
 - [x] 2026-06-09: 正式 Tauri identifier を `jp.star-system.yuuko-news` に確定（PR #63）
-- [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / 本PR）
+- [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / PR #64）
+- [x] 2026-06-10: 制限的CSPを設定（実機検証は残件 / PR #65）
+- [x] 2026-06-10: アーカイブ退避候補の選定ロジックを追加（PR #66）
+- [x] 2026-06-10: ゆうこ辞書のメモ編集・削除・★操作を実データへ接続（PR #67）
 - [x] 2026-06-10: 月次ZIPアーカイブ本体（増分1・非破壊）を実装（PR #68）
 - [x] 2026-06-10: Codex cloudによるPRレビュー導線と日本語レビュー指針を整備（PR #69 / #70）
 - [x] 2026-06-10: 媒体ToS・AI要約の運用方針を明文化（MVP/公開版の保存・要約・表示範囲＋ソース追加時のToS/AI要約可否チェック / PR #71）
 - [x] 2026-06-10: おすすめ判定の重み・キーワードを整理し、初期キーワードを配線（PR #72）
+- [x] 2026-06-10: Playwright UI E2Eを`/e2e`コメント＋Actions手動起動の任意CIとして追加（PR #73）
+- [x] 2026-06-10: E2E結果コメント権限を修正し、Chromium 7件・artifact・PRコメントの実動作を確認（PR #74）
