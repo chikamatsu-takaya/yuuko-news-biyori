@@ -109,6 +109,23 @@ impl DictionaryRepository {
         Ok(updated)
     }
 
+    pub fn update_dictionary_favorite(
+        &self,
+        entry_id: &str,
+        is_starred: bool,
+    ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let mut store = self.load_store_or_default()?;
+        let entry = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.dictionary_id == entry_id)
+            .ok_or_else(|| AppError::NotFound(format!("dictionary entry not found: {entry_id}")))?;
+        entry.favorite = is_starred;
+        let updated = entry.to_list_item_dto();
+        self.save_store(&store)?;
+        Ok(updated)
+    }
+
     pub fn delete_dictionary_entry(&self, entry_id: &str) -> Result<String, AppError> {
         let mut store = self.load_store_or_default()?;
         let before = store.entries.len();
@@ -625,11 +642,42 @@ mod tests {
     }
 
     #[test]
-    fn update_dictionary_memo_rejects_unknown_entry() {
+    fn update_dictionary_memo_reject_unknown_entry() {
         let context = TestRepositoryContext::new();
         let error = context
             .repository
             .update_dictionary_memo("entry-unknown", Some("x".to_string()))
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
+    }
+
+    #[test]
+    fn update_dictionary_favorite_sets_and_returns_favorite() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let updated = context
+            .repository
+            .update_dictionary_favorite("entry-article-001-generated-ai", false)
+            .unwrap();
+        assert!(!updated.is_starred);
+
+        let entries = context
+            .repository
+            .list_dictionary_entries(None, None, false)
+            .unwrap();
+        assert!(!entries[0].is_starred);
+    }
+
+    #[test]
+    fn update_dictionary_favorite_rejects_unknown_entry() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .update_dictionary_favorite("entry-unknown", true)
             .unwrap_err();
         assert!(error.to_string().contains("dictionary entry not found"));
     }

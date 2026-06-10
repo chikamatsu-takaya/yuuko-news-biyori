@@ -27,11 +27,14 @@ import {
   Pencil,
   Bell,
   HelpCircle,
+  Save,
+  X,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
@@ -44,6 +47,9 @@ import {
 } from "@/components/ui/select";
 import {
   listDictionaryEntries,
+  updateDictionaryMemo,
+  updateDictionaryFavorite,
+  deleteDictionaryEntry,
   type DictionaryEntryListItemDto as TauriDictionaryEntryListItemDto,
   type DictionaryEntryType as TauriDictionaryEntryType,
 } from "@/lib/tauri/dictionary";
@@ -70,6 +76,7 @@ type DictionaryEntry = {
   relatedArticleId?: string;
   relatedArticle?: string;
   isFavorite: boolean;
+  memo?: string;
   iconType: DictionaryIconType;
 };
 
@@ -96,6 +103,7 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     relatedArticleId: "article-001",
     relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: true,
+    memo: "最近よく聞くので覚えておきたい。",
     iconType: "robot",
   },
   {
@@ -240,6 +248,7 @@ function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
     relatedArticleId: entry.relatedArticleId,
     relatedArticle: entry.relatedArticleTitle,
     isFavorite: entry.isStarred,
+    memo: entry.memo,
     iconType: iconTypeFor(entry.type),
   };
 }
@@ -350,10 +359,12 @@ function DictionaryEntryCard({
   entry,
   isSelected,
   onClick,
+  onToggleFavorite,
 }: {
   entry: DictionaryEntry;
   isSelected: boolean;
   onClick: () => void;
+  onToggleFavorite: (entryId: string, current: boolean) => void;
 }) {
   return (
     <Card
@@ -391,10 +402,7 @@ function DictionaryEntryCard({
           className="shrink-0 p-1"
           onClick={(event) => {
             event.stopPropagation();
-            console.log(
-              "Dictionary favorite toggle is not implemented yet:",
-              entry.id
-            );
+            onToggleFavorite(entry.id, entry.isFavorite);
           }}
         >
           <Star
@@ -529,66 +537,62 @@ export default function DictionaryScreen({
   const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+
+  // Memo edit states
+  const [isEditingMemo, setIsEditingMemo] = React.useState(false);
+  const [editMemoValue, setEditMemoValue] = React.useState("");
 
   const trimmedSearchQuery = searchQuery.trim();
 
+  // Reset edit state when selection changes
   React.useEffect(() => {
-    let isMounted = true;
+    setIsEditingMemo(false);
+    setEditMemoValue("");
+    setActionError(null);
+  }, [selectedEntryId]);
 
-    const loadEntries = async () => {
-      setIsLoading(true);
-      setLoadNotice(null);
+  const loadEntries = React.useCallback(async () => {
+    setIsLoading(true);
+    setLoadNotice(null);
 
-      try {
-        const dictionaryEntries = await listDictionaryEntries({
-          keyword: trimmedSearchQuery || undefined,
-          type:
-            activeFilter !== "all" && activeFilter !== "favorite"
-              ? activeFilter
-              : undefined,
-          starredOnly: activeFilter === "favorite" ? true : undefined,
-        });
+    try {
+      const dictionaryEntries = await listDictionaryEntries({
+        keyword: trimmedSearchQuery || undefined,
+        type:
+          activeFilter !== "all" && activeFilter !== "favorite"
+            ? activeFilter
+            : undefined,
+        starredOnly: activeFilter === "favorite" ? true : undefined,
+      });
 
-        if (!isMounted) {
-          return;
-        }
-
-        if (!dictionaryEntries) {
-          setEntries(
-            filterFallbackEntries(
-              fallbackDictionaryEntries,
-              trimmedSearchQuery,
-              activeFilter
-            )
-          );
-          setLoadNotice(previewNotice);
-          return;
-        }
-
-        setEntries(dictionaryEntries.map(toUiEntry));
-      } catch (error) {
-        if (!isMounted) {
-          return;
-        }
-
-        setEntries([]);
-        setLoadNotice(
-          "辞書一覧の取得に失敗しました。時間をおいてもう一度お試しください。"
+      if (!dictionaryEntries) {
+        setEntries(
+          filterFallbackEntries(
+            fallbackDictionaryEntries,
+            trimmedSearchQuery,
+            activeFilter
+          )
         );
-        console.warn("Failed to load dictionary entries:", error);
-      } finally {
-        if (isMounted) {
-          setIsLoading(false);
-        }
+        setLoadNotice(previewNotice);
+        return;
       }
-    };
 
-    void loadEntries();
-
-    return () => {
-      isMounted = false;
-    };
+      setEntries(dictionaryEntries.map(toUiEntry));
+    } catch (error) {
+      setEntries([]);
+      setLoadNotice(
+        "辞書一覧の取得に失敗しました。時間をおいてもう一度お試しください。"
+      );
+      console.warn("Failed to load dictionary entries:", error);
+    } finally {
+      setIsLoading(false);
+    }
   }, [activeFilter, trimmedSearchQuery]);
+
+  React.useEffect(() => {
+    void loadEntries();
+  }, [loadEntries]);
 
   React.useEffect(() => {
     setCurrentPage(1);
@@ -644,6 +648,60 @@ export default function DictionaryScreen({
     }
 
     onOpenArticle?.(selectedEntry.relatedArticleId);
+  };
+
+  const handleToggleFavorite = async (entryId: string, current: boolean) => {
+    setActionError(null);
+    try {
+      await updateDictionaryFavorite({ entryId, isStarred: !current });
+      await loadEntries();
+    } catch (error) {
+      console.error("Failed to toggle favorite:", error);
+      setActionError("お気に入りの更新に失敗しました。");
+    }
+  };
+
+  const handleStartEditMemo = () => {
+    setEditMemoValue(selectedEntry?.memo || "");
+    setIsEditingMemo(true);
+    setActionError(null);
+  };
+
+  const handleSaveMemo = async () => {
+    if (!selectedEntry) {
+      return;
+    }
+    setActionError(null);
+    try {
+      await updateDictionaryMemo({
+        entryId: selectedEntry.id,
+        memo: editMemoValue,
+      });
+      setIsEditingMemo(false);
+      await loadEntries();
+    } catch (error) {
+      console.error("Failed to save memo:", error);
+      setActionError("メモの保存に失敗しました。");
+    }
+  };
+
+  const handleDeleteEntry = async () => {
+    if (!selectedEntry) {
+      return;
+    }
+    if (!window.confirm(`「${selectedEntry.term}」を辞書から削除しますか？`)) {
+      return;
+    }
+
+    setActionError(null);
+    try {
+      await deleteDictionaryEntry({ entryId: selectedEntry.id });
+      setSelectedEntryId(null);
+      await loadEntries();
+    } catch (error) {
+      console.error("Failed to delete entry:", error);
+      setActionError("辞書項目の削除に失敗しました。");
+    }
   };
 
   return (
@@ -787,6 +845,13 @@ export default function DictionaryScreen({
               <p className="mb-4 text-xs text-amber-700">{loadNotice}</p>
             ) : null}
 
+            {actionError ? (
+              <p className="mb-4 text-xs text-red-500 bg-red-50 p-2 rounded border border-red-100 flex items-center gap-2">
+                <X className="w-3 h-3" />
+                {actionError}
+              </p>
+            ) : null}
+
             <Card className="border-border/50 py-0">
               <CardContent className="p-4">
                 <div className="mb-4 flex items-center justify-between gap-3">
@@ -844,6 +909,7 @@ export default function DictionaryScreen({
                         entry={entry}
                         isSelected={entry.id === selectedEntryId}
                         onClick={() => setSelectedEntryId(entry.id)}
+                        onToggleFavorite={handleToggleFavorite}
                       />
                     ))}
                   </div>
@@ -911,7 +977,16 @@ export default function DictionaryScreen({
                         </h3>
                         <TypeBadge type={selectedEntry.type} />
                       </div>
-                      <div className="flex items-center gap-1 text-xs">
+                      <button
+                        type="button"
+                        className="flex items-center gap-1 text-xs"
+                        onClick={() =>
+                          handleToggleFavorite(
+                            selectedEntry.id,
+                            selectedEntry.isFavorite
+                          )
+                        }
+                      >
                         <Star
                           className={`h-4 w-4 ${
                             selectedEntry.isFavorite
@@ -919,8 +994,10 @@ export default function DictionaryScreen({
                               : "text-muted-foreground"
                           }`}
                         />
-                        <span className="text-muted-foreground">お気に入り</span>
-                      </div>
+                        <span className="text-muted-foreground">
+                          お気に入り
+                        </span>
+                      </button>
                     </div>
                   </CardContent>
                 </Card>
@@ -987,22 +1064,48 @@ export default function DictionaryScreen({
                       <div className="flex items-center gap-1.5">
                         <Pencil className="h-4 w-4 text-amber-600" />
                         <h4 className="text-sm font-semibold text-foreground">
-                          メモ（次タスク予定）
+                          メモ
                         </h4>
                       </div>
-                      <button
-                        type="button"
-                        className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
-                        onClick={() =>
-                          console.log("Edit dictionary memo:", selectedEntry.id)
-                        }
-                      >
-                        編集
-                      </button>
+                      {!isEditingMemo ? (
+                        <button
+                          type="button"
+                          className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                          onClick={handleStartEditMemo}
+                        >
+                          編集
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                            onClick={handleSaveMemo}
+                          >
+                            <Save className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] text-red-500 hover:underline"
+                            onClick={() => setIsEditingMemo(false)}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-xs leading-relaxed text-foreground">
-                      一覧・詳細表示までは接続済みです。メモ保存とお気に入り切替は次のタスクでつなぎ込みます。
-                    </p>
+                    {!isEditingMemo ? (
+                      <p className="text-xs leading-relaxed text-foreground">
+                        {selectedEntry.memo || "メモはまだありません。"}
+                      </p>
+                    ) : (
+                      <Textarea
+                        value={editMemoValue}
+                        onChange={(e) => setEditMemoValue(e.target.value)}
+                        className="min-h-[80px] text-xs"
+                        placeholder="メモを入力..."
+                      />
+                    )}
                     <div className="mt-2 flex justify-end">
                       <PawIcon className="h-4 w-4 text-amber-400/50" />
                     </div>
@@ -1025,9 +1128,7 @@ export default function DictionaryScreen({
                     variant="outline"
                     size="sm"
                     className="flex-1 border-red-300 text-red-500 hover:bg-red-50"
-                    onClick={() =>
-                      console.log("Delete dictionary entry:", selectedEntry.id)
-                    }
+                    onClick={handleDeleteEntry}
                   >
                     <Trash2 className="mr-1 h-4 w-4" />
                     削除する

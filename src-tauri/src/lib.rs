@@ -111,6 +111,7 @@ pub fn run() {
             commands::dictionary_commands::list_dictionary_entries,
             commands::dictionary_commands::save_dictionary_entry,
             commands::dictionary_commands::update_dictionary_memo,
+            commands::dictionary_commands::update_dictionary_favorite,
             commands::dictionary_commands::delete_dictionary_entry,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
