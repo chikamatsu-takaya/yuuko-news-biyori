@@ -1,0 +1,192 @@
+# PRコメントまたはActions画面から任意実行するPlaywright UI E2E。
+# PRコードを実行するジョブには書き込み権限を与えず、結果コメントは別ジョブから投稿する。
+name: Playwright UI E2E
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "テストするPR番号（省略時は選択したブランチ）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playwright-ui-e2e-${{ github.event.issue.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve_target:
+    name: Resolve test target
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/e2e') &&
+       (github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      repository: ${{ steps.resolve.outputs.repository }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      target_label: ${{ steps.resolve.outputs.target_label }}
+    steps:
+      - name: Resolve PR head or selected branch
+        id: resolve
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const isPrComment = context.eventName === "issue_comment";
+
+            if (isPrComment) {
+              const body = context.payload.comment?.body ?? "";
+              if (!/(^|\r?\n)\s*\/e2e(?:\s|$)/i.test(body)) {
+                core.setFailed("PRコメントの独立した行に /e2e を指定してください。");
+                return;
+              }
+            }
+
+            const rawPrNumber = isPrComment
+              ? String(context.payload.issue.number)
+              : (process.env.REQUESTED_PR_NUMBER ?? "").trim();
+
+            if (rawPrNumber) {
+              if (!/^\d+$/.test(rawPrNumber)) {
+                core.setFailed("pr_number には正の整数を指定してください。");
+                return;
+              }
+
+              const prNumber = Number(rawPrNumber);
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              if (!pullRequest.head.repo) {
+                core.setFailed(`PR #${prNumber} のheadリポジトリを取得できません。`);
+                return;
+              }
+
+              core.setOutput("repository", pullRequest.head.repo.full_name);
+              core.setOutput("sha", pullRequest.head.sha);
+              core.setOutput("pr_number", String(prNumber));
+              core.setOutput(
+                "target_label",
+                `PR #${prNumber} (${pullRequest.head.label})`,
+              );
+              return;
+            }
+
+            core.setOutput(
+              "repository",
+              `${context.repo.owner}/${context.repo.repo}`,
+            );
+            core.setOutput("sha", context.sha);
+            core.setOutput("pr_number", "");
+            core.setOutput("target_label", context.ref);
+
+  ui_e2e:
+    name: Chromium UI E2E
+    needs: resolve_target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout test target
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve_target.outputs.repository }}
+          ref: ${{ needs.resolve_target.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright UI E2E
+        run: pnpm run test:ui
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ needs.resolve_target.outputs.pr_number || github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report_result:
+    name: Report result to PR
+    needs: [resolve_target, ui_e2e]
+    if: >-
+      always() &&
+      needs.resolve_target.result == 'success' &&
+      needs.resolve_target.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Comment test result
+        uses: actions/github-script@v7
+        env:
+          E2E_RESULT: ${{ needs.ui_e2e.result }}
+          PR_NUMBER: ${{ needs.resolve_target.outputs.pr_number }}
+          TARGET_LABEL: ${{ needs.resolve_target.outputs.target_label }}
+        with:
+          script: |
+            const result = process.env.E2E_RESULT;
+            const labels = {
+              success: "✅ 成功",
+              failure: "❌ 失敗",
+              cancelled: "⚠️ キャンセル",
+              skipped: "⚠️ スキップ",
+            };
+            const resultLabel = labels[result] ?? `⚠️ ${result}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              "### Playwright UI E2E",
+              "",
+              `- 結果: **${resultLabel}**`,
+              `- 対象: ${process.env.TARGET_LABEL}`,
+              `- 実行ログ・レポート: [GitHub Actions run](${runUrl})`,
+              "- 失敗時のスクリーンショット・traceは、run内の `playwright-report-*` artifactで確認できます。",
+              "",
+              "このE2Eは任意チェックです。既存の必須CIには組み込んでいません。",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body,
+            });
