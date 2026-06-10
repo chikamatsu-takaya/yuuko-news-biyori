@@ -1,24 +1,24 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-09
+最終更新: 2026-06-10
 対象ブランチ: `develop`
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
 ## 0. 今日見る場所
 
 ### Now
-- [x] ニュース履歴画面を実データへ接続する（PR #56）
+- [ ] Codex PRレビュー導線を整備する（方式A: Codex cloud / `@codex review`）
   - Priority: P1.5
-  - Status: Done
+  - Status: Review
   - Owner: @codex
-  - Branch: `codex/article-history-backend`
-  - Issue/PR: #56
+  - Branch: `codex/codex-review-setup`
+  - Issue/PR: 本PR
   - Done when:
-    - `NewsHistoryScreen` が `mockHistoryItems` ではなく保存済み記事一覧を表示できる ✅
-    - 既読/未読・お気に入り・アーカイブ表示の最低限フィルタがTauri command経由で動く ✅
-    - 記事選択からニュース閲覧画面へ再閲覧できる ✅
+    - `AGENTS.md` に Codex GitHubレビュー用の `Review guidelines` がある ✅
+    - READMEに `@codex review` の起動方法と、APIキー不要の方式Aであることが明記されている ✅
+    - ClaudeレビューCIとは別物で、GitHub Actions workflow/Secret追加不要であることが共有されている ✅
   - Notes:
-    - PR #56 でマージ済み。次はバックエンド先行方針で アーカイブ方針確定（完了）→ 設定アクション方針（候補4）→ ゆうこ通知バックエンド（候補3）
+    - 方式Aは Codex cloud / GitHub連携の Code review 機能を使う。PRコメントは `@codex review`。実利用には ChatGPT 側の Codex code review settings で対象リポジトリをONにする必要がある
 
 ### Next
 - [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
@@ -75,11 +75,11 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #61 まで反映済み**（ゆうこ通知バックエンド強化まで）。open PRなし。
+- `develop` は **PR #68 まで反映済み**（月次ZIPアーカイブ本体・非破壊まで）。open PRなし。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
-- **CI Claude: `@claude` PRレビューが OAuth(サブスク)認証で稼働(#39/#47/#48)。public向けに投稿者権限ゲート済み(#49)**。
+- **AI PRレビュー**: `@claude` PRレビューは OAuth(サブスク)認証で稼働(#39/#47/#48)し、public向け権限ゲート済み(#49)。Codexレビューは方式A（Codex cloud / `@codex review` / APIキー不要）で導線整備中。
 - ニュース取得は `pnpm run setup:dev-news-source` で検証用 `news_sources.json` / `network_allowlist.json` を app-data に作成すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
 - リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了。
 - **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
@@ -93,7 +93,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - **GachaScreen初期レイアウト修正は完了(#60)**（フロント・メンバー担当）。
 - **設計書突き合わせ結果**: 設定画面の未実装操作(#59完了)、ゆうこ通知(#61バックエンド完了・画面接続#46)、辞書メモ/削除UI、正式identifier、権限/ログ/性能点検を追加追跡。
 - **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、辞書メモ/削除UI配線、Mock依存置換、失敗時UI統一、余白微修正、GachaScreen）は**メンバー担当**。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
-- **次の優先順（非フロント）**: 正式identifier決定 → リリース前セキュリティ点検（capability/CSP/権限・ログ/秘密情報）→ 軽量常駐の性能確認 → アーカイブ実ZIP実装(#57後続) → 媒体ToS/AI要約 運用方針明文化 → おすすめ判定の重み調整 → Playwright UI E2EのCI導入。
+- **次の優先順（非フロント）**: Codex PRレビュー導線整備 → 軽量常駐の性能確認 → 媒体ToS/AI要約 運用方針明文化 → おすすめ判定の重み調整 → Playwright UI E2EのCI導入。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -663,3 +663,4 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-09: タスクチェックリストを #55–#61 反映で同期（PR #62）
 - [x] 2026-06-09: 正式 Tauri identifier を `jp.star-system.yuuko-news` に確定（PR #63）
 - [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / 本PR）
+- [x] 2026-06-10: 月次ZIPアーカイブ本体（増分1・非破壊）を実装（PR #68）
