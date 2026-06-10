@@ -420,17 +420,17 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 任意ファイル操作/任意URL取得の公開口がないことを再確認している ✅（全commandドメイン限定・汎用口なし）
   - Notes:
     - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
-- [ ] CSPを設定する（制限的CSP・要 `tauri dev` 検証）
+- [ ] CSPを設定する（制限的CSP・要 実機検証）
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Doing
+  - Owner: @claude（適用）/ 検証=アプリを動かせる担当
+  - Branch: `chore/set-csp`
+  - Issue/PR: 本PR
   - Done when:
-    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（提案値は点検結果 §6）
-    - `pnpm tauri dev` で全画面の描画とコンソールのCSP違反なしを確認している
+    - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（点検結果 §6）✅（本PRで適用。script/style は static export 制約で `'unsafe-inline'`）
+    - 実機（`tauri build` のバンドル、または `devCsp` を設定した `tauri dev`）で全画面の描画とコンソールのCSP違反なしを確認している ⬜（要・人による目視）
   - Notes:
-    - webview実機検証が必要なため点検PRから分離（未検証のまま配布しない＝安全側）。提案値・検証手順は点検結果 §6
+    - 本PRはCSP適用まで。**本番CSPは `tauri build` で目視検証**（dev server は本番cspが当たらない場合あり）。検証で問題が出たら適用値を調整。手順は点検結果 §6
 - [x] ログ・AI送信データ・秘密情報の最終点検を行う
   - Priority: P1.5
   - Status: Done
