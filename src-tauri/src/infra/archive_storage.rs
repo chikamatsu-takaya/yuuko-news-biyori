@@ -34,7 +34,9 @@ pub fn write_verified_zip(zip_path: &Path, entries: &[ArchiveEntry]) -> Result<u
     }
 
     let temp_path = zip_path.with_extension("zip.tmp");
-    write_zip(&temp_path, entries)?;
+    write_zip(&temp_path, entries).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
     if let Err(error) = verify_zip(&temp_path, entries) {
         // 検証に失敗した一時ZIPは残さない。
         let _ = std::fs::remove_file(&temp_path);

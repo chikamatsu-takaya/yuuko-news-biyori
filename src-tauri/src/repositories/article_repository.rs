@@ -186,6 +186,19 @@ impl ArticleRepository {
             let size_bytes =
                 crate::infra::archive_storage::write_verified_zip(&zip_path, &entries)?;
 
+            let zip_info = ArchiveZipInfoDto {
+                month: month_label,
+                file: file_name,
+                article_count,
+                size_bytes,
+            };
+
+            // 月ごとにindexへ反映しておく。後続月で失敗しても、成功済みZIPを孤立させないため。
+            if let Err(error) = self.update_archive_index(now, std::slice::from_ref(&zip_info)) {
+                let _ = std::fs::remove_file(&zip_path);
+                return Err(error);
+            }
+
             // 検証成功後に archived 印を付ける（非破壊：元.mdは残す）。
             for mut record in month_records {
                 record.is_archived = true;
@@ -194,16 +207,7 @@ impl ArticleRepository {
                 archived_article_count += 1;
             }
 
-            zip_files.push(ArchiveZipInfoDto {
-                month: month_label,
-                file: file_name,
-                article_count,
-                size_bytes,
-            });
-        }
-
-        if !zip_files.is_empty() {
-            self.update_archive_index(now, &zip_files)?;
+            zip_files.push(zip_info);
         }
 
         Ok(ArchiveSummaryDto {
@@ -1586,6 +1590,49 @@ mod tests {
         // 再実行すると候補は無い（古い2件はarchived済み・recentは新しいため）。
         let candidates_after = context.repository.list_archive_candidates(now).unwrap();
         assert!(candidates_after.is_empty());
+    }
+
+    #[test]
+    fn archive_candidates_indexes_successful_month_when_later_month_fails() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        let old_may = PersistedArticleRecord {
+            article_id: "old-may".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_june = PersistedArticleRecord {
+            article_id: "old-june".to_string(),
+            fetched_at: "2026-06-01T00:00:00Z".to_string(),
+            published_at_text: "2026-06-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_may).unwrap();
+        context.repository.save_article_record(&old_june).unwrap();
+
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(archive_dir.join("2026-06.zip.tmp")).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 0, 0, 0).unwrap();
+        let result = context.repository.archive_candidates(now);
+        assert!(result.is_err());
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.archives.len(), 1);
+        assert_eq!(index.archives[0].month, "2026-05");
+        assert!(archive_dir.join("2026-05.zip").exists());
+
+        let may_record = context.repository.find_article_record("old-may").unwrap();
+        assert!(may_record.is_archived);
+
+        let june_record = context.repository.find_article_record("old-june").unwrap();
+        assert!(!june_record.is_archived);
     }
 
     #[test]
