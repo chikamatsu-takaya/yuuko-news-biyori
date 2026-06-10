@@ -92,7 +92,13 @@ impl ArticleRepository {
     ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
         let mut articles = self.load_article_records()?;
-        articles.sort_by(compare_history_records);
+        // 退避は古い記事から処理するのが自然なため、fetched_at 昇順（古い順）で返す。
+        // 履歴表示用の compare_history_records（新しい順）とは順序の意図が異なる。
+        articles.sort_by(|left, right| {
+            left.fetched_at
+                .cmp(&right.fetched_at)
+                .then_with(|| left.article_id.cmp(&right.article_id))
+        });
 
         Ok(articles
             .into_iter()
@@ -1322,6 +1328,44 @@ mod tests {
             .map(|candidate| candidate.article_id.as_str())
             .collect();
         assert_eq!(ids, vec!["old-plain"]);
+    }
+
+    #[test]
+    fn list_archive_candidates_excludes_store_favorite() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        // Markdownフラグは非お気に入り（古い・非archived）の記事。
+        let old_store_fav = PersistedArticleRecord {
+            article_id: "old-store-fav".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_store_fav)
+            .unwrap();
+
+        // JSON上書き（ArticleFavoriteStore）のみでお気に入り登録する（record フラグは false のまま）。
+        // is_effectively_favorite が store 経由のお気に入りも除外することを統合確認する。
+        let favorites_path = context
+            .root_dir
+            .join("favorites")
+            .join("article_favorites.json");
+        std::fs::create_dir_all(favorites_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &favorites_path,
+            r#"{"version":1,"favorite_article_ids":["old-store-fav"]}"#,
+        )
+        .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let candidates = context.repository.list_archive_candidates(now).unwrap();
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.article_id != "old-store-fav"));
     }
 
     #[test]
