@@ -34,6 +34,9 @@ pub enum AppError {
     #[error("parse error: {0}")]
     Parse(String),
 
+    #[error("archive error: {0}")]
+    Archive(String),
+
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
@@ -48,6 +51,7 @@ impl AppError {
             Self::Network(_) => "NETWORK_ERROR",
             Self::NotFound(_) => "NOT_FOUND_ERROR",
             Self::Parse(_) => "PARSE_ERROR",
+            Self::Archive(_) => "ARCHIVE_ERROR",
             Self::Io(_) => "IO_ERROR",
             Self::Json(_) => "JSON_ERROR",
         }

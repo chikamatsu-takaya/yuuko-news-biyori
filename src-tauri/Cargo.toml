@@ -31,3 +31,6 @@ scraper = "0.24"
 serde_yaml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 atom_syndication = "0.12"
+# 月次アーカイブのZIP圧縮（データ設計書 §14）。std/既存に ZIP 作成機能が無いため追加。
+# C依存を避けるため default-features は無効化し、純Rustの deflate のみ有効化（常駐負荷・ビルド軽量化）。
+zip = { version = "2", default-features = false, features = ["deflate"] }

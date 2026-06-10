@@ -1,7 +1,7 @@
 use crate::domain::article::{
-    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
-    GetArticleDetailParams, GetRecommendedArticlesParams, ListArticleHistoryParams,
-    UpdateArticleFavoriteParams,
+    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
+    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ListArticleHistoryParams, UpdateArticleFavoriteParams,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -54,5 +54,11 @@ impl ArticleService {
     /// 実ZIP圧縮は後続のため、ここでは候補の列挙のみを行う。
     pub fn list_archive_candidates(&self) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
         self.repository.list_archive_candidates(chrono::Utc::now())
+    }
+
+    /// 退避候補を月次ZIPへ圧縮し、archived 印を付ける（増分1・非破壊／元.mdは保持）。
+    /// 判定の基準時刻は現在UTC。結果サマリーを返す。
+    pub fn archive_candidates(&self) -> Result<ArchiveSummaryDto, AppError> {
+        self.repository.archive_candidates(chrono::Utc::now())
     }
 }

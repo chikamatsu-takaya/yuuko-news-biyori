@@ -96,6 +96,24 @@ pub struct FavoriteUpdateResult {
     pub is_favorite: bool,
 }
 
+/// 月次アーカイブ実行の結果サマリー（command 返却用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveSummaryDto {
+    pub archived_article_count: usize,
+    pub zip_files: Vec<ArchiveZipInfoDto>,
+}
+
+/// 1つの月次ZIPの情報（データ設計書 §14.4 のインデックス項目に対応）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveZipInfoDto {
+    pub month: String,
+    pub file: String,
+    pub article_count: usize,
+    pub size_bytes: u64,
+}
+
 /// 取得パイプライン（NewsService）が新規記事を保存する際の入力。
 /// `PersistedArticleRecord` は repository 内部型のため、保存用の公開入力として用意する。
 /// この型は内部Rust APIでのみ使用し、Tauri command では公開しない。

@@ -1,9 +1,9 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
-    GetArticleDetailParams, GetRecommendedArticlesParams, ListArticleHistoryParams,
-    UpdateArticleFavoriteParams,
+    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
+    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ListArticleHistoryParams, UpdateArticleFavoriteParams,
 };
 use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
@@ -113,6 +113,22 @@ pub async fn get_archive_candidates(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join archive-candidates task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 退避候補を月次ZIPへ圧縮し archived 印を付ける（増分1・非破壊）。手動トリガの read-write command。
+/// 元.md削除・自動スケジューラ化は後続。
+#[tauri::command]
+pub async fn archive_old_articles(state: State<'_, AppState>) -> CommandResult<ArchiveSummaryDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.archive_candidates())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join archive-old-articles task: {error}"),
             )
         })?
         .map_err(CommandError::from)
