@@ -7,18 +7,20 @@
 ## 0. 今日見る場所
 
 ### Now
-- [ ] Codex PRレビュー導線を整備する（方式A: Codex cloud / `@codex review`）
-  - Priority: P1.5
+- [ ] Playwright UI E2Eを任意実行できるCI導線を追加する
+  - Priority: P2
   - Status: Review
   - Owner: @codex
-  - Branch: `codex/codex-review-setup`
+  - Branch: `codex/playwright-ui-e2e-ci`
   - Issue/PR: 本PR
   - Done when:
-    - `AGENTS.md` に Codex GitHubレビュー用の `Review guidelines` がある ✅
-    - READMEに `@codex review` の起動方法と、APIキー不要の方式Aであることが明記されている ✅
-    - ClaudeレビューCIとは別物で、GitHub Actions workflow/Secret追加不要であることが共有されている ✅
+    - PRコメント本文を `/e2e` だけにして投稿すると、PR headに対してChromium UI E2Eが動く ✅
+    - Actions画面からブランチまたはPR番号を指定して手動実行できる ✅
+    - 失敗時もPlaywright report・スクリーンショット・traceをartifactで確認できる ✅
+    - PRコード実行ジョブに書き込み権限やSecretを渡さない ✅
+    - `review:quick` / `review:strict` と既存必須CIへは未組み込みである ✅
   - Notes:
-    - 方式Aは Codex cloud / GitHub連携の Code review 機能を使う。PRコメントは `@codex review`。実利用には ChatGPT 側の Codex code review settings で対象リポジトリをONにする必要がある
+    - コメント起動は `OWNER` / `MEMBER` / `COLLABORATOR` に限定。結果コメントは、PRコードを実行しない別ジョブから投稿する
 
 ### Next
 - [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
@@ -75,13 +77,13 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #68 まで反映済み**（月次ZIPアーカイブ本体・非破壊まで）。open PRなし。
+- `develop` は **PR #72 まで反映済み**（媒体ToS/AI要約方針・おすすめ判定調整を含む）。Playwright UI E2E任意CIを本PRで整備中。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
-- **AI PRレビュー**: `@claude` PRレビューは OAuth(サブスク)認証で稼働(#39/#47/#48)し、public向け権限ゲート済み(#49)。Codexレビューは方式A（Codex cloud / `@codex review` / APIキー不要）で導線整備中。
+- **AI PRレビュー**: `@claude` PRレビューは OAuth(サブスク)認証で稼働(#39/#47/#48)し、public向け権限ゲート済み(#49)。Codexレビューは方式A（Codex cloud / `@codex review` / APIキー不要）の導線と日本語レビュー指針まで完了(#69/#70)。
 - ニュース取得は `pnpm run setup:dev-news-source` で検証用 `news_sources.json` / `network_allowlist.json` を app-data に作成すれば実データ取得可能。製品デフォルトは deny-by-default 維持。
-- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)／必須CIへの組み込みは未了。
+- リポジトリ public 化済み・既存CI（lint/test/clippy/audit/secret-scan）無料稼働。Playwright UI E2E はカバレッジ拡充(#45)済みで、コメント/手動起動の任意CIを本PRで整備中。必須CIへの組み込みは未実施。
 - **タスク進捗ダッシュボード追加は完了(#53)**。Markdown正本を維持しつつ、`task-management/` のHTMLビューで日次確認できる。
 - **UI画像警告対応は完了(#50)**。`yuuko.png` のLCP/画像比率警告とGachaScreenのモバイル崩れを修正済み。
 - **ニュースソース設定導線は完了(#54)**。既存設定の部分書き込み防止・dry-run conflict表示・手順書更新まで反映済み。
@@ -93,7 +95,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - **GachaScreen初期レイアウト修正は完了(#60)**（フロント・メンバー担当）。
 - **設計書突き合わせ結果**: 設定画面の未実装操作(#59完了)、ゆうこ通知(#61バックエンド完了・画面接続#46)、辞書メモ/削除UI、正式identifier、権限/ログ/性能点検を追加追跡。
 - **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、辞書メモ/削除UI配線、Mock依存置換、失敗時UI統一、余白微修正、GachaScreen）は**メンバー担当**。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
-- **次の優先順（非フロント）**: 軽量常駐の性能確認 → おすすめ判定の重み調整 → アーカイブ増分2（元.md削除＋ZIP再閲覧＋自動化）→ Playwright UI E2EのCI導入。（Codex導線=#69/#70完了・媒体ToS/AI要約明文化=本PR完了）
+- **次の優先順（非フロント）**: Playwright UI E2Eの任意CI導入（本PR）→ 軽量常駐の性能確認 → アーカイブ増分2（元.md削除＋ZIP再閲覧＋自動化）。Codex導線(#69/#70)・媒体ToS/AI要約方針(#71)・おすすめ判定調整(#72)は完了。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -116,20 +118,20 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Issue/PR: 未定
   - Done when:
     - Playwrightの実行時間と安定性を確認したうえで、review scriptへの組み込み可否が決まっている
-- [ ] Playwright Chromium install をCI手順へ追加（`pnpm exec playwright install chromium`）
+- [ ] Playwright Chromium install をCI手順へ追加（`pnpm exec playwright install --with-deps chromium`）
   - Priority: P2
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/playwright-ui-e2e-ci`
+  - Issue/PR: 本PR
   - Done when:
     - CI上でChromiumが確実に準備され、UI E2Eを任意チェックとして実行できる
 - [ ] GitHub ActionsでUI E2Eを任意チェックとして追加
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/playwright-ui-e2e-ci`
+  - Issue/PR: 本PR
   - Done when:
     - PR上でUI E2Eの結果を確認できる
     - 失敗時も既存必須CIを不必要に塞がない運用になっている
@@ -522,20 +524,20 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - 新規 `docs/02_design/おすすめ判定ポリシー.md`。あわせて NewsService が `important_keywords` を空→初期候補に配線し keyword_match が実発火するよう修正
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
 （補足：E2Eのテストカバレッジはチーム PR #45 で拡充済み。残りは下記のCI統合のみ。）
-- [ ] CIで `pnpm exec playwright install chromium` を実行
+- [ ] CIで `pnpm exec playwright install --with-deps chromium` を実行
   - Priority: P2
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/playwright-ui-e2e-ci`
+  - Issue/PR: 本PR
   - Done when:
     - GitHub Actions上でPlaywrightブラウザが安定してインストールされる
 - [ ] まず任意チェックとして追加
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/playwright-ui-e2e-ci`
+  - Issue/PR: 本PR
   - Done when:
     - PR上でUI E2E結果を確認でき、失敗時の運用が明確になっている
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
@@ -666,4 +668,6 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-09: 正式 Tauri identifier を `jp.star-system.yuuko-news` に確定（PR #63）
 - [x] 2026-06-09: リリース前セキュリティ点検を実施（capability/権限・ログ/AI送信/秘密情報を確認・結果docを追加。CSP適用は要 `tauri dev` 検証で後続 / 本PR）
 - [x] 2026-06-10: 月次ZIPアーカイブ本体（増分1・非破壊）を実装（PR #68）
-- [x] 2026-06-10: 媒体ToS・AI要約の運用方針を明文化（MVP/公開版の保存・要約・表示範囲＋ソース追加時のToS/AI要約可否チェック / 本PR）
+- [x] 2026-06-10: Codex cloudによるPRレビュー導線と日本語レビュー指針を整備（PR #69 / #70）
+- [x] 2026-06-10: 媒体ToS・AI要約の運用方針を明文化（MVP/公開版の保存・要約・表示範囲＋ソース追加時のToS/AI要約可否チェック / PR #71）
+- [x] 2026-06-10: おすすめ判定の重み・キーワードを整理し、初期キーワードを配線（PR #72）
