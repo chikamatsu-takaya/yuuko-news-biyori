@@ -168,7 +168,8 @@ impl NewsService {
 
         let context = RecommendationContext {
             preferred_genres: self.load_preferred_genres(),
-            important_keywords: Vec::new(),
+            // 重要キーワードの初期候補（MVP）。docs/02_design/おすすめ判定ポリシー.md §3。
+            important_keywords: RecommendationService::initial_important_keywords(),
         };
 
         // 既存記事IDを起点に重複排除（既知記事は本文取得もスキップして通信を抑える）。

@@ -508,18 +508,18 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - MVPでは未実装であることがチェックリスト上も明確になっている
   - Notes:
     - 根拠: 要件定義書 §7.8 / セキュリティ詳細設計書 §16.2。実装は後続、ただし秘密情報を移行しない方針は先に固定する
-- [ ] おすすめ判定の初期キーワード・重み調整方針を整理する
+- [x] おすすめ判定の初期キーワード・重み調整方針を整理する
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: @claude
+  - Branch: `feature/recommendation-tuning`
+  - Issue/PR: 本PR
   - Done when:
-    - 重要度キーワード/驚き要素キーワードの初期候補が整理されている
-    - `RecommendationService` の重み調整をどの資料・設定で管理するか決まっている
-    - 社内ニュースやお知らせを混在表示する将来拡張を阻害しない方針になっている
+    - 重要度キーワード/驚き要素キーワードの初期候補が整理されている ✅（`おすすめ判定ポリシー.md` §3 ＋ `INITIAL_IMPORTANT_KEYWORDS` / `SURPRISE_TERMS`）
+    - `RecommendationService` の重み調整をどの資料・設定で管理するか決まっている ✅（同 §4: MVPはRust定数＋本docを正、将来は設定化/傾向メモ）
+    - 社内ニュースやお知らせを混在表示する将来拡張を阻害しない方針になっている ✅（同 §5）
   - Notes:
-    - 根拠: 要件定義書 §14 / §11.0。現状RecommendationServiceは実装済みだが、運用キーワード設計は未整理
+    - 新規 `docs/02_design/おすすめ判定ポリシー.md`。あわせて NewsService が `important_keywords` を空→初期候補に配線し keyword_match が実発火するよう修正
 ### P2: Playwright UI E2EのCI導入（public化でCI無料 → 着手可能）
 （補足：E2Eのテストカバレッジはチーム PR #45 で拡充済み。残りは下記のCI統合のみ。）
 - [ ] CIで `pnpm exec playwright install chromium` を実行
