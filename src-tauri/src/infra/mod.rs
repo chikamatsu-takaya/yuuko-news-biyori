@@ -5,6 +5,7 @@
 //! 必ずこの層の検証を通すことを前提とする。
 
 pub mod allowlist;
+pub mod archive_storage;
 pub mod gemini_client;
 pub mod html_fetcher;
 pub mod rss_client;

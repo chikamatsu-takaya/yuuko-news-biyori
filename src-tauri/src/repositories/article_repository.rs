@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
-    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
+    ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDetailDto, ArticleHistoryFilter,
+    ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
+    FavoriteUpdateResult, FetchedArticle,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -18,21 +19,32 @@ const FRONT_MATTER_DELIMITER: &str = "---";
 pub struct ArticleRepository {
     article_favorites_path: PathBuf,
     article_news_dir: PathBuf,
+    archive_dir: PathBuf,
+    archive_index_path: PathBuf,
 }
 
 impl ArticleRepository {
     pub fn new(paths: &AppPaths) -> Self {
+        let archive_dir = paths.app_data_dir.join("archive");
         Self {
             article_favorites_path: paths.article_favorites_path.clone(),
             article_news_dir: paths.article_news_dir.clone(),
+            archive_index_path: archive_dir.join("archive_index.json"),
+            archive_dir,
         }
     }
 
     #[cfg(test)]
-    fn with_paths(article_news_dir: PathBuf, article_favorites_path: PathBuf) -> Self {
+    fn with_paths(
+        article_news_dir: PathBuf,
+        article_favorites_path: PathBuf,
+        archive_dir: PathBuf,
+    ) -> Self {
         Self {
             article_favorites_path,
             article_news_dir,
+            archive_index_path: archive_dir.join("archive_index.json"),
+            archive_dir,
         }
     }
 
@@ -119,6 +131,197 @@ impl ArticleRepository {
         let favorite_store = self.load_favorite_store_or_default()?;
         let article = self.find_article_record(article_id)?;
         Ok(article.to_detail_dto(is_effectively_favorite(&article, &favorite_store)))
+    }
+
+    /// 退避候補を月次ZIPへ圧縮し、`archive_index.json` を更新して archived 印を付ける（増分1・非破壊）。
+    /// 元の記事Markdownは削除せず保持する（容量解放＝元.md削除は後続）。候補が無ければ何もしない。
+    /// ZIP整合性検証に成功した月だけ archived 印を付ける（破損時は印を付けない＝安全側）。
+    pub fn archive_candidates(&self, now: DateTime<Utc>) -> Result<ArchiveSummaryDto, AppError> {
+        use std::collections::BTreeMap;
+
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let records = self.load_article_records()?;
+
+        // 新規候補と既存アーカイブ済み記事を月別に分ける。
+        // 同じ月を再ZIP化する際、既存ZIP内の記事を落とさないため archived 済みも再同梱する。
+        let mut by_month: BTreeMap<String, Vec<PersistedArticleRecord>> = BTreeMap::new();
+        let mut archived_by_month: BTreeMap<String, Vec<PersistedArticleRecord>> = BTreeMap::new();
+        for record in records {
+            let bucket = record.month_bucket();
+            if record.is_archived {
+                archived_by_month.entry(bucket).or_default().push(record);
+                continue;
+            }
+
+            let is_favorite = is_effectively_favorite(&record, &favorite_store);
+            if crate::domain::article::is_archive_candidate(
+                &record.fetched_at,
+                is_favorite,
+                false,
+                now,
+            ) {
+                by_month.entry(bucket).or_default().push(record);
+            }
+        }
+
+        let mut zip_files = Vec::new();
+        let mut archived_article_count = 0usize;
+
+        for (bucket, mut month_records) in by_month {
+            month_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
+            let mut zip_records = archived_by_month.remove(&bucket).unwrap_or_default();
+            zip_records.extend(month_records.iter().cloned());
+            zip_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
+
+            // 記事Markdownを再直列化してZIPエントリにする。
+            let entries: Vec<crate::infra::archive_storage::ArchiveEntry> = zip_records
+                .iter()
+                .map(|record| {
+                    let markdown = serialize_article_markdown(record)?;
+                    Ok(crate::infra::archive_storage::ArchiveEntry {
+                        name: archive_entry_name(&record.article_id)?,
+                        contents: markdown.into_bytes(),
+                    })
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            let article_count = entries.len();
+
+            let month_label = format_month_label(&bucket);
+            let file_name = format!("{month_label}.zip");
+            let zip_path = self.archive_dir.join(&file_name);
+            let zip_backup_path = self.prepare_archive_zip_backup(&zip_path)?;
+            // ZIP作成＋再オープン検証（検証失敗時はここで中断し、archived 印は付けない）。
+            let size_bytes =
+                match crate::infra::archive_storage::write_verified_zip(&zip_path, &entries) {
+                    Ok(size_bytes) => size_bytes,
+                    Err(error) => {
+                        self.restore_archive_zip_backup(&zip_path, zip_backup_path.as_deref());
+                        return Err(error);
+                    }
+                };
+
+            let zip_info = ArchiveZipInfoDto {
+                month: month_label,
+                file: file_name,
+                article_count,
+                size_bytes,
+            };
+
+            // 検証成功後に archived 印を付ける（非破壊：元.mdは残す）。
+            let mut saved_originals = Vec::new();
+            for mut record in month_records {
+                let original = record.clone();
+                record.is_archived = true;
+                record.status.archived = true;
+                if let Err(error) = self.save_article_record(&record) {
+                    self.rollback_archived_records(&saved_originals);
+                    self.restore_archive_zip_backup(&zip_path, zip_backup_path.as_deref());
+                    return Err(error);
+                }
+                saved_originals.push(original);
+                archived_article_count += 1;
+            }
+
+            // 月ごとにindexへ反映しておく。後続月で失敗しても、成功済みZIPを孤立させないため。
+            if let Err(error) = self.update_archive_index(now, std::slice::from_ref(&zip_info)) {
+                self.rollback_archived_records(&saved_originals);
+                self.restore_archive_zip_backup(&zip_path, zip_backup_path.as_deref());
+                return Err(error);
+            }
+
+            self.remove_archive_zip_backup(zip_backup_path.as_deref());
+            zip_files.push(zip_info);
+        }
+
+        Ok(ArchiveSummaryDto {
+            archived_article_count,
+            zip_files,
+        })
+    }
+
+    fn load_archive_index_or_default(&self) -> Result<ArchiveIndex, AppError> {
+        if !self.archive_index_path.exists() {
+            return Ok(ArchiveIndex::default());
+        }
+        let raw = std::fs::read_to_string(&self.archive_index_path)?;
+        let index = serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(&raw))?;
+        Ok(index)
+    }
+
+    fn update_archive_index(
+        &self,
+        now: DateTime<Utc>,
+        zip_files: &[ArchiveZipInfoDto],
+    ) -> Result<(), AppError> {
+        let mut index = self.load_archive_index_or_default()?;
+        let created_at = format_archive_timestamp(now);
+        for info in zip_files {
+            // 同じ月のエントリは置き換える（再実行時の重複防止）。
+            index.archives.retain(|entry| entry.month != info.month);
+            index.archives.push(ArchiveIndexEntry {
+                month: info.month.clone(),
+                file: info.file.clone(),
+                article_count: info.article_count,
+                created_at: created_at.clone(),
+                size_bytes: info.size_bytes,
+            });
+        }
+        index
+            .archives
+            .sort_by(|left, right| left.month.cmp(&right.month));
+        if let Some(parent) = self.archive_index_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let payload = serde_json::to_vec_pretty(&index)?;
+        atomic_write(&self.archive_index_path, &payload, "archive index")
+    }
+
+    fn rollback_archived_records(&self, originals: &[PersistedArticleRecord]) {
+        for record in originals {
+            if let Err(error) = self.save_article_record(record) {
+                log::error!(
+                    "Failed to rollback archived article state for {}: {error}",
+                    record.article_id
+                );
+            }
+        }
+    }
+
+    fn prepare_archive_zip_backup(&self, zip_path: &Path) -> Result<Option<PathBuf>, AppError> {
+        if !zip_path.exists() {
+            return Ok(None);
+        }
+
+        let backup_path = zip_path.with_extension("zip.rollback");
+        if backup_path.exists() {
+            std::fs::remove_file(&backup_path)?;
+        }
+        std::fs::rename(zip_path, &backup_path)?;
+        Ok(Some(backup_path))
+    }
+
+    fn restore_archive_zip_backup(&self, zip_path: &Path, backup_path: Option<&Path>) {
+        if zip_path.exists() {
+            let _ = std::fs::remove_file(zip_path);
+        }
+
+        if let Some(backup_path) = backup_path {
+            if backup_path.exists() {
+                if let Err(error) = std::fs::rename(backup_path, zip_path) {
+                    log::error!("Failed to restore previous archive zip: {error}");
+                }
+            }
+        }
+    }
+
+    fn remove_archive_zip_backup(&self, backup_path: Option<&Path>) {
+        if let Some(backup_path) = backup_path {
+            if backup_path.exists() {
+                if let Err(error) = std::fs::remove_file(backup_path) {
+                    log::warn!("Failed to remove archive zip rollback backup: {error}");
+                }
+            }
+        }
     }
 
     pub fn update_article_favorite(
@@ -892,6 +1095,52 @@ fn is_effectively_favorite(
     article.favorite || favorite_store.contains(&article.article_id)
 }
 
+fn archive_entry_name(article_id: &str) -> Result<String, AppError> {
+    if article_id.is_empty()
+        || !article_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(AppError::Archive(format!(
+            "unsafe article id for archive entry: {article_id}"
+        )));
+    }
+
+    Ok(format!("{article_id}.md"))
+}
+
+/// 月バケット "YYYYMM" を表示用ラベル "YYYY-MM" へ変換する（アーカイブZIP名・index 用）。
+/// 6桁数字でなければそのまま返す（"unknown" 等）。
+fn format_month_label(bucket: &str) -> String {
+    if bucket.len() == 6 && bucket.chars().all(|ch| ch.is_ascii_digit()) {
+        format!("{}-{}", &bucket[0..4], &bucket[4..6])
+    } else {
+        bucket.to_string()
+    }
+}
+
+/// アーカイブ index の createdAt 用タイムスタンプ（UTC・他サービスと同形式）。
+fn format_archive_timestamp(now: DateTime<Utc>) -> String {
+    now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// `archive/archive_index.json` の構造（データ設計書 §14.4）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct ArchiveIndex {
+    archives: Vec<ArchiveIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveIndexEntry {
+    month: String,
+    file: String,
+    article_count: usize,
+    created_at: String,
+    size_bytes: u64,
+}
+
 fn month_bucket_from_text(value: &str) -> Option<String> {
     let digits = value
         .chars()
@@ -1168,7 +1417,8 @@ mod tests {
     use crate::domain::article::{ArticleHistoryFilter, ArticleReadState};
 
     use super::{
-        month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate, PersistedArticleRecord,
+        archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
+        PersistedArticleRecord,
     };
 
     struct TestRepositoryContext {
@@ -1190,7 +1440,9 @@ mod tests {
             let news_dir = root_dir.join("news");
             let favorites_path = root_dir.join("favorites").join("article_favorites.json");
             std::fs::create_dir_all(&news_dir).unwrap();
-            let repository = ArticleRepository::with_paths(news_dir.clone(), favorites_path);
+            let archive_dir = root_dir.join("archive");
+            let repository =
+                ArticleRepository::with_paths(news_dir.clone(), favorites_path, archive_dir);
             Self {
                 repository,
                 news_dir,
@@ -1366,6 +1618,274 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|candidate| candidate.article_id != "old-store-fav"));
+    }
+
+    #[test]
+    fn archive_candidates_zips_old_articles_and_marks_archived_non_destructively() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        // 古い候補2件（同月 2026-05）＋ 最近1件。
+        // 月バケットは published_at_text 優先のため、ZIP月を固定するよう明示する。
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let recent = PersistedArticleRecord {
+            article_id: "recent".to_string(),
+            fetched_at: "2026-07-10T00:00:00Z".to_string(),
+            published_at_text: "2026-07-10T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        for record in [&old_a, &old_b, &recent] {
+            context.repository.save_article_record(record).unwrap();
+        }
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let summary = context.repository.archive_candidates(now).unwrap();
+
+        // 古い2件が archived 化され、月次ZIPが1つ（2026-05）作られる。
+        assert_eq!(summary.archived_article_count, 2);
+        assert_eq!(summary.zip_files.len(), 1);
+        assert_eq!(summary.zip_files[0].month, "2026-05");
+        assert_eq!(summary.zip_files[0].article_count, 2);
+        assert!(summary.zip_files[0].size_bytes > 0);
+
+        // ZIPと index が作られている。
+        let archive_dir = context.root_dir.join("archive");
+        assert!(archive_dir.join("2026-05.zip").exists());
+        assert!(archive_dir.join("archive_index.json").exists());
+
+        // 非破壊: 元の記事Markdownは残っている（archived 印は付く）。
+        assert!(context.news_dir.join("202605").join("old-a.md").exists());
+
+        // 再実行すると候補は無い（古い2件はarchived済み・recentは新しいため）。
+        let candidates_after = context.repository.list_archive_candidates(now).unwrap();
+        assert!(candidates_after.is_empty());
+    }
+
+    #[test]
+    fn archive_candidates_rebuilds_existing_month_zip_with_archived_records() {
+        use chrono::{TimeZone, Utc};
+        use zip::ZipArchive;
+
+        let context = TestRepositoryContext::new();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_a).unwrap();
+        context.repository.save_article_record(&old_b).unwrap();
+
+        let first_summary = context.repository.archive_candidates(now).unwrap();
+        assert_eq!(first_summary.archived_article_count, 2);
+        assert_eq!(first_summary.zip_files[0].article_count, 2);
+
+        let old_c = PersistedArticleRecord {
+            article_id: "old-c".to_string(),
+            fetched_at: "2026-05-03T00:00:00Z".to_string(),
+            published_at_text: "2026-05-03T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_c).unwrap();
+
+        let second_summary = context.repository.archive_candidates(now).unwrap();
+        assert_eq!(second_summary.archived_article_count, 1);
+        assert_eq!(second_summary.zip_files[0].article_count, 3);
+
+        let archive_dir = context.root_dir.join("archive");
+        assert!(!archive_dir.join("2026-05.zip.rollback").exists());
+        let file = std::fs::File::open(archive_dir.join("2026-05.zip")).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index).unwrap().name().to_string());
+        }
+        names.sort();
+        assert_eq!(names, vec!["old-a.md", "old-b.md", "old-c.md"]);
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.archives.len(), 1);
+        assert_eq!(index.archives[0].article_count, 3);
+    }
+
+    #[test]
+    fn archive_candidates_restores_existing_month_zip_when_rebuild_fails() {
+        use chrono::{TimeZone, Utc};
+        use zip::ZipArchive;
+
+        let context = TestRepositoryContext::new();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_a).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_b).unwrap();
+        std::fs::create_dir_all(context.news_dir.join("202605").join("old-b.md.tmp")).unwrap();
+
+        let result = context.repository.archive_candidates(now);
+        assert!(result.is_err());
+
+        let archive_dir = context.root_dir.join("archive");
+        assert!(!archive_dir.join("2026-05.zip.rollback").exists());
+        let file = std::fs::File::open(archive_dir.join("2026-05.zip")).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 1);
+        assert!(archive.by_name("old-a.md").is_ok());
+        assert!(archive.by_name("old-b.md").is_err());
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.archives.len(), 1);
+        assert_eq!(index.archives[0].article_count, 1);
+
+        let old_a_after = context.repository.find_article_record("old-a").unwrap();
+        let old_b_after = context.repository.find_article_record("old-b").unwrap();
+        assert!(old_a_after.is_archived);
+        assert!(!old_b_after.is_archived);
+    }
+
+    #[test]
+    fn archive_candidates_indexes_successful_month_when_later_month_fails() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        let old_may = PersistedArticleRecord {
+            article_id: "old-may".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_june = PersistedArticleRecord {
+            article_id: "old-june".to_string(),
+            fetched_at: "2026-06-01T00:00:00Z".to_string(),
+            published_at_text: "2026-06-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_may).unwrap();
+        context.repository.save_article_record(&old_june).unwrap();
+
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(archive_dir.join("2026-06.zip.tmp")).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 0, 0, 0).unwrap();
+        let result = context.repository.archive_candidates(now);
+        assert!(result.is_err());
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.archives.len(), 1);
+        assert_eq!(index.archives[0].month, "2026-05");
+        assert!(archive_dir.join("2026-05.zip").exists());
+
+        let may_record = context.repository.find_article_record("old-may").unwrap();
+        assert!(may_record.is_archived);
+
+        let june_record = context.repository.find_article_record("old-june").unwrap();
+        assert!(!june_record.is_archived);
+    }
+
+    #[test]
+    fn archive_candidates_rolls_back_archived_marks_when_save_fails() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_a).unwrap();
+        context.repository.save_article_record(&old_b).unwrap();
+
+        // 2件目保存時の atomic_write を失敗させ、1件目だけ archived 済みで残らないことを確認する。
+        std::fs::create_dir_all(context.news_dir.join("202605").join("old-b.md.tmp")).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let result = context.repository.archive_candidates(now);
+        assert!(result.is_err());
+
+        let old_a_after = context.repository.find_article_record("old-a").unwrap();
+        let old_b_after = context.repository.find_article_record("old-b").unwrap();
+        assert!(!old_a_after.is_archived);
+        assert!(!old_a_after.status.archived);
+        assert!(!old_b_after.is_archived);
+        assert!(!old_b_after.status.archived);
+
+        let archive_dir = context.root_dir.join("archive");
+        assert!(!archive_dir.join("2026-05.zip").exists());
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert!(index.archives.is_empty());
+    }
+
+    #[test]
+    fn archive_entry_name_rejects_path_like_article_ids() {
+        assert_eq!(
+            archive_entry_name("news_0123-abcd").unwrap(),
+            "news_0123-abcd.md"
+        );
+        assert!(archive_entry_name("../evil").is_err());
+        assert!(archive_entry_name("evil/name").is_err());
+        assert!(archive_entry_name("").is_err());
     }
 
     #[test]
