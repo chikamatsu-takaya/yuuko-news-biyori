@@ -333,6 +333,48 @@ PRのコメント欄、またはコード行へのレビューコメントで、
 
 ---
 
+## Codex によるPRレビュー（@codex review / APIキー不要）
+
+Codex cloud の GitHub 連携を有効化すると、Pull Request 上で `@codex review` とコメントするだけで Codex にレビューを依頼できます。
+この方式では、リポジトリの GitHub Actions に `OPENAI_API_KEY` を登録する必要はありません。
+
+### 起動方法
+
+PRのコメント欄で、以下のように投稿します。
+
+```text
+@codex review
+@codex review for security regressions
+```
+
+- `@codex review` がレビュー起動の基本形です。
+- `@codex` だけで `review` を付けない場合は、レビューではなくCodex cloud taskとして扱われる場合があります。
+- 一回限りの重点観点は、コメント本文へ追記します。
+- 自動レビューにしたい場合は、Codex側の Code review settings で Automatic reviews を有効化します。
+
+### 事前設定
+
+1. Codex cloud でこのリポジトリを利用できる状態にします。
+2. ChatGPT の [Codex code review settings](https://chatgpt.com/codex/settings/code-review) を開きます。
+3. 対象リポジトリの **Code review** を有効化します。
+4. レビュー観点は `AGENTS.md` の `Review guidelines` を正本として管理します。
+
+### 認証・コストの考え方
+
+- GitHub Actions workflow は追加しません。
+- `OPENAI_API_KEY` / `CODEX_ACCESS_TOKEN` などのSecret登録は、この方式では不要です。
+- 利用可否と消費枠は、Codex cloud / ChatGPT 側のプラン・ワークスペース設定に依存します。
+- チーム運用では、誰がCodex cloudへ接続できるか、どのリポジトリでレビューを有効化するかを管理してください。
+
+### 動かない場合の確認
+
+- Codex cloud が対象リポジトリに接続されているか
+- Code review settings で対象リポジトリの Code review がONになっているか
+- PRコメントが正確に `@codex review` を含んでいるか
+- リポジトリ直下の `AGENTS.md` が存在し、レビュー指針が読みやすい形で書かれているか
+
+---
+
 ## セキュリティ上の注意
 
 以下はGitに含めないでください。
