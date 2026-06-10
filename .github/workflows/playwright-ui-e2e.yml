@@ -26,7 +26,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '/e2e') &&
+       github.event.comment.body == '/e2e' &&
        (github.event.comment.author_association == 'OWNER' ||
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'))
@@ -51,8 +51,8 @@ jobs:
 
             if (isPrComment) {
               const body = context.payload.comment?.body ?? "";
-              if (!/(^|\r?\n)\s*\/e2e(?:\s|$)/i.test(body)) {
-                core.setFailed("PRコメントの独立した行に /e2e を指定してください。");
+              if (body !== "/e2e") {
+                core.setFailed("PRコメント本文には /e2e だけを指定してください。");
                 return;
               }
             }

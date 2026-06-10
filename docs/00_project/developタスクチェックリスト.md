@@ -14,7 +14,7 @@
   - Branch: `codex/playwright-ui-e2e-ci`
   - Issue/PR: 本PR
   - Done when:
-    - PRコメントの独立した行に `/e2e` と投稿すると、PR headに対してChromium UI E2Eが動く ✅
+    - PRコメント本文を `/e2e` だけにして投稿すると、PR headに対してChromium UI E2Eが動く ✅
     - Actions画面からブランチまたはPR番号を指定して手動実行できる ✅
     - 失敗時もPlaywright report・スクリーンショット・traceをartifactで確認できる ✅
     - PRコード実行ジョブに書き込み権限やSecretを渡さない ✅
