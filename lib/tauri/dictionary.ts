@@ -24,6 +24,7 @@ export type DictionaryEntryListItemDto = {
   relatedArticleId?: string;
   relatedArticleTitle?: string;
   lastViewedAtText?: string;
+  memo?: string;
   isStarred: boolean;
 };
 
@@ -40,6 +41,20 @@ export type ListDictionaryEntriesParams = {
 
 export type SaveDictionaryEntryParams = {
   entry: DictionaryEntryDto;
+};
+
+export type UpdateDictionaryMemoParams = {
+  entryId: string;
+  memo: string;
+};
+
+export type UpdateDictionaryFavoriteParams = {
+  entryId: string;
+  isStarred: boolean;
+};
+
+export type DeleteDictionaryEntryParams = {
+  entryId: string;
 };
 
 export const explainSelectedTerm = async (
@@ -72,4 +87,38 @@ export const saveDictionaryEntry = async (
   }
 
   return invoke<DictionaryEntryDto>("save_dictionary_entry", { params });
+};
+
+export const updateDictionaryMemo = async (
+  params: UpdateDictionaryMemoParams
+): Promise<DictionaryEntryListItemDto> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Tauri runtime not found");
+  }
+
+  return invoke<DictionaryEntryListItemDto>("update_dictionary_memo", {
+    params,
+  });
+};
+
+export const updateDictionaryFavorite = async (
+  params: UpdateDictionaryFavoriteParams
+): Promise<DictionaryEntryListItemDto> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Tauri runtime not found");
+  }
+
+  return invoke<DictionaryEntryListItemDto>("update_dictionary_favorite", {
+    params,
+  });
+};
+
+export const deleteDictionaryEntry = async (
+  params: DeleteDictionaryEntryParams
+): Promise<string> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Tauri runtime not found");
+  }
+
+  return invoke<string>("delete_dictionary_entry", { params });
 };

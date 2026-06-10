@@ -208,6 +208,25 @@ impl UpdateDictionaryMemoParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateDictionaryFavoriteParams {
+    pub entry_id: String,
+    pub is_starred: bool,
+}
+
+impl UpdateDictionaryFavoriteParams {
+    pub fn validated(&self) -> Result<(String, bool), AppError> {
+        let entry_id = self.entry_id.trim();
+        if entry_id.is_empty() {
+            return Err(AppError::Validation(
+                "entryId must not be empty".to_string(),
+            ));
+        }
+        Ok((entry_id.to_string(), self.is_starred))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteDictionaryEntryParams {
     pub entry_id: String,
 }
@@ -352,7 +371,7 @@ mod tests {
     use super::{
         DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryType,
         ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
-        UpdateDictionaryMemoParams,
+        UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
     };
 
     #[test]
@@ -470,6 +489,26 @@ mod tests {
         let params = UpdateDictionaryMemoParams {
             entry_id: " ".to_string(),
             memo: "x".to_string(),
+        };
+        assert!(params.validated().is_err());
+    }
+
+    #[test]
+    fn update_favorite_params_validate_and_trim() {
+        let params = UpdateDictionaryFavoriteParams {
+            entry_id: " entry-1 ".to_string(),
+            is_starred: true,
+        };
+        let (entry_id, is_starred) = params.validated().unwrap();
+        assert_eq!(entry_id, "entry-1");
+        assert!(is_starred);
+    }
+
+    #[test]
+    fn update_favorite_params_reject_empty_entry_id() {
+        let params = UpdateDictionaryFavoriteParams {
+            entry_id: " ".to_string(),
+            is_starred: true,
         };
         assert!(params.validated().is_err());
     }
