@@ -32,6 +32,21 @@ const SURPRISE_TERMS: [&str; 10] = [
     "驚異",
 ];
 
+/// 重要キーワードの初期候補（MVP・AI/IT領域）。タイトル/タグに含まれると加点する。
+/// 詳細・管理方針は docs/02_design/おすすめ判定ポリシー.md を参照。将来はユーザー傾向メモ由来へ拡張。
+const INITIAL_IMPORTANT_KEYWORDS: [&str; 10] = [
+    "生成AI",
+    "LLM",
+    "大規模言語モデル",
+    "オープンソース",
+    "セキュリティ",
+    "脆弱性",
+    "クラウド",
+    "量子",
+    "規制",
+    "標準化",
+];
+
 /// 採点対象の記事属性（採点に必要な最小集合）。借用で受け取りコピーを避ける。
 pub struct RecommendationInput<'a> {
     pub title: &'a str,
@@ -81,6 +96,15 @@ pub struct RecommendationService {
 impl RecommendationService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 重要キーワードの初期候補を返す（MVP既定）。NewsService が採点コンテキストへ供給する。
+    /// 将来はユーザー傾向メモ由来へ差し替える（docs/02_design/おすすめ判定ポリシー.md §4）。
+    pub fn initial_important_keywords() -> Vec<String> {
+        INITIAL_IMPORTANT_KEYWORDS
+            .iter()
+            .map(|keyword| keyword.to_string())
+            .collect()
     }
 
     /// 記事1件のおすすめスコア（0.0〜1.0）を算出する。
@@ -337,5 +361,33 @@ mod tests {
         let sorted = service.sort_by_recommendation(items, |item| item.1);
         let labels: Vec<&str> = sorted.into_iter().map(|item| item.0).collect();
         assert_eq!(labels, vec!["high", "mid", "low"]);
+    }
+
+    #[test]
+    fn initial_important_keywords_boost_matching_article() {
+        let service = RecommendationService::new();
+        let keywords = RecommendationService::initial_important_keywords();
+        assert!(!keywords.is_empty());
+
+        let ctx = RecommendationContext {
+            preferred_genres: Vec::new(),
+            important_keywords: keywords,
+        };
+        let tag_values = tags(&[]);
+        let matching = RecommendationInput {
+            title: "生成AIの新モデルが発表",
+            genre: "テクノロジー",
+            tags: &tag_values,
+            read_state: &ArticleReadState::Unread,
+            age_hours: None,
+        };
+        let plain = RecommendationInput {
+            title: "通常のお知らせ",
+            genre: "テクノロジー",
+            tags: &tag_values,
+            read_state: &ArticleReadState::Unread,
+            age_hours: None,
+        };
+        assert!(service.calculate_score(&matching, &ctx) > service.calculate_score(&plain, &ctx));
     }
 }
