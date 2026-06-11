@@ -14,6 +14,7 @@ use crate::error::AppError;
 use crate::paths::AppPaths;
 
 const FRONT_MATTER_DELIMITER: &str = "---";
+const ARCHIVE_INDEX_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct ArticleRepository {
@@ -81,16 +82,42 @@ impl ArticleRepository {
         limit: usize,
     ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let mut articles = self.load_article_records()?;
-        articles.sort_by(compare_history_records);
+        let active_records = self.load_article_records()?;
+        let mut seen_ids = active_records
+            .iter()
+            .map(|article| article.article_id.clone())
+            .collect::<HashSet<_>>();
+        let mut articles = active_records
+            .into_iter()
+            .map(|article| {
+                let is_favorite = is_effectively_favorite(&article, &favorite_store);
+                article.to_history_item_dto(is_favorite)
+            })
+            .collect::<Vec<_>>();
+
+        // 元Markdown削除後も履歴を軽量表示できるよう、ZIPを開かず記事カタログを統合する。
+        // 同一IDのMarkdownが存在する間は、更新可能な実データ側を優先する。
+        match self.load_archive_index_or_default() {
+            Ok(archive_index) => articles.extend(
+                archive_index
+                    .archives
+                    .iter()
+                    .flat_map(|archive| archive.articles.iter())
+                    .filter(|article| seen_ids.insert(article.article_id.clone()))
+                    .map(|article| {
+                        article.to_history_item_dto(favorite_store.contains(&article.article_id))
+                    }),
+            ),
+            Err(error) => {
+                // indexはZIPから再構築できる派生データなので、通常履歴までは停止させない。
+                log::warn!("Failed to load archive index for article history: {error}");
+            }
+        }
+        articles.sort_by(compare_history_items);
 
         Ok(articles
             .into_iter()
-            .filter_map(|article| {
-                let is_favorite = is_effectively_favorite(&article, &favorite_store);
-                matches_history_filter(&article, is_favorite, &filter)
-                    .then(|| article.to_history_item_dto(is_favorite))
-            })
+            .filter(|article| matches_history_item_filter(article, &filter))
             .take(limit)
             .collect())
     }
@@ -141,6 +168,7 @@ impl ArticleRepository {
 
         let favorite_store = self.load_favorite_store_or_default()?;
         let records = self.load_article_records()?;
+        let archive_index = self.load_archive_index_or_default()?;
 
         // 新規候補と既存アーカイブ済み記事を月別に分ける。
         // 同じ月を再ZIP化する際、既存ZIP内の記事を落とさないため archived 済みも再同梱する。
@@ -170,6 +198,11 @@ impl ArticleRepository {
         for (bucket, mut month_records) in by_month {
             month_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
             let mut zip_records = archived_by_month.remove(&bucket).unwrap_or_default();
+            self.ensure_month_catalog_records_available(
+                &format_month_label(&bucket),
+                &archive_index,
+                &zip_records,
+            )?;
             zip_records.extend(month_records.iter().cloned());
             zip_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
 
@@ -223,7 +256,7 @@ impl ArticleRepository {
             }
 
             // 月ごとにindexへ反映しておく。後続月で失敗しても、成功済みZIPを孤立させないため。
-            if let Err(error) = self.update_archive_index(now, std::slice::from_ref(&zip_info)) {
+            if let Err(error) = self.update_archive_index(now, &zip_info, &zip_records) {
                 self.rollback_archived_records(&saved_originals);
                 self.restore_archive_zip_backup(&zip_path, zip_backup_path.as_deref());
                 return Err(error);
@@ -239,33 +272,81 @@ impl ArticleRepository {
         })
     }
 
+    /// ZIPを直接読み戻せない段階では、既存ZIPの全記事Markdownが揃う月だけ再構築する。
+    /// カタログ内記事が欠けた状態で上書きすると、ZIPにだけ残る記事を失うため安全側で停止する。
+    fn ensure_month_catalog_records_available(
+        &self,
+        month: &str,
+        archive_index: &ArchiveIndex,
+        archived_records: &[PersistedArticleRecord],
+    ) -> Result<(), AppError> {
+        let Some(archive) = archive_index
+            .archives
+            .iter()
+            .find(|archive| archive.month == month)
+        else {
+            return Ok(());
+        };
+        if !archive.catalog_complete {
+            return Err(AppError::Archive(format!(
+                "refusing to rebuild month with incomplete archive catalog: {month}"
+            )));
+        }
+
+        let available_ids = archived_records
+            .iter()
+            .map(|record| record.article_id.as_str())
+            .collect::<HashSet<_>>();
+        let missing_ids = archive
+            .articles
+            .iter()
+            .filter(|article| !available_ids.contains(article.article_id.as_str()))
+            .map(|article| article.article_id.as_str())
+            .collect::<Vec<_>>();
+        if !missing_ids.is_empty() {
+            return Err(AppError::Archive(format!(
+                "refusing to rebuild {month}: archived markdown is missing for {}",
+                missing_ids.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
     fn load_archive_index_or_default(&self) -> Result<ArchiveIndex, AppError> {
         if !self.archive_index_path.exists() {
             return Ok(ArchiveIndex::default());
         }
         let raw = std::fs::read_to_string(&self.archive_index_path)?;
         let index = serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(&raw))?;
+        index.validate()?;
         Ok(index)
     }
 
     fn update_archive_index(
         &self,
         now: DateTime<Utc>,
-        zip_files: &[ArchiveZipInfoDto],
+        zip_info: &ArchiveZipInfoDto,
+        records: &[PersistedArticleRecord],
     ) -> Result<(), AppError> {
         let mut index = self.load_archive_index_or_default()?;
+        index.version = ARCHIVE_INDEX_VERSION;
         let created_at = format_archive_timestamp(now);
-        for info in zip_files {
-            // 同じ月のエントリは置き換える（再実行時の重複防止）。
-            index.archives.retain(|entry| entry.month != info.month);
-            index.archives.push(ArchiveIndexEntry {
-                month: info.month.clone(),
-                file: info.file.clone(),
-                article_count: info.article_count,
-                created_at: created_at.clone(),
-                size_bytes: info.size_bytes,
-            });
-        }
+        let articles = records
+            .iter()
+            .map(ArchiveArticleIndexEntry::from_record)
+            .collect::<Result<Vec<_>, AppError>>()?;
+
+        // 同じ月のエントリは置き換える（再実行時の重複防止）。
+        index.archives.retain(|entry| entry.month != zip_info.month);
+        index.archives.push(ArchiveIndexEntry {
+            month: zip_info.month.clone(),
+            file: zip_info.file.clone(),
+            article_count: zip_info.article_count,
+            created_at,
+            size_bytes: zip_info.size_bytes,
+            catalog_complete: true,
+            articles,
+        });
         index
             .archives
             .sort_by(|left, right| left.month.cmp(&right.month));
@@ -367,11 +448,19 @@ impl ArticleRepository {
 
     /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
-        Ok(self
+        let mut article_ids = self
             .load_article_records()?
             .into_iter()
             .map(|article| article.article_id)
-            .collect())
+            .collect::<HashSet<_>>();
+        article_ids.extend(
+            self.load_archive_index_or_default()?
+                .archives
+                .into_iter()
+                .flat_map(|archive| archive.articles)
+                .map(|article| article.article_id),
+        );
+        Ok(article_ids)
     }
 
     /// 取得済みの新規記事を保存する（内部Rust API・Tauri commandとして公開しない）。
@@ -1063,19 +1152,15 @@ fn compare_article_records(
         .then_with(|| left.article_id.cmp(&right.article_id))
 }
 
-fn compare_history_records(
-    left: &PersistedArticleRecord,
-    right: &PersistedArticleRecord,
-) -> Ordering {
+fn compare_history_items(left: &ArticleHistoryItemDto, right: &ArticleHistoryItemDto) -> Ordering {
     right
         .fetched_at
         .cmp(&left.fetched_at)
         .then_with(|| left.article_id.cmp(&right.article_id))
 }
 
-fn matches_history_filter(
-    article: &PersistedArticleRecord,
-    is_favorite: bool,
+fn matches_history_item_filter(
+    article: &ArticleHistoryItemDto,
     filter: &ArticleHistoryFilter,
 ) -> bool {
     match filter {
@@ -1083,7 +1168,7 @@ fn matches_history_filter(
         ArticleHistoryFilter::Unread => article.read_state == ArticleReadState::Unread,
         // Previewed は軽量プレビューを見た状態なので、履歴UIでは既読側へまとめる。
         ArticleHistoryFilter::Read => article.read_state != ArticleReadState::Unread,
-        ArticleHistoryFilter::Favorite => is_favorite,
+        ArticleHistoryFilter::Favorite => article.is_favorite,
         ArticleHistoryFilter::Archived => article.is_archived,
     }
 }
@@ -1125,10 +1210,65 @@ fn format_archive_timestamp(now: DateTime<Utc>) -> String {
 }
 
 /// `archive/archive_index.json` の構造（データ設計書 §14.4）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ArchiveIndex {
+    #[serde(default = "legacy_archive_index_version")]
+    version: u32,
+    #[serde(default)]
     archives: Vec<ArchiveIndexEntry>,
+}
+
+impl Default for ArchiveIndex {
+    fn default() -> Self {
+        Self {
+            version: ARCHIVE_INDEX_VERSION,
+            archives: Vec::new(),
+        }
+    }
+}
+
+impl ArchiveIndex {
+    fn validate(&self) -> Result<(), AppError> {
+        if !(1..=ARCHIVE_INDEX_VERSION).contains(&self.version) {
+            return Err(AppError::Archive(format!(
+                "unsupported archive index version: {}",
+                self.version
+            )));
+        }
+
+        let mut article_ids = HashSet::new();
+        for archive in &self.archives {
+            if !archive.catalog_complete && !archive.articles.is_empty() {
+                return Err(AppError::Archive(format!(
+                    "incomplete archive catalog contains article metadata for {}",
+                    archive.month
+                )));
+            }
+            if archive.catalog_complete && archive.article_count != archive.articles.len() {
+                return Err(AppError::Archive(format!(
+                    "archive index article count mismatch for {}",
+                    archive.month
+                )));
+            }
+            for article in &archive.articles {
+                let expected_entry_name = archive_entry_name(&article.article_id)?;
+                if article.entry_name != expected_entry_name {
+                    return Err(AppError::Archive(format!(
+                        "archive entry name mismatch for {}",
+                        article.article_id
+                    )));
+                }
+                if !article_ids.insert(article.article_id.as_str()) {
+                    return Err(AppError::Archive(format!(
+                        "duplicate article id in archive index: {}",
+                        article.article_id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1139,6 +1279,65 @@ struct ArchiveIndexEntry {
     article_count: usize,
     created_at: String,
     size_bytes: u64,
+    /// v1から未移行の月を識別し、不完全なカタログを削除判断に使わないための印。
+    #[serde(default)]
+    catalog_complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    articles: Vec<ArchiveArticleIndexEntry>,
+}
+
+/// 履歴表示と重複取得防止に必要な最小メタデータ。本文はZIP内Markdownだけに保持する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveArticleIndexEntry {
+    article_id: String,
+    entry_name: String,
+    title: String,
+    source_name: String,
+    published_at_text: String,
+    fetched_at: String,
+    genre: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    read_state: ArticleReadState,
+    recommendation_score: f32,
+}
+
+impl ArchiveArticleIndexEntry {
+    fn from_record(record: &PersistedArticleRecord) -> Result<Self, AppError> {
+        Ok(Self {
+            article_id: record.article_id.clone(),
+            entry_name: archive_entry_name(&record.article_id)?,
+            title: record.title.clone(),
+            source_name: record.source_name.clone(),
+            published_at_text: record.published_at_text.clone(),
+            fetched_at: record.fetched_at.clone(),
+            genre: record.genre.clone(),
+            summary: record.summary.clone().or_else(|| record.excerpt.clone()),
+            read_state: record.read_state.clone(),
+            recommendation_score: record.recommendation_score,
+        })
+    }
+
+    fn to_history_item_dto(&self, is_favorite: bool) -> ArticleHistoryItemDto {
+        ArticleHistoryItemDto {
+            article_id: self.article_id.clone(),
+            title: self.title.clone(),
+            source_name: self.source_name.clone(),
+            published_at_text: self.published_at_text.clone(),
+            fetched_at: self.fetched_at.clone(),
+            genre: self.genre.clone(),
+            summary: self.summary.clone(),
+            is_favorite,
+            read_state: self.read_state.clone(),
+            is_archived: true,
+            recommendation_score: self.recommendation_score,
+        }
+    }
+}
+
+fn legacy_archive_index_version() -> u32 {
+    1
 }
 
 fn month_bucket_from_text(value: &str) -> Option<String> {
@@ -1735,8 +1934,301 @@ mod tests {
         assert_eq!(names, vec!["old-a.md", "old-b.md", "old-c.md"]);
 
         let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.version, 2);
         assert_eq!(index.archives.len(), 1);
         assert_eq!(index.archives[0].article_count, 3);
+        assert!(index.archives[0].catalog_complete);
+        assert_eq!(index.archives[0].articles.len(), 3);
+        assert_eq!(index.archives[0].articles[0].entry_name, "old-a.md");
+    }
+
+    #[test]
+    fn archive_index_reads_legacy_v1_without_article_catalog() {
+        let context = TestRepositoryContext::new();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{
+  "archives": [
+    {
+      "month": "2026-05",
+      "file": "2026-05.zip",
+      "articleCount": 2,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+
+        assert_eq!(index.version, 1);
+        assert_eq!(index.archives.len(), 1);
+        assert!(!index.archives[0].catalog_complete);
+        assert!(index.archives[0].articles.is_empty());
+    }
+
+    #[test]
+    fn archive_index_upgrade_keeps_unmigrated_month_incomplete() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{
+  "archives": [
+    {
+      "month": "2026-05",
+      "file": "2026-05.zip",
+      "articleCount": 2,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+        let june_article = PersistedArticleRecord {
+            article_id: "june-article".to_string(),
+            fetched_at: "2026-06-01T00:00:00Z".to_string(),
+            published_at_text: "2026-06-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&june_article)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let index = context.repository.load_archive_index_or_default().unwrap();
+
+        assert_eq!(index.version, 2);
+        assert_eq!(index.archives.len(), 2);
+        assert!(!index.archives[0].catalog_complete);
+        assert!(index.archives[0].articles.is_empty());
+        assert!(index.archives[1].catalog_complete);
+        assert_eq!(index.archives[1].articles.len(), 1);
+    }
+
+    #[test]
+    fn archive_index_rejects_mismatched_entry_name() {
+        let context = TestRepositoryContext::new();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{
+  "version": 2,
+  "archives": [
+    {
+      "month": "2026-05",
+      "file": "2026-05.zip",
+      "articleCount": 1,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024,
+      "articles": [
+        {
+          "articleId": "safe-id",
+          "entryName": "../evil.md",
+          "title": "記事",
+          "sourceName": "Example",
+          "publishedAtText": "2026-05-01T00:00:00Z",
+          "fetchedAt": "2026-05-01T00:00:00Z",
+          "genre": "テクノロジー",
+          "readState": "unread",
+          "recommendationScore": 0.5
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let result = context.repository.load_archive_index_or_default();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_history_keeps_active_articles_when_archive_index_is_corrupt() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(archive_dir.join("archive_index.json"), "{broken").unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+
+        assert_eq!(articles.len(), 3);
+    }
+
+    #[test]
+    fn list_history_includes_catalog_article_after_markdown_is_removed() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "catalog-only".to_string(),
+            title: "ZIPにだけ残る記事".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        std::fs::remove_file(context.news_dir.join("202605").join("catalog-only.md")).unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::Archived, 10)
+            .unwrap();
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].article_id, "catalog-only");
+        assert_eq!(articles[0].title, "ZIPにだけ残る記事");
+        assert!(articles[0].is_archived);
+    }
+
+    #[test]
+    fn list_history_prefers_active_markdown_over_catalog_snapshot() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "active-wins".to_string(),
+            title: "アーカイブ時のタイトル".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        let mut active_article = context
+            .repository
+            .find_article_record("active-wins")
+            .unwrap();
+        active_article.title = "Markdown側で更新したタイトル".to_string();
+        context
+            .repository
+            .save_article_record(&active_article)
+            .unwrap();
+
+        let articles = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].title, "Markdown側で更新したタイトル");
+    }
+
+    #[test]
+    fn existing_article_ids_include_catalog_article_without_markdown() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "archived-id".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        std::fs::remove_file(context.news_dir.join("202605").join("archived-id.md")).unwrap();
+
+        let article_ids = context.repository.existing_article_ids().unwrap();
+
+        assert!(article_ids.contains("archived-id"));
+    }
+
+    #[test]
+    fn archive_candidates_refuses_month_rebuild_when_catalog_article_markdown_is_missing() {
+        use chrono::{TimeZone, Utc};
+        use std::io::Read;
+        use zip::ZipArchive;
+
+        let context = TestRepositoryContext::new();
+        let archived_article = PersistedArticleRecord {
+            article_id: "zip-only".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&archived_article)
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        std::fs::remove_file(context.news_dir.join("202605").join("zip-only.md")).unwrap();
+
+        let new_article = PersistedArticleRecord {
+            article_id: "new-same-month".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&new_article)
+            .unwrap();
+
+        let result = context.repository.archive_candidates(now);
+
+        assert!(result.is_err());
+        let new_article_after = context
+            .repository
+            .find_article_record("new-same-month")
+            .unwrap();
+        assert!(!new_article_after.is_archived);
+
+        let archive_dir = context.root_dir.join("archive");
+        let file = std::fs::File::open(archive_dir.join("2026-05.zip")).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 1);
+        let mut zip_only = archive.by_name("zip-only.md").unwrap();
+        let mut contents = String::new();
+        zip_only.read_to_string(&mut contents).unwrap();
+        assert!(contents.contains("articleId: zip-only"));
+        drop(zip_only);
+        assert!(archive.by_name("new-same-month.md").is_err());
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert_eq!(index.archives.len(), 1);
+        assert_eq!(index.archives[0].articles.len(), 1);
+        assert_eq!(index.archives[0].articles[0].article_id, "zip-only");
     }
 
     #[test]
