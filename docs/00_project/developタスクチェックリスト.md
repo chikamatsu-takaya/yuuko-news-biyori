@@ -9,10 +9,10 @@
 ### Now
 - [ ] 月次ZIPアーカイブ増分2の索引・履歴統合基盤を実装する
   - Priority: P1.5
-  - Status: Doing
+  - Status: Review
   - Owner: @codex
   - Branch: `codex/archive-index-history`
-  - Issue/PR: 未定
+  - Issue/PR: #79
   - Done when:
     - `archive_index.json` v2に記事単位の履歴表示メタデータが保存される
     - v1 indexを後方互換で読み込める
