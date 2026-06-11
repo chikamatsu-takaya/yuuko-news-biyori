@@ -74,7 +74,7 @@ jobs:
 
       # tagモード(@claude応答)は作業リポジトリ(.git)を必要とする。浅いチェックアウトで足りる（公式例準拠）。
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
