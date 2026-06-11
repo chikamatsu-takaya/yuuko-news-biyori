@@ -54,6 +54,8 @@ import {
   type DictionaryEntryType as TauriDictionaryEntryType,
 } from "@/lib/tauri/dictionary";
 
+import { useToast } from "@/hooks/use-toast";
+
 type NavigationItem = {
   id: string;
   label: string;
@@ -537,7 +539,8 @@ export default function DictionaryScreen({
   const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
-  const [actionError, setActionError] = React.useState<string | null>(null);
+
+  const { toast } = useToast();
 
   // Memo edit states
   const [isEditingMemo, setIsEditingMemo] = React.useState(false);
@@ -549,7 +552,6 @@ export default function DictionaryScreen({
   React.useEffect(() => {
     setIsEditingMemo(false);
     setEditMemoValue("");
-    setActionError(null);
   }, [selectedEntryId]);
 
   const loadEntries = React.useCallback(async () => {
@@ -651,27 +653,28 @@ export default function DictionaryScreen({
   };
 
   const handleToggleFavorite = async (entryId: string, current: boolean) => {
-    setActionError(null);
     try {
       await updateDictionaryFavorite({ entryId, isStarred: !current });
       await loadEntries();
     } catch (error) {
       console.error("Failed to toggle favorite:", error);
-      setActionError("お気に入りの更新に失敗しました。");
+      toast({
+        variant: "destructive",
+        title: "更新に失敗しちゃった",
+        description: "お気に入りの更新ができなかったよ。もう一度試してみてね。",
+      });
     }
   };
 
   const handleStartEditMemo = () => {
     setEditMemoValue(selectedEntry?.memo || "");
     setIsEditingMemo(true);
-    setActionError(null);
   };
 
   const handleSaveMemo = async () => {
     if (!selectedEntry) {
       return;
     }
-    setActionError(null);
     try {
       await updateDictionaryMemo({
         entryId: selectedEntry.id,
@@ -681,7 +684,11 @@ export default function DictionaryScreen({
       await loadEntries();
     } catch (error) {
       console.error("Failed to save memo:", error);
-      setActionError("メモの保存に失敗しました。");
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "メモの保存ができなかったよ。もう一度試してみてね。",
+      });
     }
   };
 
@@ -693,14 +700,17 @@ export default function DictionaryScreen({
       return;
     }
 
-    setActionError(null);
     try {
       await deleteDictionaryEntry({ entryId: selectedEntry.id });
       setSelectedEntryId(null);
       await loadEntries();
     } catch (error) {
       console.error("Failed to delete entry:", error);
-      setActionError("辞書項目の削除に失敗しました。");
+      toast({
+        variant: "destructive",
+        title: "削除に失敗しちゃった",
+        description: "辞書項目の削除ができなかったよ。もう一度試してみてね。",
+      });
     }
   };
 
@@ -843,13 +853,6 @@ export default function DictionaryScreen({
 
             {loadNotice ? (
               <p className="mb-4 text-xs text-amber-700">{loadNotice}</p>
-            ) : null}
-
-            {actionError ? (
-              <p className="mb-4 text-xs text-red-500 bg-red-50 p-2 rounded border border-red-100 flex items-center gap-2">
-                <X className="w-3 h-3" />
-                {actionError}
-              </p>
             ) : null}
 
             <Card className="border-border/50 py-0">

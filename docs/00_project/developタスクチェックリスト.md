@@ -162,13 +162,18 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - Tauri未接続時のプレビュー用途と実データ用途が明確に分離されている
 - [ ] 失敗時UI（トースト / 再試行 / フォールバック）を統一
   - Priority: P2
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: メンバー
+  - Branch: `feature/error-ui-unification`
   - Issue/PR: 未定
   - Done when:
     - 主要画面の通信失敗表示が同じ文体・同じ再試行導線で揃っている
     - ユーザーに「失敗したが安全に継続できる」ことが伝わる
+    - DictionaryScreen / SettingsScreen の操作失敗通知が Toast に統一されている
+    - Toast 基盤が導入され、他画面へ横展開できる状態になっている
+  - Notes:
+    - 第一段階として `app/layout.tsx` に `Toaster` を追加し、DictionaryScreen / SettingsScreen に Toast 通知を適用
+    - MainScreen / NewsReaderScreen / NewsHistoryScreen への横展開はレビュー後の別PRで対応予定
 - [ ] 余白・横幅・はみ出し・スクロール領域・文字潰れの微修正
   - Priority: P2
   - Status: Todo

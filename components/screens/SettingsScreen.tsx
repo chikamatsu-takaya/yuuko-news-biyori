@@ -51,6 +51,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
+import { useToast } from "@/hooks/use-toast";
+
 // Types
 type NotificationSettings = {
   enabled: boolean;
@@ -296,8 +298,8 @@ export default function SettingsScreen({
     React.useState<UserSettingsDto | null>(null);
   const [activeMenu, setActiveMenu] = React.useState("notification");
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
-  // リセット失敗時のユーザー向けフィードバック（CLAUDE.md §10.1）。
-  const [resetError, setResetError] = React.useState<string | null>(null);
+
+  const { toast } = useToast();
 
   const handleNavigate = (screen: string) => {
     if (onNavigate) {
@@ -371,9 +373,17 @@ export default function SettingsScreen({
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
       setBackendSettings(dto);
-      console.log("Settings saved via tauri command.");
+      toast({
+        title: "設定を保存したよ",
+        description: "新しい設定が反映されたよ。ありがとう！",
+      });
     } catch (error) {
       console.error("Failed to save settings via tauri command:", error);
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "設定の保存ができなかったよ。もう一度試してみてね。",
+      });
     }
   };
 
@@ -387,7 +397,6 @@ export default function SettingsScreen({
   // リセットは破壊的操作のため確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
-    setResetError(null);
     try {
       const dto = await resetUserSettings();
       if (dto) {
@@ -397,10 +406,18 @@ export default function SettingsScreen({
         // 非Tauri（プレビュー）時は表示のみ初期化する。
         setSettings(mockSettings);
       }
+      toast({
+        title: "設定をリセットしたよ",
+        description: "すべての設定が初期状態に戻ったよ。",
+      });
     } catch (error) {
       // 破壊的操作のため、失敗は黙殺せずユーザーへ伝える（CLAUDE.md §10.1/§10.2）。
       console.error("Failed to reset settings via tauri command:", error);
-      setResetError("設定の初期化に失敗しました。時間をおいて再試行してください。");
+      toast({
+        variant: "destructive",
+        title: "リセットに失敗しちゃった",
+        description: "設定を戻せなかったよ。もう一度試してみてね。",
+      });
     } finally {
       setResetDialogOpen(false);
     }
@@ -476,21 +493,12 @@ export default function SettingsScreen({
               variant="ghost"
               className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground text-sm"
               onClick={() => {
-                setResetError(null);
                 setResetDialogOpen(true);
               }}
             >
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
             </Button>
-            {resetError && (
-              <p
-                role="alert"
-                className="mt-2 text-xs text-destructive leading-relaxed"
-              >
-                {resetError}
-              </p>
-            )}
           </div>
         </aside>
 
