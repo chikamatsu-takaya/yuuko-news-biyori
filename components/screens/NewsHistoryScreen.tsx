@@ -14,6 +14,11 @@ import {
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import {
   Home,
   Newspaper,
   Clock,
@@ -34,6 +39,7 @@ import {
   RotateCcw,
   Share2,
   FolderOpen,
+  Info,
 } from "lucide-react";
 
 // Types
@@ -498,7 +504,7 @@ export default function NewsHistoryScreen({
       setHistoryItems([]);
       setSelectedItemId(null);
       setLoadNotice(
-        "ニュース履歴の読み込みに失敗しました。少し時間を置いて再度お試しください。"
+        "ニュース履歴の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
       console.warn("Failed to load article history:", error);
     } finally {
@@ -671,9 +677,13 @@ export default function NewsHistoryScreen({
           </div>
 
           {loadNotice && (
-            <div className="mb-3 rounded-lg border border-[var(--yuuko-green)]/30 bg-white px-3 py-2 text-xs text-muted-foreground">
-              {loadNotice}
-            </div>
+            <Alert role="status" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <AlertDescription className="text-xs text-muted-foreground">
+                {loadNotice}
+              </AlertDescription>
+            </Alert>
           )}
 
           {/* History List */}
