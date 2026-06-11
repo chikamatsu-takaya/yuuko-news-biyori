@@ -44,6 +44,7 @@ import {
 } from "@/lib/tauri/dictionary";
 import { recordFriendshipEvent } from "@/lib/tauri/yuuko";
 import { RankUpDialog } from "@/components/dialogs/RankUpDialog";
+import { useToast } from "@/hooks/use-toast";
 
 type NavigationItem = {
   id: string;
@@ -642,6 +643,7 @@ export default function NewsReaderScreen({
   onOpenArticle?: (articleId: string) => void;
 }) {
   const [isAutoStart] = React.useState(true);
+  const { toast } = useToast();
   const [article, setArticle] = React.useState<ReaderArticleDetail>(() =>
     getFallbackArticleById(articleId)
   );
@@ -914,11 +916,16 @@ export default function NewsReaderScreen({
       setFavoriteNotice(
         "お気に入りの更新に失敗しました。時間をおいてもう一度お試しください。"
       );
+      toast({
+        variant: "destructive",
+        title: "更新に失敗しちゃった",
+        description: "お気に入りの更新ができなかったよ。もう一度試してみてね。",
+      });
       console.warn("Failed to update article favorite:", error);
     } finally {
       setIsUpdatingFavorite(false);
     }
-  }, [article.id, article.isFavorite]);
+  }, [article.id, article.isFavorite, toast]);
 
   const handleSaveDictionaryEntry = React.useCallback(async () => {
     if (!selectedDictionaryEntry || selectedDictionaryEntry.isStarred) {
@@ -938,11 +945,16 @@ export default function NewsReaderScreen({
       setSelectedDictionaryEntry(savedEntry);
     } catch (error) {
       setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "辞書の保存ができなかったよ。もう一度試してみてね。",
+      });
       console.warn("Failed to save dictionary entry:", error);
     } finally {
       setIsSavingDictionaryEntry(false);
     }
-  }, [selectedDictionaryEntry]);
+  }, [selectedDictionaryEntry, toast]);
 
   const handleGenerateSummary = React.useCallback(async () => {
     setIsGeneratingSummary(true);
@@ -983,6 +995,11 @@ export default function NewsReaderScreen({
         setSummaryNotice(
           "要約生成に失敗しました。時間をおいてもう一度お試しください。"
         );
+        toast({
+          variant: "destructive",
+          title: "作成に失敗しちゃった",
+          description: "要約の作成ができなかったよ。もう一度試してみてね。",
+        });
       }
       console.warn("Failed to generate article summary:", error);
     } finally {
@@ -990,7 +1007,7 @@ export default function NewsReaderScreen({
         setIsGeneratingSummary(false);
       }
     }
-  }, [article.id]);
+  }, [article.id, toast]);
 
   const openTerm = (term: SupportTerm) => {
     setSelectedTerm(term);
