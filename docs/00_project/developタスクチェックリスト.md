@@ -7,18 +7,20 @@
 ## 0. 今日見る場所
 
 ### Now
-- [ ] 月次ZIPアーカイブ増分2（元Markdown削除・ZIP再閲覧・自動実行）を設計する
+- [ ] 月次ZIPアーカイブ増分2の索引・履歴統合基盤を実装する
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/archive-index-history`
+  - Issue/PR: #79
   - Done when:
-    - ZIPと`archive_index.json`の整合確認後にだけ元Markdownを削除する失敗時設計が決まっている
-    - 履歴画面からZIP内記事を安全に再閲覧する方法が決まっている
-    - 自動実行のタイミングと、再実行時の冪等性が決まっている
+    - `archive_index.json` v2に記事単位の履歴表示メタデータが保存される
+    - v1 indexを後方互換で読み込める
+    - 元Markdownがない記事も履歴へ表示でき、RSS再取得の重複判定対象になる
+    - 元Markdownが残る間は、indexのスナップショットよりMarkdown側を優先する
   - Notes:
-    - 増分1（非破壊ZIP作成・index更新・archived印）はPR #68で完了。データ削除を伴うため、実装前レビューを重視する
+    - このPRでは元Markdown削除・ZIP復元command・自動実行を行わない
+    - 後続は「安全な復元」→「退避付き削除」→「日次自動化」の順で分割する
 
 ### Next
 - [ ] バックグラウンド常駐方式を決定し、待機状態を実装する
@@ -374,9 +376,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
+    - 記事単位indexを使い、元Markdown削除後も履歴表示と重複取得防止ができる
     - ZIPとindexの整合確認後にだけ元Markdownを削除する
     - ZIP内記事を安全に再閲覧できる
     - 自動実行のタイミングと再実行時の冪等性がテストされている
+  - Notes:
+    - 実装順: 記事単位index・履歴統合 → 復元command → 退避付き削除 → 日次自動化
 
 ### P1.5: 設計書突き合わせで追加したMVP残件（2026-06-08確認）
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。
