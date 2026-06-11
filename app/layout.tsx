@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Noto_Sans_JP } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
+import { Toaster } from "@/components/ui/toaster";
 import './globals.css'
 
 const notoSansJP = Noto_Sans_JP({ 
@@ -41,6 +42,7 @@ export default function RootLayout({
     <html lang="ja" className="bg-[#FFFDF5]">
       <body className={`${notoSansJP.className} antialiased`}>
         {children}
+        <Toaster />
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>

@@ -21,19 +21,19 @@
     - 方式Aは Codex cloud / GitHub連携の Code review 機能を使う。PRコメントは `@codex review`。実利用には ChatGPT 側の Codex code review settings で対象リポジトリをONにする必要がある
 
 ### Next
-- [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
-  - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
+- [ ] 失敗時UI（トースト / 再試行 / フォールバック）を統一
+  - Priority: P2
+  - Status: Doing
+  - Owner: メンバー
+  - Branch: `feature/error-ui-unification`
   - Issue/PR: 未定
   - Done when:
-    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある
-    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ
-    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される
-    - ★付与/解除がユーザー操作から永続化される
+    - 主要画面の通信失敗表示が同じ文体・同じ再試行導線で揃っている
+    - ユーザーに「失敗したが安全に継続できる」ことが伝わる
+    - `console.error` のみで終わっている操作失敗箇所を洗い出している
+    - 再試行可能な処理に再試行導線がある
   - Notes:
-    - ニュース履歴実データ化の次候補。フロント修正中メンバーの担当範囲と重なる場合は後ろへ回す
+    - 辞書UI配線完了後の次タスク。まずは主要画面の失敗時表示の現状調査から開始する
 
 ### Blocked / 要判断
 - [x] アーカイブ退避の起点・粒度を決める（→ 1か月→月次ZIPで確定）
@@ -354,19 +354,22 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: MVPスコープ §6.2 / 画面詳細設計書 SCR-005
     - PR #56 でマージ済み（status barの実データ件数表示・空/エラー時文言の整理を含む）
-- [ ] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
+- [x] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Done
+  - Owner: メンバー
+  - Branch: `feature/dictionary-ui-actions`
   - Issue/PR: 未定
   - Done when:
-    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある
-    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ
-    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される
-    - ★付与/解除がユーザー操作から永続化される（既存保存コマンド流用 or 専用command追加のどちらかで実装）
+    - `lib/tauri/dictionary.ts` に `update_dictionary_memo` / `delete_dictionary_entry` の型付きラッパーがある ✅
+    - `DictionaryScreen` のメモ編集・削除が `console.log` ではなくRust commandを呼ぶ ✅
+    - 削除前に確認を挟み、削除後に一覧と詳細表示が安全に更新される ✅
+    - ★付与/解除がユーザー操作から永続化される ✅
   - Notes:
-    - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36で実装済み、フロント配線が未了
+    - `update_dictionary_favorite` command を追加し、参照回数・最終参照日時を更新せずに★状態のみ変更できるようにした
+    - レビュー指摘対応として、選択中エントリ切り替え時にメモ編集状態とエラー表示をリセット
+    - 操作失敗時に画面上へ `actionError` を表示
+    - `cargo check` / `cargo test` / `pnpm lint` / `pnpm run test:ui` 通過
 - [ ] ゆうこ通知・軽量プレビューの操作結果をフロントへ接続する
   - Priority: P1.5
   - Status: Doing
