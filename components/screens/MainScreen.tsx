@@ -36,6 +36,7 @@ import {
   type RefreshNewsResult as TauriRefreshNewsResult,
 } from "@/lib/tauri/news";
 import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
+import { useToast } from "@/hooks/use-toast";
 
 // ============================================
 // TypeScript Types
@@ -490,6 +491,8 @@ export default function MainScreen({
     React.useState(fallbackYuukoMessage);
   const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
 
+  const { toast } = useToast();
+
   React.useEffect(() => {
     let active = true;
 
@@ -615,12 +618,17 @@ export default function MainScreen({
         setArticleNotice(
           "お気に入りの更新に失敗しました。時間をおいてもう一度お試しください。"
         );
+        toast({
+          variant: "destructive",
+          title: "更新に失敗しちゃった",
+          description: "お気に入りの更新ができなかったよ。もう一度試してみてね。",
+        });
         console.warn("Failed to update article favorite:", error);
       } finally {
         setFavoriteSavingArticleId(null);
       }
     },
-    [articles]
+    [articles, toast]
   );
 
   const handleRefreshNews = React.useCallback(async () => {
@@ -657,11 +665,16 @@ export default function MainScreen({
       setRefreshNotice(
         "ニュース更新に失敗しました。設定ファイルやネットワークを確認してください。"
       );
+      toast({
+        variant: "destructive",
+        title: "更新に失敗しちゃった",
+        description: "ニュースの取得ができなかったよ。ネットワークを確認してみてね。",
+      });
       console.warn("Failed to refresh news:", error);
     } finally {
       setIsRefreshingNews(false);
     }
-  }, [loadRecommendedArticles]);
+  }, [loadRecommendedArticles, toast]);
 
   return (
     <div className="h-dvh w-full overflow-hidden bg-[var(--yuuko-cream)] flex flex-col">
