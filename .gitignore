@@ -33,6 +33,7 @@ build/
 *.tsbuildinfo
 playwright-report/
 test-results/
+performance-results/
 
 # Tauri / Rust
 src-tauri/target/
