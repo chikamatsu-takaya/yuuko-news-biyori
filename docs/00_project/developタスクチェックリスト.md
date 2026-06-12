@@ -9,10 +9,10 @@
 ### Now
 - [ ] アーカイブ処理を日次で冪等に自動実行する
   - Priority: P1.5
-  - Status: Doing
+  - Status: Review
   - Owner: @codex
   - Branch: `codex/archive-daily-scheduler`
-  - Issue/PR: 未定
+  - Issue/PR: #84
   - Done when:
     - 起動時または日付変更時に、同日重複を避けて月次ZIP作成と安全な元Markdown削除を実行できる
     - 失敗時も既存ZIP・index・Markdownの整合性を維持し、アプリ本体を停止させない
@@ -370,17 +370,17 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 複数月・途中失敗・同月再実行時の整合性をテストしている ✅
 - [ ] 月次ZIPアーカイブ増分2（安全な復元・元Markdown削除・自動実行）
   - Priority: P1.5
-  - Status: Doing
+  - Status: Review
   - Owner: @codex
   - Branch: `codex/archive-daily-scheduler`
-  - Issue/PR: 未定
+  - Issue/PR: #84
   - Done when:
     - 記事単位indexを使い、元Markdown削除後も履歴表示と重複取得防止ができる ✅（PR #79）
     - ZIPとindexの整合確認後にだけ元Markdownを削除する ✅（PR #82）
     - ZIP内記事を安全に再閲覧できる ✅（PR #81）
-    - 自動実行のタイミングと再実行時の冪等性がテストされている（実装中）
+    - 自動実行のタイミングと再実行時の冪等性がテストされている（PR #84レビュー中）
   - Notes:
-    - 実装順: 記事単位index・履歴統合（PR #79完了）→ 復元command（PR #81完了）→ 退避付き削除（PR #82完了）→ 日次自動化（現在）
+    - 実装順: 記事単位index・履歴統合（PR #79完了）→ 復元command（PR #81完了）→ 退避付き削除（PR #82完了）→ 日次自動化（PR #84レビュー中）
 
 ### P1.5: 設計書突き合わせで追加したMVP残件（2026-06-08確認）
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。
