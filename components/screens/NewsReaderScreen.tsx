@@ -9,6 +9,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import {
   ArrowLeft,
   Bell,
   BookOpen,
@@ -26,6 +31,7 @@ import {
   Settings,
   Star,
   X,
+  Info,
 } from "lucide-react";
 import {
   generateArticleSummary,
@@ -671,8 +677,12 @@ export default function NewsReaderScreen({
     React.useState(false);
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
+  const [isLoadingArticle, setIsLoadingArticle] = React.useState(true);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
+    "info"
+  );
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
@@ -684,6 +694,7 @@ export default function NewsReaderScreen({
   // 同一記事の open / 同一用語の解説で重複加算しないためのセッション内ガード。
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
+  const loadArticleRequestIdRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -705,66 +716,72 @@ export default function NewsReaderScreen({
     };
   }, []);
 
-  React.useEffect(() => {
-    let active = true;
+  const loadArticle = React.useCallback(async () => {
+    loadArticleRequestIdRef.current += 1;
+    const requestId = loadArticleRequestIdRef.current;
+    const requestArticleId = resolvedArticleId;
+    setIsLoadingArticle(true);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
 
-    const loadArticle = async () => {
-      try {
-        const detail = await getArticleDetail({ articleId: resolvedArticleId });
-        if (!active) {
-          return;
-        }
+    try {
+      const detail = await getArticleDetail({ articleId: requestArticleId });
+      if (!isMountedRef.current || requestId !== loadArticleRequestIdRef.current) {
+        return;
+      }
 
-        if (!detail) {
-          const fallbackDetail = getFallbackArticleById(resolvedArticleId);
-          setArticle(fallbackDetail);
-          setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
-          setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
-          setLoadNotice(null);
-          return;
-        }
-
-        const mappedArticle = mapTauriArticleToUi(detail);
-        setArticle(mappedArticle);
-        setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
-        setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
-        setLoadNotice(null);
-
-        // 実データの記事を開いたら友情ポイントを加算（同一記事はセッション内で1回だけ）。
-        if (!recordedOpensRef.current.has(resolvedArticleId)) {
-          recordedOpensRef.current.add(resolvedArticleId);
-          void recordFriendshipEvent("news_detail_opened")
-            .then((result) => {
-              if (active && result?.rankedUp) {
-                setRankUpState({ open: true, newRank: result.newRank });
-              }
-            })
-            .catch((eventError) => {
-              console.warn("Failed to record friendship event:", eventError);
-            });
-        }
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        const fallbackDetail = getFallbackArticleById(resolvedArticleId);
+      if (!detail) {
+        const fallbackDetail = getFallbackArticleById(requestArticleId);
         setArticle(fallbackDetail);
         setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
         setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
-        setLoadNotice(
-          "記事詳細の取得に失敗したため、サンプル表示に切り替えました。"
-        );
-        console.warn("Failed to load article detail:", error);
+        setLoadNotice(null);
+        return;
       }
-    };
 
-    void loadArticle();
+      const mappedArticle = mapTauriArticleToUi(detail);
+      setArticle(mappedArticle);
+      setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
+      setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
+      setLoadNotice(null);
 
-    return () => {
-      active = false;
-    };
+      // 実データの記事を開いたら友情ポイントを加算（同一記事はセッション内で1回だけ）。
+      if (!recordedOpensRef.current.has(requestArticleId)) {
+        recordedOpensRef.current.add(requestArticleId);
+        void recordFriendshipEvent("news_detail_opened")
+          .then((result) => {
+            if (isMountedRef.current && requestId === loadArticleRequestIdRef.current && result?.rankedUp) {
+              setRankUpState({ open: true, newRank: result.newRank });
+            }
+          })
+          .catch((eventError) => {
+            console.warn("Failed to record friendship event:", eventError);
+          });
+      }
+    } catch (error) {
+      if (!isMountedRef.current || requestId !== loadArticleRequestIdRef.current) {
+        return;
+      }
+
+      const fallbackDetail = getFallbackArticleById(requestArticleId);
+      setArticle(fallbackDetail);
+      setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
+      setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+      setLoadNotice(
+        "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
+      );
+      setLoadNoticeKind("error");
+      console.warn("Failed to load article detail:", error);
+    } finally {
+      if (isMountedRef.current && requestId === loadArticleRequestIdRef.current) {
+        setIsLoadingArticle(false);
+      }
+    }
   }, [resolvedArticleId]);
+
+  React.useEffect(() => {
+    void loadArticle();
+  }, [loadArticle]);
 
   React.useEffect(() => {
     let active = true;
@@ -1134,9 +1151,28 @@ export default function NewsReaderScreen({
                     <ExternalLink className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-                {loadNotice ? (
-                  <p className="mt-3 text-xs text-amber-700">{loadNotice}</p>
-                ) : null}
+                {loadNotice && (
+                  <Alert role="presentation" className="mt-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+                    <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                    <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                      <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                        {loadNotice}
+                      </span>
+                      {loadNoticeKind === "error" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                          onClick={() => void loadArticle()}
+                          disabled={isLoadingArticle}
+                        >
+                          再試行
+                        </Button>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
                 {favoriteNotice ? (
                   <p className="mt-2 text-xs text-amber-700">{favoriteNotice}</p>
                 ) : null}

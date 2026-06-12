@@ -445,6 +445,9 @@ export default function NewsHistoryScreen({
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [loadNoticeKind, setLoadNoticeKind] = React.useState<
+    "info" | "error" | "empty"
+  >("info");
 
   const visibleHistoryItems = React.useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -467,6 +470,7 @@ export default function NewsHistoryScreen({
   const loadHistoryItems = React.useCallback(async () => {
     setIsLoading(true);
     setLoadNotice(null);
+    setLoadNoticeKind("info");
 
     try {
       const articles = await listArticleHistory({
@@ -480,6 +484,7 @@ export default function NewsHistoryScreen({
         setLoadNotice(
           "ブラウザ単体プレビューのため、サンプル履歴を表示しています。"
         );
+        setLoadNoticeKind("info");
         setSelectedItemId((currentId) =>
           fallbackItems.some((item) => item.id === currentId)
             ? currentId
@@ -490,11 +495,12 @@ export default function NewsHistoryScreen({
 
       const mappedItems = articles.map(mapTauriHistoryItemToUi);
       setHistoryItems(mappedItems);
-      setLoadNotice(
-        mappedItems.length === 0
-          ? "この条件に一致する保存済み記事はまだありません。"
-          : null
-      );
+      if (mappedItems.length === 0) {
+        setLoadNotice("この条件に一致する保存済み記事はまだありません。");
+        setLoadNoticeKind("empty");
+      } else {
+        setLoadNotice(null);
+      }
       setSelectedItemId((currentId) =>
         mappedItems.some((item) => item.id === currentId)
           ? currentId
@@ -506,6 +512,7 @@ export default function NewsHistoryScreen({
       setLoadNotice(
         "ニュース履歴の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
+      setLoadNoticeKind("error");
       console.warn("Failed to load article history:", error);
     } finally {
       setIsLoading(false);
@@ -677,11 +684,24 @@ export default function NewsHistoryScreen({
           </div>
 
           {loadNotice && (
-            <Alert role="status" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+            <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
               <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
               <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
-              <AlertDescription className="text-xs text-muted-foreground">
-                {loadNotice}
+              <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                  {loadNotice}
+                </span>
+                {loadNoticeKind === "error" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    onClick={() => void loadHistoryItems()}
+                    disabled={isLoading}
+                  >
+                    再試行
+                  </Button>
+                )}
               </AlertDescription>
             </Alert>
           )}
