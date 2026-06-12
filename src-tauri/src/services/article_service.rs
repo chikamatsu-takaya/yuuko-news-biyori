@@ -1,6 +1,6 @@
 use crate::domain::article::{
-    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
-    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
+    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
     ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
     UpdateArticleFavoriteParams,
 };
@@ -70,5 +70,10 @@ impl ArticleService {
     ) -> Result<RestoreArchivedArticleResult, AppError> {
         let article_id = params.validated_article_id()?;
         self.repository.restore_archived_article(&article_id)
+    }
+
+    /// 完全な月次ZIPと記事カタログで検証できたarchived Markdownだけを退避付きで削除する。
+    pub fn retire_archived_markdown(&self) -> Result<ArchiveRetirementSummaryDto, AppError> {
+        self.repository.retire_archived_markdown()
     }
 }

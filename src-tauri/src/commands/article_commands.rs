@@ -1,8 +1,8 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
-    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
+    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
     ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
     UpdateArticleFavoriteParams,
 };
@@ -148,6 +148,23 @@ pub async fn restore_archived_article(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join restore-archived-article task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 完全性を検証できたarchived Markdownだけを、ロールバック可能な退避を経て通常領域から削除する。
+#[tauri::command]
+pub async fn retire_archived_markdown(
+    state: State<'_, AppState>,
+) -> CommandResult<ArchiveRetirementSummaryDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.retire_archived_markdown())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join retire-archived-markdown task: {error}"),
             )
         })?
         .map_err(CommandError::from)
