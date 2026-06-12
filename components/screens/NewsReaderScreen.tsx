@@ -431,16 +431,20 @@ function TermPopup({
   isLoading,
   isSaving,
   notice,
+  noticeKind,
   onSave,
   onClose,
+  onRetry,
 }: {
   term: string;
   dictionaryEntry: TauriDictionaryEntry | null;
   isLoading: boolean;
   isSaving: boolean;
   notice: string | null;
+  noticeKind: "info" | "error" | null;
   onSave: () => void;
   onClose: () => void;
+  onRetry?: () => void;
 }) {
   return (
     <div className="absolute left-1/2 top-1/2 z-50 w-80 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
@@ -469,14 +473,37 @@ function TermPopup({
       </div>
 
       {isLoading ? (
-        <div className="flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <div className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           <Spinner className="size-4" />
           <span>用語解説を取得しています…</span>
         </div>
       ) : null}
 
       {notice ? (
-        <p className="mb-2 text-xs text-amber-700">{notice}</p>
+        <Alert role="presentation" className="mb-3 border-[var(--yuuko-green)]/30 bg-white p-2">
+          <div className="flex items-start gap-2">
+            <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+            <div className="flex-1 min-w-0">
+              <span
+                className="block text-[10px] leading-normal text-muted-foreground"
+                role={noticeKind === "error" ? "alert" : "status"}
+              >
+                {notice}
+              </span>
+            </div>
+            {noticeKind === "error" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 shrink-0 px-2 text-[9px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                onClick={onRetry}
+                disabled={isLoading}
+              >
+                再試行
+              </Button>
+            )}
+          </div>
+        </Alert>
       ) : null}
 
       {dictionaryEntry ? (
@@ -672,17 +699,27 @@ export default function NewsReaderScreen({
           )
         : null
     );
-  const [isExplainingTerm, setIsExplainingTerm] = React.useState(false);
+  const [isLoadingTermExplanation, setIsLoadingTermExplanation] =
+    React.useState(false);
   const [isSavingDictionaryEntry, setIsSavingDictionaryEntry] =
     React.useState(false);
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
   const [isLoadingArticle, setIsLoadingArticle] = React.useState(true);
+  const [isLoadingRelatedArticles, setIsLoadingRelatedArticles] =
+    React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
+  const [termNoticeKind, setTermNoticeKind] = React.useState<"info" | "error">(
+    "info"
+  );
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  const [relatedNotice, setRelatedNotice] = React.useState<string | null>(null);
+  const [relatedNoticeKind, setRelatedNoticeKind] = React.useState<
+    "info" | "error"
+  >("info");
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
@@ -695,6 +732,8 @@ export default function NewsReaderScreen({
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
   const loadArticleRequestIdRef = React.useRef(0);
+  const loadRelatedRequestIdRef = React.useRef(0);
+  const loadTermRequestIdRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -783,114 +822,133 @@ export default function NewsReaderScreen({
     void loadArticle();
   }, [loadArticle]);
 
-  React.useEffect(() => {
-    let active = true;
+  const loadRelatedArticles = React.useCallback(async () => {
+    loadRelatedRequestIdRef.current += 1;
+    const requestId = loadRelatedRequestIdRef.current;
+    setIsLoadingRelatedArticles(true);
+    setRelatedNotice(null);
+    setRelatedNoticeKind("info");
 
-    const loadRelatedArticles = async () => {
-      try {
-        const summaries = await getRecommendedArticles({ limit: 5 });
-        if (!active || !summaries) {
-          setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-          return;
-        }
-
-        const mappedArticles = summaries
-          .map(mapSummaryToRelated)
-          .filter((item) => item.id !== resolvedArticleId);
-
-        if (mappedArticles.length > 0) {
-          setRelatedArticles(mappedArticles);
-          return;
-        }
-
-        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-        console.warn("Failed to load related articles:", error);
-      }
-    };
-
-    void loadRelatedArticles();
-
-    return () => {
-      active = false;
-    };
-  }, [resolvedArticleId]);
-
-  React.useEffect(() => {
-    let active = true;
-
-    const loadTermExplanation = async () => {
-      if (!selectedTerm || !showTermPopup) {
-        setSelectedDictionaryEntry(null);
-        setIsExplainingTerm(false);
-        setIsSavingDictionaryEntry(false);
-        setTermNotice(null);
+    try {
+      const summaries = await getRecommendedArticles({ limit: 5 });
+      if (!isMountedRef.current || requestId !== loadRelatedRequestIdRef.current) {
         return;
       }
 
-      const fallbackEntry = buildFallbackDictionaryEntry(
-        {
-          id: article.id,
-          title: article.title,
-        },
-        selectedTerm
-      );
-      setSelectedDictionaryEntry(fallbackEntry);
-      setIsExplainingTerm(true);
-      setTermNotice(null);
-
-      try {
-        const entry = await explainSelectedTerm({
-          articleId: article.id,
-          selectedText: selectedTerm.term,
-        });
-
-        if (!active) {
-          return;
-        }
-
-        setSelectedDictionaryEntry(entry ?? fallbackEntry);
-
-        // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
-        const termKey = `${article.id}::${selectedTerm.term}`;
-        if (entry && !recordedTermsRef.current.has(termKey)) {
-          recordedTermsRef.current.add(termKey);
-          void recordFriendshipEvent("term_explained")
-            .then((result) => {
-              if (active && result?.rankedUp) {
-                setRankUpState({ open: true, newRank: result.newRank });
-              }
-            })
-            .catch((eventError) => {
-              console.warn("Failed to record friendship event:", eventError);
-            });
-        }
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setSelectedDictionaryEntry(fallbackEntry);
-        setTermNotice("用語解説の取得に失敗したため、補助説明を表示しています。");
-        console.warn("Failed to explain selected term:", error);
-      } finally {
-        if (active) {
-          setIsExplainingTerm(false);
-        }
+      if (!summaries) {
+        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+        return;
       }
-    };
 
-    void loadTermExplanation();
+      const mappedArticles = summaries
+        .map(mapSummaryToRelated)
+        .filter((item) => item.id !== resolvedArticleId);
 
-    return () => {
-      active = false;
-    };
+      if (mappedArticles.length > 0) {
+        setRelatedArticles(mappedArticles);
+        return;
+      }
+
+      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+    } catch (error) {
+      if (!isMountedRef.current || requestId !== loadRelatedRequestIdRef.current) {
+        return;
+      }
+
+      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+      setRelatedNotice(
+        "関連記事の読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。"
+      );
+      setRelatedNoticeKind("error");
+      console.warn("Failed to load related articles:", error);
+    } finally {
+      if (isMountedRef.current && requestId === loadRelatedRequestIdRef.current) {
+        setIsLoadingRelatedArticles(false);
+      }
+    }
+  }, [resolvedArticleId]);
+
+  React.useEffect(() => {
+    void loadRelatedArticles();
+  }, [loadRelatedArticles]);
+
+  const loadTermExplanation = React.useCallback(async () => {
+    loadTermRequestIdRef.current += 1;
+    const requestId = loadTermRequestIdRef.current;
+
+    if (!selectedTerm || !showTermPopup) {
+      setSelectedDictionaryEntry(null);
+      setIsLoadingTermExplanation(false);
+      setIsSavingDictionaryEntry(false);
+      setTermNotice(null);
+      setTermNoticeKind("info");
+      return;
+    }
+
+    const fallbackEntry = buildFallbackDictionaryEntry(
+      {
+        id: article.id,
+        title: article.title,
+      },
+      selectedTerm
+    );
+    setSelectedDictionaryEntry(fallbackEntry);
+    setIsLoadingTermExplanation(true);
+    setTermNotice(null);
+    setTermNoticeKind("info");
+
+    try {
+      const entry = await explainSelectedTerm({
+        articleId: article.id,
+        selectedText: selectedTerm.term,
+      });
+
+      if (!isMountedRef.current || requestId !== loadTermRequestIdRef.current) {
+        return;
+      }
+
+      setSelectedDictionaryEntry(entry ?? fallbackEntry);
+
+      // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
+      const termKey = `${article.id}::${selectedTerm.term}`;
+      if (entry && !recordedTermsRef.current.has(termKey)) {
+        recordedTermsRef.current.add(termKey);
+        void recordFriendshipEvent("term_explained")
+          .then((result) => {
+            if (
+              isMountedRef.current &&
+              requestId === loadTermRequestIdRef.current &&
+              result?.rankedUp
+            ) {
+              setRankUpState({ open: true, newRank: result.newRank });
+            }
+          })
+          .catch((eventError) => {
+            console.warn("Failed to record friendship event:", eventError);
+          });
+      }
+    } catch (error) {
+      if (!isMountedRef.current || requestId !== loadTermRequestIdRef.current) {
+        return;
+      }
+
+      setSelectedDictionaryEntry(fallbackEntry);
+      setTermNotice("用語解説の取得に失敗したため、補助説明を表示しています。");
+      setTermNoticeKind("error");
+      console.warn("Failed to explain selected term:", error);
+    } finally {
+      if (
+        isMountedRef.current &&
+        requestId === loadTermRequestIdRef.current
+      ) {
+        setIsLoadingTermExplanation(false);
+      }
+    }
   }, [article.id, article.title, selectedTerm, showTermPopup]);
+
+  React.useEffect(() => {
+    void loadTermExplanation();
+  }, [loadTermExplanation]);
 
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
@@ -951,6 +1009,7 @@ export default function NewsReaderScreen({
 
     setIsSavingDictionaryEntry(true);
     setTermNotice(null);
+    setTermNoticeKind("info");
 
     try {
       const savedEntry = await saveDictionaryEntry({
@@ -1289,6 +1348,28 @@ export default function NewsReaderScreen({
                     関連記事
                   </h3>
                 </div>
+                {relatedNotice && (
+                  <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+                    <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                    <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                      <span role={relatedNoticeKind === "error" ? "alert" : "status"}>
+                        {relatedNotice}
+                      </span>
+                      {relatedNoticeKind === "error" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                          onClick={() => void loadRelatedArticles()}
+                          disabled={isLoadingRelatedArticles}
+                        >
+                          再試行
+                        </Button>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <button
                   className="flex w-full items-center gap-3 text-left"
                   onClick={() => onOpenArticle?.(featuredRelatedArticle.id)}
@@ -1342,11 +1423,13 @@ export default function NewsReaderScreen({
             <TermPopup
               term={selectedTerm.term}
               dictionaryEntry={selectedDictionaryEntry}
-              isLoading={isExplainingTerm}
+              isLoading={isLoadingTermExplanation}
               isSaving={isSavingDictionaryEntry}
               notice={termNotice}
+              noticeKind={termNoticeKind}
               onSave={handleSaveDictionaryEntry}
               onClose={() => setShowTermPopup(false)}
+              onRetry={loadTermExplanation}
             />
           ) : null}
         </main>
