@@ -1,4 +1,5 @@
 pub mod ai_provider_service;
+pub mod archive_scheduler;
 pub mod article_service;
 pub mod dictionary_service;
 pub mod friendship_service;

@@ -55,6 +55,7 @@ pub fn run() {
                 &paths,
                 news_service.clone(),
                 SettingsRepository::new(&paths),
+                article_service.clone(),
             );
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
@@ -81,7 +82,7 @@ pub fn run() {
                 yuuko_service,
             });
 
-            // 低頻度チェック方式の定期取得（起動時＋日付変更）を専用スレッドで開始する。
+            // 同じ低頻度スレッドでニュース取得と日次アーカイブ保守を確認する。
             news_scheduler.start();
 
             log::info!(
