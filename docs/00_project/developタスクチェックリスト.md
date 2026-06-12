@@ -1,40 +1,40 @@
 # developタスクチェックリスト
 
-最終更新: 2026-06-11
+最終更新: 2026-06-12
 対象ブランチ: `develop`
 目的: MVP開発の進捗・次アクション・品質ゲートを1枚で共有する
 
 ## 0. 今日見る場所
 
 ### Now
-- [ ] 月次ZIPアーカイブ増分2の索引・履歴統合基盤を実装する
+- [ ] 月次ZIPから安全に単一記事を復元するcommandを実装する
   - Priority: P1.5
   - Status: Review
   - Owner: @codex
-  - Branch: `codex/archive-index-history`
-  - Issue/PR: #79
+  - Branch: `codex/archive-article-restore`
+  - Issue/PR: #81
   - Done when:
-    - `archive_index.json` v2に記事単位の履歴表示メタデータが保存される
-    - v1 indexを後方互換で読み込める
-    - 元Markdownがない記事も履歴へ表示でき、RSS再取得の重複判定対象になる
-    - 元Markdownが残る間は、indexのスナップショットよりMarkdown側を優先する
+    - Reactから任意パスを受け取らず、`articleId`だけで対象ZIPとentryを特定できる
+    - ZIP・entry・Front Matterの整合性とサイズ上限を検証してからMarkdownを復元する
+    - 既存Markdownを上書きせず、再実行時に冪等である
+    - 復元済み記事が再アーカイブ候補にならない
   - Notes:
-    - このPRでは元Markdown削除・ZIP復元command・自動実行を行わない
-    - 後続は「安全な復元」→「退避付き削除」→「日次自動化」の順で分割する
+    - 索引・履歴統合基盤はPR #79でマージ済み
+    - このPRでは画面ボタン配線・元Markdown削除・自動実行を行わない
 
 ### Next
-- [ ] バックグラウンド常駐方式を決定し、待機状態を実装する
+- [ ] 月次ZIPとindexの整合確認後に元Markdownを退避付きで削除する
   - Priority: P1.5
-  - Status: Todo
+  - Status: Next
   - Owner: 未定
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
-    - 単一ウィンドウ非表示方式または小型ゆうこウィンドウ併用方式の採否が決まっている
-    - メイン画面を閉じても必要最小限の通知・日付確認だけが動く待機状態を再現できる
-    - 待機時とメイン画面表示時を同じ測定手順で比較できる
+    - v2記事カタログと月次ZIPの全記事整合性を確認した月だけを削除対象にできる
+    - 削除前退避またはロールバック経路があり、途中失敗で記事を失わない
+    - 復元済み・お気に入り・カタログ不完全な記事を削除しない
   - Notes:
-    - 2026-06-11時点は単一の可視メインウィンドウのみで、`hide` / `show`や別ゆうこウィンドウへの切替処理は未実装
+    - 安全な単記事復元commandのマージ後に着手する
 
 ### Blocked / 要判断
 - [ ] 本番CSPをTauri実機で検証する
@@ -369,19 +369,19 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 月単位ZIPを作成・検証し、`archive_index.json`を更新できる ✅
     - 成功記事だけにarchived印を付け、元Markdownを保持する非破壊設計になっている ✅
     - 複数月・途中失敗・同月再実行時の整合性をテストしている ✅
-- [ ] 月次ZIPアーカイブ増分2（元Markdown削除・ZIP再閲覧・自動実行）
+- [ ] 月次ZIPアーカイブ増分2（安全な復元・元Markdown削除・自動実行）
   - Priority: P1.5
-  - Status: Next
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Review
+  - Owner: @codex
+  - Branch: `codex/archive-article-restore`
+  - Issue/PR: #81
   - Done when:
-    - 記事単位indexを使い、元Markdown削除後も履歴表示と重複取得防止ができる
+    - 記事単位indexを使い、元Markdown削除後も履歴表示と重複取得防止ができる ✅（PR #79）
     - ZIPとindexの整合確認後にだけ元Markdownを削除する
     - ZIP内記事を安全に再閲覧できる
     - 自動実行のタイミングと再実行時の冪等性がテストされている
   - Notes:
-    - 実装順: 記事単位index・履歴統合 → 復元command → 退避付き削除 → 日次自動化
+    - 実装順: 記事単位index・履歴統合（PR #79完了）→ 復元command（PR #81レビュー中）→ 退避付き削除 → 日次自動化
 
 ### P1.5: 設計書突き合わせで追加したMVP残件（2026-06-08確認）
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。

@@ -114,6 +114,21 @@ pub struct ArchiveZipInfoDto {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveRestoreStatus {
+    Restored,
+    AlreadyAvailable,
+}
+
+/// アーカイブ記事の単記事復元結果。復元先パスはセキュリティ上公開しない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreArchivedArticleResult {
+    pub article_id: String,
+    pub status: ArchiveRestoreStatus,
+}
+
 /// 取得パイプライン（NewsService）が新規記事を保存する際の入力。
 /// `PersistedArticleRecord` は repository 内部型のため、保存用の公開入力として用意する。
 /// この型は内部Rust APIでのみ使用し、Tauri command では公開しない。
@@ -238,11 +253,34 @@ impl UpdateArticleFavoriteParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreArchivedArticleParams {
+    pub article_id: String,
+}
+
+impl RestoreArchivedArticleParams {
+    pub fn validated_article_id(&self) -> Result<String, AppError> {
+        let article_id = self.article_id.trim();
+        if article_id.is_empty()
+            || !article_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            return Err(AppError::Validation(
+                "articleId contains unsupported characters".to_string(),
+            ));
+        }
+        Ok(article_id.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_archive_candidate, ArticleHistoryFilter, GetArticleDetailParams,
-        GetRecommendedArticlesParams, ListArticleHistoryParams, UpdateArticleFavoriteParams,
+        GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
+        UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
 
@@ -336,6 +374,19 @@ mod tests {
         };
 
         assert!(params.validated_inputs().is_err());
+    }
+
+    #[test]
+    fn restore_archived_article_params_validate_and_trim() {
+        let params = RestoreArchivedArticleParams {
+            article_id: " article-001 ".to_string(),
+        };
+        assert_eq!(params.validated_article_id().unwrap(), "article-001");
+
+        let invalid = RestoreArchivedArticleParams {
+            article_id: "../article".to_string(),
+        };
+        assert!(invalid.validated_article_id().is_err());
     }
 
     #[test]
