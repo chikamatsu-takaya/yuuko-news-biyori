@@ -114,6 +114,16 @@ pub struct ArchiveZipInfoDto {
     pub size_bytes: u64,
 }
 
+/// ZIPとindexの整合確認後に、通常ニュース領域から退避したMarkdownの結果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveRetirementSummaryDto {
+    pub retired_article_count: usize,
+    pub retired_months: Vec<String>,
+    /// commit後の一時退避領域を削除できなかった場合だけtrue。記事の退避自体は完了している。
+    pub cleanup_pending: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchiveRestoreStatus {

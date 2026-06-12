@@ -96,6 +96,12 @@ export type RestoreArchivedArticleResult = {
   status: "restored" | "already_available";
 };
 
+export type ArchiveRetirementSummaryDto = {
+  retiredArticleCount: number;
+  retiredMonths: string[];
+  cleanupPending: boolean;
+};
+
 export const getRecommendedArticles = async (
   params: GetRecommendedArticlesParams = {}
 ): Promise<ArticleSummaryDto[] | null> => {
@@ -158,4 +164,12 @@ export const restoreArchivedArticle = async (
   return invoke<RestoreArchivedArticleResult>("restore_archived_article", {
     params,
   });
+};
+
+export const retireArchivedMarkdown = async (): Promise<ArchiveRetirementSummaryDto> => {
+  if (!isTauriRuntime()) {
+    return { retiredArticleCount: 0, retiredMonths: [], cleanupPending: false };
+  }
+
+  return invoke<ArchiveRetirementSummaryDto>("retire_archived_markdown");
 };
