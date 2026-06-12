@@ -678,11 +678,17 @@ export default function NewsReaderScreen({
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
   const [isLoadingArticle, setIsLoadingArticle] = React.useState(true);
+  const [isLoadingRelatedArticles, setIsLoadingRelatedArticles] =
+    React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  const [relatedNotice, setRelatedNotice] = React.useState<string | null>(null);
+  const [relatedNoticeKind, setRelatedNoticeKind] = React.useState<
+    "info" | "error"
+  >("info");
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
@@ -695,6 +701,7 @@ export default function NewsReaderScreen({
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
   const loadArticleRequestIdRef = React.useRef(0);
+  const loadRelatedRequestIdRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -783,43 +790,55 @@ export default function NewsReaderScreen({
     void loadArticle();
   }, [loadArticle]);
 
-  React.useEffect(() => {
-    let active = true;
+  const loadRelatedArticles = React.useCallback(async () => {
+    loadRelatedRequestIdRef.current += 1;
+    const requestId = loadRelatedRequestIdRef.current;
+    setIsLoadingRelatedArticles(true);
+    setRelatedNotice(null);
+    setRelatedNoticeKind("info");
 
-    const loadRelatedArticles = async () => {
-      try {
-        const summaries = await getRecommendedArticles({ limit: 5 });
-        if (!active || !summaries) {
-          setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-          return;
-        }
-
-        const mappedArticles = summaries
-          .map(mapSummaryToRelated)
-          .filter((item) => item.id !== resolvedArticleId);
-
-        if (mappedArticles.length > 0) {
-          setRelatedArticles(mappedArticles);
-          return;
-        }
-
-        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
-        console.warn("Failed to load related articles:", error);
+    try {
+      const summaries = await getRecommendedArticles({ limit: 5 });
+      if (!isMountedRef.current || requestId !== loadRelatedRequestIdRef.current) {
+        return;
       }
-    };
 
-    void loadRelatedArticles();
+      if (!summaries) {
+        setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+        return;
+      }
 
-    return () => {
-      active = false;
-    };
+      const mappedArticles = summaries
+        .map(mapSummaryToRelated)
+        .filter((item) => item.id !== resolvedArticleId);
+
+      if (mappedArticles.length > 0) {
+        setRelatedArticles(mappedArticles);
+        return;
+      }
+
+      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+    } catch (error) {
+      if (!isMountedRef.current || requestId !== loadRelatedRequestIdRef.current) {
+        return;
+      }
+
+      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+      setRelatedNotice(
+        "関連記事の読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。"
+      );
+      setRelatedNoticeKind("error");
+      console.warn("Failed to load related articles:", error);
+    } finally {
+      if (isMountedRef.current && requestId === loadRelatedRequestIdRef.current) {
+        setIsLoadingRelatedArticles(false);
+      }
+    }
   }, [resolvedArticleId]);
+
+  React.useEffect(() => {
+    void loadRelatedArticles();
+  }, [loadRelatedArticles]);
 
   React.useEffect(() => {
     let active = true;
@@ -1289,6 +1308,28 @@ export default function NewsReaderScreen({
                     関連記事
                   </h3>
                 </div>
+                {relatedNotice && (
+                  <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+                    <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                    <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                      <span role={relatedNoticeKind === "error" ? "alert" : "status"}>
+                        {relatedNotice}
+                      </span>
+                      {relatedNoticeKind === "error" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                          onClick={() => void loadRelatedArticles()}
+                          disabled={isLoadingRelatedArticles}
+                        >
+                          再試行
+                        </Button>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <button
                   className="flex w-full items-center gap-3 text-left"
                   onClick={() => onOpenArticle?.(featuredRelatedArticle.id)}
