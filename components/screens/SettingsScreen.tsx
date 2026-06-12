@@ -20,11 +20,17 @@ import {
   Download,
   Archive,
   Check,
+  Info,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -298,6 +304,12 @@ export default function SettingsScreen({
     React.useState<UserSettingsDto | null>(null);
   const [activeMenu, setActiveMenu] = React.useState("notification");
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
+    "info"
+  );
+  const isMountedRef = React.useRef(true);
 
   const { toast } = useToast();
 
@@ -307,29 +319,46 @@ export default function SettingsScreen({
     }
   };
 
-  React.useEffect(() => {
-    let cancelled = false;
+  const loadSettings = React.useCallback(async () => {
+    setIsLoading(true);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
 
-    const load = async () => {
-      try {
-        const dto = await getUserSettings();
-        if (!dto || cancelled) {
-          return;
-        }
-
-        setBackendSettings(dto);
-        setSettings((prev) => mapSettingsFromDto(prev, dto));
-      } catch (error) {
-        console.error("Failed to load settings from tauri command:", error);
+    try {
+      const dto = await getUserSettings();
+      if (!isMountedRef.current) {
+        return;
       }
-    };
 
-    void load();
+      if (!dto) {
+        return;
+      }
 
-    return () => {
-      cancelled = true;
-    };
+      setBackendSettings(dto);
+      setSettings((prev) => mapSettingsFromDto(prev, dto));
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      console.error("Failed to load settings from tauri command:", error);
+      setLoadNotice(
+        "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+      );
+      setLoadNoticeKind("error");
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+    }
   }, []);
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    void loadSettings();
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [loadSettings]);
 
   const updateNotification = (
     key: keyof NotificationSettings,
@@ -512,6 +541,36 @@ export default function SettingsScreen({
               ゆうことの過ごし方を、あなた好みにカスタマイズできます。
             </span>
           </div>
+
+          {loadNotice && (
+            <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm max-w-2xl">
+              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                  {loadNotice}
+                </span>
+                {loadNoticeKind === "error" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    onClick={() => void loadSettings()}
+                    disabled={isLoading}
+                  >
+                    再試行
+                  </Button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {isLoading && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-3 text-xs text-muted-foreground max-w-2xl">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--yuuko-green)] border-t-transparent" />
+              <span>設定を読み込んでいます…</span>
+            </div>
+          )}
 
           {/* Settings Cards */}
           <div className="space-y-4 max-w-2xl">
