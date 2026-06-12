@@ -398,7 +398,14 @@ impl ArticleRepository {
     /// rollback領域への全件移動後にcommit済み領域へ原子的に切り替え、途中失敗時は元へ戻す。
     pub fn retire_archived_markdown(&self) -> Result<ArchiveRetirementSummaryDto, AppError> {
         let _write_guard = self.lock_writes()?;
-        self.recover_retirement_staging()?;
+        let recovered_cleanup_pending = self.recover_retirement_staging()?;
+        if recovered_cleanup_pending {
+            return Ok(ArchiveRetirementSummaryDto {
+                retired_article_count: 0,
+                retired_months: Vec::new(),
+                cleanup_pending: true,
+            });
+        }
 
         let candidates = self.plan_archive_retirement()?;
         let retired_months = candidates
@@ -567,12 +574,14 @@ impl ArticleRepository {
     }
 
     /// 前回停止時のrollback領域は元へ戻し、commit済み領域は削除完了として掃除する。
-    fn recover_retirement_staging(&self) -> Result<(), AppError> {
+    fn recover_retirement_staging(&self) -> Result<bool, AppError> {
         let committed_root = self.archive_dir.join(RETIREMENT_COMMITTED_DIR);
+        let mut cleanup_pending = false;
         if committed_root.exists() {
             if let Err(error) = std::fs::remove_dir_all(&committed_root) {
                 // commit済み領域は通常ニュース領域へ戻してはならない。掃除だけを後続へ持ち越す。
                 log::warn!("Archive retirement committed cleanup is pending: {error}");
+                cleanup_pending = true;
             }
         }
 
@@ -580,7 +589,7 @@ impl ArticleRepository {
         if rollback_root.exists() {
             self.restore_retirement_rollback(&rollback_root)?;
         }
-        Ok(())
+        Ok(cleanup_pending)
     }
 
     fn commit_archive_retirement(

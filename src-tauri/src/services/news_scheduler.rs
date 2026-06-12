@@ -1,4 +1,4 @@
-//! ニュース取得の定期トリガー（低頻度チェック方式・要件 §7.2.2「起動時＋日付変更」）。
+//! ニュース取得とアーカイブ保守の低頻度スケジューラ。
 //!
 //! 方針:
 //! - 専用スレッドで低頻度（既定30分）に「ローカル日付が変わったか」だけを確認する。
@@ -7,6 +7,8 @@
 //! - **refresh 成功時のみ** `last_news_refresh_date` を更新する。失敗時は更新せず次回再試行。
 //! - 深夜0時ぴったりの厳密実行は行わない（スリープ復帰・OS時刻変更にも比較的強い）。
 //! - 設定 `news.fetch_on_startup` / `news.fetch_at_midnight` の ON/OFF を尊重する。
+//! - 同じtickで日次アーカイブ保守も確認し、追加の常駐スレッドを作らない。
+//! - アーカイブ保守はニュース取得設定とは独立し、完全成功した日だけ完了状態を保存する。
 //!
 //! `last_news_refresh_date` はローカル日付（YYYY-MM-DD）。取得タイミング管理用の状態で
 //! セキュリティ境界ではないため、欠落・破損時は fail-open（未取得扱い＝再取得）とする。
@@ -20,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::archive_scheduler::{ArchiveMaintenanceOutcome, ArchiveScheduler};
+use crate::services::article_service::ArticleService;
 use crate::services::news_service::NewsService;
 
 /// 日付確認の間隔（低頻度）。まずは30分とする。
@@ -72,8 +76,9 @@ enum TickKind {
     Periodic,
 }
 
-/// 低頻度チェック方式の定期取得スケジューラ。
+/// 低頻度チェック方式のニュース取得・アーカイブ保守スケジューラ。
 pub struct NewsScheduler {
+    archive_scheduler: ArchiveScheduler,
     news_service: NewsService,
     settings_repository: SettingsRepository,
     state_path: PathBuf,
@@ -85,8 +90,10 @@ impl NewsScheduler {
         paths: &AppPaths,
         news_service: NewsService,
         settings_repository: SettingsRepository,
+        article_service: ArticleService,
     ) -> Self {
         Self {
+            archive_scheduler: ArchiveScheduler::new(paths, article_service),
             news_service,
             settings_repository,
             state_path: paths.news_refresh_state_path.clone(),
@@ -107,18 +114,37 @@ impl NewsScheduler {
     }
 
     fn tick_blocking(&self, kind: TickKind) {
+        let today = local_today();
+        match self.archive_scheduler.run_if_due(&today) {
+            Ok(ArchiveMaintenanceOutcome::Skipped) => {}
+            Ok(ArchiveMaintenanceOutcome::Completed {
+                archived_article_count,
+                retired_article_count,
+            }) => log::info!(
+                "daily archive maintenance completed: archived={archived_article_count}, retired={retired_article_count}"
+            ),
+            Ok(ArchiveMaintenanceOutcome::CleanupPending {
+                archived_article_count,
+                retired_article_count,
+            }) => log::warn!(
+                "daily archive maintenance cleanup is pending; will retry: archived={archived_article_count}, retired={retired_article_count}"
+            ),
+            Err(error) => log::warn!(
+                "daily archive maintenance failed; will retry on next check: {error}"
+            ),
+        }
+
         // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
-        tauri::async_runtime::block_on(self.tick(kind));
+        tauri::async_runtime::block_on(self.tick_news(kind, &today));
     }
 
-    async fn tick(&self, kind: TickKind) {
+    async fn tick_news(&self, kind: TickKind, today: &str) {
         if !self.is_enabled(kind) {
             return;
         }
 
-        let today = local_today();
         let state = NewsRefreshState::load(&self.state_path);
-        if !should_refresh(state.last_news_refresh_date.as_deref(), &today) {
+        if !should_refresh(state.last_news_refresh_date.as_deref(), today) {
             return;
         }
 
@@ -130,7 +156,7 @@ impl NewsScheduler {
                 );
                 // 成功時のみ日付を更新する。
                 let updated = NewsRefreshState {
-                    last_news_refresh_date: Some(today),
+                    last_news_refresh_date: Some(today.to_string()),
                 };
                 if let Err(error) = updated.save(&self.state_path) {
                     log::warn!("failed to persist last_news_refresh_date: {error}");
