@@ -10,6 +10,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import {
   Home,
   Newspaper,
   History,
@@ -25,6 +30,7 @@ import {
   Sparkles,
   PlayCircle,
   RefreshCw,
+  Info,
 } from "lucide-react";
 import {
   getRecommendedArticles,
@@ -487,6 +493,11 @@ export default function MainScreen({
   const [refreshResult, setRefreshResult] =
     React.useState<TauriRefreshNewsResult | null>(null);
   const [isRefreshingNews, setIsRefreshingNews] = React.useState(false);
+  const [isLoadingArticles, setIsLoadingArticles] = React.useState(true);
+  const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
+    "info"
+  );
   const [yuukoBalloonMessage, setYuukoBalloonMessage] =
     React.useState(fallbackYuukoMessage);
   const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
@@ -542,6 +553,8 @@ export default function MainScreen({
   }, []);
 
   const loadRecommendedArticles = React.useCallback(async (): Promise<boolean> => {
+    setIsLoadingArticles(true);
+    setLoadNotice(null);
     try {
       const recommendedArticles = await getRecommendedArticles({ limit: 10 });
       if (!recommendedArticles) {
@@ -554,8 +567,12 @@ export default function MainScreen({
 
       return true;
     } catch (error) {
+      setLoadNotice("おすすめニュースの読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。");
+      setLoadNoticeKind("error");
       console.warn("Failed to load recommended articles:", error);
       return false;
+    } finally {
+      setIsLoadingArticles(false);
     }
   }, []);
 
@@ -776,6 +793,29 @@ export default function MainScreen({
                   </Button>
                 </div>
               </div>
+
+              {loadNotice && (
+                <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+                  <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                  <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                  <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                    <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                      {loadNotice}
+                    </span>
+                    {loadNoticeKind === "error" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                        onClick={() => void loadRecommendedArticles()}
+                        disabled={isLoadingArticles}
+                      >
+                        再試行
+                      </Button>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
 
               {articleNotice ? (
                 <p className="mb-3 text-xs text-amber-700">{articleNotice}</p>

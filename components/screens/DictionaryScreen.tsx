@@ -29,10 +29,16 @@ import {
   HelpCircle,
   Save,
   X,
+  Info,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
@@ -539,6 +545,9 @@ export default function DictionaryScreen({
   const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
+  const [loadNoticeKind, setLoadNoticeKind] = React.useState<
+    "info" | "error" | "empty"
+  >("info");
 
   const { toast } = useToast();
 
@@ -557,6 +566,7 @@ export default function DictionaryScreen({
   const loadEntries = React.useCallback(async () => {
     setIsLoading(true);
     setLoadNotice(null);
+    setLoadNoticeKind("info");
 
     try {
       const dictionaryEntries = await listDictionaryEntries({
@@ -577,15 +587,21 @@ export default function DictionaryScreen({
           )
         );
         setLoadNotice(previewNotice);
+        setLoadNoticeKind("info");
         return;
       }
 
       setEntries(dictionaryEntries.map(toUiEntry));
+      if (dictionaryEntries.length === 0) {
+        setLoadNotice(null);
+        setLoadNoticeKind("empty");
+      }
     } catch (error) {
       setEntries([]);
       setLoadNotice(
-        "辞書一覧の取得に失敗しました。時間をおいてもう一度お試しください。"
+        "辞書一覧の取得に失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
+      setLoadNoticeKind("error");
       console.warn("Failed to load dictionary entries:", error);
     } finally {
       setIsLoading(false);
@@ -851,9 +867,28 @@ export default function DictionaryScreen({
               })}
             </div>
 
-            {loadNotice ? (
-              <p className="mb-4 text-xs text-amber-700">{loadNotice}</p>
-            ) : null}
+            {loadNotice && (
+              <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
+                <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                    {loadNotice}
+                  </span>
+                  {loadNoticeKind === "error" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                      onClick={() => void loadEntries()}
+                      disabled={isLoading}
+                    >
+                      再試行
+                    </Button>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
 
             <Card className="border-border/50 py-0">
               <CardContent className="p-4">
