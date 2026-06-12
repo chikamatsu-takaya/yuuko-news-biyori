@@ -106,6 +106,8 @@ pub fn run() {
             commands::article_commands::generate_article_summary,
             commands::article_commands::get_archive_candidates,
             commands::article_commands::archive_old_articles,
+            commands::article_commands::restore_archived_article,
+            commands::article_commands::retire_archived_markdown,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,

@@ -1,7 +1,8 @@
 use crate::domain::article::{
-    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
-    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
-    ListArticleHistoryParams, UpdateArticleFavoriteParams,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
+    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
+    UpdateArticleFavoriteParams,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -60,5 +61,19 @@ impl ArticleService {
     /// 判定の基準時刻は現在UTC。結果サマリーを返す。
     pub fn archive_candidates(&self) -> Result<ArchiveSummaryDto, AppError> {
         self.repository.archive_candidates(chrono::Utc::now())
+    }
+
+    /// アーカイブから指定記事だけを安全に復元する。パスの解決とZIP検証はrepository側で行う。
+    pub fn restore_archived_article(
+        &self,
+        params: RestoreArchivedArticleParams,
+    ) -> Result<RestoreArchivedArticleResult, AppError> {
+        let article_id = params.validated_article_id()?;
+        self.repository.restore_archived_article(&article_id)
+    }
+
+    /// 完全な月次ZIPと記事カタログで検証できたarchived Markdownだけを退避付きで削除する。
+    pub fn retire_archived_markdown(&self) -> Result<ArchiveRetirementSummaryDto, AppError> {
+        self.repository.retire_archived_markdown()
     }
 }

@@ -1,9 +1,10 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto,
-    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
-    ListArticleHistoryParams, UpdateArticleFavoriteParams,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
+    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
+    UpdateArticleFavoriteParams,
 };
 use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
@@ -129,6 +130,41 @@ pub async fn archive_old_articles(state: State<'_, AppState>) -> CommandResult<A
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join archive-old-articles task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 記事IDだけを受け取り、Rust側で対応する月次ZIPとentryを特定して単記事復元する。
+#[tauri::command]
+pub async fn restore_archived_article(
+    state: State<'_, AppState>,
+    params: RestoreArchivedArticleParams,
+) -> CommandResult<RestoreArchivedArticleResult> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.restore_archived_article(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join restore-archived-article task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 完全性を検証できたarchived Markdownだけを、ロールバック可能な退避を経て通常領域から削除する。
+#[tauri::command]
+pub async fn retire_archived_markdown(
+    state: State<'_, AppState>,
+) -> CommandResult<ArchiveRetirementSummaryDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.retire_archived_markdown())
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join retire-archived-markdown task: {error}"),
             )
         })?
         .map_err(CommandError::from)

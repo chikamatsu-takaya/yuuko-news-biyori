@@ -87,6 +87,21 @@ export type GeneratedArticleSummaryDto = {
   yuukoComment: string;
 };
 
+export type RestoreArchivedArticleParams = {
+  articleId: string;
+};
+
+export type RestoreArchivedArticleResult = {
+  articleId: string;
+  status: "restored" | "already_available";
+};
+
+export type ArchiveRetirementSummaryDto = {
+  retiredArticleCount: number;
+  retiredMonths: string[];
+  cleanupPending: boolean;
+};
+
 export const getRecommendedArticles = async (
   params: GetRecommendedArticlesParams = {}
 ): Promise<ArticleSummaryDto[] | null> => {
@@ -137,4 +152,24 @@ export const generateArticleSummary = async (
   return invoke<GeneratedArticleSummaryDto>("generate_article_summary", {
     params,
   });
+};
+
+export const restoreArchivedArticle = async (
+  params: RestoreArchivedArticleParams
+): Promise<RestoreArchivedArticleResult> => {
+  if (!isTauriRuntime()) {
+    return { articleId: params.articleId, status: "already_available" };
+  }
+
+  return invoke<RestoreArchivedArticleResult>("restore_archived_article", {
+    params,
+  });
+};
+
+export const retireArchivedMarkdown = async (): Promise<ArchiveRetirementSummaryDto> => {
+  if (!isTauriRuntime()) {
+    return { retiredArticleCount: 0, retiredMonths: [], cleanupPending: false };
+  }
+
+  return invoke<ArchiveRetirementSummaryDto>("retire_archived_markdown");
 };

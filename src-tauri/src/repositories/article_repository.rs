@@ -1,20 +1,27 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDetailDto, ArticleHistoryFilter,
-    ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
-    FavoriteUpdateResult, FetchedArticle,
+    ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
+    ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
+    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
+    RestoreArchivedArticleResult,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
 
 const FRONT_MATTER_DELIMITER: &str = "---";
 const ARCHIVE_INDEX_VERSION: u32 = 2;
+const MAX_ARCHIVE_ZIP_SIZE: u64 = 128 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_SIZE: u64 = 2 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_ENTRY_SIZE: u64 = 128 * 1024 * 1024;
+const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
+const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
 
 #[derive(Debug, Clone)]
 pub struct ArticleRepository {
@@ -22,6 +29,7 @@ pub struct ArticleRepository {
     article_news_dir: PathBuf,
     archive_dir: PathBuf,
     archive_index_path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ArticleRepository {
@@ -32,6 +40,7 @@ impl ArticleRepository {
             article_news_dir: paths.article_news_dir.clone(),
             archive_index_path: archive_dir.join("archive_index.json"),
             archive_dir,
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -46,10 +55,13 @@ impl ArticleRepository {
             article_news_dir,
             archive_index_path: archive_dir.join("archive_index.json"),
             archive_dir,
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
+        let _write_guard = self.lock_writes()?;
+        self.recover_retirement_staging()?;
         std::fs::create_dir_all(&self.article_news_dir)?;
         if news_dir_contains_markdown_files(&self.article_news_dir)? {
             return Ok(());
@@ -142,6 +154,9 @@ impl ArticleRepository {
         Ok(articles
             .into_iter()
             .filter_map(|article| {
+                if article.archive_state == PersistedArchiveState::Restored {
+                    return None;
+                }
                 let is_favorite = is_effectively_favorite(&article, &favorite_store);
                 crate::domain::article::is_archive_candidate(
                     &article.fetched_at,
@@ -164,7 +179,7 @@ impl ArticleRepository {
     /// 元の記事Markdownは削除せず保持する（容量解放＝元.md削除は後続）。候補が無ければ何もしない。
     /// ZIP整合性検証に成功した月だけ archived 印を付ける（破損時は印を付けない＝安全側）。
     pub fn archive_candidates(&self, now: DateTime<Utc>) -> Result<ArchiveSummaryDto, AppError> {
-        use std::collections::BTreeMap;
+        let _write_guard = self.lock_writes()?;
 
         let favorite_store = self.load_favorite_store_or_default()?;
         let records = self.load_article_records()?;
@@ -178,6 +193,9 @@ impl ArticleRepository {
             let bucket = record.month_bucket();
             if record.is_archived {
                 archived_by_month.entry(bucket).or_default().push(record);
+                continue;
+            }
+            if record.archive_state == PersistedArchiveState::Restored {
                 continue;
             }
 
@@ -198,11 +216,21 @@ impl ArticleRepository {
         for (bucket, mut month_records) in by_month {
             month_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
             let mut zip_records = archived_by_month.remove(&bucket).unwrap_or_default();
-            self.ensure_month_catalog_records_available(
-                &format_month_label(&bucket),
-                &archive_index,
-                &zip_records,
-            )?;
+            if let Some(archive) = archive_index
+                .archives
+                .iter()
+                .find(|archive| archive.month == format_month_label(&bucket))
+            {
+                let archived_ids = zip_records
+                    .iter()
+                    .map(|record| record.article_id.clone())
+                    .collect::<HashSet<_>>();
+                zip_records.extend(
+                    self.load_verified_archive_records(archive)?
+                        .into_values()
+                        .filter(|record| !archived_ids.contains(&record.article_id)),
+                );
+            }
             zip_records.extend(month_records.iter().cloned());
             zip_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
 
@@ -244,6 +272,7 @@ impl ArticleRepository {
             let mut saved_originals = Vec::new();
             for mut record in month_records {
                 let original = record.clone();
+                record.archive_state = PersistedArchiveState::Archived;
                 record.is_archived = true;
                 record.status.archived = true;
                 if let Err(error) = self.save_article_record(&record) {
@@ -270,46 +299,6 @@ impl ArticleRepository {
             archived_article_count,
             zip_files,
         })
-    }
-
-    /// ZIPを直接読み戻せない段階では、既存ZIPの全記事Markdownが揃う月だけ再構築する。
-    /// カタログ内記事が欠けた状態で上書きすると、ZIPにだけ残る記事を失うため安全側で停止する。
-    fn ensure_month_catalog_records_available(
-        &self,
-        month: &str,
-        archive_index: &ArchiveIndex,
-        archived_records: &[PersistedArticleRecord],
-    ) -> Result<(), AppError> {
-        let Some(archive) = archive_index
-            .archives
-            .iter()
-            .find(|archive| archive.month == month)
-        else {
-            return Ok(());
-        };
-        if !archive.catalog_complete {
-            return Err(AppError::Archive(format!(
-                "refusing to rebuild month with incomplete archive catalog: {month}"
-            )));
-        }
-
-        let available_ids = archived_records
-            .iter()
-            .map(|record| record.article_id.as_str())
-            .collect::<HashSet<_>>();
-        let missing_ids = archive
-            .articles
-            .iter()
-            .filter(|article| !available_ids.contains(article.article_id.as_str()))
-            .map(|article| article.article_id.as_str())
-            .collect::<Vec<_>>();
-        if !missing_ids.is_empty() {
-            return Err(AppError::Archive(format!(
-                "refusing to rebuild {month}: archived markdown is missing for {}",
-                missing_ids.join(", ")
-            )));
-        }
-        Ok(())
     }
 
     fn load_archive_index_or_default(&self) -> Result<ArchiveIndex, AppError> {
@@ -405,11 +394,305 @@ impl ArticleRepository {
         }
     }
 
+    /// ZIP・記事カタログ・ローカルMarkdownが一致するarchived記事だけを通常領域から退避する。
+    /// rollback領域への全件移動後にcommit済み領域へ原子的に切り替え、途中失敗時は元へ戻す。
+    pub fn retire_archived_markdown(&self) -> Result<ArchiveRetirementSummaryDto, AppError> {
+        let _write_guard = self.lock_writes()?;
+        self.recover_retirement_staging()?;
+
+        let candidates = self.plan_archive_retirement()?;
+        let retired_months = candidates
+            .iter()
+            .map(|candidate| candidate.month.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let retired_article_count = candidates.len();
+        let cleanup_pending = self.commit_archive_retirement(&candidates)?;
+
+        Ok(ArchiveRetirementSummaryDto {
+            retired_article_count,
+            retired_months,
+            cleanup_pending,
+        })
+    }
+
+    fn plan_archive_retirement(&self) -> Result<Vec<ArchiveRetirementCandidate>, AppError> {
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let index = self.load_archive_index_or_default()?;
+        let mut records_by_month: BTreeMap<String, Vec<PersistedArticleRecord>> = BTreeMap::new();
+
+        for record in self.load_article_records()? {
+            if record.archive_state != PersistedArchiveState::Archived {
+                continue;
+            }
+            if !record.is_archived || !record.status.archived {
+                return Err(AppError::Archive(format!(
+                    "archived article state is inconsistent: {}",
+                    record.article_id
+                )));
+            }
+            if is_effectively_favorite(&record, &favorite_store) {
+                continue;
+            }
+            records_by_month
+                .entry(format_month_label(&record.month_bucket()))
+                .or_default()
+                .push(record);
+        }
+
+        let mut candidates = Vec::new();
+        for (month, mut records) in records_by_month {
+            records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
+            let archive = index
+                .archives
+                .iter()
+                .find(|archive| archive.month == month)
+                .ok_or_else(|| {
+                    AppError::Archive(format!(
+                        "archive index is missing for retirement month: {month}"
+                    ))
+                })?;
+            let archived_records = self.load_verified_archive_records(archive)?;
+
+            for record in records {
+                let archived_record =
+                    archived_records.get(&record.article_id).ok_or_else(|| {
+                        AppError::Archive(format!(
+                            "archive entry is missing for retirement article: {}",
+                            record.article_id
+                        ))
+                    })?;
+                if !record.equivalent_for_retirement(archived_record) {
+                    return Err(AppError::Archive(format!(
+                        "local article changed after archive creation: {}",
+                        record.article_id
+                    )));
+                }
+
+                let bucket = record.month_bucket();
+                validate_month_bucket(&bucket)?;
+                let entry_name = archive_entry_name(&record.article_id)?;
+                let relative_path = PathBuf::from(&bucket).join(entry_name);
+                let source_path = self.article_news_dir.join(&relative_path);
+                let source_metadata = std::fs::symlink_metadata(&source_path)?;
+                if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+                    return Err(AppError::Archive(format!(
+                        "retirement source markdown is not a regular file: {}",
+                        record.article_id
+                    )));
+                }
+                let source_record = self.load_article_record(&source_path)?;
+                if source_record != record {
+                    return Err(AppError::Archive(format!(
+                        "retirement source path does not match the planned article: {}",
+                        record.article_id
+                    )));
+                }
+                candidates.push(ArchiveRetirementCandidate {
+                    month: month.clone(),
+                    source_path,
+                    relative_path,
+                    expected_record: source_record,
+                });
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn load_verified_archive_records(
+        &self,
+        archive: &ArchiveIndexEntry,
+    ) -> Result<HashMap<String, PersistedArticleRecord>, AppError> {
+        if !archive.catalog_complete {
+            return Err(AppError::Archive(format!(
+                "archive article catalog is incomplete: {}",
+                archive.month
+            )));
+        }
+        validate_archive_location(archive)?;
+        let zip_path = self.archive_dir.join(&archive.file);
+        let actual_size = std::fs::metadata(&zip_path)?.len();
+        if actual_size != archive.size_bytes {
+            return Err(AppError::Archive(format!(
+                "archive size does not match index for {}",
+                archive.month
+            )));
+        }
+
+        let expected_names = archive
+            .articles
+            .iter()
+            .map(|article| article.entry_name.clone())
+            .collect::<Vec<_>>();
+        let mut contents = crate::infra::archive_storage::read_verified_archive_entries(
+            &zip_path,
+            &expected_names,
+            MAX_ARCHIVE_ZIP_SIZE,
+            MAX_ARCHIVE_ENTRY_SIZE,
+            MAX_ARCHIVE_TOTAL_ENTRY_SIZE,
+        )?;
+        let mut records = HashMap::new();
+
+        for catalog_article in &archive.articles {
+            let bytes = contents
+                .remove(&catalog_article.entry_name)
+                .ok_or_else(|| {
+                    AppError::Archive(format!(
+                        "archive entry is missing after verification: {}",
+                        catalog_article.entry_name
+                    ))
+                })?;
+            let raw = String::from_utf8(bytes).map_err(|_| {
+                AppError::Archive(format!(
+                    "archive article is not valid UTF-8: {}",
+                    catalog_article.article_id
+                ))
+            })?;
+            let record = parse_article_record(&raw, "archive article")?;
+            if record.article_id != catalog_article.article_id
+                || format_month_label(&record.month_bucket()) != archive.month
+                || !catalog_article.matches_record(&record)?
+            {
+                return Err(AppError::Archive(format!(
+                    "archive article metadata does not match the index: {}",
+                    catalog_article.article_id
+                )));
+            }
+            records.insert(record.article_id.clone(), record);
+        }
+
+        Ok(records)
+    }
+
+    /// 前回停止時のrollback領域は元へ戻し、commit済み領域は削除完了として掃除する。
+    fn recover_retirement_staging(&self) -> Result<(), AppError> {
+        let committed_root = self.archive_dir.join(RETIREMENT_COMMITTED_DIR);
+        if committed_root.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&committed_root) {
+                // commit済み領域は通常ニュース領域へ戻してはならない。掃除だけを後続へ持ち越す。
+                log::warn!("Archive retirement committed cleanup is pending: {error}");
+            }
+        }
+
+        let rollback_root = self.archive_dir.join(RETIREMENT_ROLLBACK_DIR);
+        if rollback_root.exists() {
+            self.restore_retirement_rollback(&rollback_root)?;
+        }
+        Ok(())
+    }
+
+    fn commit_archive_retirement(
+        &self,
+        candidates: &[ArchiveRetirementCandidate],
+    ) -> Result<bool, AppError> {
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        let rollback_root = self.archive_dir.join(RETIREMENT_ROLLBACK_DIR);
+        let committed_root = self.archive_dir.join(RETIREMENT_COMMITTED_DIR);
+        if rollback_root.exists() || committed_root.exists() {
+            return Err(AppError::Archive(
+                "archive retirement staging was not cleaned before commit".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(&rollback_root)?;
+
+        for candidate in candidates {
+            let current_record = match self.load_article_record(&candidate.source_path) {
+                Ok(record) => record,
+                Err(error) => {
+                    if let Err(restore_error) = self.restore_retirement_rollback(&rollback_root) {
+                        log::error!(
+                            "Failed to rollback archive retirement after revalidation error: {restore_error}"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            if current_record != candidate.expected_record {
+                if let Err(restore_error) = self.restore_retirement_rollback(&rollback_root) {
+                    log::error!(
+                        "Failed to rollback archive retirement after source change: {restore_error}"
+                    );
+                }
+                return Err(AppError::Archive(format!(
+                    "article markdown changed before retirement commit: {}",
+                    candidate.expected_record.article_id
+                )));
+            }
+
+            let staged_path = rollback_root.join(&candidate.relative_path);
+            if let Some(parent) = staged_path.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    if let Err(restore_error) = self.restore_retirement_rollback(&rollback_root) {
+                        log::error!(
+                            "Failed to rollback archive retirement after staging error: {restore_error}"
+                        );
+                    }
+                    return Err(error.into());
+                }
+            }
+            if let Err(error) = std::fs::rename(&candidate.source_path, &staged_path) {
+                if let Err(restore_error) = self.restore_retirement_rollback(&rollback_root) {
+                    log::error!(
+                        "Failed to rollback archive retirement after move error: {restore_error}"
+                    );
+                }
+                return Err(error.into());
+            }
+        }
+
+        if let Err(error) = std::fs::rename(&rollback_root, &committed_root) {
+            if let Err(restore_error) = self.restore_retirement_rollback(&rollback_root) {
+                log::error!(
+                    "Failed to rollback archive retirement after commit error: {restore_error}"
+                );
+            }
+            return Err(error.into());
+        }
+
+        match std::fs::remove_dir_all(&committed_root) {
+            Ok(()) => Ok(false),
+            Err(error) => {
+                log::warn!("Archive retirement cleanup is pending: {error}");
+                Ok(true)
+            }
+        }
+    }
+
+    fn restore_retirement_rollback(&self, rollback_root: &Path) -> Result<(), AppError> {
+        let staged_files = collect_retirement_markdown_files(rollback_root)?;
+        for staged_path in staged_files {
+            let relative_path = validate_retirement_relative_path(rollback_root, &staged_path)?;
+            let target_path = self.article_news_dir.join(relative_path);
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if target_path.exists() {
+                if std::fs::read(&target_path)? != std::fs::read(&staged_path)? {
+                    return Err(AppError::Archive(format!(
+                        "refusing to overwrite changed markdown during rollback: {}",
+                        target_path.display()
+                    )));
+                }
+                std::fs::remove_file(&staged_path)?;
+                continue;
+            }
+            std::fs::rename(&staged_path, &target_path)?;
+        }
+        std::fs::remove_dir_all(rollback_root)?;
+        Ok(())
+    }
+
     pub fn update_article_favorite(
         &self,
         article_id: &str,
         is_favorite: bool,
     ) -> Result<FavoriteUpdateResult, AppError> {
+        let _write_guard = self.lock_writes()?;
         let mut article = self.find_article_record(article_id)?;
         article.favorite = is_favorite;
         self.save_article_record(&article)?;
@@ -434,6 +717,7 @@ impl ArticleRepository {
         article_id: &str,
         update: ArticleSummaryUpdate,
     ) -> Result<(), AppError> {
+        let _write_guard = self.lock_writes()?;
         let mut article = self.find_article_record(article_id)?;
         article.summary = Some(update.summary);
         article.yuuko_explanation = Some(update.yuuko_explanation);
@@ -466,6 +750,7 @@ impl ArticleRepository {
     /// 取得済みの新規記事を保存する（内部Rust API・Tauri commandとして公開しない）。
     /// 既存 article_id はスキップして重複排除し、新規保存できた件数を返す。
     pub fn save_fetched_articles(&self, articles: Vec<FetchedArticle>) -> Result<usize, AppError> {
+        let _write_guard = self.lock_writes()?;
         let mut existing = self.existing_article_ids()?;
         let mut saved = 0usize;
 
@@ -482,11 +767,80 @@ impl ArticleRepository {
         Ok(saved)
     }
 
+    /// 記事IDから月次ZIP内の1記事だけを検証・復元する。任意パスは受け取らない。
+    pub fn restore_archived_article(
+        &self,
+        article_id: &str,
+    ) -> Result<RestoreArchivedArticleResult, AppError> {
+        let _write_guard = self.lock_writes()?;
+
+        if let Some(mut article) = self.find_article_record_optional(article_id)? {
+            if article.archive_state == PersistedArchiveState::Archived {
+                article.archive_state = PersistedArchiveState::Restored;
+                article.is_archived = false;
+                article.status.archived = false;
+                self.save_article_record(&article)?;
+                return Ok(RestoreArchivedArticleResult {
+                    article_id: article_id.to_string(),
+                    status: ArchiveRestoreStatus::Restored,
+                });
+            }
+            return Ok(RestoreArchivedArticleResult {
+                article_id: article_id.to_string(),
+                status: ArchiveRestoreStatus::AlreadyAvailable,
+            });
+        }
+
+        let index = self.load_archive_index_or_default()?;
+        let (archive, catalog_article) = index.find_article(article_id)?;
+        validate_archive_location(archive)?;
+        let zip_path = self.archive_dir.join(&archive.file);
+        let bytes = crate::infra::archive_storage::read_verified_entry(
+            &zip_path,
+            &catalog_article.entry_name,
+            MAX_ARCHIVE_ZIP_SIZE,
+            MAX_ARCHIVE_ENTRY_SIZE,
+        )?;
+        let raw = String::from_utf8(bytes)
+            .map_err(|_| AppError::Archive("archive article is not valid UTF-8".to_string()))?;
+        let mut article = parse_article_record(&raw, "archive article")?;
+        if article.article_id != article_id
+            || format_month_label(&article.month_bucket()) != archive.month
+        {
+            return Err(AppError::Archive(
+                "archive article metadata does not match the index".to_string(),
+            ));
+        }
+
+        article.archive_state = PersistedArchiveState::Restored;
+        article.is_archived = false;
+        article.status.archived = false;
+        self.save_article_record(&article)?;
+        Ok(RestoreArchivedArticleResult {
+            article_id: article_id.to_string(),
+            status: ArchiveRestoreStatus::Restored,
+        })
+    }
+
+    fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
+        self.write_lock
+            .lock()
+            .map_err(|_| AppError::Archive("article write lock is poisoned".to_string()))
+    }
+
     fn find_article_record(&self, article_id: &str) -> Result<PersistedArticleRecord, AppError> {
-        self.load_article_records()?
-            .into_iter()
-            .find(|article| article.article_id == article_id)
+        self.find_article_record_optional(article_id)?
             .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))
+    }
+
+    fn find_article_record_optional(
+        &self,
+        article_id: &str,
+    ) -> Result<Option<PersistedArticleRecord>, AppError> {
+        Ok(self
+            .load_article_records()?
+            .into_iter()
+            .find(|article| article.article_id == article_id))
     }
 
     fn load_article_records(&self) -> Result<Vec<PersistedArticleRecord>, AppError> {
@@ -502,16 +856,7 @@ impl ArticleRepository {
 
     fn load_article_record(&self, path: &Path) -> Result<PersistedArticleRecord, AppError> {
         let raw = std::fs::read_to_string(path)?;
-        let (front_matter_raw, body_raw) = split_front_matter(&raw, path)?;
-        let front_matter: PersistedArticleFrontMatter = serde_yaml::from_str(&front_matter_raw)
-            .map_err(|error| {
-                AppError::Parse(format!(
-                    "failed to parse article front matter '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        let sections = parse_article_body(&body_raw);
-        PersistedArticleRecord::from_parts(front_matter, sections)
+        parse_article_record(&raw, &path.display().to_string())
     }
 
     fn save_article_record(&self, article: &PersistedArticleRecord) -> Result<(), AppError> {
@@ -571,6 +916,14 @@ impl ArticleRepository {
     }
 }
 
+#[derive(Debug)]
+struct ArchiveRetirementCandidate {
+    month: String,
+    source_path: PathBuf,
+    relative_path: PathBuf,
+    expected_record: PersistedArticleRecord,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct ArticleFavoriteStore {
@@ -607,7 +960,7 @@ impl ArticleFavoriteStore {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PersistedArticleRecord {
     version: u32,
     article_id: String,
@@ -622,6 +975,7 @@ struct PersistedArticleRecord {
     status: PersistedArticleStatus,
     read_state: ArticleReadState,
     favorite: bool,
+    archive_state: PersistedArchiveState,
     is_archived: bool,
     recommendation_score: f32,
     summary_generated_at: Option<String>,
@@ -650,6 +1004,17 @@ impl PersistedArticleRecord {
             .published_at
             .clone()
             .unwrap_or_else(|| front_matter.fetched_at.clone());
+        let declared_archive_state = front_matter
+            .archive_state
+            .unwrap_or(PersistedArchiveState::Active);
+        let archive_state = match front_matter.archived {
+            Some(true) => PersistedArchiveState::Archived,
+            Some(false) if declared_archive_state == PersistedArchiveState::Restored => {
+                PersistedArchiveState::Restored
+            }
+            Some(false) => PersistedArchiveState::Active,
+            None => declared_archive_state,
+        };
 
         Ok(Self {
             version: normalize_version(front_matter.version),
@@ -665,10 +1030,8 @@ impl PersistedArticleRecord {
             status: front_matter.status,
             read_state: front_matter.read_state,
             favorite: front_matter.favorite,
-            is_archived: front_matter.archived.unwrap_or(matches!(
-                front_matter.archive_state,
-                Some(PersistedArchiveState::Archived)
-            )),
+            archive_state,
+            is_archived: archive_state == PersistedArchiveState::Archived,
             recommendation_score: front_matter.recommendation_score,
             summary_generated_at: front_matter.summary_generated_at,
             ai_provider: front_matter.ai_provider,
@@ -709,6 +1072,7 @@ impl PersistedArticleRecord {
             },
             read_state: article.read_state,
             favorite: false,
+            archive_state: PersistedArchiveState::Active,
             is_archived: false,
             recommendation_score: article.recommendation_score,
             summary_generated_at: None,
@@ -786,7 +1150,7 @@ impl PersistedArticleRecord {
             status: self.status.clone(),
             read_state: self.read_state.clone(),
             favorite: self.favorite,
-            archive_state: None,
+            archive_state: Some(self.archive_state),
             archived: Some(self.is_archived),
             recommendation_score: self.recommendation_score,
             summary_generated_at: self.summary_generated_at.clone(),
@@ -799,6 +1163,17 @@ impl PersistedArticleRecord {
         month_bucket_from_text(&self.published_at_text)
             .or_else(|| month_bucket_from_text(&self.fetched_at))
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn equivalent_for_retirement(&self, archived_record: &Self) -> bool {
+        let mut local = self.clone();
+        let mut archived = archived_record.clone();
+        for record in [&mut local, &mut archived] {
+            record.archive_state = PersistedArchiveState::Active;
+            record.is_archived = false;
+            record.status.archived = false;
+        }
+        local == archived
     }
 }
 
@@ -840,7 +1215,7 @@ struct PersistedArticleFrontMatter {
     content_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct PersistedArticleStatus {
     fetched: bool,
@@ -852,11 +1227,12 @@ struct PersistedArticleStatus {
     archived: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum PersistedArchiveState {
     Active,
     Archived,
+    Restored,
 }
 
 #[derive(Debug, Default)]
@@ -956,12 +1332,82 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), Ap
     Ok(())
 }
 
-fn split_front_matter(raw: &str, path: &Path) -> Result<(String, String), AppError> {
+fn collect_retirement_markdown_files(dir: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut pending_dirs = vec![dir.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(current_dir) = pending_dirs.pop() {
+        for entry in std::fs::read_dir(&current_dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                return Err(AppError::Archive(
+                    "archive retirement staging contains a symlink".to_string(),
+                ));
+            }
+            if file_type.is_dir() {
+                pending_dirs.push(entry.path());
+                continue;
+            }
+            let path = entry.path();
+            if !file_type.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("md")
+            {
+                return Err(AppError::Archive(
+                    "archive retirement staging contains an unexpected file".to_string(),
+                ));
+            }
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn validate_retirement_relative_path(root: &Path, path: &Path) -> Result<PathBuf, AppError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| AppError::Archive("retirement staging path escaped its root".to_string()))?;
+    let components = relative.components().collect::<Vec<_>>();
+    let [Component::Normal(bucket), Component::Normal(file_name)] = components.as_slice() else {
+        return Err(AppError::Archive(
+            "retirement staging path has an unsafe shape".to_string(),
+        ));
+    };
+    let bucket = bucket.to_str().ok_or_else(|| {
+        AppError::Archive("retirement staging month is not valid UTF-8".to_string())
+    })?;
+    validate_month_bucket(bucket)?;
+    let file_name = file_name.to_str().ok_or_else(|| {
+        AppError::Archive("retirement staging filename is not valid UTF-8".to_string())
+    })?;
+    let article_id = file_name
+        .strip_suffix(".md")
+        .ok_or_else(|| AppError::Archive("retirement staging filename is unsafe".to_string()))?;
+    if archive_entry_name(article_id)? != file_name {
+        return Err(AppError::Archive(
+            "retirement staging filename is unsafe".to_string(),
+        ));
+    }
+    Ok(PathBuf::from(bucket).join(file_name))
+}
+
+fn parse_article_record(raw: &str, source_label: &str) -> Result<PersistedArticleRecord, AppError> {
+    let (front_matter_raw, body_raw) = split_front_matter(raw, source_label)?;
+    let front_matter: PersistedArticleFrontMatter = serde_yaml::from_str(&front_matter_raw)
+        .map_err(|error| {
+            AppError::Parse(format!(
+                "failed to parse article front matter '{source_label}': {error}"
+            ))
+        })?;
+    let sections = parse_article_body(&body_raw);
+    PersistedArticleRecord::from_parts(front_matter, sections)
+}
+
+fn split_front_matter(raw: &str, source_label: &str) -> Result<(String, String), AppError> {
     let mut lines = raw.lines();
     if lines.next().map(str::trim) != Some(FRONT_MATTER_DELIMITER) {
         return Err(AppError::Parse(format!(
-            "article markdown '{}' is missing YAML front matter",
-            path.display()
+            "article markdown '{source_label}' is missing YAML front matter"
         )));
     }
 
@@ -977,8 +1423,7 @@ fn split_front_matter(raw: &str, path: &Path) -> Result<(String, String), AppErr
 
     if !found_closing_delimiter {
         return Err(AppError::Parse(format!(
-            "article markdown '{}' has an unterminated YAML front matter block",
-            path.display()
+            "article markdown '{source_label}' has an unterminated YAML front matter block"
         )));
     }
 
@@ -1269,6 +1714,29 @@ impl ArchiveIndex {
         }
         Ok(())
     }
+
+    fn find_article(
+        &self,
+        article_id: &str,
+    ) -> Result<(&ArchiveIndexEntry, &ArchiveArticleIndexEntry), AppError> {
+        for archive in &self.archives {
+            if let Some(article) = archive
+                .articles
+                .iter()
+                .find(|article| article.article_id == article_id)
+            {
+                if !archive.catalog_complete {
+                    return Err(AppError::Archive(
+                        "archive article catalog is incomplete".to_string(),
+                    ));
+                }
+                return Ok((archive, article));
+            }
+        }
+        Err(AppError::NotFound(format!(
+            "archived article not found: {article_id}"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1334,10 +1802,56 @@ impl ArchiveArticleIndexEntry {
             recommendation_score: self.recommendation_score,
         }
     }
+
+    fn matches_record(&self, record: &PersistedArticleRecord) -> Result<bool, AppError> {
+        Ok(self.article_id == record.article_id
+            && self.entry_name == archive_entry_name(&record.article_id)?
+            && self.title == record.title
+            && self.source_name == record.source_name
+            && self.published_at_text == record.published_at_text
+            && self.fetched_at == record.fetched_at
+            && self.genre == record.genre
+            && self.summary == record.summary.clone().or_else(|| record.excerpt.clone())
+            && self.read_state == record.read_state
+            && self.recommendation_score == record.recommendation_score)
+    }
 }
 
 fn legacy_archive_index_version() -> u32 {
     1
+}
+
+fn validate_archive_location(archive: &ArchiveIndexEntry) -> Result<(), AppError> {
+    let bytes = archive.month.as_bytes();
+    let month_number = archive
+        .month
+        .get(5..7)
+        .and_then(|value| value.parse::<u8>().ok());
+    let valid_month = bytes.len() == 7
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && month_number.is_some_and(|value| (1..=12).contains(&value));
+    if !valid_month || archive.file != format!("{}.zip", archive.month) {
+        return Err(AppError::Archive(
+            "archive index contains an unsafe archive location".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_month_bucket(bucket: &str) -> Result<(), AppError> {
+    let bytes = bucket.as_bytes();
+    let month = bucket.get(4..6).and_then(|value| value.parse::<u8>().ok());
+    if bytes.len() != 6
+        || !bytes.iter().all(u8::is_ascii_digit)
+        || !month.is_some_and(|value| (1..=12).contains(&value))
+    {
+        return Err(AppError::Archive(format!(
+            "unsafe article month bucket: {bucket}"
+        )));
+    }
+    Ok(())
 }
 
 fn month_bucket_from_text(value: &str) -> Option<String> {
@@ -1477,6 +1991,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             },
             read_state: ArticleReadState::Unread,
             favorite: false,
+            archive_state: PersistedArchiveState::Active,
             is_archived: false,
             recommendation_score: 0.92,
             summary_generated_at: Some("2026-06-04T09:12:00+09:00".to_string()),
@@ -1527,6 +2042,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             },
             read_state: ArticleReadState::Unread,
             favorite: false,
+            archive_state: PersistedArchiveState::Active,
             is_archived: false,
             recommendation_score: 0.84,
             summary_generated_at: Some("2026-06-04T08:45:00+09:00".to_string()),
@@ -1577,6 +2093,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             },
             read_state: ArticleReadState::Previewed,
             favorite: false,
+            archive_state: PersistedArchiveState::Active,
             is_archived: false,
             recommendation_score: 0.79,
             summary_generated_at: Some("2026-06-04T07:56:00+09:00".to_string()),
@@ -1613,11 +2130,11 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::domain::article::{ArticleHistoryFilter, ArticleReadState};
+    use crate::domain::article::{ArchiveRestoreStatus, ArticleHistoryFilter, ArticleReadState};
 
     use super::{
         archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
-        PersistedArticleRecord,
+        PersistedArchiveState, PersistedArticleRecord,
     };
 
     struct TestRepositoryContext {
@@ -1875,6 +2392,468 @@ mod tests {
         // 再実行すると候補は無い（古い2件はarchived済み・recentは新しいため）。
         let candidates_after = context.repository.list_archive_candidates(now).unwrap();
         assert!(candidates_after.is_empty());
+    }
+
+    #[test]
+    fn retire_archived_markdown_removes_verified_files_and_keeps_restore_path() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["retire-a", "retire-b"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 2);
+        assert_eq!(summary.retired_months, vec!["2026-05"]);
+        assert!(!summary.cleanup_pending);
+        assert!(!context.news_dir.join("202605").join("retire-a.md").exists());
+        assert!(!context.news_dir.join("202605").join("retire-b.md").exists());
+
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::Archived, 10)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(context
+            .repository
+            .existing_article_ids()
+            .unwrap()
+            .contains("retire-a"));
+
+        let restored = context
+            .repository
+            .restore_archived_article("retire-a")
+            .unwrap();
+        assert_eq!(restored.status, ArchiveRestoreStatus::Restored);
+        assert!(context.news_dir.join("202605").join("retire-a.md").exists());
+
+        let second = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(second.retired_article_count, 0);
+    }
+
+    #[test]
+    fn retire_archived_markdown_skips_favorite_and_restored_articles() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["favorite-archive", "restored-archive"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        context
+            .repository
+            .update_article_favorite("favorite-archive", true)
+            .unwrap();
+        context
+            .repository
+            .restore_archived_article("restored-archive")
+            .unwrap();
+
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 0);
+        assert!(context
+            .news_dir
+            .join("202605")
+            .join("favorite-archive.md")
+            .exists());
+        assert!(context
+            .news_dir
+            .join("202605")
+            .join("restored-archive.md")
+            .exists());
+    }
+
+    #[test]
+    fn retire_archived_markdown_fails_closed_when_local_content_changed() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["unchanged", "changed"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        context
+            .repository
+            .update_article_summary(
+                "changed",
+                ArticleSummaryUpdate {
+                    summary: "archive作成後の要約".to_string(),
+                    yuuko_explanation: "更新後の説明".to_string(),
+                    focus_points: vec!["更新".to_string()],
+                    yuuko_comment: "更新後のコメント".to_string(),
+                    generated_at: "2026-07-15T00:00:00Z".to_string(),
+                    ai_provider: "mock".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(context.repository.retire_archived_markdown().is_err());
+        assert!(context
+            .news_dir
+            .join("202605")
+            .join("unchanged.md")
+            .exists());
+        assert!(context.news_dir.join("202605").join("changed.md").exists());
+    }
+
+    #[test]
+    fn retirement_move_failure_restores_already_staged_markdown() {
+        let context = TestRepositoryContext::new();
+        let first_record = PersistedArticleRecord {
+            article_id: "first".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&first_record)
+            .unwrap();
+        let first_path = context.news_dir.join("202605").join("first.md");
+        let missing_path = context.news_dir.join("202605").join("missing.md");
+        let missing_record = PersistedArticleRecord {
+            article_id: "missing".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let candidates = vec![
+            super::ArchiveRetirementCandidate {
+                month: "2026-05".to_string(),
+                source_path: first_path.clone(),
+                relative_path: PathBuf::from("202605").join("first.md"),
+                expected_record: first_record,
+            },
+            super::ArchiveRetirementCandidate {
+                month: "2026-05".to_string(),
+                source_path: missing_path,
+                relative_path: PathBuf::from("202605").join("missing.md"),
+                expected_record: missing_record,
+            },
+        ];
+
+        assert!(context
+            .repository
+            .commit_archive_retirement(&candidates)
+            .is_err());
+        assert!(first_path.exists());
+        assert!(!context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR)
+            .exists());
+    }
+
+    #[test]
+    fn retirement_commit_rechecks_markdown_and_rolls_back_prior_moves() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["a-first", "z-changed"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let candidates = context.repository.plan_archive_retirement().unwrap();
+
+        context
+            .repository
+            .update_article_summary(
+                "z-changed",
+                ArticleSummaryUpdate {
+                    summary: "計画作成後の変更".to_string(),
+                    yuuko_explanation: "更新後".to_string(),
+                    focus_points: vec!["更新".to_string()],
+                    yuuko_comment: "変更あり".to_string(),
+                    generated_at: "2026-07-15T00:00:00Z".to_string(),
+                    ai_provider: "mock".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(context
+            .repository
+            .commit_archive_retirement(&candidates)
+            .is_err());
+        assert!(context.news_dir.join("202605").join("a-first.md").exists());
+        assert!(context
+            .news_dir
+            .join("202605")
+            .join("z-changed.md")
+            .exists());
+        assert!(!context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR)
+            .exists());
+    }
+
+    #[test]
+    fn retirement_recovery_restores_uncommitted_staging_before_startup_seed() {
+        let context = TestRepositoryContext::new();
+        let rollback_root = context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR);
+        let staged_path = rollback_root.join("202605").join("crash.md");
+        std::fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+        std::fs::write(&staged_path, "staged").unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(context.news_dir.join("202605").join("crash.md")).unwrap(),
+            "staged"
+        );
+        assert!(!rollback_root.exists());
+        assert!(!context.news_dir.join("202606").exists());
+    }
+
+    #[test]
+    fn retirement_recovery_discards_committed_staging_without_restoring_it() {
+        let context = TestRepositoryContext::new();
+        let committed_root = context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_COMMITTED_DIR);
+        let committed_path = committed_root.join("202605").join("committed.md");
+        std::fs::create_dir_all(committed_path.parent().unwrap()).unwrap();
+        std::fs::write(&committed_path, "committed").unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        assert!(!committed_root.exists());
+        assert!(!context
+            .news_dir
+            .join("202605")
+            .join("committed.md")
+            .exists());
+        assert!(context.news_dir.join("202606").exists());
+    }
+
+    #[test]
+    fn restore_archived_article_restores_zip_only_article_idempotently() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "restore-target".to_string(),
+            title: "アーカイブ時のタイトル".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let article_path = context.news_dir.join("202605").join("restore-target.md");
+        std::fs::remove_file(&article_path).unwrap();
+
+        let result = context
+            .repository
+            .restore_archived_article("restore-target")
+            .unwrap();
+        assert_eq!(result.status, ArchiveRestoreStatus::Restored);
+        assert!(article_path.exists());
+
+        let mut restored = context
+            .repository
+            .find_article_record("restore-target")
+            .unwrap();
+        assert_eq!(restored.archive_state, PersistedArchiveState::Restored);
+        assert!(!restored.is_archived);
+        assert!(!restored.status.archived);
+        assert!(context
+            .repository
+            .get_article_detail("restore-target")
+            .is_ok());
+        assert!(context
+            .repository
+            .list_archive_candidates(now)
+            .unwrap()
+            .is_empty());
+
+        restored.title = "復元後に編集したタイトル".to_string();
+        context.repository.save_article_record(&restored).unwrap();
+        let second = context
+            .repository
+            .restore_archived_article("restore-target")
+            .unwrap();
+        assert_eq!(second.status, ArchiveRestoreStatus::AlreadyAvailable);
+        assert_eq!(
+            context
+                .repository
+                .find_article_record("restore-target")
+                .unwrap()
+                .title,
+            "復元後に編集したタイトル"
+        );
+    }
+
+    #[test]
+    fn restore_archived_article_reactivates_retained_markdown() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "retained-archive".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let result = context
+            .repository
+            .restore_archived_article("retained-archive")
+            .unwrap();
+
+        assert_eq!(result.status, ArchiveRestoreStatus::Restored);
+        let restored = context
+            .repository
+            .find_article_record("retained-archive")
+            .unwrap();
+        assert_eq!(restored.archive_state, PersistedArchiveState::Restored);
+        assert!(!restored.is_archived);
+        assert!(context
+            .repository
+            .list_archive_candidates(now)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restore_archived_article_rejects_unsafe_index_location() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "unsafe-index".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let article_path = context.news_dir.join("202605").join("unsafe-index.md");
+        std::fs::remove_file(&article_path).unwrap();
+
+        let mut index = context.repository.load_archive_index_or_default().unwrap();
+        index.archives[0].file = "../2026-05.zip".to_string();
+        std::fs::write(
+            context.root_dir.join("archive").join("archive_index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        assert!(context
+            .repository
+            .restore_archived_article("unsafe-index")
+            .is_err());
+        assert!(!article_path.exists());
+    }
+
+    #[test]
+    fn restore_archived_article_rejects_markdown_that_disagrees_with_index() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let archived_article = PersistedArticleRecord {
+            article_id: "metadata-target".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&archived_article)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let article_path = context.news_dir.join("202605").join("metadata-target.md");
+        std::fs::remove_file(&article_path).unwrap();
+
+        let mismatched_article = PersistedArticleRecord {
+            article_id: "different-article".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..archived_article
+        };
+        let mismatched_markdown = super::serialize_article_markdown(&mismatched_article).unwrap();
+        crate::infra::archive_storage::write_verified_zip(
+            &context.root_dir.join("archive").join("2026-05.zip"),
+            &[crate::infra::archive_storage::ArchiveEntry {
+                name: "metadata-target.md".to_string(),
+                contents: mismatched_markdown.into_bytes(),
+            }],
+        )
+        .unwrap();
+
+        assert!(context
+            .repository
+            .restore_archived_article("metadata-target")
+            .is_err());
+        assert!(!article_path.exists());
     }
 
     #[test]
@@ -2170,7 +3149,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_candidates_refuses_month_rebuild_when_catalog_article_markdown_is_missing() {
+    fn archive_candidates_rebuilds_month_from_verified_zip_when_markdown_is_retired() {
         use chrono::{TimeZone, Utc};
         use std::io::Read;
         use zip::ZipArchive;
@@ -2205,30 +3184,31 @@ mod tests {
             .save_article_record(&new_article)
             .unwrap();
 
-        let result = context.repository.archive_candidates(now);
+        let result = context.repository.archive_candidates(now).unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(result.archived_article_count, 1);
         let new_article_after = context
             .repository
             .find_article_record("new-same-month")
             .unwrap();
-        assert!(!new_article_after.is_archived);
+        assert!(new_article_after.is_archived);
 
         let archive_dir = context.root_dir.join("archive");
         let file = std::fs::File::open(archive_dir.join("2026-05.zip")).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
-        assert_eq!(archive.len(), 1);
+        assert_eq!(archive.len(), 2);
         let mut zip_only = archive.by_name("zip-only.md").unwrap();
         let mut contents = String::new();
         zip_only.read_to_string(&mut contents).unwrap();
         assert!(contents.contains("articleId: zip-only"));
         drop(zip_only);
-        assert!(archive.by_name("new-same-month.md").is_err());
+        assert!(archive.by_name("new-same-month.md").is_ok());
 
         let index = context.repository.load_archive_index_or_default().unwrap();
         assert_eq!(index.archives.len(), 1);
-        assert_eq!(index.archives[0].articles.len(), 1);
-        assert_eq!(index.archives[0].articles[0].article_id, "zip-only");
+        assert_eq!(index.archives[0].articles.len(), 2);
+        assert_eq!(index.archives[0].articles[0].article_id, "new-same-month");
+        assert_eq!(index.archives[0].articles[1].article_id, "zip-only");
     }
 
     #[test]

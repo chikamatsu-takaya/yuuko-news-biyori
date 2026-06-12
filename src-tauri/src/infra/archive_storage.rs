@@ -5,9 +5,9 @@
 //!   （破損ZIPを残さない・整合性チェック＝データ設計書 §9.4 / §14）。
 //! - 出力先は呼び出し側が決める安全なパスのみを扱い、任意パスは受け取らない（§14.5）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -18,6 +18,194 @@ use crate::error::AppError;
 pub struct ArchiveEntry {
     pub name: String,
     pub contents: Vec<u8>,
+}
+
+/// 月次ZIPから指定した単一ファイルだけを安全に読み取る。
+/// 呼び出し側が導出した固定パスとentry名だけを受け取り、展開先パスは扱わない。
+pub fn read_verified_entry(
+    zip_path: &Path,
+    expected_entry_name: &str,
+    max_zip_size: u64,
+    max_entry_size: u64,
+) -> Result<Vec<u8>, AppError> {
+    validate_entry_name(expected_entry_name)?;
+    let zip_size = std::fs::metadata(zip_path)?.len();
+    if zip_size > max_zip_size {
+        return Err(AppError::Archive("archive file is too large".to_string()));
+    }
+
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| AppError::Archive(format!("failed to open archive: {error}")))?;
+    let mut contents = None;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            AppError::Archive(format!("failed to inspect archive entry #{index}: {error}"))
+        })?;
+        if entry.name() != expected_entry_name {
+            continue;
+        }
+        if contents.is_some() {
+            return Err(AppError::Archive(
+                "archive contains duplicate target entries".to_string(),
+            ));
+        }
+        if entry.encrypted() || !entry.is_file() {
+            return Err(AppError::Archive(
+                "archive target entry is not a readable file".to_string(),
+            ));
+        }
+        if entry.enclosed_name().as_deref() != Some(Path::new(expected_entry_name)) {
+            return Err(AppError::Archive(
+                "archive target entry has an unsafe path".to_string(),
+            ));
+        }
+        if entry.size() > max_entry_size {
+            return Err(AppError::Archive(
+                "archive target entry is too large".to_string(),
+            ));
+        }
+
+        let mut buffer = Vec::with_capacity(entry.size() as usize);
+        entry
+            .by_ref()
+            .take(max_entry_size + 1)
+            .read_to_end(&mut buffer)
+            .map_err(|error| {
+                AppError::Archive(format!("failed to read archive target entry: {error}"))
+            })?;
+        if buffer.len() as u64 > max_entry_size {
+            return Err(AppError::Archive(
+                "archive target entry exceeded the size limit".to_string(),
+            ));
+        }
+        contents = Some(buffer);
+    }
+
+    contents.ok_or_else(|| AppError::Archive("archive target entry was not found".to_string()))
+}
+
+/// 月次ZIP全体を記事カタログと突き合わせ、期待されたMarkdownだけを読み取る。
+/// 余分・欠落・重複entryを許可せず、各entryの展開サイズも制限する。
+pub fn read_verified_archive_entries(
+    zip_path: &Path,
+    expected_entry_names: &[String],
+    max_zip_size: u64,
+    max_entry_size: u64,
+    max_total_entry_size: u64,
+) -> Result<HashMap<String, Vec<u8>>, AppError> {
+    let expected_names = expected_entry_names
+        .iter()
+        .map(|name| {
+            validate_entry_name(name)?;
+            Ok(name.as_str())
+        })
+        .collect::<Result<HashSet<_>, AppError>>()?;
+    if expected_names.len() != expected_entry_names.len() {
+        return Err(AppError::Archive(
+            "archive catalog contains duplicate entry names".to_string(),
+        ));
+    }
+
+    let zip_size = std::fs::metadata(zip_path)?.len();
+    if zip_size > max_zip_size {
+        return Err(AppError::Archive("archive file is too large".to_string()));
+    }
+
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| AppError::Archive(format!("failed to open archive: {error}")))?;
+    if archive.len() != expected_names.len() {
+        return Err(AppError::Archive(format!(
+            "archive entry count mismatch: expected {}, found {}",
+            expected_names.len(),
+            archive.len()
+        )));
+    }
+
+    let mut contents = HashMap::new();
+    let mut declared_total_entry_size = 0u64;
+    let mut actual_total_entry_size = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            AppError::Archive(format!("failed to inspect archive entry #{index}: {error}"))
+        })?;
+        let entry_name = entry.name().to_string();
+        validate_entry_name(&entry_name)?;
+        if !expected_names.contains(entry_name.as_str()) {
+            return Err(AppError::Archive(format!(
+                "archive contains unexpected entry: {entry_name}"
+            )));
+        }
+        if contents.contains_key(&entry_name) {
+            return Err(AppError::Archive(
+                "archive contains duplicate target entries".to_string(),
+            ));
+        }
+        if entry.encrypted() || !entry.is_file() {
+            return Err(AppError::Archive(
+                "archive target entry is not a readable file".to_string(),
+            ));
+        }
+        if entry.enclosed_name().as_deref() != Some(Path::new(&entry_name)) {
+            return Err(AppError::Archive(
+                "archive target entry has an unsafe path".to_string(),
+            ));
+        }
+        if entry.size() > max_entry_size {
+            return Err(AppError::Archive(
+                "archive target entry is too large".to_string(),
+            ));
+        }
+        declared_total_entry_size = declared_total_entry_size
+            .checked_add(entry.size())
+            .ok_or_else(|| AppError::Archive("archive total entry size overflowed".to_string()))?;
+        if declared_total_entry_size > max_total_entry_size {
+            return Err(AppError::Archive(
+                "archive total entry size is too large".to_string(),
+            ));
+        }
+
+        let mut buffer = Vec::with_capacity(entry.size() as usize);
+        entry
+            .by_ref()
+            .take(max_entry_size + 1)
+            .read_to_end(&mut buffer)
+            .map_err(|error| {
+                AppError::Archive(format!("failed to read archive target entry: {error}"))
+            })?;
+        if buffer.len() as u64 > max_entry_size {
+            return Err(AppError::Archive(
+                "archive target entry exceeded the size limit".to_string(),
+            ));
+        }
+        actual_total_entry_size = actual_total_entry_size
+            .checked_add(buffer.len() as u64)
+            .ok_or_else(|| AppError::Archive("archive total entry size overflowed".to_string()))?;
+        if actual_total_entry_size > max_total_entry_size {
+            return Err(AppError::Archive(
+                "archive total entry size is too large".to_string(),
+            ));
+        }
+        contents.insert(entry_name, buffer);
+    }
+
+    Ok(contents)
+}
+
+fn validate_entry_name(entry_name: &str) -> Result<(), AppError> {
+    let path = PathBuf::from(entry_name);
+    let mut components = path.components();
+    let is_single_file = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && path.extension().and_then(|value| value.to_str()) == Some("md");
+    if !is_single_file {
+        return Err(AppError::Archive(
+            "archive target entry name is unsafe".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// エントリ集合を deflate 圧縮で `zip_path` へ書き出し、再オープンして整合性検証する。
@@ -210,6 +398,96 @@ mod tests {
             entry.read_to_string(&mut text).unwrap();
             assert_eq!(text, "hello");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_verified_entry_returns_only_the_requested_file() {
+        let dir = temp_dir("read-entry");
+        let zip_path = dir.join("2026-05.zip");
+        let entries = vec![
+            ArchiveEntry {
+                name: "article-a.md".to_string(),
+                contents: b"article-a".to_vec(),
+            },
+            ArchiveEntry {
+                name: "article-b.md".to_string(),
+                contents: b"article-b".to_vec(),
+            },
+        ];
+        write_verified_zip(&zip_path, &entries).unwrap();
+
+        let contents = read_verified_entry(&zip_path, "article-b.md", 1024 * 1024, 1024).unwrap();
+        assert_eq!(contents, b"article-b");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_verified_entry_rejects_unsafe_names_and_large_entries() {
+        let dir = temp_dir("read-guards");
+        let zip_path = dir.join("2026-05.zip");
+        let entries = vec![ArchiveEntry {
+            name: "article.md".to_string(),
+            contents: b"12345".to_vec(),
+        }];
+        write_verified_zip(&zip_path, &entries).unwrap();
+
+        assert!(read_verified_entry(&zip_path, "../article.md", 1024 * 1024, 1024).is_err());
+        assert!(read_verified_entry(&zip_path, "article.md", 1024 * 1024, 4).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_verified_entry_rejects_missing_target_entry() {
+        let dir = temp_dir("missing-entry");
+        let zip_path = dir.join("2026-05.zip");
+        let entries = vec![ArchiveEntry {
+            name: "other.md".to_string(),
+            contents: b"other".to_vec(),
+        }];
+        write_verified_zip(&zip_path, &entries).unwrap();
+
+        let result = read_verified_entry(&zip_path, "article.md", 1024 * 1024, 1024);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_verified_archive_entries_requires_exact_catalog_match() {
+        let dir = temp_dir("read-full-archive");
+        let zip_path = dir.join("2026-05.zip");
+        let entries = vec![
+            ArchiveEntry {
+                name: "a.md".to_string(),
+                contents: b"a".to_vec(),
+            },
+            ArchiveEntry {
+                name: "b.md".to_string(),
+                contents: b"b".to_vec(),
+            },
+        ];
+        write_verified_zip(&zip_path, &entries).unwrap();
+
+        let expected = vec!["a.md".to_string(), "b.md".to_string()];
+        let contents =
+            read_verified_archive_entries(&zip_path, &expected, 1024 * 1024, 1024, 2048).unwrap();
+        assert_eq!(contents.get("a.md").unwrap(), b"a");
+        assert_eq!(contents.get("b.md").unwrap(), b"b");
+
+        let incomplete_catalog = vec!["a.md".to_string()];
+        assert!(read_verified_archive_entries(
+            &zip_path,
+            &incomplete_catalog,
+            1024 * 1024,
+            1024,
+            2048,
+        )
+        .is_err());
+        assert!(read_verified_archive_entries(&zip_path, &expected, 1024 * 1024, 1024, 1).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
