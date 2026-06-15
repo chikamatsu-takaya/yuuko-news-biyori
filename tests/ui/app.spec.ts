@@ -87,6 +87,24 @@ test("home screen renders and primary controls are hittable", async ({
   await page.getByRole("button", { name: "ニュースを更新" }).click();
   await expect(page.getByText("ニュースを更新しました。")).toBeVisible();
 
+  // Tauriのclose呼び出しをmockし、共通タイトルバーの操作経路を確認する。
+  await page.getByRole("button", { name: "バックグラウンドで待機" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          Boolean(
+            (window as typeof window & {
+              __E2E_WINDOW_CLOSE_CALLED__?: boolean;
+            }).__E2E_WINDOW_CLOSE_CALLED__
+          )
+      )
+    )
+    .toBe(true);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
   await expectVisibleInteractiveHitTargets(page, "home");
   await captureScreen(page, testInfo, "home");
 });
@@ -191,6 +209,13 @@ async function installTauriMocks(page: Page) {
         const params = args?.params ?? {};
 
         switch (cmd) {
+          case "plugin:window|close":
+            (
+              window as typeof window & {
+                __E2E_WINDOW_CLOSE_CALLED__?: boolean;
+              }
+            ).__E2E_WINDOW_CLOSE_CALLED__ = true;
+            return null;
           case "get_recommended_articles":
             return [articleSummary];
           case "list_article_history":

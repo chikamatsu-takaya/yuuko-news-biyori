@@ -1,3 +1,4 @@
+mod app_lifecycle;
 mod commands;
 mod domain;
 mod error;
@@ -31,7 +32,15 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            app_lifecycle::handle_window_event(window, event);
+        })
         .setup(|app| {
+            if let Err(error) = app_lifecycle::setup(app) {
+                // トレイが無いままclose-to-hideだけ有効になると終了不能になるため、通常終了へ戻す。
+                log::error!("常駐ライフサイクルを初期化できませんでした: {error}");
+            }
+
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);
             paths.ensure_storage_dirs()?;
