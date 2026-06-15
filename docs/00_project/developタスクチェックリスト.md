@@ -7,47 +7,41 @@
 ## 0. 今日見る場所
 
 ### Now
-- [ ] バックグラウンド常駐方式を決定し、待機状態を実装する
+- [ ] Windows実機で常駐動作・非表示性能・本番CSPを一括検証する
   - Priority: P1.5
   - Status: Doing
-  - Owner: @codex
-  - Branch: `codex/background-resident-lifecycle`
-  - Issue/PR: 未定
+  - Owner: @codex（手順・記録）/ 実機操作=アプリを起動できる担当
+  - Branch: `codex/resident-runtime-validation`
+  - Issue/PR: #65（CSP設定）/ #87（常駐実装）
   - Done when:
-    - 単一ウィンドウ非表示方式または小型ゆうこウィンドウ併用方式の採否が決まっている
-    - メイン画面を閉じてもニュース取得・日次アーカイブの低頻度処理が継続する
-    - トレイから再表示と明示終了ができる
+    - 閉じる操作後もプロセスが継続し、トレイから再表示・明示終了できる ✅
+    - 非表示中もニュース取得・日次アーカイブの低頻度スケジューラが継続している ⬜（日付変更時の実発火は未確認）
+    - 表示中と非表示中のCPU・メモリ差を同条件で記録している ✅
+    - 本番ビルドの主要画面でCSP違反が発生していない ✅
   - Notes:
-    - MVPは単一メインウィンドウのclose-to-hide方式を採用し、小型ゆうこ別ウィンドウは後続に分離する
-    - 画面内の「常駐を終了する」ボタン配線はフロント変更として別スライスにする
+    - `docs/01_setup/軽量常駐性能確認手順.md` §9と、`docs/02_design/リリース前セキュリティ点検結果.md`のCSP確認手順に沿って実施する
+    - コード・自動テストでは代替できないWindowsトレイ/WebView2の最終確認
+    - 2026-06-15: `tauri build --debug`成功、WM_CLOSE後も同一PID継続、表示/非表示60秒測定、トレイ再表示・明示終了まで確認
+    - 初回確認で検出したVercel Analyticsの`Unexpected token '<'`は、デスクトップ版で不要なAnalyticsを除去して解消。再ビルド後の主要画面でCSP違反・構文エラーなしを確認
+    - 残件は日付変更時のニュース取得・日次アーカイブ実行を1回確認すること
 
 ### Next
-- [ ] 非表示待機時のCPU・メモリと終了動作をWindows実機で再測定する
+- [ ] AIプロバイダ接続テストの最小バックエンド基盤を追加する
   - Priority: P1.5
   - Status: Next
-  - Owner: アプリを起動できる担当
-  - Branch: `codex/background-resident-lifecycle`
+  - Owner: 未定
+  - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
-    - 閉じる操作後もプロセスと低頻度スケジューラが継続している
-    - トレイから再表示・明示終了でき、終了後にプロセスが残らない
-    - 待機時とメイン画面表示時のCPU・メモリ差を同条件で記録している
+    - `test_ai_provider`相当の用途・戻り値・失敗時挙動が設計と一致している
+    - GeminiのAPIキーや送信本文をReact・ログ・戻り値へ露出しない
+    - APIキー未設定時はMockProviderの疎通結果を安全に返せる
   - Notes:
-    - `docs/01_setup/軽量常駐性能確認手順.md` §9に沿って確認する
+    - 新規Tauri commandが本当に必要かを先に確認し、公開する場合も接続確認専用の固定操作に限定する
+    - 根拠: 画面詳細設計書 SCR-003 §7.5 / §7.10
 
 ### Blocked / 要判断
-- [ ] 本番CSPをTauri実機で検証する
-  - Priority: P1.5
-  - Status: Blocked
-  - Owner: アプリを起動できる担当
-  - Branch: 未作成
-  - Issue/PR: #65（設定適用）
-  - Done when:
-    - `tauri build`、または本番相当CSPを有効にした`tauri dev`で主要画面が表示できる
-    - ブラウザコンソールとTauriログにCSP違反が出ていない
-    - 問題があればCSPを必要最小限の範囲で調整している
-  - Notes:
-    - CSP設定自体はPR #65で反映済み。Windows/Tauri実機による人の目視確認待ち
+- 現時点で、外部要因により着手不能なP1/P1.5タスクはなし。
 
 ## 1. 使い方
 - このMarkdownをタスク管理の唯一の正本とする。HTMLビューやスプレッドシートは表示・共有用であり、正本にはしない。
@@ -76,7 +70,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - 終了するときはターミナルで `Ctrl + C` を押す。
 
 ## 2. 現在地サマリー
-- `develop` は **PR #86まで反映済み**。失敗時UI統一は主要画面・記事サブコンテンツ・設定初期ロードまで進み、未配線画面などへの横展開が残件。
+- `develop` は **PR #87まで反映済み**。失敗時UI統一は主要画面・記事サブコンテンツ・設定初期ロードまで進み、未配線画面などへの横展開が残件。
 - 主要画面・Tauri command 一式・ニュース取得パイプライン・手動更新UI・UI E2E まで到達。
 - **実AI: Gemini連携(#38)＋堅牢化(失敗時mock/モデル設定化/疎通確認 #41)＋要約のMarkdown永続化(#44) まで完了**。
 - **友情ランク: ポイント加算・ランクアップ・RankUpDialog 配線まで完了(#52)**。日次上限・イベント種別検証・並行更新対策もPRレビュー対応済み。
@@ -92,11 +86,11 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - **アーカイブ退避方針を確定(#57)し、増分1(#68)・記事索引/履歴統合(#79)・安全な単記事復元(#81)・退避付き削除(#82)・日次自動化(#84)まで完了**。
 - **設定アクション方針整理＋リセット実装は完了(#59)**: リセット=確認ダイアログ＋`reset_user_settings`、後回し3操作（キャッシュ削除/辞書export/アーカイブ管理）は非活性「準備中」、AI接続テストは後続。
 - **ゆうこ通知バックエンド強化は完了(#61)**: クールタイム(60/120/180分)・日次上限・紹介済みFIFO・`request_yuuko_notification`（選定＋ゲート。アクティブ通知/報酬pending時は上書きしない）・dismiss/handle/ignore/markIgnoredのTSラッパー。画面接続は#46（メンバー担当）。
-- **軽量常駐の初回性能測定は完了**: Windows向け測定スクリプトと再現手順を追加し、起動時間・プロセスツリーCPU/メモリ・TCP接続・ニュース状態変化の基準値を取得。真の非表示待機状態は未実装のため別タスク化。
+- **バックグラウンド常駐のMVP実装は完了(#87)**: 単一メインウィンドウのclose-to-hide、固定トレイメニューからの再表示・明示終了、トレイ初期化失敗時のフェイルセーフまで反映済み。Windows実機での性能・トレイ・本番CSP確認が残件。
 - **GachaScreen初期レイアウト修正は完了(#60)**（フロント・メンバー担当）。
 - **設計書突き合わせ結果**: 設定画面の未実装操作(#59完了)、ゆうこ通知(#61バックエンド完了・画面接続#46)、辞書メモ/削除UI、正式identifier、権限/ログ/性能点検を追加追跡。
 - **担当の住み分け**: フロント系（#46 ゆうこ導線/ホーム/用語選択、Mock依存置換、失敗時UI統一、余白微修正）は**メンバー担当**。辞書メモ/削除/★操作は#67で完了。AIは非フロント（バックエンド/設定/セキュリティ/docs/判断）を優先する。
-- **次の優先順（非フロント）**: バックグラウンド常駐方式の決定・実装 → 非表示待機の性能再測定 → Playwright E2Eの必須化要否判断。
+- **次の優先順（非フロント）**: Windows実機で常駐・性能・本番CSPを一括検証 → AIプロバイダ接続テスト基盤 → Playwright E2Eの必須化要否判断。
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
@@ -340,6 +334,19 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
 - [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
 - [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
+- [ ] AIプロバイダ接続テストの最小バックエンド基盤を追加する
+  - Priority: P1.5
+  - Status: Next
+  - Owner: 未定
+  - Branch: 未作成
+  - Issue/PR: 未定
+  - Done when:
+    - 接続確認専用の固定処理として、GeminiまたはMockProviderの利用可否を確認できる
+    - APIキー、プロンプト、記事本文をログ・DTO・React側へ露出しない
+    - Gemini失敗時もアプリ全体を停止させず、調査可能な固定エラー種別を返す
+    - Tauri commandを追加する場合は`test_ai_provider`相当の用途に限定し、任意URL・任意入力を受け付けない
+  - Notes:
+    - 根拠: 画面詳細設計書 SCR-003 §7.5 / §7.10。UI配線はバックエンド基盤の後続PRへ分離可能
 - [x] （B-4後続・実装）要約のMarkdown永続化（PR #44）：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存。再表示はキャッシュ・更新は明示再生成。種は元 excerpt から作り再生成膨張を防止
 - [x] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 準拠で「1か月→月次ZIP（お気に入り除外）」を確定（「4〜7日」案は不採用）
   - Priority: P1.5
@@ -463,22 +470,22 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Branch: `chore/release-security-review`
   - Issue/PR: #64
   - Done when:
-    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み ✅（capabilityは `core:default` のみ＝最小。CSPは未設定→制限的CSPを提案・後続で適用）
+    - `src-tauri/capabilities/default.json` と `tauri.conf.json` の権限・CSP方針がレビュー済み ✅（capabilityは `core:default`＋main限定`core:window:allow-close`。制限的CSPはPR #65で適用済み）
     - 追加が必要なTauri pluginがある場合、権限・ライセンス・必要性が記録されている ✅（`tauri-plugin-log` のみ・デバッグビルド限定）
     - 任意ファイル操作/任意URL取得の公開口がないことを再確認している ✅（全commandドメイン限定・汎用口なし）
   - Notes:
     - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
-- [ ] CSPを設定する（制限的CSP・要 実機検証）
+- [x] 制限的CSPをWindows/Tauri実機で検証する
   - Priority: P1.5
-  - Status: Blocked
-  - Owner: @claude（適用）/ 検証=アプリを動かせる担当
-  - Branch: `chore/set-csp`
-  - Issue/PR: #65
+  - Status: Done
+  - Owner: @codex（手順・記録）/ 実機操作=アプリを起動できる担当
+  - Branch: `codex/resident-runtime-validation`
+  - Issue/PR: #65（設定適用）
   - Done when:
     - `tauri.conf.json` の `app.security.csp` に制限的CSPを設定（点検結果 §6）✅（PR #65で適用。script/style は static export 制約で `'unsafe-inline'`）
-    - 実機（`tauri build` のバンドル、または `devCsp` を設定した `tauri dev`）で全画面の描画とコンソールのCSP違反なしを確認している ⬜（要・人による目視）
+    - 実機（`tauri build` のバンドル、または `devCsp` を設定した `tauri dev`）で全画面の描画とコンソールのCSP違反なしを確認している ✅（2026-06-15）
   - Notes:
-    - PR #65はCSP適用まで。**本番CSPは `tauri build` で目視検証**（dev server は本番cspが当たらない場合あり）。検証で問題が出たら適用値を調整。手順は点検結果 §6
+    - PR #65でCSPを適用し、2026-06-15に`tauri build --debug`のWindows/WebView2で主要画面を目視確認。Vercel Analytics由来の構文エラーは依存ごと除去し、再確認で解消済み
 - [x] ログ・AI送信データ・秘密情報の最終点検を行う
   - Priority: P1.5
   - Status: Done
@@ -504,20 +511,37 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - `scripts/measure-app-performance.ps1` と `docs/01_setup/軽量常駐性能確認手順.md` を追加。初回debug build基準値とニュース更新頻度を記録
     - 根拠: 要件定義書 §8.2 / §14。固定の製品目標値は複数PC・release build測定後に決定する
-- [ ] バックグラウンド常駐方式を決定し、待機状態を実装する
+- [x] バックグラウンド常駐方式を決定し、待機状態を実装する（PR #87）
   - Priority: P1.5
-  - Status: Doing
+  - Status: Done
   - Owner: @codex
   - Branch: `codex/background-resident-lifecycle`
-  - Issue/PR: 未定
+  - Issue/PR: #87
   - Done when:
     - 単一ウィンドウ非表示方式をMVPとして採用している ✅
-    - メイン画面を閉じても必要最小限のニュース取得・日次アーカイブが動く
-    - トレイからメイン画面の再表示と明示終了ができる
-    - 待機時とメイン画面表示時のCPU・メモリ差を再測定している
+    - メイン画面の閉じる操作を非表示待機へ変換できる ✅
+    - トレイからメイン画面の再表示と明示終了を要求できる ✅
+    - トレイ初期化失敗時に通常終了へ戻るフェイルセーフがある ✅
   - Notes:
-    - close-to-hide＋固定トレイメニューを実装中。小型ゆうこ別ウィンドウと画面内終了ボタン配線は別スライス
+    - Windows実機でのトレイ挙動・低頻度処理継続・性能再測定は別タスク `codex/resident-runtime-validation` で追跡
+    - 小型ゆうこ別ウィンドウと画面内サイドバーの終了ボタン配線は別スライス
     - 根拠: 要件定義書 §8.2 / §14、画面詳細設計書 §3.3
+- [ ] Windows実機で常駐動作・非表示性能・本番CSPを一括検証する
+  - Priority: P1.5
+  - Status: Doing
+  - Owner: @codex（手順・記録）/ 実機操作=アプリを起動できる担当
+  - Branch: `codex/resident-runtime-validation`
+  - Issue/PR: #65 / #87
+  - Done when:
+    - 閉じる操作後もプロセスが継続し、トレイから再表示・明示終了できる ✅
+    - 非表示中もニュース取得・日次アーカイブの低頻度処理が継続している ⬜（日付変更時の実発火は未確認）
+    - 表示中と非表示中のCPU・メモリ差を同条件で記録している ✅
+    - `tauri build --debug`の主要画面でCSP違反が発生していない ✅
+  - Notes:
+    - 実施・記録手順: `docs/01_setup/軽量常駐性能確認手順.md` §10
+    - Windows通知領域とWebView2の目視を伴うため、完全自動化せず人による最終確認を残す
+    - 2026-06-15: debugバンドル生成、close-to-hide、同一PID継続、表示/非表示60秒測定、通知領域からの再表示・明示終了、主要画面のCSP確認まで完了
+    - Vercel Analytics由来の`Unexpected token '<'`はAnalytics除去後の再ビルドで解消済み。残件は日付変更時の低頻度処理の実行確認
 
 ### P2: 設計書由来の後続画面・データ管理バックログ
 MVPでは簡易または後回しでよいが、設計書に明記されているため追跡対象にする。今すぐ着手しないものは `Status: Todo` のまま維持する。
@@ -745,3 +769,4 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 - [x] 2026-06-12: 主要4画面のメインロード失敗にAlert・再試行導線を追加（PR #83）
 - [x] 2026-06-12: 記事閲覧の関連記事・用語解説ロード失敗に再試行導線を追加（PR #85）
 - [x] 2026-06-12: 設定画面の初期ロード失敗に再試行導線を追加（PR #86）
+- [x] 2026-06-15: 単一メインウィンドウのclose-to-hideと固定トレイ再表示・明示終了を追加（PR #87）
