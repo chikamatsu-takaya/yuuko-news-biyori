@@ -7,7 +7,6 @@ import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   Home,
   Bell,
-  Cat,
   ShieldOff,
   Sparkles,
   Database,
@@ -110,6 +109,24 @@ type SettingsMenuItem = {
   icon: React.ComponentType<{ className?: string }>;
 };
 
+function YuukoDisplayMenuIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="12" cy="12" r="8.2" />
+      <path d="M14.7 7.6c-.7-.5-1.5-.8-2.5-.8-1.8 0-3 .9-3 2.2 0 1.5 1.4 2 3 2.4 1.7.4 3 .9 3 2.5 0 1.4-1.3 2.4-3.2 2.4-1.2 0-2.2-.4-3-1" />
+    </svg>
+  );
+}
+
 // Mock Data
 const mockSettings: SettingsState = {
   notification: {
@@ -147,7 +164,7 @@ const mockSettings: SettingsState = {
 
 const settingsMenuItems: SettingsMenuItem[] = [
   { id: "notification", label: "通知", icon: Bell },
-  { id: "yuuko", label: "ゆうこ表示", icon: Cat },
+  { id: "yuuko", label: "ゆうこ表示", icon: YuukoDisplayMenuIcon },
   { id: "suppression", label: "抑制条件", icon: ShieldOff },
   { id: "ai", label: "解説・AI設定", icon: Sparkles },
   { id: "data", label: "データ管理", icon: Database },
@@ -205,9 +222,9 @@ const buildDtoForSave = (
   const source = baseDto ?? fallbackUserSettingsDto;
   const normalizedProvider =
     settingsState.ai.provider === "mock" ||
-    settingsState.ai.provider === "gemini" ||
-    settingsState.ai.provider === "openai" ||
-    settingsState.ai.provider === "local"
+      settingsState.ai.provider === "gemini" ||
+      settingsState.ai.provider === "openai" ||
+      settingsState.ai.provider === "local"
       ? settingsState.ai.provider
       : source.aiProvider;
 
@@ -575,248 +592,286 @@ export default function SettingsScreen({
           {/* Settings Cards */}
           <div className="space-y-4 max-w-2xl">
             {/* Notification Settings */}
-            <Card className="border-0 shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
-                  <Bell className="w-5 h-5" />
-                  通知設定
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <SettingRow label="ニュース通知を受け取る">
-                  <Switch
-                    checked={settings.notification.enabled}
-                    onCheckedChange={(checked) =>
-                      updateNotification("enabled", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="通知時間帯">
-                  <div className="flex items-center gap-2">
-                    <TimeInput
-                      value={settings.notification.startTime}
-                      onChange={(v) => updateNotification("startTime", v)}
-                    />
-                    <span className="text-muted-foreground">〜</span>
-                    <TimeInput
-                      value={settings.notification.endTime}
-                      onChange={(v) => updateNotification("endTime", v)}
-                    />
-                  </div>
-                </SettingRow>
-                <SettingRow label="通知頻度">
-                  <Select
-                    value={settings.notification.frequency}
-                    onValueChange={(v) => updateNotification("frequency", v)}
-                  >
-                    <SelectTrigger className="w-36">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1日1回まで">1日1回まで</SelectItem>
-                      <SelectItem value="1日3回まで">1日3回まで</SelectItem>
-                      <SelectItem value="1日5回まで">1日5回まで</SelectItem>
-                      <SelectItem value="制限なし">制限なし</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="おすすめニュースの最小件数" helpText>
-                  <div className="flex items-center gap-3">
-                    <Slider
-                      value={[settings.notification.minRecommendCount]}
-                      onValueChange={(v) =>
-                        updateNotification("minRecommendCount", v[0])
+            {activeMenu === "notification" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Bell className="w-5 h-5" />
+                    通知設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="ニュース通知を受け取る">
+                    <Switch
+                      checked={settings.notification.enabled}
+                      onCheckedChange={(checked) =>
+                        updateNotification("enabled", checked)
                       }
-                      min={1}
-                      max={10}
-                      step={1}
-                      className="w-32"
                     />
-                    <span className="text-sm text-foreground w-8">
-                      {settings.notification.minRecommendCount}件
-                    </span>
-                  </div>
-                </SettingRow>
-              </CardContent>
-            </Card>
+                  </SettingRow>
+                  <SettingRow label="通知時間帯">
+                    <div className="flex items-center gap-2">
+                      <TimeInput
+                        value={settings.notification.startTime}
+                        onChange={(v) => updateNotification("startTime", v)}
+                      />
+                      <span className="text-muted-foreground">〜</span>
+                      <TimeInput
+                        value={settings.notification.endTime}
+                        onChange={(v) => updateNotification("endTime", v)}
+                      />
+                    </div>
+                  </SettingRow>
+                  <SettingRow label="通知頻度">
+                    <Select
+                      value={settings.notification.frequency}
+                      onValueChange={(v) => updateNotification("frequency", v)}
+                    >
+                      <SelectTrigger className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1日1回まで">1日1回まで</SelectItem>
+                        <SelectItem value="1日3回まで">1日3回まで</SelectItem>
+                        <SelectItem value="1日5回まで">1日5回まで</SelectItem>
+                        <SelectItem value="制限なし">制限なし</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label="おすすめニュースの最小件数" helpText>
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        value={[settings.notification.minRecommendCount]}
+                        onValueChange={(v) =>
+                          updateNotification("minRecommendCount", v[0])
+                        }
+                        min={1}
+                        max={10}
+                        step={1}
+                        className="w-32"
+                      />
+                      <span className="text-sm text-foreground w-8">
+                        {settings.notification.minRecommendCount}件
+                      </span>
+                    </div>
+                  </SettingRow>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Yuuko Display Settings */}
-            <Card className="border-0 shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
-                  <Cat className="w-5 h-5" />
-                  ゆうこ表示設定
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <SettingRow label="常駐時のゆうこを表示する">
-                  <Switch
-                    checked={settings.yuuko.showResident}
-                    onCheckedChange={(checked) =>
-                      updateYuuko("showResident", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="吹き出しの自動表示">
-                  <Select
-                    value={settings.yuuko.balloonMode}
-                    onValueChange={(v) => updateYuuko("balloonMode", v)}
-                  >
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="常に表示">常に表示</SelectItem>
-                      <SelectItem value="控えめに">控えめに</SelectItem>
-                      <SelectItem value="ほぼ表示しない">
-                        ほぼ表示しない
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="ゆうこの話しかけ頻度">
-                  <Select
-                    value={settings.yuuko.talkFrequency}
-                    onValueChange={(v) => updateYuuko("talkFrequency", v)}
-                  >
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="多め">多め</SelectItem>
-                      <SelectItem value="ふつう">ふつう</SelectItem>
-                      <SelectItem value="少なめ">少なめ</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="ゆうこのアニメーション">
-                  <Select
-                    value={settings.yuuko.animationMode}
-                    onValueChange={(v) => updateYuuko("animationMode", v)}
-                  >
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="派手">派手</SelectItem>
-                      <SelectItem value="通常">通常</SelectItem>
-                      <SelectItem value="控えめ">控えめ</SelectItem>
-                      <SelectItem value="なし">なし</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-              </CardContent>
-            </Card>
+            {activeMenu === "yuuko" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <YuukoDisplayMenuIcon className="w-5 h-5" />
+                    ゆうこ表示設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="常駐時のゆうこを表示する">
+                    <Switch
+                      checked={settings.yuuko.showResident}
+                      onCheckedChange={(checked) =>
+                        updateYuuko("showResident", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow label="吹き出しの自動表示">
+                    <Select
+                      value={settings.yuuko.balloonMode}
+                      onValueChange={(v) => updateYuuko("balloonMode", v)}
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="常に表示">常に表示</SelectItem>
+                        <SelectItem value="控えめに">控えめに</SelectItem>
+                        <SelectItem value="ほぼ表示しない">
+                          ほぼ表示しない
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label="ゆうこの話しかけ頻度">
+                    <Select
+                      value={settings.yuuko.talkFrequency}
+                      onValueChange={(v) => updateYuuko("talkFrequency", v)}
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="多め">多め</SelectItem>
+                        <SelectItem value="ふつう">ふつう</SelectItem>
+                        <SelectItem value="少なめ">少なめ</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label="ゆうこのアニメーション">
+                    <Select
+                      value={settings.yuuko.animationMode}
+                      onValueChange={(v) => updateYuuko("animationMode", v)}
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="派手">派手</SelectItem>
+                        <SelectItem value="通常">通常</SelectItem>
+                        <SelectItem value="控えめ">控えめ</SelectItem>
+                        <SelectItem value="なし">なし</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Suppression Settings */}
-            <Card className="border-0 shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
-                  <ShieldOff className="w-5 h-5" />
-                  抑制条件設定
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <SettingRow label="会議中は通知を抑制する">
-                  <Switch
-                    checked={settings.suppression.suppressInMeeting}
-                    onCheckedChange={(checked) =>
-                      updateSuppression("suppressInMeeting", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="マイク使用中は通知を抑制する">
-                  <Switch
-                    checked={settings.suppression.suppressWhenMicInUse}
-                    onCheckedChange={(checked) =>
-                      updateSuppression("suppressWhenMicInUse", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="フルスクリーン時は通知を抑制する">
-                  <Switch
-                    checked={settings.suppression.suppressWhenFullscreen}
-                    onCheckedChange={(checked) =>
-                      updateSuppression("suppressWhenFullscreen", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="ゲーム実行中は通知を抑制する">
-                  <Switch
-                    checked={settings.suppression.suppressWhenGaming}
-                    onCheckedChange={(checked) =>
-                      updateSuppression("suppressWhenGaming", checked)
-                    }
-                  />
-                </SettingRow>
-              </CardContent>
-            </Card>
+            {activeMenu === "suppression" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <ShieldOff className="w-5 h-5" />
+                    抑制条件設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="会議中は通知を抑制する">
+                    <Switch
+                      checked={settings.suppression.suppressInMeeting}
+                      onCheckedChange={(checked) =>
+                        updateSuppression("suppressInMeeting", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow label="マイク使用中は通知を抑制する">
+                    <Switch
+                      checked={settings.suppression.suppressWhenMicInUse}
+                      onCheckedChange={(checked) =>
+                        updateSuppression("suppressWhenMicInUse", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow label="フルスクリーン時は通知を抑制する">
+                    <Switch
+                      checked={settings.suppression.suppressWhenFullscreen}
+                      onCheckedChange={(checked) =>
+                        updateSuppression("suppressWhenFullscreen", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow label="ゲーム実行中は通知を抑制する">
+                    <Switch
+                      checked={settings.suppression.suppressWhenGaming}
+                      onCheckedChange={(checked) =>
+                        updateSuppression("suppressWhenGaming", checked)
+                      }
+                    />
+                  </SettingRow>
+                </CardContent>
+              </Card>
+            )}
 
             {/* AI Settings */}
-            <Card className="border-0 shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
-                  <Sparkles className="w-5 h-5" />
-                  解説・AI設定
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <SettingRow label="解説の詳しさ">
-                  <Select
-                    value={settings.ai.explanationDetail}
-                    onValueChange={(v) => updateAi("explanationDetail", v)}
-                  >
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="詳しく">詳しく</SelectItem>
-                      <SelectItem value="ふつう">ふつう</SelectItem>
-                      <SelectItem value="簡潔に">簡潔に</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="専門用語の解説レベル">
-                  <Select
-                    value={settings.ai.termExplanationLevel}
-                    onValueChange={(v) => updateAi("termExplanationLevel", v)}
-                  >
-                    <SelectTrigger className="w-36">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="小学生レベル">小学生レベル</SelectItem>
-                      <SelectItem value="中学生レベル">中学生レベル</SelectItem>
-                      <SelectItem value="高校生レベル">高校生レベル</SelectItem>
-                      <SelectItem value="専門家レベル">専門家レベル</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="長文要点説明の自動候補">
-                  <Switch
-                    checked={settings.ai.autoSuggestLongSummary}
-                    onCheckedChange={(checked) =>
-                      updateAi("autoSuggestLongSummary", checked)
-                    }
-                  />
-                </SettingRow>
-                <SettingRow label="AI処理の優先モード">
-                  <Select
-                    value={settings.ai.priorityMode}
-                    onValueChange={(v) => updateAi("priorityMode", v)}
-                  >
-                    <SelectTrigger className="w-36">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="速度重視">速度重視</SelectItem>
-                      <SelectItem value="バランス重視">バランス重視</SelectItem>
-                      <SelectItem value="品質重視">品質重視</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-              </CardContent>
-            </Card>
+            {activeMenu === "ai" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Sparkles className="w-5 h-5" />
+                    解説・AI設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="解説の詳しさ">
+                    <Select
+                      value={settings.ai.explanationDetail}
+                      onValueChange={(v) => updateAi("explanationDetail", v)}
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="詳しく">詳しく</SelectItem>
+                        <SelectItem value="ふつう">ふつう</SelectItem>
+                        <SelectItem value="簡潔に">簡潔に</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label="専門用語の解説レベル">
+                    <Select
+                      value={settings.ai.termExplanationLevel}
+                      onValueChange={(v) => updateAi("termExplanationLevel", v)}
+                    >
+                      <SelectTrigger className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="小学生レベル">小学生レベル</SelectItem>
+                        <SelectItem value="中学生レベル">中学生レベル</SelectItem>
+                        <SelectItem value="高校生レベル">高校生レベル</SelectItem>
+                        <SelectItem value="専門家レベル">専門家レベル</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                  <SettingRow label="長文要点説明の自動候補">
+                    <Switch
+                      checked={settings.ai.autoSuggestLongSummary}
+                      onCheckedChange={(checked) =>
+                        updateAi("autoSuggestLongSummary", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow label="AI処理の優先モード">
+                    <Select
+                      value={settings.ai.priorityMode}
+                      onValueChange={(v) => updateAi("priorityMode", v)}
+                    >
+                      <SelectTrigger className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="速度重視">速度重視</SelectItem>
+                        <SelectItem value="バランス重視">バランス重視</SelectItem>
+                        <SelectItem value="品質重視">品質重視</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Placeholder categories */}
+            {(activeMenu === "data" ||
+              activeMenu === "integration" ||
+              activeMenu === "other") && (
+                <Card className="border-0 shadow-sm">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
+                      {activeMenu === "data" && <Database className="w-5 h-5" />}
+                      {activeMenu === "integration" && (
+                        <Link2 className="w-5 h-5" />
+                      )}
+                      {activeMenu === "other" && <Settings className="w-5 h-5" />}
+                      {settingsMenuItems.find((m) => m.id === activeMenu)?.label}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="py-8 flex flex-col items-center justify-center text-center">
+                    <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                      <Settings className="w-6 h-6 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-sm font-medium text-foreground mb-1">
+                      準備中だよ
+                    </h3>
+                    <p className="text-xs text-muted-foreground max-w-[240px]">
+                      この設定項目は今後のアップデートで追加される予定です。
+                      楽しみにしていてね♪
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
           </div>
         </main>
 
