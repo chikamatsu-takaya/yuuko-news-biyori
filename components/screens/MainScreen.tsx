@@ -42,6 +42,7 @@ import {
   type RefreshNewsResult as TauriRefreshNewsResult,
 } from "@/lib/tauri/news";
 import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
+import { getUserSettings } from "@/lib/tauri/settings";
 import { useToast } from "@/hooks/use-toast";
 
 // ============================================
@@ -556,7 +557,20 @@ export default function MainScreen({
     setIsLoadingArticles(true);
     setLoadNotice(null);
     try {
-      const recommendedArticles = await getRecommendedArticles({ limit: 10 });
+      let limit = 10;
+      try {
+        const settings = await getUserSettings();
+        if (settings) {
+          limit = Math.min(10, Math.max(1, settings.notifyMaxPerDay));
+        }
+      } catch (settingsError) {
+        console.warn(
+          "Failed to load settings for recommended articles count:",
+          settingsError
+        );
+      }
+
+      const recommendedArticles = await getRecommendedArticles({ limit });
       if (!recommendedArticles) {
         return false;
       }
@@ -567,7 +581,9 @@ export default function MainScreen({
 
       return true;
     } catch (error) {
-      setLoadNotice("おすすめニュースの読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。");
+      setLoadNotice(
+        "おすすめニュースの読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。"
+      );
       setLoadNoticeKind("error");
       console.warn("Failed to load recommended articles:", error);
       return false;
