@@ -107,6 +107,10 @@ type NewsSettingsState = {
   maxRecommendations: number;
 };
 
+type IntegrationSettings = {
+  autoStartOnPcBoot: boolean;
+};
+
 type SettingsState = {
   notification: NotificationSettings;
   yuuko: YuukoDisplaySettings;
@@ -115,6 +119,7 @@ type SettingsState = {
   data: DataManagementState;
   user: UserProfileSettingsState;
   news: NewsSettingsState;
+  integration: IntegrationSettings;
 };
 
 type SettingsMenuItem = {
@@ -181,6 +186,9 @@ const mockSettings: SettingsState = {
     genres: ["AI", "IT"],
     maxRecommendations: 10,
   },
+  integration: {
+    autoStartOnPcBoot: false,
+  },
 };
 
 const settingsMenuItems: SettingsMenuItem[] = [
@@ -244,6 +252,10 @@ const mapSettingsFromDto = (
     genres: dto.genres || [],
     maxRecommendations: dto.maxDailyRecommendations || 10,
   },
+  integration: {
+    ...base.integration,
+    autoStartOnPcBoot: dto.autoStartOnPcBoot ?? false,
+  },
 });
 
 const buildDtoForSave = (
@@ -268,7 +280,7 @@ const buildDtoForSave = (
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
     suppressDuringMicUse: settingsState.suppression.suppressWhenMicInUse,
     suppressDuringFullscreen: settingsState.suppression.suppressWhenFullscreen,
-    autoStartOnPcBoot: source.autoStartOnPcBoot,
+    autoStartOnPcBoot: settingsState.integration.autoStartOnPcBoot,
     explanationLevel: source.explanationLevel,
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
@@ -464,6 +476,16 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       news: { ...prev.news, [key]: value },
+    }));
+  };
+
+  const updateIntegration = (
+    key: keyof IntegrationSettings,
+    value: boolean
+  ) => {
+    setSettings((prev) => ({
+      ...prev,
+      integration: { ...prev.integration, [key]: value },
     }));
   };
 
@@ -983,41 +1005,49 @@ export default function SettingsScreen({
             )}
 
             {/* Placeholder categories */}
-            {(activeMenu === "data" || activeMenu === "integration") && (
+            {activeMenu === "data" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
                   <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                    {activeMenu === "data" && <Database className="w-5 h-5" />}
-                    {activeMenu === "integration" && (
-                      <Link2 className="w-5 h-5" />
-                    )}
-                    {settingsMenuItems.find((m) => m.id === activeMenu)?.label}
+                    <Database className="w-5 h-5" />
+                    データ管理
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="py-8 flex flex-col items-center justify-center text-center">
                   <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
                     <Settings className="w-6 h-6 text-muted-foreground" />
                   </div>
-                  {activeMenu === "data" ? (
-                    <>
-                      <h3 className="text-sm font-medium text-foreground mb-1">
-                        データ管理は準備中だよ
-                      </h3>
-                      <p className="text-xs text-muted-foreground max-w-[280px]">
-                        データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <h3 className="text-sm font-medium text-foreground mb-1">
-                        準備中だよ
-                      </h3>
-                      <p className="text-xs text-muted-foreground max-w-[240px]">
-                        この設定項目は今後のアップデートで追加される予定です。
-                        楽しみにしていてね♪
-                      </p>
-                    </>
-                  )}
+                  <h3 className="text-sm font-medium text-foreground mb-1">
+                    データ管理は準備中だよ
+                  </h3>
+                  <p className="text-xs text-muted-foreground max-w-[280px]">
+                    データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Integration Settings */}
+            {activeMenu === "integration" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Link2 className="w-5 h-5" />
+                    起動・連携設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="PC起動時の自動起動設定">
+                    <Switch
+                      checked={settings.integration.autoStartOnPcBoot}
+                      onCheckedChange={(checked) =>
+                        updateIntegration("autoStartOnPcBoot", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
+                    💡 この設定は今後の自動起動機能で利用されます。現在は設定値のみ保存されます。
+                  </p>
                 </CardContent>
               </Card>
             )}
