@@ -561,7 +561,7 @@ export default function MainScreen({
       try {
         const settings = await getUserSettings();
         if (settings) {
-          limit = Math.min(10, Math.max(1, settings.notifyMaxPerDay));
+          limit = Math.min(50, Math.max(1, settings.maxDailyRecommendations || 10));
         }
       } catch (settingsError) {
         console.warn(

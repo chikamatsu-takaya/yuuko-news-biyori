@@ -66,8 +66,9 @@ type NotificationSettings = {
   startTime: string;
   endTime: string;
   frequency: string;
-  minRecommendCount: number;
+  maxPerDay: number;
 };
+
 
 type YuukoDisplaySettings = {
   showResident: boolean;
@@ -103,6 +104,7 @@ type UserProfileSettingsState = {
 
 type NewsSettingsState = {
   genres: string[];
+  maxRecommendations: number;
 };
 
 type SettingsState = {
@@ -146,7 +148,7 @@ const mockSettings: SettingsState = {
     startTime: "07:00",
     endTime: "22:00",
     frequency: "1日3回まで",
-    minRecommendCount: 3,
+    maxPerDay: 3,
   },
   yuuko: {
     showResident: true,
@@ -177,6 +179,7 @@ const mockSettings: SettingsState = {
   },
   news: {
     genres: ["AI", "IT"],
+    maxRecommendations: 10,
   },
 };
 
@@ -206,6 +209,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   selectedPersonalityId: "standard",
   nickname: "",
   aiProvider: "mock",
+  maxDailyRecommendations: 10,
 };
 
 const mapSettingsFromDto = (
@@ -218,7 +222,7 @@ const mapSettingsFromDto = (
     enabled: dto.enableYuukoPopup,
     startTime: dto.notifyStartTime,
     endTime: dto.notifyEndTime,
-    minRecommendCount: dto.notifyMaxPerDay,
+    maxPerDay: dto.notifyMaxPerDay,
   },
   suppression: {
     ...base.suppression,
@@ -238,6 +242,7 @@ const mapSettingsFromDto = (
   news: {
     ...base.news,
     genres: dto.genres || [],
+    maxRecommendations: dto.maxDailyRecommendations || 10,
   },
 });
 
@@ -258,7 +263,7 @@ const buildDtoForSave = (
     genres: settingsState.news.genres,
     notifyStartTime: settingsState.notification.startTime,
     notifyEndTime: settingsState.notification.endTime,
-    notifyMaxPerDay: settingsState.notification.minRecommendCount,
+    notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
     suppressDuringMicUse: settingsState.suppression.suppressWhenMicInUse,
@@ -270,6 +275,7 @@ const buildDtoForSave = (
     selectedPersonalityId: source.selectedPersonalityId,
     nickname: settingsState.user.nickname,
     aiProvider: normalizedProvider,
+    maxDailyRecommendations: settingsState.news.maxRecommendations,
   };
 };
 
@@ -448,6 +454,13 @@ export default function SettingsScreen({
   };
 
   const updateNews = (key: keyof NewsSettingsState, value: string[]) => {
+    setSettings((prev) => ({
+      ...prev,
+      news: { ...prev.news, [key]: value },
+    }));
+  };
+
+  const updateNewsCount = (key: keyof NewsSettingsState, value: number) => {
     setSettings((prev) => ({
       ...prev,
       news: { ...prev.news, [key]: value },
@@ -678,20 +691,20 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="おすすめニュースの最小件数" helpText>
+                  <SettingRow label="1日の最大通知件数" helpText>
                     <div className="flex items-center gap-3">
                       <Slider
-                        value={[settings.notification.minRecommendCount]}
+                        value={[settings.notification.maxPerDay]}
                         onValueChange={(v) =>
-                          updateNotification("minRecommendCount", v[0])
+                          updateNotification("maxPerDay", v[0])
                         }
                         min={1}
-                        max={10}
+                        max={20}
                         step={1}
                         className="w-32"
                       />
                       <span className="text-sm text-foreground w-8">
-                        {settings.notification.minRecommendCount}件
+                        {settings.notification.maxPerDay}件
                       </span>
                     </div>
                   </SettingRow>
@@ -904,6 +917,24 @@ export default function SettingsScreen({
                       />
                       <span className="text-[10px] text-muted-foreground">
                         32文字以内
+                      </span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow label="ホームに表示するおすすめ記事数">
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        value={[settings.news.maxRecommendations]}
+                        onValueChange={(v) =>
+                          updateNewsCount("maxRecommendations", v[0])
+                        }
+                        min={1}
+                        max={50}
+                        step={1}
+                        className="w-32"
+                      />
+                      <span className="text-sm text-foreground w-8">
+                        {settings.news.maxRecommendations}件
                       </span>
                     </div>
                   </SettingRow>
