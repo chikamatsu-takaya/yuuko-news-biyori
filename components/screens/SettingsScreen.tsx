@@ -39,6 +39,8 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   getUserSettings,
   saveUserSettings,
@@ -64,8 +66,9 @@ type NotificationSettings = {
   startTime: string;
   endTime: string;
   frequency: string;
-  minRecommendCount: number;
+  maxPerDay: number;
 };
+
 
 type YuukoDisplaySettings = {
   showResident: boolean;
@@ -95,12 +98,28 @@ type DataManagementState = {
   maxStorageGb: number;
 };
 
+type UserProfileSettingsState = {
+  nickname: string;
+};
+
+type NewsSettingsState = {
+  genres: string[];
+  maxRecommendations: number;
+};
+
+type IntegrationSettings = {
+  autoStartOnPcBoot: boolean;
+};
+
 type SettingsState = {
   notification: NotificationSettings;
   yuuko: YuukoDisplaySettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
   data: DataManagementState;
+  user: UserProfileSettingsState;
+  news: NewsSettingsState;
+  integration: IntegrationSettings;
 };
 
 type SettingsMenuItem = {
@@ -134,7 +153,7 @@ const mockSettings: SettingsState = {
     startTime: "07:00",
     endTime: "22:00",
     frequency: "1日3回まで",
-    minRecommendCount: 3,
+    maxPerDay: 3,
   },
   yuuko: {
     showResident: true,
@@ -159,6 +178,16 @@ const mockSettings: SettingsState = {
   data: {
     usedStorageGb: 1.24,
     maxStorageGb: 5.0,
+  },
+  user: {
+    nickname: "",
+  },
+  news: {
+    genres: ["AI", "IT"],
+    maxRecommendations: 10,
+  },
+  integration: {
+    autoStartOnPcBoot: false,
   },
 };
 
@@ -188,6 +217,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   selectedPersonalityId: "standard",
   nickname: "",
   aiProvider: "mock",
+  maxDailyRecommendations: 10,
 };
 
 const mapSettingsFromDto = (
@@ -200,7 +230,7 @@ const mapSettingsFromDto = (
     enabled: dto.enableYuukoPopup,
     startTime: dto.notifyStartTime,
     endTime: dto.notifyEndTime,
-    minRecommendCount: dto.notifyMaxPerDay,
+    maxPerDay: dto.notifyMaxPerDay,
   },
   suppression: {
     ...base.suppression,
@@ -212,6 +242,19 @@ const mapSettingsFromDto = (
     ...base.ai,
     provider: dto.aiProvider,
     providerStatus: dto.aiProvider,
+  },
+  user: {
+    ...base.user,
+    nickname: dto.nickname || "",
+  },
+  news: {
+    ...base.news,
+    genres: dto.genres || [],
+    maxRecommendations: dto.maxDailyRecommendations || 10,
+  },
+  integration: {
+    ...base.integration,
+    autoStartOnPcBoot: dto.autoStartOnPcBoot ?? false,
   },
 });
 
@@ -229,21 +272,22 @@ const buildDtoForSave = (
       : source.aiProvider;
 
   return {
-    genres: source.genres,
+    genres: settingsState.news.genres,
     notifyStartTime: settingsState.notification.startTime,
     notifyEndTime: settingsState.notification.endTime,
-    notifyMaxPerDay: settingsState.notification.minRecommendCount,
+    notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
     suppressDuringMicUse: settingsState.suppression.suppressWhenMicInUse,
     suppressDuringFullscreen: settingsState.suppression.suppressWhenFullscreen,
-    autoStartOnPcBoot: source.autoStartOnPcBoot,
+    autoStartOnPcBoot: settingsState.integration.autoStartOnPcBoot,
     explanationLevel: source.explanationLevel,
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
     selectedPersonalityId: source.selectedPersonalityId,
-    nickname: source.nickname,
+    nickname: settingsState.user.nickname,
     aiProvider: normalizedProvider,
+    maxDailyRecommendations: settingsState.news.maxRecommendations,
   };
 };
 
@@ -411,6 +455,37 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       ai: { ...prev.ai, [key]: value },
+    }));
+  };
+
+  const updateUser = (key: keyof UserProfileSettingsState, value: string) => {
+    setSettings((prev) => ({
+      ...prev,
+      user: { ...prev.user, [key]: value },
+    }));
+  };
+
+  const updateNews = (key: keyof NewsSettingsState, value: string[]) => {
+    setSettings((prev) => ({
+      ...prev,
+      news: { ...prev.news, [key]: value },
+    }));
+  };
+
+  const updateNewsCount = (key: keyof NewsSettingsState, value: number) => {
+    setSettings((prev) => ({
+      ...prev,
+      news: { ...prev.news, [key]: value },
+    }));
+  };
+
+  const updateIntegration = (
+    key: keyof IntegrationSettings,
+    value: boolean
+  ) => {
+    setSettings((prev) => ({
+      ...prev,
+      integration: { ...prev.integration, [key]: value },
     }));
   };
 
@@ -638,20 +713,20 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="おすすめニュースの最小件数" helpText>
+                  <SettingRow label="1日の最大通知件数" helpText>
                     <div className="flex items-center gap-3">
                       <Slider
-                        value={[settings.notification.minRecommendCount]}
+                        value={[settings.notification.maxPerDay]}
                         onValueChange={(v) =>
-                          updateNotification("minRecommendCount", v[0])
+                          updateNotification("maxPerDay", v[0])
                         }
                         min={1}
-                        max={10}
+                        max={20}
                         step={1}
                         className="w-32"
                       />
                       <span className="text-sm text-foreground w-8">
-                        {settings.notification.minRecommendCount}件
+                        {settings.notification.maxPerDay}件
                       </span>
                     </div>
                   </SettingRow>
@@ -843,35 +918,139 @@ export default function SettingsScreen({
               </Card>
             )}
 
-            {/* Placeholder categories */}
-            {(activeMenu === "data" ||
-              activeMenu === "integration" ||
-              activeMenu === "other") && (
-                <Card className="border-0 shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                      {activeMenu === "data" && <Database className="w-5 h-5" />}
-                      {activeMenu === "integration" && (
-                        <Link2 className="w-5 h-5" />
-                      )}
-                      {activeMenu === "other" && <Settings className="w-5 h-5" />}
-                      {settingsMenuItems.find((m) => m.id === activeMenu)?.label}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="py-8 flex flex-col items-center justify-center text-center">
-                    <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                      <Settings className="w-6 h-6 text-muted-foreground" />
+            {/* Other Settings */}
+            {activeMenu === "other" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Settings className="w-5 h-5" />
+                    ユーザー・ニュース設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="ニックネーム">
+                    <div className="flex flex-col items-end gap-1">
+                      <Input
+                        value={settings.user.nickname}
+                        onChange={(e) => updateUser("nickname", e.target.value)}
+                        placeholder="ゆうこに呼んでほしい名前"
+                        className="w-48"
+                        maxLength={32}
+                      />
+                      <span className="text-[10px] text-muted-foreground">
+                        32文字以内
+                      </span>
                     </div>
-                    <h3 className="text-sm font-medium text-foreground mb-1">
-                      準備中だよ
-                    </h3>
-                    <p className="text-xs text-muted-foreground max-w-[240px]">
-                      この設定項目は今後のアップデートで追加される予定です。
-                      楽しみにしていてね♪
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
+                  </SettingRow>
+
+                  <SettingRow label="ホームに表示するおすすめ記事数">
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        value={[settings.news.maxRecommendations]}
+                        onValueChange={(v) =>
+                          updateNewsCount("maxRecommendations", v[0])
+                        }
+                        min={1}
+                        max={50}
+                        step={1}
+                        className="w-32"
+                      />
+                      <span className="text-sm text-foreground w-8">
+                        {settings.news.maxRecommendations}件
+                      </span>
+                    </div>
+                  </SettingRow>
+
+                  <div className="py-3">
+                    <div className="flex items-center gap-1.5 mb-3">
+                      <span className="text-sm text-foreground">関心のあるジャンル</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      {[
+                        "IT",
+                        "AI",
+                        "開発",
+                        "セキュリティ",
+                        "クラウド",
+                        "ビジネス",
+                        "ガジェット",
+                      ].map((genre) => (
+                        <div key={genre} className="flex items-center space-x-2">
+                          <Checkbox
+                            id={`genre-${genre}`}
+                            checked={settings.news.genres.includes(genre)}
+                            onCheckedChange={(checked) => {
+                              const currentGenres = settings.news.genres;
+                              if (checked) {
+                                updateNews("genres", [...currentGenres, genre]);
+                              } else {
+                                updateNews("genres",
+                                  currentGenres.filter((g) => g !== genre)
+                                );
+                              }
+                            }}
+                          />
+                          <label
+                            htmlFor={`genre-${genre}`}
+                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          >
+                            {genre}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Placeholder categories */}
+            {activeMenu === "data" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
+                    <Database className="w-5 h-5" />
+                    データ管理
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="py-8 flex flex-col items-center justify-center text-center">
+                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                    <Settings className="w-6 h-6 text-muted-foreground" />
+                  </div>
+                  <h3 className="text-sm font-medium text-foreground mb-1">
+                    データ管理は準備中だよ
+                  </h3>
+                  <p className="text-xs text-muted-foreground max-w-[280px]">
+                    データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Integration Settings */}
+            {activeMenu === "integration" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Link2 className="w-5 h-5" />
+                    起動・連携設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="PC起動時の自動起動設定">
+                    <Switch
+                      checked={settings.integration.autoStartOnPcBoot}
+                      onCheckedChange={(checked) =>
+                        updateIntegration("autoStartOnPcBoot", checked)
+                      }
+                    />
+                  </SettingRow>
+                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
+                    💡 この設定は今後の自動起動機能で利用されます。現在は設定値のみ保存されます。
+                  </p>
+                </CardContent>
+              </Card>
+            )}
           </div>
         </main>
 
@@ -928,10 +1107,13 @@ export default function SettingsScreen({
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green)]">
                 <Database className="w-4 h-4" />
-                データ管理
+                ストレージ状況
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                保存データの使用状況を確認できます。
+              </p>
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs text-muted-foreground">

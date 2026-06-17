@@ -19,6 +19,7 @@ export type UserSettingsDto = {
   selectedPersonalityId: string;
   nickname: string;
   aiProvider: AiProvider;
+  maxDailyRecommendations: number;
 };
 
 type CommandOk = {

@@ -202,6 +202,7 @@ async function installTauriMocks(page: Page) {
       selectedPersonalityId: "default",
       nickname: "E2E",
       aiProvider: "mock",
+      maxDailyRecommendations: 10,
     };
 
     const internals = {

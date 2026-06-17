@@ -79,6 +79,7 @@ pub struct UserSettingsDto {
     pub selected_personality_id: String,
     pub nickname: String,
     pub ai_provider: AiProvider,
+    pub max_daily_recommendations: u32,
 }
 
 impl Default for UserSettingsDto {
@@ -99,6 +100,7 @@ impl Default for UserSettingsDto {
             selected_personality_id: "standard".to_string(),
             nickname: String::new(),
             ai_provider: AiProvider::Mock,
+            max_daily_recommendations: 10,
         }
     }
 }
@@ -111,6 +113,12 @@ impl UserSettingsDto {
         if self.notify_max_per_day > 20 {
             return Err(AppError::Validation(
                 "notifyMaxPerDay must be between 0 and 20".to_string(),
+            ));
+        }
+
+        if self.max_daily_recommendations < 1 || self.max_daily_recommendations > 50 {
+            return Err(AppError::Validation(
+                "maxDailyRecommendations must be between 1 and 50".to_string(),
             ));
         }
 
@@ -197,6 +205,7 @@ impl PersistedSettings {
             selected_personality_id: self.ui.personality_id.clone(),
             nickname: self.user.nickname.clone(),
             ai_provider: AiProvider::from_storage(&self.ai.provider),
+            max_daily_recommendations: self.news.max_daily_recommendations,
         }
     }
 
@@ -204,6 +213,7 @@ impl PersistedSettings {
         self.version = 1;
         self.user.nickname = dto.nickname;
         self.news.categories = dto.genres;
+        self.news.max_daily_recommendations = dto.max_daily_recommendations;
         self.notification.enabled = dto.enable_yuuko_popup;
         self.notification.max_per_day = dto.notify_max_per_day;
         self.notification.suppress_during_meeting = dto.suppress_during_meeting;
