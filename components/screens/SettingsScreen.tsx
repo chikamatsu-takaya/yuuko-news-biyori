@@ -998,13 +998,26 @@ export default function SettingsScreen({
                   <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
                     <Settings className="w-6 h-6 text-muted-foreground" />
                   </div>
-                  <h3 className="text-sm font-medium text-foreground mb-1">
-                    準備中だよ
-                  </h3>
-                  <p className="text-xs text-muted-foreground max-w-[240px]">
-                    この設定項目は今後のアップデートで追加される予定です。
-                    楽しみにしていてね♪
-                  </p>
+                  {activeMenu === "data" ? (
+                    <>
+                      <h3 className="text-sm font-medium text-foreground mb-1">
+                        データ管理は準備中だよ
+                      </h3>
+                      <p className="text-xs text-muted-foreground max-w-[280px]">
+                        データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="text-sm font-medium text-foreground mb-1">
+                        準備中だよ
+                      </h3>
+                      <p className="text-xs text-muted-foreground max-w-[240px]">
+                        この設定項目は今後のアップデートで追加される予定です。
+                        楽しみにしていてね♪
+                      </p>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             )}
@@ -1064,10 +1077,13 @@ export default function SettingsScreen({
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green)]">
                 <Database className="w-4 h-4" />
-                データ管理
+                ストレージ状況
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                保存データの使用状況を確認できます。
+              </p>
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs text-muted-foreground">
