@@ -39,6 +39,8 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   getUserSettings,
   saveUserSettings,
@@ -95,12 +97,22 @@ type DataManagementState = {
   maxStorageGb: number;
 };
 
+type UserProfileSettingsState = {
+  nickname: string;
+};
+
+type NewsSettingsState = {
+  genres: string[];
+};
+
 type SettingsState = {
   notification: NotificationSettings;
   yuuko: YuukoDisplaySettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
   data: DataManagementState;
+  user: UserProfileSettingsState;
+  news: NewsSettingsState;
 };
 
 type SettingsMenuItem = {
@@ -160,6 +172,12 @@ const mockSettings: SettingsState = {
     usedStorageGb: 1.24,
     maxStorageGb: 5.0,
   },
+  user: {
+    nickname: "",
+  },
+  news: {
+    genres: ["AI", "IT"],
+  },
 };
 
 const settingsMenuItems: SettingsMenuItem[] = [
@@ -213,6 +231,14 @@ const mapSettingsFromDto = (
     provider: dto.aiProvider,
     providerStatus: dto.aiProvider,
   },
+  user: {
+    ...base.user,
+    nickname: dto.nickname || "",
+  },
+  news: {
+    ...base.news,
+    genres: dto.genres || [],
+  },
 });
 
 const buildDtoForSave = (
@@ -229,7 +255,7 @@ const buildDtoForSave = (
       : source.aiProvider;
 
   return {
-    genres: source.genres,
+    genres: settingsState.news.genres,
     notifyStartTime: settingsState.notification.startTime,
     notifyEndTime: settingsState.notification.endTime,
     notifyMaxPerDay: settingsState.notification.minRecommendCount,
@@ -242,7 +268,7 @@ const buildDtoForSave = (
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
     selectedPersonalityId: source.selectedPersonalityId,
-    nickname: source.nickname,
+    nickname: settingsState.user.nickname,
     aiProvider: normalizedProvider,
   };
 };
@@ -411,6 +437,20 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       ai: { ...prev.ai, [key]: value },
+    }));
+  };
+
+  const updateUser = (key: keyof UserProfileSettingsState, value: string) => {
+    setSettings((prev) => ({
+      ...prev,
+      user: { ...prev.user, [key]: value },
+    }));
+  };
+
+  const updateNews = (key: keyof NewsSettingsState, value: string[]) => {
+    setSettings((prev) => ({
+      ...prev,
+      news: { ...prev.news, [key]: value },
     }));
   };
 
@@ -843,35 +883,100 @@ export default function SettingsScreen({
               </Card>
             )}
 
-            {/* Placeholder categories */}
-            {(activeMenu === "data" ||
-              activeMenu === "integration" ||
-              activeMenu === "other") && (
-                <Card className="border-0 shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                      {activeMenu === "data" && <Database className="w-5 h-5" />}
-                      {activeMenu === "integration" && (
-                        <Link2 className="w-5 h-5" />
-                      )}
-                      {activeMenu === "other" && <Settings className="w-5 h-5" />}
-                      {settingsMenuItems.find((m) => m.id === activeMenu)?.label}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="py-8 flex flex-col items-center justify-center text-center">
-                    <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                      <Settings className="w-6 h-6 text-muted-foreground" />
+            {/* Other Settings */}
+            {activeMenu === "other" && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                    <Settings className="w-5 h-5" />
+                    ユーザー・ニュース設定
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <SettingRow label="ニックネーム">
+                    <div className="flex flex-col items-end gap-1">
+                      <Input
+                        value={settings.user.nickname}
+                        onChange={(e) => updateUser("nickname", e.target.value)}
+                        placeholder="ゆうこに呼んでほしい名前"
+                        className="w-48"
+                        maxLength={32}
+                      />
+                      <span className="text-[10px] text-muted-foreground">
+                        32文字以内
+                      </span>
                     </div>
-                    <h3 className="text-sm font-medium text-foreground mb-1">
-                      準備中だよ
-                    </h3>
-                    <p className="text-xs text-muted-foreground max-w-[240px]">
-                      この設定項目は今後のアップデートで追加される予定です。
-                      楽しみにしていてね♪
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
+                  </SettingRow>
+
+                  <div className="py-3">
+                    <div className="flex items-center gap-1.5 mb-3">
+                      <span className="text-sm text-foreground">関心のあるジャンル</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      {[
+                        "IT",
+                        "AI",
+                        "開発",
+                        "セキュリティ",
+                        "クラウド",
+                        "ビジネス",
+                        "ガジェット",
+                      ].map((genre) => (
+                        <div key={genre} className="flex items-center space-x-2">
+                          <Checkbox
+                            id={`genre-${genre}`}
+                            checked={settings.news.genres.includes(genre)}
+                            onCheckedChange={(checked) => {
+                              const currentGenres = settings.news.genres;
+                              if (checked) {
+                                updateNews("genres", [...currentGenres, genre]);
+                              } else {
+                                updateNews("genres",
+                                  currentGenres.filter((g) => g !== genre)
+                                );
+                              }
+                            }}
+                          />
+                          <label
+                            htmlFor={`genre-${genre}`}
+                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          >
+                            {genre}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Placeholder categories */}
+            {(activeMenu === "data" || activeMenu === "integration") && (
+              <Card className="border-0 shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
+                    {activeMenu === "data" && <Database className="w-5 h-5" />}
+                    {activeMenu === "integration" && (
+                      <Link2 className="w-5 h-5" />
+                    )}
+                    {settingsMenuItems.find((m) => m.id === activeMenu)?.label}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="py-8 flex flex-col items-center justify-center text-center">
+                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                    <Settings className="w-6 h-6 text-muted-foreground" />
+                  </div>
+                  <h3 className="text-sm font-medium text-foreground mb-1">
+                    準備中だよ
+                  </h3>
+                  <p className="text-xs text-muted-foreground max-w-[240px]">
+                    この設定項目は今後のアップデートで追加される予定です。
+                    楽しみにしていてね♪
+                  </p>
+                </CardContent>
+              </Card>
+            )}
           </div>
         </main>
 
