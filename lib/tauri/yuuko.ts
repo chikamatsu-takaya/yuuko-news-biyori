@@ -86,7 +86,8 @@ export type NotificationReason =
   | "already_active"
   | "daily_limit"
   | "cooling_down"
-  | "no_candidate";
+  | "no_candidate"
+  | "outside_time_range";
 
 export type RequestYuukoNotificationResult = {
   notified: boolean;

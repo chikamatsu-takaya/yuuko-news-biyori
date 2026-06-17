@@ -66,6 +66,7 @@ pub enum NotificationGate {
     Allowed,
     DailyLimitReached,
     CoolingDown,
+    OutsideTimeRange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,8 +265,23 @@ impl PersistedYuukoState {
 
     /// 通知を出してよいか判定する（設計書 §4.3/§5.2 のMVP抑制条件）。
     /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
+    /// 時間帯判定（start_time, end_time）が指定されている場合は、ローカル時刻で判定する。
     /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
-    pub fn can_notify(&self, now: DateTime<Utc>, max_per_day: u32) -> NotificationGate {
+    pub fn can_notify(
+        &self,
+        now: DateTime<Utc>,
+        max_per_day: u32,
+        start_time: &str,
+        end_time: &str,
+    ) -> NotificationGate {
+        let local_time = now.with_timezone(&chrono::Local);
+        use chrono::Timelike;
+        let current_minutes = local_time.hour() * 60 + local_time.minute();
+
+        if !is_within_notification_time_range(current_minutes, start_time, end_time) {
+            return NotificationGate::OutsideTimeRange;
+        }
+
         let today = now.format(DATE_FORMAT).to_string();
         let used_today = if self.daily_notification.date == today {
             self.daily_notification.count
@@ -390,6 +406,50 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// "HH:MM" 形式の文字列をパースして (時, 分) を返す。
+fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
+    let (h_str, m_str) = s.split_once(':')?;
+    let h: u32 = h_str.parse().ok()?;
+    let m: u32 = m_str.parse().ok()?;
+    if h < 24 && m < 60 {
+        Some((h, m))
+    } else {
+        None
+    }
+}
+
+fn is_within_notification_time_range(
+    current_minutes: u32,
+    start_time: &str,
+    end_time: &str,
+) -> bool {
+    if current_minutes >= 24 * 60 {
+        return false;
+    }
+
+    let (start_h, start_m) = match parse_hour_minute(start_time) {
+        Some(time) => time,
+        None => return false,
+    };
+    let (end_h, end_m) = match parse_hour_minute(end_time) {
+        Some(time) => time,
+        None => return false,
+    };
+
+    let start_minutes = start_h * 60 + start_m;
+    let end_minutes = end_h * 60 + end_m;
+
+    if start_minutes == end_minutes {
+        return true;
+    }
+
+    if start_minutes < end_minutes {
+        current_minutes >= start_minutes && current_minutes <= end_minutes
+    } else {
+        current_minutes >= start_minutes || current_minutes <= end_minutes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +507,7 @@ mod tests {
         assert_eq!(state.confirmed_reward_ids, vec!["reward-0".to_string()]);
         // 閉じた後は再通知抑制（クールダウン）が設定される。
         assert!(state.cooldown_until.is_some());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::CoolingDown);
+        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::CoolingDown);
     }
 
     #[test]
@@ -485,12 +545,12 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3),
+            state.can_notify(now, 3, "00:00", "00:00"),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
         let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
-        assert_eq!(state.can_notify(tomorrow, 3), NotificationGate::Allowed);
+        assert_eq!(state.can_notify(tomorrow, 3, "00:00", "00:00"), NotificationGate::Allowed);
     }
 
     #[test]
@@ -499,10 +559,10 @@ mod tests {
         let mut state = PersistedYuukoState::default();
         state.mark_notified(base, article("a1", ArticleReadState::Unread, false, 0.9));
         // 直後はクールタイム中。
-        assert_eq!(state.can_notify(base, 3), NotificationGate::CoolingDown);
+        assert_eq!(state.can_notify(base, 3, "00:00", "00:00"), NotificationGate::CoolingDown);
         // 最短クールタイム経過後は通知可能。
         let after = base + Duration::minutes(MIN_COOLTIME_MINUTES);
-        assert_eq!(state.can_notify(after, 3), NotificationGate::Allowed);
+        assert_eq!(state.can_notify(after, 3, "00:00", "00:00"), NotificationGate::Allowed);
     }
 
     #[test]
@@ -558,7 +618,7 @@ mod tests {
                                                       // 無視のクールダウンは閉じる(120分)より長い。120分後でもまだ抑制中。
         let after_dismiss_window = now + Duration::minutes(DISMISS_COOLDOWN_MINUTES);
         assert_eq!(
-            state.can_notify(after_dismiss_window, 3),
+            state.can_notify(after_dismiss_window, 3, "00:00", "00:00"),
             NotificationGate::CoolingDown
         );
     }
@@ -572,10 +632,45 @@ mod tests {
 
         state.dismiss_notification(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
+        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::Allowed);
 
         state.mark_ignored(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
+        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::Allowed);
+    }
+
+    #[test]
+    fn time_range_check_accepts_normal_range_inside() {
+        assert!(is_within_notification_time_range(12 * 60, "09:00", "18:00"));
+    }
+
+    #[test]
+    fn time_range_check_rejects_normal_range_outside() {
+        assert!(!is_within_notification_time_range(20 * 60, "09:00", "18:00"));
+    }
+
+    #[test]
+    fn time_range_check_accepts_overnight_range_late_night() {
+        assert!(is_within_notification_time_range(23 * 60, "22:00", "07:00"));
+    }
+
+    #[test]
+    fn time_range_check_accepts_overnight_range_early_morning() {
+        assert!(is_within_notification_time_range(5 * 60, "22:00", "07:00"));
+    }
+
+    #[test]
+    fn time_range_check_rejects_overnight_range_daytime() {
+        assert!(!is_within_notification_time_range(12 * 60, "22:00", "07:00"));
+    }
+
+    #[test]
+    fn time_range_check_treats_same_start_and_end_as_all_day() {
+        assert!(is_within_notification_time_range(12 * 60, "09:00", "09:00"));
+    }
+
+    #[test]
+    fn time_range_check_rejects_invalid_time_format() {
+        assert!(!is_within_notification_time_range(12 * 60, "invalid", "18:00"));
     }
 }
