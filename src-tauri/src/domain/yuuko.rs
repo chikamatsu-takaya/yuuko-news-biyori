@@ -267,18 +267,17 @@ impl PersistedYuukoState {
     /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
     /// 時間帯判定（start_time, end_time）が指定されている場合は、ローカル時刻で判定する。
     /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
-    pub fn can_notify(
+    pub fn can_notify<'a>(
         &self,
         now: DateTime<Utc>,
         max_per_day: u32,
-        start_time: &str,
-        end_time: &str,
+        time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> NotificationGate {
         let local_time = now.with_timezone(&chrono::Local);
         use chrono::Timelike;
         let current_minutes = local_time.hour() * 60 + local_time.minute();
 
-        if !is_within_notification_time_range(current_minutes, start_time, end_time) {
+        if !is_within_any_notification_time_range(current_minutes, time_ranges) {
             return NotificationGate::OutsideTimeRange;
         }
 
@@ -450,6 +449,15 @@ fn is_within_notification_time_range(
     }
 }
 
+fn is_within_any_notification_time_range<'a>(
+    current_minutes: u32,
+    time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    time_ranges.into_iter().any(|(start_time, end_time)| {
+        is_within_notification_time_range(current_minutes, start_time, end_time)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,7 +515,10 @@ mod tests {
         assert_eq!(state.confirmed_reward_ids, vec!["reward-0".to_string()]);
         // 閉じた後は再通知抑制（クールダウン）が設定される。
         assert!(state.cooldown_until.is_some());
-        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::CoolingDown);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "00:00")]),
+            NotificationGate::CoolingDown
+        );
     }
 
     #[test]
@@ -545,12 +556,15 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3, "00:00", "00:00"),
+            state.can_notify(now, 3, [("00:00", "00:00")]),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
         let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
-        assert_eq!(state.can_notify(tomorrow, 3, "00:00", "00:00"), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(tomorrow, 3, [("00:00", "00:00")]),
+            NotificationGate::Allowed
+        );
     }
 
     #[test]
@@ -559,10 +573,16 @@ mod tests {
         let mut state = PersistedYuukoState::default();
         state.mark_notified(base, article("a1", ArticleReadState::Unread, false, 0.9));
         // 直後はクールタイム中。
-        assert_eq!(state.can_notify(base, 3, "00:00", "00:00"), NotificationGate::CoolingDown);
+        assert_eq!(
+            state.can_notify(base, 3, [("00:00", "00:00")]),
+            NotificationGate::CoolingDown
+        );
         // 最短クールタイム経過後は通知可能。
         let after = base + Duration::minutes(MIN_COOLTIME_MINUTES);
-        assert_eq!(state.can_notify(after, 3, "00:00", "00:00"), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(after, 3, [("00:00", "00:00")]),
+            NotificationGate::Allowed
+        );
     }
 
     #[test]
@@ -618,7 +638,7 @@ mod tests {
                                                       // 無視のクールダウンは閉じる(120分)より長い。120分後でもまだ抑制中。
         let after_dismiss_window = now + Duration::minutes(DISMISS_COOLDOWN_MINUTES);
         assert_eq!(
-            state.can_notify(after_dismiss_window, 3, "00:00", "00:00"),
+            state.can_notify(after_dismiss_window, 3, [("00:00", "00:00")]),
             NotificationGate::CoolingDown
         );
     }
@@ -632,11 +652,17 @@ mod tests {
 
         state.dismiss_notification(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "00:00")]),
+            NotificationGate::Allowed
+        );
 
         state.mark_ignored(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3, "00:00", "00:00"), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "00:00")]),
+            NotificationGate::Allowed
+        );
     }
 
     #[test]
@@ -646,7 +672,11 @@ mod tests {
 
     #[test]
     fn time_range_check_rejects_normal_range_outside() {
-        assert!(!is_within_notification_time_range(20 * 60, "09:00", "18:00"));
+        assert!(!is_within_notification_time_range(
+            20 * 60,
+            "09:00",
+            "18:00"
+        ));
     }
 
     #[test]
@@ -661,7 +691,11 @@ mod tests {
 
     #[test]
     fn time_range_check_rejects_overnight_range_daytime() {
-        assert!(!is_within_notification_time_range(12 * 60, "22:00", "07:00"));
+        assert!(!is_within_notification_time_range(
+            12 * 60,
+            "22:00",
+            "07:00"
+        ));
     }
 
     #[test]
@@ -671,6 +705,24 @@ mod tests {
 
     #[test]
     fn time_range_check_rejects_invalid_time_format() {
-        assert!(!is_within_notification_time_range(12 * 60, "invalid", "18:00"));
+        assert!(!is_within_notification_time_range(
+            12 * 60,
+            "invalid",
+            "18:00"
+        ));
+    }
+
+    #[test]
+    fn any_time_range_check_accepts_second_matching_range() {
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert!(is_within_any_notification_time_range(14 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_rejects_when_no_ranges_match() {
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert!(!is_within_any_notification_time_range(20 * 60, ranges));
     }
 }

@@ -108,19 +108,15 @@ impl YuukoService {
             return Ok(notification_result(false, "already_active", &state));
         }
 
-        let first_range = settings
-            .notification
-            .work_time_ranges
-            .first()
-            .cloned()
-            .unwrap_or_default();
-
         let now = Utc::now();
         match state.can_notify(
             now,
             settings.notification.max_per_day,
-            &first_range.start,
-            &first_range.end,
+            settings
+                .notification
+                .work_time_ranges
+                .iter()
+                .map(|range| (range.start.as_str(), range.end.as_str())),
         ) {
             NotificationGate::DailyLimitReached => {
                 return Ok(notification_result(false, "daily_limit", &state));
