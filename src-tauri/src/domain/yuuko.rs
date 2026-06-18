@@ -439,7 +439,7 @@ fn is_within_notification_time_range(
     let end_minutes = end_h * 60 + end_m;
 
     if start_minutes == end_minutes {
-        return true;
+        return false;
     }
 
     if start_minutes < end_minutes {
@@ -517,7 +517,7 @@ mod tests {
         // 閉じた後は再通知抑制（クールダウン）が設定される。
         assert!(state.cooldown_until.is_some());
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "00:00")]),
+            state.can_notify(now, 3, [("00:00", "23:59")]),
             NotificationGate::CoolingDown
         );
     }
@@ -557,13 +557,13 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "00:00")]),
+            state.can_notify(now, 3, [("00:00", "23:59")]),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
         let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
         assert_eq!(
-            state.can_notify(tomorrow, 3, [("00:00", "00:00")]),
+            state.can_notify(tomorrow, 3, [("00:00", "23:59")]),
             NotificationGate::Allowed
         );
     }
@@ -575,13 +575,13 @@ mod tests {
         state.mark_notified(base, article("a1", ArticleReadState::Unread, false, 0.9));
         // 直後はクールタイム中。
         assert_eq!(
-            state.can_notify(base, 3, [("00:00", "00:00")]),
+            state.can_notify(base, 3, [("00:00", "23:59")]),
             NotificationGate::CoolingDown
         );
         // 最短クールタイム経過後は通知可能。
         let after = base + Duration::minutes(MIN_COOLTIME_MINUTES);
         assert_eq!(
-            state.can_notify(after, 3, [("00:00", "00:00")]),
+            state.can_notify(after, 3, [("00:00", "23:59")]),
             NotificationGate::Allowed
         );
     }
@@ -639,7 +639,7 @@ mod tests {
                                                       // 無視のクールダウンは閉じる(120分)より長い。120分後でもまだ抑制中。
         let after_dismiss_window = now + Duration::minutes(DISMISS_COOLDOWN_MINUTES);
         assert_eq!(
-            state.can_notify(after_dismiss_window, 3, [("00:00", "00:00")]),
+            state.can_notify(after_dismiss_window, 3, [("00:00", "23:59")]),
             NotificationGate::CoolingDown
         );
     }
@@ -654,14 +654,14 @@ mod tests {
         state.dismiss_notification(now);
         assert!(state.cooldown_until.is_none());
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "00:00")]),
+            state.can_notify(now, 3, [("00:00", "23:59")]),
             NotificationGate::Allowed
         );
 
         state.mark_ignored(now);
         assert!(state.cooldown_until.is_none());
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "00:00")]),
+            state.can_notify(now, 3, [("00:00", "23:59")]),
             NotificationGate::Allowed
         );
     }
@@ -700,8 +700,17 @@ mod tests {
     }
 
     #[test]
-    fn time_range_check_treats_same_start_and_end_as_all_day() {
-        assert!(is_within_notification_time_range(12 * 60, "09:00", "09:00"));
+    fn time_range_check_rejects_same_start_and_end_as_zero_length() {
+        assert!(!is_within_notification_time_range(
+            13 * 60,
+            "13:00",
+            "13:00"
+        ));
+        assert!(!is_within_notification_time_range(
+            20 * 60,
+            "13:00",
+            "13:00"
+        ));
     }
 
     #[test]
@@ -725,6 +734,20 @@ mod tests {
         let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
 
         assert!(!is_within_any_notification_time_range(20 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_rejects_zero_length_range_even_with_multiple_ranges() {
+        let ranges = [("09:00", "12:00"), ("13:00", "13:00")];
+
+        assert!(!is_within_any_notification_time_range(20 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_keeps_valid_range_when_other_range_is_zero_length() {
+        let ranges = [("09:00", "12:00"), ("13:00", "13:00")];
+
+        assert!(is_within_any_notification_time_range(10 * 60, ranges));
     }
 
     #[test]

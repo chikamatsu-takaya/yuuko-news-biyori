@@ -12,7 +12,7 @@ export type UserSettingsDto = {
   genres: string[];
   notifyStartTime: string;
   notifyEndTime: string;
-  workTimeRanges: WorkTimeRangeDto[];
+  workTimeRanges?: WorkTimeRangeDto[];
   notifyMaxPerDay: number;
   enableYuukoPopup: boolean;
   suppressDuringMeeting: boolean;

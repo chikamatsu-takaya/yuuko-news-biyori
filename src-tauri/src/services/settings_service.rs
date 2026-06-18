@@ -93,4 +93,26 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
     }
+
+    #[test]
+    fn save_user_settings_preserves_compat_time_range_when_work_ranges_are_omitted() {
+        let (service, path) = temp_service();
+        let dto = UserSettingsDto {
+            notify_start_time: "10:00".to_string(),
+            notify_end_time: "16:00".to_string(),
+            work_time_ranges: None,
+            ..UserSettingsDto::default()
+        };
+
+        service.save_user_settings(dto).unwrap();
+
+        let repository = SettingsRepository::with_path(path.clone());
+        let persisted = repository.load_or_default().unwrap();
+        assert_eq!(persisted.notification.work_time_ranges.len(), 1);
+        assert_eq!(persisted.notification.work_time_ranges[0].start, "10:00");
+        assert_eq!(persisted.notification.work_time_ranges[0].end, "16:00");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
 }
