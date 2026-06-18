@@ -1,12 +1,16 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { requestYuukoNotification } from "@/lib/tauri/yuuko";
+import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
 
 /**
- * ゆうこの通知候補を定期的にチェックするフック。
- * 実際の通知可否や候補選定は Rust 側の request_yuuko_notification が担当します。
- * 
+ * ゆうこの通知状態を定期的にチェックするフック。
+ *
+ * P1指摘への対応:
+ * requestYuukoNotification は Rust 側で通知枠を消費（mark_notified）する破壊的な操作のため、
+ * UI側で通知表示やクリック処理が未実装の段階では定期実行を避けます。
+ * 代わりに非破壊的な getYuukoNotificationState を使用して状態を監視します。
+ *
  * @param intervalMs チェック間隔（ミリ秒）。デフォルト5分 (300,000ms)。
  */
 export const useNotificationScheduler = (intervalMs = 300000) => {
@@ -20,16 +24,14 @@ export const useNotificationScheduler = (intervalMs = 300000) => {
 
       isChecking.current = true;
       try {
-        const result = await requestYuukoNotification();
-        if (result?.notified) {
-          // 将来的にここで OS 通知を発火させたり、グローバルな通知状態を更新したりします。
-          // 現時点では、バックエンド側で通知状態が Waiting -> Appearing 等に遷移しているため、
-          // フロントエンドの各画面が状態を再取得した際に反映されます。
-          console.debug("[NotificationScheduler] 通知候補を検知しました:", result.reason);
+        // 非破壊的な状態取得のみを行う
+        const state = await getYuukoNotificationState();
+        if (state?.hasNotification) {
+          // バックエンド側で既に通知が有効になっている場合（手動トリガーや将来の別経路など）
+          console.debug("[NotificationScheduler] 通知が有効な状態です:", state.state);
         }
       } catch (error) {
-        // 定期チェックの失敗でアプリを落とさないよう、エラーログに留めます。
-        console.error("[NotificationScheduler] チェック中にエラーが発生しました:", error);
+        console.error("[NotificationScheduler] 状態チェック中にエラーが発生しました:", error);
       } finally {
         isChecking.current = false;
       }

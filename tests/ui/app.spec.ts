@@ -222,7 +222,7 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
-test("notification scheduler calls request_yuuko_notification periodically", async ({
+test("notification scheduler polls get_yuuko_notification_state and does NOT call request_yuuko_notification", async ({
   page,
 }) => {
   // Initialize clock to control setInterval
@@ -230,47 +230,57 @@ test("notification scheduler calls request_yuuko_notification periodically", asy
 
   await openHome(page);
 
-  // The hook calls it once on mount (first run)
+  // request_yuuko_notification should NOT be called automatically
+  const requestCallCount = await page.evaluate(
+    () =>
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+  );
+  expect(requestCallCount).toBe(0);
+
+  // get_yuuko_notification_state should be called on mount (MainScreen + Scheduler)
   await expect
     .poll(() =>
       page.evaluate(
         () =>
           /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+          (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
           /* eslint-enable @typescript-eslint/no-explicit-any */
       )
     )
-    .toBe(1);
+    .toBeGreaterThanOrEqual(2);
+
+  const initialPollCount = await page.evaluate(
+    () =>
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+  );
 
   // Fast forward 5 minutes (300,000ms)
   await page.clock.fastForward(300000);
 
-  // Should be called again
+  // get_yuuko_notification_state should be called again
   await expect
     .poll(() =>
       page.evaluate(
         () =>
           /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+          (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
           /* eslint-enable @typescript-eslint/no-explicit-any */
       )
     )
-    .toBe(2);
+    .toBe(initialPollCount + 1);
 
-  // Fast forward another 5 minutes
-  await page.clock.fastForward(300000);
-
-  // Should be called a third time
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
-          /* eslint-enable @typescript-eslint/no-explicit-any */
-      )
-    )
-    .toBe(3);
+  // request_yuuko_notification should still be 0
+  const finalRequestCallCount = await page.evaluate(
+    () =>
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+  );
+  expect(finalRequestCallCount).toBe(0);
 });
 
 async function openHome(page: Page) {
@@ -386,6 +396,10 @@ async function installTauriMocks(page: Page) {
               errors: [],
             };
           case "get_yuuko_notification_state":
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ =
+              ((window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0) + 1;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               state: "Waiting",
               positionMode: "RightBottom",
