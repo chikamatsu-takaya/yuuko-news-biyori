@@ -179,6 +179,49 @@ test("settings save keeps morning and afternoon work time ranges", async ({
   expect(saved?.notifyEndTime).toBe("18:00");
 });
 
+test("settings save keeps single work time range", async ({ page }) => {
+  const settingsScreen = majorScreens.find((screen) => screen.id === "settings")!;
+
+  // Set override for this test
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      workTimeRanges: [{ start: "10:00", end: "16:00" }],
+      notifyStartTime: "10:00",
+      notifyEndTime: "16:00",
+    };
+  });
+
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: settingsScreen.navName, exact: true })
+    .click();
+
+  await page
+    .getByRole("button", { name: settingsScreen.criticalButtons[1] })
+    .click();
+
+  const saved = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: {
+            notifyStartTime?: string;
+            notifyEndTime?: string;
+            workTimeRanges?: { start: string; end: string }[];
+          };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__
+  );
+
+  expect(saved?.workTimeRanges).toEqual([{ start: "10:00", end: "16:00" }]);
+  expect(saved?.notifyStartTime).toBe("10:00");
+  expect(saved?.notifyEndTime).toBe("16:00");
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -244,6 +287,9 @@ async function installTauriMocks(page: Page) {
       nickname: "E2E",
       aiProvider: "mock",
       maxDailyRecommendations: 10,
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      ...((window as any).__E2E_USER_SETTINGS_OVERRIDE__ || {}),
+      /* eslint-enable @typescript-eslint/no-explicit-any */
     };
 
     const internals = {
@@ -297,7 +343,12 @@ async function installTauriMocks(page: Page) {
               currentArticleId: "e2e-article-1",
             };
           case "get_user_settings":
-            return userSettings;
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            return {
+              ...userSettings,
+              ...((window as any).__E2E_USER_SETTINGS_OVERRIDE__ || {}),
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
           case "save_user_settings":
             (
               window as typeof window & {

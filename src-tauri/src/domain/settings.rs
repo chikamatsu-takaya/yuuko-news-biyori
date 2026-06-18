@@ -196,11 +196,19 @@ impl PersistedSettings {
 
     pub fn to_dto(&self) -> UserSettingsDto {
         let work_time_ranges = normalize_work_time_ranges(&self.notification.work_time_ranges);
+        let notify_start_time = work_time_ranges
+            .first()
+            .map(|range| range.start.clone())
+            .unwrap_or_else(|| "09:00".to_string());
+        let notify_end_time = work_time_ranges
+            .last()
+            .map(|range| range.end.clone())
+            .unwrap_or_else(|| "18:00".to_string());
 
         UserSettingsDto {
             genres: self.news.categories.clone(),
-            notify_start_time: work_time_ranges[0].start.clone(),
-            notify_end_time: work_time_ranges[1].end.clone(),
+            notify_start_time,
+            notify_end_time,
             work_time_ranges: Some(work_time_ranges),
             notify_max_per_day: self.notification.max_per_day,
             enable_yuuko_popup: self.notification.enabled,
@@ -350,7 +358,7 @@ fn default_work_time_ranges() -> Vec<WorkTimeRange> {
 fn normalize_work_time_ranges(ranges: &[WorkTimeRange]) -> Vec<WorkTimeRange> {
     match ranges.len() {
         0 => default_work_time_ranges(),
-        1 => vec![ranges[0].clone(), default_work_time_ranges()[1].clone()],
+        1 => vec![ranges[0].clone()],
         _ => ranges.iter().take(2).cloned().collect(),
     }
 }
@@ -616,12 +624,12 @@ mod tests {
     }
 
     #[test]
-    fn dto_with_single_work_range_fills_afternoon_with_default_range() {
+    fn dto_with_single_work_range_keeps_single_range() {
         let settings = PersistedSettings {
             notification: NotificationSettings {
                 work_time_ranges: vec![WorkTimeRange {
                     start: "10:00".to_string(),
-                    end: "12:00".to_string(),
+                    end: "16:00".to_string(),
                 }],
                 ..NotificationSettings::default()
             },
@@ -634,11 +642,33 @@ mod tests {
             .as_ref()
             .expect("DTO should expose normalized work time ranges");
 
-        assert_eq!(work_time_ranges.len(), 2);
+        assert_eq!(work_time_ranges.len(), 1);
         assert_eq!(work_time_ranges[0].start, "10:00");
-        assert_eq!(work_time_ranges[0].end, "12:00");
-        assert_eq!(work_time_ranges[1].start, "13:00");
-        assert_eq!(work_time_ranges[1].end, "18:00");
+        assert_eq!(work_time_ranges[0].end, "16:00");
+        assert_eq!(dto.notify_start_time, "10:00");
+        assert_eq!(dto.notify_end_time, "16:00");
+    }
+
+    #[test]
+    fn single_work_range_survives_get_then_save_round_trip() {
+        let original = PersistedSettings {
+            notification: NotificationSettings {
+                work_time_ranges: vec![WorkTimeRange {
+                    start: "10:00".to_string(),
+                    end: "16:00".to_string(),
+                }],
+                ..NotificationSettings::default()
+            },
+            ..PersistedSettings::default()
+        };
+        let dto = original.to_dto();
+        let mut saved = PersistedSettings::default();
+
+        saved.apply_from_dto(dto);
+
+        assert_eq!(saved.notification.work_time_ranges.len(), 1);
+        assert_eq!(saved.notification.work_time_ranges[0].start, "10:00");
+        assert_eq!(saved.notification.work_time_ranges[0].end, "16:00");
     }
 
     #[test]

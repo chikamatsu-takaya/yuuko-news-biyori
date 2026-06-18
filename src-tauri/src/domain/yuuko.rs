@@ -832,4 +832,17 @@ mod tests {
             NotificationGate::Allowed
         );
     }
+
+    #[test]
+    fn single_saved_work_range_blocks_after_its_end_time() {
+        let local_after_range = Local.with_ymd_and_hms(2026, 6, 9, 17, 0, 0).unwrap();
+        let now = local_after_range.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("10:00", "16:00")];
+
+        assert_eq!(
+            state.can_notify(now, 3, ranges),
+            NotificationGate::OutsideTimeRange
+        );
+    }
 }

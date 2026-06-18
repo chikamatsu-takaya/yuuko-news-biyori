@@ -239,7 +239,7 @@ const normalizeWorkTimeRanges = (
   }
 
   if (ranges.length === 1) {
-    return [{ ...ranges[0] }, { ...defaultWorkTimeRanges[1] }];
+    return [{ ...ranges[0] }];
   }
 
   return ranges.slice(0, 2).map((range) => ({ ...range }));
@@ -305,7 +305,7 @@ const buildDtoForSave = (
   return {
     genres: settingsState.news.genres,
     notifyStartTime: workTimeRanges[0].start,
-    notifyEndTime: workTimeRanges[1].end,
+    notifyEndTime: workTimeRanges[workTimeRanges.length - 1].end,
     workTimeRanges,
     notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
@@ -472,6 +472,11 @@ export default function SettingsScreen({
       const workTimeRanges = normalizeWorkTimeRanges(
         prev.notification.workTimeRanges
       );
+
+      if (workTimeRanges[rangeIndex] === undefined) {
+        return prev;
+      }
+
       workTimeRanges[rangeIndex] = {
         ...workTimeRanges[rangeIndex],
         [key]: value,
@@ -737,7 +742,7 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="午前の通知時間帯">
+                  <SettingRow label={settings.notification.workTimeRanges.length > 1 ? "午前の通知時間帯" : "通知時間帯"}>
                     <div className="flex items-center gap-2">
                       <TimeInput
                         value={settings.notification.workTimeRanges[0].start}
@@ -750,19 +755,21 @@ export default function SettingsScreen({
                       />
                     </div>
                   </SettingRow>
-                  <SettingRow label="午後の通知時間帯">
-                    <div className="flex items-center gap-2">
-                      <TimeInput
-                        value={settings.notification.workTimeRanges[1].start}
-                        onChange={(v) => updateNotificationRange(1, "start", v)}
-                      />
-                      <span className="text-muted-foreground">〜</span>
-                      <TimeInput
-                        value={settings.notification.workTimeRanges[1].end}
-                        onChange={(v) => updateNotificationRange(1, "end", v)}
-                      />
-                    </div>
-                  </SettingRow>
+                  {settings.notification.workTimeRanges.length > 1 && (
+                    <SettingRow label="午後の通知時間帯">
+                      <div className="flex items-center gap-2">
+                        <TimeInput
+                          value={settings.notification.workTimeRanges[1].start}
+                          onChange={(v) => updateNotificationRange(1, "start", v)}
+                        />
+                        <span className="text-muted-foreground">〜</span>
+                        <TimeInput
+                          value={settings.notification.workTimeRanges[1].end}
+                          onChange={(v) => updateNotificationRange(1, "end", v)}
+                        />
+                      </div>
+                    </SettingRow>
+                  )}
                   <SettingRow label="通知頻度">
                     <Select
                       value={settings.notification.frequency}

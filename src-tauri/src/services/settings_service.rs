@@ -48,6 +48,7 @@ impl SettingsService {
 mod tests {
     use super::*;
     use crate::domain::settings::AiProvider;
+    use crate::domain::settings::{NotificationSettings, WorkTimeRange};
     use crate::repositories::settings_repository::SettingsRepository;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -111,6 +112,34 @@ mod tests {
         assert_eq!(persisted.notification.work_time_ranges.len(), 1);
         assert_eq!(persisted.notification.work_time_ranges[0].start, "10:00");
         assert_eq!(persisted.notification.work_time_ranges[0].end, "16:00");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn get_then_save_user_settings_keeps_single_work_time_range() {
+        let (service, path) = temp_service();
+        let repository = SettingsRepository::with_path(path.clone());
+        let persisted = PersistedSettings {
+            notification: NotificationSettings {
+                work_time_ranges: vec![WorkTimeRange {
+                    start: "10:00".to_string(),
+                    end: "16:00".to_string(),
+                }],
+                ..NotificationSettings::default()
+            },
+            ..PersistedSettings::default()
+        };
+        repository.save(&persisted).unwrap();
+
+        let dto = service.get_user_settings().unwrap();
+        service.save_user_settings(dto).unwrap();
+
+        let reloaded = repository.load_or_default().unwrap();
+        assert_eq!(reloaded.notification.work_time_ranges.len(), 1);
+        assert_eq!(reloaded.notification.work_time_ranges[0].start, "10:00");
+        assert_eq!(reloaded.notification.work_time_ranges[0].end, "16:00");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
