@@ -142,6 +142,43 @@ for (const screen of majorScreens) {
   });
 }
 
+test("settings save keeps morning and afternoon work time ranges", async ({
+  page,
+}) => {
+  const settingsScreen = majorScreens.find((screen) => screen.id === "settings")!;
+
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: settingsScreen.navName, exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: settingsScreen.criticalButtons[1] })
+    .click();
+
+  const saved = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: {
+            notifyStartTime?: string;
+            notifyEndTime?: string;
+            workTimeRanges?: { start: string; end: string }[];
+          };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__
+  );
+
+  expect(saved?.workTimeRanges).toEqual([
+    { start: "09:00", end: "12:00" },
+    { start: "13:00", end: "18:00" },
+  ]);
+  expect(saved?.notifyStartTime).toBe("09:00");
+  expect(saved?.notifyEndTime).toBe("18:00");
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -189,7 +226,11 @@ async function installTauriMocks(page: Page) {
     const userSettings = {
       genres: ["AI・テクノロジー"],
       notifyStartTime: "09:00",
-      notifyEndTime: "21:00",
+      notifyEndTime: "18:00",
+      workTimeRanges: [
+        { start: "09:00", end: "12:00" },
+        { start: "13:00", end: "18:00" },
+      ],
       notifyMaxPerDay: 3,
       enableYuukoPopup: true,
       suppressDuringMeeting: true,
@@ -258,6 +299,11 @@ async function installTauriMocks(page: Page) {
           case "get_user_settings":
             return userSettings;
           case "save_user_settings":
+            (
+              window as typeof window & {
+                __E2E_SAVED_USER_SETTINGS__?: unknown;
+              }
+            ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
           case "list_dictionary_entries":
             return [dictionaryEntry];

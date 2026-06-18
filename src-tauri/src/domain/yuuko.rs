@@ -461,7 +461,8 @@ fn is_within_any_notification_time_range<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use crate::domain::settings::PersistedSettings;
+    use chrono::{Local, TimeZone};
 
     fn article(
         id: &str,
@@ -724,5 +725,88 @@ mod tests {
         let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
 
         assert!(!is_within_any_notification_time_range(20 * 60, ranges));
+    }
+
+    #[test]
+    fn default_work_ranges_block_local_lunch_break() {
+        let local_lunch = Local.with_ymd_and_hms(2026, 6, 9, 12, 30, 0).unwrap();
+        let now = local_lunch.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert_eq!(
+            state.can_notify(now, 3, ranges),
+            NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn default_work_ranges_allow_local_afternoon() {
+        let local_afternoon = Local.with_ymd_and_hms(2026, 6, 9, 13, 30, 0).unwrap();
+        let now = local_afternoon.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert_eq!(state.can_notify(now, 3, ranges), NotificationGate::Allowed);
+    }
+
+    #[test]
+    fn missing_work_ranges_settings_block_local_lunch_break() {
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": true,
+                "mode": "random_in_work_time",
+                "maxPerDay": 3
+            }
+        }"#;
+        let settings: PersistedSettings =
+            serde_json::from_str(legacy).expect("legacy settings should load");
+        let local_lunch = Local.with_ymd_and_hms(2026, 6, 9, 12, 30, 0).unwrap();
+        let now = local_lunch.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+
+        assert_eq!(
+            state.can_notify(
+                now,
+                settings.notification.max_per_day,
+                settings
+                    .notification
+                    .work_time_ranges
+                    .iter()
+                    .map(|range| (range.start.as_str(), range.end.as_str())),
+            ),
+            NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn missing_work_ranges_settings_allow_local_afternoon() {
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": true,
+                "mode": "random_in_work_time",
+                "maxPerDay": 3
+            }
+        }"#;
+        let settings: PersistedSettings =
+            serde_json::from_str(legacy).expect("legacy settings should load");
+        let local_afternoon = Local.with_ymd_and_hms(2026, 6, 9, 13, 30, 0).unwrap();
+        let now = local_afternoon.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+
+        assert_eq!(
+            state.can_notify(
+                now,
+                settings.notification.max_per_day,
+                settings
+                    .notification
+                    .work_time_ranges
+                    .iter()
+                    .map(|range| (range.start.as_str(), range.end.as_str())),
+            ),
+            NotificationGate::Allowed
+        );
     }
 }
