@@ -29,8 +29,9 @@ impl SettingsRepository {
         }
 
         let raw = std::fs::read_to_string(&self.settings_path)?;
-        let settings =
+        let mut settings =
             serde_json::from_str::<PersistedSettings>(crate::util::strip_utf8_bom(&raw))?;
+        settings.normalize_after_load();
         Ok(settings)
     }
 
@@ -139,5 +140,31 @@ mod tests {
         let result = repo.load_or_default();
         let _ = std::fs::remove_file(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_or_default_normalizes_empty_work_time_ranges() {
+        let path = unique_settings_path();
+        let json = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": true,
+                "mode": "random_in_work_time",
+                "workTimeRanges": [],
+                "maxPerDay": 3
+            }
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let repo = SettingsRepository::with_path(path.clone());
+        let loaded = repo
+            .load_or_default()
+            .expect("settings with empty workTimeRanges should load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.notification.work_time_ranges.len(), 2);
+        assert_eq!(loaded.notification.work_time_ranges[0].start, "09:00");
+        assert_eq!(loaded.notification.work_time_ranges[0].end, "12:00");
+        assert_eq!(loaded.notification.work_time_ranges[1].start, "13:00");
+        assert_eq!(loaded.notification.work_time_ranges[1].end, "18:00");
     }
 }

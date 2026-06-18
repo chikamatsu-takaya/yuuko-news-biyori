@@ -45,6 +45,7 @@ import {
   getUserSettings,
   saveUserSettings,
   resetUserSettings,
+  type WorkTimeRangeDto,
   type UserSettingsDto,
 } from "@/lib/tauri/settings";
 import {
@@ -63,8 +64,7 @@ import { useToast } from "@/hooks/use-toast";
 // Types
 type NotificationSettings = {
   enabled: boolean;
-  startTime: string;
-  endTime: string;
+  workTimeRanges: WorkTimeRangeDto[];
   frequency: string;
   maxPerDay: number;
 };
@@ -150,8 +150,10 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
-    startTime: "07:00",
-    endTime: "22:00",
+    workTimeRanges: [
+      { start: "09:00", end: "12:00" },
+      { start: "13:00", end: "18:00" },
+    ],
     frequency: "1日3回まで",
     maxPerDay: 3,
   },
@@ -205,6 +207,10 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   genres: ["AI", "IT"],
   notifyStartTime: "09:00",
   notifyEndTime: "18:00",
+  workTimeRanges: [
+    { start: "09:00", end: "12:00" },
+    { start: "13:00", end: "18:00" },
+  ],
   notifyMaxPerDay: 3,
   enableYuukoPopup: true,
   suppressDuringMeeting: true,
@@ -220,43 +226,65 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   maxDailyRecommendations: 10,
 };
 
+const defaultWorkTimeRanges: WorkTimeRangeDto[] = [
+  { start: "09:00", end: "12:00" },
+  { start: "13:00", end: "18:00" },
+];
+
+const normalizeWorkTimeRanges = (
+  ranges?: WorkTimeRangeDto[]
+): WorkTimeRangeDto[] => {
+  if (!ranges || ranges.length === 0) {
+    return defaultWorkTimeRanges.map((range) => ({ ...range }));
+  }
+
+  if (ranges.length === 1) {
+    return [{ ...ranges[0] }];
+  }
+
+  return ranges.slice(0, 2).map((range) => ({ ...range }));
+};
+
 const mapSettingsFromDto = (
   base: SettingsState,
   dto: UserSettingsDto
-): SettingsState => ({
-  ...base,
-  notification: {
-    ...base.notification,
-    enabled: dto.enableYuukoPopup,
-    startTime: dto.notifyStartTime,
-    endTime: dto.notifyEndTime,
-    maxPerDay: dto.notifyMaxPerDay,
-  },
-  suppression: {
-    ...base.suppression,
-    suppressInMeeting: dto.suppressDuringMeeting,
-    suppressWhenMicInUse: dto.suppressDuringMicUse,
-    suppressWhenFullscreen: dto.suppressDuringFullscreen,
-  },
-  ai: {
-    ...base.ai,
-    provider: dto.aiProvider,
-    providerStatus: dto.aiProvider,
-  },
-  user: {
-    ...base.user,
-    nickname: dto.nickname || "",
-  },
-  news: {
-    ...base.news,
-    genres: dto.genres || [],
-    maxRecommendations: dto.maxDailyRecommendations || 10,
-  },
-  integration: {
-    ...base.integration,
-    autoStartOnPcBoot: dto.autoStartOnPcBoot ?? false,
-  },
-});
+): SettingsState => {
+  const workTimeRanges = normalizeWorkTimeRanges(dto.workTimeRanges);
+
+  return {
+    ...base,
+    notification: {
+      ...base.notification,
+      enabled: dto.enableYuukoPopup,
+      workTimeRanges,
+      maxPerDay: dto.notifyMaxPerDay,
+    },
+    suppression: {
+      ...base.suppression,
+      suppressInMeeting: dto.suppressDuringMeeting,
+      suppressWhenMicInUse: dto.suppressDuringMicUse,
+      suppressWhenFullscreen: dto.suppressDuringFullscreen,
+    },
+    ai: {
+      ...base.ai,
+      provider: dto.aiProvider,
+      providerStatus: dto.aiProvider,
+    },
+    user: {
+      ...base.user,
+      nickname: dto.nickname || "",
+    },
+    news: {
+      ...base.news,
+      genres: dto.genres || [],
+      maxRecommendations: dto.maxDailyRecommendations || 10,
+    },
+    integration: {
+      ...base.integration,
+      autoStartOnPcBoot: dto.autoStartOnPcBoot ?? false,
+    },
+  };
+};
 
 const buildDtoForSave = (
   settingsState: SettingsState,
@@ -270,11 +298,15 @@ const buildDtoForSave = (
       settingsState.ai.provider === "local"
       ? settingsState.ai.provider
       : source.aiProvider;
+  const workTimeRanges = normalizeWorkTimeRanges(
+    settingsState.notification.workTimeRanges
+  );
 
   return {
     genres: settingsState.news.genres,
-    notifyStartTime: settingsState.notification.startTime,
-    notifyEndTime: settingsState.notification.endTime,
+    notifyStartTime: workTimeRanges[0].start,
+    notifyEndTime: workTimeRanges[workTimeRanges.length - 1].end,
+    workTimeRanges,
     notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
@@ -423,12 +455,38 @@ export default function SettingsScreen({
 
   const updateNotification = (
     key: keyof NotificationSettings,
-    value: boolean | string | number
+    value: boolean | string | number | WorkTimeRangeDto[]
   ) => {
     setSettings((prev) => ({
       ...prev,
       notification: { ...prev.notification, [key]: value },
     }));
+  };
+
+  const updateNotificationRange = (
+    rangeIndex: 0 | 1,
+    key: keyof WorkTimeRangeDto,
+    value: string
+  ) => {
+    setSettings((prev) => {
+      const workTimeRanges = normalizeWorkTimeRanges(
+        prev.notification.workTimeRanges
+      );
+
+      if (workTimeRanges[rangeIndex] === undefined) {
+        return prev;
+      }
+
+      workTimeRanges[rangeIndex] = {
+        ...workTimeRanges[rangeIndex],
+        [key]: value,
+      };
+
+      return {
+        ...prev,
+        notification: { ...prev.notification, workTimeRanges },
+      };
+    });
   };
 
   const updateYuuko = (
@@ -684,19 +742,34 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="通知時間帯">
+                  <SettingRow label={settings.notification.workTimeRanges.length > 1 ? "午前の通知時間帯" : "通知時間帯"}>
                     <div className="flex items-center gap-2">
                       <TimeInput
-                        value={settings.notification.startTime}
-                        onChange={(v) => updateNotification("startTime", v)}
+                        value={settings.notification.workTimeRanges[0].start}
+                        onChange={(v) => updateNotificationRange(0, "start", v)}
                       />
                       <span className="text-muted-foreground">〜</span>
                       <TimeInput
-                        value={settings.notification.endTime}
-                        onChange={(v) => updateNotification("endTime", v)}
+                        value={settings.notification.workTimeRanges[0].end}
+                        onChange={(v) => updateNotificationRange(0, "end", v)}
                       />
                     </div>
                   </SettingRow>
+                  {settings.notification.workTimeRanges.length > 1 && (
+                    <SettingRow label="午後の通知時間帯">
+                      <div className="flex items-center gap-2">
+                        <TimeInput
+                          value={settings.notification.workTimeRanges[1].start}
+                          onChange={(v) => updateNotificationRange(1, "start", v)}
+                        />
+                        <span className="text-muted-foreground">〜</span>
+                        <TimeInput
+                          value={settings.notification.workTimeRanges[1].end}
+                          onChange={(v) => updateNotificationRange(1, "end", v)}
+                        />
+                      </div>
+                    </SettingRow>
+                  )}
                   <SettingRow label="通知頻度">
                     <Select
                       value={settings.notification.frequency}

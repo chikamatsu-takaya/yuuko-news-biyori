@@ -3,10 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 export type AiProvider = "mock" | "gemini" | "openai" | "local";
 export type ExplanationLevel = "simple" | "normal" | "detailed";
 
+export type WorkTimeRangeDto = {
+  start: string;
+  end: string;
+};
+
 export type UserSettingsDto = {
   genres: string[];
   notifyStartTime: string;
   notifyEndTime: string;
+  workTimeRanges?: WorkTimeRangeDto[];
   notifyMaxPerDay: number;
   enableYuukoPopup: boolean;
   suppressDuringMeeting: boolean;

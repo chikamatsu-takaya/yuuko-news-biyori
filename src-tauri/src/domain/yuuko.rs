@@ -66,6 +66,7 @@ pub enum NotificationGate {
     Allowed,
     DailyLimitReached,
     CoolingDown,
+    OutsideTimeRange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,8 +265,22 @@ impl PersistedYuukoState {
 
     /// 通知を出してよいか判定する（設計書 §4.3/§5.2 のMVP抑制条件）。
     /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
+    /// 時間帯判定（start_time, end_time）が指定されている場合は、ローカル時刻で判定する。
     /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
-    pub fn can_notify(&self, now: DateTime<Utc>, max_per_day: u32) -> NotificationGate {
+    pub fn can_notify<'a>(
+        &self,
+        now: DateTime<Utc>,
+        max_per_day: u32,
+        time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> NotificationGate {
+        let local_time = now.with_timezone(&chrono::Local);
+        use chrono::Timelike;
+        let current_minutes = local_time.hour() * 60 + local_time.minute();
+
+        if !is_within_any_notification_time_range(current_minutes, time_ranges) {
+            return NotificationGate::OutsideTimeRange;
+        }
+
         let today = now.format(DATE_FORMAT).to_string();
         let used_today = if self.daily_notification.date == today {
             self.daily_notification.count
@@ -390,10 +405,64 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// "HH:MM" 形式の文字列をパースして (時, 分) を返す。
+fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
+    let (h_str, m_str) = s.split_once(':')?;
+    let h: u32 = h_str.parse().ok()?;
+    let m: u32 = m_str.parse().ok()?;
+    if h < 24 && m < 60 {
+        Some((h, m))
+    } else {
+        None
+    }
+}
+
+fn is_within_notification_time_range(
+    current_minutes: u32,
+    start_time: &str,
+    end_time: &str,
+) -> bool {
+    if current_minutes >= 24 * 60 {
+        return false;
+    }
+
+    let (start_h, start_m) = match parse_hour_minute(start_time) {
+        Some(time) => time,
+        None => return false,
+    };
+    let (end_h, end_m) = match parse_hour_minute(end_time) {
+        Some(time) => time,
+        None => return false,
+    };
+
+    let start_minutes = start_h * 60 + start_m;
+    let end_minutes = end_h * 60 + end_m;
+
+    if start_minutes == end_minutes {
+        return false;
+    }
+
+    if start_minutes < end_minutes {
+        current_minutes >= start_minutes && current_minutes <= end_minutes
+    } else {
+        current_minutes >= start_minutes || current_minutes <= end_minutes
+    }
+}
+
+fn is_within_any_notification_time_range<'a>(
+    current_minutes: u32,
+    time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    time_ranges.into_iter().any(|(start_time, end_time)| {
+        is_within_notification_time_range(current_minutes, start_time, end_time)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use crate::domain::settings::PersistedSettings;
+    use chrono::{Local, TimeZone};
 
     fn article(
         id: &str,
@@ -447,7 +516,10 @@ mod tests {
         assert_eq!(state.confirmed_reward_ids, vec!["reward-0".to_string()]);
         // 閉じた後は再通知抑制（クールダウン）が設定される。
         assert!(state.cooldown_until.is_some());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::CoolingDown);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "23:59")]),
+            NotificationGate::CoolingDown
+        );
     }
 
     #[test]
@@ -485,12 +557,15 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3),
+            state.can_notify(now, 3, [("00:00", "23:59")]),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
         let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
-        assert_eq!(state.can_notify(tomorrow, 3), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(tomorrow, 3, [("00:00", "23:59")]),
+            NotificationGate::Allowed
+        );
     }
 
     #[test]
@@ -499,10 +574,16 @@ mod tests {
         let mut state = PersistedYuukoState::default();
         state.mark_notified(base, article("a1", ArticleReadState::Unread, false, 0.9));
         // 直後はクールタイム中。
-        assert_eq!(state.can_notify(base, 3), NotificationGate::CoolingDown);
+        assert_eq!(
+            state.can_notify(base, 3, [("00:00", "23:59")]),
+            NotificationGate::CoolingDown
+        );
         // 最短クールタイム経過後は通知可能。
         let after = base + Duration::minutes(MIN_COOLTIME_MINUTES);
-        assert_eq!(state.can_notify(after, 3), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(after, 3, [("00:00", "23:59")]),
+            NotificationGate::Allowed
+        );
     }
 
     #[test]
@@ -558,7 +639,7 @@ mod tests {
                                                       // 無視のクールダウンは閉じる(120分)より長い。120分後でもまだ抑制中。
         let after_dismiss_window = now + Duration::minutes(DISMISS_COOLDOWN_MINUTES);
         assert_eq!(
-            state.can_notify(after_dismiss_window, 3),
+            state.can_notify(after_dismiss_window, 3, [("00:00", "23:59")]),
             NotificationGate::CoolingDown
         );
     }
@@ -572,10 +653,196 @@ mod tests {
 
         state.dismiss_notification(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "23:59")]),
+            NotificationGate::Allowed
+        );
 
         state.mark_ignored(now);
         assert!(state.cooldown_until.is_none());
-        assert_eq!(state.can_notify(now, 3), NotificationGate::Allowed);
+        assert_eq!(
+            state.can_notify(now, 3, [("00:00", "23:59")]),
+            NotificationGate::Allowed
+        );
+    }
+
+    #[test]
+    fn time_range_check_accepts_normal_range_inside() {
+        assert!(is_within_notification_time_range(12 * 60, "09:00", "18:00"));
+    }
+
+    #[test]
+    fn time_range_check_rejects_normal_range_outside() {
+        assert!(!is_within_notification_time_range(
+            20 * 60,
+            "09:00",
+            "18:00"
+        ));
+    }
+
+    #[test]
+    fn time_range_check_accepts_overnight_range_late_night() {
+        assert!(is_within_notification_time_range(23 * 60, "22:00", "07:00"));
+    }
+
+    #[test]
+    fn time_range_check_accepts_overnight_range_early_morning() {
+        assert!(is_within_notification_time_range(5 * 60, "22:00", "07:00"));
+    }
+
+    #[test]
+    fn time_range_check_rejects_overnight_range_daytime() {
+        assert!(!is_within_notification_time_range(
+            12 * 60,
+            "22:00",
+            "07:00"
+        ));
+    }
+
+    #[test]
+    fn time_range_check_rejects_same_start_and_end_as_zero_length() {
+        assert!(!is_within_notification_time_range(
+            13 * 60,
+            "13:00",
+            "13:00"
+        ));
+        assert!(!is_within_notification_time_range(
+            20 * 60,
+            "13:00",
+            "13:00"
+        ));
+    }
+
+    #[test]
+    fn time_range_check_rejects_invalid_time_format() {
+        assert!(!is_within_notification_time_range(
+            12 * 60,
+            "invalid",
+            "18:00"
+        ));
+    }
+
+    #[test]
+    fn any_time_range_check_accepts_second_matching_range() {
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert!(is_within_any_notification_time_range(14 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_rejects_when_no_ranges_match() {
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert!(!is_within_any_notification_time_range(20 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_rejects_zero_length_range_even_with_multiple_ranges() {
+        let ranges = [("09:00", "12:00"), ("13:00", "13:00")];
+
+        assert!(!is_within_any_notification_time_range(20 * 60, ranges));
+    }
+
+    #[test]
+    fn any_time_range_check_keeps_valid_range_when_other_range_is_zero_length() {
+        let ranges = [("09:00", "12:00"), ("13:00", "13:00")];
+
+        assert!(is_within_any_notification_time_range(10 * 60, ranges));
+    }
+
+    #[test]
+    fn default_work_ranges_block_local_lunch_break() {
+        let local_lunch = Local.with_ymd_and_hms(2026, 6, 9, 12, 30, 0).unwrap();
+        let now = local_lunch.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert_eq!(
+            state.can_notify(now, 3, ranges),
+            NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn default_work_ranges_allow_local_afternoon() {
+        let local_afternoon = Local.with_ymd_and_hms(2026, 6, 9, 13, 30, 0).unwrap();
+        let now = local_afternoon.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("09:00", "12:00"), ("13:00", "18:00")];
+
+        assert_eq!(state.can_notify(now, 3, ranges), NotificationGate::Allowed);
+    }
+
+    #[test]
+    fn missing_work_ranges_settings_block_local_lunch_break() {
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": true,
+                "mode": "random_in_work_time",
+                "maxPerDay": 3
+            }
+        }"#;
+        let settings: PersistedSettings =
+            serde_json::from_str(legacy).expect("legacy settings should load");
+        let local_lunch = Local.with_ymd_and_hms(2026, 6, 9, 12, 30, 0).unwrap();
+        let now = local_lunch.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+
+        assert_eq!(
+            state.can_notify(
+                now,
+                settings.notification.max_per_day,
+                settings
+                    .notification
+                    .work_time_ranges
+                    .iter()
+                    .map(|range| (range.start.as_str(), range.end.as_str())),
+            ),
+            NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn missing_work_ranges_settings_allow_local_afternoon() {
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": true,
+                "mode": "random_in_work_time",
+                "maxPerDay": 3
+            }
+        }"#;
+        let settings: PersistedSettings =
+            serde_json::from_str(legacy).expect("legacy settings should load");
+        let local_afternoon = Local.with_ymd_and_hms(2026, 6, 9, 13, 30, 0).unwrap();
+        let now = local_afternoon.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+
+        assert_eq!(
+            state.can_notify(
+                now,
+                settings.notification.max_per_day,
+                settings
+                    .notification
+                    .work_time_ranges
+                    .iter()
+                    .map(|range| (range.start.as_str(), range.end.as_str())),
+            ),
+            NotificationGate::Allowed
+        );
+    }
+
+    #[test]
+    fn single_saved_work_range_blocks_after_its_end_time() {
+        let local_after_range = Local.with_ymd_and_hms(2026, 6, 9, 17, 0, 0).unwrap();
+        let now = local_after_range.with_timezone(&Utc);
+        let state = PersistedYuukoState::default();
+        let ranges = [("10:00", "16:00")];
+
+        assert_eq!(
+            state.can_notify(now, 3, ranges),
+            NotificationGate::OutsideTimeRange
+        );
     }
 }
