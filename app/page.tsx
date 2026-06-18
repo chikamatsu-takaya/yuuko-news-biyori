@@ -9,6 +9,7 @@ import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
+import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 
 type ScreenType =
   | "home"
@@ -21,6 +22,9 @@ type ScreenType =
   | "onboarding";
 
 export default function Page() {
+  // アプリ起動中、全画面共通で通知候補を定期チェックする
+  useNotificationScheduler();
+
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
   const [selectedArticleId, setSelectedArticleId] = React.useState<string | null>(
     null

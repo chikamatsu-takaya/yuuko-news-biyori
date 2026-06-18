@@ -222,6 +222,57 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
+test("notification scheduler calls request_yuuko_notification periodically", async ({
+  page,
+}) => {
+  // Initialize clock to control setInterval
+  await page.clock.install();
+
+  await openHome(page);
+
+  // The hook calls it once on mount (first run)
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+      )
+    )
+    .toBe(1);
+
+  // Fast forward 5 minutes (300,000ms)
+  await page.clock.fastForward(300000);
+
+  // Should be called again
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+      )
+    )
+    .toBe(2);
+
+  // Fast forward another 5 minutes
+  await page.clock.fastForward(300000);
+
+  // Should be called a third time
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+      )
+    )
+    .toBe(3);
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -374,6 +425,21 @@ async function installTauriMocks(page: Page) {
               earnedPoint: 0,
               rankedUp: false,
               newRank: null,
+            };
+          case "request_yuuko_notification":
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ =
+              ((window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0) + 1;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return {
+              notified: false,
+              reason: "no_candidate",
+              state: {
+                state: "Waiting",
+                positionMode: "RightBottom",
+                hasNotification: false,
+                currentArticleId: "e2e-article-1",
+              },
             };
           default:
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);
