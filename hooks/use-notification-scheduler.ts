@@ -34,8 +34,15 @@ export const useNotificationScheduler = ({
   intervalMs = 300000,
   onStateChange,
 }: UseNotificationSchedulerOptions = {}) => {
-  // ポーリングの同時実行を防ぐフラグ（前回完了前の重複実行を抑止）。
-  const isChecking = useRef(false);
+  // 現在マウント中かを表すフラグ。結果採用の可否はこの ref のみで判断し、
+  // 個々の effect クロージャ（cancelled）には依存しない。
+  // StrictMode の setup→cleanup→setup では false→true に戻るため、
+  // 1回目で開始した取得の結果を、2回目setup後も採用できる。
+  const mountedRef = useRef(false);
+  // 実行中の getYuukoNotificationState() Promise を共有する。
+  // 取得中に再度ポーリングが走っても新しい command を起動せず、同じ結果を待つ
+  // （初回取得の重複実行を防ぐ）。
+  const inFlightRef = useRef<Promise<YuukoNotificationState | null> | null>(null);
   // onStateChange は呼び出し元で都度生成され得るため、ref経由で最新を参照し
   // タイマーの再生成（=間隔リセット）を避ける。
   const onStateChangeRef = useRef(onStateChange);
@@ -45,19 +52,21 @@ export const useNotificationScheduler = ({
   }, [onStateChange]);
 
   useEffect(() => {
-    // アンマウント後にコールバックが走らないようにするためのフラグ。
-    let cancelled = false;
+    mountedRef.current = true;
 
     const pollNotificationState = async () => {
-      if (isChecking.current) {
-        return;
-      }
-
-      isChecking.current = true;
-      try {
+      // 取得中でなければ新規にcommandを起動。取得中なら同じPromiseの完了を待つ。
+      if (!inFlightRef.current) {
         // 非破壊的な状態取得のみ（通知候補生成・通知枠消費は行わない）。
-        const state = await getYuukoNotificationState();
-        if (!cancelled) {
+        inFlightRef.current = getYuukoNotificationState();
+      }
+      const pending = inFlightRef.current;
+
+      try {
+        const state = await pending;
+        // 取得完了時点でマウント中なら採用する。
+        // アンマウント後（mountedRef=false のまま）は state を更新しない。
+        if (mountedRef.current) {
           onStateChangeRef.current?.(state);
         }
       } catch (error) {
@@ -67,7 +76,10 @@ export const useNotificationScheduler = ({
           error
         );
       } finally {
-        isChecking.current = false;
+        // 自分が待っていたPromiseがまだ共有中なら解放し、次回は新規取得できるようにする。
+        if (inFlightRef.current === pending) {
+          inFlightRef.current = null;
+        }
       }
     };
 
@@ -79,7 +91,7 @@ export const useNotificationScheduler = ({
     }, intervalMs);
 
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
       clearInterval(timerId);
     };
   }, [intervalMs]);

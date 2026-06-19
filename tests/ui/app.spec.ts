@@ -222,13 +222,14 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
-test("notification scheduler is the single fetch path and is not double-called on home start", async ({
+test("notification scheduler fetches once on home start and reflects the first result even under StrictMode", async ({
   page,
 }) => {
   // setInterval を制御するため、遷移前に仮想クロックを導入する。
   await page.clock.install();
 
-  // 通知ありの状態を返させ、Page→MainScreen への反映を DOM で確認する。
+  // 通知ありの状態を返させ、初回取得結果が Page→MainScreen へ即時反映されることを
+  // DOM で確認する（StrictMode の二重invokeでも初回結果が捨てられないこと）。
   await page.addInitScript(() => {
     /* eslint-disable @typescript-eslint/no-explicit-any */
     (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ = {
