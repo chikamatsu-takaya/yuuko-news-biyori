@@ -22,7 +22,7 @@ type ScreenType =
   | "onboarding";
 
 export default function Page() {
-  // アプリ起動中、全画面共通で通知候補を定期チェックする
+  // アプリ起動中、全画面共通で通知状態を定期チェックする
   useNotificationScheduler();
 
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");

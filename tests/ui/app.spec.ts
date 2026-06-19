@@ -222,7 +222,7 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
-test("notification scheduler polls get_yuuko_notification_state and does NOT call request_yuuko_notification", async ({
+test("notification scheduler periodically polls get_yuuko_notification_state and does NOT call request_yuuko_notification", async ({
   page,
 }) => {
   // Initialize clock to control setInterval
