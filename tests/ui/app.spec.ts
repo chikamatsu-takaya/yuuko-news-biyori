@@ -222,65 +222,65 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
-test("notification scheduler periodically polls get_yuuko_notification_state and does NOT call request_yuuko_notification", async ({
+test("notification scheduler polls get_yuuko_notification_state and reaches Page state without consuming notifications", async ({
   page,
 }) => {
-  // Initialize clock to control setInterval
+  // setInterval を制御するため、遷移前に仮想クロックを導入する。
   await page.clock.install();
+
+  // 通知ありの状態を返させ、Page側stateへ反映されることを確認する。
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ = {
+      hasNotification: true,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
 
   await openHome(page);
 
-  // request_yuuko_notification should NOT be called automatically
-  const requestCallCount = await page.evaluate(
-    () =>
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+  const getStateCount = () =>
+    page.evaluate(
+      () =>
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
       /* eslint-enable @typescript-eslint/no-explicit-any */
-  );
-  expect(requestCallCount).toBe(0);
+    );
+  const getRequestCount = () =>
+    page.evaluate(
+      () =>
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    );
 
-  // get_yuuko_notification_state should be called on mount (MainScreen + Scheduler)
+  // request_yuuko_notification（破壊的）は自動実行されない。
+  expect(await getRequestCount()).toBe(0);
+
+  // マウント時に get_yuuko_notification_state が呼ばれる（MainScreen + スケジューラ初回）。
+  await expect.poll(getStateCount).toBeGreaterThanOrEqual(2);
+
+  // 取得した通知状態が Page 側 state（導線の window 公開値）へ到達している。
   await expect
     .poll(() =>
       page.evaluate(
         () =>
           /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
-          /* eslint-enable @typescript-eslint/no-explicit-any */
+          (window as any).__YUUKO_NOTIFICATION_STATE__?.hasNotification ?? null
+        /* eslint-enable @typescript-eslint/no-explicit-any */
       )
     )
-    .toBeGreaterThanOrEqual(2);
+    .toBe(true);
 
-  const initialPollCount = await page.evaluate(
-    () =>
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-  );
+  const beforeForward = await getStateCount();
 
-  // Fast forward 5 minutes (300,000ms)
+  // 5分（300,000ms）進めると、スケジューラが再度ポーリングする。
   await page.clock.fastForward(300000);
 
-  // get_yuuko_notification_state should be called again
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
-          /* eslint-enable @typescript-eslint/no-explicit-any */
-      )
-    )
-    .toBe(initialPollCount + 1);
+  await expect.poll(getStateCount).toBe(beforeForward + 1);
 
-  // request_yuuko_notification should still be 0
-  const finalRequestCallCount = await page.evaluate(
-    () =>
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-  );
-  expect(finalRequestCallCount).toBe(0);
+  // 5分後も破壊的コマンドは呼ばれていない。
+  expect(await getRequestCount()).toBe(0);
 });
 
 async function openHome(page: Page) {
@@ -395,10 +395,13 @@ async function installTauriMocks(page: Page) {
               saved: 1,
               errors: [],
             };
-          case "get_yuuko_notification_state":
+          case "get_yuuko_notification_state": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ =
-              ((window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0) + 1;
+              ((window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0) +
+              1;
+            const notificationOverride =
+              (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ || {};
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               state: "Waiting",
@@ -406,7 +409,9 @@ async function installTauriMocks(page: Page) {
               balloonText: "E2E確認中だよ。",
               hasNotification: false,
               currentArticleId: "e2e-article-1",
+              ...notificationOverride,
             };
+          }
           case "get_user_settings":
             /* eslint-disable @typescript-eslint/no-explicit-any */
             return {
@@ -441,6 +446,8 @@ async function installTauriMocks(page: Page) {
               newRank: null,
             };
           case "request_yuuko_notification":
+            // スケジューラは破壊的なこのコマンドを呼ばない想定。
+            // 万一呼ばれたらカウントされ、テストが検知できるようにしておく。
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ =
               ((window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0) + 1;
