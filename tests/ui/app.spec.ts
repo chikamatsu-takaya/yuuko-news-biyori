@@ -222,6 +222,59 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
+test("notification scheduler fetches once on home start and reflects the first result even under StrictMode", async ({
+  page,
+}) => {
+  // setInterval を制御するため、遷移前に仮想クロックを導入する。
+  await page.clock.install();
+
+  // 通知ありの状態を返させ、初回取得結果が Page→MainScreen へ即時反映されることを
+  // DOM で確認する（StrictMode の二重invokeでも初回結果が捨てられないこと）。
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ = {
+      hasNotification: true,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+  await openHome(page);
+
+  const getStateCount = () =>
+    page.evaluate(
+      () =>
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    );
+  const getRequestCount = () =>
+    page.evaluate(
+      () =>
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    );
+
+  // 初回取得結果が Page 側 state を経由して MainScreen に反映されている
+  // （hasNotification: true のときのステータス文言が表示される）。
+  await expect(page.getByText("新しいニュース通知があるよ！")).toBeVisible();
+
+  // 二重取得防止: ホーム起動時の get_yuuko_notification_state は Page のスケジューラ
+  // 1回のみ（MainScreen からは呼ばれない）。
+  expect(await getStateCount()).toBe(1);
+
+  // request_yuuko_notification（破壊的）は自動実行されない。
+  expect(await getRequestCount()).toBe(0);
+
+  // 5分（300,000ms）進めると、スケジューラが追加で1回だけ再ポーリングする。
+  await page.clock.fastForward(300000);
+
+  await expect.poll(getStateCount).toBe(2);
+
+  // 5分後も破壊的コマンドは呼ばれていない。
+  expect(await getRequestCount()).toBe(0);
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -334,14 +387,23 @@ async function installTauriMocks(page: Page) {
               saved: 1,
               errors: [],
             };
-          case "get_yuuko_notification_state":
+          case "get_yuuko_notification_state": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ =
+              ((window as any).__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__ || 0) +
+              1;
+            const notificationOverride =
+              (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ || {};
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               state: "Waiting",
               positionMode: "RightBottom",
               balloonText: "E2E確認中だよ。",
               hasNotification: false,
               currentArticleId: "e2e-article-1",
+              ...notificationOverride,
             };
+          }
           case "get_user_settings":
             /* eslint-disable @typescript-eslint/no-explicit-any */
             return {
@@ -374,6 +436,23 @@ async function installTauriMocks(page: Page) {
               earnedPoint: 0,
               rankedUp: false,
               newRank: null,
+            };
+          case "request_yuuko_notification":
+            // スケジューラは破壊的なこのコマンドを呼ばない想定。
+            // 万一呼ばれたらカウントされ、テストが検知できるようにしておく。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ =
+              ((window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ || 0) + 1;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return {
+              notified: false,
+              reason: "no_candidate",
+              state: {
+                state: "Waiting",
+                positionMode: "RightBottom",
+                hasNotification: false,
+                currentArticleId: "e2e-article-1",
+              },
             };
           default:
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);

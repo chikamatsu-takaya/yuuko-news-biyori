@@ -9,6 +9,8 @@ import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
+import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
+import type { YuukoNotificationState } from "@/lib/tauri/yuuko";
 
 type ScreenType =
   | "home"
@@ -25,6 +27,15 @@ export default function Page() {
   const [selectedArticleId, setSelectedArticleId] = React.useState<string | null>(
     null
   );
+
+  // 通知状態取得は Page 側スケジューラに一本化する。取得した最新値をここで保持し、
+  // 表示が必要な画面（MainScreen 等）へ props で渡す（通知枠の消費・表示は行わない）。
+  const [yuukoNotificationState, setYuukoNotificationState] =
+    React.useState<YuukoNotificationState | null>(null);
+
+  // getYuukoNotificationState を定期実行し、結果を上記 state へ反映する。
+  // request_yuuko_notification は呼ばない（通知枠を消費しないため）。
+  useNotificationScheduler({ onStateChange: setYuukoNotificationState });
 
   const handleNavigate = (screen: string) => {
     if (screen === "home") {
@@ -95,5 +106,11 @@ export default function Page() {
     return <OnboardingScreen onNavigate={handleNavigate} />;
   }
 
-  return <MainScreen onNavigate={handleNavigate} onOpenArticle={handleOpenArticle} />;
+  return (
+    <MainScreen
+      onNavigate={handleNavigate}
+      onOpenArticle={handleOpenArticle}
+      yuukoNotificationState={yuukoNotificationState}
+    />
+  );
 }
