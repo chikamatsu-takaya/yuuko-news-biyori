@@ -41,7 +41,7 @@ import {
   refreshNews,
   type RefreshNewsResult as TauriRefreshNewsResult,
 } from "@/lib/tauri/news";
-import { getYuukoNotificationState } from "@/lib/tauri/yuuko";
+import type { YuukoNotificationState } from "@/lib/tauri/yuuko";
 import { getUserSettings } from "@/lib/tauri/settings";
 import { useToast } from "@/hooks/use-toast";
 
@@ -481,9 +481,12 @@ function YuukoCharacter() {
 export default function MainScreen({
   onNavigate,
   onOpenArticle,
+  yuukoNotificationState,
 }: {
   onNavigate?: (screen: string) => void;
   onOpenArticle?: (articleId: string) => void;
+  // 通知状態は Page 側スケジューラが一元取得する。MainScreen は受け取って表示するだけ。
+  yuukoNotificationState?: YuukoNotificationState | null;
 }) {
   const [isAutoStart] = React.useState(true);
   const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
@@ -505,53 +508,42 @@ export default function MainScreen({
 
   const { toast } = useToast();
 
+  // 通知状態は Page 側スケジューラが取得する。ここでは受け取った状態から
+  // 吹き出し・ステータス文言を導出するだけ（自前で getYuukoNotificationState は呼ばない）。
   React.useEffect(() => {
-    let active = true;
+    const state = yuukoNotificationState;
+    if (!state) {
+      // 未取得（非Tauri等）の間はフォールバック文言を維持する。
+      return;
+    }
 
-    const loadYuukoNotificationState = async () => {
-      try {
-        const state = await getYuukoNotificationState();
-        if (!active || !state) {
-          return;
-        }
+    const rewardMessage =
+      state.rewardNotification?.pending && state.rewardNotification.message
+        ? state.rewardNotification.message
+        : undefined;
+    setYuukoBalloonMessage(
+      rewardMessage ?? state.balloonText ?? fallbackYuukoMessage
+    );
 
-        const rewardMessage =
-          state.rewardNotification?.pending && state.rewardNotification.message
-            ? state.rewardNotification.message
-            : undefined;
-        setYuukoBalloonMessage(
-          rewardMessage ?? state.balloonText ?? fallbackYuukoMessage
-        );
+    if (state.rewardNotification?.pending) {
+      setStatusMessage(
+        `未確認の報酬が${state.rewardNotification.rewardIds.length}件あるよ！`
+      );
+      return;
+    }
 
-        if (state.rewardNotification?.pending) {
-          setStatusMessage(
-            `未確認の報酬が${state.rewardNotification.rewardIds.length}件あるよ！`
-          );
-          return;
-        }
+    if (state.hasNotification) {
+      setStatusMessage("新しいニュース通知があるよ！");
+      return;
+    }
 
-        if (state.hasNotification) {
-          setStatusMessage("新しいニュース通知があるよ！");
-          return;
-        }
+    if (state.state === "Suppressed") {
+      setStatusMessage("通知はOFF中だよ。設定からいつでも変更できるよ。");
+      return;
+    }
 
-        if (state.state === "Suppressed") {
-          setStatusMessage("通知はOFF中だよ。設定からいつでも変更できるよ。");
-          return;
-        }
-
-        setStatusMessage(fallbackStatusMessage);
-      } catch (error) {
-        console.warn("Failed to load yuuko notification state:", error);
-      }
-    };
-
-    void loadYuukoNotificationState();
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    setStatusMessage(fallbackStatusMessage);
+  }, [yuukoNotificationState]);
 
   const loadRecommendedArticles = React.useCallback(async (): Promise<boolean> => {
     setIsLoadingArticles(true);

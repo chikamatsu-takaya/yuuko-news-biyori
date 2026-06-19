@@ -222,13 +222,13 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
-test("notification scheduler polls get_yuuko_notification_state and reaches Page state without consuming notifications", async ({
+test("notification scheduler is the single fetch path and is not double-called on home start", async ({
   page,
 }) => {
   // setInterval を制御するため、遷移前に仮想クロックを導入する。
   await page.clock.install();
 
-  // 通知ありの状態を返させ、Page側stateへ反映されることを確認する。
+  // 通知ありの状態を返させ、Page→MainScreen への反映を DOM で確認する。
   await page.addInitScript(() => {
     /* eslint-disable @typescript-eslint/no-explicit-any */
     (window as any).__E2E_NOTIFICATION_STATE_OVERRIDE__ = {
@@ -254,30 +254,21 @@ test("notification scheduler polls get_yuuko_notification_state and reaches Page
       /* eslint-enable @typescript-eslint/no-explicit-any */
     );
 
+  // 初回取得結果が Page 側 state を経由して MainScreen に反映されている
+  // （hasNotification: true のときのステータス文言が表示される）。
+  await expect(page.getByText("新しいニュース通知があるよ！")).toBeVisible();
+
+  // 二重取得防止: ホーム起動時の get_yuuko_notification_state は Page のスケジューラ
+  // 1回のみ（MainScreen からは呼ばれない）。
+  expect(await getStateCount()).toBe(1);
+
   // request_yuuko_notification（破壊的）は自動実行されない。
   expect(await getRequestCount()).toBe(0);
 
-  // マウント時に get_yuuko_notification_state が呼ばれる（MainScreen + スケジューラ初回）。
-  await expect.poll(getStateCount).toBeGreaterThanOrEqual(2);
-
-  // 取得した通知状態が Page 側 state（導線の window 公開値）へ到達している。
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          /* eslint-disable @typescript-eslint/no-explicit-any */
-          (window as any).__YUUKO_NOTIFICATION_STATE__?.hasNotification ?? null
-        /* eslint-enable @typescript-eslint/no-explicit-any */
-      )
-    )
-    .toBe(true);
-
-  const beforeForward = await getStateCount();
-
-  // 5分（300,000ms）進めると、スケジューラが再度ポーリングする。
+  // 5分（300,000ms）進めると、スケジューラが追加で1回だけ再ポーリングする。
   await page.clock.fastForward(300000);
 
-  await expect.poll(getStateCount).toBe(beforeForward + 1);
+  await expect.poll(getStateCount).toBe(2);
 
   // 5分後も破壊的コマンドは呼ばれていない。
   expect(await getRequestCount()).toBe(0);
