@@ -21,8 +21,6 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
 // E2E では Playwright clock で短縮検証できるよう定数化している。
 const BALLOON_AUTO_DISMISS_MS = 20000;
 const PREVIEW_AUTO_DISMISS_MS = 30000;
-// 退場アニメーションの長さ。この後に確定アクション（開く/閉じる/無視）を実行する（§8.2）。
-const LEAVE_ANIMATION_MS = 300;
 
 // プレビューに要約が無いときの、ゆうこの一言（§10.6 要約なし→タイトル＋ゆうこの一言）。
 const DEFAULT_TEASER = "気になったら「詳しく見る」でいっしょに読もう？";
@@ -85,9 +83,6 @@ export default function YuukoInAppNotification({
   useEffect(() => {
     setView(initialView);
   }, [initialView, articleId]);
-  // 退場アニメーション中フラグ。確定アクションはアニメーション後に実行する。
-  const [leaving, setLeaving] = useState(false);
-  const leaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 最新コールバックを ref で保持し、自動退場/Esc の effect 依存を安定させる。
   const onOpenRef = useRef(onOpen);
@@ -99,61 +94,52 @@ export default function YuukoInAppNotification({
     onIgnoreRef.current = onIgnore;
   }, [onOpen, onClose, onIgnore]);
 
-  // 退場アニメーションを挟んでから確定アクションを実行する。
-  // leaveTimerRef を多重起動ガードに使う（state更新内で副作用を起こさない）。
-  const beginLeave = useCallback((action: () => void) => {
-    if (leaveTimerRef.current) {
+  // 終端操作（閉じる/Esc/詳しく見る/自動退場）の確定。
+  // setTimeout で遅延させず即座に Page コールバックを呼ぶ。
+  // → 退場演出やアンマウント（ウィンドウ非表示）で確定処理を失わせない（Page 側キューが担う）。
+  // 確定は一度きり。
+  const terminalFiredRef = useRef(false);
+  const fireTerminal = useCallback((action: () => void) => {
+    if (terminalFiredRef.current) {
       return;
     }
-    setLeaving(true);
-    leaveTimerRef.current = setTimeout(action, LEAVE_ANIMATION_MS);
+    terminalFiredRef.current = true;
+    action();
   }, []);
 
-  // アンマウント時に退場タイマーを後始末する。
+  // 自動退場（無操作）。段階に応じた時間で無視扱いにする（§9.4）。
+  // タイマーはアンマウント時にクリアされる（ウィンドウ非表示中は進まない）。
+  // 発火時は即座に onIgnore を呼ぶ（確定は Page 側キューが直列実行する）。
   useEffect(() => {
-    return () => {
-      if (leaveTimerRef.current) {
-        clearTimeout(leaveTimerRef.current);
-      }
-    };
-  }, []);
-
-  // 自動退場（無操作）。段階に応じた時間で無視扱いにする。退場中は再設定しない（§9.4）。
-  useEffect(() => {
-    if (leaving) {
-      return;
-    }
     const timeoutMs =
       view === "preview" ? PREVIEW_AUTO_DISMISS_MS : BALLOON_AUTO_DISMISS_MS;
     const timer = setTimeout(() => {
-      beginLeave(() => onIgnoreRef.current());
+      fireTerminal(() => onIgnoreRef.current());
     }, timeoutMs);
     return () => clearTimeout(timer);
-  }, [view, leaving, beginLeave]);
+  }, [view, fireTerminal]);
 
   // Esc は閉じると同等（§10.6）。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        beginLeave(() => onCloseRef.current());
+        fireTerminal(() => onCloseRef.current());
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [beginLeave]);
+  }, [fireTerminal]);
 
-  const handleClose = () => beginLeave(() => onCloseRef.current());
-  // 「詳しく見る」/プレビュー再クリック → 退場後に記事を開く（§10.4）。
-  const handleOpen = () => beginLeave(() => onOpenRef.current());
+  // 閉じる/詳しく見るは即座に Page へ確定を委譲する（遅延なし）。
+  const handleClose = () => fireTerminal(() => onCloseRef.current());
+  // 「詳しく見る」/プレビュー再クリック → 記事を開く（§10.4）。
+  const handleOpen = () => fireTerminal(() => onOpenRef.current());
   // 初回クリック → 軽量プレビューへ（まだ遷移しない）。クリック確定系の状態も進める（§10.3）。
+  // これは終端操作ではない（表示を継続する）。
   const handleFirstClick = () => {
     setView("preview");
     onFirstClick?.();
   };
-
-  const animationClass = leaving
-    ? "yuuko-notification-leave"
-    : "yuuko-notification-enter";
 
   return (
     <div
@@ -162,7 +148,7 @@ export default function YuukoInAppNotification({
       className={`pointer-events-none fixed z-50 flex flex-col gap-2 ${POSITION_CLASS[positionMode]}`}
     >
       <div
-        className={`pointer-events-auto flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 ${animationClass}`}
+        className="pointer-events-auto flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 yuuko-notification-enter"
       >
         {/* 吹き出し / 軽量プレビュー（ゆうこ本体の上・近くに表示） */}
         <div className="relative rounded-2xl border border-border/50 bg-white p-3 pr-7 shadow-lg">

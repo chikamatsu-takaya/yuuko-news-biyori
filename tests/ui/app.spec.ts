@@ -1169,6 +1169,140 @@ test("resumes as the light preview (not the balloon) when the active notificatio
   );
 });
 
+// 終端操作直後に hidden 化しても確定処理を失わないことを検証するヘルパ。
+const setWindowVisible = (page: Page, visible: boolean) =>
+  page.evaluate(
+    (v) =>
+      (
+        window as unknown as Record<string, (visible: boolean) => void>
+      ).__E2E_SET_WINDOW_VISIBLE__(v),
+    visible
+  );
+
+test("dismiss confirmation is not lost when the window hides right after closing", async ({
+  page,
+}) => {
+  // clock を入れておくと、旧実装の退場 setTimeout はアンマウントで失われる。
+  // 即時確定（今回の方針A）なら clock 進行なしでも dismiss が呼ばれる。
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installVisibilityControl(page, false);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 閉じる → 退場演出完了を待たずに hidden（アンマウント）。
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  await setWindowVisible(page, false);
+
+  // 明示操作の確定（dismiss）は失われない。
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+
+  // 再表示しても同じ active 通知は復活しない。
+  await setWindowVisible(page, true);
+  await page.waitForTimeout(200);
+  await expect(notification).toHaveCount(0);
+  expect(await readBackendActive(page)).toBeNull();
+});
+
+test("dismiss confirmation is not lost when the window hides right after Escape", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installVisibilityControl(page, false);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await setWindowVisible(page, false);
+
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+
+  await setWindowVisible(page, true);
+  await page.waitForTimeout(200);
+  await expect(notification).toHaveCount(0);
+  expect(await readBackendActive(page)).toBeNull();
+});
+
+test("handle_yuuko_clicked and navigation are not lost when the window hides right after 詳しく見る", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installVisibilityControl(page, false);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // preview へ進める。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+
+  // 詳しく見る → 直後に hidden（演出完了を待たずアンマウント）。
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await setWindowVisible(page, false);
+
+  // クリック確定（handle_yuuko_clicked）は失われず、dismiss は呼ばれない。
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  // 記事遷移処理も失われない（news 固有の「ホームへ戻る」）。
+  await expect(
+    page.getByRole("button", { name: "ホームへ戻る" }).first()
+  ).toBeVisible();
+
+  // 再表示しても同じ active 通知は復活しない。
+  await setWindowVisible(page, true);
+  await page.waitForTimeout(200);
+  await expect(notification).toHaveCount(0);
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+});
+
+test("ignore that already fired is not lost when the window hides right after auto-dismiss", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installVisibilityControl(page, false);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // balloon 自動退場(20s)を発火させる（onIgnore は即時確定）。
+  await page.clock.fastForward(20000);
+  // 発火直後に hidden。
+  await setWindowVisible(page, false);
+
+  // 既に開始済みの ignore 確定は失われない。
+  await expect
+    .poll(() => readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+
+  // 再表示しても復活しない。
+  await setWindowVisible(page, true);
+  await page.waitForTimeout(200);
+  await expect(notification).toHaveCount(0);
+  expect(await readBackendActive(page)).toBeNull();
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -1380,6 +1514,10 @@ async function installTauriMocks(page: Page) {
             const initialPreview = Boolean(
               (window as any).__E2E_REQUEST_INITIAL_PREVIEW__
             );
+            // 既に紹介済みか（Rust の introduced_article_ids 相当）。再紹介しない。
+            const alreadyIntroduced = Boolean(
+              (window as any).__E2E_ARTICLE_INTRODUCED__
+            );
             const backendActive = (window as any).__E2E_BACKEND_ACTIVE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -1418,10 +1556,19 @@ async function installTauriMocks(page: Page) {
                 state: backendActive,
               };
             }
+            if (alreadyIntroduced) {
+              // 紹介済み記事は再紹介しない（詳しく見るで開いた後の再surface防止）。
+              return {
+                notified: false,
+                reason: "no_candidate",
+                state: waitingState,
+              };
+            }
             if (wantNotified) {
-              // 候補生成成功＝消費。backend に active を永続化する（再表示時に get で拾える）。
+              // 候補生成成功＝消費。backend に active を永続化し、紹介済みに記録する。
               /* eslint-disable @typescript-eslint/no-explicit-any */
               (window as any).__E2E_BACKEND_ACTIVE__ = activeState;
+              (window as any).__E2E_ARTICLE_INTRODUCED__ = true;
               /* eslint-enable @typescript-eslint/no-explicit-any */
               return { notified: true, reason: "notified", state: activeState };
             }
