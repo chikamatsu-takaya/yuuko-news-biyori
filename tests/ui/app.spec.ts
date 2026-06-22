@@ -1303,6 +1303,45 @@ test("ignore that already fired is not lost when the window hides right after au
   expect(await readBackendActive(page)).toBeNull();
 });
 
+test("does not retain the Leaving state, so the processed news balloon is not re-shown on home after 詳しく見る", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリックで軽量プレビュー → 「詳しく見る」でニュース閲覧画面へ。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await expect(
+    page.getByRole("button", { name: "ホームへ戻る" }).first()
+  ).toBeVisible();
+
+  // handle_yuuko_clicked は Leaving（balloonText/previewArticle が残る非active）を返す。
+  // ニュース閲覧画面からホームへ戻る。
+  await page.getByRole("button", { name: "ホームへ戻る" }).first().click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
+  // 処理済みニュースの通知文言が、ホーム側（MainScreen の吹き出し含む）へ再表示されない。
+  await page.waitForTimeout(200);
+  await expect(
+    page.getByText("気になるニュースを見つけたよ。「E2Eテスト用ニュース」")
+  ).toHaveCount(0);
+  // アプリ内通知も出ていない。
+  await expect(notification).toHaveCount(0);
+  // 成功導線なので dismiss は呼ばれない（handle_yuuko_clicked を使用）。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(

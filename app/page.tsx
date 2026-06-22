@@ -86,6 +86,17 @@ export default function Page() {
   // 終端中に抑止する対象の記事ID（同一 active 通知のみ抑止する）。
   const suppressActiveNotificationIdRef = React.useRef<string | null>(null);
 
+  // 通知状態を Page state へ反映する共通関数。
+  // active なニュース通知（BalloonVisible/PreviewVisible/Appearing + 紹介対象あり）以外は
+  // null として扱う。Leaving/Waiting/Hidden/Suppressed 等は balloonText/previewArticle が
+  // 残って返っても、ホーム側で処理済みニュースを再表示しないよう保持しない。
+  const applyYuukoNotificationState = React.useCallback(
+    (next: YuukoNotificationState | null) => {
+      setYuukoNotificationState(isActiveNewsNotification(next) ? next : null);
+    },
+    []
+  );
+
   // scheduler から返る通知状態の反映をラップする。
   // 終端操作の進行中は、同一の active 通知を再採用しない（閉じた後の再表示防止）。
   // 終端中でない、または別記事・非active状態なら通常どおり反映する。
@@ -106,9 +117,9 @@ export default function Page() {
           return;
         }
       }
-      setYuukoNotificationState(next);
+      applyYuukoNotificationState(next);
     },
-    []
+    [applyYuukoNotificationState]
   );
 
   // 通知候補生成（requestYuukoNotification）を定期実行し、結果状態を Page state へ反映する。
@@ -176,13 +187,14 @@ export default function Page() {
       try {
         const next = await handleYuukoClicked();
         if (token === yuukoActionTokenRef.current) {
-          setYuukoNotificationState(next);
+          // Leaving など非active状態は null 化して保持しない（成功導線後の再表示防止）。
+          applyYuukoNotificationState(next);
         }
       } catch (error) {
         console.error("Failed to advance yuuko click state:", error);
       }
     });
-  }, [enqueueYuukoAction]);
+  }, [enqueueYuukoAction, applyYuukoNotificationState]);
 
   // 終端操作の開始: UI即時非表示＋終端中フラグ＋抑止対象IDを立てる。
   // 以降、backend 解消が完了するまで scheduler は同一 active 通知を採用しない。
@@ -232,8 +244,8 @@ export default function Page() {
     void enqueueYuukoAction(async () => {
       try {
         const next = await dismissYuukoNotification();
-        setYuukoNotificationState(next);
-        // dismiss は Waiting（非active）を返す → 終端フラグを戻してよい。
+        // dismiss は Waiting（非active）を返す → null 化して保持しない。
+        applyYuukoNotificationState(next);
         if (!isActiveNewsNotification(next)) {
           endTerminalAction();
         }
@@ -251,7 +263,7 @@ export default function Page() {
     void enqueueYuukoAction(async () => {
       try {
         const next = await markYuukoIgnored();
-        setYuukoNotificationState(next);
+        applyYuukoNotificationState(next);
         if (!isActiveNewsNotification(next)) {
           endTerminalAction();
         }
