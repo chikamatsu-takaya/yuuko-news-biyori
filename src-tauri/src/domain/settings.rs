@@ -467,6 +467,30 @@ mod tests {
     }
 
     #[test]
+    fn notify_max_per_day_round_trips_through_apply_and_to_dto() {
+        // 通知頻度（notifyMaxPerDay）を変更して保存→再読み込みで同じ値が返ること。
+        let mut settings = PersistedSettings::default();
+        let dto = UserSettingsDto {
+            notify_max_per_day: 5,
+            ..UserSettingsDto::default()
+        };
+
+        settings.apply_from_dto(dto);
+        assert_eq!(settings.notification.max_per_day, 5);
+
+        let reloaded = settings.to_dto();
+        assert_eq!(reloaded.notify_max_per_day, 5);
+    }
+
+    #[test]
+    fn default_notify_max_per_day_is_three() {
+        // 保存値が無い場合は既定値「1日3回まで」（=3）になること。
+        let settings = PersistedSettings::default();
+        assert_eq!(settings.notification.max_per_day, 3);
+        assert_eq!(settings.to_dto().notify_max_per_day, 3);
+    }
+
+    #[test]
     fn default_notification_uses_morning_and_afternoon_work_ranges() {
         let settings = PersistedSettings::default();
 

@@ -222,6 +222,86 @@ test("settings save keeps single work time range", async ({ page }) => {
   expect(saved?.notifyEndTime).toBe("16:00");
 });
 
+const openSettings = async (page: Page) => {
+  const settingsScreen = majorScreens.find((screen) => screen.id === "settings")!;
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: settingsScreen.navName, exact: true })
+    .click();
+};
+
+const readSavedSettings = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: {
+            notifyMaxPerDay?: number;
+            notifyStartTime?: string;
+            notifyEndTime?: string;
+            workTimeRanges?: { start: string; end: string }[];
+          };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__
+  );
+
+test("settings save persists the notification frequency dropdown selection", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  // 通知頻度を「1日3回まで」（既定）から「1日5回まで」へ変更する。
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+
+  // 保存する。
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  const saved = await readSavedSettings(page);
+  // 通知頻度が notifyMaxPerDay として保存される（=5）。
+  expect(saved?.notifyMaxPerDay).toBe(5);
+  // 既存の通知時間帯（午前/午後2枠）は壊れない。
+  expect(saved?.workTimeRanges).toEqual([
+    { start: "09:00", end: "12:00" },
+    { start: "13:00", end: "18:00" },
+  ]);
+  expect(saved?.notifyStartTime).toBe("09:00");
+  expect(saved?.notifyEndTime).toBe("18:00");
+});
+
+test("settings reload restores the saved notification frequency (not the default)", async ({
+  page,
+}) => {
+  // 保存値として notifyMaxPerDay=5 を返させる。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 5 };
+  });
+
+  await openSettings(page);
+
+  // 既定の「1日3回まで」ではなく、保存値に対応する「1日5回まで」が表示される。
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
+  ).toHaveCount(0);
+});
+
+test("settings shows the default frequency 1日3回まで when there is no saved value", async ({
+  page,
+}) => {
+  // 既定（notifyMaxPerDay=3）のまま開く。
+  await openSettings(page);
+
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
+  ).toBeVisible();
+});
+
 // 通知ありモック（request_yuuko_notification → notified:true）を有効化する。
 async function enableNotificationCandidate(page: Page) {
   await page.addInitScript(() => {

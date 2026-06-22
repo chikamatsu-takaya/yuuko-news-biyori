@@ -245,6 +245,38 @@ const normalizeWorkTimeRanges = (
   return ranges.slice(0, 2).map((range) => ({ ...range }));
 };
 
+// 通知頻度ドロップダウンの表示文言と、永続値 notifyMaxPerDay（= notification.maxPerDay）の対応。
+// 通知頻度は notifyMaxPerDay として保存・復元する（独立フィールドは増やさない）。
+// 「制限なし」は Rust 側の検証上限（0〜20）に合わせて 20 として扱う。
+const UNLIMITED_MAX_PER_DAY = 20;
+
+const frequencyToMaxPerDay = (frequency: string): number => {
+  switch (frequency) {
+    case "1日1回まで":
+      return 1;
+    case "1日5回まで":
+      return 5;
+    case "制限なし":
+      return UNLIMITED_MAX_PER_DAY;
+    case "1日3回まで":
+    default:
+      return 3;
+  }
+};
+
+const maxPerDayToFrequency = (maxPerDay: number): string => {
+  if (maxPerDay <= 1) {
+    return "1日1回まで";
+  }
+  if (maxPerDay <= 3) {
+    return "1日3回まで";
+  }
+  if (maxPerDay <= 5) {
+    return "1日5回まで";
+  }
+  return "制限なし";
+};
+
 const mapSettingsFromDto = (
   base: SettingsState,
   dto: UserSettingsDto
@@ -257,7 +289,9 @@ const mapSettingsFromDto = (
       ...base.notification,
       enabled: dto.enableYuukoPopup,
       workTimeRanges,
+      // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3（=「1日3回まで」）。
       maxPerDay: dto.notifyMaxPerDay,
+      frequency: maxPerDayToFrequency(dto.notifyMaxPerDay),
     },
     suppression: {
       ...base.suppression,
@@ -460,6 +494,31 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       notification: { ...prev.notification, [key]: value },
+    }));
+  };
+
+  // 通知頻度ドロップダウン: 表示文言と保存値(maxPerDay)を常に同期させる。
+  // これにより保存・再読み込みで選択値が維持される（maxPerDay として永続化）。
+  const updateNotificationFrequency = (frequency: string) => {
+    setSettings((prev) => ({
+      ...prev,
+      notification: {
+        ...prev.notification,
+        frequency,
+        maxPerDay: frequencyToMaxPerDay(frequency),
+      },
+    }));
+  };
+
+  // 1日の最大通知件数スライダー: maxPerDay を更新し、頻度ドロップダウン表示も追従させる。
+  const updateNotificationMaxPerDay = (maxPerDay: number) => {
+    setSettings((prev) => ({
+      ...prev,
+      notification: {
+        ...prev.notification,
+        maxPerDay,
+        frequency: maxPerDayToFrequency(maxPerDay),
+      },
     }));
   };
 
@@ -773,7 +832,7 @@ export default function SettingsScreen({
                   <SettingRow label="通知頻度">
                     <Select
                       value={settings.notification.frequency}
-                      onValueChange={(v) => updateNotification("frequency", v)}
+                      onValueChange={(v) => updateNotificationFrequency(v)}
                     >
                       <SelectTrigger className="w-36">
                         <SelectValue />
@@ -791,7 +850,7 @@ export default function SettingsScreen({
                       <Slider
                         value={[settings.notification.maxPerDay]}
                         onValueChange={(v) =>
-                          updateNotification("maxPerDay", v[0])
+                          updateNotificationMaxPerDay(v[0])
                         }
                         min={1}
                         max={20}
