@@ -140,3 +140,50 @@
     forced-color-adjust: none;
   }
 }
+
+/*
+ * 常駐ゆうこ通知の登場/退場アニメーション（ゆうこ登場・通知挙動 詳細設計書 §8）。
+ * 右下から「ぴょこっと」出て、退場時は右下へ戻る。軽量CSSのみ・無限ループなし。
+ * transform/opacity だけを使い、レイアウトを揺らさない。
+ */
+@keyframes yuuko-notification-pop-in {
+  0% {
+    transform: translateY(28px) scale(0.96);
+    opacity: 0;
+  }
+  60% {
+    transform: translateY(-4px) scale(1.01);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes yuuko-notification-pop-out {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(28px) scale(0.98);
+    opacity: 0;
+  }
+}
+
+.yuuko-notification-enter {
+  animation: yuuko-notification-pop-in 0.45s ease-out both;
+}
+
+.yuuko-notification-leave {
+  animation: yuuko-notification-pop-out 0.3s ease-in both;
+}
+
+/* 動きを抑える設定では演出を止める（軽量性・アクセシビリティ）。 */
+@media (prefers-reduced-motion: reduce) {
+  .yuuko-notification-enter,
+  .yuuko-notification-leave {
+    animation: none;
+  }
+}
