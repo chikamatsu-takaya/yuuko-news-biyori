@@ -1085,6 +1085,90 @@ test("does not show the in-app notification when notifications are disabled", as
   ).toHaveCount(0);
 });
 
+test("does not auto-dismiss while the window is hidden and restarts the timer after re-show", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installVisibilityControl(page, false); // 表示で開始
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // 表示直後に hidden へ → 通知コンポーネントはアンマウントされ、自動退場タイマーが止まる。
+  await setVisible(false);
+  await expect(notification).toHaveCount(0);
+
+  // hidden 中に自動退場時間（20s/30s）以上進めても消費しない。
+  await page.clock.fastForward(40000);
+  await page.waitForTimeout(100);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+
+  // 再表示 → get で active を拾い直し、通知が再表示される。
+  await setVisible(true);
+  await expect(notification).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+
+  // 再表示後、表示中に自動退場時間を進めると、その時点で mark_yuuko_ignored が呼ばれる。
+  await page.clock.fastForward(20000);
+  await page.clock.fastForward(400);
+  await expect
+    .poll(() => readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__"))
+    .toBe(1);
+  await expect(notification).toHaveCount(0);
+});
+
+test("resumes as the light preview (not the balloon) when the active notification is already PreviewVisible", async ({
+  page,
+}) => {
+  // 既存 active を PreviewVisible 相当で返す。
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_REQUEST_NOTIFIED__ = true;
+    w.__E2E_REQUEST_INITIAL_PREVIEW__ = true;
+  });
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 最初から軽量プレビュー（タイトル＋詳しく見る）。吹き出し段階のボタンは出ない。
+  await expect(
+    notification.getByText("E2Eテスト用ニュース", { exact: true })
+  ).toBeVisible();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect(
+    notification.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+
+  // 「詳しく見る」でニュース閲覧画面へ遷移する（消えるだけで開けない、にならない）。
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await expect(
+    page.getByRole("button", { name: "ホームへ戻る" }).first()
+  ).toBeVisible();
+  // 成功導線なので dismiss は呼ばない。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -1292,11 +1376,15 @@ async function installTauriMocks(page: Page) {
             const wantNotified = Boolean(
               (window as any).__E2E_REQUEST_NOTIFIED__
             );
+            // 既存 active を PreviewVisible 相当で返す（再開時の preview 表示検証用）。
+            const initialPreview = Boolean(
+              (window as any).__E2E_REQUEST_INITIAL_PREVIEW__
+            );
             const backendActive = (window as any).__E2E_BACKEND_ACTIVE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
 
             const activeState = {
-              state: "BalloonVisible",
+              state: initialPreview ? "PreviewVisible" : "BalloonVisible",
               positionMode: "RightBottom",
               balloonText:
                 "気になるニュースを見つけたよ。「E2Eテスト用ニュース」",

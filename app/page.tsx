@@ -319,17 +319,25 @@ export default function Page() {
   const activeNotification = isActiveNewsNotification(yuukoNotificationState)
     ? yuukoNotificationState
     : null;
+  const activeNotificationArticleId =
+    activeNotification?.currentArticleId ??
+    activeNotification?.previewArticle?.articleId ??
+    null;
 
   return (
     <>
       {renderCurrentScreen()}
-      {activeNotification && (
+      {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
+          （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
+          scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}
+      {isWindowVisible && activeNotification && (
         <YuukoInAppNotification
           // 記事が変わったら段階(view)をリセットするため key で作り直す。
-          key={
-            activeNotification.currentArticleId ??
-            activeNotification.previewArticle?.articleId ??
-            "yuuko-notification"
+          key={activeNotificationArticleId ?? "yuuko-notification"}
+          articleId={activeNotificationArticleId ?? undefined}
+          // backend が PreviewVisible のときは最初から軽量プレビューで再開する。
+          initialView={
+            activeNotification.state === "PreviewVisible" ? "preview" : "balloon"
           }
           balloonText={activeNotification.balloonText}
           articleTitle={activeNotification.previewArticle?.title}

@@ -36,6 +36,13 @@ type YuukoInAppNotificationProps = {
   sourceName?: string;
   /** 短い要約（あれば軽量プレビューで表示）。 */
   summary?: string;
+  /** 紹介対象の記事ID（表示段階の同期キー）。変わったら表示段階を初期化する。 */
+  articleId?: string;
+  /**
+   * 初期表示段階。backend が既に PreviewVisible のとき "preview"。
+   * 再開時（永続 PreviewVisible / already_active）に吹き出しからやり直さないために使う。
+   */
+  initialView?: "balloon" | "preview";
   /** 表示位置（Rust側の position_mode）。既定は右下。 */
   positionMode?: YuukoPositionMode;
   /** 初回クリック（吹き出し→軽量プレビュー）。クリック確定系を進めるために呼ぶ。 */
@@ -61,6 +68,8 @@ export default function YuukoInAppNotification({
   articleTitle,
   sourceName,
   summary,
+  articleId,
+  initialView = "balloon",
   positionMode = "RightBottom",
   onFirstClick,
   onOpen,
@@ -68,7 +77,14 @@ export default function YuukoInAppNotification({
   onIgnore,
 }: YuukoInAppNotificationProps) {
   // 表示段階：吹き出し → 初回クリックで軽量プレビュー（§10.2）。
-  const [view, setView] = useState<"balloon" | "preview">("balloon");
+  // backend が既に PreviewVisible なら最初から preview で再開する。
+  const [view, setView] = useState<"balloon" | "preview">(initialView);
+
+  // backend の段階（initialView）や記事が変わったら表示段階を同期する。
+  // 同一記事で initialView が変わらない間は、初回クリックで進めた preview を維持する。
+  useEffect(() => {
+    setView(initialView);
+  }, [initialView, articleId]);
   // 退場アニメーション中フラグ。確定アクションはアニメーション後に実行する。
   const [leaving, setLeaving] = useState(false);
   const leaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
