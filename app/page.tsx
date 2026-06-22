@@ -80,13 +80,45 @@ export default function Page() {
     };
   }, []);
 
+  // 終端操作（閉じる/Esc/自動退場/詳しく見る）の進行中フラグ。
+  // backend 解消が完了するまでの間、scheduler が拾った同一 active 通知を再表示しないために使う。
+  const terminalActionInFlightRef = React.useRef(false);
+  // 終端中に抑止する対象の記事ID（同一 active 通知のみ抑止する）。
+  const suppressActiveNotificationIdRef = React.useRef<string | null>(null);
+
+  // scheduler から返る通知状態の反映をラップする。
+  // 終端操作の進行中は、同一の active 通知を再採用しない（閉じた後の再表示防止）。
+  // 終端中でない、または別記事・非active状態なら通常どおり反映する。
+  const handleSchedulerStateChange = React.useCallback(
+    (next: YuukoNotificationState | null) => {
+      if (
+        terminalActionInFlightRef.current &&
+        next &&
+        isActiveNewsNotification(next)
+      ) {
+        const nextArticleId =
+          next.currentArticleId ?? next.previewArticle?.articleId ?? null;
+        if (
+          !suppressActiveNotificationIdRef.current ||
+          suppressActiveNotificationIdRef.current === nextArticleId
+        ) {
+          // 閉じる/ignore/open 確定中の同一 active 通知は採用しない。
+          return;
+        }
+      }
+      setYuukoNotificationState(next);
+    },
+    []
+  );
+
   // 通知候補生成（requestYuukoNotification）を定期実行し、結果状態を Page state へ反映する。
   // 生成結果は下のアプリ内通知表示と同一導線に接続されるため「未表示消費」にならない。
   // ウィンドウ非表示中は canGenerateCandidates=false となり生成自体を行わない。
+  // onStateChange は handleSchedulerStateChange 経由で、終端操作中の再表示を抑止する。
   useNotificationScheduler({
     generateCandidates: true,
     canGenerateCandidates: isWindowVisible,
-    onStateChange: setYuukoNotificationState,
+    onStateChange: handleSchedulerStateChange,
   });
 
   const handleNavigate = (screen: string) => {
@@ -114,69 +146,119 @@ export default function Page() {
     setCurrentScreen("news");
   };
 
-  // 閉じる/Esc: 通知を「閉じる」扱いで解消する（再通知抑制クールタイムが付く）。
-  // 既存の dismiss_yuuko_notification を使い、新規 Rust command は追加しない。
-  const resolveAsDismissed = React.useCallback(async () => {
-    try {
-      const next = await dismissYuukoNotification();
-      setYuukoNotificationState(next);
-    } catch (error) {
-      // 失敗してもアプリは落とさない（画面上は既に非表示にしている）。
-      console.error("Failed to dismiss yuuko notification:", error);
-    }
-  }, []);
+  // ゆうこ通知の backend 操作（クリック確定 / 閉じる / 無視）を1本のキューで直列化する。
+  // handle_yuuko_clicked / dismiss / ignore はそれぞれ別々に load/save するため、
+  // 直列化しないと保存順序が乱れ active 通知が残るレースになり得る。
+  const yuukoActionChainRef = React.useRef<Promise<void>>(Promise.resolve());
+  // 表示セッションのトークン。閉じる/Esc/自動退場/詳しく見るで進める。
+  // 古いトークンのクリック確定結果は UI へ採用しない（閉じた後に再表示しないため）。
+  const yuukoActionTokenRef = React.useRef(0);
 
-  // 自動退場（無操作タイムアウト）は「無視」扱い。既存の mark_yuuko_ignored を使う。
-  const ignoreActiveNotification = React.useCallback(async () => {
-    try {
-      const next = await markYuukoIgnored();
-      setYuukoNotificationState(next);
-    } catch (error) {
-      console.error("Failed to mark yuuko notification ignored:", error);
-    }
-  }, []);
+  const enqueueYuukoAction = React.useCallback(
+    (action: () => Promise<void>) => {
+      const run = yuukoActionChainRef.current
+        .catch(() => {
+          // 前の操作が失敗しても次の操作は止めない。
+        })
+        .then(action);
+      yuukoActionChainRef.current = run;
+      return run;
+    },
+    []
+  );
 
   // クリック確定（2段階遷移）。閉じるとは別物で、再通知抑制クールタイムは付けない。
   // 初回クリック: BalloonVisible→PreviewVisible、詳しく見る: PreviewVisible→Leaving 相当へ進める。
-  const confirmYuukoClick = React.useCallback(async () => {
-    try {
-      const next = await handleYuukoClicked();
-      // Leaving 等の非active状態はアプリ内通知の表示対象外になるので、そのまま反映してよい。
-      setYuukoNotificationState(next);
-    } catch (error) {
-      console.error("Failed to advance yuuko click state:", error);
-    }
-  }, []);
+  // pending 中に閉じる/無視/詳しく見るでトークンが進んだら、その結果は UI へ採用しない。
+  const confirmYuukoClick = React.useCallback(() => {
+    const token = yuukoActionTokenRef.current;
+    return enqueueYuukoAction(async () => {
+      try {
+        const next = await handleYuukoClicked();
+        if (token === yuukoActionTokenRef.current) {
+          setYuukoNotificationState(next);
+        }
+      } catch (error) {
+        console.error("Failed to advance yuuko click state:", error);
+      }
+    });
+  }, [enqueueYuukoAction]);
+
+  // 終端操作の開始: UI即時非表示＋終端中フラグ＋抑止対象IDを立てる。
+  // 以降、backend 解消が完了するまで scheduler は同一 active 通知を採用しない。
+  const beginTerminalAction = (articleId: string | null) => {
+    terminalActionInFlightRef.current = true;
+    suppressActiveNotificationIdRef.current = articleId;
+    setYuukoNotificationState(null);
+  };
+
+  // 終端操作の解除: backend が非active へ進んだ後に呼ぶ。
+  const endTerminalAction = () => {
+    terminalActionInFlightRef.current = false;
+    suppressActiveNotificationIdRef.current = null;
+  };
+
+  const currentNotificationArticleId = () =>
+    yuukoNotificationState?.currentArticleId ??
+    yuukoNotificationState?.previewArticle?.articleId ??
+    null;
 
   // 初回クリック: 表示はプレビューへ切り替えつつ、クリック確定系で状態を進める（遷移はしない）。
+  // これは終端操作ではない（表示を継続するため、終端フラグは立てない）。
   const handleNotificationFirstClick = () => {
     void confirmYuukoClick();
   };
 
   // 「詳しく見る」/再クリック確定: 対象記事を開く。dismiss ではなくクリック確定系を使う。
   const handleNotificationOpen = () => {
-    const state = yuukoNotificationState;
-    const articleId =
-      state?.currentArticleId ?? state?.previewArticle?.articleId ?? null;
-    // まず画面上から消してから遷移・確定する（再表示のちらつき防止）。
-    setYuukoNotificationState(null);
+    const articleId = currentNotificationArticleId();
+    // 表示セッションを終了（古いクリック結果・scheduler由来の再表示を抑止）してから遷移・確定する。
+    yuukoActionTokenRef.current += 1;
+    beginTerminalAction(articleId);
     if (articleId) {
       handleOpenArticle(articleId);
     }
     // 成功導線なので dismiss は呼ばない（閉じる扱いのクールタイムを付けない）。
-    void confirmYuukoClick();
+    // handle_yuuko_clicked が Leaving まで進んで active が解消したら終端フラグを戻す。
+    void confirmYuukoClick().finally(() => {
+      endTerminalAction();
+    });
   };
 
-  // 閉じる/Esc: 画面上から消し、「閉じる」として active を解消する（画面遷移はしない）。
+  // 閉じる/Esc: UIは即時非表示。pending click 完了後に dismiss を実行する（同一キュー・直列）。
   const handleNotificationClose = () => {
-    setYuukoNotificationState(null);
-    void resolveAsDismissed();
+    yuukoActionTokenRef.current += 1; // 古いクリック確定結果を採用しない
+    beginTerminalAction(currentNotificationArticleId());
+    void enqueueYuukoAction(async () => {
+      try {
+        const next = await dismissYuukoNotification();
+        setYuukoNotificationState(next);
+        // dismiss は Waiting（非active）を返す → 終端フラグを戻してよい。
+        if (!isActiveNewsNotification(next)) {
+          endTerminalAction();
+        }
+      } catch (error) {
+        // 失敗時は backend 状態不明のため終端フラグは戻さない（再表示を抑止し続ける安全側）。
+        console.error("Failed to dismiss yuuko notification:", error);
+      }
+    });
   };
 
-  // 自動退場: 画面上から消し、無視扱いで active を解消する。
+  // 自動退場: UIは即時非表示。pending click 完了後に ignore を実行する（同一キュー・直列）。
   const handleNotificationIgnore = () => {
-    setYuukoNotificationState(null);
-    void ignoreActiveNotification();
+    yuukoActionTokenRef.current += 1;
+    beginTerminalAction(currentNotificationArticleId());
+    void enqueueYuukoAction(async () => {
+      try {
+        const next = await markYuukoIgnored();
+        setYuukoNotificationState(next);
+        if (!isActiveNewsNotification(next)) {
+          endTerminalAction();
+        }
+      } catch (error) {
+        console.error("Failed to mark yuuko notification ignored:", error);
+      }
+    });
   };
 
   const renderCurrentScreen = () => {

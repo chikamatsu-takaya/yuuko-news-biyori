@@ -332,6 +332,432 @@ test("first click does not navigate and does not call dismiss", async ({
   );
 });
 
+test("first click and 詳しく見る serialize handle_yuuko_clicked (no concurrent execution)", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  // 1回目の handle_yuuko_clicked を保留させるゲートを仕込む。
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_HANDLE_CLICKED_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_HANDLE_CLICKED__ = resolve;
+    });
+  });
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → handle_yuuko_clicked #1 開始（ゲートで保留）。プレビューへ切替。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // #1 完了前に「詳しく見る」を押す → navigate は進むが #2 は #1 完了まで実行されない。
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await expect(
+    page.getByRole("button", { name: "ホームへ戻る" }).first()
+  ).toBeVisible();
+  // #1 保留中、#2 の handle_yuuko_clicked はまだ走っていない（直列化）。
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(1);
+
+  // #1 を解放 → 直列に #2 が走る。
+  await page.evaluate(() =>
+    (
+      window as unknown as Record<string, () => void>
+    ).__E2E_RELEASE_HANDLE_CLICKED__()
+  );
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(2);
+
+  // 並行実行は一度も起きていない。
+  expect(
+    await page.evaluate(() =>
+      Boolean(
+        (window as unknown as Record<string, unknown>)
+          .__E2E_HANDLE_CLICKED_CONCURRENT__
+      )
+    )
+  ).toBe(false);
+  // 成功導線では dismiss を呼ばない。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  // backend active は残らず（Leaving でクリア）、通知は再表示されない。
+  await expect(notification).toHaveCount(0);
+});
+
+// handle_yuuko_clicked #1 と dismiss/ignore を保留させるゲートを仕込む。
+async function installClickAndTeardownGates(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_HANDLE_CLICKED_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_HANDLE_CLICKED__ = resolve;
+    });
+    w.__E2E_DISMISS_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_DISMISS__ = resolve;
+    });
+    w.__E2E_IGNORE_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_IGNORE__ = resolve;
+    });
+  });
+}
+
+const releaseGate = (page: Page, releaser: string) =>
+  page.evaluate(
+    (key) => (window as unknown as Record<string, () => void>)[key]?.(),
+    releaser
+  );
+
+const readBackendActive = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown>).__E2E_BACKEND_ACTIVE__ ??
+      null
+  );
+
+test("closing while the first-click handle_yuuko_clicked is pending does not re-show", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → handle_yuuko_clicked #1 開始（保留）。プレビューへ。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // #1 未完了のまま閉じる → UI 即時非表示（onClose で token を進める）。
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  await expect(notification).toHaveCount(0);
+
+  // #1 を解放 → 遅れて返るが token 不一致で UI へ採用しない。dismiss は #1 後に開始（保留中）。
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  // dismiss 保留中でも通知は再表示されない（pending click 結果を採用していない）。
+  await expect(notification).toHaveCount(0);
+
+  // dismiss を解放 → backend がクリアされる。ignore は呼ばれない。
+  await releaseGate(page, "__E2E_RELEASE_DISMISS__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+});
+
+test("Escape while the first-click handle_yuuko_clicked is pending does not re-show", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // #1 未完了のまま Esc。
+  await page.keyboard.press("Escape");
+  await expect(notification).toHaveCount(0);
+
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  await expect(notification).toHaveCount(0);
+
+  await releaseGate(page, "__E2E_RELEASE_DISMISS__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+});
+
+test("auto-dismiss while the first-click handle_yuuko_clicked is pending uses mark_yuuko_ignored and does not re-show", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → preview（自動退場は 30 秒）、#1 保留。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // 自動退場時間（preview=30s）＋退場アニメを進める → UI 非表示。
+  await page.clock.fastForward(30000);
+  await page.clock.fastForward(1000);
+  await expect(notification).toHaveCount(0);
+
+  // #1 を解放 → token 不一致で再表示しない。ignore は #1 後に開始（保留中）。
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__"))
+    .toBe(1);
+  await expect(notification).toHaveCount(0);
+  // 自動退場は dismiss ではなく ignore を使う。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+
+  await releaseGate(page, "__E2E_RELEASE_IGNORE__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+});
+
+test("a rejected in-flight request shared by two polls does not crash the app", async ({
+  page,
+}) => {
+  await installVisibilityControl(page, false);
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_REQUEST_NOTIFIED__ = true;
+    w.__E2E_REQUEST_SHOULD_REJECT__ = true;
+    w.__E2E_REQUEST_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_REQUEST__ = resolve;
+    });
+  });
+  await openHome(page);
+
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // hidden→visible で2つ目の poll が同じ in-flight Promise を待つ状態を作る。
+  await setVisible(false);
+  await page.waitForTimeout(100);
+  await setVisible(true);
+  await page.waitForTimeout(100);
+
+  // 共有 in-flight を reject（owner / 待機側の両方が同じ Promise を await）。
+  await releaseGate(page, "__E2E_RELEASE_REQUEST__");
+  await page.waitForTimeout(200);
+
+  // アプリは落ちていない（ホームが表示・操作可能）。
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  // テスト由来の未捕捉 rejection は発生していない。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, number>)
+          .__E2E_UNHANDLED_REJECTIONS__ || 0
+    )
+  ).toBe(0);
+  // 取得失敗なので通知は表示されない。
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+});
+
+test("closing keeps the notification hidden even when a scheduler interval fires during dismiss", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → preview, #1 保留。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // #1 未完了のまま閉じる → 退場アニメ後に UI 非表示。
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  await page.clock.fastForward(400);
+  await expect(notification).toHaveCount(0);
+
+  // #1 解放 → token 不一致で skip。dismiss は #1 後に開始（ゲートで保留）。
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  // dismiss 保留中に scheduler interval を進める → active を拾っても再表示されない。
+  await page.clock.fastForward(300000);
+  await page.waitForTimeout(100);
+  await expect(notification).toHaveCount(0);
+
+  // dismiss 解放 → 解除後も再表示されない。
+  await releaseGate(page, "__E2E_RELEASE_DISMISS__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+});
+
+test("Escape keeps the notification hidden even when a scheduler interval fires during dismiss", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // #1 未完了のまま Esc。
+  await page.keyboard.press("Escape");
+  await page.clock.fastForward(400);
+  await expect(notification).toHaveCount(0);
+
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  // dismiss 保留中に scheduler interval を進める。
+  await page.clock.fastForward(300000);
+  await page.waitForTimeout(100);
+  await expect(notification).toHaveCount(0);
+
+  await releaseGate(page, "__E2E_RELEASE_DISMISS__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+});
+
+test("auto-dismiss keeps the notification hidden even when a scheduler interval fires during ignore", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → preview（自動退場 30 秒）、#1 保留。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // 自動退場時間（preview=30s）＋退場アニメ → onIgnore。
+  await page.clock.fastForward(30000);
+  await page.clock.fastForward(400);
+  await expect(notification).toHaveCount(0);
+
+  // #1 解放。ignore は #1 後に開始（ゲートで保留）。
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await expect
+    .poll(() => readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__"))
+    .toBe(1);
+
+  // ignore 保留中に scheduler interval を進める → 再表示されない。
+  await page.clock.fastForward(300000);
+  await page.waitForTimeout(100);
+  await expect(notification).toHaveCount(0);
+
+  await releaseGate(page, "__E2E_RELEASE_IGNORE__");
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+  await expect(notification).toHaveCount(0);
+  // 自動退場は dismiss ではなく ignore を使う。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+});
+
+test("詳しく見る keeps the notification hidden when a scheduler interval fires during click confirmation", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableNotificationCandidate(page);
+  await installClickAndTeardownGates(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック → preview, #1 保留。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // 詳しく見る → 退場アニメ後に onOpen（navigate + クリック確定#2）。
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await page.clock.fastForward(400);
+  await expect(
+    page.getByRole("button", { name: "ホームへ戻る" }).first()
+  ).toBeVisible();
+
+  // クリック確定中（#1 保留）に scheduler interval を進める → active を拾っても再表示されない。
+  await page.clock.fastForward(300000);
+  await page.waitForTimeout(100);
+  await expect(notification).toHaveCount(0);
+
+  // #1 解放 → #1, #2 が直列に進み Leaving 到達。終端解除後も再表示されない。
+  await releaseGate(page, "__E2E_RELEASE_HANDLE_CLICKED__");
+  await page.waitForTimeout(100);
+  await expect(notification).toHaveCount(0);
+  // 成功導線なので dismiss は呼ばない。
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  await expect.poll(() => readBackendActive(page)).toBeNull();
+});
+
 test("closing during the balloon stage hides it and calls dismiss without navigating", async ({
   page,
 }) => {
@@ -586,6 +1012,60 @@ test("a request that resolves after the window hides is not shown, and re-surfac
   );
 });
 
+test("a request still pending at re-show re-surfaces via get once resolved, without an extra request", async ({
+  page,
+}) => {
+  // 表示で開始し、request を遅延resolveできるゲートを仕込む。
+  await installVisibilityControl(page, false);
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_REQUEST_NOTIFIED__ = true;
+    w.__E2E_REQUEST_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_REQUEST__ = resolve;
+    });
+  });
+  await openHome(page);
+
+  // 表示中に request 開始（ゲートで保留中）。
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // request 完了前に hidden → visible（=request保留のまま再表示まで進む）。
+  await setVisible(false);
+  await page.waitForTimeout(100);
+  await setVisible(true);
+  await page.waitForTimeout(100);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  // まだ resolve していないので通知は出ていない。
+  await expect(notification).toHaveCount(0);
+
+  // ここで request を resolve（非表示中に消費されたものを、再表示後に get で拾い直す）。
+  await page.evaluate(() =>
+    (window as unknown as Record<string, () => void>).__E2E_RELEASE_REQUEST__()
+  );
+
+  // 保留中requestの完了後、次の5分intervalを待たずに get で active を拾い表示する。
+  await expect(notification).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_GET_NOTIFICATION_STATE_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+  // 余分な request は走っていない（依然1回）。
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    1
+  );
+});
+
 test("does not show the in-app notification when notifications are disabled", async ({
   page,
 }) => {
@@ -614,6 +1094,19 @@ async function openHome(page: Page) {
 
 async function installTauriMocks(page: Page) {
   await page.addInitScript(() => {
+    // 未捕捉の Promise reject を記録する（取得失敗でアプリを落とさない検証用）。
+    // 無関係な dev 由来の reject を拾わないよう、テスト用エラーのみカウントする。
+    const rejectionWindow = window as unknown as Record<string, number>;
+    rejectionWindow.__E2E_UNHANDLED_REJECTIONS__ = 0;
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (message.includes("E2E request failure")) {
+        rejectionWindow.__E2E_UNHANDLED_REJECTIONS__ =
+          (rejectionWindow.__E2E_UNHANDLED_REJECTIONS__ || 0) + 1;
+      }
+    });
+
     const articleSummary = {
       articleId: "e2e-article-1",
       title: "E2Eテスト用ニュース",
@@ -786,6 +1279,10 @@ async function installTauriMocks(page: Page) {
               (window as any).__E2E_REQUEST_GATE__ = null;
               await gate;
             }
+            // 遅延reject（待機側のエラー処理検証用）。
+            if ((window as any).__E2E_REQUEST_SHOULD_REJECT__) {
+              throw new Error("E2E request failure");
+            }
             const wantDisabled = Boolean(
               (window as any).__E2E_REQUEST_DISABLED__
             );
@@ -846,10 +1343,16 @@ async function installTauriMocks(page: Page) {
               state: waitingState,
             };
           }
-          case "dismiss_yuuko_notification":
+          case "dismiss_yuuko_notification": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_DISMISS_NOTIFICATION_CALL_COUNT__ =
               ((window as any).__E2E_DISMISS_NOTIFICATION_CALL_COUNT__ || 0) + 1;
+            // 任意の遅延（古いクリック結果で再表示しないことの観測用）。
+            const dismissGate = (window as any).__E2E_DISMISS_GATE__;
+            if (dismissGate) {
+              (window as any).__E2E_DISMISS_GATE__ = null;
+              await dismissGate;
+            }
             (window as any).__E2E_NOTIFICATION_DISMISSED__ = true;
             (window as any).__E2E_BACKEND_ACTIVE__ = null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -859,38 +1362,64 @@ async function installTauriMocks(page: Page) {
               positionMode: "RightBottom",
               hasNotification: false,
             };
+          }
           case "handle_yuuko_clicked": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_HANDLE_CLICKED_CALL_COUNT__ =
               ((window as any).__E2E_HANDLE_CLICKED_CALL_COUNT__ || 0) + 1;
+            // 並行実行検出: 同時に2件 active なら直列化できていない。
+            const activeNow =
+              ((window as any).__E2E_HANDLE_CLICKED_ACTIVE__ || 0) + 1;
+            (window as any).__E2E_HANDLE_CLICKED_ACTIVE__ = activeNow;
+            if (activeNow > 1) {
+              (window as any).__E2E_HANDLE_CLICKED_CONCURRENT__ = true;
+            }
+            // 1回目だけ遅延resolve（直列化の検証用）。
+            const clickGate = (window as any).__E2E_HANDLE_CLICKED_GATE__;
+            if (clickGate) {
+              (window as any).__E2E_HANDLE_CLICKED_GATE__ = null;
+              await clickGate;
+            }
             const current = (window as any).__E2E_BACKEND_ACTIVE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
+            let result;
             if (!current) {
-              return {
+              result = {
                 state: "Waiting",
                 positionMode: "RightBottom",
                 hasNotification: false,
               };
+            } else {
+              // 2段階遷移: BalloonVisible→PreviewVisible→Leaving（クールタイムは付けない）。
+              const nextState =
+                current.state === "PreviewVisible"
+                  ? "Leaving"
+                  : current.state === "BalloonVisible"
+                    ? "PreviewVisible"
+                    : current.state;
+              const updated = { ...current, state: nextState };
+              /* eslint-disable @typescript-eslint/no-explicit-any */
+              // Leaving は非active。再surfaceしないよう backend をクリアする。
+              (window as any).__E2E_BACKEND_ACTIVE__ =
+                nextState === "Leaving" ? null : updated;
+              /* eslint-enable @typescript-eslint/no-explicit-any */
+              result = updated;
             }
-            // 2段階遷移: BalloonVisible→PreviewVisible→Leaving（クールタイムは付けない）。
-            const nextState =
-              current.state === "PreviewVisible"
-                ? "Leaving"
-                : current.state === "BalloonVisible"
-                  ? "PreviewVisible"
-                  : current.state;
-            const updated = { ...current, state: nextState };
             /* eslint-disable @typescript-eslint/no-explicit-any */
-            // Leaving は非active。再surfaceしないよう backend をクリアする。
-            (window as any).__E2E_BACKEND_ACTIVE__ =
-              nextState === "Leaving" ? null : updated;
+            (window as any).__E2E_HANDLE_CLICKED_ACTIVE__ =
+              ((window as any).__E2E_HANDLE_CLICKED_ACTIVE__ || 1) - 1;
             /* eslint-enable @typescript-eslint/no-explicit-any */
-            return updated;
+            return result;
           }
-          case "mark_yuuko_ignored":
+          case "mark_yuuko_ignored": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_MARK_IGNORED_CALL_COUNT__ =
               ((window as any).__E2E_MARK_IGNORED_CALL_COUNT__ || 0) + 1;
+            const ignoreGate = (window as any).__E2E_IGNORE_GATE__;
+            if (ignoreGate) {
+              (window as any).__E2E_IGNORE_GATE__ = null;
+              await ignoreGate;
+            }
             (window as any).__E2E_NOTIFICATION_DISMISSED__ = true;
             (window as any).__E2E_BACKEND_ACTIVE__ = null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -900,6 +1429,7 @@ async function installTauriMocks(page: Page) {
               positionMode: "RightBottom",
               hasNotification: false,
             };
+          }
           default:
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);
         }

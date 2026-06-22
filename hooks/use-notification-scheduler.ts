@@ -118,9 +118,45 @@ export const useNotificationScheduler = ({
       if (generateCandidates && !canGenerateCandidatesRef.current) {
         return;
       }
-      // 取得/生成中なら、同じ Promise の完了を待つだけ（重複防止）。
+      // 取得/生成中なら、同じ Promise の完了を待つ（重複防止）。
+      // 共有 Promise が reject した場合でも、待機側でアプリを落とさないよう try/catch で包む。
       if (inFlightRef.current) {
-        await inFlightRef.current;
+        try {
+          await inFlightRef.current;
+          // 保留中 request の完了後、再表示待ちが残っていれば get で active を拾い直す。
+          // 保留中 request の結果は世代不一致で採用されないため、ここで拾わないと
+          // 次の interval まで表示が遅延してしまう（request中に hidden→visible したケース）。
+          if (
+            generateCandidates &&
+            resurfaceNeededRef.current &&
+            canGenerateCandidatesRef.current &&
+            mountedRef.current
+          ) {
+            resurfaceNeededRef.current = false;
+            const getPromise = getYuukoNotificationState();
+            inFlightRef.current = getPromise;
+            try {
+              const state = await getPromise;
+              if (
+                canGenerateCandidatesRef.current &&
+                mountedRef.current &&
+                isActiveNewsState(state)
+              ) {
+                onStateChangeRef.current?.(state);
+              }
+            } finally {
+              if (inFlightRef.current === getPromise) {
+                inFlightRef.current = null;
+              }
+            }
+          }
+        } catch (error) {
+          // 共有中の request / get が失敗してもアプリは落とさず、このtickを終了する。
+          console.warn(
+            "[NotificationScheduler] 通知状態の取得に失敗しました（待機側）:",
+            error
+          );
+        }
         return;
       }
 
