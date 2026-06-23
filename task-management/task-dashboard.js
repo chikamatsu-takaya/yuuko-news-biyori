@@ -9,9 +9,14 @@ const EXCLUDED_SECTION_KEYWORDS = [
   "作業テンプレート",
 ];
 
+// Firestore 表示時のみ status 更新ボタンに出す選択肢（firestore-source.js の ALLOWED_STATUSES と揃える）。
+const FIRESTORE_STATUS_OPTIONS = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
+
 const state = {
   data: null,
   showCompleted: false,
+  // ?source=firestore で読み込んだときだけ true。status 更新UIの表示可否に使う。
+  isFirestore: false,
 };
 
 const elements = {
@@ -48,11 +53,61 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCategoryProgress();
     renderTaskTree();
   });
+  // status 更新ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
+  elements.taskTree.addEventListener("click", (event) => {
+    const button = event.target.closest(".status-update-button");
+    if (!button || button.disabled) {
+      return;
+    }
+    const { taskId, status } = button.dataset;
+    if (!taskId || !status) {
+      return;
+    }
+    void applyFirestoreStatusUpdate(taskId, status, button);
+  });
   void loadDashboard();
 });
 
+// Firestore 表示時のみ呼ばれる status 更新処理（段階2の最小書き込みPOC）。
+// 更新後は POC方針どおり Firestore を再取得して全体を作り直す（部分更新はしない）。
+async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  // 二重押下を避けるため、同じタスクの操作ボタンを一旦すべて無効化する。
+  const controls = button.closest(".status-update");
+  const buttons = controls ? controls.querySelectorAll("button") : [button];
+  buttons.forEach((element) => {
+    element.disabled = true;
+  });
+  setLoadState(`Firestoreのstatusを更新しています（${nextStatus}）...`, false);
+
+  try {
+    const { updateTaskStatusForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await updateTaskStatusForPoc(taskId, nextStatus);
+
+    // 更新成功後は再取得 → 変換 → 差し替え → 再描画でツリーを作り直す。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState(`Firestoreのstatusを更新しました（${nextStatus}）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to update status", error);
+    setLoadState(`Firestoreのstatus更新に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    buttons.forEach((element) => {
+      element.disabled = false;
+    });
+  }
+}
+
 async function loadDashboard() {
   hideRenderedSections();
+  // 既定は Markdown 表示扱い。Firestore 読み込みに成功したときだけ true へ上げる。
+  state.isFirestore = false;
 
   // 読み取りPOC（§14/§15）: ?source=firestore のときだけ Firestore を参照する。
   // 取得・変換に成功したら Firestore データで描画して終了。失敗時は安全側に倒し、
@@ -65,11 +120,13 @@ async function loadDashboard() {
       );
       const docs = await fetchFirestoreTasksForPoc();
       state.data = firestoreToBoardModel(docs);
+      state.isFirestore = true;
       renderDashboard();
       setLoadState(`Firestoreを読み込みました（${docs.length}件）。`, false);
       return;
     } catch (error) {
       console.error("[Firestore POC] failed to load from Firestore", error);
+      state.isFirestore = false;
       // フォールバックとして従来の Markdown 読み取りへ進む。
     }
   }
@@ -655,7 +712,37 @@ function renderTaskCard(task) {
       </ul>
       ${renderLongList("Done when", task.doneWhen)}
       ${renderLongList("Notes", task.notes)}
+      ${renderStatusControls(task)}
     </article>
+  `;
+}
+
+// Firestore 表示時のみ、タスクカード内に status 更新ボタンを描画する。
+// Markdown 表示時（state.isFirestore === false）や firestoreId 不在時は何も出さない。
+function renderStatusControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+
+  const current = task.completed ? "Done" : task.status || "Todo";
+  const buttons = FIRESTORE_STATUS_OPTIONS.map((status) => {
+    const isCurrent = status === current;
+    return `
+      <button
+        type="button"
+        class="status-update-button${isCurrent ? " is-current" : ""}"
+        data-task-id="${escapeHtml(task.firestoreId)}"
+        data-status="${escapeHtml(status)}"
+        ${isCurrent ? "disabled" : ""}
+      >${escapeHtml(status)}</button>
+    `;
+  }).join("");
+
+  return `
+    <div class="status-update">
+      <strong>Status変更:</strong>
+      <div class="status-update-buttons">${buttons}</div>
+    </div>
   `;
 }
 

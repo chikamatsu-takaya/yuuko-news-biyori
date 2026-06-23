@@ -526,6 +526,52 @@ details[open] > summary::after {
   font-size: 0.86rem;
 }
 
+/* Firestore 表示時のみ出る status 更新UI（POC段階2）。既存カードを崩さない最小スタイル。 */
+.status-update {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.status-update > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.status-update-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-update-button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  padding: 3px 11px;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.status-update-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.status-update-button.is-current {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.status-update-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .empty-state {
   color: var(--muted);
 }
