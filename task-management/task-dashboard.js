@@ -52,20 +52,29 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function loadDashboard() {
-  // 読み取りPOC（§14/§15）: ?source=firestore のときだけ Firestore 取得確認を行う。
-  // 案A: 取得結果を console に出すだけで、画面表示は従来の Markdown のまま続行する。
-  // 既存の Markdown 経路には影響させない（失敗しても下の通常処理はそのまま動く）。
+  hideRenderedSections();
+
+  // 読み取りPOC（§14/§15）: ?source=firestore のときだけ Firestore を参照する。
+  // 取得・変換に成功したら Firestore データで描画して終了。失敗時は安全側に倒し、
+  // 従来の Markdown 読み取りへフォールバックする（既存の Markdown 経路は変更しない）。
   if (new URLSearchParams(location.search).get("source") === "firestore") {
+    setLoadState("Firestoreを読み込んでいます...", false);
     try {
-      const { fetchFirestoreTasksForPoc } = await import("./firestore-source.js");
-      await fetchFirestoreTasksForPoc();
+      const { fetchFirestoreTasksForPoc, firestoreToBoardModel } = await import(
+        "./firestore-source.js"
+      );
+      const docs = await fetchFirestoreTasksForPoc();
+      state.data = firestoreToBoardModel(docs);
+      renderDashboard();
+      setLoadState(`Firestoreを読み込みました（${docs.length}件）。`, false);
+      return;
     } catch (error) {
-      console.error("[Firestore POC] failed to fetch tasks", error);
+      console.error("[Firestore POC] failed to load from Firestore", error);
+      // フォールバックとして従来の Markdown 読み取りへ進む。
     }
   }
 
   setLoadState("Markdownを読み込んでいます...", false);
-  hideRenderedSections();
 
   try {
     const response = await fetch(`${CHECKLIST_PATH}?t=${Date.now()}`, {
