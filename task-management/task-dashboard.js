@@ -65,8 +65,143 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     void applyFirestoreStatusUpdate(taskId, status, button);
   });
+  // Firestore 追加フォームは index.html を変更しないため JS から動的生成する。
+  setupAddTaskForm();
   void loadDashboard();
 });
+
+// index.html を変更せずにタスク追加フォームを差し込む（段階3の最小書き込みPOC）。
+// 生成は1度だけで、表示/非表示は state.isFirestore に応じて renderDashboard 側で切り替える。
+function setupAddTaskForm() {
+  if (!elements.taskListSection || !elements.taskListSection.parentNode) {
+    return;
+  }
+
+  const statusOptions = FIRESTORE_STATUS_OPTIONS.map(
+    (status) =>
+      `<option value="${escapeHtml(status)}"${status === "Todo" ? " selected" : ""}>${escapeHtml(status)}</option>`,
+  ).join("");
+
+  const section = document.createElement("section");
+  section.id = "addTaskSection";
+  section.className = "panel add-task-panel";
+  section.hidden = true;
+  section.innerHTML = `
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Firestore</p>
+        <h2>タスクを追加</h2>
+      </div>
+    </div>
+    <form id="addTaskForm" class="add-task-form">
+      <label class="add-task-field">
+        <span>title <em>*</em></span>
+        <input type="text" name="title" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>category <em>*</em></span>
+        <input type="text" name="category" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>subcategory</span>
+        <input type="text" name="subcategory" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>priority</span>
+        <select name="priority">
+          <option value="P1">P1</option>
+          <option value="P2" selected>P2</option>
+          <option value="P3">P3</option>
+        </select>
+      </label>
+      <label class="add-task-field">
+        <span>status</span>
+        <select name="status">${statusOptions}</select>
+      </label>
+      <label class="add-task-field">
+        <span>owner</span>
+        <input type="text" name="owner" autocomplete="off" />
+      </label>
+      <div class="add-task-actions">
+        <button type="submit" class="button primary compact">タスクを追加</button>
+      </div>
+    </form>
+  `;
+
+  // タスク一覧の直前に置く（一覧の上に小さな追加フォームを出す方針）。
+  elements.taskListSection.parentNode.insertBefore(section, elements.taskListSection);
+  elements.addTaskSection = section;
+
+  section.querySelector("#addTaskForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void handleAddTaskSubmit(event.currentTarget);
+  });
+}
+
+// Firestore 表示時のみ呼ばれるタスク追加処理（段階3の最小書き込みPOC）。
+// 追加後は POC方針どおり Firestore を再取得して全体を作り直す。
+async function handleAddTaskSubmit(form) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  const formData = new FormData(form);
+  const input = {
+    title: String(formData.get("title") ?? "").trim(),
+    category: String(formData.get("category") ?? "").trim(),
+    subcategory: String(formData.get("subcategory") ?? "").trim(),
+    priority: String(formData.get("priority") ?? "").trim(),
+    status: String(formData.get("status") ?? "").trim(),
+    owner: String(formData.get("owner") ?? "").trim(),
+  };
+
+  // 前段バリデーション（詳細な検証は firestore-source 側でも行う）。
+  if (!input.title) {
+    setLoadState("title は必須です。", true);
+    return;
+  }
+  if (!input.category) {
+    setLoadState("category は必須です。", true);
+    return;
+  }
+  if (!FIRESTORE_STATUS_OPTIONS.includes(input.status)) {
+    setLoadState(`status が不正です: ${input.status}`, true);
+    return;
+  }
+
+  const submitButton = form.querySelector("button[type=submit]");
+  if (submitButton) {
+    submitButton.disabled = true;
+  }
+  setLoadState("Firestoreにタスクを追加しています...", false);
+
+  try {
+    const { addTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await addTaskForPoc(input);
+
+    // 追加成功後は再取得 → 変換 → 差し替え → 再描画でツリーを作り直す。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+
+    // 連続入力しやすいよう title だけクリアする（category 等は残す）。
+    const titleInput = form.querySelector('[name="title"]');
+    if (titleInput) {
+      titleInput.value = "";
+      titleInput.focus();
+    }
+    setLoadState(`Firestoreにタスクを追加しました（全${docs.length}件）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to add task", error);
+    setLoadState(`Firestoreへのタスク追加に失敗しました: ${error.message}`, true);
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+    }
+  }
+}
 
 // Firestore 表示時のみ呼ばれる status 更新処理（段階2の最小書き込みPOC）。
 // 更新後は POC方針どおり Firestore を再取得して全体を作り直す（部分更新はしない）。
@@ -163,6 +298,10 @@ function hideRenderedSections() {
     "taskListSection",
   ]) {
     elements[key].hidden = true;
+  }
+  // 追加フォームも一旦隠す（Markdown 経路や読み込み失敗時に残さない）。
+  if (elements.addTaskSection) {
+    elements.addTaskSection.hidden = true;
   }
 }
 
@@ -394,6 +533,10 @@ function renderDashboard() {
   elements.qualityGateSection.hidden = false;
   elements.categoryProgressSection.hidden = false;
   elements.taskListSection.hidden = false;
+  // 追加フォームは Firestore 表示時だけ出す（Markdown 表示では非表示）。
+  if (elements.addTaskSection) {
+    elements.addTaskSection.hidden = !state.isFirestore;
+  }
 }
 
 function renderOverview(summary, meta) {
