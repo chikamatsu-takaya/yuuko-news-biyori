@@ -27,6 +27,7 @@
 11. 実装前に確認すべきこと
 12. 未決事項・更新履歴
 13. md ↔ Firestore マッピング詳細（段階1成果物）
+14. Firestore 読み取りPOC方針
 
 ---
 
@@ -211,6 +212,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: 初版作成（調査・方針整理のみ。実装未着手）。
 - 2026-06-23: §13「md ↔ Firestore マッピング詳細（段階1成果物）」を追記。§10/§11 に関連確認観点を追記。
 - 2026-06-23: サンプル確認（代表タスク3件）を踏まえ、§13.5「サンプル確認で確定した既定方針」を追記（id 設計・order 採番・completed/status・issuePr・Done when/Notes・完了済みカテゴリの集計方針・初期移行時のタイムスタンプ）。
+- 2026-06-23: §14「Firestore 読み取りPOC方針」を追記（読み取り専用・最小POCの目的/範囲/追加・変更ファイル/`loadDashboard()` 差し替え/SDK 読み込み方式/`FirestoreSource`・`firestoreToBoardModel()` 責務/サンプルデータ案/成功条件/ロールバック注意点）。
 
 ---
 
@@ -334,3 +336,126 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
   - `updatedBy` は **`"md-import"`** を基本案とする。
   - `completedAt` は正確な完了日時が分からないため **`null`** を基本案とする。
   - **全件が同じ `updatedAt` になることは初期移行として許容**する。
+
+---
+
+## 14. Firestore 読み取りPOC方針
+
+> Firestore に手動登録した少数データを既存の進捗管理画面で読み取れるか検証するための、最小・読み取り専用 POC の方針。実装・SDK 追加・接続処理は含まない。書き込み系は対象外。
+
+### 14.1 POCの目的
+- Firestore に**手動登録した少数のテストデータ**を、既存の進捗管理画面で**描画できるか**確認する。
+- **起動方法・操作感を変えずに** Firestore から読み取れるか確認する。
+- Firestore データを既存の **`state.data` 形式へ変換**できるか確認する。
+- **`renderDashboard()` 以降をできるだけ無改修**で使えるか確認する。
+- **書き込み・編集・削除・ステータス変更は対象外**とする。
+
+### 14.2 POCの最小範囲
+- 通常アクセスは**従来どおり Markdown 参照のまま**にする。
+- **`?source=firestore` のような URL パラメータ**を付けた場合だけ Firestore 参照へ切り替える。
+- 最初は**全件取得**でよい。
+- **差分取得・localStorage キャッシュ・リアルタイム監視はまだ行わない**。
+- Firestore 側のサンプルデータは**3件程度**に絞る。
+- 既存 UI の見た目は変更しない。
+- 書き込み系の UI や処理は追加しない。
+
+### 14.3 追加が必要になりそうなファイル（すべて `task-management/` 配下に閉じる）
+- `task-management/firebase-config.js`
+  - Firebase Web 設定値（`firebaseConfig`）を持つ。
+  - **Web 用 `firebaseConfig` は公開識別子であり、サービスアカウント秘密鍵とは別物**。秘密鍵はここに置かない。
+- `task-management/firestore-source.js`
+  - Firestore からタスクを読み取る。
+  - `firestoreToBoardModel()` で既存 `state.data` 形式へ変換する。
+- `task-management/data-source.js`
+  - 必要に応じて `MarkdownSource` / `FirestoreSource` を切り替えるアダプタ。
+  - **POC では必須ではなく**、構成を分けたい場合の候補とする。
+
+### 14.4 変更が必要になりそうな既存ファイル
+- `task-management/task-dashboard.js`
+  - `loadDashboard()` に**最小限の分岐**を追加する想定。
+  - `?source=firestore` の場合だけ `FirestoreSource` を使う。
+  - それ以外は**従来の Markdown 参照を維持**する。
+- **変更しない方針**（明記）:
+  - `task-management/serve-dashboard.mjs`
+  - `task-management/index.html`
+  - `task-management/task-dashboard.css`
+  - 本体アプリ側
+  - `package.json`
+  - Rust / Tauri 側
+
+### 14.5 `loadDashboard()` の差し替え方針
+- 既存の `fetch(md) → parseMarkdown() → state.data` の経路は**消さない**。
+- 先頭で URL パラメータを見て、`source=firestore` の場合だけ Firestore 読み取りへ分岐する。
+- Firestore 取得に失敗した場合は、**Markdown 参照にフォールバック**するか、**既存のエラー表示**に流す。
+- `renderDashboard()` 以降は触らない。
+- 既存の `state.data` の形を維持する。
+
+### 14.6 Firebase SDK の読み込み方式
+- **npm 追加やビルド手順追加は行わない**方針。
+- **gstatic CDN の ESM を使う案を基本**とする。
+- `task-dashboard.js` は**クラシックスクリプトのまま**、必要な時だけ `await import("./firestore-source.js")` で**動的 import** する。
+- 動的 import された `firestore-source.js` 側で Firebase SDK を import する。
+- **`index.html` を `type="module"` に変更しない**方針を基本とする。
+
+### 14.7 `FirestoreSource` の責務
+- Firebase 初期化。
+- Firestore DB 取得。
+- `tasks` コレクションの読み取り。
+- POC では **`archived == false` の単発取得**を基本とする。
+- **`onSnapshot` によるリアルタイム監視は使わない**。
+- 取得結果を `firestoreToBoardModel()` に渡す。
+- エラー時は**呼び出し元へ throw** する。
+
+### 14.8 `firestoreToBoardModel()` の責務
+- 返却形式は **`{ meta, sections, tasks, qualityGate, today }` を維持**する。
+- `title → task.text`
+- `branchName → task.branch`
+- `category → section.title / task.sectionTitle`
+- `subcategory → subsection.title / task.subsectionTitle`
+- `order ?? sourceLine ?? 連番 → task.line`
+- `archived == true` は通常表示・集計から除外する。
+- `category` / `subcategory` でグルーピングして `sections` / `subsections` を再構築する。
+- `qualityGate` は**「品質ゲート」を含むカテゴリ**から取得する。
+- `today` は**「今日見る場所」を含むカテゴリ**から取得する。
+- 差異吸収はすべて `firestoreToBoardModel()` 内に閉じる。
+
+### 14.9 手動登録する Firestore サンプルデータ案（3件程度）
+`tasks` コレクションへ手動登録する想定。3つのビュー（Focus / 品質ゲート / 概況・ツリー）を点灯させる構成。
+
+- **doc1: Focus / Now 用**
+  - `category: "0. 今日見る場所"` / `subcategory: "Now"`
+  - `status: "Doing"` / `completed: false`
+  - `branchName` / `issuePr` / `doneWhen` / `notes` を含める
+  - `order: 10`
+- **doc2: 品質ゲート / 完了タスク用**
+  - `category: "3. 品質ゲート"`
+  - `status: "Done"` / `completed: true`
+  - `doneWhen` を含める
+  - `order: 20`
+- **doc3: 通常カテゴリの未完了タスク用**（集計・カテゴリ進捗・タスクツリー確認用）
+  - 集計除外でも品質ゲートでもない通常カテゴリ
+  - `status: "Todo"` / `completed: false`
+  - `order: 30`
+- **補足**: 必要に応じて **`archived: true` の確認用データを1件**追加し、「既定で表示・集計から除外される」ことも確認する。
+
+### 14.10 POC成功条件
+- `http://localhost:8080/task-management/?source=firestore` で Firestore データが表示される。
+- 通常の `http://localhost:8080/task-management/` は**従来どおり Markdown 表示のまま**。
+- 概況・カテゴリ進捗・タスクツリーが表示される。
+- **Focus / Now** に Firestore の対象データが表示される。
+- **品質ゲート**に Firestore の対象データが表示される。
+- **Branch / Issue/PR / Done when / Notes** が表示される。
+- **`archived: true` のデータは表示・集計から除外**される。
+- **コンソールエラーが出ない**。
+- **起動コマンドや操作感が変わらない**。
+
+### 14.11 POC失敗時に戻しやすくするための注意点
+- 既定は **Markdown 参照のまま**にする。
+- Firestore 参照は **URL パラメータでのみ有効化**する。
+- 追加ファイルを**分離**する。
+- `loadDashboard()` の変更は**分岐追加だけ**にする。
+- **Markdown 経路を削除しない**。
+- Firestore 取得失敗時に **Markdown へフォールバック**できるようにする。
+- 本体アプリ・CSS・HTML・静的サーバは**変更しない**。
+- **秘密鍵を置かない**。
+- Firebase 側は**テスト用プロジェクトと期限付き Rules で隔離**する。
