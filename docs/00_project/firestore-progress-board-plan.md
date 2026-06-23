@@ -1,9 +1,9 @@
 # 進捗管理画面 Firestore 連携 調査・設計メモ
 
-> 本メモは **調査・方針整理のみ** です。実装・Firebase SDK 追加・Firestore 接続処理・既存コード変更は含みません。
+> 本メモは **調査・方針整理** を主とします（§1〜§15）。§16 は `task-management/` 配下に閉じた最小 POC（読み取り・表示・status 更新）の**実施結果記録**で、本体アプリ（Tauri / Rust / Next.js）には影響しません。
 > 既存の進捗管理画面（`task-management/`）の利用感・起動方法・本体アプリ（Tauri / Rust / Next.js）には影響を与えない前提で整理しています。
 
-- ステータス: 調査・設計（実装未着手）
+- ステータス: 調査・設計＋最小 POC 実施済み（§16）。本格運用・書き込み一般化は未着手
 - 作成日: 2026-06-23
 - 対象: 進捗管理画面（`task-management/`）のデータ参照先を Markdown → Firestore へ段階移行する方針
 - 関連ファイル:
@@ -29,6 +29,7 @@
 13. md ↔ Firestore マッピング詳細（段階1成果物）
 14. Firestore 読み取りPOC方針
 15. Firestore 読み取りPOC用サンプルデータ案
+16. Firestore POC 実施結果（読み取り・表示・status更新）
 
 ---
 
@@ -215,6 +216,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: サンプル確認（代表タスク3件）を踏まえ、§13.5「サンプル確認で確定した既定方針」を追記（id 設計・order 採番・completed/status・issuePr・Done when/Notes・完了済みカテゴリの集計方針・初期移行時のタイムスタンプ）。
 - 2026-06-23: §14「Firestore 読み取りPOC方針」を追記（読み取り専用・最小POCの目的/範囲/追加・変更ファイル/`loadDashboard()` 差し替え/SDK 読み込み方式/`FirestoreSource`・`firestoreToBoardModel()` 責務/サンプルデータ案/成功条件/ロールバック注意点）。
 - 2026-06-23: §15「Firestore 読み取りPOC用サンプルデータ案」を追記（`tasks` コレクション・推奨ドキュメントID・doc1〜doc4 のフィールド/型/値・Console 手入力の注意点・確認できること/できないこと）。
+- 2026-06-23: §16「Firestore POC 実施結果（読み取り・表示・status更新）」を追記。読み取り3件取得・`?source=firestore` 切替・`firestoreToBoardModel()` 変換表示・status 更新（`updateDoc` で `status`/`completed`/`completedAt`/`updatedAt`/`updatedBy` 限定、Done 連動、再取得再描画）を実施結果として記録。未実装（追加・編集・削除・archived 切替・全件インポート・onSnapshot・差分・キャッシュ・認証・権限UI・本番 Rules）と次候補（追加 POC / archived 非表示 / 全件インポート / Rules・認証 / Firestore 正運用）を明記。冒頭ステータスを「調査・設計＋最小 POC 実施済み」に更新。
 
 ---
 
@@ -620,3 +622,80 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 - **大量データ性能**（3件規模では負荷・ページング不明）。
 - **本番 Rules**（POC用の暫定 Rules 前提）。
 - **全件移行時の網羅性**（代表3件のためマッピング網羅性は別途検証）。
+
+---
+
+## 16. Firestore POC 実施結果（読み取り・表示・status更新）
+
+> §14/§15 の方針に基づき、`task-management/` 配下に閉じた最小 POC を実施した結果記録。読み取り → 表示 → status 更新の3段階を確認済み。本体アプリ・起動方法・通常 Markdown 表示には影響していない。
+
+### 16.1 Firestore 読み取りPOC（結果）
+- `tasks` コレクションに**手動登録した3件**を取得できた。
+  - `today-now-resident-runtime-validation`
+  - `quality-gate-playwright-ui-e2e-ci`
+  - `notification-scheduler-cooldown-tuning`
+- **`?source=firestore` のときだけ** Firestore 参照に切り替わることを確認。
+- 通常の `/task-management/` は**従来どおり Markdown 表示のまま**。
+- `firebase-config.js` は**ローカル実値入りだが `skip-worktree` 済みでコミット対象外**（Web 用 `firebaseConfig` は公開識別子。秘密鍵は置かない方針を維持）。
+
+### 16.2 Firestore 表示POC（結果）
+- Firestore 取得データを **`firestoreToBoardModel()` で既存 `state.data` 形式へ変換**できた。
+- `?source=firestore` のとき、Firestore の**3件を既存画面に表示**できた。
+- 通常 URL では**従来の Markdown 既存画面**が表示されることを確認。
+- **Markdown 表示側に影響がない**ことを確認。
+- 差異吸収（`title→text`・`branchName→branch`・`category→sectionTitle` 等）は `firestoreToBoardModel()` 内に閉じ、`renderDashboard()` 以降は無改修で再利用。
+
+### 16.3 Firestore status 更新POC（結果）
+- **Firestore 表示時だけ** status 更新 UI を表示できた。
+- 通常 Markdown 表示では **status 更新 UI が出ない**ことを確認。
+- `tasks/{docId}` に対して **`updateDoc` で status 更新**できた。
+- **更新対象フィールドは以下に限定**（本文・`archived` 等は変更しない）:
+  - `status`
+  - `completed`
+  - `completedAt`
+  - `updatedAt`
+  - `updatedBy`
+- **`Done` に変更した場合**: `completed=true` / `completedAt=serverTimestamp()`
+- **`Done` 以外に変更した場合**: `completed=false` / `completedAt=null`
+- `updatedAt=serverTimestamp()`（常に更新）
+- `updatedBy="manual-poc"`（POC 段階の固定値）
+- 更新後に **Firestore を再取得し、画面を再描画**できた（部分更新ではなく再取得 → 変換 → 差し替え → 再描画）。
+- **Firestore Console 上の値と画面表示が一致**することを確認。
+
+### 16.4 確認済み URL
+| URL | 表示 | status 更新 UI |
+|---|---|---|
+| `http://localhost:8080/task-management/` | Markdown 表示 | なし |
+| `http://localhost:8080/task-management/?source=firestore` | Firestore 表示 | あり |
+
+### 16.5 確認済みテスト
+1. 通常 Markdown 表示に影響がない。
+2. Firestore 表示で更新 UI が出る。
+3. doc3 `notification-scheduler-cooldown-tuning` を `Todo → Done` に変更できる。
+4. Firestore Console で `status=Done` / `completed=true` / `completedAt=Timestamp` を確認。
+5. `Done → Todo` に戻せる。
+6. `completed=false` / `completedAt=null` を確認。
+7. `Doing` / `Review` / `Blocked` への変更も確認。
+8. 現在 status のボタンが無効化される。
+9. 再読み込み後も Firestore 上の状態が保持される。
+10. コンソールに致命的なエラーがない。
+
+### 16.6 今回の POC で未実装（明記）
+- タスク追加
+- タスク本文編集
+- タスク削除
+- `archived` 切り替え
+- Markdown 全件インポート
+- `onSnapshot` によるリアルタイム監視
+- 差分取得
+- localStorage キャッシュ
+- 認証
+- 権限管理 UI
+- Firestore Rules の本番運用設計
+
+### 16.7 次に進む候補
+1. タスク追加 POC。
+2. `archived=true` による非表示 POC。
+3. Markdown 全件インポート。
+4. Firestore Rules / 認証方針の検討。
+5. Firestore を正とする運用への切り替え検討。
