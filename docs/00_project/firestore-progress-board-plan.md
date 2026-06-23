@@ -26,6 +26,7 @@
 10. 段階的な実装案
 11. 実装前に確認すべきこと
 12. 未決事項・更新履歴
+13. md ↔ Firestore マッピング詳細（段階1成果物）
 
 ---
 
@@ -170,7 +171,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 | 段階 | 内容 | 主な確認観点 |
 |---|---|---|
 | 段階0 | 調査・設計（本メモ） | データ形・変換・Rules 方針の合意 |
-| 段階1 | md ↔ Firestore マッピング確定 | §6 の対応表確定（id 採番・status enum・line→order） |
+| 段階1 | md ↔ Firestore マッピング確定 | §6/§13 の対応表確定（id 採番・status enum・line→order）／**Firestore 項目と既存 state.data キーの別名変換を確定**（`branchName→branch`・`title→text`・`category→sectionTitle` 等）／**「今日見る場所」「品質ゲート」が既存ロジックで成立するよう category 名を維持** |
 | 段階2 | Firebase 設定・初期インポート（管理者） | Firestore 有効化／Web app 登録／`firebaseConfig` 取得／期限付きテスト Rules／md→`tasks` 移行（Admin 鍵はローカル Secrets）。**md 件数 = Firestore 件数** |
 | 段階3 | 読み取り専用連携 | アダプタ導入＋`loadDashboard` 差し替え＋`firestoreToBoardModel`。**起動・UI 不変**／既定 md→表示一致確認後に既定切替／差分取得で読み取り最小 |
 | 段階4 | 更新処理追加 | status 変更・追加・編集・`archived` 論理削除／`updatedAt`(server)・`updatedBy` 強制／自動保存しない／論理削除が集計除外 |
@@ -190,6 +191,13 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - **Firestore Rules の最低限方針**: 初期は期限付きテスト Rules、書き込み解禁前に App Check か allowlist を必須化、`allow read, write: if true;` を恒久運用しない合意。
 - **SDK 読み込み方式**: 動的 `import()`（`index.html` 不変）／`type="module"` 化（1 行変更）のどちらを採るか。
 - **公開/非公開リポジトリ**: 公開なら段階4 前に App Check/allowlist を前倒し。
+- **マッピングの確定事項（§13.4 の既定案で合意するか）**:
+  - **id 採番**: `category + subcategory + title` 由来の決定的 ID／Firestore 正後はタイトル変更で ID を変えない。
+  - **`line` / `order`**: `order` を表示順の正、`task.line ← order ?? sourceLine ?? 連番`。
+  - **`completed` / `status`**: `status` を正・`completed` は派生、移行時の矛盾は `[x]` 優先で `status=Done`。
+  - **`owner`**: 当面は文字列（将来 `ownerUid` 追加）。
+  - **`issuePr`**: 当面は 1 文字列（将来 `issueNumbers[]` / `prNumbers[]` 追加）。
+  - **初期移行時のタイムスタンプ等**: `createdAt`/`updatedAt`＝移行時刻、`updatedBy`＝`"migration"`/`"md-import"`、`completedAt`＝`null` 基本。
 
 ## 12. 未決事項・更新履歴
 
@@ -201,3 +209,128 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 
 ### 更新履歴
 - 2026-06-23: 初版作成（調査・方針整理のみ。実装未着手）。
+- 2026-06-23: §13「md ↔ Firestore マッピング詳細（段階1成果物）」を追記。§10/§11 に関連確認観点を追記。
+- 2026-06-23: サンプル確認（代表タスク3件）を踏まえ、§13.5「サンプル確認で確定した既定方針」を追記（id 設計・order 採番・completed/status・issuePr・Done when/Notes・完了済みカテゴリの集計方針・初期移行時のタイムスタンプ）。
+
+---
+
+## 13. md ↔ Firestore マッピング詳細（段階1成果物）
+
+> 段階1の成果物。`developタスクチェックリスト.md` の実データを確認したうえで、Markdown / Firestore / 既存 `state.data` の対応関係を確定するための詳細メモ。実装・接続処理は含まない。
+
+### 13.1 実Markdown書式の確認結果
+
+`docs/00_project/developタスクチェックリスト.md` の実データ確認結果:
+
+- `##` は**大分類**として扱う（先頭に `N. ` 番号が付く場合がある。例: `## 0. 今日見る場所`）。
+- `###` は**中分類**として扱う（例: `### Now` / `### Next` / `### Blocked`）。
+- `- [ ]` / `- [x]` は**タスク**として扱う。属性を持たない素のチェック項目もある（例: 品質ゲートの `- [x] \`pnpm run lint\``）。
+- `[x]` は**完了扱い**にする。
+- 属性ラベルは**主に英語**で、`Priority` / `Status` / `Owner` / `Branch` / `Issue/PR` / `Done when` / `Notes` が使われている。
+- **日本語ラベル**（`担当` / `ブランチ` / `完了条件` / `補足`）も既存 parser は受理するが、**実データ上は英語ラベルが中心**（日本語ラベルはテンプレ例の数件のみ）。
+- `Done when` と `Notes` は**複数行配列**として扱う（ラベル行のあとネスト箇条書きを配列に蓄積）。
+- `Branch` の**バッククォートは除去**する（`` `codex/...` `` → `codex/...`）。
+- 先頭付近の `最終更新` / `対象ブランチ` は **`meta/board` 相当**として扱う。
+- **集計除外セクションは既存ロジックを維持**する（使い方／タスク状態の定義／表示ビュー方針／現在地サマリー／今日見る場所／完了ログ／作業テンプレート。`normalizeTitle` で `N. ` 除去・小文字化してキーワード一致）。
+- 値の例: `Priority: P0/P1/P1.5/P2`、`Status: Todo/Next/Doing/Review/Blocked/Done`、`Owner: @name / 未定`、`Branch: \`feature/...\` / 未作成`、`Issue/PR: #xx（注記）/ 未定`。
+
+### 13.2 Markdown ↔ Firestore ↔ 既存 state.data の詳細マッピング
+
+> 重要: 既存描画が読むキーは Firestore のフィールド名と**一部名前が異なる**（`branchName`↔`branch`、`title`↔`text`、`category`↔`sectionTitle` など）。差異吸収は `firestoreToBoardModel()` 内で行う（§13.3）。
+
+| Markdown 由来 | Firestore | 既存 state.data（描画参照キー） |
+|---|---|---|
+| `- [ ] / - [x]` のテキスト | `title` | `task.text` |
+| `[x]` | `completed` | `task.completed` |
+| `##`（大分類） | `category` | `section.title`, `task.sectionTitle` |
+| `###`（中分類） | `subcategory` | `subsection.title`, `task.subsectionTitle` |
+| `Priority` | `priority` | `task.priority` |
+| `Status` | `status` | `task.status` |
+| `Owner` | `owner` | `task.owner` |
+| `Branch`（` `` ` 除去） | `branchName` | `task.branch` |
+| `Issue/PR` | `issuePr` | `task.issuePr` |
+| `Done when` | `doneWhen[]` | `task.doneWhen[]` |
+| `Notes` | `notes[]` | `task.notes[]` |
+| 行番号 | `sourceLine` / `order` | `task.line` |
+| `最終更新` | `meta/board.updatedAt` | `meta.updatedAt` |
+| `対象ブランチ` | `meta/board.targetBranch` | `meta.branch` |
+
+補助項目（描画が直接参照しない）: `section.excluded` ＝ `isExcludedSection(category)` で算出、`task.includedInProgress` ＝ `!section.excluded`。`section.rawLines` / `section.line` は描画未使用のため Firestore 復元時は空でよい。
+
+### 13.3 Firestore → 既存 state.data 変換方針（`firestoreToBoardModel()` の出力契約）
+
+- 返却する形は **`{ meta, sections, tasks, qualityGate, today }` を維持**する（`renderDashboard()` 以降は無改修）。
+- `title` は `task.text` に変換する。
+- `branchName` は `task.branch` に変換する。
+- `category` は `section.title` / `task.sectionTitle` に変換する。
+- `subcategory` は `subsection.title` / `task.subsectionTitle` に変換する。
+- `order ?? sourceLine ?? 連番` を `task.line` に流す。
+- `archived == true` のタスクは通常表示・集計から除外する（既定クエリで `archived==false`）。
+- `category` / `subcategory` でグルーピングして `sections` / `subsections` を再構築する（並びは `order` 昇順を基本に安定ソート）。
+- `qualityGate` は既存と同じく**「品質ゲート」を含むカテゴリ**から取得する。
+- `today` は既存と同じく**「今日見る場所」を含むカテゴリ**から取得する。
+- 既存 UI を無改修で使うため、**差異吸収はすべて `firestoreToBoardModel()` 内に閉じる**。
+- 成立条件: Focus / 品質ゲートを既存ロジックで動かすため、`category` は md と同一文字列（`0. 今日見る場所`・`品質ゲート` 等）で保持し、「今日見る場所」配下タスクの `subcategory` は `Now` / `Next` / `Blocked` を維持する（`normalizeTitle` 一致のため）。
+
+### 13.4 未決事項と現時点の既定案
+
+- **id 採番**
+  - 初回移行時は `category + subcategory + title` 由来の**決定的 ID** を基本案とする（冪等な再移行）。
+  - Firestore を正にした後は、**タイトル変更で ID が変わらない**ように運用する（id を不変扱い）。
+- **`line` と `order`**
+  - Firestore では **`order` を表示順の正**とする。
+  - 既存画面の `task.line` には **`order ?? sourceLine ?? 連番`** を流す（表示ラベル「Line:」のラベル変更は将来の極小 UI 調整）。
+- **`completed` と `status=Done`**
+  - Firestore では **`status` を正**とする。
+  - `completed` は **`status === "Done"` から派生**させる。
+  - 移行時に矛盾がある場合は**チェック状態 `[x]` を優先して `status=Done` に寄せる**案とする。
+- **`owner`**
+  - 当面は**文字列**で保持する。
+  - 将来 Firebase Auth を入れる場合は **`ownerUid` を追加**する（`owner` は表示名として残す）。
+- **`issuePr`**
+  - 当面は**1 項目の文字列**で保持する。
+  - 将来必要になった場合に **`issueNumbers[]` / `prNumbers[]`** を追加する（破壊変更にしない）。
+- **初期移行時の `createdAt` / `updatedAt` / `updatedBy`**
+  - `createdAt` / `updatedAt` は**移行時刻**を入れる（サーバタイムスタンプ）。
+  - `updatedBy` は **`"migration"`** または **`"md-import"`** を入れる。
+  - `completedAt` は正確な完了日時が分からないため **`null` を基本案**とする。
+
+### 13.5 サンプル確認で確定した既定方針
+
+Firestore 初期データ投入前のサンプル確認（代表タスク3件）を踏まえ、§13.4 の各未決事項について現時点の既定方針を以下に確定する。実装はまだ行わない。
+
+- **id 設計**
+  - 初回移行時は `category + subcategory + title` 由来の**決定的 ID** を基本とする。
+  - Firestore を正にした後は、**タイトル変更で ID を変えない**。
+  - id は Firestore 運用開始後は**不変扱い**にする。
+- **order 採番**
+  - Firestore では **`order` を表示順の正**とする。
+  - 初期移行時は **Markdown 上の出現順**で `order` を採番する。
+  - 後から差し込みやすいよう、**`10, 20, 30...` と間隔を空けた採番**を基本案とする。
+  - `sourceLine` は**移行元確認用**として保持する。
+  - 既存画面の `task.line` には **`order ?? sourceLine ?? 連番`** を流す。
+- **completed / status**
+  - Firestore では **`status` を正**とする。
+  - `completed` は **`status === "Done"` から派生**する値として扱う。
+  - 初期移行時に Markdown が `[x]` の場合は **`status=Done` / `completed=true` に寄せる**。
+  - `[ ]` で `Status: Done` のような矛盾がある場合は、原則として**チェック状態を優先**する案とする。
+- **issuePr**
+  - 当面は **`issuePr` を 1 項目の文字列**として保持する。
+  - 複数 Issue/PR や注記も**そのまま文字列**で保持する。
+  - 将来必要になった場合に **`issueNumbers[]` / `prNumbers[]`** を追加する。
+  - 初期段階では **`#\d+` の抽出や分割は行わない**。
+- **Done when / Notes**
+  - `Done when` と `Notes` は当面 **`string[]`** として保持する。
+  - `✅` / `⬜` のような**進捗マーカーも文字列に含めたまま**保持する。
+  - 将来、個別チェック管理が必要になった場合に **`{ text, done }[]`** のような構造化を検討する。
+  - 初期段階では**構造化しない**。
+- **完了済みカテゴリの集計方針**
+  - `category` は**表示グループ**として扱う。
+  - 進捗判定はカテゴリ名ではなく、各タスクの **`status` / `completed`** で判定する。
+  - **`完了済み` を含むカテゴリ名であっても、カテゴリ全体を完了扱いにはしない**。
+  - 既存の**集計除外セクション判定は維持**する。
+- **初期移行時のタイムスタンプ**
+  - 初期移行時は `createdAt` / `updatedAt` に**移行時刻**を入れる。
+  - `updatedBy` は **`"md-import"`** を基本案とする。
+  - `completedAt` は正確な完了日時が分からないため **`null`** を基本案とする。
+  - **全件が同じ `updatedAt` になることは初期移行として許容**する。
