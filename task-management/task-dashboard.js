@@ -52,6 +52,18 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function loadDashboard() {
+  // 読み取りPOC（§14/§15）: ?source=firestore のときだけ Firestore 取得確認を行う。
+  // 案A: 取得結果を console に出すだけで、画面表示は従来の Markdown のまま続行する。
+  // 既存の Markdown 経路には影響させない（失敗しても下の通常処理はそのまま動く）。
+  if (new URLSearchParams(location.search).get("source") === "firestore") {
+    try {
+      const { fetchFirestoreTasksForPoc } = await import("./firestore-source.js");
+      await fetchFirestoreTasksForPoc();
+    } catch (error) {
+      console.error("[Firestore POC] failed to fetch tasks", error);
+    }
+  }
+
   setLoadState("Markdownを読み込んでいます...", false);
   hideRenderedSections();
 
