@@ -28,6 +28,7 @@
 12. 未決事項・更新履歴
 13. md ↔ Firestore マッピング詳細（段階1成果物）
 14. Firestore 読み取りPOC方針
+15. Firestore 読み取りPOC用サンプルデータ案
 
 ---
 
@@ -213,6 +214,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: §13「md ↔ Firestore マッピング詳細（段階1成果物）」を追記。§10/§11 に関連確認観点を追記。
 - 2026-06-23: サンプル確認（代表タスク3件）を踏まえ、§13.5「サンプル確認で確定した既定方針」を追記（id 設計・order 採番・completed/status・issuePr・Done when/Notes・完了済みカテゴリの集計方針・初期移行時のタイムスタンプ）。
 - 2026-06-23: §14「Firestore 読み取りPOC方針」を追記（読み取り専用・最小POCの目的/範囲/追加・変更ファイル/`loadDashboard()` 差し替え/SDK 読み込み方式/`FirestoreSource`・`firestoreToBoardModel()` 責務/サンプルデータ案/成功条件/ロールバック注意点）。
+- 2026-06-23: §15「Firestore 読み取りPOC用サンプルデータ案」を追記（`tasks` コレクション・推奨ドキュメントID・doc1〜doc4 のフィールド/型/値・Console 手入力の注意点・確認できること/できないこと）。
 
 ---
 
@@ -459,3 +461,162 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 - 本体アプリ・CSS・HTML・静的サーバは**変更しない**。
 - **秘密鍵を置かない**。
 - Firebase 側は**テスト用プロジェクトと期限付き Rules で隔離**する。
+
+---
+
+## 15. Firestore 読み取りPOC用サンプルデータ案
+
+> §14 の読み取りPOCで、Firebase Console から手動登録する `tasks` ドキュメントの具体案。実装・接続処理は含まない。書き込みは行わず、Console での手入力のみを前提とする。
+
+### 15.1 作成するコレクション名
+- コレクション名: **`tasks`**（ルート直下のコレクション）。
+- サブコレクションにはせず、ルート直下に作る。
+- 読み取りクエリは **`where("archived", "==", false)`**（必要に応じて `orderBy("order")`）を想定する。
+
+### 15.2 推奨ドキュメントID
+§13.5「id 設計」（`category + subcategory + title` 由来の決定的ID・運用開始後は不変）に沿った、人間が読めるケバブケースを推奨する。自動IDでも読み取りPOC自体は成立するが、再投入時の重複防止と対応関係の追跡のため手入力を推奨。
+
+| 用途 | 推奨ドキュメントID |
+|---|---|
+| doc1 (Focus/Now) | `today-now-resident-runtime-validation` |
+| doc2 (品質ゲート/完了) | `quality-gate-playwright-ui-e2e-ci` |
+| doc3 (通常カテゴリ/未完了) | `notification-scheduler-cooldown-tuning` |
+| doc4 (archived確認用・任意) | `archived-sample-legacy-task` |
+
+### 15.3 サンプルドキュメント案
+
+共通の型方針（§13.2/§13.5準拠）:
+- 文字列: `category` / `subcategory` / `title` / `status` / `priority` / `owner` / `branchName` / `issuePr` / `updatedBy`
+- 真偽値: `completed` / `archived`
+- 数値: `order` / `sourceLine`
+- 配列(string[]): `doneWhen` / `notes`
+- Timestamp: `createdAt` / `updatedAt` / `completedAt`（完了時のみ・未完了は `null`）
+- null許容: `subcategory` / `branchName` / `issuePr` / `completedAt`
+
+#### doc1: Focus / Now 用タスク（ID: `today-now-resident-runtime-validation`）
+
+| フィールド | 型 | 値 |
+|---|---|---|
+| `category` | string | `"0. 今日見る場所"` |
+| `subcategory` | string | `"Now"` |
+| `title` | string | `"常駐ランタイムの動作検証"` |
+| `status` | string | `"Doing"` |
+| `completed` | boolean | `false` |
+| `priority` | string | `"P1"` |
+| `owner` | string | `"codex"` |
+| `branchName` | string | `"codex/resident-runtime-validation"` |
+| `issuePr` | string | `"#65（CSP設定）/ #87（常駐実装）"` |
+| `doneWhen` | array(string) | `["⬜ CSP設定が本番相当で通ること", "⬜ 常駐プロセスが指定時間帯で起動すること", "✅ 起動ログが出力されること"]` |
+| `notes` | array(string) | `["常駐実装の検証メモ", "CSPは別Issueと連動"]` |
+| `order` | number | `10` |
+| `sourceLine` | number | `10` |
+| `archived` | boolean | `false` |
+| `createdAt` | timestamp | 移行時刻 |
+| `updatedAt` | timestamp | 移行時刻 |
+| `updatedBy` | string | `"md-import"` |
+| `completedAt` | null | `null` |
+
+#### doc2: 品質ゲート / 完了タスク（ID: `quality-gate-playwright-ui-e2e-ci`）
+
+| フィールド | 型 | 値 |
+|---|---|---|
+| `category` | string | `"3. 品質ゲート"` |
+| `subcategory` | null | `null` |
+| `title` | string | `"Playwright UI E2E を CI に組み込む"` |
+| `status` | string | `"Done"` |
+| `completed` | boolean | `true` |
+| `priority` | string | `"P1"` |
+| `owner` | string | `"codex"` |
+| `branchName` | string | `"codex/playwright-ui-e2e-ci"` |
+| `issuePr` | string | `"#73"` |
+| `doneWhen` | array(string) | `["✅ CI上でChromiumのUI E2Eが緑になること"]` |
+| `notes` | array(string) | `[]` |
+| `order` | number | `20` |
+| `sourceLine` | number | `116` |
+| `archived` | boolean | `false` |
+| `createdAt` | timestamp | 移行時刻 |
+| `updatedAt` | timestamp | 移行時刻 |
+| `updatedBy` | string | `"md-import"` |
+| `completedAt` | null | `null`（§13.5: 正確な完了日時が不明なため初期移行では null 基本） |
+
+#### doc3: 通常カテゴリの未完了タスク（ID: `notification-scheduler-cooldown-tuning`）
+
+集計・カテゴリ進捗バー・タスクツリーを点灯させるための「集計除外でも品質ゲートでもない通常カテゴリ」の未完了タスク。
+
+| フィールド | 型 | 値 |
+|---|---|---|
+| `category` | string | `"8. ゆうこ通知 / 進捗"` |
+| `subcategory` | null | `null` |
+| `title` | string | `"通知クールダウン時間の調整"` |
+| `status` | string | `"Todo"` |
+| `completed` | boolean | `false` |
+| `priority` | string | `"P2"` |
+| `owner` | string | `"takaya"` |
+| `branchName` | null | `null` |
+| `issuePr` | null | `null` |
+| `doneWhen` | array(string) | `[]` |
+| `notes` | array(string) | `[]` |
+| `order` | number | `30` |
+| `sourceLine` | number | `140` |
+| `archived` | boolean | `false` |
+| `createdAt` | timestamp | 移行時刻 |
+| `updatedAt` | timestamp | 移行時刻 |
+| `updatedBy` | string | `"md-import"` |
+| `completedAt` | null | `null` |
+
+> `category` は実在の集計対象カテゴリに合わせて読み替える（除外セクション＝「今日見る場所」等以外で、`isExcludedSection` に該当しない名前であることが条件）。
+
+#### doc4（任意・確認用）: archived 除外確認（ID: `archived-sample-legacy-task`）
+
+`archived == true` が表示・集計から落ちることの確認用。`?source=firestore` で**画面に出ない**ことが正解になる。
+
+| フィールド | 型 | 値 |
+|---|---|---|
+| `category` | string | `"8. ゆうこ通知 / 進捗"` |
+| `subcategory` | null | `null` |
+| `title` | string | `"（旧）廃止済みタスク"` |
+| `status` | string | `"Done"` |
+| `completed` | boolean | `true` |
+| `priority` | string | `"P3"` |
+| `owner` | string | `"codex"` |
+| `branchName` | null | `null` |
+| `issuePr` | null | `null` |
+| `doneWhen` | array(string) | `[]` |
+| `notes` | array(string) | `[]` |
+| `order` | number | `40` |
+| `sourceLine` | number | `200` |
+| `archived` | boolean | **`true`** |
+| `createdAt` | timestamp | 移行時刻 |
+| `updatedAt` | timestamp | 移行時刻 |
+| `updatedBy` | string | `"md-import"` |
+| `completedAt` | null | `null` |
+
+### 15.4 Firebase Console で手入力する時の注意点
+- `order` / `sourceLine` は必ず **number**（文字列 `"10"` にしない）。
+- `completed` / `archived` は **boolean**（`"true"` 文字列にしない）。
+- `subcategory` / `branchName` / `issuePr` / `completedAt` は値がないとき **null** 型を選ぶ（空文字 `""` と区別する）。
+- `doneWhen` / `notes` は **array(string)**。空でも array 型のまま要素ゼロ（`[]`）にする（string 単体にしない）。
+- `✅` / `⬜` などの絵文字マーカーは**文字列に含めたまま**で良い（§13.5）。
+- `createdAt` / `updatedAt` は **Timestamp** 型で Console のカレンダーUIから設定する（epoch 数値や文字列にしない）。
+- **Web 用 `firebaseConfig`（apiKey 等）は公開識別子であり、サービスアカウント秘密鍵とは別物**。混同しない。
+- **サービスアカウント秘密鍵はリポジトリにもフロントにも置かない**（読み取りPOCに Admin SDK は不要）。
+- `category` は先頭の「数字＋ピリオド＋半角スペース」まで含めて**完全一致**で入力する（`normalizeTitle` / 除外セクション判定 / `today`・`qualityGate` 抽出が文字列一致に依存するため）。
+
+### 15.5 POCで確認できること
+- **概況**（全体進捗％・件数）。
+- **カテゴリ進捗**バー。
+- **タスクツリー**（category/subcategory グルーピング再構築）。
+- **Focus / Now**（doc1 が Focus 欄に表示）。
+- **品質ゲート**（doc2 が品質ゲート表示に出る）。
+- **Branch / Issue/PR / Done when / Notes** の表示（キー別名変換 §13.3 の検証）。
+- **archived 除外**（doc4 が表示・集計に出ない）。
+- **通常アクセス時の Markdown 表示維持**（`?source` なしは従来どおり）。
+
+### 15.6 このサンプルでは確認できないこと
+- **書き込み**（追加・編集・削除・ステータス変更）。
+- **リアルタイム更新**（`onSnapshot` 不使用）。
+- **差分取得**（全件取得方針のため）。
+- **localStorage キャッシュ**。
+- **大量データ性能**（3件規模では負荷・ページング不明）。
+- **本番 Rules**（POC用の暫定 Rules 前提）。
+- **全件移行時の網羅性**（代表3件のためマッピング網羅性は別途検証）。
