@@ -1,6 +1,6 @@
-// Markdown 全件インポート / 再同期（§17）の第1段階 dry-run スクリプト。
+// Markdown 全件インポート / 再同期（§17）の dry-run スクリプト。
 //
-// この段階でやること:
+// 第1段階（既定 / --dry-run）でやること:
 // - developタスクチェックリスト.md を読む
 // - parseMarkdownTasks() で解析する
 // - Firestore 投入用フィールドへ変換する
@@ -8,12 +8,18 @@
 // - 件数・代表データ・警告を console に表示する
 // - --out 指定時は変換結果を JSON へ出力する
 //
+// 第2段階（--compare-firestore 追加時）でやること:
+// - 上記に加えて Firestore tasks コレクションを「読み取り専用」で取得する
+// - 決定的IDで Markdown側（desired）と Firestore側（current）を突き合わせる
+// - 追加予定 / 更新予定 / 変更なし / 削除候補 / 保護対象 / 警告 を dry-run 表示する
+//
 // この段階でやらないこと（重要・安全側）:
-// - Firestore への接続・読み取り・追加・更新・削除
-// - Firebase SDK の import / firebase-config.js の読み込み
+// - Firestore への書き込み（追加・更新・削除）/ --apply / --delete-missing
+// - 書き込み API（setDoc / updateDoc / deleteDoc / addDoc / serverTimestamp）の import
 // - 画面側ファイル・package.json / pnpm-lock.yaml の変更
 //
-// 実装は Node.js 標準ライブラリのみ（fs / path / crypto / url）。常に dry-run 扱い。
+// Firestore 読み取りは firestore-sync-source.mjs（REST・読み取り専用）に分離する。
+// --compare-firestore が無ければ Firestore へは一切接続しない。
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -21,6 +27,26 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import { parseMarkdownTasks, collectSectionTasks, isExcludedSection } from "./markdown-task-parser.mjs";
+
+// 比較対象フィールド（§17.7）。これ以外（createdAt/updatedAt/updatedBy/completedAt/
+// archived/source/completed）は差分判定に使わない。
+const COMPARE_FIELDS = [
+  "title",
+  "category",
+  "subcategory",
+  "priority",
+  "status",
+  "owner",
+  "branchName",
+  "issuePr",
+  "doneWhen",
+  "notes",
+  "order",
+  "sourceLine",
+];
+
+// 空文字と null/未設定を同等扱いにするフィールド（§17 比較時の正規化）。
+const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr"]);
 
 // status の許可値（firestore-source.js の ALLOWED_STATUSES と揃える）。
 const ALLOWED_STATUSES = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
@@ -32,12 +58,15 @@ const DEFAULT_INPUT = "docs/00_project/developタスクチェックリスト.md"
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 
-main();
+main().catch((error) => {
+  console.error(`[markdown-sync] 想定外のエラー: ${error.message}`);
+  process.exitCode = 1;
+});
 
-function main() {
+async function main() {
   const options = parseArgs(process.argv.slice(2));
 
-  // 第1段階では --dry-run の有無にかかわらず常に dry-run（書き込みは一切しない）。
+  // どのオプションでも書き込みは一切しない（常に dry-run）。
   const inputAbs = resolve(REPO_ROOT, options.input);
 
   let markdown;
@@ -53,6 +82,13 @@ function main() {
   const parsed = parseMarkdownTasks(markdown);
   const { items, warnings } = buildFirestoreItems(parsed);
 
+  // --compare-firestore 指定時のみ Firestore を読み取り、差分比較 dry-run を行う。
+  if (options.compareFirestore) {
+    await runCompare(options, items, warnings);
+    return;
+  }
+
+  // 既定（第1段階）: Markdown 解析・変換のみの dry-run。
   const summary = buildSummary(parsed, items, warnings);
   printDryRun(options.input, summary, items, warnings);
 
@@ -75,12 +111,58 @@ function main() {
 }
 
 /**
+ * 第2段階: Firestore（current）と Markdown 変換結果（desired）を比較する dry-run。
+ * 読み取りのみ。Firestore への書き込みは行わない。
+ */
+async function runCompare(options, items, warnings) {
+  // 読み取り専用モジュールを動的 import する（compare 指定時のみ Firestore へ接続する）。
+  const { fetchCurrentFirestoreTasks } = await import("./firestore-sync-source.mjs");
+
+  let currentDocs;
+  try {
+    currentDocs = await fetchCurrentFirestoreTasks();
+  } catch (error) {
+    console.error(`[markdown-sync] Firestore 読み取りに失敗しました: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const diff = compareDesiredAndCurrent(items, currentDocs);
+  const summary = {
+    desiredTasks: items.length,
+    currentDocs: currentDocs.length,
+    toCreate: diff.toCreate.length,
+    toUpdate: diff.toUpdate.length,
+    unchanged: diff.unchanged.length,
+    toDeleteCandidates: diff.toDeleteCandidates.length,
+    protectedCurrentOnly: diff.protectedCurrentOnly.length,
+    warnings: warnings.length,
+  };
+
+  printCompare(options.input, summary, diff, warnings);
+
+  if (options.out) {
+    const outAbs = resolve(REPO_ROOT, options.out);
+    writeJsonOutput(outAbs, {
+      mode: "compare-dry-run",
+      input: options.input,
+      summary,
+      diff,
+      warnings,
+    });
+    console.log("");
+    console.log(`JSON を書き出しました: ${options.out}`);
+  }
+}
+
+/**
  * コマンドライン引数を解釈する。
  * 対応: --dry-run（第1段階では常に dry-run なのでフラグ受理のみ） / --input <path> / --out <path>
  */
 function parseArgs(argv) {
   const options = {
     dryRun: false,
+    compareFirestore: false,
     input: DEFAULT_INPUT,
     out: null,
   };
@@ -89,6 +171,8 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--dry-run") {
       options.dryRun = true;
+    } else if (arg === "--compare-firestore") {
+      options.compareFirestore = true;
     } else if (arg === "--input") {
       options.input = argv[i + 1] ?? options.input;
       i += 1;
@@ -314,6 +398,218 @@ function printDryRun(input, summary, items, warnings) {
       console.log(`- [${warning.type}] ${warning.message}`);
     }
   }
+}
+
+/**
+ * desired（Markdown変換結果）と current（Firestore）を決定的IDで突き合わせて分類する。
+ * 返却: { toCreate, toUpdate, unchanged, toDeleteCandidates, protectedCurrentOnly }
+ *
+ * @param {Array<{id:string, data:object}>} desiredItems
+ * @param {Array<{id:string, data:object}>} currentDocs
+ */
+function compareDesiredAndCurrent(desiredItems, currentDocs) {
+  const currentById = new Map(currentDocs.map((doc) => [doc.id, doc]));
+  const desiredIds = new Set(desiredItems.map((item) => item.id));
+
+  const toCreate = [];
+  const toUpdate = [];
+  const unchanged = [];
+
+  for (const item of desiredItems) {
+    const current = currentById.get(item.id);
+    if (!current) {
+      // Markdown にあり Firestore に無い → 追加予定。
+      toCreate.push({ id: item.id, data: item.data });
+      continue;
+    }
+
+    const diffs = computeFieldDiffs(current.data, item.data);
+    if (diffs.length === 0) {
+      unchanged.push({ id: item.id, title: item.data.title });
+    } else {
+      toUpdate.push({ id: item.id, title: item.data.title, diffs });
+    }
+  }
+
+  // Firestore のみに存在するもの → source により削除候補 / 保護対象へ振り分ける。
+  const toDeleteCandidates = [];
+  const protectedCurrentOnly = [];
+  for (const doc of currentDocs) {
+    if (desiredIds.has(doc.id)) {
+      continue;
+    }
+    const source = doc.data?.source;
+    const title = doc.data?.title != null ? String(doc.data.title) : "";
+    if (source === "md-import") {
+      // md-import 由来かつ Markdown から消えたものだけ削除候補にできる（実削除はしない）。
+      toDeleteCandidates.push({
+        id: doc.id,
+        title,
+        source: source ?? null,
+        reason: "source is md-import and missing from Markdown",
+      });
+    } else {
+      // manual-poc / source未設定 / md-import以外 は保護対象（削除しない）。
+      protectedCurrentOnly.push({
+        id: doc.id,
+        title,
+        source: source == null ? null : String(source),
+        reason: source == null ? "source is missing" : "source is not md-import",
+      });
+    }
+  }
+
+  return { toCreate, toUpdate, unchanged, toDeleteCandidates, protectedCurrentOnly };
+}
+
+/**
+ * 比較対象フィールド（§17.7）だけを正規化して突き合わせ、異なるものを diffs にする。
+ * before = Firestore側（current）, after = Markdown側（desired）。
+ */
+function computeFieldDiffs(currentData, desiredData) {
+  const diffs = [];
+  for (const field of COMPARE_FIELDS) {
+    const before = normalizeForCompare(field, currentData?.[field]);
+    const after = normalizeForCompare(field, desiredData?.[field]);
+    if (!valuesEqual(before, after)) {
+      diffs.push({ field, before, after });
+    }
+  }
+  return diffs;
+}
+
+/**
+ * 比較前の正規化（§17 比較時の正規化規則）。
+ * - undefined/null は同等（null へ寄せる）
+ * - subcategory/branchName/issuePr は空文字も null 扱い
+ * - doneWhen/notes は配列（未設定は []、各要素は文字列 trim）
+ * - order/sourceLine は数値（数値化できなければ null）
+ * - その他の文字列は trim
+ */
+function normalizeForCompare(field, value) {
+  if (field === "doneWhen" || field === "notes") {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.map((entry) => String(entry ?? "").trim());
+  }
+
+  if (field === "order" || field === "sourceLine") {
+    if (value == null || value === "") {
+      return null;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  if (NULLABLE_STRING_FIELDS.has(field)) {
+    if (value == null) {
+      return null;
+    }
+    const trimmed = String(value).trim();
+    return trimmed === "" ? null : trimmed;
+  }
+
+  // 通常の文字列フィールド（title/category/priority/status/owner）。
+  if (value == null) {
+    return "";
+  }
+  return String(value).trim();
+}
+
+/**
+ * 正規化済みの値どうしを比較する。配列は要素順込みで一致を判定する。
+ */
+function valuesEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    return a.every((value, index) => value === b[index]);
+  }
+  return a === b;
+}
+
+/**
+ * compare dry-run 結果を console へ表示する。
+ */
+function printCompare(input, summary, diff, warnings) {
+  console.log("Markdown sync compare dry-run");
+  console.log(`input: ${input}`);
+  console.log(`desired tasks: ${summary.desiredTasks}`);
+  console.log(`current firestore docs: ${summary.currentDocs}`);
+  console.log("");
+  console.log("diff:");
+  console.log(`toCreate: ${summary.toCreate}`);
+  console.log(`toUpdate: ${summary.toUpdate}`);
+  console.log(`unchanged: ${summary.unchanged}`);
+  console.log(`toDeleteCandidates: ${summary.toDeleteCandidates}`);
+  console.log(`protectedCurrentOnly: ${summary.protectedCurrentOnly}`);
+  console.log(`warnings: ${warnings.length}`);
+
+  console.log("");
+  console.log("samples:");
+
+  if (diff.toCreate.length > 0) {
+    console.log("toCreate:");
+    for (const item of diff.toCreate.slice(0, 5)) {
+      console.log(`- id: ${item.id}`);
+      console.log(`  title: ${item.data.title}`);
+      console.log(`  category: ${item.data.category}`);
+      console.log(`  status: ${item.data.status}`);
+      console.log(`  order: ${item.data.order}`);
+    }
+  }
+
+  if (diff.toUpdate.length > 0) {
+    console.log("toUpdate:");
+    for (const item of diff.toUpdate.slice(0, 5)) {
+      console.log(`- id: ${item.id}`);
+      console.log(`  title: ${item.title}`);
+      for (const d of item.diffs) {
+        console.log(`    ${d.field}: ${formatValue(d.before)} -> ${formatValue(d.after)}`);
+      }
+    }
+  }
+
+  if (diff.toDeleteCandidates.length > 0) {
+    console.log("toDeleteCandidates:");
+    for (const item of diff.toDeleteCandidates.slice(0, 5)) {
+      console.log(`- id: ${item.id}`);
+      console.log(`  title: ${item.title}`);
+      console.log(`  source: ${item.source ?? "(missing)"}`);
+      console.log(`  reason: ${item.reason}`);
+    }
+  }
+
+  if (diff.protectedCurrentOnly.length > 0) {
+    console.log("protectedCurrentOnly:");
+    for (const item of diff.protectedCurrentOnly.slice(0, 5)) {
+      console.log(`- id: ${item.id}`);
+      console.log(`  title: ${item.title}`);
+      console.log(`  source: ${item.source ?? "(missing)"}`);
+      console.log(`  reason: ${item.reason}`);
+    }
+  }
+
+  if (warnings.length > 0) {
+    console.log("");
+    console.log("warnings detail:");
+    for (const warning of warnings) {
+      console.log(`- [${warning.type}] ${warning.message}`);
+    }
+  }
+}
+
+// diff 表示用に値を読みやすく整形する（配列は JSON、null は (null)）。
+function formatValue(value) {
+  if (value === null) {
+    return "(null)";
+  }
+  if (Array.isArray(value)) {
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
 
 /**
