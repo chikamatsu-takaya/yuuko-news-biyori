@@ -53,8 +53,17 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCategoryProgress();
     renderTaskTree();
   });
-  // status 更新ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
+  // status 更新・削除ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
   elements.taskTree.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest(".task-delete-button");
+    if (deleteButton && !deleteButton.disabled) {
+      const { taskId, taskTitle } = deleteButton.dataset;
+      if (taskId) {
+        void applyFirestoreTaskDelete(taskId, taskTitle ?? "", deleteButton);
+      }
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -236,6 +245,44 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
     buttons.forEach((element) => {
       element.disabled = false;
     });
+  }
+}
+
+// Firestore 表示時のみ呼ばれる物理削除処理（段階4の最小書き込みPOC）。
+// 削除前に confirm で明示確認し、成功後は再取得して全体を作り直す。
+async function applyFirestoreTaskDelete(taskId, taskTitle, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  // 物理削除は元に戻せないため、実行前に必ず確認する（タスク名があれば文面に含める）。
+  const label = taskTitle ? `「${taskTitle}」` : "このタスク";
+  const confirmed = window.confirm(
+    `${label}をFirestoreから削除します。\n元に戻せません。削除しますか？`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  button.disabled = true;
+  setLoadState("Firestoreのタスクを削除しています...", false);
+
+  try {
+    const { deleteTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await deleteTaskForPoc(taskId);
+
+    // 削除成功後は再取得 → 変換 → 差し替え → 再描画でツリーを作り直す。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState(`Firestoreのタスクを削除しました（全${docs.length}件）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to delete task", error);
+    setLoadState(`Firestoreのタスク削除に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、ボタンを戻して再操作できるようにする。
+    button.disabled = false;
   }
 }
 
@@ -856,7 +903,27 @@ function renderTaskCard(task) {
       ${renderLongList("Done when", task.doneWhen)}
       ${renderLongList("Notes", task.notes)}
       ${renderStatusControls(task)}
+      ${renderDeleteControl(task)}
     </article>
+  `;
+}
+
+// Firestore 表示時のみ、タスクカード内に物理削除ボタンを描画する（段階4）。
+// status 更新ボタンと区別するため、別ブロック・赤系の「削除」文言で右寄せに出す。
+function renderDeleteControl(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+
+  return `
+    <div class="task-delete">
+      <button
+        type="button"
+        class="task-delete-button"
+        data-task-id="${escapeHtml(task.firestoreId)}"
+        data-task-title="${escapeHtml(task.text)}"
+      >削除</button>
+    </div>
   `;
 }
 
