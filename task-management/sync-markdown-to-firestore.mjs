@@ -261,6 +261,9 @@ async function runCompare(options, items, warnings) {
     const outAbs = resolve(REPO_ROOT, options.out);
     writeJsonOutput(outAbs, {
       mode: "compare-dry-run",
+      // 生成日時（ISO文字列）。画面側がJSONの鮮度を表示するために使う。
+      // 既存の summary / diff / warnings 構造は変更しない（フィールド追加のみ）。
+      generatedAt: new Date().toISOString(),
       input: options.input,
       summary,
       diff,

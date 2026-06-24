@@ -669,6 +669,21 @@ details[open] > summary::after {
   font-size: 0.9rem;
 }
 
+/* compare結果の生成日時（鮮度）表示。タイトル直下に置く。 */
+.markdown-sync-generated {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+/* 事前生成JSONである旨の注意文。鮮度が古い可能性をユーザーへ伝える。 */
+.markdown-sync-freshness {
+  margin: 0 0 12px;
+  color: var(--amber);
+  font-size: 0.8rem;
+}
+
 /* 件数カードは6分類。stats-grid の8列を6列へ上書きして余白を詰める。 */
 .markdown-sync-stats {
   grid-template-columns: repeat(6, minmax(0, 1fr));

@@ -26,6 +26,7 @@ const markdownSyncElements = {
   details: null,
   status: null,
   compareButton: null,
+  generatedAt: null,
 };
 
 // 事前生成済み compare 結果JSONの取得パス（画面URL基準）。
@@ -75,6 +76,10 @@ function setupMarkdownSyncPanel() {
     <p class="markdown-sync-lead">
       現在は確認用プレビューです。Firestoreへの書き込みは行いません。
     </p>
+    <p id="markdownSyncGeneratedAt" class="markdown-sync-generated">compare結果生成日時: 不明</p>
+    <p class="markdown-sync-freshness">
+      この結果は事前生成されたJSONを表示しています。最新状態を確認する場合はJSONを再生成してください。
+    </p>
     <div id="markdownSyncStats" class="stats-grid markdown-sync-stats"></div>
     <p id="markdownSyncStatus" class="markdown-sync-status" hidden></p>
     <div id="markdownSyncDetails" class="markdown-sync-details"></div>
@@ -97,6 +102,7 @@ function setupMarkdownSyncPanel() {
   markdownSyncElements.details = section.querySelector("#markdownSyncDetails");
   markdownSyncElements.status = section.querySelector("#markdownSyncStatus");
   markdownSyncElements.compareButton = section.querySelector("#markdownSyncCompareButton");
+  markdownSyncElements.generatedAt = section.querySelector("#markdownSyncGeneratedAt");
 
   // Compare確認ボタンは「事前生成済みJSONの読み取り表示」だけ（Firestoreへは接続しない）。
   // Node スクリプトの実行も書き込みも行わない（既存JSONを fetch して表示するのみ）。
@@ -168,6 +174,13 @@ function renderMarkdownSyncPreview(compareResult) {
   }
   const data = normalizeCompareResult(compareResult);
   lastMarkdownCompareResult = data;
+
+  // 生成日時（メタ情報）。compareResult から直接読む（無ければ「不明」表示）。
+  const generatedAt =
+    compareResult && typeof compareResult.generatedAt === "string"
+      ? compareResult.generatedAt
+      : null;
+  updateMarkdownSyncGeneratedAt(generatedAt);
 
   // 件数カード（追加予定 / 更新予定 / 削除候補 / 変更なし / 保護対象 / 警告）。
   markdownSyncElements.stats.innerHTML = MARKDOWN_SYNC_CATEGORIES.map((category) => {
@@ -243,7 +256,11 @@ function normalizeMarkdownCompareResult(raw) {
     // diff に warnings が無ければ top-level（--out の出力形）から拾う。
     warnings: diff.warnings ?? top.warnings,
   };
-  return normalizeCompareResult(merged);
+  const normalized = normalizeCompareResult(merged);
+  // generatedAt はメタ情報。--out では top-level に出る（diff にあれば fallback）。
+  const generatedAt = top.generatedAt ?? diff.generatedAt ?? null;
+  normalized.generatedAt = typeof generatedAt === "string" ? generatedAt : null;
+  return normalized;
 }
 
 // compare 結果の各分類を必ず配列へ正規化する（未指定は空配列）。
@@ -349,6 +366,44 @@ function setMarkdownSyncStatus(message, options = {}) {
     );
   }
   el.innerHTML = parts.join("");
+}
+
+// 生成日時の表示を更新する。generatedAt が無い古いJSONはエラーにせず「不明」扱い。
+function updateMarkdownSyncGeneratedAt(generatedAt) {
+  const el = markdownSyncElements.generatedAt;
+  if (!el) {
+    return;
+  }
+  if (!generatedAt) {
+    el.textContent = "compare結果生成日時: 不明（生成日時なし・古いJSON形式の可能性があります）";
+    return;
+  }
+  el.textContent = `compare結果生成日時: ${formatGeneratedAt(generatedAt)}`;
+}
+
+// ISO文字列を日本時間（JST）で読みやすく整形する。失敗時は元の文字列を返す。
+function formatGeneratedAt(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "不明";
+  }
+  try {
+    const parts = new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(date);
+    const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
+    return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} (JST)`;
+  } catch {
+    // Intl が使えない環境ではISO文字列のまま見せる（鮮度確認の目的は満たせる）。
+    return String(iso);
+  }
 }
 
 // task-dashboard.js の escapeHtml と独立に持つ（このファイル単体でも完結させるため）。
