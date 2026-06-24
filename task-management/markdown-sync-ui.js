@@ -26,6 +26,7 @@ const markdownSyncElements = {
   details: null,
   status: null,
   compareButton: null,
+  applyAllButton: null,
   generatedAt: null,
 };
 
@@ -84,11 +85,11 @@ function setupMarkdownSyncPanel() {
     <p id="markdownSyncStatus" class="markdown-sync-status" hidden></p>
     <div id="markdownSyncDetails" class="markdown-sync-details"></div>
     <div class="markdown-sync-actions">
-      <span class="markdown-sync-actions-label">反映操作（準備中）:</span>
-      <button type="button" class="button compact" disabled>全件反映</button>
+      <span class="markdown-sync-actions-label">反映操作:</span>
+      <button id="markdownSyncApplyAllButton" type="button" class="button compact">追加・更新を反映</button>
     </div>
     <p class="markdown-sync-disabled-note">
-      反映処理はまだ画面からは実行できません。現在はプレビュー準備段階です。
+      反映するのは「追加予定」「更新予定」のみです。削除候補は今回も削除しません（削除処理は未実装）。
     </p>
   `;
 
@@ -99,6 +100,7 @@ function setupMarkdownSyncPanel() {
   markdownSyncElements.details = section.querySelector("#markdownSyncDetails");
   markdownSyncElements.status = section.querySelector("#markdownSyncStatus");
   markdownSyncElements.compareButton = section.querySelector("#markdownSyncCompareButton");
+  markdownSyncElements.applyAllButton = section.querySelector("#markdownSyncApplyAllButton");
   markdownSyncElements.generatedAt = section.querySelector("#markdownSyncGeneratedAt");
 
   // Compare確認ボタンは「事前生成済みJSONの読み取り表示」だけ（Firestoreへは接続しない）。
@@ -106,13 +108,35 @@ function setupMarkdownSyncPanel() {
   markdownSyncElements.compareButton.addEventListener("click", () => {
     void loadMarkdownCompareJson();
   });
+
+  // 追加・更新ボタン: JSON再読込→件数集計→confirm→OKで toCreate/toUpdate を反映。
+  // 削除候補(toDeleteCandidates)は反映しない（警告のみ）。
+  markdownSyncElements.applyAllButton.addEventListener("click", () => {
+    void runMarkdownApplyAll();
+  });
 }
 
 /**
- * 事前生成済みの compare 結果JSONを読み込み、プレビューへ反映する（読み取りのみ）。
- * - 画面からは Node スクリプトを実行しない。開発者が --out で生成した JSON を fetch するだけ。
+ * 事前生成済みの compare 結果JSONを fetch して正規化結果を返す（読み取りのみ・共通処理）。
+ * - 画面からは Node スクリプトを実行しない。開発者が --out で生成した JSON を読むだけ。
  * - Firestore への接続・書き込みは一切しない。
- * - 読み込み中 / 成功 / 失敗の状態を補助メッセージで表示する。
+ * - 失敗時は例外を投げる（呼び出し側でエラー表示する）。
+ * Compare確認ボタンと全件反映ボタンで共通利用する。
+ */
+async function fetchMarkdownCompareData() {
+  // 静的サーバーが配信する JSON を読むだけ。キャッシュ回避にクエリを付ける。
+  const response = await fetch(`${MARKDOWN_SYNC_COMPARE_JSON_PATH}?t=${Date.now()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const raw = await response.json();
+  return normalizeMarkdownCompareResult(raw);
+}
+
+/**
+ * Compare確認ボタン: JSONを読み込んでプレビューへ反映する（読み取りのみ）。
  */
 async function loadMarkdownCompareJson() {
   const button = markdownSyncElements.compareButton;
@@ -122,15 +146,7 @@ async function loadMarkdownCompareJson() {
   setMarkdownSyncStatus("compare結果JSONを読み込み中...");
 
   try {
-    // 静的サーバーが配信する JSON を読むだけ。キャッシュ回避にクエリを付ける。
-    const response = await fetch(`${MARKDOWN_SYNC_COMPARE_JSON_PATH}?t=${Date.now()}`, {
-      cache: "no-store",
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const raw = await response.json();
-    const data = normalizeMarkdownCompareResult(raw);
+    const data = await fetchMarkdownCompareData();
     renderMarkdownSyncPreview(data);
     setMarkdownSyncStatus("compare結果JSONを読み込みました（読み込み成功・Firestore未接続）。");
   } catch (error) {
@@ -142,6 +158,150 @@ async function loadMarkdownCompareJson() {
   } finally {
     if (button) {
       button.disabled = false;
+    }
+  }
+}
+
+/**
+ * 追加・更新ボタン: toCreate / toUpdate を Firestore へ反映する。
+ * 1) JSON再読み込み 2) 件数集計 3) confirm 表示 4) OKで create→update を順次実行
+ * 5) 進捗・結果サマリー表示。削除候補(toDeleteCandidates)は反映しない（警告のみ）。
+ * Firestore への DELETE は一切呼ばない（apply モジュールに delete は無い）。
+ */
+async function runMarkdownApplyAll() {
+  const button = markdownSyncElements.applyAllButton;
+  const compareButton = markdownSyncElements.compareButton;
+  if (button) {
+    button.disabled = true;
+  }
+  setMarkdownSyncStatus("compare結果JSONを読み込み中...");
+
+  // 1. 最新の compare JSON を再読み込み（表示中の内容ではなく毎回読み直す）。
+  let data;
+  try {
+    data = await fetchMarkdownCompareData();
+  } catch (error) {
+    console.error("[Markdown sync] failed to load compare JSON for apply", error);
+    setMarkdownSyncStatus(
+      "compare結果JSONを読み込めませんでした。先にNodeスクリプトで --out を生成してください。",
+      { isError: true, commandHint: MARKDOWN_SYNC_GEN_COMMAND },
+    );
+    if (button) {
+      button.disabled = false;
+    }
+    return;
+  }
+
+  // 読み込んだ最新内容で表示も更新しておく（確認内容と画面表示を一致させる）。
+  renderMarkdownSyncPreview(data);
+
+  // 2. 件数を集計。
+  const counts = {
+    toCreate: data.toCreate.length,
+    toUpdate: data.toUpdate.length,
+    toDeleteCandidates: data.toDeleteCandidates.length,
+    protectedCurrentOnly: data.protectedCurrentOnly.length,
+    warnings: data.warnings.length,
+  };
+
+  // 3. 確認文（実行する処理 / 実行しない処理を明示）。
+  const lines = [
+    "Markdown同期の追加・更新を反映します。",
+    "",
+    `追加予定: ${counts.toCreate}件`,
+    `更新予定: ${counts.toUpdate}件`,
+    `削除候補: ${counts.toDeleteCandidates}件（今回は削除しません）`,
+    `保護対象: ${counts.protectedCurrentOnly}件（変更しません）`,
+    `警告: ${counts.warnings}件`,
+    "",
+    "実行する処理:",
+    "- 追加予定をFirestoreへ作成",
+    "- 更新予定をFirestoreへ更新",
+    "",
+    "実行しない処理:",
+    "- 削除候補の削除",
+    "- 保護対象の変更",
+    "",
+  ];
+  if (counts.toDeleteCandidates > 0) {
+    lines.push("削除候補がありますが、今回の反映対象外です。");
+    lines.push("削除処理はまだ実装していないため、Firestoreから削除は行いません。");
+    lines.push("");
+  }
+  lines.push("続行しますか？");
+
+  const confirmed = window.confirm(lines.join("\n"));
+  if (!confirmed) {
+    setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
+    if (button) {
+      button.disabled = false;
+    }
+    return;
+  }
+
+  // 反映対象が無ければ書き込みせず終了。
+  if (counts.toCreate === 0 && counts.toUpdate === 0) {
+    setMarkdownSyncStatus(
+      "追加・更新の反映対象はありません。\n削除候補がある場合も、削除処理は未実装のため実行しません。",
+    );
+    if (button) {
+      button.disabled = false;
+    }
+    return;
+  }
+
+  // 4. 反映実行（apply モジュールを動的 import。delete は構造上呼べない）。
+  if (compareButton) {
+    compareButton.disabled = true;
+  }
+  setMarkdownSyncStatus(
+    `追加・更新を反映中...\n作成: 0 / ${counts.toCreate}\n更新: 0 / ${counts.toUpdate}`,
+  );
+
+  try {
+    const { applyMarkdownCreateAndUpdate } = await import("./markdown-sync-apply.js");
+    const result = await applyMarkdownCreateAndUpdate(data, {
+      onProgress: (info) => {
+        // 進捗（作成 x/n・更新 y/m）を逐次表示する。
+        setMarkdownSyncStatus(
+          `追加・更新を反映中...\n` +
+            `作成: ${info.result.created.length} / ${counts.toCreate}\n` +
+            `更新: ${info.result.updated.length} / ${counts.toUpdate}`,
+        );
+      },
+    });
+
+    // 5. 結果サマリー表示。
+    const summaryLines = [
+      "追加・更新の反映が完了しました。",
+      "",
+      `作成: ${result.created.length}件`,
+      `更新: ${result.updated.length}件`,
+      `スキップ: ${result.skipped.length}件`,
+      `エラー: ${result.errors.length}件`,
+      `削除候補: ${result.deleteCandidatesSkipped.length}件（未処理）`,
+    ];
+    if (result.errors.length > 0) {
+      summaryLines.push("");
+      summaryLines.push("エラー詳細:");
+      for (const err of result.errors.slice(0, 5)) {
+        summaryLines.push(`- ${err.id ?? "(no id)"} [${err.phase ?? "-"}] ${err.message ?? err.status ?? ""}`);
+      }
+      if (result.errors.length > 5) {
+        summaryLines.push(`- ほか ${result.errors.length - 5} 件`);
+      }
+    }
+    setMarkdownSyncStatus(summaryLines.join("\n"), { isError: result.errors.length > 0 });
+    console.log("[Markdown sync] apply result", result);
+  } catch (error) {
+    console.error("[Markdown sync] apply failed", error);
+    setMarkdownSyncStatus(`追加・更新の反映に失敗しました: ${error.message}`, { isError: true });
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+    if (compareButton) {
+      compareButton.disabled = false;
     }
   }
 }
@@ -497,7 +657,9 @@ function setMarkdownSyncStatus(message, options = {}) {
   el.hidden = false;
   el.classList.toggle("is-error", options.isError === true);
 
-  const parts = [`<span>${escapeSyncHtml(message)}</span>`];
+  // 改行（\n）は <br> に変換して複数行（進捗・結果サマリー）を表示できるようにする。
+  const html = escapeSyncHtml(message).replaceAll("\n", "<br>");
+  const parts = [`<span>${html}</span>`];
   if (options.commandHint) {
     parts.push(
       `<code class="markdown-sync-command">${escapeSyncHtml(options.commandHint)}</code>`,

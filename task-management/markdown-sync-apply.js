@@ -1,0 +1,353 @@
+// Markdown同期: 追加(toCreate)・更新(toUpdate)の実反映（ブラウザ用・create/update のみ）。
+//
+// 役割（§17.16 画面UI化の反映段階）:
+// - compare 結果の toCreate を Firestore へ新規作成（既存IDは上書きせず skip）。
+// - compare 結果の toUpdate を Firestore へ PATCH 更新（updateMask で対象フィールドのみ）。
+// - toDeleteCandidates は「絶対に削除しない」。記録のみ（deleteCandidatesSkipped）。
+//
+// 安全設計:
+// - このファイルには Firestore DELETE を行う関数を一切実装しない（構造上 DELETE を呼べない）。
+// - 更新は source="md-import" の既存ドキュメントのみ。それ以外は skip（protected保護）。
+// - createdAt / completedAt / archived / source は更新マスクに含めない（触れない）。
+// - 認可は firebase-config.js の公開設定値（projectId/apiKey）のみ利用。Admin SDK は使わない。
+//
+// REST 自前実装の理由（§4.6 既存と異なる場合は理由明記）:
+// - Node 用 firestore-sync-source.mjs は `.mjs`。dev サーバーが `.mjs` を text/javascript で
+//   配信しないため、ブラウザの ESM import が MIME 検査で失敗する。よって画面用に必要最小限の
+//   Firestore REST 関数をこのファイルへ持つ（firebase-config.js の公開値のみ利用）。
+
+import { firebaseConfig } from "./firebase-config.js";
+
+const FIRESTORE_BASE = "https://firestore.googleapis.com/v1";
+
+// 比較対象12フィールド（Node側 sync スクリプトと揃える）。
+const COMPARE_FIELDS = [
+  "title",
+  "category",
+  "subcategory",
+  "priority",
+  "status",
+  "owner",
+  "branchName",
+  "issuePr",
+  "doneWhen",
+  "notes",
+  "order",
+  "sourceLine",
+];
+
+/**
+ * 追加(toCreate)と更新(toUpdate)を反映する。削除は行わない。
+ *
+ * @param {object} compareData normalizeMarkdownCompareResult() の結果
+ * @param {{ onProgress?: (info: object) => void }} [options]
+ * @returns {Promise<{created:Array, updated:Array, skipped:Array, errors:Array, deleteCandidatesSkipped:Array}>}
+ */
+export async function applyMarkdownCreateAndUpdate(compareData, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
+  const toCreate = Array.isArray(compareData?.toCreate) ? compareData.toCreate : [];
+  const toUpdate = Array.isArray(compareData?.toUpdate) ? compareData.toUpdate : [];
+  const toDelete = Array.isArray(compareData?.toDeleteCandidates)
+    ? compareData.toDeleteCandidates
+    : [];
+
+  const result = {
+    created: [],
+    updated: [],
+    skipped: [],
+    errors: [],
+    deleteCandidatesSkipped: [],
+  };
+
+  // 削除候補は処理しない。記録のみ（DELETE は絶対に呼ばない）。
+  for (const item of toDelete) {
+    result.deleteCandidatesSkipped.push({ id: item?.id ?? null, title: item?.title ?? "" });
+  }
+
+  // 更新の source ガード用に、現状の Firestore を1回だけ取得して id->source を作る。
+  // 取得に失敗したら更新はすべて error 扱いにし、作成だけ進める（安全側）。
+  let sourceById = null;
+  let sourceFetchError = null;
+  if (toUpdate.length > 0) {
+    try {
+      sourceById = await fetchCurrentSources();
+    } catch (error) {
+      sourceFetchError = error;
+    }
+  }
+
+  // 1. toCreate（新規作成）。既存IDは createTask が 409 で alreadyExists を返す→skip。
+  const createTimestamps = new Set(["createdAt", "updatedAt"]);
+  let createIndex = 0;
+  for (const item of toCreate) {
+    createIndex += 1;
+    const id = item?.id ?? null;
+    if (!id) {
+      result.errors.push({ id: null, phase: "create", message: "id がありません" });
+      onProgress({ phase: "create", index: createIndex, total: toCreate.length, result });
+      continue;
+    }
+    const data = buildCreateData(item);
+    const now = new Date().toISOString();
+    const writeData = { ...data, createdAt: now, updatedAt: now };
+    try {
+      const res = await createTask(id, writeData, createTimestamps);
+      if (res.ok) {
+        result.created.push({ id, title: data.title });
+      } else if (res.alreadyExists) {
+        result.skipped.push({ id, phase: "create", reason: "already exists" });
+      } else {
+        result.errors.push({ id, phase: "create", status: res.status, message: res.body });
+      }
+    } catch (error) {
+      result.errors.push({ id, phase: "create", message: error.message });
+    }
+    onProgress({ phase: "create", index: createIndex, total: toCreate.length, result });
+  }
+
+  // 2. toUpdate（PATCH更新）。source=md-import のみ。変更フィールド＋メタのみマスク更新。
+  const updateTimestamps = new Set(["updatedAt"]);
+  let updateIndex = 0;
+  for (const item of toUpdate) {
+    updateIndex += 1;
+    const id = item?.id ?? null;
+    if (!id) {
+      result.errors.push({ id: null, phase: "update", message: "id がありません" });
+      onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+      continue;
+    }
+    // current 取得に失敗していた場合は安全側で error にしてスキップ（書き込まない）。
+    if (sourceFetchError) {
+      result.errors.push({
+        id,
+        phase: "update",
+        message: `現状取得に失敗したため更新をスキップ: ${sourceFetchError.message}`,
+      });
+      onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+      continue;
+    }
+    const source = sourceById && sourceById.has(id) ? sourceById.get(id) : undefined;
+    if (source === undefined) {
+      result.skipped.push({ id, phase: "update", reason: "current が見つかりません" });
+      onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+      continue;
+    }
+    if (source !== "md-import") {
+      // protected: md-import 以外は更新しない。
+      result.skipped.push({ id, phase: "update", reason: `source=${source ?? "未設定"} 保護` });
+      onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+      continue;
+    }
+
+    const { mask, writeData } = buildUpdateFromDiffs(item);
+    if (mask.length === 0) {
+      result.skipped.push({ id, phase: "update", reason: "更新対象フィールドなし" });
+      onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+      continue;
+    }
+    try {
+      const res = await updateTaskFields(id, writeData, mask, updateTimestamps);
+      if (res.ok) {
+        result.updated.push({ id, title: item?.title ?? "", fields: mask });
+      } else {
+        result.errors.push({ id, phase: "update", status: res.status, message: res.body });
+      }
+    } catch (error) {
+      result.errors.push({ id, phase: "update", message: error.message });
+    }
+    onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
+  }
+
+  return result;
+}
+
+// toCreate 1件分の作成データを組み立てる。{ id, data } 形・フラット形どちらにも対応。
+function buildCreateData(item) {
+  const source =
+    item && typeof item === "object" && item.data && typeof item.data === "object"
+      ? item.data
+      : (item ?? {});
+  const status = String(source.status ?? "Todo");
+  return {
+    title: source.title ?? "",
+    category: source.category ?? "",
+    subcategory: source.subcategory ?? null,
+    priority: source.priority ?? "P2",
+    status,
+    owner: source.owner ?? "",
+    branchName: source.branchName ?? null,
+    issuePr: source.issuePr ?? null,
+    doneWhen: Array.isArray(source.doneWhen) ? source.doneWhen : [],
+    notes: Array.isArray(source.notes) ? source.notes : [],
+    order: typeof source.order === "number" ? source.order : null,
+    sourceLine: typeof source.sourceLine === "number" ? source.sourceLine : null,
+    // completed は status 連動（既存 data に boolean があればそれを優先）。
+    completed: typeof source.completed === "boolean" ? source.completed : status === "Done",
+    completedAt: source.completedAt ?? null,
+    archived: source.archived === true,
+    source: "md-import",
+    updatedBy: "md-import",
+  };
+}
+
+// toUpdate の diffs（field/before/after）から、更新マスクと書き込み値を作る。
+// after は compare 側で正規化済みの desired 値（null可・配列可・数値可）。
+function buildUpdateFromDiffs(item) {
+  const diffs = Array.isArray(item?.diffs) ? item.diffs : [];
+  const mask = [];
+  const writeData = {};
+  let statusChanged = false;
+  let statusAfter = null;
+
+  for (const diff of diffs) {
+    const field = diff?.field;
+    if (!COMPARE_FIELDS.includes(field)) {
+      continue;
+    }
+    mask.push(field);
+    writeData[field] = diff?.after ?? null;
+    if (field === "status") {
+      statusChanged = true;
+      statusAfter = diff?.after;
+    }
+  }
+
+  // メタ情報は常に更新（createdAt/completedAt/archived/source はマスク外で不変）。
+  writeData.updatedAt = new Date().toISOString();
+  writeData.updatedBy = "md-import";
+  mask.push("updatedAt", "updatedBy");
+
+  // status が変わった場合のみ completed を status 連動で更新する。
+  if (statusChanged) {
+    writeData.completed = String(statusAfter) === "Done";
+    mask.push("completed");
+  }
+
+  return { mask, writeData };
+}
+
+// ---- Firestore REST（最小限・read + create + update のみ。delete は持たない） ----
+
+// source ガード用に tasks の id->source マップを取得する（ページング対応）。
+async function fetchCurrentSources() {
+  const projectId = firebaseConfig?.projectId;
+  const apiKey = firebaseConfig?.apiKey;
+  if (!projectId) {
+    throw new Error("firebase-config.js に projectId がありません。");
+  }
+  const basePath = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks`;
+  const map = new Map();
+  let pageToken = null;
+  do {
+    const params = new URLSearchParams({ pageSize: "300" });
+    if (apiKey) params.set("key", apiKey);
+    if (pageToken) params.set("pageToken", pageToken);
+    const response = await fetch(`${basePath}?${params.toString()}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`Firestore 読み取り失敗 (HTTP ${response.status})`);
+    }
+    const json = await response.json();
+    for (const doc of json.documents ?? []) {
+      const name = String(doc.name ?? "");
+      const id = name.slice(name.lastIndexOf("/") + 1);
+      const sourceField = doc.fields?.source;
+      const source = sourceField && "stringValue" in sourceField ? sourceField.stringValue : null;
+      map.set(id, source);
+    }
+    pageToken = json.nextPageToken ?? null;
+  } while (pageToken);
+  return map;
+}
+
+// tasks/{id} を新規作成する（POST + documentId）。既存IDは 409 ALREADY_EXISTS。
+async function createTask(id, data, timestampFields) {
+  const projectId = firebaseConfig?.projectId;
+  const apiKey = firebaseConfig?.apiKey;
+  if (!projectId) {
+    throw new Error("firebase-config.js に projectId がありません。");
+  }
+  const params = new URLSearchParams({ documentId: id });
+  if (apiKey) params.set("key", apiKey);
+  const url = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks?${params.toString()}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ fields: toRestFields(data, timestampFields) }),
+  });
+  const body = await safeText(response);
+  const alreadyExists = response.status === 409 || /ALREADY_EXISTS/.test(body);
+  return { ok: response.ok, status: response.status, alreadyExists, body };
+}
+
+// tasks/{id} の updateMask フィールドだけを PATCH 更新する（マスク外は不変）。
+async function updateTaskFields(id, data, updateMaskFields, timestampFields) {
+  const projectId = firebaseConfig?.projectId;
+  const apiKey = firebaseConfig?.apiKey;
+  if (!projectId) {
+    throw new Error("firebase-config.js に projectId がありません。");
+  }
+  const params = new URLSearchParams();
+  for (const field of updateMaskFields) {
+    params.append("updateMask.fieldPaths", field);
+  }
+  if (apiKey) params.set("key", apiKey);
+  const url = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks/${id}?${params.toString()}`;
+  // body には mask 対象キーだけを入れる（mask とキー集合を一致させる）。
+  const masked = {};
+  for (const field of updateMaskFields) {
+    masked[field] = data?.[field] ?? null;
+  }
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ fields: toRestFields(masked, timestampFields) }),
+  });
+  const body = await safeText(response);
+  return { ok: response.ok, status: response.status, body };
+}
+
+// 素のJSオブジェクトを Firestore REST の fields 形式へ変換する。
+function toRestFields(data, timestampFields = new Set()) {
+  const fields = {};
+  for (const [key, value] of Object.entries(data ?? {})) {
+    if (timestampFields.has(key) && value != null) {
+      fields[key] = { timestampValue: String(value) };
+    } else {
+      fields[key] = toRestValue(value);
+    }
+  }
+  return fields;
+}
+
+function toRestValue(value) {
+  if (value === null || value === undefined) {
+    return { nullValue: null };
+  }
+  if (typeof value === "boolean") {
+    return { booleanValue: value };
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  }
+  if (typeof value === "string") {
+    return { stringValue: value };
+  }
+  if (Array.isArray(value)) {
+    return { arrayValue: { values: value.map(toRestValue) } };
+  }
+  if (typeof value === "object") {
+    return { mapValue: { fields: toRestFields(value) } };
+  }
+  return { nullValue: null };
+}
+
+async function safeText(response) {
+  try {
+    return await response.text();
+  } catch {
+    return "";
+  }
+}
