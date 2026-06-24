@@ -28,7 +28,14 @@ const markdownSyncElements = {
   compareButton: null,
   applyAllButton: null,
   generatedAt: null,
+  modalOverlay: null,
+  modalBody: null,
+  modalExecuteButton: null,
+  modalCancelButton: null,
 };
+
+// モーダル「実行する」押下時に反映する compare 結果を一時保持する。
+let pendingMarkdownApplyData = null;
 
 // 事前生成済み compare 結果JSONの取得パス（画面URL基準）。
 // 画面からは Node スクリプトを実行せず、開発者が手動で --out 生成した JSON を読むだけ。
@@ -109,10 +116,65 @@ function setupMarkdownSyncPanel() {
     void loadMarkdownCompareJson();
   });
 
-  // 追加・更新ボタン: JSON再読込→件数集計→confirm→OKで toCreate/toUpdate を反映。
+  // 追加・更新ボタン: JSON再読込→件数集計→確認モーダル表示。
   // 削除候補(toDeleteCandidates)は反映しない（警告のみ）。
   markdownSyncElements.applyAllButton.addEventListener("click", () => {
     void runMarkdownApplyAll();
+  });
+
+  // 確認モーダル（画面内）を1度だけ生成する。window.confirm の置き換え。
+  setupMarkdownApplyModal();
+}
+
+// 反映確認モーダルのDOMを生成し、ボタンを配線する（初期は hidden）。
+function setupMarkdownApplyModal() {
+  if (markdownSyncElements.modalOverlay) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "markdownSyncModalOverlay";
+  overlay.className = "markdown-sync-modal-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = `
+    <div class="markdown-sync-modal" role="dialog" aria-modal="true" aria-labelledby="markdownSyncModalTitle">
+      <h2 id="markdownSyncModalTitle">Markdown同期の追加・更新を反映</h2>
+      <div id="markdownSyncModalBody" class="markdown-sync-modal-body"></div>
+      <div class="markdown-sync-modal-actions">
+        <button id="markdownSyncModalCancel" type="button" class="button compact">キャンセル</button>
+        <button id="markdownSyncModalExecute" type="button" class="button primary compact">実行する</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  markdownSyncElements.modalOverlay = overlay;
+  markdownSyncElements.modalBody = overlay.querySelector("#markdownSyncModalBody");
+  markdownSyncElements.modalExecuteButton = overlay.querySelector("#markdownSyncModalExecute");
+  markdownSyncElements.modalCancelButton = overlay.querySelector("#markdownSyncModalCancel");
+
+  // キャンセル: モーダルを閉じ、書き込みせずキャンセルメッセージを出す。
+  markdownSyncElements.modalCancelButton.addEventListener("click", () => {
+    cancelMarkdownApplyModal();
+  });
+  // オーバーレイ背景クリックもキャンセル扱い。
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      cancelMarkdownApplyModal();
+    }
+  });
+  // Escape でもキャンセル。
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      cancelMarkdownApplyModal();
+    }
+  });
+
+  // 実行する: ボタンを押せなくし、モーダルを閉じ、既存の create + update 反映処理を実行する。
+  markdownSyncElements.modalExecuteButton.addEventListener("click", () => {
+    markdownSyncElements.modalExecuteButton.disabled = true;
+    const data = pendingMarkdownApplyData;
+    hideMarkdownApplyConfirmModal();
+    void executeMarkdownApplyAfterConfirm(data);
   });
 }
 
@@ -163,14 +225,13 @@ async function loadMarkdownCompareJson() {
 }
 
 /**
- * 追加・更新ボタン: toCreate / toUpdate を Firestore へ反映する。
- * 1) JSON再読み込み 2) 件数集計 3) confirm 表示 4) OKで create→update を順次実行
- * 5) 進捗・結果サマリー表示。削除候補(toDeleteCandidates)は反映しない（警告のみ）。
- * Firestore への DELETE は一切呼ばない（apply モジュールに delete は無い）。
+ * 追加・更新ボタン: toCreate / toUpdate を Firestore へ反映する（確認は画面内モーダル）。
+ * 1) JSON再読み込み 2) 件数集計 3) 確認モーダル表示（ここまで）。
+ * 「実行する」押下で executeMarkdownApplyAfterConfirm() が走る。
+ * JSON読み込み失敗時はモーダルを出さず、既存のエラー表示にする。
  */
 async function runMarkdownApplyAll() {
   const button = markdownSyncElements.applyAllButton;
-  const compareButton = markdownSyncElements.compareButton;
   if (button) {
     button.disabled = true;
   }
@@ -204,40 +265,109 @@ async function runMarkdownApplyAll() {
     warnings: data.warnings.length,
   };
 
-  // 3. 確認文（実行する処理 / 実行しない処理を明示）。
-  const lines = [
-    "Markdown同期の追加・更新を反映します。",
-    "",
-    `追加予定: ${counts.toCreate}件`,
-    `更新予定: ${counts.toUpdate}件`,
-    `削除候補: ${counts.toDeleteCandidates}件（今回は削除しません）`,
-    `保護対象: ${counts.protectedCurrentOnly}件（変更しません）`,
-    `警告: ${counts.warnings}件`,
-    "",
-    "実行する処理:",
-    "- 追加予定をFirestoreへ作成",
-    "- 更新予定をFirestoreへ更新",
-    "",
-    "実行しない処理:",
-    "- 削除候補の削除",
-    "- 保護対象の変更",
-    "",
-  ];
-  if (counts.toDeleteCandidates > 0) {
-    lines.push("削除候補がありますが、今回の反映対象外です。");
-    lines.push("削除処理はまだ実装していないため、Firestoreから削除は行いません。");
-    lines.push("");
-  }
-  lines.push("続行しますか？");
+  // 3. 確認モーダルを表示（apply ボタンは閉じるまで disabled のまま）。
+  setMarkdownSyncStatus("");
+  showMarkdownApplyConfirmModal(data, counts);
+}
 
-  const confirmed = window.confirm(lines.join("\n"));
-  if (!confirmed) {
-    setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
+/**
+ * 反映確認モーダルを表示する。件数・実行する処理・実行しない処理・削除候補警告を出す。
+ */
+function showMarkdownApplyConfirmModal(data, counts) {
+  if (!markdownSyncElements.modalOverlay || !markdownSyncElements.modalBody) {
+    return;
+  }
+  // 反映対象データを保持（「実行する」押下時に使う）。
+  pendingMarkdownApplyData = data;
+
+  const deleteWarning =
+    counts.toDeleteCandidates > 0
+      ? `<p class="markdown-sync-modal-danger">
+           削除候補がありますが、今回の反映対象外です。<br>
+           削除処理はまだ実装していないため、Firestoreから削除は行いません。
+         </p>`
+      : "";
+
+  markdownSyncElements.modalBody.innerHTML = `
+    <p>Markdown同期の追加・更新を反映します。</p>
+    <ul class="markdown-sync-modal-counts">
+      <li>追加予定: <strong>${counts.toCreate}</strong>件</li>
+      <li>更新予定: <strong>${counts.toUpdate}</strong>件</li>
+      <li>削除候補: <strong>${counts.toDeleteCandidates}</strong>件（今回は削除しません）</li>
+      <li>保護対象: <strong>${counts.protectedCurrentOnly}</strong>件（変更しません）</li>
+      <li>警告: <strong>${counts.warnings}</strong>件</li>
+    </ul>
+    <div class="markdown-sync-modal-cols">
+      <div class="markdown-sync-modal-col">
+        <h3>実行する処理</h3>
+        <ul>
+          <li>追加予定をFirestoreへ作成</li>
+          <li>更新予定をFirestoreへ更新</li>
+        </ul>
+      </div>
+      <div class="markdown-sync-modal-col">
+        <h3>実行しない処理</h3>
+        <ul>
+          <li>削除候補の削除</li>
+          <li>保護対象の変更</li>
+        </ul>
+      </div>
+    </div>
+    ${deleteWarning}
+  `;
+
+  // 実行ボタンを押せる状態に戻し、モーダルを開く。
+  if (markdownSyncElements.modalExecuteButton) {
+    markdownSyncElements.modalExecuteButton.disabled = false;
+  }
+  markdownSyncElements.modalOverlay.hidden = false;
+  // フォーカスを実行ボタンへ（Escape キーも拾えるようにする）。
+  if (markdownSyncElements.modalExecuteButton) {
+    markdownSyncElements.modalExecuteButton.focus();
+  }
+}
+
+// モーダルを閉じる（状態だけ。メッセージは出さない）。
+function hideMarkdownApplyConfirmModal() {
+  if (markdownSyncElements.modalOverlay) {
+    markdownSyncElements.modalOverlay.hidden = true;
+  }
+}
+
+// キャンセル: モーダルを閉じ、書き込みせずキャンセルメッセージを出す。apply ボタンを戻す。
+function cancelMarkdownApplyModal() {
+  if (markdownSyncElements.modalOverlay && markdownSyncElements.modalOverlay.hidden) {
+    return;
+  }
+  hideMarkdownApplyConfirmModal();
+  pendingMarkdownApplyData = null;
+  setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
+  if (markdownSyncElements.applyAllButton) {
+    markdownSyncElements.applyAllButton.disabled = false;
+  }
+}
+
+/**
+ * モーダルで「実行する」を押した後の反映処理（既存ロジックをそのまま実行）。
+ * - toCreate 作成・toUpdate 更新のみ。toDeleteCandidates は削除しない。
+ * - Firestore への DELETE は一切呼ばない（apply モジュールに delete は無い）。
+ */
+async function executeMarkdownApplyAfterConfirm(data) {
+  const button = markdownSyncElements.applyAllButton;
+  const compareButton = markdownSyncElements.compareButton;
+
+  if (!data) {
+    // 念のため（pending が無いケース）。
     if (button) {
       button.disabled = false;
     }
     return;
   }
+
+  const counts = {
+    toCreate: data.toCreate.length,
+    toUpdate: data.toUpdate.length,
+  };
 
   // 反映対象が無ければ書き込みせず終了。
   if (counts.toCreate === 0 && counts.toUpdate === 0) {
@@ -247,10 +377,11 @@ async function runMarkdownApplyAll() {
     if (button) {
       button.disabled = false;
     }
+    pendingMarkdownApplyData = null;
     return;
   }
 
-  // 4. 反映実行（apply モジュールを動的 import。delete は構造上呼べない）。
+  // 反映実行（apply モジュールを動的 import。delete は構造上呼べない）。
   if (compareButton) {
     compareButton.disabled = true;
   }
@@ -271,7 +402,7 @@ async function runMarkdownApplyAll() {
       },
     });
 
-    // 5. 結果サマリー表示。
+    // 結果サマリー表示。
     const summaryLines = [
       "追加・更新の反映が完了しました。",
       "",
@@ -303,6 +434,7 @@ async function runMarkdownApplyAll() {
     if (compareButton) {
       compareButton.disabled = false;
     }
+    pendingMarkdownApplyData = null;
   }
 }
 
