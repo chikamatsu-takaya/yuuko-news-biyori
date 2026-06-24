@@ -115,19 +115,19 @@ async function main() {
       return;
     }
 
-    // update-only（第5段階）: 現段階は --update-only --limit 1 のみ許可。
+    // update-only（第5段階）: --update-only --limit N（N は 1..10）のみ許可。
     if (options.updateOnly) {
       if (options.all) {
         console.error("[markdown-sync] --update-only --all はまだ実装していません（安全のため停止）。");
         process.exitCode = 1;
         return;
       }
-      if (options.limit !== 1) {
+      if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10) {
         console.error(
-          "[markdown-sync] update-only は --apply --update-only --limit 1 のみ許可しています。" +
+          "[markdown-sync] update-only の --limit は 1 以上 10 以下で指定してください。" +
             `（指定された limit: ${options.limit ?? "未指定"}）`,
         );
-        console.error("  2件以上・全件の更新はまだ実装していません（安全のため停止）。");
+        console.error("  全件更新はまだ実装していません（安全のため停止）。");
         process.exitCode = 1;
         return;
       }
@@ -414,10 +414,11 @@ async function runApplyCreateOnly(options, items) {
 }
 
 /**
- * 第5段階: toUpdate の先頭1件だけを Firestore へ PATCH 更新する（update-only）。
+ * 第5段階: toUpdate の先頭から最大 limit 件（1..10）を Firestore へ PATCH 更新する（update-only）。
  * - 更新は比較対象12フィールド＋completed＋updatedAt/updatedBy のみ（updateMask 指定）。
  * - createdAt / completedAt / archived / source には触れない。
  * - 更新対象は source="md-import" の既存ドキュメントのみ。それ以外は skip。
+ * - エラーは記録しつつ継続し、最後に errors として集計する。
  */
 async function runApplyUpdateOnly(options, items) {
   const { fetchCurrentFirestoreTasks, updateFirestoreTaskFields } = await import(
@@ -440,23 +441,27 @@ async function runApplyUpdateOnly(options, items) {
   const desiredById = new Map(items.map((item) => [item.id, item]));
   const currentById = new Map(currentDocs.map((doc) => [doc.id, doc]));
 
+  // 3. 対象は toUpdate の先頭から limit 件。
+  const targets = toUpdate.slice(0, options.limit);
+
   console.log("Markdown sync apply update-only");
   console.log("mode: apply");
   console.log("operation: update-only");
   console.log(`limit: ${options.limit}`);
   console.log(`toUpdate available: ${toUpdate.length}`);
+  console.log(`targets: ${targets.length}`);
 
   const result = {
     mode: "apply-update-only",
     limit: options.limit,
-    summary: { requested: 0, updated: 0, skipped: 0, errors: 0 },
+    summary: { requested: targets.length, updated: 0, skipped: 0, errors: 0 },
     updated: [],
     skipped: [],
     errors: [],
   };
 
   // toUpdate が0件なら何もしない。
-  if (toUpdate.length === 0) {
+  if (targets.length === 0) {
     console.log("");
     console.log("updated: 0（更新対象がありません）");
     console.log("skipped: 0");
@@ -465,41 +470,52 @@ async function runApplyUpdateOnly(options, items) {
     return;
   }
 
-  // 3. 対象は toUpdate の先頭1件。
-  const target = toUpdate[0];
-  result.summary.requested = 1;
-  const desired = desiredById.get(target.id);
-  const current = currentById.get(target.id);
+  // 対象一覧（id・title・diffs 要約）を表示する。
+  console.log("targets:");
+  targets.forEach((target, index) => {
+    const diffSummary = target.diffs
+      .map((d) => `${d.field} ${formatValue(d.before)} -> ${formatValue(d.after)}`)
+      .join(", ");
+    console.log(`${index + 1}. ${target.id} | ${target.title} | diffs: ${diffSummary}`);
+  });
 
-  console.log("target:");
-  console.log(`- id: ${target.id}`);
-  console.log(`  title: ${target.title}`);
-  console.log("  diffs:");
-  for (const d of target.diffs) {
-    console.log(`    ${d.field}: ${formatValue(d.before)} -> ${formatValue(d.after)}`);
-  }
+  const timestampFields = new Set(["updatedAt"]);
+  const total = targets.length;
 
-  // 4. 安全確認: source="md-import" の既存ドキュメントのみ更新する。
-  const source = current?.data?.source ?? null;
-  if (!desired || !current) {
-    result.skipped.push({ id: target.id, reason: "desired/current が解決できません" });
-  } else if (source !== "md-import") {
-    result.skipped.push({ id: target.id, reason: `source が md-import ではない（${source ?? "未設定"}）` });
-    console.log("");
-    console.log(`skipped: source=${source ?? "未設定"} のため更新しません（保護）。`);
-  } else {
-    // 5. 書き込みデータを組み立てる（12フィールド＋completed＋updatedAt/updatedBy のみ）。
+  // 4. 先頭から順に PATCH 更新。source 保護・エラー継続。
+  console.log("");
+  let index = 0;
+  for (const target of targets) {
+    index += 1;
+    const desired = desiredById.get(target.id);
+    const current = currentById.get(target.id);
+    const source = current?.data?.source ?? null;
+
+    // 安全確認: desired/current が引けない、または source!=md-import は更新しない。
+    if (!desired || !current) {
+      result.skipped.push({ id: target.id, reason: "desired/current が解決できません" });
+      console.log(`[${index}/${total}] skipped ${target.id}（desired/current 不一致）`);
+      continue;
+    }
+    if (source !== "md-import") {
+      result.skipped.push({
+        id: target.id,
+        reason: `source が md-import ではない（${source ?? "未設定"}）`,
+      });
+      console.log(`[${index}/${total}] skipped ${target.id}（source=${source ?? "未設定"} 保護）`);
+      continue;
+    }
+
+    // 5. 書き込みデータ（12フィールド＋completed＋updatedAt/updatedBy のみ）。
     const status = String(desired.data.status ?? "Todo");
     const writeData = {};
     for (const field of COMPARE_FIELDS) {
       writeData[field] = desired.data[field];
     }
-    // completed は status に連動（Done→true / それ以外→false）。completedAt は触れない。
+    // completed は status 連動（Done→true / それ以外→false）。completedAt は触れない。
     writeData.completed = status === "Done";
     writeData.updatedAt = new Date().toISOString();
     writeData.updatedBy = "md-import";
-
-    const timestampFields = new Set(["updatedAt"]);
 
     try {
       const res = await updateFirestoreTaskFields(
@@ -510,21 +526,15 @@ async function runApplyUpdateOnly(options, items) {
       );
       if (res.ok) {
         result.updated.push({ id: target.id, title: target.title, diffs: target.diffs });
-        console.log("");
-        console.log("updated: 1");
-        console.log(`id: ${target.id}`);
+        console.log(`[${index}/${total}] updated ${target.id}`);
       } else {
         result.errors.push({ id: target.id, status: res.status, message: res.body });
-        console.error("");
-        console.error(`updated: 0（更新に失敗しました HTTP ${res.status}）`);
-        console.error(`error: ${res.body}`);
+        console.error(`[${index}/${total}] error ${target.id}（HTTP ${res.status}）`);
         process.exitCode = 1;
       }
     } catch (error) {
       result.errors.push({ id: target.id, status: null, message: error.message });
-      console.error("");
-      console.error("updated: 0（更新中に例外が発生しました）");
-      console.error(`error: ${error.message}`);
+      console.error(`[${index}/${total}] error ${target.id}（${error.message}）`);
       process.exitCode = 1;
     }
   }
@@ -537,6 +547,28 @@ async function runApplyUpdateOnly(options, items) {
   console.log(`updated: ${result.summary.updated}`);
   console.log(`skipped: ${result.summary.skipped}`);
   console.log(`errors: ${result.summary.errors}`);
+
+  if (result.updated.length > 0) {
+    console.log("");
+    console.log("updated ids:");
+    for (const item of result.updated) {
+      console.log(`- ${item.id}`);
+    }
+  }
+  if (result.skipped.length > 0) {
+    console.log("");
+    console.log("skipped ids:");
+    for (const item of result.skipped) {
+      console.log(`- ${item.id}（${item.reason}）`);
+    }
+  }
+  if (result.errors.length > 0) {
+    console.error("");
+    console.error("errors:");
+    for (const item of result.errors) {
+      console.error(`- ${item.id} | HTTP ${item.status ?? "-"} | ${item.message}`);
+    }
+  }
 
   console.log("");
   console.log("再確認: node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestore");
