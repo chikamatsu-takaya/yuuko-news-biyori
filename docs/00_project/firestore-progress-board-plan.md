@@ -1,6 +1,6 @@
 # 進捗管理画面 Firestore 連携 調査・設計メモ
 
-> 本メモは **調査・方針整理** を主とします（§1〜§15）。§16 は `task-management/` 配下に閉じた最小 POC（読み取り・表示・status 更新）の**実施結果記録**で、本体アプリ（Tauri / Rust / Next.js）には影響しません。
+> 本メモは **調査・方針整理** を主とします（§1〜§15）。§16 は `task-management/` 配下に閉じた最小 POC（読み取り・表示・status 更新・タスク追加・物理削除）の**実施結果記録**で、本体アプリ（Tauri / Rust / Next.js）には影響しません。
 > 既存の進捗管理画面（`task-management/`）の利用感・起動方法・本体アプリ（Tauri / Rust / Next.js）には影響を与えない前提で整理しています。
 
 - ステータス: 調査・設計＋最小 POC 実施済み（§16）。本格運用・書き込み一般化は未着手
@@ -29,7 +29,7 @@
 13. md ↔ Firestore マッピング詳細（段階1成果物）
 14. Firestore 読み取りPOC方針
 15. Firestore 読み取りPOC用サンプルデータ案
-16. Firestore POC 実施結果（読み取り・表示・status更新）
+16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
 
 ---
 
@@ -217,6 +217,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: §14「Firestore 読み取りPOC方針」を追記（読み取り専用・最小POCの目的/範囲/追加・変更ファイル/`loadDashboard()` 差し替え/SDK 読み込み方式/`FirestoreSource`・`firestoreToBoardModel()` 責務/サンプルデータ案/成功条件/ロールバック注意点）。
 - 2026-06-23: §15「Firestore 読み取りPOC用サンプルデータ案」を追記（`tasks` コレクション・推奨ドキュメントID・doc1〜doc4 のフィールド/型/値・Console 手入力の注意点・確認できること/できないこと）。
 - 2026-06-23: §16「Firestore POC 実施結果（読み取り・表示・status更新）」を追記。読み取り3件取得・`?source=firestore` 切替・`firestoreToBoardModel()` 変換表示・status 更新（`updateDoc` で `status`/`completed`/`completedAt`/`updatedAt`/`updatedBy` 限定、Done 連動、再取得再描画）を実施結果として記録。未実装（追加・編集・削除・archived 切替・全件インポート・onSnapshot・差分・キャッシュ・認証・権限UI・本番 Rules）と次候補（追加 POC / archived 非表示 / 全件インポート / Rules・認証 / Firestore 正運用）を明記。冒頭ステータスを「調査・設計＋最小 POC 実施済み」に更新。
+- 2026-06-24: §16 にタスク追加POC（§16.6）と物理削除POC（§16.7）の結果を追記。追加は `addDoc` で最小項目入力＋初期値補完（archived=false/各種 null・[]、createdAt/updatedAt=serverTimestamp、updatedBy="manual-poc"、Done 連動、order=既存最大+10→40 を確認）。削除は方針を `archived=true` 論理削除から **`deleteDoc` 物理削除**へ変更（confirm 必須・Firestore 表示時のみ・再取得再描画）。§16.8 に実装済み/当面実装しない（archived 切替）/未実装の整理、§16.9 に次候補（全件インポート / 本文編集 / Rules・認証 / Firestore 正運用 / order 採番改善）を記載。見出し・目次を「…追加・物理削除」へ更新。
 
 ---
 
@@ -625,9 +626,9 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 
 ---
 
-## 16. Firestore POC 実施結果（読み取り・表示・status更新）
+## 16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
 
-> §14/§15 の方針に基づき、`task-management/` 配下に閉じた最小 POC を実施した結果記録。読み取り → 表示 → status 更新の3段階を確認済み。本体アプリ・起動方法・通常 Markdown 表示には影響していない。
+> §14/§15 の方針に基づき、`task-management/` 配下に閉じた最小 POC を実施した結果記録。読み取り → 表示 → status 更新 → タスク追加 → 物理削除の各段階を確認済み。本体アプリ・起動方法・通常 Markdown 表示には影響していない。
 
 ### 16.1 Firestore 読み取りPOC（結果）
 - `tasks` コレクションに**手動登録した3件**を取得できた。
@@ -663,7 +664,7 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 - **Firestore Console 上の値と画面表示が一致**することを確認。
 
 ### 16.4 確認済み URL
-| URL | 表示 | status 更新 UI |
+| URL | 表示 | 更新 / 追加 / 削除 UI |
 |---|---|---|
 | `http://localhost:8080/task-management/` | Markdown 表示 | なし |
 | `http://localhost:8080/task-management/?source=firestore` | Firestore 表示 | あり |
@@ -680,11 +681,56 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 9. 再読み込み後も Firestore 上の状態が保持される。
 10. コンソールに致命的なエラーがない。
 
-### 16.6 今回の POC で未実装（明記）
-- タスク追加
+### 16.6 Firestore タスク追加POC（結果）
+- **Firestore 表示時だけ** タスク追加 UI を表示できた。
+- 通常 Markdown 表示では **タスク追加 UI が出ない**ことを確認。
+- 画面から `tasks` コレクションへ **`addDoc` で新規タスクを追加**できた。
+- **入力項目は最小限**: `title` / `category` / `subcategory` / `priority` / `status` / `owner`。
+- 追加時のフィールドを以下で作成できた:
+  - `archived=false`
+  - `branchName=null`
+  - `issuePr=null`
+  - `doneWhen=[]`
+  - `notes=[]`
+  - `sourceLine=null`
+  - `createdAt=serverTimestamp()`
+  - `updatedAt=serverTimestamp()`
+  - `updatedBy="manual-poc"`
+- **`status=Todo` の場合**: `completed=false` / `completedAt=null`
+- **`status=Done` の場合**: `completed=true` / `completedAt=serverTimestamp()`
+- `order` は **既存最大 order + 10** で採番できた。
+  - 既存3件が `10` / `20` / `30` の状態で、追加タスクが **`order=40`** になったことを確認。
+- 追加後に **Firestore を再取得し、画面に反映**できた。
+- 追加したタスクに対して **status 更新も正常に動作**した（`Todo → Done` / `Done → Todo`）。
+
+### 16.7 Firestore 物理削除POC（結果）
+- **方針変更**: メンバー相談の結果、開発段階の進捗管理ツールであるため、`archived=true` の論理削除ではなく **`deleteDoc` による物理削除**に変更した。
+- 変更理由:
+  - 本番ユーザーデータではない。
+  - 不要タスクを Firestore に残し続けるより運用が単純。
+  - 最悪、元の Markdown から必要なタスクを戻せる。
+- **Firestore 表示時だけ** 削除 UI を表示できた。
+- 通常 Markdown 表示では **削除 UI が出ない**ことを確認。
+- 削除前に **`confirm` を出す**（タスク名を文面に含める）。
+- **`confirm` で OK した場合のみ** `deleteDoc` で `tasks/{docId}` を物理削除する。
+- 削除後に **Firestore を再取得し、画面から対象タスクが消える**ことを確認。
+- **Firestore Console 上でも対象ドキュメントが物理削除**されていることを確認。
+- **`archived=true` は使わない方針**に変更（§8 の論理削除方針に対する POC 段階での上書き判断）。
+
+### 16.8 実装済みと未実装の整理（更新）
+
+**実装済み（POC 段階）**:
+- 読み取り（§16.1）
+- 表示（§16.2）
+- status 更新（§16.3）
+- **タスク追加（§16.6）**
+- **タスク削除（物理削除 / §16.7）**
+
+**当面実装しない（方針変更）**:
+- `archived` 切り替え … 削除は **物理削除（`deleteDoc`）方針に変更**したため、archived による論理削除 UI は**当面実装しない**。
+
+**未実装（今後の候補）**:
 - タスク本文編集
-- タスク削除
-- `archived` 切り替え
 - Markdown 全件インポート
 - `onSnapshot` によるリアルタイム監視
 - 差分取得
@@ -693,9 +739,9 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 - 権限管理 UI
 - Firestore Rules の本番運用設計
 
-### 16.7 次に進む候補
-1. タスク追加 POC。
-2. `archived=true` による非表示 POC。
-3. Markdown 全件インポート。
-4. Firestore Rules / 認証方針の検討。
-5. Firestore を正とする運用への切り替え検討。
+### 16.9 次に進む候補（更新）
+1. Markdown 全件インポート。
+2. タスク本文編集 POC。
+3. Firestore Rules / 認証方針の検討。
+4. Firestore を正とする運用への切り替え検討。
+5. `order` 採番方式の改善検討。
