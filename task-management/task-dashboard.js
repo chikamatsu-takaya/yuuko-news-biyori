@@ -76,6 +76,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   // Firestore 追加フォームは index.html を変更しないため JS から動的生成する。
   setupAddTaskForm();
+  // Markdown同期プレビューのパネルも JS から動的生成する（Firestore表示時のみ表示）。
+  // 別ファイル markdown-sync-ui.js が読み込まれている場合のみ呼ぶ（安全側）。
+  if (typeof setupMarkdownSyncPanel === "function") {
+    setupMarkdownSyncPanel();
+  }
   void loadDashboard();
 });
 
@@ -350,6 +355,10 @@ function hideRenderedSections() {
   if (elements.addTaskSection) {
     elements.addTaskSection.hidden = true;
   }
+  // Markdown同期プレビューも一旦隠す（再読み込み・フォールバック時に残さない）。
+  if (typeof setMarkdownSyncPanelVisible === "function") {
+    setMarkdownSyncPanelVisible(false);
+  }
 }
 
 function setLoadState(message, isError) {
@@ -583,6 +592,18 @@ function renderDashboard() {
   // 追加フォームは Firestore 表示時だけ出す（Markdown 表示では非表示）。
   if (elements.addTaskSection) {
     elements.addTaskSection.hidden = !state.isFirestore;
+  }
+  // Markdown同期プレビューも Firestore 表示時だけ出す。今回は読み取り専用のモック表示まで。
+  // 実 compare 結果は後続で renderMarkdownSyncPreview() にそのまま渡せる構造にしてある。
+  if (typeof setMarkdownSyncPanelVisible === "function") {
+    setMarkdownSyncPanelVisible(state.isFirestore);
+    if (
+      state.isFirestore &&
+      typeof renderMarkdownSyncPreview === "function" &&
+      typeof buildMockMarkdownCompareResult === "function"
+    ) {
+      renderMarkdownSyncPreview(buildMockMarkdownCompareResult());
+    }
   }
 }
 
