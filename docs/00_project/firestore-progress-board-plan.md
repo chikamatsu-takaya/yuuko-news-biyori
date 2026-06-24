@@ -220,6 +220,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: §16「Firestore POC 実施結果（読み取り・表示・status更新）」を追記。読み取り3件取得・`?source=firestore` 切替・`firestoreToBoardModel()` 変換表示・status 更新（`updateDoc` で `status`/`completed`/`completedAt`/`updatedAt`/`updatedBy` 限定、Done 連動、再取得再描画）を実施結果として記録。未実装（追加・編集・削除・archived 切替・全件インポート・onSnapshot・差分・キャッシュ・認証・権限UI・本番 Rules）と次候補（追加 POC / archived 非表示 / 全件インポート / Rules・認証 / Firestore 正運用）を明記。冒頭ステータスを「調査・設計＋最小 POC 実施済み」に更新。
 - 2026-06-24: §16 にタスク追加POC（§16.6）と物理削除POC（§16.7）の結果を追記。追加は `addDoc` で最小項目入力＋初期値補完（archived=false/各種 null・[]、createdAt/updatedAt=serverTimestamp、updatedBy="manual-poc"、Done 連動、order=既存最大+10→40 を確認）。削除は方針を `archived=true` 論理削除から **`deleteDoc` 物理削除**へ変更（confirm 必須・Firestore 表示時のみ・再取得再描画）。§16.8 に実装済み/当面実装しない（archived 切替）/未実装の整理、§16.9 に次候補（全件インポート / 本文編集 / Rules・認証 / Firestore 正運用 / order 採番改善）を記載。見出し・目次を「…追加・物理削除」へ更新。
 - 2026-06-24: §17「Markdown全件インポート / 再同期方針」を追記（実装はせず方針整理のみ）。一度きりでなく繰り返し可能な宣言的同期として設計。ローカルスクリプト方式・dry-run 既定/`--apply`/`--delete-missing`、決定的 ID（`category+subcategory+title` 由来・将来 `id:` 明示案）、`source="md-import"`/`"manual-poc"` 区別、12 フィールド比較（メタ・タイムスタンプは比較対象外）、物理削除は `source="md-import"` 限定＋明示オプション必須、status/completed/`completedAt` 保持方針、order/sourceLine 採番、実装ステップ・未決事項・推奨手順を記載。目次・冒頭注記を更新。
+- 2026-06-24: §17.16「メンバー向け運用と画面UI化方針」を追記（docs のみ・実装なし）。Node スクリプトは当面**開発・検証用**に限定し、最終的なメンバー操作は**画面UI化**へ寄せる方針を明記。日常の進捗更新は画面・タスク洗い出し後の一括反映は Markdown 更新＋再同期機能・Claude Code は開発/UI実装/不具合修正用、という役割分担を整理。画面UI化時の必須安全策（必ず dry-run・件数/代表データ表示・削除候補は明示チェック時のみ・反映前確認/反映後再 compare/ログ・`protectedCurrentOnly` 非自動変更・`source` 未設定/`manual-poc`/`md-import` 以外は削除しない）を規定。段階方針（短期=create-only を `--limit` で拡大検証／中期=更新・削除候補・冪等性を Node で検証／最終=同一ロジックを画面UI化）を記載。あわせて §17.15 直後に実装状況メモ（第1〜第3段階を Node スクリプトで実装・検証済み、Firestore アクセスは REST API 利用）を追記。
 
 ---
 
@@ -918,3 +919,64 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 5. `--apply`（追加・更新のみ、削除なし）を実装し、**冪等性テスト**（2回目が「変更なし」）を通す。
 6. `--delete-missing`（`source="md-import"` 限定・物理削除）を最後に実装し、dry-run の削除候補と一致することを確認。
 7. 結果を本メモ §17 に追記（実施結果）し、未決事項を更新する。
+
+> 実装状況メモ（2026-06-24）: §17.12〜§17.15 のうち、第1段階（解析・変換・決定的 ID・JSON 出力）／第2段階（current 取得・差分 dry-run）／第3段階（`--apply --limit 1` の1件追加テスト）まで Node スクリプトで実装・検証済み。`task-management/sync-markdown-to-firestore.mjs`・`task-management/firestore-sync-source.mjs`・`task-management/markdown-task-parser.mjs` がその成果物。Firestore 読み取り／単件作成は npm 追加を避けるため Web SDK ではなく **Firestore REST API（Node の `fetch`）** を用いている。全件 apply・更新・削除は未実装。
+
+### 17.16 メンバー向け運用と画面UI化方針
+§17.12〜§17.15 の同期スクリプト（Node）はあくまで**開発・検証用**であり、全メンバーが直接実行する前提にはしない。最終的なメンバー操作は**画面UI**へ寄せる。理由は、各メンバー PC でのスクリプト実行は環境差・操作ミスが起きやすいため（Node バージョン差／PowerShell・Git Bash などシェル差／`firebase-config.js` の実値設定差／`skip-worktree` の理解不足／コマンド入力ミス／`tmp/` 生成物の扱い／`--apply`・`--delete-missing` の誤実行リスク）。
+
+#### 17.16.1 Node スクリプトの位置づけ（当面は開発・検証用）
+Node スクリプト（`sync-markdown-to-firestore.mjs` ほか）は、当面は次の用途に限定する。
+- 開発者によるロジック検証
+- Markdown 解析結果の確認
+- Firestore 差分 dry-run の確認
+- apply ロジックの段階検証（`--limit` で件数を絞った安全確認）
+- 画面UI化前の安全確認
+
+→ Node スクリプトは**開発・検証用**であり、最終的に全メンバーが直接使う前提にはしない。
+
+#### 17.16.2 メンバー向け最終操作は画面UI化を目指す
+最終的には、次のような画面操作へ寄せる。
+1. Firestore 表示画面を開く。
+2. Markdown 再同期パネル（または画面）を開く。
+3. Markdown ファイルを選択、または本文を貼り付ける。
+4. dry-run を実行する。
+5. 追加予定 / 更新予定 / 削除候補 / 保護対象 を画面で確認する。
+6. 問題なければ反映ボタンを押す。
+7. 反映後に再 compare 結果を表示する。
+
+目的: メンバーごとの PC 環境差を避ける／コマンド入力ミスを避ける／操作手順を統一する／差分を画面で確認しやすくする／apply 前の安全確認を必須化する。
+
+#### 17.16.3 日常運用と一括更新の役割分担
+- **日常の進捗更新 → 画面から行う**（既存の Firestore 表示 POC の延長）。
+  - 例: Todo → Doing、Doing → Review、Review → Done、Blocked にする、タスクを1件追加、不要タスクを1件削除。
+- **タスク洗い出し後の一括反映 → Markdown を更新したうえで再同期機能から行う**。
+  - 例: タスクを大量に追加、まとめて整理、カテゴリや順番を整理、Markdown 側で洗い直した内容を Firestore へ反映。
+- **Claude Code の役割**: 普段の進捗操作には使わない。次に使う。
+  - 同期スクリプトの開発／画面UI の実装／dry-run・apply の不具合修正／docs 追記／大きな反映作業前の確認手順作成。
+
+#### 17.16.4 画面UI化するときの必須安全策
+画面UI化する場合、次を必須方針とする。
+- 最初は**必ず dry-run**（いきなり反映しない）。
+- 追加予定 / 更新予定 / 削除候補 / 保護対象 の**件数を表示**する。
+- 各分類の**代表データ**を表示する。
+- 削除候補は**初期状態では反映しない**。
+- 「Markdown に存在しない md-import タスクも削除する」のような**明示チェックがある場合のみ**削除対象にする。
+- 反映前に**確認ダイアログ**を出す。
+- 反映後に**再 compare を自動実行**する。
+- **反映ログ**を表示する。
+- `protectedCurrentOnly` は**絶対に自動変更しない**。
+- `source` 未設定 / `manual-poc` / `md-import` 以外は**削除しない**（§17.6 / §17.8 と一致）。
+
+#### 17.16.5 今後の段階方針
+- **短期（開発者による検証用）**:
+  - Node スクリプトで create-only の10件追加 → 残り全件追加まで段階確認（`--limit` を広げる）。
+  - これは開発者による検証であり、メンバー運用ではない。
+- **中期（Node スクリプトで検証継続）**:
+  - 更新処理を Node スクリプトで検証。
+  - 削除候補の扱いを Node スクリプトで検証。
+  - 冪等性（2回目が「変更なし」）を確認。
+- **最終（画面UI化）**:
+  - 同じロジックを画面UIから操作できるようにする。
+  - メンバーは基本的に画面から操作する。
+  - Node スクリプトは開発者向け補助ツールとして残す。
