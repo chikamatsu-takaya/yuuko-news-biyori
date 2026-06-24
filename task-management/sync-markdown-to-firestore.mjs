@@ -53,6 +53,11 @@ const COMPARE_FIELDS = [
 // 空文字と null/未設定を同等扱いにするフィールド（§17 比較時の正規化）。
 const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr"]);
 
+// update（PATCH）で書き込む（＝updateMask に載せる）フィールド。
+// 比較対象12フィールド＋ completed（status 連動）＋ updatedAt / updatedBy のみ。
+// createdAt / completedAt / archived / source は mask に含めず一切触れない。
+const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
+
 // status の許可値（firestore-source.js の ALLOWED_STATUSES と揃える）。
 const ALLOWED_STATUSES = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
 
@@ -98,6 +103,35 @@ async function main() {
     if (options.deleteMissing) {
       console.error("[markdown-sync] --delete-missing はまだ実装していません（安全のため停止）。");
       process.exitCode = 1;
+      return;
+    }
+
+    // create-only と update-only の同時指定は意図が曖昧なため停止する。
+    if (options.createOnly && options.updateOnly) {
+      console.error(
+        "[markdown-sync] --create-only と --update-only は同時指定できません（どちらか一方）。",
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    // update-only（第5段階）: 現段階は --update-only --limit 1 のみ許可。
+    if (options.updateOnly) {
+      if (options.all) {
+        console.error("[markdown-sync] --update-only --all はまだ実装していません（安全のため停止）。");
+        process.exitCode = 1;
+        return;
+      }
+      if (options.limit !== 1) {
+        console.error(
+          "[markdown-sync] update-only は --apply --update-only --limit 1 のみ許可しています。" +
+            `（指定された limit: ${options.limit ?? "未指定"}）`,
+        );
+        console.error("  2件以上・全件の更新はまだ実装していません（安全のため停止）。");
+        process.exitCode = 1;
+        return;
+      }
+      await runApplyUpdateOnly(options, items);
       return;
     }
 
@@ -379,6 +413,137 @@ async function runApplyCreateOnly(options, items) {
   finishApply(options, result);
 }
 
+/**
+ * 第5段階: toUpdate の先頭1件だけを Firestore へ PATCH 更新する（update-only）。
+ * - 更新は比較対象12フィールド＋completed＋updatedAt/updatedBy のみ（updateMask 指定）。
+ * - createdAt / completedAt / archived / source には触れない。
+ * - 更新対象は source="md-import" の既存ドキュメントのみ。それ以外は skip。
+ */
+async function runApplyUpdateOnly(options, items) {
+  const { fetchCurrentFirestoreTasks, updateFirestoreTaskFields } = await import(
+    "./firestore-sync-source.mjs"
+  );
+
+  // 1. current 取得、2. 差分計算（toUpdate を得る）。
+  let currentDocs;
+  try {
+    currentDocs = await fetchCurrentFirestoreTasks();
+  } catch (error) {
+    console.error(`[markdown-sync] Firestore 読み取りに失敗しました: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const diff = compareDesiredAndCurrent(items, currentDocs);
+  const toUpdate = diff.toUpdate;
+
+  // desired / current を id で引けるようにする。
+  const desiredById = new Map(items.map((item) => [item.id, item]));
+  const currentById = new Map(currentDocs.map((doc) => [doc.id, doc]));
+
+  console.log("Markdown sync apply update-only");
+  console.log("mode: apply");
+  console.log("operation: update-only");
+  console.log(`limit: ${options.limit}`);
+  console.log(`toUpdate available: ${toUpdate.length}`);
+
+  const result = {
+    mode: "apply-update-only",
+    limit: options.limit,
+    summary: { requested: 0, updated: 0, skipped: 0, errors: 0 },
+    updated: [],
+    skipped: [],
+    errors: [],
+  };
+
+  // toUpdate が0件なら何もしない。
+  if (toUpdate.length === 0) {
+    console.log("");
+    console.log("updated: 0（更新対象がありません）");
+    console.log("skipped: 0");
+    console.log("errors: 0");
+    finishApply(options, result);
+    return;
+  }
+
+  // 3. 対象は toUpdate の先頭1件。
+  const target = toUpdate[0];
+  result.summary.requested = 1;
+  const desired = desiredById.get(target.id);
+  const current = currentById.get(target.id);
+
+  console.log("target:");
+  console.log(`- id: ${target.id}`);
+  console.log(`  title: ${target.title}`);
+  console.log("  diffs:");
+  for (const d of target.diffs) {
+    console.log(`    ${d.field}: ${formatValue(d.before)} -> ${formatValue(d.after)}`);
+  }
+
+  // 4. 安全確認: source="md-import" の既存ドキュメントのみ更新する。
+  const source = current?.data?.source ?? null;
+  if (!desired || !current) {
+    result.skipped.push({ id: target.id, reason: "desired/current が解決できません" });
+  } else if (source !== "md-import") {
+    result.skipped.push({ id: target.id, reason: `source が md-import ではない（${source ?? "未設定"}）` });
+    console.log("");
+    console.log(`skipped: source=${source ?? "未設定"} のため更新しません（保護）。`);
+  } else {
+    // 5. 書き込みデータを組み立てる（12フィールド＋completed＋updatedAt/updatedBy のみ）。
+    const status = String(desired.data.status ?? "Todo");
+    const writeData = {};
+    for (const field of COMPARE_FIELDS) {
+      writeData[field] = desired.data[field];
+    }
+    // completed は status に連動（Done→true / それ以外→false）。completedAt は触れない。
+    writeData.completed = status === "Done";
+    writeData.updatedAt = new Date().toISOString();
+    writeData.updatedBy = "md-import";
+
+    const timestampFields = new Set(["updatedAt"]);
+
+    try {
+      const res = await updateFirestoreTaskFields(
+        target.id,
+        writeData,
+        UPDATE_WRITE_FIELDS,
+        timestampFields,
+      );
+      if (res.ok) {
+        result.updated.push({ id: target.id, title: target.title, diffs: target.diffs });
+        console.log("");
+        console.log("updated: 1");
+        console.log(`id: ${target.id}`);
+      } else {
+        result.errors.push({ id: target.id, status: res.status, message: res.body });
+        console.error("");
+        console.error(`updated: 0（更新に失敗しました HTTP ${res.status}）`);
+        console.error(`error: ${res.body}`);
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      result.errors.push({ id: target.id, status: null, message: error.message });
+      console.error("");
+      console.error("updated: 0（更新中に例外が発生しました）");
+      console.error(`error: ${error.message}`);
+      process.exitCode = 1;
+    }
+  }
+
+  result.summary.updated = result.updated.length;
+  result.summary.skipped = result.skipped.length;
+  result.summary.errors = result.errors.length;
+
+  console.log("");
+  console.log(`updated: ${result.summary.updated}`);
+  console.log(`skipped: ${result.summary.skipped}`);
+  console.log(`errors: ${result.summary.errors}`);
+
+  console.log("");
+  console.log("再確認: node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestore");
+
+  finishApply(options, result);
+}
+
 // apply 結果を必要に応じて JSON 出力する（共通処理）。
 function finishApply(options, result) {
   if (options.out) {
@@ -410,6 +575,7 @@ function parseArgs(argv) {
     compareFirestore: false,
     apply: false,
     createOnly: false,
+    updateOnly: false,
     deleteMissing: false,
     all: false,
     limit: null,
@@ -427,6 +593,8 @@ function parseArgs(argv) {
       options.apply = true;
     } else if (arg === "--create-only") {
       options.createOnly = true;
+    } else if (arg === "--update-only") {
+      options.updateOnly = true;
     } else if (arg === "--delete-missing") {
       // 受理だけして apply ガード側で停止させる（未実装の削除を誤って通さないため）。
       options.deleteMissing = true;

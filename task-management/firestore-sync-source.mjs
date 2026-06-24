@@ -167,6 +167,64 @@ export async function createFirestoreTask(id, data, timestampFields = new Set())
 }
 
 /**
+ * tasks/{docId} の指定フィールドだけを PATCH で更新する（第5段階・update）。
+ * - updateMaskFields に挙げたフィールドのみ更新する（マスク外＝createdAt/completedAt/
+ *   archived/source 等には一切触れない）。
+ * - data は updateMaskFields のキーを含むこと。mask にあって data に無いキーは
+ *   Firestore 側で削除されてしまうため、呼び出し側で必ず data に値を渡すこと。
+ *
+ * @param {string} id  ドキュメントID
+ * @param {Record<string, unknown>} data  更新するフィールド値（mask 対象のみ）
+ * @param {string[]} updateMaskFields  updateMask.fieldPaths に渡すフィールド名
+ * @param {Set<string>} timestampFields  timestampValue として書き込むフィールド名
+ * @returns {Promise<{ ok: boolean, status: number, body: string }>}
+ */
+export async function updateFirestoreTaskFields(
+  id,
+  data,
+  updateMaskFields,
+  timestampFields = new Set(),
+) {
+  const projectId = firebaseConfig?.projectId;
+  const apiKey = firebaseConfig?.apiKey;
+  if (!projectId) {
+    throw new Error("firebase-config.js に projectId がありません。");
+  }
+  if (!id) {
+    throw new Error("更新対象の id が指定されていません。");
+  }
+  if (!Array.isArray(updateMaskFields) || updateMaskFields.length === 0) {
+    throw new Error("updateMaskFields が空です（更新対象フィールドが必要）。");
+  }
+
+  // updateMask.fieldPaths を更新対象フィールド分だけ並べる（マスク外は変更されない）。
+  const params = new URLSearchParams();
+  for (const field of updateMaskFields) {
+    params.append("updateMask.fieldPaths", field);
+  }
+  if (apiKey) {
+    params.set("key", apiKey);
+  }
+  const url = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks/${id}?${params.toString()}`;
+
+  // body には mask 対象のフィールドだけを入れる（mask とキー集合を一致させる）。
+  const masked = {};
+  for (const field of updateMaskFields) {
+    masked[field] = data?.[field] ?? null;
+  }
+  const fields = toRestFields(masked, timestampFields);
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ fields }),
+  });
+
+  const body = await safeReadText(response);
+  return { ok: response.ok, status: response.status, body };
+}
+
+/**
  * 素の JS オブジェクトを Firestore REST の fields 形式へ変換する。
  * timestampFields に含まれるキーは timestampValue として書き込む。
  */
