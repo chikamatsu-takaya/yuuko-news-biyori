@@ -115,19 +115,28 @@ async function main() {
       return;
     }
 
-    // update-only（第5段階）: --update-only --limit N（N は 1..10）のみ許可。
+    // update-only（第5段階）: --update-only --limit N（N は 1..10）または --update-only --all のみ許可。
     if (options.updateOnly) {
-      if (options.all) {
-        console.error("[markdown-sync] --update-only --all はまだ実装していません（安全のため停止）。");
+      // --all と --limit の同時指定は意図が曖昧なため停止する。
+      if (options.all && options.limit != null) {
+        console.error(
+          "[markdown-sync] --all と --limit は同時指定できません（どちらか一方にしてください）。",
+        );
         process.exitCode = 1;
         return;
       }
+      // --all 指定時は toUpdate 全件を更新する（誤実行防止のため --all 明示が必須）。
+      if (options.all) {
+        await runApplyUpdateOnly(options, items);
+        return;
+      }
+      // --all 以外は limit 必須（1 以上 10 以下のみ許可。未指定・範囲外は停止）。
       if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10) {
         console.error(
           "[markdown-sync] update-only の --limit は 1 以上 10 以下で指定してください。" +
             `（指定された limit: ${options.limit ?? "未指定"}）`,
         );
-        console.error("  全件更新はまだ実装していません（安全のため停止）。");
+        console.error("  全件更新する場合は --update-only --all を使ってください。");
         process.exitCode = 1;
         return;
       }
@@ -414,7 +423,8 @@ async function runApplyCreateOnly(options, items) {
 }
 
 /**
- * 第5段階: toUpdate の先頭から最大 limit 件（1..10）を Firestore へ PATCH 更新する（update-only）。
+ * 第5段階: toUpdate を Firestore へ PATCH 更新する（update-only）。
+ * - 対象範囲: --all のとき全件、--limit N（1..10）のとき先頭から N 件。
  * - 更新は比較対象12フィールド＋completed＋updatedAt/updatedBy のみ（updateMask 指定）。
  * - createdAt / completedAt / archived / source には触れない。
  * - 更新対象は source="md-import" の既存ドキュメントのみ。それ以外は skip。
@@ -441,19 +451,25 @@ async function runApplyUpdateOnly(options, items) {
   const desiredById = new Map(items.map((item) => [item.id, item]));
   const currentById = new Map(currentDocs.map((doc) => [doc.id, doc]));
 
-  // 3. 対象は toUpdate の先頭から limit 件。
-  const targets = toUpdate.slice(0, options.limit);
+  // 3. 対象は --all のとき toUpdate 全件、それ以外は先頭から limit 件。
+  const isAll = options.all === true;
+  const targets = isAll ? toUpdate : toUpdate.slice(0, options.limit);
 
   console.log("Markdown sync apply update-only");
   console.log("mode: apply");
   console.log("operation: update-only");
-  console.log(`limit: ${options.limit}`);
+  if (isAll) {
+    console.log("target: all");
+  } else {
+    console.log(`limit: ${options.limit}`);
+  }
   console.log(`toUpdate available: ${toUpdate.length}`);
   console.log(`targets: ${targets.length}`);
 
+  // 結果オブジェクト。--all のときは target:"all"、それ以外は limit:N を持たせる。
   const result = {
     mode: "apply-update-only",
-    limit: options.limit,
+    ...(isAll ? { target: "all" } : { limit: options.limit }),
     summary: { requested: targets.length, updated: 0, skipped: 0, errors: 0 },
     updated: [],
     skipped: [],
@@ -470,14 +486,18 @@ async function runApplyUpdateOnly(options, items) {
     return;
   }
 
-  // 対象一覧（id・title・diffs 要約）を表示する。
-  console.log("targets:");
-  targets.forEach((target, index) => {
+  // 対象一覧（id・title・diffs 要約）。多い場合は先頭10件だけ preview 表示する。
+  const previewCount = Math.min(10, targets.length);
+  console.log(targets.length > previewCount ? "target preview:" : "targets:");
+  targets.slice(0, previewCount).forEach((target, index) => {
     const diffSummary = target.diffs
       .map((d) => `${d.field} ${formatValue(d.before)} -> ${formatValue(d.after)}`)
       .join(", ");
     console.log(`${index + 1}. ${target.id} | ${target.title} | diffs: ${diffSummary}`);
   });
+  if (targets.length > previewCount) {
+    console.log(`... ほか ${targets.length - previewCount} 件`);
+  }
 
   const timestampFields = new Set(["updatedAt"]);
   const total = targets.length;
