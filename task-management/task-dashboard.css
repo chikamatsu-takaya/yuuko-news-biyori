@@ -764,6 +764,73 @@ details[open] > summary::after {
   font-size: 0.76rem;
 }
 
+/* p 要素としても使うため、行間の余白を詰める。 */
+p.markdown-sync-id {
+  margin: 2px 0 0;
+}
+
+/* 更新予定は diff を縦に並べるため、詳細グリッドの全幅を使う。 */
+.markdown-sync-group-wide {
+  grid-column: 1 / -1;
+}
+
+/* 1タスク分の塊（title / ID / 変更内容）。 */
+.markdown-sync-item {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.markdown-sync-item:first-of-type {
+  margin-top: 6px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.markdown-sync-item-title {
+  margin: 0;
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+
+.markdown-sync-diff-label {
+  margin: 6px 0 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.markdown-sync-diff-list,
+.markdown-sync-meta-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.84rem;
+}
+
+.markdown-sync-diff-list li {
+  margin: 4px 0;
+}
+
+.markdown-sync-diff-list strong,
+.markdown-sync-meta-list strong {
+  color: var(--text);
+}
+
+.markdown-sync-meta-list {
+  color: var(--muted);
+  list-style: none;
+  padding-left: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+}
+
+.markdown-sync-protected-note {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .markdown-sync-danger-note {
   margin: 0 0 8px;
   color: var(--red);

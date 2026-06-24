@@ -85,9 +85,6 @@ function setupMarkdownSyncPanel() {
     <div id="markdownSyncDetails" class="markdown-sync-details"></div>
     <div class="markdown-sync-actions">
       <span class="markdown-sync-actions-label">反映操作（準備中）:</span>
-      <button type="button" class="button compact" disabled>追加を反映</button>
-      <button type="button" class="button compact" disabled>更新を反映</button>
-      <button type="button" class="button compact" disabled>削除を反映</button>
       <button type="button" class="button compact" disabled>全件反映</button>
     </div>
     <p class="markdown-sync-disabled-note">
@@ -194,13 +191,13 @@ function renderMarkdownSyncPreview(compareResult) {
     `;
   }).join("");
 
-  // 詳細（代表3件まで）。追加 / 更新 / 削除候補 / 警告 / 保護対象を順に出す。
+  // 詳細。更新予定は diff（field/before/after）まで、その他は分類ごとに見やすく出す。
   const blocks = [
-    renderSyncDetailGroup("追加予定", data.toCreate),
-    renderSyncDetailGroup("更新予定", data.toUpdate),
+    renderSyncUpdateGroup(data.toUpdate),
+    renderSyncCreateGroup(data.toCreate),
     renderSyncDeleteGroup(data.toDeleteCandidates),
     renderSyncWarningGroup(data.warnings),
-    renderSyncDetailGroup("保護対象（変更しません）", data.protectedCurrentOnly),
+    renderSyncProtectedGroup(data.protectedCurrentOnly),
   ].filter(Boolean);
 
   markdownSyncElements.details.innerHTML =
@@ -274,17 +271,158 @@ function normalizeCompareResult(compareResult) {
   return normalized;
 }
 
-// 通常の分類（追加予定・更新予定・保護対象）の詳細ブロックを作る。代表3件まで。
-function renderSyncDetailGroup(label, items) {
+// 更新予定: タスクごとに title / ID と、diffs（field: before → after）を表示する。
+// 先頭10件まで詳細表示し、残りは件数のみ示す。
+function renderSyncUpdateGroup(items) {
   if (!items.length) {
     return "";
   }
+  const previewCount = Math.min(10, items.length);
+  const cards = items
+    .slice(0, previewCount)
+    .map((item) => {
+      const title = item?.title != null ? String(item.title) : "(無題)";
+      const id = item?.id != null ? String(item.id) : "";
+      const diffs = Array.isArray(item?.diffs) ? item.diffs : [];
+      const idText = id
+        ? `<p class="markdown-sync-id">ID: ${escapeSyncHtml(id)}</p>`
+        : "";
+      const diffBody = diffs.length
+        ? `<p class="markdown-sync-diff-label">変更内容:</p>
+           <ul class="markdown-sync-diff-list">${diffs.map(renderSyncDiffLine).join("")}</ul>`
+        : `<p class="empty-state">差分情報がありません。</p>`;
+      return `
+        <div class="markdown-sync-item">
+          <p class="markdown-sync-item-title">${escapeSyncHtml(title)}</p>
+          ${idText}
+          ${diffBody}
+        </div>
+      `;
+    })
+    .join("");
+  const more =
+    items.length > previewCount
+      ? `<p class="empty-state">ほか ${items.length - previewCount} 件</p>`
+      : "";
   return `
-    <div class="markdown-sync-group">
-      <h3>${escapeSyncHtml(label)}（${items.length}）</h3>
-      ${renderSyncSampleList(items)}
+    <div class="markdown-sync-group markdown-sync-group-wide">
+      <h3>更新予定（${items.length}）</h3>
+      ${cards}${more}
     </div>
   `;
+}
+
+// 1件分の diff 行（field: before → after）。null/undefined/空文字は「なし」表示。
+function renderSyncDiffLine(diff) {
+  const field = diff?.field != null ? String(diff.field) : "(不明)";
+  const before = formatSyncDiffValue(diff?.before);
+  const after = formatSyncDiffValue(diff?.after);
+  return `<li><strong>${escapeSyncHtml(field)}:</strong> ${escapeSyncHtml(before)} → ${escapeSyncHtml(after)}</li>`;
+}
+
+// diff 値の整形。null/undefined/空配列/空文字は「なし」、配列は JSON 文字列にする。
+function formatSyncDiffValue(value) {
+  if (value === null || value === undefined) {
+    return "なし";
+  }
+  if (Array.isArray(value)) {
+    return value.length ? JSON.stringify(value) : "なし";
+  }
+  const str = String(value);
+  return str.trim() === "" ? "なし" : str;
+}
+
+// 追加予定: title / ID と、あれば category / status / priority / owner を表示する。
+function renderSyncCreateGroup(items) {
+  if (!items.length) {
+    return "";
+  }
+  const previewCount = Math.min(10, items.length);
+  const cards = items
+    .slice(0, previewCount)
+    .map((item) => {
+      const title = pickSyncField(item, "title");
+      const id = item?.id != null ? String(item.id) : "";
+      const idText = id
+        ? `<p class="markdown-sync-id">ID: ${escapeSyncHtml(id)}</p>`
+        : "";
+      const meta = [
+        ["category", pickSyncField(item, "category")],
+        ["status", pickSyncField(item, "status")],
+        ["priority", pickSyncField(item, "priority")],
+        ["owner", pickSyncField(item, "owner")],
+      ]
+        .filter(([, value]) => value != null && String(value).trim() !== "")
+        .map(
+          ([label, value]) =>
+            `<li><strong>${escapeSyncHtml(label)}:</strong> ${escapeSyncHtml(String(value))}</li>`,
+        )
+        .join("");
+      return `
+        <div class="markdown-sync-item">
+          <p class="markdown-sync-item-title">${escapeSyncHtml(title != null ? String(title) : "(無題)")}</p>
+          ${idText}
+          ${meta ? `<ul class="markdown-sync-meta-list">${meta}</ul>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+  const more =
+    items.length > previewCount
+      ? `<p class="empty-state">ほか ${items.length - previewCount} 件</p>`
+      : "";
+  return `
+    <div class="markdown-sync-group">
+      <h3>追加予定（${items.length}）</h3>
+      ${cards}${more}
+    </div>
+  `;
+}
+
+// 保護対象: id / title / source を表示し、変更しない旨を明示する。代表3件。
+function renderSyncProtectedGroup(items) {
+  if (!items.length) {
+    return "";
+  }
+  const previewCount = Math.min(3, items.length);
+  const cards = items
+    .slice(0, previewCount)
+    .map((item) => {
+      const title = pickSyncField(item, "title");
+      const id = item?.id != null ? String(item.id) : "";
+      const source = pickSyncField(item, "source");
+      const idText = id ? ` <span class="markdown-sync-id">${escapeSyncHtml(id)}</span>` : "";
+      const sourceText =
+        source != null && String(source).trim() !== ""
+          ? ` <span class="markdown-sync-id">source: ${escapeSyncHtml(String(source))}</span>`
+          : "";
+      return `<li>${escapeSyncHtml(title != null ? String(title) : "(無題)")}${idText}${sourceText}</li>`;
+    })
+    .join("");
+  const more =
+    items.length > previewCount
+      ? `<li class="empty-state">ほか ${items.length - previewCount} 件</li>`
+      : "";
+  return `
+    <div class="markdown-sync-group">
+      <h3>保護対象（${items.length}）</h3>
+      <p class="markdown-sync-protected-note">これらは変更しません（md-import 以外 / source未設定）。</p>
+      <ul class="markdown-sync-sample-list">${cards}${more}</ul>
+    </div>
+  `;
+}
+
+// item から指定キーを取り出す。toCreate は { id, data } 形なので data 優先で見る。
+function pickSyncField(item, key) {
+  if (item && typeof item === "object") {
+    if (item.data && typeof item.data === "object" && item.data[key] != null) {
+      return item.data[key];
+    }
+    if (item[key] != null) {
+      return item[key];
+    }
+  }
+  return null;
 }
 
 // 削除候補は危険操作のため、未実装である旨の注意文を必ず添える。
