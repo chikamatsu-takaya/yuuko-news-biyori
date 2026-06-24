@@ -1,9 +1,9 @@
 # 進捗管理画面 Firestore 連携 調査・設計メモ
 
-> 本メモは **調査・方針整理** を主とします（§1〜§15）。§16 は `task-management/` 配下に閉じた最小 POC（読み取り・表示・status 更新・タスク追加・物理削除）の**実施結果記録**で、本体アプリ（Tauri / Rust / Next.js）には影響しません。
+> 本メモは **調査・方針整理** を主とします（§1〜§15、§17）。§16 は `task-management/` 配下に閉じた最小 POC（読み取り・表示・status 更新・タスク追加・物理削除）の**実施結果記録**で、本体アプリ（Tauri / Rust / Next.js）には影響しません。§17 は Markdown 全件インポート / 再同期の**設計方針（実装未着手）**です。
 > 既存の進捗管理画面（`task-management/`）の利用感・起動方法・本体アプリ（Tauri / Rust / Next.js）には影響を与えない前提で整理しています。
 
-- ステータス: 調査・設計＋最小 POC 実施済み（§16）。本格運用・書き込み一般化は未着手
+- ステータス: 調査・設計＋最小 POC 実施済み（§16）。Markdown 再同期は設計のみ（§17・実装未着手）。本格運用・書き込み一般化は未着手
 - 作成日: 2026-06-23
 - 対象: 進捗管理画面（`task-management/`）のデータ参照先を Markdown → Firestore へ段階移行する方針
 - 関連ファイル:
@@ -30,6 +30,7 @@
 14. Firestore 読み取りPOC方針
 15. Firestore 読み取りPOC用サンプルデータ案
 16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
+17. Markdown全件インポート / 再同期方針
 
 ---
 
@@ -218,6 +219,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-23: §15「Firestore 読み取りPOC用サンプルデータ案」を追記（`tasks` コレクション・推奨ドキュメントID・doc1〜doc4 のフィールド/型/値・Console 手入力の注意点・確認できること/できないこと）。
 - 2026-06-23: §16「Firestore POC 実施結果（読み取り・表示・status更新）」を追記。読み取り3件取得・`?source=firestore` 切替・`firestoreToBoardModel()` 変換表示・status 更新（`updateDoc` で `status`/`completed`/`completedAt`/`updatedAt`/`updatedBy` 限定、Done 連動、再取得再描画）を実施結果として記録。未実装（追加・編集・削除・archived 切替・全件インポート・onSnapshot・差分・キャッシュ・認証・権限UI・本番 Rules）と次候補（追加 POC / archived 非表示 / 全件インポート / Rules・認証 / Firestore 正運用）を明記。冒頭ステータスを「調査・設計＋最小 POC 実施済み」に更新。
 - 2026-06-24: §16 にタスク追加POC（§16.6）と物理削除POC（§16.7）の結果を追記。追加は `addDoc` で最小項目入力＋初期値補完（archived=false/各種 null・[]、createdAt/updatedAt=serverTimestamp、updatedBy="manual-poc"、Done 連動、order=既存最大+10→40 を確認）。削除は方針を `archived=true` 論理削除から **`deleteDoc` 物理削除**へ変更（confirm 必須・Firestore 表示時のみ・再取得再描画）。§16.8 に実装済み/当面実装しない（archived 切替）/未実装の整理、§16.9 に次候補（全件インポート / 本文編集 / Rules・認証 / Firestore 正運用 / order 採番改善）を記載。見出し・目次を「…追加・物理削除」へ更新。
+- 2026-06-24: §17「Markdown全件インポート / 再同期方針」を追記（実装はせず方針整理のみ）。一度きりでなく繰り返し可能な宣言的同期として設計。ローカルスクリプト方式・dry-run 既定/`--apply`/`--delete-missing`、決定的 ID（`category+subcategory+title` 由来・将来 `id:` 明示案）、`source="md-import"`/`"manual-poc"` 区別、12 フィールド比較（メタ・タイムスタンプは比較対象外）、物理削除は `source="md-import"` 限定＋明示オプション必須、status/completed/`completedAt` 保持方針、order/sourceLine 採番、実装ステップ・未決事項・推奨手順を記載。目次・冒頭注記を更新。
 
 ---
 
@@ -745,3 +747,174 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 3. Firestore Rules / 認証方針の検討。
 4. Firestore を正とする運用への切り替え検討。
 5. `order` 採番方式の改善検討。
+
+---
+
+## 17. Markdown全件インポート / 再同期方針
+
+> `developタスクチェックリスト.md` を Firestore へ反映する仕組みの設計方針。**一度きりの初期投入ではなく、タスクを洗い直して何度でも再反映できる「繰り返し同期」**として設計する。本章は方針整理のみで、実装・スクリプト追加・接続処理は含まない（実装は別途承認のうえ独立 PR を想定）。
+
+### 17.1 目的
+- `developタスクチェックリスト.md`（現在の正本）の内容を Firestore `tasks` に反映する。
+- 後日 Markdown を更新したら、**再実行で Firestore を最新の Markdown 状態へ寄せ直せる**ようにする。
+- Firestore 上の既存データと**照合**し、追加・更新・削除を**安全に**行う。
+- 画面操作（§16 の手動追加・更新・削除）と**衝突せず共存**できるようにする。
+
+### 17.2 前提
+- 既存の `parseMarkdown`（`task-dashboard.js`）と同等の解析ロジックを利用する（§2 / §13.1 の書式に準拠）。
+  - ただし `task-dashboard.js` はブラウザ用クラシックスクリプトのため、**Node 実行用に解析ロジックを切り出す**（§17.12）。
+- Firestore のフィールド定義は §6 / §13.2 / §16 を踏襲する。
+- Web 用 `firebaseConfig` は公開識別子（§9）。**全件書き込みには権限が要るため、実行時の認可方式は §17.13 の未決事項**とする。
+- 物理削除方針（§16.7）を踏襲するが、**同期時の削除は明示オプション必須**（§17.8）。
+
+### 17.3 繰り返し同期の考え方（冪等性）
+- **同じ Markdown を2回流したら結果は同じ**（冪等）になることを最優先方針とする。
+- そのために、**Markdown タスク → Firestore ドキュメントの対応は「決定的 ID」で固定**する（§17.5）。自動 ID を使うと再実行で重複登録になるため使わない。
+- 同期は次の純粋な手順に分解する:
+  1. Markdown を解析して**期待状態（desired state）**を作る。
+  2. Firestore の**現在状態（current state）**を読む。
+  3. 2つを**ID で突き合わせ**て差分（追加 / 更新 / 削除候補 / 変更なし）に分類する（§17.7）。
+  4. dry-run なら表示のみ、apply なら反映する（§17.4）。
+- 「Markdown を正にした宣言的同期（desired state を Firestore へ収束させる）」という位置づけ。§5 の「移行後は Firestore を正」とは段階が異なり、**本章は Markdown を正とする再同期**である点に注意（最終的な主従は §11 / §17.13 の未決事項）。
+
+### 17.4 インポート方式 / dry-run・apply
+- **画面ボタンではなくローカルスクリプト方式を基本案**とする。
+  - 理由: 全件反映は誤操作リスクが大きい／開発者が明示実行する方が安全／dry-run と apply を分けやすい／後で CI・自動化へ寄せやすい。
+- 想定スクリプト名（どちらか。再同期の意味が明確な後者を推奨）:
+  - `task-management/import-markdown-to-firestore.mjs`
+  - **`task-management/sync-markdown-to-firestore.mjs`（推奨）**
+- **dry-run を既定**とし、`--apply` を付けたときだけ書き込む（事故防止のため「何もフラグが無ければ書かない」設計を推奨）。
+
+| コマンド例 | 動作 |
+|---|---|
+| `node task-management/sync-markdown-to-firestore.mjs --dry-run` | 書き込まず差分サマリーのみ表示（既定挙動と同じ） |
+| `node task-management/sync-markdown-to-firestore.mjs --apply` | 追加・更新を反映（削除はしない） |
+| `node task-management/sync-markdown-to-firestore.mjs --apply --delete-missing` | 追加・更新に加え、削除候補（条件を満たすもの）も物理削除 |
+
+- **dry-run の表示項目**:
+  - 追加予定件数 / 更新予定件数 / 削除候補件数 / 変更なし件数 / エラー・警告件数。
+  - 代表的な差分内容（例: タスク名と「どのフィールドが変わるか」を数件）。
+- 出力は人が読めるサマリー＋必要なら `--json` で機械可読出力も将来検討。
+
+### 17.5 ドキュメントID方針
+- **自動 ID ではなく Markdown 由来の決定的 ID** を基本案とする（再実行で同一タスクが同一 ID になり冪等になる）。
+- 生成元: **`category + subcategory + title`**（§13.5 の id 設計を踏襲）。
+- 日本語タイトル対策: そのままでは ID に使いにくいため、**正規化文字列の安定ハッシュ（例: SHA-1 等の先頭数桁）＋人間可読プレフィックスの slug** を基本案とする。
+  - 例: `md-<asciiSlug or hash>`（衝突回避と可読性の折衷）。ハッシュのみだと可読性が落ちるため、可能な範囲で slug を併用。
+- **検討事項（未決を含む）**:
+  - **タイトル変更時に別 ID 扱いになる問題**: `title` を ID 構成要素にすると、タイトル修正＝「旧 ID 削除＋新 ID 追加」に見える。初期段階は許容（削除候補は明示オプションでのみ実削除）だが、頻繁な改題には弱い。
+  - **将来 `id:` を Markdown 側に持たせる案**: Markdown のタスク行に `id: <安定キー>` を明示できるようにし、タイトル変更に強い不変キーへ移行する（推奨の最終形）。導入したらそれを最優先で ID に使う。
+  - **初期段階**: まずは `category/subcategory/title` 由来 ID でよい（小規模・洗い直し前提）。
+  - **衝突時の扱い**: 同一 ID が生成された場合は**後勝ちにせず警告して停止/スキップ**し、Markdown 側の重複（同カテゴリ・同タイトル）を是正してもらう方針を基本とする。
+
+### 17.6 source フィールド方針
+- Firestore ドキュメントに `source` を追加し、**生成元を区別**する。
+  - `source: "md-import"` … Markdown 同期で作成・更新したタスク。
+  - `source: "manual-poc"` … 画面から手動追加したタスク（§16.6 で既に `updatedBy="manual-poc"` を付与。`source` も同値で付ける方針）。
+- 目的:
+  - Markdown 同期タスクと手動追加タスクを区別する。
+  - **削除候補は `source="md-import"` のものだけ**に限定する（§17.8）。
+  - 手動追加タスク・`source` 不明のタスクを**同期で勝手に消さない**。
+- 互換性: 既存ドキュメントには `source` が無い場合がある。**`source` 未設定は「不明」とみなし削除対象から除外**する（安全側）。同期 apply 時に `md-import` 該当分へ `source` を補完するかは §17.13 の未決事項。
+
+### 17.7 差分判定方針
+- Markdown 解析結果（desired）と Firestore 現在データ（current）を**決定的 ID で突き合わせ**、次に分類する。
+
+| 区分 | 条件 |
+|---|---|
+| 追加 | Markdown にあり、Firestore に無い ID |
+| 更新 | 両方にあり、**比較対象フィールド**のいずれかが異なる |
+| 削除候補 | Firestore にあり、Markdown に無い ID（さらに §17.8 の条件で実削除可否を判定） |
+| 変更なし | 両方にあり、比較対象フィールドがすべて一致 |
+
+- **比較対象フィールド**: `title` / `category` / `subcategory` / `priority` / `status` / `owner` / `branchName` / `issuePr` / `doneWhen` / `notes` / `order` / `sourceLine`。
+- **比較から除外**: `createdAt` / `updatedAt` / `updatedBy` / `completedAt` / `archived` / `source`（メタ・運用フィールドは差分判定に使わない。`completedAt` の扱いは §17.9）。
+- 比較の正規化メモ:
+  - `doneWhen` / `notes` は配列。**順序込みの完全一致**を基本（順序差も「更新」とみなす）。空配列 `[]` と未設定はそろえて扱う。
+  - `subcategory` の `null` と空文字は同一視する（§16.6 の追加方針に合わせる）。
+  - 文字列は trim 後比較。`branchName` のバッククォート除去など既存解析の正規化を踏襲。
+
+### 17.8 削除方針（物理削除・要明示）
+- 削除は §16.7 の**物理削除（`deleteDoc`）**を踏襲する（`archived=true` は使わない）。
+- 同期での削除は危険なため、安全策を必須とする:
+  - **dry-run で削除候補を必ず表示**（件数＋代表タスク名）。
+  - **apply でも `--delete-missing` を付けたときだけ**実削除する。
+  - **削除対象は `source="md-import"` のものだけ**。
+  - `source="manual-poc"` / `source` 不明は**削除しない**（手動データ保護）。
+  - 削除前に**件数を表示**し、可能なら最終確認（件数しきい値超過時は中断する等のガードも将来検討）。
+- 既定（`--delete-missing` なし）では、Markdown から消えたタスクも**Firestore に残す**（消すのは明示時のみ）。
+
+### 17.9 status / completed / completedAt 方針
+- `[x]` / `[ ]` と `Status` の関係（§13.5 を踏襲）:
+  - `[x]` → `status=Done` / `completed=true`。
+  - `[ ]` かつ `Status` あり → その `Status` を使う。
+  - `[ ]` かつ `Status` なし → `status=Todo`。
+  - `status=Done` → `completed=true` / `status!==Done` → `completed=false`（completed は status からの派生）。
+  - `[ ]` で `Status: Done` のような矛盾は**チェック状態を優先**（§13.5）。
+- `completedAt` の扱い（**完了日時を同期で壊さない**ことを重視）:
+  - **初回インポート**: 正確な完了日時が不明なため `null` を基本。
+  - **apply 時に新規 Done として追加**する場合: 真の完了時刻ではないため **`null` を基本案**とする（`serverTimestamp()` だと「同期実行時刻＝完了時刻」になり誤りになりやすい。要決定 → §17.13）。
+  - **既存 Firestore に `completedAt` がある場合**: 同期で**不要に上書きしない**（既存値を保持）。status が Done のまま、または手動更新で入った `completedAt` を同期が消さない方針。
+  - Done→非Done に変わった場合のみ `completedAt=null` に戻す（§16.3 の更新ルールと整合）。
+
+### 17.10 order / sourceLine 方針
+- `sourceLine` = Markdown 上の行番号（移行・突合の参考値。表示順の正ではない）。
+- `order` = 表示順の正。
+- **初期同期**: Markdown 出現順で `10, 20, 30...` と**間隔を空けて採番**（§13.5）。
+- **再同期で並びが変わった場合**: `order` を更新するか否かは方針を分ける。
+  - 案A（**Markdown 出現順を正にする**・推奨）: 再同期で Markdown 順に合わせて `order` を振り直す。差分判定で `order` を比較対象に含めているため「更新」として反映される。
+  - 案B（**極力 order を動かさない**）: 既存 ID の `order` は保持し、新規のみ末尾に採番。並び替えは別運用。
+  - → どちらを既定にするかは §17.13 の未決事項（**案A を仮の既定**とする）。
+- **手動追加タスクとの競合回避**:
+  - 手動追加（§16.6）は「既存最大 order +10」で採番されるため、`md-import` の連番（10,20,30…）と**値が重なり得る**。
+  - 緩和案: 同期側の `order` レンジと手動側のレンジを**分離**（例: md-import は 1000 番台から、手動は別レンジ）するか、`order` の一意性は要求せず**`order` 昇順＋`source`/`id` を二次キー**にして安定ソートする。初期は後者（厳密な一意性を求めない）で十分。
+
+### 17.11 同期で書き込むフィールドまとめ（desired → Firestore）
+- Markdown 由来: `title` / `category` / `subcategory` / `priority` / `status` / `owner` / `branchName` / `issuePr` / `doneWhen` / `notes` / `order` / `sourceLine` / `completed`（status 派生）。
+- 同期が付与・管理: `source="md-import"` / `updatedBy="md-import"` / `updatedAt=serverTimestamp()`（更新・追加時）/ `createdAt=serverTimestamp()`（新規追加時のみ）/ `archived=false`。
+- 慎重に扱う: `completedAt`（§17.9 の保持方針）。
+- 比較対象外（§17.7）なので、これらメタ更新は「変更なし」を「更新」に化けさせないよう、**差分判定とは独立に**付与する。
+
+### 17.12 実装ステップ案
+1. **解析ロジックの切り出し**: `task-dashboard.js` の Markdown 解析を、ブラウザ非依存の純関数として `task-management/markdown-task-parser.mjs` に抽出（既存挙動を変えない）。`task-dashboard.js` からも将来共有できる形が理想だが、まずは複製でも可（重複は §17.13 に明記して管理）。
+2. **desired 構築**: パーサ出力を Firestore ドキュメント形（§17.11）＋決定的 ID（§17.5）へ変換。
+3. **current 取得**: `tasks` 全件読み取り（archived 含む。少数前提で全件でよい）。
+4. **差分計算**: ID 突き合わせ → 追加 / 更新 / 削除候補 / 変更なし（§17.7）。
+5. **dry-run 出力**: 件数サマリー＋代表差分（§17.4）。
+6. **apply**: `--apply` で追加・更新を `setDoc`（決定的 ID 指定）/ `updateDoc`。`--delete-missing` で条件付き物理削除（§17.8）。
+7. **冪等性テスト**: 同じ Markdown で2回 apply → 2回目が「変更なし（削除0・追加0・更新0）」になることを確認。
+
+### 17.13 未決事項
+- **実行時の認可方式**: 全件書き込みの権限をどう与えるか。
+  - 案1: 期限付きテスト Rules 期間に Web SDK で実行（§9）。
+  - 案2: Admin SDK＋サービスアカウント鍵を**ローカル Secrets** で実行（鍵はコミット禁止・`.gitignore`）。スクリプトは Node なので Admin SDK と相性が良いが、鍵管理コストが増える。
+  - → どちらを採るか要決定（config 再利用方針 §17.14 と連動）。
+- **新規 Done 追加時の `completedAt`**: `null` か `serverTimestamp()` か（§17.9）。仮既定は `null`。
+- **再同期時の `order` 振り直し**: 案A（Markdown 順に合わせる）/ 案B（極力動かさない）（§17.10）。仮既定は案A。
+- **`source` 未設定の既存ドキュメント**: 同期 apply 時に `md-import` 該当分へ `source` を補完するか、放置するか（§17.6）。
+- **Markdown 側 `id:` 明示の導入時期**: タイトル変更耐性のための不変キーをいつ入れるか（§17.5）。
+- **解析ロジックの共有 vs 複製**: `task-dashboard.js` とパーサを共通化するか、当面複製して二重保守を許容するか（§17.12）。
+- **Firestore を最終的に正にする主従**: 本章は「Markdown を正とする再同期」。§5 / §11 の「最終的に Firestore を正」とどう接続するか（同期は移行期間限定の道具か、恒久運用か）。
+
+### 17.14 実装ファイル方針
+- **追加候補**:
+  - `task-management/sync-markdown-to-firestore.mjs`（推奨名。同期スクリプト本体）。
+  - 必要なら `task-management/markdown-task-parser.mjs`（解析ロジック切り出し）。
+- **config 方針**:
+  - Web SDK 方式なら `task-management/firebase-config.js` を**再利用**（読み取り専用 import。`firebase-config.js` 自体は変更しない＝ `skip-worktree` 維持）。
+  - Admin SDK 方式なら**別 config（サービスアカウント鍵）をローカル Secrets で**読み込み、リポジトリに含めない（§9）。どちらにするかは §17.13。
+- **変更しない方針**:
+  - `task-management/firebase-config.js`
+  - `task-management/index.html` / `serve-dashboard.mjs`
+  - `package.json` / `pnpm-lock.yaml`
+  - `src/` / `src-tauri/` / 本体アプリ側
+- npm 依存追加の要否（Admin SDK 採用時のみ発生し得る）は、採用方式決定後に §15 の依存追加ルールへ照らして別途判断する。
+
+### 17.15 次に実装する場合の推奨手順
+1. **認可方式を先に決める**（§17.13）。Web SDK＋期限付き Rules か、Admin SDK＋ローカル鍵か。これでスクリプトの土台が決まる。
+2. `markdown-task-parser.mjs` を切り出し、既存表示と**解析結果が一致**することを確認（回帰防止）。
+3. `sync-markdown-to-firestore.mjs` の **dry-run を先に実装**（書き込み無し）。差分サマリーを安定させる。
+4. 既存 Firestore（POC データ）に対して dry-run し、件数・代表差分が直感と合うか確認。
+5. `--apply`（追加・更新のみ、削除なし）を実装し、**冪等性テスト**（2回目が「変更なし」）を通す。
+6. `--delete-missing`（`source="md-import"` 限定・物理削除）を最後に実装し、dry-run の削除候補と一致することを確認。
+7. 結果を本メモ §17 に追記（実施結果）し、未決事項を更新する。
