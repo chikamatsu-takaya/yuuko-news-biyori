@@ -13,13 +13,18 @@
 // - 決定的IDで Markdown側（desired）と Firestore側（current）を突き合わせる
 // - 追加予定 / 更新予定 / 変更なし / 削除候補 / 保護対象 / 警告 を dry-run 表示する
 //
+// 第3段階（--apply --limit 1 のみ許可）でやること:
+// - 内部で compare を実行し、toCreate の「先頭1件だけ」を Firestore に新規作成する（テスト追加）。
+// - 既存ドキュメントは上書き・更新しない（POST + documentId、存在時はスキップ）。
+//
 // この段階でやらないこと（重要・安全側）:
-// - Firestore への書き込み（追加・更新・削除）/ --apply / --delete-missing
-// - 書き込み API（setDoc / updateDoc / deleteDoc / addDoc / serverTimestamp）の import
+// - 全件 apply / update / delete / --delete-missing
+// - --apply --limit 1 以外での書き込み（それ以外は停止する）
+// - 既存3件・protectedCurrentOnly・source未設定/manual-poc データの変更
 // - 画面側ファイル・package.json / pnpm-lock.yaml の変更
 //
-// Firestore 読み取りは firestore-sync-source.mjs（REST・読み取り専用）に分離する。
-// --compare-firestore が無ければ Firestore へは一切接続しない。
+// Firestore アクセスは firestore-sync-source.mjs（REST・読み取り＋単件作成のみ）に分離する。
+// --compare-firestore も --apply も無ければ Firestore へは一切接続しない。
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -81,6 +86,21 @@ async function main() {
 
   const parsed = parseMarkdownTasks(markdown);
   const { items, warnings } = buildFirestoreItems(parsed);
+
+  // --apply 指定時は書き込み経路へ。第3段階の安全制約として --apply --limit 1 のみ許可する。
+  if (options.apply) {
+    if (options.limit !== 1) {
+      console.error(
+        "[markdown-sync] 第3段階では --apply --limit 1 のみ許可しています。" +
+          `（指定された limit: ${options.limit ?? "未指定"}）`,
+      );
+      console.error("  全件 apply / 2件以上の apply はまだ実装していません（安全のため停止）。");
+      process.exitCode = 1;
+      return;
+    }
+    await runApplyTest(options, items);
+    return;
+  }
 
   // --compare-firestore 指定時のみ Firestore を読み取り、差分比較 dry-run を行う。
   if (options.compareFirestore) {
@@ -156,13 +176,129 @@ async function runCompare(options, items, warnings) {
 }
 
 /**
+ * 第3段階: toCreate の先頭1件だけを Firestore へ新規作成するテスト追加（--apply --limit 1）。
+ * - 内部で compare を実行し、書き込み対象を toCreate[0] に限定する。
+ * - 既存ドキュメント・protectedCurrentOnly・source未設定/manual-poc には一切触れない。
+ */
+async function runApplyTest(options, items) {
+  // 読み取り＋単件作成モジュールを動的 import する（apply 指定時のみ Firestore へ接続）。
+  const { fetchCurrentFirestoreTasks, createFirestoreTask } = await import(
+    "./firestore-sync-source.mjs"
+  );
+
+  // 1. Firestore current を取得し、2. 差分から toCreate を求める（書き込み対象の選定）。
+  let currentDocs;
+  try {
+    currentDocs = await fetchCurrentFirestoreTasks();
+  } catch (error) {
+    console.error(`[markdown-sync] Firestore 読み取りに失敗しました: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const diff = compareDesiredAndCurrent(items, currentDocs);
+  const toCreate = diff.toCreate;
+
+  // 実行前サマリー（書き込み対象を明示する）。
+  console.log("Markdown sync apply test");
+  console.log("mode: apply");
+  console.log(`limit: ${options.limit}`);
+  console.log(`toCreate available: ${toCreate.length}`);
+
+  const result = { mode: "apply-test", limit: options.limit, created: [], skipped: [], errors: [] };
+
+  // toCreate が0件なら何もしない（安全に終了）。
+  if (toCreate.length === 0) {
+    console.log("target: (なし)");
+    console.log("");
+    console.log("created: 0（追加対象がありません）");
+    finishApply(options, result);
+    return;
+  }
+
+  // 3. 書き込み対象は toCreate の先頭1件に限定する。
+  const target = toCreate[0];
+  console.log("target:");
+  console.log(`- id: ${target.id}`);
+  console.log(`  title: ${target.data.title}`);
+  console.log(`  category: ${target.data.category}`);
+  console.log(`  status: ${target.data.status}`);
+  console.log(`  order: ${target.data.order}`);
+
+  // createdAt / updatedAt を付与（timestampValue として書き込む）。
+  // 注: completedAt は §17 方針どおり null のまま（item.data に含まれる）。
+  const now = new Date().toISOString();
+  const writeData = { ...target.data, createdAt: now, updatedAt: now };
+  const timestampFields = new Set(["createdAt", "updatedAt"]);
+
+  // 4. 単件作成（既存IDなら上書きせずスキップ）。
+  try {
+    const res = await createFirestoreTask(target.id, writeData, timestampFields);
+    if (res.ok) {
+      result.created.push({
+        id: target.id,
+        title: target.data.title,
+        category: target.data.category,
+        status: target.data.status,
+      });
+      console.log("");
+      console.log("created: 1");
+      console.log(`id: ${target.id}`);
+    } else if (res.alreadyExists) {
+      // 対象IDが既に存在 → 上書きしない方針のためスキップ扱い。
+      result.skipped.push({ id: target.id, title: target.data.title, reason: "already exists" });
+      console.log("");
+      console.log("created: 0（既に存在するためスキップしました）");
+      console.log(`id: ${target.id}`);
+    } else {
+      result.errors.push({ id: target.id, status: res.status, message: res.body });
+      console.error("");
+      console.error(`created: 0（作成に失敗しました HTTP ${res.status}）`);
+      console.error(`id: ${target.id}`);
+      console.error(`error: ${res.body}`);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    result.errors.push({ id: target.id, status: null, message: error.message });
+    console.error("");
+    console.error(`created: 0（作成中に例外が発生しました）`);
+    console.error(`error: ${error.message}`);
+    process.exitCode = 1;
+  }
+
+  finishApply(options, result);
+}
+
+// apply 結果を必要に応じて JSON 出力する（共通処理）。
+function finishApply(options, result) {
+  if (options.out) {
+    const outAbs = resolve(REPO_ROOT, options.out);
+    writeJsonOutput(outAbs, result);
+    console.log("");
+    console.log(`JSON を書き出しました: ${options.out}`);
+  }
+}
+
+/**
+ * --limit の値を数値へ変換する（不正値は null）。
+ */
+function parseLimit(raw) {
+  if (raw == null) {
+    return null;
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) ? num : null;
+}
+
+/**
  * コマンドライン引数を解釈する。
- * 対応: --dry-run（第1段階では常に dry-run なのでフラグ受理のみ） / --input <path> / --out <path>
+ * 対応: --dry-run / --compare-firestore / --apply / --limit <n> / --input <path> / --out <path>
  */
 function parseArgs(argv) {
   const options = {
     dryRun: false,
     compareFirestore: false,
+    apply: false,
+    limit: null,
     input: DEFAULT_INPUT,
     out: null,
   };
@@ -173,6 +309,13 @@ function parseArgs(argv) {
       options.dryRun = true;
     } else if (arg === "--compare-firestore") {
       options.compareFirestore = true;
+    } else if (arg === "--apply") {
+      options.apply = true;
+    } else if (arg === "--limit") {
+      options.limit = parseLimit(argv[i + 1]);
+      i += 1;
+    } else if (arg.startsWith("--limit=")) {
+      options.limit = parseLimit(arg.slice("--limit=".length));
     } else if (arg === "--input") {
       options.input = argv[i + 1] ?? options.input;
       i += 1;
