@@ -685,9 +685,27 @@ details[open] > summary::after {
 }
 
 .markdown-sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin: 12px 0 0;
   color: var(--muted);
   font-size: 0.84rem;
+}
+
+.markdown-sync-status.is-error {
+  color: var(--red);
+  font-weight: 700;
+}
+
+/* 読み込み失敗時に併記する開発者向け生成コマンド。横スクロールで折り返さず見せる。 */
+.markdown-sync-command {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 0.78rem;
 }
 
 .markdown-sync-details {

@@ -28,6 +28,14 @@ const markdownSyncElements = {
   compareButton: null,
 };
 
+// 事前生成済み compare 結果JSONの取得パス（画面URL基準）。
+// 画面からは Node スクリプトを実行せず、開発者が手動で --out 生成した JSON を読むだけ。
+const MARKDOWN_SYNC_COMPARE_JSON_PATH = "tmp/markdown-sync-compare-dry-run.json";
+
+// JSON が無い場合に案内する開発者向け生成コマンド（読み込み失敗時に表示）。
+const MARKDOWN_SYNC_GEN_COMMAND =
+  "node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestore --out task-management/tmp/markdown-sync-compare-dry-run.json";
+
 // compare の分類定義（表示順・ラベル・危険フラグ）。件数カードと詳細で共通利用する。
 const MARKDOWN_SYNC_CATEGORIES = [
   { key: "toCreate", label: "追加予定" },
@@ -90,15 +98,49 @@ function setupMarkdownSyncPanel() {
   markdownSyncElements.status = section.querySelector("#markdownSyncStatus");
   markdownSyncElements.compareButton = section.querySelector("#markdownSyncCompareButton");
 
-  // Compare確認ボタンは「読み取り専用の再描画」だけ（Firestoreへは接続しない）。
-  // イベント配線の土台として置くが、書き込みは絶対に行わない。
+  // Compare確認ボタンは「事前生成済みJSONの読み取り表示」だけ（Firestoreへは接続しない）。
+  // Node スクリプトの実行も書き込みも行わない（既存JSONを fetch して表示するのみ）。
   markdownSyncElements.compareButton.addEventListener("click", () => {
-    const data = lastMarkdownCompareResult ?? buildMockMarkdownCompareResult();
-    renderMarkdownSyncPreview(data);
-    setMarkdownSyncStatus(
-      "プレビューを再表示しました（現在はモック表示・Firestore未接続・書き込みなし）。",
-    );
+    void loadMarkdownCompareJson();
   });
+}
+
+/**
+ * 事前生成済みの compare 結果JSONを読み込み、プレビューへ反映する（読み取りのみ）。
+ * - 画面からは Node スクリプトを実行しない。開発者が --out で生成した JSON を fetch するだけ。
+ * - Firestore への接続・書き込みは一切しない。
+ * - 読み込み中 / 成功 / 失敗の状態を補助メッセージで表示する。
+ */
+async function loadMarkdownCompareJson() {
+  const button = markdownSyncElements.compareButton;
+  if (button) {
+    button.disabled = true;
+  }
+  setMarkdownSyncStatus("compare結果JSONを読み込み中...");
+
+  try {
+    // 静的サーバーが配信する JSON を読むだけ。キャッシュ回避にクエリを付ける。
+    const response = await fetch(`${MARKDOWN_SYNC_COMPARE_JSON_PATH}?t=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const raw = await response.json();
+    const data = normalizeMarkdownCompareResult(raw);
+    renderMarkdownSyncPreview(data);
+    setMarkdownSyncStatus("compare結果JSONを読み込みました（読み込み成功・Firestore未接続）。");
+  } catch (error) {
+    console.error("[Markdown sync] failed to load compare JSON", error);
+    setMarkdownSyncStatus(
+      "compare結果JSONを読み込めませんでした。先にNodeスクリプトで --out を生成してください。",
+      { isError: true, commandHint: MARKDOWN_SYNC_GEN_COMMAND },
+    );
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
 }
 
 /**
@@ -178,6 +220,30 @@ function buildMockMarkdownCompareResult() {
     protectedCurrentOnly,
     warnings: [],
   };
+}
+
+/**
+ * Nodeスクリプトの --out JSON を画面表示用の形へ正規化する。
+ * - { diff: {...} } でラップされている場合は diff を取り出す（compare-dry-run の出力形）。
+ *   ただし warnings は --out では top-level に出るため、diff に無ければ top から拾う。
+ * - トップレベルに配列がある場合はそのまま使う。
+ * - 存在しない分類は空配列にする。
+ * 返却: { toCreate, toUpdate, toDeleteCandidates, unchanged, protectedCurrentOnly, warnings }
+ */
+function normalizeMarkdownCompareResult(raw) {
+  const top = raw && typeof raw === "object" ? raw : {};
+  const diff = top.diff && typeof top.diff === "object" ? top.diff : top;
+
+  const merged = {
+    toCreate: diff.toCreate,
+    toUpdate: diff.toUpdate,
+    toDeleteCandidates: diff.toDeleteCandidates,
+    unchanged: diff.unchanged,
+    protectedCurrentOnly: diff.protectedCurrentOnly,
+    // diff に warnings が無ければ top-level（--out の出力形）から拾う。
+    warnings: diff.warnings ?? top.warnings,
+  };
+  return normalizeCompareResult(merged);
 }
 
 // compare 結果の各分類を必ず配列へ正規化する（未指定は空配列）。
@@ -260,18 +326,29 @@ function renderSyncSampleList(items) {
   return `<ul class="markdown-sync-sample-list">${lines}${more}</ul>`;
 }
 
-// 補助メッセージ表示（Firestore未接続である旨など）。
-function setMarkdownSyncStatus(message) {
-  if (!markdownSyncElements.status) {
+// 補助メッセージ表示（読み込み中 / 成功 / 失敗）。
+// options.isError でエラー強調、options.commandHint で開発者向け生成コマンドを併記する。
+function setMarkdownSyncStatus(message, options = {}) {
+  const el = markdownSyncElements.status;
+  if (!el) {
     return;
   }
   if (!message) {
-    markdownSyncElements.status.hidden = true;
-    markdownSyncElements.status.textContent = "";
+    el.hidden = true;
+    el.innerHTML = "";
+    el.classList.remove("is-error");
     return;
   }
-  markdownSyncElements.status.hidden = false;
-  markdownSyncElements.status.textContent = message;
+  el.hidden = false;
+  el.classList.toggle("is-error", options.isError === true);
+
+  const parts = [`<span>${escapeSyncHtml(message)}</span>`];
+  if (options.commandHint) {
+    parts.push(
+      `<code class="markdown-sync-command">${escapeSyncHtml(options.commandHint)}</code>`,
+    );
+  }
+  el.innerHTML = parts.join("");
 }
 
 // task-dashboard.js の escapeHtml と独立に持つ（このファイル単体でも完結させるため）。
