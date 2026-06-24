@@ -87,18 +87,71 @@ async function main() {
   const parsed = parseMarkdownTasks(markdown);
   const { items, warnings } = buildFirestoreItems(parsed);
 
-  // --apply 指定時は書き込み経路へ。第3段階の安全制約として --apply --limit 1 のみ許可する。
+  // --apply 指定時は書き込み経路へ。第4段階の安全制約:
+  // - 許可するのは create-only（追加のみ）だけ。update / delete は未実装。
+  // - --delete-missing が来たら停止（削除はまだ実装しない）。
+  // - 件数指定: --create-only --limit N（N は 1..10）。
+  // - 全件追加: --create-only --all（誤実行防止のため --all 明示が必須。--limit とは併用不可）。
+  // - 後方互換として --apply --limit 1（create-only 省略）も追加のみとして許可する。
   if (options.apply) {
-    if (options.limit !== 1) {
-      console.error(
-        "[markdown-sync] 第3段階では --apply --limit 1 のみ許可しています。" +
-          `（指定された limit: ${options.limit ?? "未指定"}）`,
-      );
-      console.error("  全件 apply / 2件以上の apply はまだ実装していません（安全のため停止）。");
+    // 削除系オプションは今段階では一切受け付けない（安全のため即停止）。
+    if (options.deleteMissing) {
+      console.error("[markdown-sync] --delete-missing はまだ実装していません（安全のため停止）。");
       process.exitCode = 1;
       return;
     }
-    await runApplyTest(options, items);
+
+    // --all と --limit の同時指定は意図が曖昧なため停止する。
+    if (options.all && options.limit != null) {
+      console.error(
+        "[markdown-sync] --all と --limit は同時指定できません（どちらか一方にしてください）。",
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    // 全件追加（--all）は create-only 明示が必須。
+    if (options.all && !options.createOnly) {
+      console.error("[markdown-sync] --all は --create-only と併用してください（安全のため停止）。");
+      process.exitCode = 1;
+      return;
+    }
+
+    // create-only 明示が無い場合は、後方互換の --apply --limit 1 のみ許可する。
+    if (!options.createOnly) {
+      if (options.limit !== 1) {
+        console.error(
+          "[markdown-sync] --apply は create-only のみ対応です。" +
+            `（指定された limit: ${options.limit ?? "未指定"}）`,
+        );
+        console.error(
+          "  追加は次の形で実行してください: --apply --create-only --limit N （N は 1〜10）" +
+            " または --apply --create-only --all",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        "[markdown-sync] ヒント: 明示性のため `--apply --create-only --limit 1` の利用を推奨します。",
+      );
+    }
+
+    // --all 以外は limit 必須（1 以上 10 以下のみ許可。未指定・範囲外は停止）。
+    if (!options.all) {
+      if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10) {
+        console.error(
+          "[markdown-sync] create-only の --limit は 1 以上 10 以下で指定してください。" +
+            `（指定された limit: ${options.limit ?? "未指定"}）`,
+        );
+        console.error(
+          "  全件を追加する場合は --create-only --all を使ってください（更新・削除は未実装）。",
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+
+    await runApplyCreateOnly(options, items);
     return;
   }
 
@@ -176,11 +229,13 @@ async function runCompare(options, items, warnings) {
 }
 
 /**
- * 第3段階: toCreate の先頭1件だけを Firestore へ新規作成するテスト追加（--apply --limit 1）。
- * - 内部で compare を実行し、書き込み対象を toCreate[0] に限定する。
+ * 第4段階: toCreate を create-only で Firestore へ新規作成する。
+ * - 対象範囲: --all のとき全件、--limit N（1..10）のとき先頭から N 件。
+ * - 各件は決定的IDで作成。既存IDは上書きせず skipped。update / delete は行わない。
  * - 既存ドキュメント・protectedCurrentOnly・source未設定/manual-poc には一切触れない。
+ * - エラーは記録しつつ継続し、最後に errors として集計する（create-only は冪等で再実行可能）。
  */
-async function runApplyTest(options, items) {
+async function runApplyCreateOnly(options, items) {
   // 読み取り＋単件作成モジュールを動的 import する（apply 指定時のみ Firestore へ接続）。
   const { fetchCurrentFirestoreTasks, createFirestoreTask } = await import(
     "./firestore-sync-source.mjs"
@@ -198,72 +253,128 @@ async function runApplyTest(options, items) {
   const diff = compareDesiredAndCurrent(items, currentDocs);
   const toCreate = diff.toCreate;
 
-  // 実行前サマリー（書き込み対象を明示する）。
-  console.log("Markdown sync apply test");
-  console.log("mode: apply");
-  console.log(`limit: ${options.limit}`);
-  console.log(`toCreate available: ${toCreate.length}`);
+  // 3. 書き込み対象を決める（--all は全件、それ以外は先頭から limit 件）。
+  const isAll = options.all === true;
+  const targets = isAll ? toCreate : toCreate.slice(0, options.limit);
 
-  const result = { mode: "apply-test", limit: options.limit, created: [], skipped: [], errors: [] };
+  // 実行前サマリー（書き込み対象を明示する）。
+  console.log("Markdown sync apply create-only");
+  console.log("mode: apply");
+  console.log("operation: create-only");
+  if (isAll) {
+    console.log("target: all");
+  } else {
+    console.log(`limit: ${options.limit}`);
+  }
+  console.log(`toCreate available: ${toCreate.length}`);
+  console.log(`targets: ${targets.length}`);
+
+  // 結果オブジェクト。--all のときは target:"all"、それ以外は limit:N を持たせる。
+  const result = {
+    mode: "apply-create-only",
+    ...(isAll ? { target: "all" } : { limit: options.limit }),
+    summary: { requested: targets.length, created: 0, skipped: 0, errors: 0 },
+    created: [],
+    skipped: [],
+    errors: [],
+  };
 
   // toCreate が0件なら何もしない（安全に終了）。
-  if (toCreate.length === 0) {
-    console.log("target: (なし)");
+  if (targets.length === 0) {
     console.log("");
     console.log("created: 0（追加対象がありません）");
+    console.log("skipped: 0");
+    console.log("errors: 0");
     finishApply(options, result);
     return;
   }
 
-  // 3. 書き込み対象は toCreate の先頭1件に限定する。
-  const target = toCreate[0];
-  console.log("target:");
-  console.log(`- id: ${target.id}`);
-  console.log(`  title: ${target.data.title}`);
-  console.log(`  category: ${target.data.category}`);
-  console.log(`  status: ${target.data.status}`);
-  console.log(`  order: ${target.data.order}`);
+  // 全件は一覧が長くなるため代表（先頭10件）だけプレビュー表示する。
+  const previewCount = Math.min(10, targets.length);
+  console.log(targets.length > previewCount ? "target preview:" : "targets:");
+  targets.slice(0, previewCount).forEach((target, index) => {
+    const d = target.data;
+    console.log(
+      `${index + 1}. ${target.id} | ${d.title} | ${d.category} | ${d.status} | order ${d.order}`,
+    );
+  });
+  if (targets.length > previewCount) {
+    console.log(`... ほか ${targets.length - previewCount} 件`);
+  }
 
-  // createdAt / updatedAt を付与（timestampValue として書き込む）。
-  // 注: completedAt は §17 方針どおり null のまま（item.data に含まれる）。
-  const now = new Date().toISOString();
-  const writeData = { ...target.data, createdAt: now, updatedAt: now };
   const timestampFields = new Set(["createdAt", "updatedAt"]);
+  const total = targets.length;
 
-  // 4. 単件作成（既存IDなら上書きせずスキップ）。
-  try {
-    const res = await createFirestoreTask(target.id, writeData, timestampFields);
-    if (res.ok) {
-      result.created.push({
-        id: target.id,
-        title: target.data.title,
-        category: target.data.category,
-        status: target.data.status,
-      });
-      console.log("");
-      console.log("created: 1");
-      console.log(`id: ${target.id}`);
-    } else if (res.alreadyExists) {
-      // 対象IDが既に存在 → 上書きしない方針のためスキップ扱い。
-      result.skipped.push({ id: target.id, title: target.data.title, reason: "already exists" });
-      console.log("");
-      console.log("created: 0（既に存在するためスキップしました）");
-      console.log(`id: ${target.id}`);
-    } else {
-      result.errors.push({ id: target.id, status: res.status, message: res.body });
-      console.error("");
-      console.error(`created: 0（作成に失敗しました HTTP ${res.status}）`);
-      console.error(`id: ${target.id}`);
-      console.error(`error: ${res.body}`);
+  // 4. 先頭から順に単件作成（既存IDなら上書きせずスキップ）。エラーは記録して継続する。
+  console.log("");
+  let index = 0;
+  for (const target of targets) {
+    index += 1;
+    // createdAt / updatedAt を付与（timestampValue）。completedAt は §17 方針どおり null のまま。
+    const now = new Date().toISOString();
+    const writeData = { ...target.data, createdAt: now, updatedAt: now };
+
+    try {
+      const res = await createFirestoreTask(target.id, writeData, timestampFields);
+      if (res.ok) {
+        result.created.push({
+          id: target.id,
+          title: target.data.title,
+          category: target.data.category,
+          status: target.data.status,
+        });
+        console.log(`[${index}/${total}] created ${target.id}`);
+      } else if (res.alreadyExists) {
+        // 既存IDは上書きしない方針のためスキップ扱い。
+        result.skipped.push({ id: target.id, title: target.data.title, reason: "already exists" });
+        console.log(`[${index}/${total}] skipped ${target.id}（already exists）`);
+      } else {
+        result.errors.push({ id: target.id, status: res.status, message: res.body });
+        console.error(`[${index}/${total}] error ${target.id}（HTTP ${res.status}）`);
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      result.errors.push({ id: target.id, status: null, message: error.message });
+      console.error(`[${index}/${total}] error ${target.id}（${error.message}）`);
       process.exitCode = 1;
     }
-  } catch (error) {
-    result.errors.push({ id: target.id, status: null, message: error.message });
-    console.error("");
-    console.error(`created: 0（作成中に例外が発生しました）`);
-    console.error(`error: ${error.message}`);
-    process.exitCode = 1;
   }
+
+  result.summary.created = result.created.length;
+  result.summary.skipped = result.skipped.length;
+  result.summary.errors = result.errors.length;
+
+  // 実行後サマリー。
+  console.log("");
+  console.log(`created: ${result.summary.created}`);
+  console.log(`skipped: ${result.summary.skipped}`);
+  console.log(`errors: ${result.summary.errors}`);
+
+  if (result.created.length > 0) {
+    console.log("");
+    console.log("created ids:");
+    for (const item of result.created) {
+      console.log(`- ${item.id}`);
+    }
+  }
+  if (result.skipped.length > 0) {
+    console.log("");
+    console.log("skipped ids:");
+    for (const item of result.skipped) {
+      console.log(`- ${item.id}（${item.reason}）`);
+    }
+  }
+  if (result.errors.length > 0) {
+    console.error("");
+    console.error("errors:");
+    for (const item of result.errors) {
+      console.error(`- ${item.id} | HTTP ${item.status ?? "-"} | ${item.message}`);
+    }
+  }
+
+  // 実行後の再 compare 確認コマンドを案内する（自動では再取得しない）。
+  console.log("");
+  console.log("再確認: node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestore");
 
   finishApply(options, result);
 }
@@ -298,6 +409,9 @@ function parseArgs(argv) {
     dryRun: false,
     compareFirestore: false,
     apply: false,
+    createOnly: false,
+    deleteMissing: false,
+    all: false,
     limit: null,
     input: DEFAULT_INPUT,
     out: null,
@@ -311,6 +425,13 @@ function parseArgs(argv) {
       options.compareFirestore = true;
     } else if (arg === "--apply") {
       options.apply = true;
+    } else if (arg === "--create-only") {
+      options.createOnly = true;
+    } else if (arg === "--delete-missing") {
+      // 受理だけして apply ガード側で停止させる（未実装の削除を誤って通さないため）。
+      options.deleteMissing = true;
+    } else if (arg === "--all") {
+      options.all = true;
     } else if (arg === "--limit") {
       options.limit = parseLimit(argv[i + 1]);
       i += 1;
