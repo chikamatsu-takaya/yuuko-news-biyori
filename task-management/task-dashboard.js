@@ -9,9 +9,14 @@ const EXCLUDED_SECTION_KEYWORDS = [
   "作業テンプレート",
 ];
 
+// Firestore 表示時のみ status 更新ボタンに出す選択肢（firestore-source.js の ALLOWED_STATUSES と揃える）。
+const FIRESTORE_STATUS_OPTIONS = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
+
 const state = {
   data: null,
   showCompleted: false,
+  // ?source=firestore で読み込んだときだけ true。status 更新UIの表示可否に使う。
+  isFirestore: false,
 };
 
 const elements = {
@@ -48,12 +53,226 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCategoryProgress();
     renderTaskTree();
   });
+  // status 更新ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
+  // 物理削除UIは方針変更により廃止（toDeleteCandidates は表示・警告のみ）。
+  elements.taskTree.addEventListener("click", (event) => {
+    const button = event.target.closest(".status-update-button");
+    if (!button || button.disabled) {
+      return;
+    }
+    const { taskId, status } = button.dataset;
+    if (!taskId || !status) {
+      return;
+    }
+    void applyFirestoreStatusUpdate(taskId, status, button);
+  });
+  // Firestore 追加フォームは index.html を変更しないため JS から動的生成する。
+  setupAddTaskForm();
+  // Markdown同期プレビューのパネルも JS から動的生成する（Firestore表示時のみ表示）。
+  // 別ファイル markdown-sync-ui.js が読み込まれている場合のみ呼ぶ（安全側）。
+  if (typeof setupMarkdownSyncPanel === "function") {
+    setupMarkdownSyncPanel();
+  }
   void loadDashboard();
 });
 
+// index.html を変更せずにタスク追加フォームを差し込む（段階3の最小書き込みPOC）。
+// 生成は1度だけで、表示/非表示は state.isFirestore に応じて renderDashboard 側で切り替える。
+function setupAddTaskForm() {
+  if (!elements.taskListSection || !elements.taskListSection.parentNode) {
+    return;
+  }
+
+  const statusOptions = FIRESTORE_STATUS_OPTIONS.map(
+    (status) =>
+      `<option value="${escapeHtml(status)}"${status === "Todo" ? " selected" : ""}>${escapeHtml(status)}</option>`,
+  ).join("");
+
+  const section = document.createElement("section");
+  section.id = "addTaskSection";
+  section.className = "panel add-task-panel";
+  section.hidden = true;
+  section.innerHTML = `
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Firestore</p>
+        <h2>タスクを追加</h2>
+      </div>
+    </div>
+    <form id="addTaskForm" class="add-task-form">
+      <label class="add-task-field">
+        <span>title <em>*</em></span>
+        <input type="text" name="title" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>category <em>*</em></span>
+        <input type="text" name="category" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>subcategory</span>
+        <input type="text" name="subcategory" autocomplete="off" />
+      </label>
+      <label class="add-task-field">
+        <span>priority</span>
+        <select name="priority">
+          <option value="P1">P1</option>
+          <option value="P2" selected>P2</option>
+          <option value="P3">P3</option>
+        </select>
+      </label>
+      <label class="add-task-field">
+        <span>status</span>
+        <select name="status">${statusOptions}</select>
+      </label>
+      <label class="add-task-field">
+        <span>owner</span>
+        <input type="text" name="owner" autocomplete="off" />
+      </label>
+      <div class="add-task-actions">
+        <button type="submit" class="button primary compact">タスクを追加</button>
+      </div>
+    </form>
+  `;
+
+  // タスク一覧の直前に置く（一覧の上に小さな追加フォームを出す方針）。
+  elements.taskListSection.parentNode.insertBefore(section, elements.taskListSection);
+  elements.addTaskSection = section;
+
+  section.querySelector("#addTaskForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void handleAddTaskSubmit(event.currentTarget);
+  });
+}
+
+// Firestore 表示時のみ呼ばれるタスク追加処理（段階3の最小書き込みPOC）。
+// 追加後は POC方針どおり Firestore を再取得して全体を作り直す。
+async function handleAddTaskSubmit(form) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  const formData = new FormData(form);
+  const input = {
+    title: String(formData.get("title") ?? "").trim(),
+    category: String(formData.get("category") ?? "").trim(),
+    subcategory: String(formData.get("subcategory") ?? "").trim(),
+    priority: String(formData.get("priority") ?? "").trim(),
+    status: String(formData.get("status") ?? "").trim(),
+    owner: String(formData.get("owner") ?? "").trim(),
+  };
+
+  // 前段バリデーション（詳細な検証は firestore-source 側でも行う）。
+  if (!input.title) {
+    setLoadState("title は必須です。", true);
+    return;
+  }
+  if (!input.category) {
+    setLoadState("category は必須です。", true);
+    return;
+  }
+  if (!FIRESTORE_STATUS_OPTIONS.includes(input.status)) {
+    setLoadState(`status が不正です: ${input.status}`, true);
+    return;
+  }
+
+  const submitButton = form.querySelector("button[type=submit]");
+  if (submitButton) {
+    submitButton.disabled = true;
+  }
+  setLoadState("Firestoreにタスクを追加しています...", false);
+
+  try {
+    const { addTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await addTaskForPoc(input);
+
+    // 追加成功後は再取得 → 変換 → 差し替え → 再描画でツリーを作り直す。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+
+    // 連続入力しやすいよう title だけクリアする（category 等は残す）。
+    const titleInput = form.querySelector('[name="title"]');
+    if (titleInput) {
+      titleInput.value = "";
+      titleInput.focus();
+    }
+    setLoadState(`Firestoreにタスクを追加しました（全${docs.length}件）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to add task", error);
+    setLoadState(`Firestoreへのタスク追加に失敗しました: ${error.message}`, true);
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+    }
+  }
+}
+
+// Firestore 表示時のみ呼ばれる status 更新処理（段階2の最小書き込みPOC）。
+// 更新後は POC方針どおり Firestore を再取得して全体を作り直す（部分更新はしない）。
+async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  // 二重押下を避けるため、同じタスクの操作ボタンを一旦すべて無効化する。
+  const controls = button.closest(".status-update");
+  const buttons = controls ? controls.querySelectorAll("button") : [button];
+  buttons.forEach((element) => {
+    element.disabled = true;
+  });
+  setLoadState(`Firestoreのstatusを更新しています（${nextStatus}）...`, false);
+
+  try {
+    const { updateTaskStatusForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await updateTaskStatusForPoc(taskId, nextStatus);
+
+    // 更新成功後は再取得 → 変換 → 差し替え → 再描画でツリーを作り直す。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState(`Firestoreのstatusを更新しました（${nextStatus}）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to update status", error);
+    setLoadState(`Firestoreのstatus更新に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    buttons.forEach((element) => {
+      element.disabled = false;
+    });
+  }
+}
+
 async function loadDashboard() {
-  setLoadState("Markdownを読み込んでいます...", false);
   hideRenderedSections();
+  // 既定は Markdown 表示扱い。Firestore 読み込みに成功したときだけ true へ上げる。
+  state.isFirestore = false;
+
+  // 読み取りPOC（§14/§15）: ?source=firestore のときだけ Firestore を参照する。
+  // 取得・変換に成功したら Firestore データで描画して終了。失敗時は安全側に倒し、
+  // 従来の Markdown 読み取りへフォールバックする（既存の Markdown 経路は変更しない）。
+  if (new URLSearchParams(location.search).get("source") === "firestore") {
+    setLoadState("Firestoreを読み込んでいます...", false);
+    try {
+      const { fetchFirestoreTasksForPoc, firestoreToBoardModel } = await import(
+        "./firestore-source.js"
+      );
+      const docs = await fetchFirestoreTasksForPoc();
+      state.data = firestoreToBoardModel(docs);
+      state.isFirestore = true;
+      renderDashboard();
+      setLoadState(`Firestoreを読み込みました（${docs.length}件）。`, false);
+      return;
+    } catch (error) {
+      console.error("[Firestore POC] failed to load from Firestore", error);
+      state.isFirestore = false;
+      // フォールバックとして従来の Markdown 読み取りへ進む。
+    }
+  }
+
+  setLoadState("Markdownを読み込んでいます...", false);
 
   try {
     const response = await fetch(`${CHECKLIST_PATH}?t=${Date.now()}`, {
@@ -85,6 +304,14 @@ function hideRenderedSections() {
     "taskListSection",
   ]) {
     elements[key].hidden = true;
+  }
+  // 追加フォームも一旦隠す（Markdown 経路や読み込み失敗時に残さない）。
+  if (elements.addTaskSection) {
+    elements.addTaskSection.hidden = true;
+  }
+  // Markdown同期プレビューも一旦隠す（再読み込み・フォールバック時に残さない）。
+  if (typeof setMarkdownSyncPanelVisible === "function") {
+    setMarkdownSyncPanelVisible(false);
   }
 }
 
@@ -316,6 +543,22 @@ function renderDashboard() {
   elements.qualityGateSection.hidden = false;
   elements.categoryProgressSection.hidden = false;
   elements.taskListSection.hidden = false;
+  // 追加フォームは Firestore 表示時だけ出す（Markdown 表示では非表示）。
+  if (elements.addTaskSection) {
+    elements.addTaskSection.hidden = !state.isFirestore;
+  }
+  // Markdown同期プレビューも Firestore 表示時だけ出す。初期表示はモック、
+  // 「Compare確認」で実 compare JSON を読み込み、「追加・更新を反映」で toCreate/toUpdate を反映する。
+  if (typeof setMarkdownSyncPanelVisible === "function") {
+    setMarkdownSyncPanelVisible(state.isFirestore);
+    if (
+      state.isFirestore &&
+      typeof renderMarkdownSyncPreview === "function" &&
+      typeof buildMockMarkdownCompareResult === "function"
+    ) {
+      renderMarkdownSyncPreview(buildMockMarkdownCompareResult());
+    }
+  }
 }
 
 function renderOverview(summary, meta) {
@@ -634,7 +877,37 @@ function renderTaskCard(task) {
       </ul>
       ${renderLongList("Done when", task.doneWhen)}
       ${renderLongList("Notes", task.notes)}
+      ${renderStatusControls(task)}
     </article>
+  `;
+}
+
+// Firestore 表示時のみ、タスクカード内に status 更新ボタンを描画する。
+// Markdown 表示時（state.isFirestore === false）や firestoreId 不在時は何も出さない。
+function renderStatusControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+
+  const current = task.completed ? "Done" : task.status || "Todo";
+  const buttons = FIRESTORE_STATUS_OPTIONS.map((status) => {
+    const isCurrent = status === current;
+    return `
+      <button
+        type="button"
+        class="status-update-button${isCurrent ? " is-current" : ""}"
+        data-task-id="${escapeHtml(task.firestoreId)}"
+        data-status="${escapeHtml(status)}"
+        ${isCurrent ? "disabled" : ""}
+      >${escapeHtml(status)}</button>
+    `;
+  }).join("");
+
+  return `
+    <div class="status-update">
+      <strong>Status変更:</strong>
+      <div class="status-update-buttons">${buttons}</div>
+    </div>
   `;
 }
 

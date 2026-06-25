@@ -60,3 +60,9 @@ yuuko_transfer_*.zip.enc
 # Temp / backup
 *.tmp
 *.bak
+
+# Markdown同期プレビューの生成物（compare JSON / 検証用スクリプト / 一時ログ）はコミットしない
+task-management/tmp/
+
+# Firebase 実値設定はローカル専用でコミットしない（共有は firebase-config.example.js と手順書）
+task-management/firebase-config.js
