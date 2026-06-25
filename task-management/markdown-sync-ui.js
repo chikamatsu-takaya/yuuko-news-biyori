@@ -86,7 +86,9 @@ function setupMarkdownSyncPanel() {
       <button id="markdownSyncCompareButton" type="button" class="button compact">Compare確認</button>
     </div>
     <p class="markdown-sync-lead">
-      現在は確認用プレビューです。Firestoreへの書き込みは行いません。
+      「Compare確認」は、事前生成されたcompare JSONを読み込んで差分を表示するだけです（読み取りのみ）。
+      「追加・更新を反映」を実行した場合は、確認後に toCreate / toUpdate のみFirestoreへ書き込みます。
+      削除候補は表示・警告のみで、Firestoreから削除しません（Firestore DELETE / deleteDoc は行いません）。
     </p>
     <p id="markdownSyncGeneratedAt" class="markdown-sync-generated">compare結果生成日時: 不明</p>
     <p class="markdown-sync-freshness">

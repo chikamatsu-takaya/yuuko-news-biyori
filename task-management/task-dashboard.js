@@ -547,8 +547,8 @@ function renderDashboard() {
   if (elements.addTaskSection) {
     elements.addTaskSection.hidden = !state.isFirestore;
   }
-  // Markdown同期プレビューも Firestore 表示時だけ出す。今回は読み取り専用のモック表示まで。
-  // 実 compare 結果は後続で renderMarkdownSyncPreview() にそのまま渡せる構造にしてある。
+  // Markdown同期プレビューも Firestore 表示時だけ出す。初期表示はモック、
+  // 「Compare確認」で実 compare JSON を読み込み、「追加・更新を反映」で toCreate/toUpdate を反映する。
   if (typeof setMarkdownSyncPanelVisible === "function") {
     setMarkdownSyncPanelVisible(state.isFirestore);
     if (

@@ -294,6 +294,10 @@ export async function addTaskForPoc(input) {
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     updatedBy: "manual-poc",
+    // 生成元を区別する（§17.6）。手動追加は "manual-poc"。Markdown 同期は "md-import"。
+    // Markdown 同期の削除候補・更新は source="md-import" 限定のため、手動追加が
+    // source 未設定（不明）として扱われないよう明示保存する。
+    source: "manual-poc",
     archived: false,
     branchName: null,
     issuePr: null,
