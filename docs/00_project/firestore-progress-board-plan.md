@@ -223,6 +223,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-24: §17.16「メンバー向け運用と画面UI化方針」を追記（docs のみ・実装なし）。Node スクリプトは当面**開発・検証用**に限定し、最終的なメンバー操作は**画面UI化**へ寄せる方針を明記。日常の進捗更新は画面・タスク洗い出し後の一括反映は Markdown 更新＋再同期機能・Claude Code は開発/UI実装/不具合修正用、という役割分担を整理。画面UI化時の必須安全策（必ず dry-run・件数/代表データ表示・削除候補は明示チェック時のみ・反映前確認/反映後再 compare/ログ・`protectedCurrentOnly` 非自動変更・`source` 未設定/`manual-poc`/`md-import` 以外は削除しない）を規定。段階方針（短期=create-only を `--limit` で拡大検証／中期=更新・削除候補・冪等性を Node で検証／最終=同一ロジックを画面UI化）を記載。あわせて §17.15 直後に実装状況メモ（第1〜第3段階を Node スクリプトで実装・検証済み、Firestore アクセスは REST API 利用）を追記。
 - 2026-06-25: Codex 指摘対応として `firebase-config.js` の扱いを整理。実値入り `firebase-config.js` は **Git 管理しない**（`.gitignore` 追加）方針に変更し、共有は `task-management/firebase-config.example.js`（プレースホルダー）＋手順書 `docs/00_project/firebase-config-setup.md` に集約。§16.1 / §17 の config 方針記述を `skip-worktree` 運用から `.gitignore` ＋ example 共有方式へ更新（過去にコミット済みの場合は `git rm --cached` で追跡解除が必要）。実値の表示・コピーはしない方針を明記。機能面は従来どおり `firebase-config.js` を読み込む前提を維持。
 - 2026-06-25: §17.17「Markdown同期プレビューUI（実装済み）の使い方と注意点」を追記（マージ前整理）。表示条件（通常URL=Markdown 表示／`?source=firestore` のみ Firestore 版＋プレビュー）、compare JSON は画面から生成せず Node で事前生成・Compare確認は `tmp/markdown-sync-compare-dry-run.json` を読むだけ、`generatedAt` 表示、追加・更新を反映は `toCreate`/`toUpdate` のみ・確認は画面内モーダル、安全ルール（削除候補は未処理で DELETE を呼ばない・`protectedCurrentOnly` 非変更・`source!=md-import` 非更新・`createdAt`/`completedAt`/`archived`/`source` 不変）、反映後は compare JSON 再生成が必要、`task-management/tmp/` は生成物でコミットしない（`.gitignore` 追加済み）を明記。あわせて反映後サマリーに再生成案内と削除未処理理由の文言を追加。
+- 2026-06-25: Codex 指摘対応（P1: Firestore 物理削除が入っている）として、**物理削除POCを今回のマージ対象から除外**。`task-management/task-dashboard.js` の `applyFirestoreTaskDelete`・削除ボタンのイベント委譲・`renderDeleteControl` を削除、`task-management/firestore-source.js` の `deleteTaskForPoc` と `deleteDoc` import を削除、`task-management/task-dashboard.css` の `.task-delete*` スタイルを削除。§16.7 を「過去POC・現行除外」と明記し、§16.8 の実装済み一覧から削除を除外。現行方針は「物理削除は未実装／`toDeleteCandidates` は表示・警告のみ／`deleteDoc`・Firestore DELETE は呼ばない／削除機能は将来 PR で安全設計後に実装」に統一。あわせて P2 対応として `firestore-source.js` に混入していた NUL バイト（1個）を除去し UTF-8 テキストとして保存し直した（Git のバイナリ扱いを解消）。
 
 ---
 
@@ -631,9 +632,9 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 
 ---
 
-## 16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
+## 16. Firestore POC 実施結果（読み取り・表示・status更新・追加／※物理削除は現行除外）
 
-> §14/§15 の方針に基づき、`task-management/` 配下に閉じた最小 POC を実施した結果記録。読み取り → 表示 → status 更新 → タスク追加 → 物理削除の各段階を確認済み。本体アプリ・起動方法・通常 Markdown 表示には影響していない。
+> §14/§15 の方針に基づき、`task-management/` 配下に閉じた最小 POC を実施した結果記録。読み取り → 表示 → status 更新 → タスク追加の各段階を確認済み（現行マージ対象）。物理削除（§16.7）は過去 POC として検証したが、**Codex 指摘対応により現行マージ対象からは除外**（現行 UI に削除ボタンなし・`deleteDoc` 不使用）。本体アプリ・起動方法・通常 Markdown 表示には影響していない。
 
 ### 16.1 Firestore 読み取りPOC（結果）
 - `tasks` コレクションに**手動登録した3件**を取得できた。
@@ -709,8 +710,16 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 - 追加後に **Firestore を再取得し、画面に反映**できた。
 - 追加したタスクに対して **status 更新も正常に動作**した（`Todo → Done` / `Done → Todo`）。
 
-### 16.7 Firestore 物理削除POC（結果）
-- **方針変更**: メンバー相談の結果、開発段階の進捗管理ツールであるため、`archived=true` の論理削除ではなく **`deleteDoc` による物理削除**に変更した。
+### 16.7 Firestore 物理削除POC（結果・※現行マージ対象からは除外）
+
+> **重要（2026-06-25・Codex 指摘対応）**: 本節は**過去 POC として一時的に検証した記録**であり、Codex の PR 前レビュー指摘（P1: Firestore 物理削除が入っている）への対応として、**物理削除機能は今回のマージ対象から除外**した。
+> - **現行 UI には削除ボタンを表示しない**（`.task-delete-button` / `renderDeleteControl` を撤去）。
+> - **現行実装では `deleteDoc` を使わない**（`firestore-source.js` の `deleteTaskForPoc` と `deleteDoc` import、`task-dashboard.js` の `applyFirestoreTaskDelete` を削除）。
+> - Markdown 同期の `toDeleteCandidates` は**表示・警告のみ**で、Firestore からの削除は行わない。
+> - 削除機能を入れる場合は、**将来 PR で個別チェック＋二段階確認などの安全設計をしてから**実装する。
+> 以下は当時の POC 記録（現行実装ではない）。
+
+- **当時の方針変更**: メンバー相談の結果、開発段階の進捗管理ツールであるため、`archived=true` の論理削除ではなく **`deleteDoc` による物理削除**を POC として検証した。
 - 変更理由:
   - 本番ユーザーデータではない。
   - 不要タスクを Firestore に残し続けるより運用が単純。
@@ -725,15 +734,18 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 
 ### 16.8 実装済みと未実装の整理（更新）
 
-**実装済み（POC 段階）**:
+**実装済み（POC 段階・現行マージ対象）**:
 - 読み取り（§16.1）
 - 表示（§16.2）
 - status 更新（§16.3）
 - **タスク追加（§16.6）**
-- **タスク削除（物理削除 / §16.7）**
 
-**当面実装しない（方針変更）**:
-- `archived` 切り替え … 削除は **物理削除（`deleteDoc`）方針に変更**したため、archived による論理削除 UI は**当面実装しない**。
+**現行マージ対象から除外（2026-06-25・Codex 指摘対応）**:
+- **タスク削除（物理削除 / §16.7）** … 過去 POC として検証したが、**今回のマージ対象から除外**。現行 UI に削除ボタンを表示せず、`deleteDoc` も使わない。`toDeleteCandidates` は表示・警告のみ。
+
+**当面実装しない**:
+- 物理削除 … 将来 PR で安全設計（個別チェック＋二段階確認など）をしてから検討する。
+- `archived` 切り替え … 論理削除 UI は当面実装しない。
 
 **未実装（今後の候補）**:
 - タスク本文編集
