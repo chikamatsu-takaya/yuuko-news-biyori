@@ -224,6 +224,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-25: Codex 指摘対応として `firebase-config.js` の扱いを整理。実値入り `firebase-config.js` は **Git 管理しない**（`.gitignore` 追加）方針に変更し、共有は `task-management/firebase-config.example.js`（プレースホルダー）＋手順書 `docs/00_project/firebase-config-setup.md` に集約。§16.1 / §17 の config 方針記述を `skip-worktree` 運用から `.gitignore` ＋ example 共有方式へ更新（過去にコミット済みの場合は `git rm --cached` で追跡解除が必要）。実値の表示・コピーはしない方針を明記。機能面は従来どおり `firebase-config.js` を読み込む前提を維持。
 - 2026-06-25: §17.17「Markdown同期プレビューUI（実装済み）の使い方と注意点」を追記（マージ前整理）。表示条件（通常URL=Markdown 表示／`?source=firestore` のみ Firestore 版＋プレビュー）、compare JSON は画面から生成せず Node で事前生成・Compare確認は `tmp/markdown-sync-compare-dry-run.json` を読むだけ、`generatedAt` 表示、追加・更新を反映は `toCreate`/`toUpdate` のみ・確認は画面内モーダル、安全ルール（削除候補は未処理で DELETE を呼ばない・`protectedCurrentOnly` 非変更・`source!=md-import` 非更新・`createdAt`/`completedAt`/`archived`/`source` 不変）、反映後は compare JSON 再生成が必要、`task-management/tmp/` は生成物でコミットしない（`.gitignore` 追加済み）を明記。あわせて反映後サマリーに再生成案内と削除未処理理由の文言を追加。
 - 2026-06-25: Codex 指摘対応（P1: Firestore 物理削除が入っている）として、**物理削除POCを今回のマージ対象から除外**。`task-management/task-dashboard.js` の `applyFirestoreTaskDelete`・削除ボタンのイベント委譲・`renderDeleteControl` を削除、`task-management/firestore-source.js` の `deleteTaskForPoc` と `deleteDoc` import を削除、`task-management/task-dashboard.css` の `.task-delete*` スタイルを削除。§16.7 を「過去POC・現行除外」と明記し、§16.8 の実装済み一覧から削除を除外。現行方針は「物理削除は未実装／`toDeleteCandidates` は表示・警告のみ／`deleteDoc`・Firestore DELETE は呼ばない／削除機能は将来 PR で安全設計後に実装」に統一。あわせて P2 対応として `firestore-source.js` に混入していた NUL バイト（1個）を除去し UTF-8 テキストとして保存し直した（Git のバイナリ扱いを解消）。
+- 2026-06-25: Codex 再レビュー P2 対応（コメント・docs の整合性のみ。実装ロジック変更なし）。`markdown-sync-ui.js` の冒頭コメントを現行実装に更新（compare JSON 読み込み・確認モーダル・`toCreate`/`toUpdate` 反映・`toDeleteCandidates` は表示/警告/スキップのみ・Firestore DELETE は行わない・画面から Node スクリプトを実行しない）。docs の `--delete-missing`／物理削除（§17.4 コマンド表・§17.8・§17.10 apply 手順・§17.15 推奨手順）に「将来案・現行PRでは未実装／現行は `deleteDoc`・Firestore DELETE を呼ばない／`toDeleteCandidates` は表示・警告のみ／`--delete-missing` は実行可能機能として扱わず安全停止／削除は将来 PR で安全設計後」を明記し、「現行で削除できる」と読める表現を解消。
 
 ---
 
@@ -805,7 +806,9 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 |---|---|
 | `node task-management/sync-markdown-to-firestore.mjs --dry-run` | 書き込まず差分サマリーのみ表示（既定挙動と同じ） |
 | `node task-management/sync-markdown-to-firestore.mjs --apply` | 追加・更新を反映（削除はしない） |
-| `node task-management/sync-markdown-to-firestore.mjs --apply --delete-missing` | 追加・更新に加え、削除候補（条件を満たすもの）も物理削除 |
+| `node task-management/sync-markdown-to-firestore.mjs --apply --delete-missing` | **【将来案・現行PRでは未実装】** 追加・更新に加え、削除候補も物理削除する設計案。**現行スクリプトでは `--delete-missing` は実行可能機能として扱わず安全停止する**（Firestore DELETE / `deleteDoc` は呼ばない）。 |
+
+> **削除に関する現行方針（2026-06-25・Codex 指摘対応）**: 本表の `--delete-missing`（物理削除）は**将来案であり、現時点では未実装**。現行のスクリプト・画面UIは **Firestore DELETE / `deleteDoc` を呼ばない**。`toDeleteCandidates` は**表示・警告のみ**。`--delete-missing` は現行PRでは実行可能機能として扱わない（指定しても安全停止）。削除機能を入れる場合は、**将来PRで個別チェック＋二段階確認などの安全設計後に実装**する。
 
 - **dry-run の表示項目**:
   - 追加予定件数 / 更新予定件数 / 削除候補件数 / 変更なし件数 / エラー・警告件数。
@@ -850,8 +853,11 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
   - `subcategory` の `null` と空文字は同一視する（§16.6 の追加方針に合わせる）。
   - 文字列は trim 後比較。`branchName` のバッククォート除去など既存解析の正規化を踏襲。
 
-### 17.8 削除方針（物理削除・要明示）
-- 削除は §16.7 の**物理削除（`deleteDoc`）**を踏襲する（`archived=true` は使わない）。
+### 17.8 削除方針（物理削除・要明示）／※将来案・現行PRでは未実装
+
+> **現行方針（2026-06-25・Codex 指摘対応）**: 本節は**将来案であり、現時点では未実装**。現行のスクリプト・画面UIは **Firestore DELETE / `deleteDoc` を呼ばない**。`toDeleteCandidates` は**表示・警告のみ**で削除処理を行わない。`--delete-missing` は現行PRでは実行可能機能として扱わない（指定しても安全停止）。§16.7 の物理削除POCは**過去の検証記録であり現行実装ではない**。削除を実装する場合は、**将来PRで個別チェック＋二段階確認などの安全設計後**に行う。以下は将来削除を実装する場合の設計案。
+
+- 削除を実装する場合は §16.7 の**物理削除（`deleteDoc`）案**を参考にする（`archived=true` は使わない方針だった）。※現行では `deleteDoc` を使わない。
 - 同期での削除は危険なため、安全策を必須とする:
   - **dry-run で削除候補を必ず表示**（件数＋代表タスク名）。
   - **apply でも `--delete-missing` を付けたときだけ**実削除する。
@@ -897,7 +903,7 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 3. **current 取得**: `tasks` 全件読み取り（archived 含む。少数前提で全件でよい）。
 4. **差分計算**: ID 突き合わせ → 追加 / 更新 / 削除候補 / 変更なし（§17.7）。
 5. **dry-run 出力**: 件数サマリー＋代表差分（§17.4）。
-6. **apply**: `--apply` で追加・更新を `setDoc`（決定的 ID 指定）/ `updateDoc`。`--delete-missing` で条件付き物理削除（§17.8）。
+6. **apply**: `--apply` で追加・更新を `setDoc`（決定的 ID 指定）/ `updateDoc`。`--delete-missing` での条件付き物理削除は**将来案・現行PRでは未実装**（§17.8。現行は `deleteDoc` を呼ばない）。
 7. **冪等性テスト**: 同じ Markdown で2回 apply → 2回目が「変更なし（削除0・追加0・更新0）」になることを確認。
 
 ### 17.13 未決事項
@@ -932,7 +938,7 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 3. `sync-markdown-to-firestore.mjs` の **dry-run を先に実装**（書き込み無し）。差分サマリーを安定させる。
 4. 既存 Firestore（POC データ）に対して dry-run し、件数・代表差分が直感と合うか確認。
 5. `--apply`（追加・更新のみ、削除なし）を実装し、**冪等性テスト**（2回目が「変更なし」）を通す。
-6. `--delete-missing`（`source="md-import"` 限定・物理削除）を最後に実装し、dry-run の削除候補と一致することを確認。
+6. `--delete-missing`（`source="md-import"` 限定・物理削除）は**将来PRで最後に実装**する（現行PRでは未実装。個別チェック＋二段階確認などの安全設計後に行う）。dry-run の削除候補と一致することを確認する。
 7. 結果を本メモ §17 に追記（実施結果）し、未決事項を更新する。
 
 > 実装状況メモ（2026-06-24）: §17.12〜§17.15 のうち、第1段階（解析・変換・決定的 ID・JSON 出力）／第2段階（current 取得・差分 dry-run）／第3段階（`--apply --limit 1` の1件追加テスト）まで Node スクリプトで実装・検証済み。`task-management/sync-markdown-to-firestore.mjs`・`task-management/firestore-sync-source.mjs`・`task-management/markdown-task-parser.mjs` がその成果物。Firestore 読み取り／単件作成は npm 追加を避けるため Web SDK ではなく **Firestore REST API（Node の `fetch`）** を用いている。全件 apply・更新・削除は未実装。

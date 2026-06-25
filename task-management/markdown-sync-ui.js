@@ -1,14 +1,18 @@
-// Markdown同期プレビューUI（§17.16 画面UI化準備の土台）。
+// Markdown同期プレビューUI（§17.16 / §17.17）。
 //
 // 役割:
-// - ?source=firestore 表示時のみ、compare 結果を「確認用」に表示するパネルを描画する。
+// - ?source=firestore 表示時のみ、事前生成された compare JSON を読み込み、差分を表示する。
 // - compare の分類（追加予定 / 更新予定 / 削除候補 / 変更なし / 保護対象 / 警告）を
-//   件数カード＋代表サンプルで見せる。
+//   件数カード＋代表サンプル（更新予定は diff 詳細）で見せる。
+// - ユーザー確認（画面内モーダル）後、toCreate / toUpdate のみ Firestore に反映する
+//   （反映処理は markdown-sync-apply.js に委譲）。
 //
-// この段階でやらないこと（重要・安全側 §17.16）:
-// - Firestore への書き込み（create / update / delete）は一切しない。
-// - 反映ボタン（追加 / 更新 / 削除 / 全件）は disabled の見た目だけ。実処理は持たない。
-// - Markdown の読み込み・解析・実 compare も未接続（モックデータ表示まで）。
+// 安全方針（重要）:
+// - 反映するのは toCreate（作成）と toUpdate（更新）のみ。
+// - toDeleteCandidates は表示・警告・スキップ記録のみで、Firestore DELETE は行わない。
+// - protectedCurrentOnly は変更しない。source != "md-import" は更新しない。
+// - compare JSON は画面からは生成しない（開発者が Node スクリプトで事前生成）。
+//   画面から Node スクリプトは実行しない（静的 JSON を fetch して読むだけ）。
 //
 // task-dashboard.js からは以下のグローバル関数経由でのみ呼ばれる（責務分離）:
 // - setupMarkdownSyncPanel()        … パネルDOMを1度だけ生成（初期は hidden）
