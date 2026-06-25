@@ -269,14 +269,14 @@ async function runMarkdownApplyAll() {
   }
 
   // await 中にパネルが非表示になっていないか確認する（古い async 処理の継続を防ぐ）。
-  // トークンが変わっている、section が無い、または既に hidden の場合は、
-  // 確認モーダルを開かず pending も残さず静かに中断する。
-  if (
-    startedToken !== markdownSyncPanelVisibilityToken ||
-    !markdownSyncElements.section ||
-    markdownSyncElements.section.hidden
-  ) {
-    dismissMarkdownApplyModal();
+  // トークンが変わっている場合は、別世代（非表示→再表示後に開かれた新しいモーダルや
+  // pending）を壊さないよう、dismissMarkdownApplyModal() を呼ばず自分だけ終了する。
+  if (startedToken !== markdownSyncPanelVisibilityToken) {
+    return;
+  }
+  // section が無い / hidden の場合も確認モーダルは開かない。非表示化時に既存処理が
+  // モーダル破棄済みのはずなので、ここでは新しいモーダルを閉じず return のみとする。
+  if (!markdownSyncElements.section || markdownSyncElements.section.hidden) {
     return;
   }
 

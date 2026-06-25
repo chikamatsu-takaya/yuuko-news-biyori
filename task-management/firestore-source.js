@@ -103,6 +103,17 @@ function isExcludedSection(title) {
   return EXCLUDED_SECTION_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
+// 共有Firestore由来の order / sourceLine は外部由来データとして扱う。
+// renderTaskCard() が task.line を未エスケープで innerHTML に埋め込むため、
+// 数値型かつ有限値のときだけ採用し、それ以外（文字列・NaN・Infinity・HTML文字列等）は
+// 採用せず null を返してフォールバックさせる（HTML注入を防ぐ・§13.5）。
+function toFiniteNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return null;
+}
+
 /**
  * Firestore の tasks ドキュメント配列を、既存画面が期待する state.data 形へ変換する。
  * 差異吸収（キー別名・グルーピング・除外判定）はすべて本関数内に閉じる（§14.8）。
@@ -124,7 +135,8 @@ export function firestoreToBoardModel(docs) {
         ? ""
         : String(doc.subcategory);
     // task.line は order ?? sourceLine ?? 連番 の優先順で決める（§13.5）。
-    const line = doc.order ?? doc.sourceLine ?? index + 1;
+    // 外部由来値はHTML注入防止のため有限数値のみ採用し、それ以外は連番へフォールバック。
+    const line = toFiniteNumber(doc.order) ?? toFiniteNumber(doc.sourceLine) ?? index + 1;
 
     // セクションを必要に応じて生成（除外判定は category 名で行う）。
     let section = sectionByTitle.get(category);
