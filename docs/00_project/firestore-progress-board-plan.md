@@ -31,6 +31,7 @@
 15. Firestore 読み取りPOC用サンプルデータ案
 16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
 17. Markdown全件インポート / 再同期方針
+18. source可視化・削除可否表示（段階1・削除実行は未実装）
 
 ---
 
@@ -1035,3 +1036,58 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 
 #### 17.17.5 生成物の扱い
 - `task-management/tmp/` 配下（`markdown-sync-compare-dry-run.json` / `markdown-sync-dry-run.json` / 検証用 `.mjs` / 一時ログ / pid ファイルなど）は**生成物でありコミットしない**。`.gitignore` に `task-management/tmp/` を追加済み。
+
+## 18. source可視化・削除可否表示（段階1・削除実行は未実装）
+
+削除機能を入れる前段として、**保存状態/source を画面で可視化**し、削除候補の**削除可否と理由**を表示する。この段階では **Firestore DELETE / `deleteDoc` を追加しない**（削除ボタン・チェックボックス・確認モーダル・削除結果表示も作らない）。`?source=firestore` 表示時にのみ意味を持つ表示で、通常URLの Markdown 表示は変更しない。
+
+### 18.1 目的
+- 次の3種類のタスクを画面で区別できるようにする。
+  - Markdown 由来のタスク（`source="md-import"`）
+  - 画面から手動追加した DB 上だけのタスク（`source="manual-poc"`／将来の DB→md 反映で Markdown へ取り込む対象）
+  - 由来不明のタスク（`source` 未設定 / 不明）
+- 削除候補（`toDeleteCandidates`）について、何が削除可能で何が削除不可かと、その理由を事前に把握できるようにする。
+
+### 18.2 保存状態/sourceバッジ（タスクカード）
+- `firestore-source.js` の `classifySourceBadge(source)` が source を表示用情報へ分類する（純粋な表示ロジック・書き込みなし）。`firestoreToBoardModel()` が各 task に `source`（正規化値）と `sourceBadge` を付与する。
+- `task-dashboard.js` の `renderSourceBadge(task)` が、`?source=firestore` 表示時（`state.isFirestore === true`）にのみタスクカードへ小さなバッジを描画する。Markdown 表示時は何も出さない。
+- 分類と表示（§17.6 の source 方針に揃える）:
+
+| source | ラベル | source表記 | 色（CSSクラス） |
+|---|---|---|---|
+| `md-import` | Markdown管理 | `source: md-import` | 青系（`source-md`） |
+| `manual-poc` | DB追加 / md未反映 | `source: manual-poc` | 黄系/注意色（`source-manual`） |
+| 未設定 | 由来不明 | `sourceなし` | グレー/警告色（`source-unknown`） |
+| 上記以外の値 | 由来不明 | `source: <値>` | グレー/警告色（`source-unknown`） |
+
+- `source` は外部由来文字列のため、ラベル・source表記はいずれも表示側で `escapeHtml` してから埋め込む（HTML注入防止・§13.5）。
+
+### 18.3 削除候補の削除可否表示（Markdown同期プレビュー）
+- `markdown-sync-ui.js` の `evaluateDeleteCandidate(item)` が削除候補1件ごとに削除可否と理由を判定する（表示専用・**削除は一切行わない**）。`renderSyncDeleteGroup()` が削除可能/削除不可の件数サマリーと、各候補の可否バッジ・理由・`source`・`ID` を表示する。
+- 削除可能として表示する条件（すべて満たす場合のみ）:
+  - `source === "md-import"`
+  - ID がある
+  - protected 扱いではない
+- 削除不可として表示する条件と理由文:
+
+| 条件 | 理由表示 |
+|---|---|
+| protected 扱い | `protected対象のため削除不可。` |
+| `source === "manual-poc"` | `manual-poc のため削除不可。DB→md反映機能でMarkdownへ取り込む対象です。` |
+| `source` が空/null/undefined | `source が不明なため削除不可。手動確認が必要です。` |
+| `source` が `md-import` 以外 | `source が md-import ではないため削除不可。` |
+| 必要な ID がない | `IDがないため削除不可。` |
+
+- 既存の compare ロジック（`sync-markdown-to-firestore.mjs`）では `toDeleteCandidates` は `source="md-import"` のものだけに振り分けられるが、UI 側は防御的に各候補を判定し直し、将来のデータやモックにも崩れず可否表示できるようにしている。
+
+### 18.4 この段階でやらないこと
+- Firestore DELETE / `deleteDoc` の追加、削除ボタン・削除チェックボックス・削除確認モーダル・削除結果表示。
+- DB の内容を Markdown ファイルへ反映する機能、Markdown ファイルの自動更新。
+- `manual-poc` を `md-import` へ変換する処理、`manual-poc` / source未設定データの削除、全件無条件削除。
+
+### 18.5 変更ファイル
+- `task-management/firestore-source.js` … `classifySourceBadge()` 追加、`firestoreToBoardModel()` で task へ `source` / `sourceBadge` を付与。
+- `task-management/task-dashboard.js` … `renderSourceBadge()` 追加、タスクカードへバッジ描画。
+- `task-management/markdown-sync-ui.js` … `evaluateDeleteCandidate()` / `renderSyncDeleteCandidate()` 追加、`renderSyncDeleteGroup()` を削除可否表示に拡張。
+- `task-management/task-dashboard.css` … source バッジ・削除可否バッジ/理由のスタイル追加。
+- 本資料（§18）に段階1の仕様を追記。

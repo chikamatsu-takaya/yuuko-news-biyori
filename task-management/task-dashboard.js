@@ -865,6 +865,7 @@ function renderTaskCard(task) {
         <p class="task-title">${renderInline(task.text)}</p>
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
+      ${renderSourceBadge(task)}
       <ul class="task-meta">
         <li><strong>Priority:</strong> ${renderInline(task.priority || "未定")}</li>
         <li><strong>Status:</strong> ${renderInline(task.status || "Todo")}</li>
@@ -879,6 +880,23 @@ function renderTaskCard(task) {
       ${renderLongList("Notes", task.notes)}
       ${renderStatusControls(task)}
     </article>
+  `;
+}
+
+// Firestore 表示時のみ、タスクカードに保存状態/sourceバッジを描画する（段階1のsource可視化）。
+// Markdown 通常表示（state.isFirestore === false）や sourceBadge 不在時は何も出さない。
+// ?source=firestore で読み込んだときだけ意味があるため、通常URLのMarkdown表示は変更しない。
+// badge.label / badge.sourceText は外部由来 source を含みうるため必ずエスケープして埋め込む。
+function renderSourceBadge(task) {
+  if (!state.isFirestore || !task.sourceBadge) {
+    return "";
+  }
+  const badge = task.sourceBadge;
+  return `
+    <div class="source-state">
+      <span class="source-badge ${escapeHtml(badge.badgeClass)}">${escapeHtml(badge.label)}</span>
+      <span class="source-state-text">${escapeHtml(badge.sourceText)}</span>
+    </div>
   `;
 }
 

@@ -780,18 +780,99 @@ function pickSyncField(item, key) {
   return null;
 }
 
+/**
+ * 削除候補1件の削除可否と理由を判定する（段階1の表示専用ロジック・書き込みは伴わない）。
+ * 削除可能とするのは「source === md-import」かつ「ID がある」かつ「protected扱いではない」のみ。
+ * それ以外（manual-poc / source未設定 / md-import以外 / protected / ID無し）は削除不可とし、
+ * 理由を添える。firestore-source.js の classifySourceBadge と source の意味付けを揃える。
+ *
+ * 注意: ここでは判定と理由文の組み立てのみを行い、削除（Firestore DELETE / deleteDoc）は一切しない。
+ *
+ * @param {{ id?: unknown, source?: unknown, protected?: unknown, data?: object }} item
+ * @returns {{ deletable: boolean, reason: string }}
+ */
+function evaluateDeleteCandidate(item) {
+  const sourceRaw = pickSyncField(item, "source");
+  const source = typeof sourceRaw === "string" ? sourceRaw.trim() : "";
+  const id = item?.id != null ? String(item.id).trim() : "";
+  // protected フラグは item 直下か data 配下のどちらでも true なら保護扱いとする（防御的）。
+  const isProtected = item?.protected === true || pickSyncField(item, "protected") === true;
+
+  // protected はもっとも強い保護理由として先に判定する。
+  if (isProtected) {
+    return { deletable: false, reason: "protected対象のため削除不可。" };
+  }
+  if (source === "manual-poc") {
+    return {
+      deletable: false,
+      reason: "manual-poc のため削除不可。DB→md反映機能でMarkdownへ取り込む対象です。",
+    };
+  }
+  if (source === "") {
+    return { deletable: false, reason: "source が不明なため削除不可。手動確認が必要です。" };
+  }
+  if (source !== "md-import") {
+    return { deletable: false, reason: "source が md-import ではないため削除不可。" };
+  }
+  if (!id) {
+    return { deletable: false, reason: "IDがないため削除不可。" };
+  }
+  // ここに到達するのは md-import かつ ID あり かつ protected でないもののみ。
+  return {
+    deletable: true,
+    reason: "md-import かつ ID あり。将来の削除機能の対象候補です（今回は削除しません）。",
+  };
+}
+
+// 削除候補1件分のカードを描画する。削除可否バッジ・理由・source・ID を表示する。
+// 削除ボタン・チェックボックスは出さない（今回は表示のみ・実削除はしない）。
+function renderSyncDeleteCandidate(item) {
+  const title = item?.title != null ? String(item.title) : "(無題)";
+  const id = item?.id != null ? String(item.id).trim() : "";
+  const sourceRaw = pickSyncField(item, "source");
+  const sourceText =
+    sourceRaw != null && String(sourceRaw).trim() !== "" ? String(sourceRaw).trim() : "未設定";
+  const verdict = evaluateDeleteCandidate(item);
+  const stateClass = verdict.deletable ? "is-deletable" : "is-blocked";
+  const stateLabel = verdict.deletable ? "削除可能" : "削除不可";
+  return `
+    <div class="markdown-sync-item markdown-sync-delete-item ${stateClass}">
+      <div class="markdown-sync-delete-head">
+        <p class="markdown-sync-item-title">${escapeSyncHtml(title)}</p>
+        <span class="markdown-sync-delete-badge ${stateClass}">${escapeSyncHtml(stateLabel)}</span>
+      </div>
+      <p class="markdown-sync-id">ID: ${escapeSyncHtml(id || "なし")}</p>
+      <p class="markdown-sync-id">source: ${escapeSyncHtml(sourceText)}</p>
+      <p class="markdown-sync-delete-reason">${escapeSyncHtml(verdict.reason)}</p>
+    </div>
+  `;
+}
+
 // 削除候補は危険操作のため、未実装である旨の注意文を必ず添える。
+// 各候補に削除可否（削除可能/削除不可）と理由を表示する（今回は表示のみ・実削除はしない）。
 function renderSyncDeleteGroup(items) {
   if (!items.length) {
     return "";
   }
+  // 全件で削除可能/不可を数えてから、先頭10件まで詳細カードを出す。
+  const deletableCount = items.filter((item) => evaluateDeleteCandidate(item).deletable).length;
+  const blockedCount = items.length - deletableCount;
+  const previewCount = Math.min(10, items.length);
+  const cards = items.slice(0, previewCount).map(renderSyncDeleteCandidate).join("");
+  const more =
+    items.length > previewCount
+      ? `<p class="empty-state">ほか ${items.length - previewCount} 件</p>`
+      : "";
   return `
     <div class="markdown-sync-group is-danger">
       <h3>削除候補（${items.length}）</h3>
       <p class="markdown-sync-danger-note">
-        削除候補はまだ反映できません。削除処理は未実装です。
+        削除候補はまだ反映できません。削除処理は未実装です（Firestore DELETE / deleteDoc は行いません）。
       </p>
-      ${renderSyncSampleList(items)}
+      <p class="markdown-sync-delete-summary">
+        削除可能: <strong>${deletableCount}</strong>件 / 削除不可: <strong>${blockedCount}</strong>件
+      </p>
+      ${cards}${more}
     </div>
   `;
 }
@@ -816,24 +897,6 @@ function renderSyncWarningGroup(items) {
       <ul class="markdown-sync-sample-list">${lines}${more}</ul>
     </div>
   `;
-}
-
-// id / title を持つ項目の代表3件をリスト表示する。
-function renderSyncSampleList(items) {
-  const sample = items.slice(0, 3);
-  const more =
-    items.length > sample.length
-      ? `<li class="empty-state">ほか ${items.length - sample.length} 件</li>`
-      : "";
-  const lines = sample
-    .map((item) => {
-      const title = item?.title != null ? String(item.title) : "(無題)";
-      const id = item?.id != null ? String(item.id) : "";
-      const idText = id ? ` <span class="markdown-sync-id">${escapeSyncHtml(id)}</span>` : "";
-      return `<li>${escapeSyncHtml(title)}${idText}</li>`;
-    })
-    .join("");
-  return `<ul class="markdown-sync-sample-list">${lines}${more}</ul>`;
 }
 
 // 補助メッセージ表示（読み込み中 / 成功 / 失敗）。
