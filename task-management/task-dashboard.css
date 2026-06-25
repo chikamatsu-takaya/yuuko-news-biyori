@@ -501,6 +501,48 @@ details[open] > summary::after {
   color: var(--red);
 }
 
+/* 保存状態/sourceバッジ（?source=firestore 表示時のみタスクカードに出る）。
+   md-import=青系（通常）/ manual-poc=黄系（注意）/ 由来不明=グレー（警告）で色分けする。 */
+.source-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-top: 8px;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.source-badge.source-md {
+  background: rgba(126, 182, 255, 0.15);
+  color: var(--blue);
+}
+
+.source-badge.source-manual {
+  background: rgba(239, 189, 100, 0.16);
+  color: var(--amber);
+}
+
+.source-badge.source-unknown {
+  background: rgba(159, 176, 170, 0.15);
+  color: var(--muted);
+}
+
+.source-state-text {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
 .task-meta {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -803,6 +845,95 @@ p.markdown-sync-id {
   font-size: 0.8rem;
 }
 
+/* 削除候補の削除可否表示（バッジ・理由）。削除の実行は「Markdownを反映」ボタンで行う。 */
+.markdown-sync-delete-summary {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.markdown-sync-delete-summary strong {
+  color: var(--text);
+}
+
+.markdown-sync-delete-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 削除可否バッジ: 削除可能=緑系 / 削除不可=赤系。色で可否を一目で分かるようにする。 */
+.markdown-sync-delete-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.markdown-sync-delete-badge.is-deletable {
+  background: rgba(123, 214, 166, 0.16);
+  color: var(--green);
+}
+
+.markdown-sync-delete-badge.is-blocked {
+  background: rgba(240, 120, 120, 0.16);
+  color: var(--red);
+}
+
+/* 削除不可の候補は左に赤帯を付け、削除できないことを視覚的に強調する。 */
+.markdown-sync-delete-item.is-blocked {
+  padding-left: 10px;
+  border-left: 3px solid rgba(240, 120, 120, 0.5);
+}
+
+.markdown-sync-delete-item.is-deletable {
+  padding-left: 10px;
+  border-left: 3px solid rgba(123, 214, 166, 0.5);
+}
+
+.markdown-sync-delete-reason {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* 削除候補の選択UI（チェックボックス・全選択行・削除ボタン）。 */
+.markdown-sync-delete-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.markdown-sync-delete-select input {
+  cursor: pointer;
+}
+
+.markdown-sync-delete-selectall-row {
+  margin: 4px 0 8px;
+  font-weight: 700;
+}
+
+/* 削除候補グループ内の選択件数表示行（削除は上部の反映ボタンで実行する）。 */
+.markdown-sync-delete-selected-line {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.markdown-sync-delete-selected-count {
+  color: var(--text);
+  font-weight: 700;
+}
+
 /* 反映確認モーダル（window.confirm の置き換え）。画面中央にオーバーレイ表示。 */
 .markdown-sync-modal-overlay {
   position: fixed;
@@ -904,14 +1035,17 @@ p.markdown-sync-id {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 12px;
   margin-top: 14px;
 }
 
-.markdown-sync-actions-label {
-  color: var(--muted);
-  font-size: 0.82rem;
+/* 件数内訳（追加 / 更新 / 削除）。ボタン名を短く保つ代わりに内訳をボタン付近に出す。 */
+.markdown-sync-breakdown {
+  color: var(--text);
+  font-size: 0.86rem;
   font-weight: 700;
+  /* ボタンを行の右端へ寄せる（内訳は左、反映ボタンは右）。 */
+  margin-right: auto;
 }
 
 .markdown-sync-actions .button:disabled {

@@ -114,6 +114,58 @@ function toFiniteNumber(value) {
   return null;
 }
 
+// source（生成元）を正規化する。文字列なら trim、空文字・非文字列は null（＝不明）扱い。
+// 表示・分類はこの正規化済み値を基準に行う。
+function normalizeSource(source) {
+  if (typeof source !== "string") {
+    return null;
+  }
+  const trimmed = source.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * task の生成元（source）を画面表示用バッジ情報へ分類する（段階1のsource可視化）。
+ * 物理削除や書き込みは一切伴わない純粋な表示用ロジック。
+ * - md-import   … Markdown管理下のタスク（通常色/青系）
+ * - manual-poc  … 画面から追加したDB上だけのタスク（注意色/黄系・将来DB→md反映の対象）
+ * - それ以外/未設定 … 由来不明（警告色/グレー系）
+ *
+ * 返却の label / sourceText はそのまま画面に出すが、外部由来 source 値を含むため
+ * 表示側で必ず escapeHtml すること（このモジュール自身は文字列の組み立てまで）。
+ * markdown-sync-ui.js の削除可否判定（evaluateDeleteCandidate）と source の意味付けを揃える。
+ *
+ * @param {unknown} source Firestore ドキュメントの source 値
+ * @returns {{ key: string, label: string, badgeClass: string, sourceText: string }}
+ */
+export function classifySourceBadge(source) {
+  const normalized = normalizeSource(source);
+
+  if (normalized === "md-import") {
+    return {
+      key: "md-import",
+      label: "Markdown管理",
+      badgeClass: "source-md",
+      sourceText: "source: md-import",
+    };
+  }
+  if (normalized === "manual-poc") {
+    return {
+      key: "manual-poc",
+      label: "DB追加 / md未反映",
+      badgeClass: "source-manual",
+      sourceText: "source: manual-poc",
+    };
+  }
+  // 未設定は「sourceなし」、未知の値は実値を添えて「由来不明」とする（手動確認の手掛かりにする）。
+  return {
+    key: "unknown",
+    label: "由来不明",
+    badgeClass: "source-unknown",
+    sourceText: normalized ? `source: ${normalized}` : "sourceなし",
+  };
+}
+
 /**
  * Firestore の tasks ドキュメント配列を、既存画面が期待する state.data 形へ変換する。
  * 差異吸収（キー別名・グルーピング・除外判定）はすべて本関数内に閉じる（§14.8）。
@@ -170,6 +222,11 @@ export function firestoreToBoardModel(docs) {
       doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
       notes: Array.isArray(doc.notes) ? doc.notes.map(String) : [],
       includedInProgress: !section.excluded,
+      // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
+      // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
+      // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
+      source: normalizeSource(doc.source),
+      sourceBadge: classifySourceBadge(doc.source),
     };
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。

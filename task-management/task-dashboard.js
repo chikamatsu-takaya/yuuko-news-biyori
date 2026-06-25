@@ -54,7 +54,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderTaskTree();
   });
   // status 更新ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
-  // 物理削除UIは方針変更により廃止（toDeleteCandidates は表示・警告のみ）。
+  // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
@@ -548,7 +548,7 @@ function renderDashboard() {
     elements.addTaskSection.hidden = !state.isFirestore;
   }
   // Markdown同期プレビューも Firestore 表示時だけ出す。初期表示はモック、
-  // 「Compare確認」で実 compare JSON を読み込み、「追加・更新を反映」で toCreate/toUpdate を反映する。
+  // 「Compare確認」で実 compare JSON を読み込み、「Markdownを反映」で追加・更新・選択済み削除をまとめて反映する（§20）。
   if (typeof setMarkdownSyncPanelVisible === "function") {
     setMarkdownSyncPanelVisible(state.isFirestore);
     if (
@@ -865,6 +865,7 @@ function renderTaskCard(task) {
         <p class="task-title">${renderInline(task.text)}</p>
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
+      ${renderSourceBadge(task)}
       <ul class="task-meta">
         <li><strong>Priority:</strong> ${renderInline(task.priority || "未定")}</li>
         <li><strong>Status:</strong> ${renderInline(task.status || "Todo")}</li>
@@ -879,6 +880,23 @@ function renderTaskCard(task) {
       ${renderLongList("Notes", task.notes)}
       ${renderStatusControls(task)}
     </article>
+  `;
+}
+
+// Firestore 表示時のみ、タスクカードに保存状態/sourceバッジを描画する（段階1のsource可視化）。
+// Markdown 通常表示（state.isFirestore === false）や sourceBadge 不在時は何も出さない。
+// ?source=firestore で読み込んだときだけ意味があるため、通常URLのMarkdown表示は変更しない。
+// badge.label / badge.sourceText は外部由来 source を含みうるため必ずエスケープして埋め込む。
+function renderSourceBadge(task) {
+  if (!state.isFirestore || !task.sourceBadge) {
+    return "";
+  }
+  const badge = task.sourceBadge;
+  return `
+    <div class="source-state">
+      <span class="source-badge ${escapeHtml(badge.badgeClass)}">${escapeHtml(badge.label)}</span>
+      <span class="source-state-text">${escapeHtml(badge.sourceText)}</span>
+    </div>
   `;
 }
 
