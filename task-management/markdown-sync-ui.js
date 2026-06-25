@@ -1025,30 +1025,30 @@ function renderSyncDeleteGroup(items) {
   if (!items.length) {
     return "";
   }
-  // 全件で削除可能/不可を数えてから、先頭10件まで詳細カードを出す。
+  // 削除候補は全件描画する（先頭N件に制限しない）。これにより、11件目以降の
+  // source="md-import" 削除可能候補にもチェックボックスが出て、選択・削除できる。
   const deletableCount = items.filter((item) => evaluateDeleteCandidate(item).deletable).length;
   const blockedCount = items.length - deletableCount;
-  const previewCount = Math.min(10, items.length);
-  const shown = items.slice(0, previewCount);
-  const cards = shown.map(renderSyncDeleteCandidate).join("");
-  const more =
-    items.length > previewCount
-      ? `<p class="empty-state">ほか ${items.length - previewCount} 件（表示中の候補のみ選択・削除できます）</p>`
+  const cards = items.map(renderSyncDeleteCandidate).join("");
+
+  // 件数が多い場合の補足（全件表示なので、必要なものだけ選ぶよう促す）。
+  const manyNote =
+    items.length > 10
+      ? `<p class="markdown-sync-protected-note">削除候補が多いため、内容を確認して必要なものだけ選択してください（削除候補は全件表示しています）。</p>`
       : "";
 
-  // 全選択は「表示中の削除可能候補」だけを対象にする（チェックボックスがある候補のみ）。
-  const shownDeletable = shown.filter((item) => evaluateDeleteCandidate(item).deletable).length;
+  // 全選択は全候補のうち削除可能なものすべてを対象にする（チェックボックスがある候補のみ）。
   const selectAll =
-    shownDeletable > 0
+    deletableCount > 0
       ? `<label class="markdown-sync-delete-select markdown-sync-delete-selectall-row">
            <input type="checkbox" class="markdown-sync-delete-checkall" />
-           <span>表示中の削除可能候補をすべて選択（${shownDeletable}件）</span>
+           <span>削除可能候補をすべて選択（${deletableCount}件）</span>
          </label>`
       : "";
 
   // 選択件数の表示のみ（削除は上部の「Markdownを反映」ボタンで実行する）。
   const selectionLine =
-    shownDeletable > 0
+    deletableCount > 0
       ? `<p class="markdown-sync-delete-selected-line">
            <span class="markdown-sync-delete-selected-count">選択中: 0件</span>
            （チェックした候補は上部の「Markdownを反映」で追加・更新と一緒に削除されます）
@@ -1065,8 +1065,9 @@ function renderSyncDeleteGroup(items) {
       <p class="markdown-sync-delete-summary">
         削除可能: <strong>${deletableCount}</strong>件 / 削除不可: <strong>${blockedCount}</strong>件
       </p>
+      ${manyNote}
       ${selectAll}
-      ${cards}${more}
+      ${cards}
       ${selectionLine}
     </div>
   `;

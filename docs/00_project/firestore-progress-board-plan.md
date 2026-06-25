@@ -1153,8 +1153,9 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - 内訳は、compare 結果の描画時・削除候補のチェック変更時に更新する（`refreshApplyBreakdown()`）。
 
 ### 20.3 削除候補の選択UI（段階2から継続）
-- 削除可能候補のチェックボックスは残す。全選択トグルも残す（対象は表示中の md-import 削除可能候補のみ）。
-- 自動で全件削除はしない。チェックした候補だけが削除対象になる。
+- 削除可能候補のチェックボックスは残す。全選択トグルも残す。
+- `toDeleteCandidates` は**全件描画**する（先頭N件に制限しない）。これにより11件目以降の `source="md-import"` 削除可能候補もチェック・削除できる。全選択トグルの対象も**全削除可能候補**。
+- 自動で全件削除はしない。チェックした候補だけが削除対象になる。manual-poc / sourceなし / protected / idなし は引き続きチェック不可。
 
 ### 20.4 統合確認モーダル
 - 「Markdownを反映」押下で、追加・更新・削除の内容をまとめて確認モーダルに出す（`window.confirm` 不使用）。
