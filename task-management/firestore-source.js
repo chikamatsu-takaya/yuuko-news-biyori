@@ -162,7 +162,10 @@ export function firestoreToBoardModel(docs) {
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
     if (subcategory) {
-      const key = `${category}${subcategory}`;
+      // 区切り文字（NUL）を挟んで衝突を防ぐ。単純連結だと ("A","BC") と ("AB","C") が
+      // 同じ "ABC" になり別カテゴリのサブセクションへ混ざるため、必ず区切る。
+      // category / subcategory は上で文字列へ正規化済み（null/undefined は除去済み）。
+      const key = `${category}\u0000${subcategory}`;
       let subsection = subsectionByKey.get(key);
       if (!subsection) {
         subsection = { title: subcategory, line, tasks: [] };

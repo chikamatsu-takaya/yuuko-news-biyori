@@ -340,17 +340,31 @@ function hideMarkdownApplyConfirmModal() {
   }
 }
 
-// キャンセル: モーダルを閉じ、書き込みせずキャンセルメッセージを出す。apply ボタンを戻す。
-function cancelMarkdownApplyModal() {
-  if (markdownSyncElements.modalOverlay && markdownSyncElements.modalOverlay.hidden) {
-    return;
-  }
+// モーダルと pending データを破棄して各ボタンを通常状態へ戻す（メッセージは出さない・共通処理）。
+// 戻り値: 破棄時点でモーダルが開いていたか（呼び出し側でメッセージ出し分けに使う）。
+function dismissMarkdownApplyModal() {
+  const wasOpen = Boolean(
+    markdownSyncElements.modalOverlay && !markdownSyncElements.modalOverlay.hidden,
+  );
   hideMarkdownApplyConfirmModal();
+  // 古い compare JSON に対する反映が継続しないよう pending を必ず破棄する。
   pendingMarkdownApplyData = null;
-  setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
+  if (markdownSyncElements.modalExecuteButton) {
+    markdownSyncElements.modalExecuteButton.disabled = false;
+  }
   if (markdownSyncElements.applyAllButton) {
     markdownSyncElements.applyAllButton.disabled = false;
   }
+  return wasOpen;
+}
+
+// キャンセル: モーダルを閉じ、書き込みせずキャンセルメッセージを出す。apply ボタンを戻す。
+function cancelMarkdownApplyModal() {
+  // モーダルが開いていなければ何もしない（メッセージも出さない）。
+  if (!dismissMarkdownApplyModal()) {
+    return;
+  }
+  setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
 }
 
 /**
@@ -458,10 +472,17 @@ async function executeMarkdownApplyAfterConfirm(data) {
 
 /**
  * Firestore 表示時のみパネルを表示する。Markdown 通常表示では常に隠す。
+ * 非表示にするとき（Firestore 読み込み失敗のフォールバック等）は、開いたままの
+ * 確認モーダルと pending データを破棄する。これにより、同期パネルが消えた画面から
+ * 古い compare JSON の反映（書き込み）が継続することを防ぐ。
  */
 function setMarkdownSyncPanelVisible(visible) {
   if (!markdownSyncElements.section) {
     return;
+  }
+  if (!visible) {
+    // パネル非表示時は確認モーダルも残さない（pending 破棄・ボタン復帰。メッセージは出さない）。
+    dismissMarkdownApplyModal();
   }
   markdownSyncElements.section.hidden = !visible;
 }
