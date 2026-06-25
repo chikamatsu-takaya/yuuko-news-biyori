@@ -845,7 +845,7 @@ p.markdown-sync-id {
   font-size: 0.8rem;
 }
 
-/* 削除候補の削除可否表示（今回は表示のみ・削除ボタンは出さない）。 */
+/* 削除候補の削除可否表示（バッジ・理由）。削除の実行は「Markdownを反映」ボタンで行う。 */
 .markdown-sync-delete-summary {
   margin: 0 0 6px;
   color: var(--muted);

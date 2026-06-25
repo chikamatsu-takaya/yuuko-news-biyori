@@ -1,15 +1,16 @@
-// Markdown同期プレビューUI（§17.16 / §17.17）。
+// Markdown同期プレビューUI（§17.16 / §17.17 / 統合反映は §20）。
 //
 // 役割:
 // - ?source=firestore 表示時のみ、事前生成された compare JSON を読み込み、差分を表示する。
 // - compare の分類（追加予定 / 更新予定 / 削除候補 / 変更なし / 保護対象 / 警告）を
 //   件数カード＋代表サンプル（更新予定は diff 詳細）で見せる。
-// - ユーザー確認（画面内モーダル）後、toCreate / toUpdate のみ Firestore に反映する
-//   （反映処理は markdown-sync-apply.js に委譲）。
+// - 「Markdownを反映」ボタンで、追加(toCreate)・更新(toUpdate)・選択済み削除候補(toDeleteCandidates)を
+//   確認モーダルで確認後にまとめて反映する（反映処理は markdown-sync-apply.js に委譲）。
 //
 // 安全方針（重要）:
-// - 反映するのは toCreate（作成）と toUpdate（更新）のみ。
-// - toDeleteCandidates は表示・警告・スキップ記録のみで、Firestore DELETE は行わない。
+// - 削除するのは source="md-import" かつ選択済みで、安全条件を満たす削除候補のみ。
+//   manual-poc / sourceなし / protected / idなし は削除しない。
+// - 確認モーダルでキャンセルした場合は、追加・更新・削除のいずれも実行しない。
 // - protectedCurrentOnly は変更しない。source != "md-import" は更新しない。
 // - compare JSON は画面からは生成しない（開発者が Node スクリプトで事前生成）。
 //   画面から Node スクリプトは実行しない（静的 JSON を fetch して読むだけ）。
@@ -977,7 +978,7 @@ function evaluateDeleteCandidate(item) {
   // ここに到達するのは md-import かつ ID あり かつ protected でないもののみ。
   return {
     deletable: true,
-    reason: "md-import かつ ID あり。将来の削除機能の対象候補です（今回は削除しません）。",
+    reason: "md-import かつ ID あり。選択して確認モーダルで承認した場合のみ削除対象になります。",
   };
 }
 
