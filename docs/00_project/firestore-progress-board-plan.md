@@ -1121,7 +1121,7 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - 削除方式は既存 create/update と同じ **Firestore REST（`DELETE`）**。Web SDK `deleteDoc` は使わない（同期パネルに重い Firebase SDK をもう一系統読み込まない・§6 軽量性。§4.6 として理由明記）。
 - **二重防御**:
   1. UI の判定を信用せず、`applyMarkdownDelete` 内で `id` / `source` / protected を独立に再検証（`validateDeletable()`）。
-  2. さらに DB 現状の `source` を取得（`fetchCurrentSources()`）し、**現状も `md-import`** のものだけ削除する。現状取得に失敗したら1件も削除しない（安全側）。
+  2. さらに DB 現状の `source` / `protected` を取得（`fetchCurrentTaskGuards()`・id → `{ source, protected }`）し、**現状も `source="md-import"`** かつ **現状の `protected` が `true` でない**ものだけ削除する。DB 現状が `protected=true` の場合は「DB上で protected=true のため削除をスキップしました。」として skip する（古い compare JSON が DB 現状の protected を反映していないケースの最終保護）。現状取得に失敗したら1件も削除しない（安全側）。
   3. 条件を満たさないものは削除せず skip 記録。
 - 戻り値は `{ deleted, skipped, errors }`。UI で削除成功/スキップ/失敗件数と理由を表示し、**compare JSON の再生成が必要**であることを案内する（画面からは再生成しない）。
 
@@ -1173,9 +1173,10 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - 結果表示: 追加成功 / 更新成功 / 削除成功 / 削除スキップ / 失敗件数 / 失敗理由 / **compare JSON の再生成が必要であること**。
 
 ### 20.6 削除安全チェックの維持（§19から不変）
-削除直前に必ず以下を再チェックする（`applyMarkdownDelete` / `validateDeletable` / `fetchCurrentSources`）。
-- id が存在する / source === "md-import" / protected ではない / ユーザーが選択済み / **DB上の現在 source も md-import**。
-- DB上の現在 source 取得に失敗した場合は1件も削除しない（安全側）。
+削除直前に必ず以下を再チェックする（`applyMarkdownDelete` / `validateDeletable` / `fetchCurrentTaskGuards`）。
+- id が存在する / source === "md-import" / protected ではない / ユーザーが選択済み / **DB上の現在 source も md-import** / **DB上の現在 protected が true でない**。
+- DB上の現在 source / protected 取得に失敗した場合は1件も削除しない（安全側）。
+- 2026-06-25: P1対応として、削除直前の DB 現状チェックに `protected` を追加（`fetchCurrentSources` → `fetchCurrentTaskGuards` に変更し id → `{ source, protected }` を取得。DB現状 `protected=true` は削除 skip）。
 - manual-poc / sourceなし / 由来不明 / protected / id無し / 未選択 / toDeleteCandidates 以外は削除しない。
 
 ### 20.7 変更ファイル

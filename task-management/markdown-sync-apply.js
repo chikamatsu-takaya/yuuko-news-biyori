@@ -9,8 +9,9 @@
 // 安全設計:
 // - 物理削除は applyMarkdownDelete だけが行う。確認モーダルで承認された後にのみ呼ばれる想定。
 // - 削除できるのは source="md-import" かつ ID あり かつ protected でない候補のみ。
-//   apply 内でも UI 判定を信用せず独立に再検証し、さらに DB 現状の source を取得して md-import を再確認する。
-// - manual-poc / source未設定 / md-import以外 / protected は削除しない（skip 記録）。
+//   apply 内でも UI 判定を信用せず独立に再検証し、さらに DB 現状の source / protected を取得して
+//   「現状も md-import」かつ「現状の protected が true でない」ことを再確認してから削除する。
+// - manual-poc / source未設定 / md-import以外 / protected（compare/DB現状いずれか）は削除しない（skip 記録）。
 // - 更新は source="md-import" の既存ドキュメントのみ。それ以外は skip（protected保護）。
 // - createdAt / completedAt / archived / source は更新マスクに含めない（触れない）。
 // - 認可は firebase-config.js の公開設定値（projectId/apiKey）のみ利用。Admin SDK は使わない。
@@ -68,15 +69,15 @@ export async function applyMarkdownCreateAndUpdate(compareData, options = {}) {
     result.deleteCandidatesSkipped.push({ id: item?.id ?? null, title: item?.title ?? "" });
   }
 
-  // 更新の source ガード用に、現状の Firestore を1回だけ取得して id->source を作る。
+  // 更新の source ガード用に、現状の Firestore を1回だけ取得して id -> { source, protected } を作る。
   // 取得に失敗したら更新はすべて error 扱いにし、作成だけ進める（安全側）。
-  let sourceById = null;
-  let sourceFetchError = null;
+  let guardById = null;
+  let guardFetchError = null;
   if (toUpdate.length > 0) {
     try {
-      sourceById = await fetchCurrentSources();
+      guardById = await fetchCurrentTaskGuards();
     } catch (error) {
-      sourceFetchError = error;
+      guardFetchError = error;
     }
   }
 
@@ -121,21 +122,22 @@ export async function applyMarkdownCreateAndUpdate(compareData, options = {}) {
       continue;
     }
     // current 取得に失敗していた場合は安全側で error にしてスキップ（書き込まない）。
-    if (sourceFetchError) {
+    if (guardFetchError) {
       result.errors.push({
         id,
         phase: "update",
-        message: `現状取得に失敗したため更新をスキップ: ${sourceFetchError.message}`,
+        message: `現状取得に失敗したため更新をスキップ: ${guardFetchError.message}`,
       });
       onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
       continue;
     }
-    const source = sourceById && sourceById.has(id) ? sourceById.get(id) : undefined;
-    if (source === undefined) {
+    const guard = guardById && guardById.has(id) ? guardById.get(id) : undefined;
+    if (guard === undefined) {
       result.skipped.push({ id, phase: "update", reason: "current が見つかりません" });
       onProgress({ phase: "update", index: updateIndex, total: toUpdate.length, result });
       continue;
     }
+    const source = guard.source;
     if (source !== "md-import") {
       // protected: md-import 以外は更新しない。
       result.skipped.push({ id, phase: "update", reason: `source=${source ?? "未設定"} 保護` });
@@ -172,9 +174,11 @@ export async function applyMarkdownCreateAndUpdate(compareData, options = {}) {
  * 削除するのは以下をすべて満たすものだけ:
  * - id がある
  * - source === "md-import"（compare 由来の値）
- * - protected 扱いではない
+ * - protected 扱いではない（compare 由来の値）
  * - さらに DB 現状の source も "md-import"（compare JSON だけを信用しない二重確認）
+ * - さらに DB 現状の protected が true でない（古い compare で protected を反映していない場合の最終保護）
  * それ以外は削除せず skip 記録する。manual-poc / source未設定 / md-import以外 / protected は決して削除しない。
+ * DB 現状（source / protected）の取得に失敗した場合は1件も削除しない（安全側）。
  *
  * @param {Array<{ id?: unknown, title?: unknown, source?: unknown, protected?: unknown, data?: object }>} items
  * @param {{ onProgress?: (info: object) => void }} [options]
@@ -205,11 +209,11 @@ export async function applyMarkdownDelete(items, options = {}) {
     return result;
   }
 
-  // 2. DB 現状の source を取得し、compare JSON だけに依存せず md-import を再確認する。
+  // 2. DB 現状の source / protected を取得し、compare JSON だけに依存せず再確認する。
   //    取得に失敗したら安全側で全候補を error 扱いにし、1件も削除しない。
-  let sourceById;
+  let guardById;
   try {
-    sourceById = await fetchCurrentSources();
+    guardById = await fetchCurrentTaskGuards();
   } catch (error) {
     for (const item of candidates) {
       result.errors.push({
@@ -221,26 +225,36 @@ export async function applyMarkdownDelete(items, options = {}) {
     return result;
   }
 
-  // 3. 1件ずつ DELETE。削除直前に DB 現状 source を最終チェックする。
+  // 3. 1件ずつ DELETE。削除直前に DB 現状の source と protected を最終チェックする。
   let index = 0;
   for (const item of candidates) {
     index += 1;
     const id = String(pickDeleteId(item));
     const title = pickDeleteTitle(item);
 
-    const currentSource = sourceById.has(id) ? sourceById.get(id) : undefined;
-    if (currentSource === undefined) {
+    const guard = guardById.has(id) ? guardById.get(id) : undefined;
+    if (guard === undefined) {
       // 既に消えている / そもそも存在しない → 削除しない。
       result.skipped.push({ id, title, reason: "Firestoreに存在しない（既に削除済みの可能性）" });
       onProgress({ phase: "delete", index, total: candidates.length, result });
       continue;
     }
-    if (currentSource !== "md-import") {
-      // DB 現状が md-import でない → 削除しない（protected 相当の最終保護）。
+    if (guard.source !== "md-import") {
+      // DB 現状が md-import でない → 削除しない。
       result.skipped.push({
         id,
         title,
-        reason: `現状のsourceが md-import ではない（${currentSource ?? "未設定"}）`,
+        reason: `現状のsourceが md-import ではない（${guard.source ?? "未設定"}）`,
+      });
+      onProgress({ phase: "delete", index, total: candidates.length, result });
+      continue;
+    }
+    if (guard.protected === true) {
+      // DB 現状が protected → 削除しない（compare JSON が古く protected を反映していない場合の最終保護）。
+      result.skipped.push({
+        id,
+        title,
+        reason: "DB上で protected=true のため削除をスキップしました。",
       });
       onProgress({ phase: "delete", index, total: candidates.length, result });
       continue;
@@ -368,10 +382,11 @@ function buildUpdateFromDiffs(item) {
   return { mask, writeData };
 }
 
-// ---- Firestore REST（最小限・read + create + update のみ。delete は持たない） ----
+// ---- Firestore REST（最小限・read / create / update / delete）。delete は applyMarkdownDelete からのみ呼ぶ ----
 
-// source ガード用に tasks の id->source マップを取得する（ページング対応）。
-async function fetchCurrentSources() {
+// 更新・削除のガード用に tasks の id -> { source, protected } マップを取得する（ページング対応）。
+// source だけでなく protected も取得し、削除直前に DB 現状の protected を再確認できるようにする。
+async function fetchCurrentTaskGuards() {
   const projectId = firebaseConfig?.projectId;
   const apiKey = firebaseConfig?.apiKey;
   if (!projectId) {
@@ -397,7 +412,13 @@ async function fetchCurrentSources() {
       const id = name.slice(name.lastIndexOf("/") + 1);
       const sourceField = doc.fields?.source;
       const source = sourceField && "stringValue" in sourceField ? sourceField.stringValue : null;
-      map.set(id, source);
+      // protected は boolean フィールド。true のときだけ保護扱い（未設定・非boolは false 扱い）。
+      const protectedField = doc.fields?.protected;
+      const isProtected =
+        protectedField && "booleanValue" in protectedField
+          ? protectedField.booleanValue === true
+          : false;
+      map.set(id, { source, protected: isProtected });
     }
     pageToken = json.nextPageToken ?? null;
   } while (pageToken);
