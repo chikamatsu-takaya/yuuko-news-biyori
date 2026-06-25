@@ -32,6 +32,7 @@
 16. Firestore POC 実施結果（読み取り・表示・status更新・追加・物理削除）
 17. Markdown全件インポート / 再同期方針
 18. source可視化・削除可否表示（段階1・削除実行は未実装）
+19. 削除候補の選択削除（段階2・md-import 限定の物理削除）
 
 ---
 
@@ -1091,3 +1092,44 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - `task-management/markdown-sync-ui.js` … `evaluateDeleteCandidate()` / `renderSyncDeleteCandidate()` 追加、`renderSyncDeleteGroup()` を削除可否表示に拡張。
 - `task-management/task-dashboard.css` … source バッジ・削除可否バッジ/理由のスタイル追加。
 - 本資料（§18）に段階1の仕様を追記。
+
+## 19. 削除候補の選択削除（段階2・md-import 限定の物理削除）
+
+§18 の削除可否表示を前提に、**削除可能（`source="md-import"`）の `toDeleteCandidates` だけ**を、ユーザーが選択・確認したうえで Firestore から物理削除できるようにする。`?source=firestore` の Markdown同期プレビュー内でのみ使う機能で、通常URLの Markdown 表示は変更しない。追加・更新の反映（`toCreate`/`toUpdate`）とは**別ボタン・別処理・別モーダル**にする。
+
+### 19.1 削除してよい条件（すべて満たすもののみ）
+- `toDeleteCandidates` に含まれている
+- ユーザーがチェックボックスで選択している
+- `id` がある
+- `source === "md-import"`
+- protected 扱いではない
+
+`manual-poc` / `source` なし・null・undefined・空 / `md-import` 以外 / protected / ID無し / 未選択 / `toDeleteCandidates` 以外は**絶対に削除しない**。`manual-poc` は将来の DB→md 反映で Markdown へ取り込む対象であり、本機能の削除対象外。
+
+### 19.2 UI（`markdown-sync-ui.js`）
+- 削除可能候補（`evaluateDeleteCandidate(item).deletable === true`）にだけチェックボックスを表示する。削除不可候補にはチェックボックスを出さない。初期は未選択。
+- 「表示中の削除可能候補をすべて選択」トグルを用意する（対象は表示中の md-import 削除可能候補のみ）。
+- 削除候補グループ内に専用ボタン「選択したmd-import削除候補を削除」を置く（`追加・更新を反映`とは別）。選択0件のときは disabled。
+- 削除ボタン押下で**削除専用の確認モーダル**を表示する（追加・更新のモーダルとは別 DOM）。モーダルには削除件数・対象ID・タイトル・「source="md-import" の選択済みのみ削除」「Firestoreから物理削除」「manual-poc / sourceなし / protected は削除しない」を明示する。
+- チェックボックス・削除ボタンは `details` 再描画で作り直されるため、安定した親（`details`）へイベント委譲する。新しい compare 結果を描画するたびに選択をリセットする。
+
+### 19.3 削除処理（`markdown-sync-apply.js` の `applyMarkdownDelete()`）
+- 物理削除は `applyMarkdownDelete()` だけが行い、**確認モーダルで承認された後にのみ**呼ばれる（`executeMarkdownDeleteAfterConfirm()` 経由）。
+- 削除方式は既存 create/update と同じ **Firestore REST（`DELETE`）**。Web SDK `deleteDoc` は使わない（同期パネルに重い Firebase SDK をもう一系統読み込まない・§6 軽量性。§4.6 として理由明記）。
+- **二重防御**:
+  1. UI の判定を信用せず、`applyMarkdownDelete` 内で `id` / `source` / protected を独立に再検証（`validateDeletable()`）。
+  2. さらに DB 現状の `source` を取得（`fetchCurrentSources()`）し、**現状も `md-import`** のものだけ削除する。現状取得に失敗したら1件も削除しない（安全側）。
+  3. 条件を満たさないものは削除せず skip 記録。
+- 戻り値は `{ deleted, skipped, errors }`。UI で削除成功/スキップ/失敗件数と理由を表示し、**compare JSON の再生成が必要**であることを案内する（画面からは再生成しない）。
+
+### 19.4 この段階でやらないこと
+- `manual-poc` / source未設定・由来不明データの削除、全件無条件削除。
+- DB→md 反映、Markdown 自動更新、`manual-poc`→`md-import` 変換。
+- Firebase Auth / Rules / App Check の本運用化。
+
+### 19.5 変更ファイル
+- `task-management/markdown-sync-apply.js` … `applyMarkdownDelete()` / `validateDeletable()` / REST `deleteTask()` 追加。ファイル冒頭の「DELETEを実装しない」方針を、承認後のみ削除する方針へ更新。
+- `task-management/markdown-sync-ui.js` … 削除選択チェックボックス・全選択・削除ボタン・削除確認モーダル・削除結果表示を追加。`renderSyncDeleteGroup()` / `renderSyncDeleteCandidate()` を選択UI対応に拡張。
+- `task-management/task-dashboard.css` … 削除選択UI（チェックボックス・全選択行・削除ボタン）のスタイル追加。
+- 本資料（§19）に段階2の仕様を追記。
+- `firestore-source.js` / `task-dashboard.js` は変更しない（削除は同期パネル＝apply モジュール側に閉じる）。

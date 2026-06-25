@@ -902,6 +902,50 @@ p.markdown-sync-id {
   font-size: 0.8rem;
 }
 
+/* 削除候補の選択UI（チェックボックス・全選択行・削除ボタン）。 */
+.markdown-sync-delete-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.markdown-sync-delete-select input {
+  cursor: pointer;
+}
+
+.markdown-sync-delete-selectall-row {
+  margin: 4px 0 8px;
+  font-weight: 700;
+}
+
+.markdown-sync-delete-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.markdown-sync-delete-selected-count {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* 削除ボタンは危険操作のため赤系で強調する。 */
+.markdown-sync-delete-button {
+  border-color: rgba(240, 120, 120, 0.5);
+  color: var(--red);
+}
+
+.markdown-sync-delete-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* 反映確認モーダル（window.confirm の置き換え）。画面中央にオーバーレイ表示。 */
 .markdown-sync-modal-overlay {
   position: fixed;

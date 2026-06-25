@@ -36,10 +36,22 @@ const markdownSyncElements = {
   modalBody: null,
   modalExecuteButton: null,
   modalCancelButton: null,
+  // 削除専用の確認モーダル（追加・更新の確認モーダルとは別物）。
+  deleteModalOverlay: null,
+  deleteModalBody: null,
+  deleteModalExecuteButton: null,
+  deleteModalCancelButton: null,
 };
 
 // モーダル「実行する」押下時に反映する compare 結果を一時保持する。
 let pendingMarkdownApplyData = null;
+
+// 削除候補のうちユーザーがチェックボックスで選択した id（削除可能なものだけ入る）。
+// renderMarkdownSyncPreview で compare 結果を描き直すたびにリセットする（初期は未選択）。
+let selectedDeleteIds = new Set();
+
+// 削除確認モーダルで「削除する」を押したときに削除する候補を一時保持する。
+let pendingMarkdownDeleteData = null;
 
 // パネル表示状態の世代トークン。非表示になるたびに +1 する。
 // runMarkdownApplyAll() は開始時のトークンを控え、await 後に値が変わっていれば
@@ -95,7 +107,7 @@ function setupMarkdownSyncPanel() {
     <p class="markdown-sync-lead">
       「Compare確認」は、事前生成されたcompare JSONを読み込んで差分を表示するだけです（読み取りのみ）。
       「追加・更新を反映」を実行した場合は、確認後に toCreate / toUpdate のみFirestoreへ書き込みます。
-      削除候補は表示・警告のみで、Firestoreから削除しません（Firestore DELETE / deleteDoc は行いません）。
+      削除は別操作です。削除候補グループ内の専用ボタンから、source="md-import" の選択済み候補だけを確認後に物理削除します（manual-poc / sourceなし / protected は削除しません）。
     </p>
     <p id="markdownSyncGeneratedAt" class="markdown-sync-generated">compare結果生成日時: 不明</p>
     <p class="markdown-sync-freshness">
@@ -109,7 +121,7 @@ function setupMarkdownSyncPanel() {
       <button id="markdownSyncApplyAllButton" type="button" class="button compact">追加・更新を反映</button>
     </div>
     <p class="markdown-sync-disabled-note">
-      反映するのは「追加予定」「更新予定」のみです。削除候補は今回も削除しません（削除処理は未実装）。
+      このボタンで反映するのは「追加予定」「更新予定」のみです（削除はしません）。削除は削除候補グループ内の専用ボタンから行います。
     </p>
   `;
 
@@ -137,6 +149,13 @@ function setupMarkdownSyncPanel() {
 
   // 確認モーダル（画面内）を1度だけ生成する。window.confirm の置き換え。
   setupMarkdownApplyModal();
+  // 削除専用の確認モーダルも1度だけ生成する（追加・更新とは別フロー）。
+  setupMarkdownDeleteModal();
+
+  // 削除候補のチェックボックス・削除ボタンは details 再描画で作り直されるため、
+  // 安定した親要素（details）にイベント委譲する（1度だけ配線）。
+  markdownSyncElements.details.addEventListener("change", handleDeleteSelectionChange);
+  markdownSyncElements.details.addEventListener("click", handleDeleteGroupClick);
 }
 
 // 反映確認モーダルのDOMを生成し、ボタンを配線する（初期は hidden）。
@@ -189,6 +208,289 @@ function setupMarkdownApplyModal() {
     hideMarkdownApplyConfirmModal();
     void executeMarkdownApplyAfterConfirm(data);
   });
+}
+
+// 削除専用の確認モーダルのDOMを生成し、ボタンを配線する（初期は hidden）。
+// 追加・更新の確認モーダルとは別物。承認するまで deleteDoc / Firestore DELETE は呼ばない。
+function setupMarkdownDeleteModal() {
+  if (markdownSyncElements.deleteModalOverlay) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "markdownSyncDeleteModalOverlay";
+  overlay.className = "markdown-sync-modal-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = `
+    <div class="markdown-sync-modal" role="dialog" aria-modal="true" aria-labelledby="markdownSyncDeleteModalTitle">
+      <h2 id="markdownSyncDeleteModalTitle">削除候補をFirestoreから削除</h2>
+      <div id="markdownSyncDeleteModalBody" class="markdown-sync-modal-body"></div>
+      <div class="markdown-sync-modal-actions">
+        <button id="markdownSyncDeleteModalCancel" type="button" class="button compact">キャンセル</button>
+        <button id="markdownSyncDeleteModalExecute" type="button" class="button primary compact">削除する</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  markdownSyncElements.deleteModalOverlay = overlay;
+  markdownSyncElements.deleteModalBody = overlay.querySelector("#markdownSyncDeleteModalBody");
+  markdownSyncElements.deleteModalExecuteButton = overlay.querySelector("#markdownSyncDeleteModalExecute");
+  markdownSyncElements.deleteModalCancelButton = overlay.querySelector("#markdownSyncDeleteModalCancel");
+
+  // キャンセル / 背景クリック / Escape はすべて削除せず閉じる。
+  markdownSyncElements.deleteModalCancelButton.addEventListener("click", () => {
+    cancelMarkdownDeleteModal();
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      cancelMarkdownDeleteModal();
+    }
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      cancelMarkdownDeleteModal();
+    }
+  });
+
+  // 削除する: ボタンを押せなくし、モーダルを閉じてから削除処理を実行する。
+  // ここで承認されて初めて applyMarkdownDelete（REST DELETE）が呼ばれる。
+  markdownSyncElements.deleteModalExecuteButton.addEventListener("click", () => {
+    markdownSyncElements.deleteModalExecuteButton.disabled = true;
+    const data = pendingMarkdownDeleteData;
+    hideMarkdownDeleteConfirmModal();
+    void executeMarkdownDeleteAfterConfirm(data);
+  });
+}
+
+// 削除候補のチェックボックス変更を受ける（details へのイベント委譲）。
+function handleDeleteSelectionChange(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
+    return;
+  }
+
+  if (target.classList.contains("markdown-sync-delete-checkall")) {
+    // 全選択トグル: 表示中の「削除可能」チェックボックスだけを対象にする。
+    const boxes = markdownSyncElements.details.querySelectorAll(".markdown-sync-delete-check");
+    boxes.forEach((box) => {
+      box.checked = target.checked;
+      const id = box.dataset.id;
+      if (!id) {
+        return;
+      }
+      if (target.checked) {
+        selectedDeleteIds.add(id);
+      } else {
+        selectedDeleteIds.delete(id);
+      }
+    });
+    updateDeleteSelectionUi();
+    return;
+  }
+
+  if (target.classList.contains("markdown-sync-delete-check")) {
+    const id = target.dataset.id;
+    if (!id) {
+      return;
+    }
+    if (target.checked) {
+      selectedDeleteIds.add(id);
+    } else {
+      selectedDeleteIds.delete(id);
+    }
+    syncDeleteCheckAllState();
+    updateDeleteSelectionUi();
+  }
+}
+
+// 削除候補グループ内の削除ボタン押下を受ける（details へのイベント委譲）。
+function handleDeleteGroupClick(event) {
+  const button = event.target.closest(".markdown-sync-delete-button");
+  if (!button || button.disabled) {
+    return;
+  }
+  runMarkdownDeleteSelected();
+}
+
+// 全選択チェックボックスの状態を、表示中の削除可能チェックボックスの選択状況に合わせる。
+function syncDeleteCheckAllState() {
+  const checkAll = markdownSyncElements.details.querySelector(".markdown-sync-delete-checkall");
+  if (!checkAll) {
+    return;
+  }
+  const boxes = Array.from(
+    markdownSyncElements.details.querySelectorAll(".markdown-sync-delete-check"),
+  );
+  const checkedCount = boxes.filter((box) => box.checked).length;
+  checkAll.checked = boxes.length > 0 && checkedCount === boxes.length;
+  checkAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+}
+
+// 選択件数の表示と削除ボタンの活性/非活性を更新する（再描画なしで部分更新）。
+function updateDeleteSelectionUi() {
+  const count = selectedDeleteIds.size;
+  const button = markdownSyncElements.details?.querySelector(".markdown-sync-delete-button");
+  if (button) {
+    button.disabled = count === 0;
+  }
+  const label = markdownSyncElements.details?.querySelector(".markdown-sync-delete-selected-count");
+  if (label) {
+    label.textContent = `選択中: ${count}件`;
+  }
+}
+
+// 削除ボタン押下: 表示中の compare 結果から「選択済み かつ 削除可能」候補だけを集め、確認モーダルを出す。
+// ここでは削除しない（モーダルで承認されるまで deleteDoc / Firestore DELETE は呼ばない）。
+function runMarkdownDeleteSelected() {
+  const candidates = Array.isArray(lastMarkdownCompareResult?.toDeleteCandidates)
+    ? lastMarkdownCompareResult.toDeleteCandidates
+    : [];
+  // 選択済み かつ 削除可能（md-import / IDあり / protectedでない）だけに厳格に絞る。
+  const selected = candidates.filter((item) => {
+    const id = item?.id != null ? String(item.id).trim() : "";
+    return id !== "" && selectedDeleteIds.has(id) && evaluateDeleteCandidate(item).deletable;
+  });
+
+  if (selected.length === 0) {
+    setMarkdownSyncStatus("削除対象が選択されていません。", { isError: true });
+    return;
+  }
+
+  showMarkdownDeleteConfirmModal(selected);
+}
+
+// 削除確認モーダルを表示する。件数・対象ID・タイトル・安全方針を明示する。
+function showMarkdownDeleteConfirmModal(items) {
+  if (!markdownSyncElements.deleteModalOverlay || !markdownSyncElements.deleteModalBody) {
+    return;
+  }
+  pendingMarkdownDeleteData = items;
+
+  const previewCount = Math.min(20, items.length);
+  const rows = items
+    .slice(0, previewCount)
+    .map((item) => {
+      const id = item?.id != null ? String(item.id) : "(no id)";
+      const title = item?.title != null ? String(item.title) : "(無題)";
+      return `<li><span class="markdown-sync-id">${escapeSyncHtml(id)}</span> ${escapeSyncHtml(title)}</li>`;
+    })
+    .join("");
+  const more =
+    items.length > previewCount
+      ? `<li class="empty-state">ほか ${items.length - previewCount} 件</li>`
+      : "";
+
+  markdownSyncElements.deleteModalBody.innerHTML = `
+    <p>選択した削除候補 <strong>${items.length}</strong>件をFirestoreから物理削除します。</p>
+    <p class="markdown-sync-modal-danger">
+      この操作はFirestore上のタスクを物理削除します。<br>
+      削除対象は source="md-import" の選択済み候補のみです。<br>
+      manual-poc / sourceなし / protected のタスクは削除しません。
+    </p>
+    <p class="markdown-sync-diff-label">削除対象:</p>
+    <ul class="markdown-sync-sample-list">${rows}${more}</ul>
+  `;
+
+  if (markdownSyncElements.deleteModalExecuteButton) {
+    markdownSyncElements.deleteModalExecuteButton.disabled = false;
+  }
+  markdownSyncElements.deleteModalOverlay.hidden = false;
+  if (markdownSyncElements.deleteModalExecuteButton) {
+    markdownSyncElements.deleteModalExecuteButton.focus();
+  }
+}
+
+// 削除確認モーダルを閉じる（状態だけ。メッセージは出さない）。
+function hideMarkdownDeleteConfirmModal() {
+  if (markdownSyncElements.deleteModalOverlay) {
+    markdownSyncElements.deleteModalOverlay.hidden = true;
+  }
+}
+
+// 削除確認モーダルと pending を破棄してボタンを戻す（メッセージは出さない・共通処理）。
+// 戻り値: 破棄時点でモーダルが開いていたか。
+function dismissMarkdownDeleteModal() {
+  const wasOpen = Boolean(
+    markdownSyncElements.deleteModalOverlay && !markdownSyncElements.deleteModalOverlay.hidden,
+  );
+  hideMarkdownDeleteConfirmModal();
+  pendingMarkdownDeleteData = null;
+  if (markdownSyncElements.deleteModalExecuteButton) {
+    markdownSyncElements.deleteModalExecuteButton.disabled = false;
+  }
+  return wasOpen;
+}
+
+// キャンセル: モーダルを閉じ、削除せずキャンセルメッセージを出す。
+function cancelMarkdownDeleteModal() {
+  if (!dismissMarkdownDeleteModal()) {
+    return;
+  }
+  setMarkdownSyncStatus("削除をキャンセルしました。");
+}
+
+// モーダルで「削除する」を押した後の削除処理。applyMarkdownDelete（REST DELETE）に委譲する。
+// apply 側でも独立に source/id/protected を再検証し、DB現状の md-import を再確認してから削除する。
+async function executeMarkdownDeleteAfterConfirm(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length === 0) {
+    pendingMarkdownDeleteData = null;
+    return;
+  }
+
+  setMarkdownSyncStatus(`削除を実行中...（対象 ${list.length}件）`);
+
+  try {
+    const { applyMarkdownDelete } = await import("./markdown-sync-apply.js");
+    const result = await applyMarkdownDelete(list, {
+      onProgress: (info) => {
+        setMarkdownSyncStatus(`削除を実行中...\n削除: ${info.result.deleted.length} / ${list.length}`);
+      },
+    });
+
+    const lines = [
+      "削除が完了しました。",
+      "",
+      `削除成功: ${result.deleted.length}件`,
+      `スキップ: ${result.skipped.length}件`,
+      `失敗: ${result.errors.length}件`,
+    ];
+    if (result.skipped.length > 0) {
+      lines.push("", "スキップ理由:");
+      for (const skip of result.skipped.slice(0, 5)) {
+        lines.push(`- ${skip.id ?? "(no id)"}: ${skip.reason ?? ""}`);
+      }
+      if (result.skipped.length > 5) {
+        lines.push(`- ほか ${result.skipped.length - 5} 件`);
+      }
+    }
+    if (result.errors.length > 0) {
+      lines.push("", "失敗理由:");
+      for (const err of result.errors.slice(0, 5)) {
+        lines.push(`- ${err.id ?? "(no id)"} [${err.phase ?? "delete"}] ${err.message ?? err.status ?? ""}`);
+      }
+      if (result.errors.length > 5) {
+        lines.push(`- ほか ${result.errors.length - 5} 件`);
+      }
+    }
+    lines.push("", "最新状態を確認するには compare JSON を再生成してください。");
+    setMarkdownSyncStatus(lines.join("\n"), {
+      isError: result.errors.length > 0,
+      commandHint: MARKDOWN_SYNC_GEN_COMMAND,
+    });
+
+    // 削除済み id は選択から除く（同じ id への重複削除を避ける）。
+    for (const done of result.deleted) {
+      selectedDeleteIds.delete(String(done.id));
+    }
+    console.log("[Markdown sync] delete result", result);
+  } catch (error) {
+    console.error("[Markdown sync] delete failed", error);
+    setMarkdownSyncStatus(`削除に失敗しました: ${error.message}`, { isError: true });
+  } finally {
+    pendingMarkdownDeleteData = null;
+    updateDeleteSelectionUi();
+  }
 }
 
 /**
@@ -310,8 +612,8 @@ function showMarkdownApplyConfirmModal(data, counts) {
   const deleteWarning =
     counts.toDeleteCandidates > 0
       ? `<p class="markdown-sync-modal-danger">
-           削除候補がありますが、今回の反映対象外です。<br>
-           削除処理はまだ実装していないため、Firestoreから削除は行いません。
+           削除候補がありますが、この「追加・更新を反映」では削除しません。<br>
+           削除は削除候補グループ内の専用ボタンから別操作で行ってください。
          </p>`
       : "";
 
@@ -413,7 +715,7 @@ async function executeMarkdownApplyAfterConfirm(data) {
   // 反映対象が無ければ書き込みせず終了。
   if (counts.toCreate === 0 && counts.toUpdate === 0) {
     setMarkdownSyncStatus(
-      "追加・更新の反映対象はありません。\n削除候補がある場合も、削除処理は未実装のため実行しません。",
+      "追加・更新の反映対象はありません。\nこの操作では削除しません（削除は削除候補グループの専用ボタンから行います）。",
     );
     if (button) {
       button.disabled = false;
@@ -422,7 +724,7 @@ async function executeMarkdownApplyAfterConfirm(data) {
     return;
   }
 
-  // 反映実行（apply モジュールを動的 import。delete は構造上呼べない）。
+  // 反映実行（apply モジュールを動的 import。この経路では create/update のみで delete は呼ばない）。
   if (compareButton) {
     compareButton.disabled = true;
   }
@@ -453,11 +755,11 @@ async function executeMarkdownApplyAfterConfirm(data) {
       `エラー: ${result.errors.length}件`,
       `削除候補: ${result.deleteCandidatesSkipped.length}件（未処理）`,
     ];
-    // 削除候補がある場合は「未処理」である理由を明示する（削除は未実装のため実行しない）。
+    // 削除候補は「追加・更新を反映」では処理しない。削除は専用ボタンから別操作で行う旨を明示する。
     if (result.deleteCandidatesSkipped.length > 0) {
       summaryLines.push("");
-      summaryLines.push("削除候補は今回も未処理です。");
-      summaryLines.push("削除処理はまだ実装していないため、Firestoreから削除は行いません。");
+      summaryLines.push("削除候補はこの操作では未処理です。");
+      summaryLines.push("削除する場合は削除候補グループ内の専用ボタンから行ってください（md-import のみ）。");
     }
     if (result.errors.length > 0) {
       summaryLines.push("");
@@ -507,6 +809,9 @@ function setMarkdownSyncPanelVisible(visible) {
     markdownSyncPanelVisibilityToken += 1;
     // パネル非表示時は確認モーダルも残さない（pending 破棄・ボタン復帰。メッセージは出さない）。
     dismissMarkdownApplyModal();
+    // 削除確認モーダルと選択状態も残さない（非表示の画面から削除が継続しないようにする）。
+    dismissMarkdownDeleteModal();
+    selectedDeleteIds = new Set();
   }
   markdownSyncElements.section.hidden = !visible;
 }
@@ -526,6 +831,9 @@ function renderMarkdownSyncPreview(compareResult) {
   }
   const data = normalizeCompareResult(compareResult);
   lastMarkdownCompareResult = data;
+
+  // 新しい compare 結果を描き直すたびに削除選択をリセットする（初期は未選択・誤削除防止）。
+  selectedDeleteIds = new Set();
 
   // 生成日時（メタ情報）。compareResult から直接読む（無ければ「不明」表示）。
   const generatedAt =
@@ -825,7 +1133,8 @@ function evaluateDeleteCandidate(item) {
 }
 
 // 削除候補1件分のカードを描画する。削除可否バッジ・理由・source・ID を表示する。
-// 削除ボタン・チェックボックスは出さない（今回は表示のみ・実削除はしない）。
+// 削除可能（md-import / IDあり / protectedでない）な候補にだけチェックボックスを出す。
+// 削除不可の候補にはチェックボックスを出さない（誤って選べないようにする）。
 function renderSyncDeleteCandidate(item) {
   const title = item?.title != null ? String(item.title) : "(無題)";
   const id = item?.id != null ? String(item.id).trim() : "";
@@ -835,6 +1144,16 @@ function renderSyncDeleteCandidate(item) {
   const verdict = evaluateDeleteCandidate(item);
   const stateClass = verdict.deletable ? "is-deletable" : "is-blocked";
   const stateLabel = verdict.deletable ? "削除可能" : "削除不可";
+
+  // 削除可能 かつ ID あり のときだけチェックボックスを描画する。初期は未選択。
+  const checkbox =
+    verdict.deletable && id
+      ? `<label class="markdown-sync-delete-select">
+           <input type="checkbox" class="markdown-sync-delete-check" data-id="${escapeSyncHtml(id)}" />
+           <span>削除対象に選択</span>
+         </label>`
+      : "";
+
   return `
     <div class="markdown-sync-item markdown-sync-delete-item ${stateClass}">
       <div class="markdown-sync-delete-head">
@@ -844,12 +1163,14 @@ function renderSyncDeleteCandidate(item) {
       <p class="markdown-sync-id">ID: ${escapeSyncHtml(id || "なし")}</p>
       <p class="markdown-sync-id">source: ${escapeSyncHtml(sourceText)}</p>
       <p class="markdown-sync-delete-reason">${escapeSyncHtml(verdict.reason)}</p>
+      ${checkbox}
     </div>
   `;
 }
 
-// 削除候補は危険操作のため、未実装である旨の注意文を必ず添える。
-// 各候補に削除可否（削除可能/削除不可）と理由を表示する（今回は表示のみ・実削除はしない）。
+// 削除候補グループ。各候補に削除可否と理由を出し、削除可能候補だけ選択・削除できるようにする。
+// 削除ボタンは「追加・更新を反映」とは別物。0件選択時は disabled（押せない）。
+// 実削除は確認モーダルで承認された後にのみ行う（このグループ描画では削除しない）。
 function renderSyncDeleteGroup(items) {
   if (!items.length) {
     return "";
@@ -858,21 +1179,45 @@ function renderSyncDeleteGroup(items) {
   const deletableCount = items.filter((item) => evaluateDeleteCandidate(item).deletable).length;
   const blockedCount = items.length - deletableCount;
   const previewCount = Math.min(10, items.length);
-  const cards = items.slice(0, previewCount).map(renderSyncDeleteCandidate).join("");
+  const shown = items.slice(0, previewCount);
+  const cards = shown.map(renderSyncDeleteCandidate).join("");
   const more =
     items.length > previewCount
-      ? `<p class="empty-state">ほか ${items.length - previewCount} 件</p>`
+      ? `<p class="empty-state">ほか ${items.length - previewCount} 件（表示中の候補のみ選択・削除できます）</p>`
       : "";
+
+  // 全選択は「表示中の削除可能候補」だけを対象にする（チェックボックスがある候補のみ）。
+  const shownDeletable = shown.filter((item) => evaluateDeleteCandidate(item).deletable).length;
+  const selectAll =
+    shownDeletable > 0
+      ? `<label class="markdown-sync-delete-select markdown-sync-delete-selectall-row">
+           <input type="checkbox" class="markdown-sync-delete-checkall" />
+           <span>表示中の削除可能候補をすべて選択（${shownDeletable}件）</span>
+         </label>`
+      : "";
+
+  // 削除可能候補があるときだけ削除ボタンを出す。初期は未選択なので disabled。
+  const actions =
+    shownDeletable > 0
+      ? `<div class="markdown-sync-delete-actions">
+           <span class="markdown-sync-delete-selected-count">選択中: 0件</span>
+           <button type="button" class="button compact markdown-sync-delete-button" disabled>選択したmd-import削除候補を削除</button>
+         </div>`
+      : `<p class="markdown-sync-protected-note">削除可能な md-import 候補はありません（削除ボタンは表示しません）。</p>`;
+
   return `
     <div class="markdown-sync-group is-danger">
       <h3>削除候補（${items.length}）</h3>
       <p class="markdown-sync-danger-note">
-        削除候補はまだ反映できません。削除処理は未実装です（Firestore DELETE / deleteDoc は行いません）。
+        削除候補のうち source="md-import" の選択済み候補だけをFirestoreから物理削除します。<br>
+        manual-poc / sourceなし / protected は削除しません。削除前に確認モーダルを表示します。
       </p>
       <p class="markdown-sync-delete-summary">
         削除可能: <strong>${deletableCount}</strong>件 / 削除不可: <strong>${blockedCount}</strong>件
       </p>
+      ${selectAll}
       ${cards}${more}
+      ${actions}
     </div>
   `;
 }

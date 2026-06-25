@@ -1,12 +1,16 @@
-// Markdown同期: 追加(toCreate)・更新(toUpdate)の実反映（ブラウザ用・create/update のみ）。
+// Markdown同期: 追加(toCreate)・更新(toUpdate)の実反映 + 選択削除（ブラウザ用）。
 //
-// 役割（§17.16 画面UI化の反映段階）:
+// 役割（§17.16 画面UI化の反映段階 / §18-19 削除段階）:
 // - compare 結果の toCreate を Firestore へ新規作成（既存IDは上書きせず skip）。
 // - compare 結果の toUpdate を Firestore へ PATCH 更新（updateMask で対象フィールドのみ）。
-// - toDeleteCandidates は「絶対に削除しない」。記録のみ（deleteCandidatesSkipped）。
+// - applyMarkdownCreateAndUpdate では toDeleteCandidates は「絶対に削除しない」。記録のみ。
+// - applyMarkdownDelete では、ユーザーが選択した削除可能候補だけを物理削除する（§19）。
 //
 // 安全設計:
-// - このファイルには Firestore DELETE を行う関数を一切実装しない（構造上 DELETE を呼べない）。
+// - 物理削除は applyMarkdownDelete だけが行う。確認モーダルで承認された後にのみ呼ばれる想定。
+// - 削除できるのは source="md-import" かつ ID あり かつ protected でない候補のみ。
+//   apply 内でも UI 判定を信用せず独立に再検証し、さらに DB 現状の source を取得して md-import を再確認する。
+// - manual-poc / source未設定 / md-import以外 / protected は削除しない（skip 記録）。
 // - 更新は source="md-import" の既存ドキュメントのみ。それ以外は skip（protected保護）。
 // - createdAt / completedAt / archived / source は更新マスクに含めない（触れない）。
 // - 認可は firebase-config.js の公開設定値（projectId/apiKey）のみ利用。Admin SDK は使わない。
@@ -161,6 +165,144 @@ export async function applyMarkdownCreateAndUpdate(compareData, options = {}) {
   return result;
 }
 
+/**
+ * ユーザーが選択した削除候補のうち、安全条件を満たすものだけを Firestore から物理削除する（§19）。
+ * 確認モーダルで承認された後にのみ呼ばれる前提。呼び出し側の判定を信用せず、ここでも独立に再検証する。
+ *
+ * 削除するのは以下をすべて満たすものだけ:
+ * - id がある
+ * - source === "md-import"（compare 由来の値）
+ * - protected 扱いではない
+ * - さらに DB 現状の source も "md-import"（compare JSON だけを信用しない二重確認）
+ * それ以外は削除せず skip 記録する。manual-poc / source未設定 / md-import以外 / protected は決して削除しない。
+ *
+ * @param {Array<{ id?: unknown, title?: unknown, source?: unknown, protected?: unknown, data?: object }>} items
+ * @param {{ onProgress?: (info: object) => void }} [options]
+ * @returns {Promise<{ deleted: Array, skipped: Array, errors: Array }>}
+ */
+export async function applyMarkdownDelete(items, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
+  const list = Array.isArray(items) ? items : [];
+  const result = { deleted: [], skipped: [], errors: [] };
+
+  // 1. 独立再検証。UI の選択や evaluateDeleteCandidate を信用せず、ここでも条件を確認する。
+  const candidates = [];
+  for (const item of list) {
+    const verdict = validateDeletable(item);
+    if (!verdict.ok) {
+      result.skipped.push({
+        id: pickDeleteId(item),
+        title: pickDeleteTitle(item),
+        reason: verdict.reason,
+      });
+    } else {
+      candidates.push(item);
+    }
+  }
+
+  // 検証を通過した候補が無ければ、ここで終了（削除リクエストは投げない）。
+  if (candidates.length === 0) {
+    return result;
+  }
+
+  // 2. DB 現状の source を取得し、compare JSON だけに依存せず md-import を再確認する。
+  //    取得に失敗したら安全側で全候補を error 扱いにし、1件も削除しない。
+  let sourceById;
+  try {
+    sourceById = await fetchCurrentSources();
+  } catch (error) {
+    for (const item of candidates) {
+      result.errors.push({
+        id: pickDeleteId(item),
+        phase: "delete",
+        message: `現状取得に失敗したため削除を中止: ${error.message}`,
+      });
+    }
+    return result;
+  }
+
+  // 3. 1件ずつ DELETE。削除直前に DB 現状 source を最終チェックする。
+  let index = 0;
+  for (const item of candidates) {
+    index += 1;
+    const id = String(pickDeleteId(item));
+    const title = pickDeleteTitle(item);
+
+    const currentSource = sourceById.has(id) ? sourceById.get(id) : undefined;
+    if (currentSource === undefined) {
+      // 既に消えている / そもそも存在しない → 削除しない。
+      result.skipped.push({ id, title, reason: "Firestoreに存在しない（既に削除済みの可能性）" });
+      onProgress({ phase: "delete", index, total: candidates.length, result });
+      continue;
+    }
+    if (currentSource !== "md-import") {
+      // DB 現状が md-import でない → 削除しない（protected 相当の最終保護）。
+      result.skipped.push({
+        id,
+        title,
+        reason: `現状のsourceが md-import ではない（${currentSource ?? "未設定"}）`,
+      });
+      onProgress({ phase: "delete", index, total: candidates.length, result });
+      continue;
+    }
+
+    try {
+      const res = await deleteTask(id);
+      if (res.ok) {
+        result.deleted.push({ id, title });
+      } else {
+        result.errors.push({ id, phase: "delete", status: res.status, message: res.body });
+      }
+    } catch (error) {
+      result.errors.push({ id, phase: "delete", message: error.message });
+    }
+    onProgress({ phase: "delete", index, total: candidates.length, result });
+  }
+
+  return result;
+}
+
+// 削除可否の独立再検証（markdown-sync-ui.js の evaluateDeleteCandidate と同じ意味付け・§17.6/§18.3）。
+// id 無し / protected / manual-poc / source未設定 / md-import以外 はすべて削除不可。
+function validateDeletable(item) {
+  const id = pickDeleteId(item);
+  const source = pickDeleteSource(item);
+  const isProtected = item?.protected === true || item?.data?.protected === true;
+
+  if (!id) {
+    return { ok: false, reason: "IDがないため削除不可。" };
+  }
+  if (isProtected) {
+    return { ok: false, reason: "protected対象のため削除不可。" };
+  }
+  if (source === "manual-poc") {
+    return { ok: false, reason: "manual-poc のため削除不可。" };
+  }
+  if (source === "") {
+    return { ok: false, reason: "source が不明なため削除不可。" };
+  }
+  if (source !== "md-import") {
+    return { ok: false, reason: "source が md-import ではないため削除不可。" };
+  }
+  return { ok: true, reason: "" };
+}
+
+// 削除候補 item から id / title / source を取り出す（フラット形・{data} 形どちらにも対応）。
+function pickDeleteId(item) {
+  const raw = item?.id ?? item?.data?.id;
+  return raw != null ? String(raw).trim() : "";
+}
+
+function pickDeleteTitle(item) {
+  const raw = item?.title ?? item?.data?.title;
+  return raw != null ? String(raw) : "";
+}
+
+function pickDeleteSource(item) {
+  const raw = item?.source ?? item?.data?.source;
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
 // toCreate 1件分の作成データを組み立てる。{ id, data } 形・フラット形どちらにも対応。
 function buildCreateData(item) {
   const source =
@@ -304,6 +446,26 @@ async function updateTaskFields(id, data, updateMaskFields, timestampFields) {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ fields: toRestFields(masked, timestampFields) }),
+  });
+  const body = await safeText(response);
+  return { ok: response.ok, status: response.status, body };
+}
+
+// tasks/{id} を物理削除する（REST DELETE）。applyMarkdownDelete からのみ呼ばれる。
+// 確認モーダル承認後に、安全条件（source=md-import 等）を満たした候補に対してのみ実行する。
+async function deleteTask(id) {
+  const projectId = firebaseConfig?.projectId;
+  const apiKey = firebaseConfig?.apiKey;
+  if (!projectId) {
+    throw new Error("firebase-config.js に projectId がありません。");
+  }
+  const params = new URLSearchParams();
+  if (apiKey) params.set("key", apiKey);
+  // id は外部由来になりうるためURLエンコードする（パス区切り混入を防ぐ）。
+  const url = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks/${encodeURIComponent(id)}?${params.toString()}`;
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
   });
   const body = await safeText(response);
   return { ok: response.ok, status: response.status, body };
