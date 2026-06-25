@@ -221,6 +221,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-24: §16 にタスク追加POC（§16.6）と物理削除POC（§16.7）の結果を追記。追加は `addDoc` で最小項目入力＋初期値補完（archived=false/各種 null・[]、createdAt/updatedAt=serverTimestamp、updatedBy="manual-poc"、Done 連動、order=既存最大+10→40 を確認）。削除は方針を `archived=true` 論理削除から **`deleteDoc` 物理削除**へ変更（confirm 必須・Firestore 表示時のみ・再取得再描画）。§16.8 に実装済み/当面実装しない（archived 切替）/未実装の整理、§16.9 に次候補（全件インポート / 本文編集 / Rules・認証 / Firestore 正運用 / order 採番改善）を記載。見出し・目次を「…追加・物理削除」へ更新。
 - 2026-06-24: §17「Markdown全件インポート / 再同期方針」を追記（実装はせず方針整理のみ）。一度きりでなく繰り返し可能な宣言的同期として設計。ローカルスクリプト方式・dry-run 既定/`--apply`/`--delete-missing`、決定的 ID（`category+subcategory+title` 由来・将来 `id:` 明示案）、`source="md-import"`/`"manual-poc"` 区別、12 フィールド比較（メタ・タイムスタンプは比較対象外）、物理削除は `source="md-import"` 限定＋明示オプション必須、status/completed/`completedAt` 保持方針、order/sourceLine 採番、実装ステップ・未決事項・推奨手順を記載。目次・冒頭注記を更新。
 - 2026-06-24: §17.16「メンバー向け運用と画面UI化方針」を追記（docs のみ・実装なし）。Node スクリプトは当面**開発・検証用**に限定し、最終的なメンバー操作は**画面UI化**へ寄せる方針を明記。日常の進捗更新は画面・タスク洗い出し後の一括反映は Markdown 更新＋再同期機能・Claude Code は開発/UI実装/不具合修正用、という役割分担を整理。画面UI化時の必須安全策（必ず dry-run・件数/代表データ表示・削除候補は明示チェック時のみ・反映前確認/反映後再 compare/ログ・`protectedCurrentOnly` 非自動変更・`source` 未設定/`manual-poc`/`md-import` 以外は削除しない）を規定。段階方針（短期=create-only を `--limit` で拡大検証／中期=更新・削除候補・冪等性を Node で検証／最終=同一ロジックを画面UI化）を記載。あわせて §17.15 直後に実装状況メモ（第1〜第3段階を Node スクリプトで実装・検証済み、Firestore アクセスは REST API 利用）を追記。
+- 2026-06-25: Codex 指摘対応として `firebase-config.js` の扱いを整理。実値入り `firebase-config.js` は **Git 管理しない**（`.gitignore` 追加）方針に変更し、共有は `task-management/firebase-config.example.js`（プレースホルダー）＋手順書 `docs/00_project/firebase-config-setup.md` に集約。§16.1 / §17 の config 方針記述を `skip-worktree` 運用から `.gitignore` ＋ example 共有方式へ更新（過去にコミット済みの場合は `git rm --cached` で追跡解除が必要）。実値の表示・コピーはしない方針を明記。機能面は従来どおり `firebase-config.js` を読み込む前提を維持。
 - 2026-06-25: §17.17「Markdown同期プレビューUI（実装済み）の使い方と注意点」を追記（マージ前整理）。表示条件（通常URL=Markdown 表示／`?source=firestore` のみ Firestore 版＋プレビュー）、compare JSON は画面から生成せず Node で事前生成・Compare確認は `tmp/markdown-sync-compare-dry-run.json` を読むだけ、`generatedAt` 表示、追加・更新を反映は `toCreate`/`toUpdate` のみ・確認は画面内モーダル、安全ルール（削除候補は未処理で DELETE を呼ばない・`protectedCurrentOnly` 非変更・`source!=md-import` 非更新・`createdAt`/`completedAt`/`archived`/`source` 不変）、反映後は compare JSON 再生成が必要、`task-management/tmp/` は生成物でコミットしない（`.gitignore` 追加済み）を明記。あわせて反映後サマリーに再生成案内と削除未処理理由の文言を追加。
 
 ---
@@ -641,7 +642,8 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
   - `notification-scheduler-cooldown-tuning`
 - **`?source=firestore` のときだけ** Firestore 参照に切り替わることを確認。
 - 通常の `/task-management/` は**従来どおり Markdown 表示のまま**。
-- `firebase-config.js` は**ローカル実値入りだが `skip-worktree` 済みでコミット対象外**（Web 用 `firebaseConfig` は公開識別子。秘密鍵は置かない方針を維持）。
+- `firebase-config.js` は**ローカル専用でコミット対象外**（`.gitignore` 済み。実行時には必要だが Git 管理しない）。共有するのは `firebase-config.example.js`（テンプレート）と手順書 `docs/00_project/firebase-config-setup.md`。実値入りの `firebase-config.js` はコミットしない。秘密鍵は置かない方針を維持（Web 用 `firebaseConfig` は公開識別子）。詳細手順は [firebase-config-setup.md](./firebase-config-setup.md) を参照。
+  - 過去に `skip-worktree` で運用していたが、Codex 指摘対応として **`.gitignore` 追加＋`firebase-config.example.js` 共有**方式へ整理（過去にコミット済みの場合は `git rm --cached task-management/firebase-config.js` で追跡解除が必要）。
 
 ### 16.2 Firestore 表示POC（結果）
 - Firestore 取得データを **`firestoreToBoardModel()` で既存 `state.data` 形式へ変換**できた。
@@ -903,7 +905,7 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
   - `task-management/sync-markdown-to-firestore.mjs`（推奨名。同期スクリプト本体）。
   - 必要なら `task-management/markdown-task-parser.mjs`（解析ロジック切り出し）。
 - **config 方針**:
-  - Web SDK 方式なら `task-management/firebase-config.js` を**再利用**（読み取り専用 import。`firebase-config.js` 自体は変更しない＝ `skip-worktree` 維持）。
+  - Web SDK 方式なら `task-management/firebase-config.js` を**再利用**（読み取り専用 import。`firebase-config.js` 自体は変更しない。**ローカル専用で `.gitignore` 済み・コミットしない**。共有は `firebase-config.example.js` ＋ [firebase-config-setup.md](./firebase-config-setup.md)）。
   - Admin SDK 方式なら**別 config（サービスアカウント鍵）をローカル Secrets で**読み込み、リポジトリに含めない（§9）。どちらにするかは §17.13。
 - **変更しない方針**:
   - `task-management/firebase-config.js`
@@ -924,7 +926,7 @@ Firestore 初期データ投入前のサンプル確認（代表タスク3件）
 > 実装状況メモ（2026-06-24）: §17.12〜§17.15 のうち、第1段階（解析・変換・決定的 ID・JSON 出力）／第2段階（current 取得・差分 dry-run）／第3段階（`--apply --limit 1` の1件追加テスト）まで Node スクリプトで実装・検証済み。`task-management/sync-markdown-to-firestore.mjs`・`task-management/firestore-sync-source.mjs`・`task-management/markdown-task-parser.mjs` がその成果物。Firestore 読み取り／単件作成は npm 追加を避けるため Web SDK ではなく **Firestore REST API（Node の `fetch`）** を用いている。全件 apply・更新・削除は未実装。
 
 ### 17.16 メンバー向け運用と画面UI化方針
-§17.12〜§17.15 の同期スクリプト（Node）はあくまで**開発・検証用**であり、全メンバーが直接実行する前提にはしない。最終的なメンバー操作は**画面UI**へ寄せる。理由は、各メンバー PC でのスクリプト実行は環境差・操作ミスが起きやすいため（Node バージョン差／PowerShell・Git Bash などシェル差／`firebase-config.js` の実値設定差／`skip-worktree` の理解不足／コマンド入力ミス／`tmp/` 生成物の扱い／`--apply`・`--delete-missing` の誤実行リスク）。
+§17.12〜§17.15 の同期スクリプト（Node）はあくまで**開発・検証用**であり、全メンバーが直接実行する前提にはしない。最終的なメンバー操作は**画面UI**へ寄せる。理由は、各メンバー PC でのスクリプト実行は環境差・操作ミスが起きやすいため（Node バージョン差／PowerShell・Git Bash などシェル差／`firebase-config.js` の未作成・実値設定差（→ `firebase-config.example.js` をコピーして作成。手順は [firebase-config-setup.md](./firebase-config-setup.md)）／コマンド入力ミス／`tmp/` 生成物の扱い／`--apply`・`--delete-missing` の誤実行リスク）。
 
 #### 17.16.1 Node スクリプトの位置づけ（当面は開発・検証用）
 Node スクリプト（`sync-markdown-to-firestore.mjs` ほか）は、当面は次の用途に限定する。
