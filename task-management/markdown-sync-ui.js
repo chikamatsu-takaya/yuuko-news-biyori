@@ -41,6 +41,13 @@ const markdownSyncElements = {
 // モーダル「実行する」押下時に反映する compare 結果を一時保持する。
 let pendingMarkdownApplyData = null;
 
+// パネル表示状態の世代トークン。非表示になるたびに +1 する。
+// runMarkdownApplyAll() は開始時のトークンを控え、await 後に値が変わっていれば
+// （＝途中でパネルが非表示になっていれば）確認モーダルを開かず中断する。
+// これにより、非表示後に完了した古い async 処理が pending を再セットしたり
+// 古い compare JSON の書き込みを継続したりすることを防ぐ。
+let markdownSyncPanelVisibilityToken = 0;
+
 // 事前生成済み compare 結果JSONの取得パス（画面URL基準）。
 // 画面からは Node スクリプトを実行せず、開発者が手動で --out 生成した JSON を読むだけ。
 const MARKDOWN_SYNC_COMPARE_JSON_PATH = "tmp/markdown-sync-compare-dry-run.json";
@@ -241,6 +248,8 @@ async function runMarkdownApplyAll() {
   if (button) {
     button.disabled = true;
   }
+  // 開始時点のパネル表示世代を控える。await 後にこれが変わっていれば中断する。
+  const startedToken = markdownSyncPanelVisibilityToken;
   setMarkdownSyncStatus("compare結果JSONを読み込み中...");
 
   // 1. 最新の compare JSON を再読み込み（表示中の内容ではなく毎回読み直す）。
@@ -256,6 +265,18 @@ async function runMarkdownApplyAll() {
     if (button) {
       button.disabled = false;
     }
+    return;
+  }
+
+  // await 中にパネルが非表示になっていないか確認する（古い async 処理の継続を防ぐ）。
+  // トークンが変わっている、section が無い、または既に hidden の場合は、
+  // 確認モーダルを開かず pending も残さず静かに中断する。
+  if (
+    startedToken !== markdownSyncPanelVisibilityToken ||
+    !markdownSyncElements.section ||
+    markdownSyncElements.section.hidden
+  ) {
+    dismissMarkdownApplyModal();
     return;
   }
 
@@ -481,6 +502,9 @@ function setMarkdownSyncPanelVisible(visible) {
     return;
   }
   if (!visible) {
+    // 表示世代を進める。これにより、進行中の runMarkdownApplyAll() が await 後に
+    // 自分のトークンが古いと判定し、確認モーダルを開かず中断できる。
+    markdownSyncPanelVisibilityToken += 1;
     // パネル非表示時は確認モーダルも残さない（pending 破棄・ボタン復帰。メッセージは出さない）。
     dismissMarkdownApplyModal();
   }
