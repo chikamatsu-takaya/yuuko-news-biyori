@@ -33,6 +33,7 @@
 17. Markdown全件インポート / 再同期方針
 18. source可視化・削除可否表示（段階1・削除実行は未実装）
 19. 削除候補の選択削除（段階2・md-import 限定の物理削除）
+20. 反映UIの統合（段階3・追加/更新/削除を1操作に）
 
 ---
 
@@ -1133,3 +1134,49 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - `task-management/task-dashboard.css` … 削除選択UI（チェックボックス・全選択行・削除ボタン）のスタイル追加。
 - 本資料（§19）に段階2の仕様を追記。
 - `firestore-source.js` / `task-dashboard.js` は変更しない（削除は同期パネル＝apply モジュール側に閉じる）。
+
+## 20. 反映UIの統合（段階3・追加/更新/削除を1操作に）
+
+段階1（source可視化）・段階2（選択削除）を前提に、反映操作のボタンを**1つに統合**する。これまで「追加・更新を反映」と「選択したmd-import削除候補を削除」の2ボタンだったものを、**「Markdownを反映」1ボタン**にまとめ、追加・更新・選択削除を1回の確認で実行できるようにする。削除の安全条件（§19）は一切弱めない。
+
+### 20.1 反映ボタン
+- ボタン名は **「Markdownを反映」**（短く保つ）。Markdown同期プレビュー上部の操作行に置く。
+- このボタンで toCreate の追加・toUpdate の更新・**選択済み toDeleteCandidates の削除**をまとめて処理する。
+- 削除されるのは段階2と同じく「選択済み かつ source="md-import" かつ ID あり かつ protected でない」候補のみ。
+- 削除専用ボタンは通常表示から外す（UIとして押す反映ボタンは「Markdownを反映」の1つだけ）。
+
+### 20.2 件数内訳の表示
+- ボタン名を長くしない代わりに、ボタン付近に内訳を表示する: `追加: N件 / 更新: N件 / 削除: N件`。
+- **削除件数は `toDeleteCandidates` 全体ではなく、選択済みの削除可能候補の件数**。削除候補があっても未選択なら削除は0件。
+- 内訳は、compare 結果の描画時・削除候補のチェック変更時に更新する（`refreshApplyBreakdown()`）。
+
+### 20.3 削除候補の選択UI（段階2から継続）
+- 削除可能候補のチェックボックスは残す。全選択トグルも残す（対象は表示中の md-import 削除可能候補のみ）。
+- 自動で全件削除はしない。チェックした候補だけが削除対象になる。
+
+### 20.4 統合確認モーダル
+- 「Markdownを反映」押下で、追加・更新・削除の内容をまとめて確認モーダルに出す（`window.confirm` 不使用）。
+- 表示内容: 追加件数 / 更新件数 / 削除件数 / 削除対象のID・タイトル / 「Firestoreから物理削除」 / 「削除対象は source="md-import" の選択済みのみ」 / 「manual-poc・sourceなし・protected は削除しない」。
+- 削除が1件以上ある場合は物理削除の警告を明確に出す。削除0件のときは強い警告を出さない（軽い補足のみ）。
+- キャンセル / 背景クリック / Escape では追加・更新・削除のいずれも実行しない。
+
+### 20.5 実行順序（安全側）
+1. 追加・更新を実行（`applyMarkdownCreateAndUpdate`・create/update のみ）。
+2. 削除対象を削除直前に再チェック（`applyMarkdownDelete` 内）。
+3. 削除を実行（REST DELETE）。
+4. 結果をまとめて表示。
+
+- 追加・更新と削除はそれぞれ try で囲み、**どちらが失敗しても結果（成功/スキップ/失敗件数・理由）が分かる**ように集計する。
+- 結果表示: 追加成功 / 更新成功 / 削除成功 / 削除スキップ / 失敗件数 / 失敗理由 / **compare JSON の再生成が必要であること**。
+
+### 20.6 削除安全チェックの維持（§19から不変）
+削除直前に必ず以下を再チェックする（`applyMarkdownDelete` / `validateDeletable` / `fetchCurrentSources`）。
+- id が存在する / source === "md-import" / protected ではない / ユーザーが選択済み / **DB上の現在 source も md-import**。
+- DB上の現在 source 取得に失敗した場合は1件も削除しない（安全側）。
+- manual-poc / sourceなし / 由来不明 / protected / id無し / 未選択 / toDeleteCandidates 以外は削除しない。
+
+### 20.7 変更ファイル
+- `task-management/markdown-sync-ui.js` … 2ボタンを「Markdownを反映」1つへ統合。件数内訳表示（`refreshApplyBreakdown` / `collectSelectedDeletableItems` / `countSelectedDeletable`）追加。統合確認モーダルと統合実行（`runMarkdownApply` / `executeMarkdownApplyAfterConfirm(data, deleteItems)`）に再構成。削除専用モーダル・削除専用ボタンとその関数を削除。
+- `task-management/task-dashboard.css` … 件数内訳（`.markdown-sync-breakdown`）と選択件数行（`.markdown-sync-delete-selected-line`）のスタイル追加。削除専用ボタン用スタイルを除去。
+- 本資料（§20）に段階3の仕様を追記。
+- `markdown-sync-apply.js` の削除処理（`applyMarkdownDelete`）は段階2のまま再利用（安全チェックは不変）。`firestore-source.js` / `task-dashboard.js` は変更しない。

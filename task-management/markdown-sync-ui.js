@@ -36,28 +36,23 @@ const markdownSyncElements = {
   modalBody: null,
   modalExecuteButton: null,
   modalCancelButton: null,
-  // 削除専用の確認モーダル（追加・更新の確認モーダルとは別物）。
-  deleteModalOverlay: null,
-  deleteModalBody: null,
-  deleteModalExecuteButton: null,
-  deleteModalCancelButton: null,
+  // ボタン付近に出す件数内訳（追加 / 更新 / 削除）の表示要素。
+  breakdown: null,
 };
 
-// モーダル「実行する」押下時に反映する compare 結果を一時保持する。
+// 統合確認モーダル「実行する」押下時に反映する compare 結果を一時保持する。
 let pendingMarkdownApplyData = null;
+
+// 同じく「実行する」押下時に削除する候補（選択済み かつ 削除可能）を一時保持する。
+let pendingMarkdownDeleteItems = null;
 
 // 削除候補のうちユーザーがチェックボックスで選択した id（削除可能なものだけ入る）。
 // renderMarkdownSyncPreview で compare 結果を描き直すたびにリセットする（初期は未選択）。
 let selectedDeleteIds = new Set();
 
-// 削除確認モーダルで「削除する」を押したときに削除する候補を一時保持する。
-let pendingMarkdownDeleteData = null;
-
 // パネル表示状態の世代トークン。非表示になるたびに +1 する。
-// runMarkdownApplyAll() は開始時のトークンを控え、await 後に値が変わっていれば
-// （＝途中でパネルが非表示になっていれば）確認モーダルを開かず中断する。
-// これにより、非表示後に完了した古い async 処理が pending を再セットしたり
-// 古い compare JSON の書き込みを継続したりすることを防ぐ。
+// 非表示化時には dismissMarkdownApplyModal() で確認モーダルと pending（削除対象を含む）を破棄する。
+// トークンは将来の非同期処理ガード用に保持する（現状の反映フローは確認時に再fetchしない）。
 let markdownSyncPanelVisibilityToken = 0;
 
 // 事前生成済み compare 結果JSONの取得パス（画面URL基準）。
@@ -106,8 +101,8 @@ function setupMarkdownSyncPanel() {
     </div>
     <p class="markdown-sync-lead">
       「Compare確認」は、事前生成されたcompare JSONを読み込んで差分を表示するだけです（読み取りのみ）。
-      「追加・更新を反映」を実行した場合は、確認後に toCreate / toUpdate のみFirestoreへ書き込みます。
-      削除は別操作です。削除候補グループ内の専用ボタンから、source="md-import" の選択済み候補だけを確認後に物理削除します（manual-poc / sourceなし / protected は削除しません）。
+      「Markdownを反映」を実行すると、確認後に toCreate の追加・toUpdate の更新・選択済み toDeleteCandidates の削除をまとめて処理します。
+      削除されるのは source="md-import" の選択済み候補のみです（manual-poc / sourceなし / protected は削除しません）。
     </p>
     <p id="markdownSyncGeneratedAt" class="markdown-sync-generated">compare結果生成日時: 不明</p>
     <p class="markdown-sync-freshness">
@@ -117,11 +112,11 @@ function setupMarkdownSyncPanel() {
     <p id="markdownSyncStatus" class="markdown-sync-status" hidden></p>
     <div id="markdownSyncDetails" class="markdown-sync-details"></div>
     <div class="markdown-sync-actions">
-      <span class="markdown-sync-actions-label">反映操作:</span>
-      <button id="markdownSyncApplyAllButton" type="button" class="button compact">追加・更新を反映</button>
+      <span id="markdownSyncApplyBreakdown" class="markdown-sync-breakdown">追加: 0件 / 更新: 0件 / 削除: 0件</span>
+      <button id="markdownSyncApplyAllButton" type="button" class="button primary compact">Markdownを反映</button>
     </div>
     <p class="markdown-sync-disabled-note">
-      このボタンで反映するのは「追加予定」「更新予定」のみです（削除はしません）。削除は削除候補グループ内の専用ボタンから行います。
+      削除件数は、削除候補のうちチェックした「削除可能（md-import）」候補の件数です。未選択の削除候補は削除しません。
     </p>
   `;
 
@@ -134,6 +129,7 @@ function setupMarkdownSyncPanel() {
   markdownSyncElements.compareButton = section.querySelector("#markdownSyncCompareButton");
   markdownSyncElements.applyAllButton = section.querySelector("#markdownSyncApplyAllButton");
   markdownSyncElements.generatedAt = section.querySelector("#markdownSyncGeneratedAt");
+  markdownSyncElements.breakdown = section.querySelector("#markdownSyncApplyBreakdown");
 
   // Compare確認ボタンは「事前生成済みJSONの読み取り表示」だけ（Firestoreへは接続しない）。
   // Node スクリプトの実行も書き込みも行わない（既存JSONを fetch して表示するのみ）。
@@ -141,21 +137,17 @@ function setupMarkdownSyncPanel() {
     void loadMarkdownCompareJson();
   });
 
-  // 追加・更新ボタン: JSON再読込→件数集計→確認モーダル表示。
-  // 削除候補(toDeleteCandidates)は反映しない（警告のみ）。
+  // 「Markdownを反映」ボタン: 追加・更新・選択削除をまとめて確認モーダルで確認してから実行する。
   markdownSyncElements.applyAllButton.addEventListener("click", () => {
-    void runMarkdownApplyAll();
+    runMarkdownApply();
   });
 
-  // 確認モーダル（画面内）を1度だけ生成する。window.confirm の置き換え。
+  // 統合確認モーダル（画面内）を1度だけ生成する。window.confirm の置き換え。
   setupMarkdownApplyModal();
-  // 削除専用の確認モーダルも1度だけ生成する（追加・更新とは別フロー）。
-  setupMarkdownDeleteModal();
 
-  // 削除候補のチェックボックス・削除ボタンは details 再描画で作り直されるため、
-  // 安定した親要素（details）にイベント委譲する（1度だけ配線）。
+  // 削除候補のチェックボックスは details 再描画で作り直されるため、
+  // 安定した親要素（details）に change をイベント委譲する（1度だけ配線）。
   markdownSyncElements.details.addEventListener("change", handleDeleteSelectionChange);
-  markdownSyncElements.details.addEventListener("click", handleDeleteGroupClick);
 }
 
 // 反映確認モーダルのDOMを生成し、ボタンを配線する（初期は hidden）。
@@ -169,7 +161,7 @@ function setupMarkdownApplyModal() {
   overlay.hidden = true;
   overlay.innerHTML = `
     <div class="markdown-sync-modal" role="dialog" aria-modal="true" aria-labelledby="markdownSyncModalTitle">
-      <h2 id="markdownSyncModalTitle">Markdown同期の追加・更新を反映</h2>
+      <h2 id="markdownSyncModalTitle">Markdownを反映（追加・更新・削除）</h2>
       <div id="markdownSyncModalBody" class="markdown-sync-modal-body"></div>
       <div class="markdown-sync-modal-actions">
         <button id="markdownSyncModalCancel" type="button" class="button compact">キャンセル</button>
@@ -201,64 +193,14 @@ function setupMarkdownApplyModal() {
     }
   });
 
-  // 実行する: ボタンを押せなくし、モーダルを閉じ、既存の create + update 反映処理を実行する。
+  // 実行する: ボタンを押せなくし、モーダルを閉じ、追加・更新・削除をまとめて実行する。
+  // ここで承認されて初めて Firestore への書き込み（作成/更新）と削除（REST DELETE）が呼ばれる。
   markdownSyncElements.modalExecuteButton.addEventListener("click", () => {
     markdownSyncElements.modalExecuteButton.disabled = true;
     const data = pendingMarkdownApplyData;
+    const deleteItems = pendingMarkdownDeleteItems;
     hideMarkdownApplyConfirmModal();
-    void executeMarkdownApplyAfterConfirm(data);
-  });
-}
-
-// 削除専用の確認モーダルのDOMを生成し、ボタンを配線する（初期は hidden）。
-// 追加・更新の確認モーダルとは別物。承認するまで deleteDoc / Firestore DELETE は呼ばない。
-function setupMarkdownDeleteModal() {
-  if (markdownSyncElements.deleteModalOverlay) {
-    return;
-  }
-  const overlay = document.createElement("div");
-  overlay.id = "markdownSyncDeleteModalOverlay";
-  overlay.className = "markdown-sync-modal-overlay";
-  overlay.hidden = true;
-  overlay.innerHTML = `
-    <div class="markdown-sync-modal" role="dialog" aria-modal="true" aria-labelledby="markdownSyncDeleteModalTitle">
-      <h2 id="markdownSyncDeleteModalTitle">削除候補をFirestoreから削除</h2>
-      <div id="markdownSyncDeleteModalBody" class="markdown-sync-modal-body"></div>
-      <div class="markdown-sync-modal-actions">
-        <button id="markdownSyncDeleteModalCancel" type="button" class="button compact">キャンセル</button>
-        <button id="markdownSyncDeleteModalExecute" type="button" class="button primary compact">削除する</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  markdownSyncElements.deleteModalOverlay = overlay;
-  markdownSyncElements.deleteModalBody = overlay.querySelector("#markdownSyncDeleteModalBody");
-  markdownSyncElements.deleteModalExecuteButton = overlay.querySelector("#markdownSyncDeleteModalExecute");
-  markdownSyncElements.deleteModalCancelButton = overlay.querySelector("#markdownSyncDeleteModalCancel");
-
-  // キャンセル / 背景クリック / Escape はすべて削除せず閉じる。
-  markdownSyncElements.deleteModalCancelButton.addEventListener("click", () => {
-    cancelMarkdownDeleteModal();
-  });
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) {
-      cancelMarkdownDeleteModal();
-    }
-  });
-  overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      cancelMarkdownDeleteModal();
-    }
-  });
-
-  // 削除する: ボタンを押せなくし、モーダルを閉じてから削除処理を実行する。
-  // ここで承認されて初めて applyMarkdownDelete（REST DELETE）が呼ばれる。
-  markdownSyncElements.deleteModalExecuteButton.addEventListener("click", () => {
-    markdownSyncElements.deleteModalExecuteButton.disabled = true;
-    const data = pendingMarkdownDeleteData;
-    hideMarkdownDeleteConfirmModal();
-    void executeMarkdownDeleteAfterConfirm(data);
+    void executeMarkdownApplyAfterConfirm(data, deleteItems);
   });
 }
 
@@ -284,7 +226,7 @@ function handleDeleteSelectionChange(event) {
         selectedDeleteIds.delete(id);
       }
     });
-    updateDeleteSelectionUi();
+    refreshApplyBreakdown();
     return;
   }
 
@@ -299,17 +241,8 @@ function handleDeleteSelectionChange(event) {
       selectedDeleteIds.delete(id);
     }
     syncDeleteCheckAllState();
-    updateDeleteSelectionUi();
+    refreshApplyBreakdown();
   }
-}
-
-// 削除候補グループ内の削除ボタン押下を受ける（details へのイベント委譲）。
-function handleDeleteGroupClick(event) {
-  const button = event.target.closest(".markdown-sync-delete-button");
-  if (!button || button.disabled) {
-    return;
-  }
-  runMarkdownDeleteSelected();
 }
 
 // 全選択チェックボックスの状態を、表示中の削除可能チェックボックスの選択状況に合わせる。
@@ -326,170 +259,35 @@ function syncDeleteCheckAllState() {
   checkAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
 }
 
-// 選択件数の表示と削除ボタンの活性/非活性を更新する（再描画なしで部分更新）。
-function updateDeleteSelectionUi() {
-  const count = selectedDeleteIds.size;
-  const button = markdownSyncElements.details?.querySelector(".markdown-sync-delete-button");
-  if (button) {
-    button.disabled = count === 0;
-  }
-  const label = markdownSyncElements.details?.querySelector(".markdown-sync-delete-selected-count");
-  if (label) {
-    label.textContent = `選択中: ${count}件`;
-  }
-}
-
-// 削除ボタン押下: 表示中の compare 結果から「選択済み かつ 削除可能」候補だけを集め、確認モーダルを出す。
-// ここでは削除しない（モーダルで承認されるまで deleteDoc / Firestore DELETE は呼ばない）。
-function runMarkdownDeleteSelected() {
-  const candidates = Array.isArray(lastMarkdownCompareResult?.toDeleteCandidates)
-    ? lastMarkdownCompareResult.toDeleteCandidates
-    : [];
-  // 選択済み かつ 削除可能（md-import / IDあり / protectedでない）だけに厳格に絞る。
-  const selected = candidates.filter((item) => {
+// 表示中の compare 結果から「選択済み かつ 削除可能」な削除候補だけを集める。
+// id / source / protected を毎回チェックし、選択状態だけを信用しない（誤削除防止）。
+function collectSelectedDeletableItems(data) {
+  const candidates = Array.isArray(data?.toDeleteCandidates) ? data.toDeleteCandidates : [];
+  return candidates.filter((item) => {
     const id = item?.id != null ? String(item.id).trim() : "";
     return id !== "" && selectedDeleteIds.has(id) && evaluateDeleteCandidate(item).deletable;
   });
-
-  if (selected.length === 0) {
-    setMarkdownSyncStatus("削除対象が選択されていません。", { isError: true });
-    return;
-  }
-
-  showMarkdownDeleteConfirmModal(selected);
 }
 
-// 削除確認モーダルを表示する。件数・対象ID・タイトル・安全方針を明示する。
-function showMarkdownDeleteConfirmModal(items) {
-  if (!markdownSyncElements.deleteModalOverlay || !markdownSyncElements.deleteModalBody) {
-    return;
-  }
-  pendingMarkdownDeleteData = items;
-
-  const previewCount = Math.min(20, items.length);
-  const rows = items
-    .slice(0, previewCount)
-    .map((item) => {
-      const id = item?.id != null ? String(item.id) : "(no id)";
-      const title = item?.title != null ? String(item.title) : "(無題)";
-      return `<li><span class="markdown-sync-id">${escapeSyncHtml(id)}</span> ${escapeSyncHtml(title)}</li>`;
-    })
-    .join("");
-  const more =
-    items.length > previewCount
-      ? `<li class="empty-state">ほか ${items.length - previewCount} 件</li>`
-      : "";
-
-  markdownSyncElements.deleteModalBody.innerHTML = `
-    <p>選択した削除候補 <strong>${items.length}</strong>件をFirestoreから物理削除します。</p>
-    <p class="markdown-sync-modal-danger">
-      この操作はFirestore上のタスクを物理削除します。<br>
-      削除対象は source="md-import" の選択済み候補のみです。<br>
-      manual-poc / sourceなし / protected のタスクは削除しません。
-    </p>
-    <p class="markdown-sync-diff-label">削除対象:</p>
-    <ul class="markdown-sync-sample-list">${rows}${more}</ul>
-  `;
-
-  if (markdownSyncElements.deleteModalExecuteButton) {
-    markdownSyncElements.deleteModalExecuteButton.disabled = false;
-  }
-  markdownSyncElements.deleteModalOverlay.hidden = false;
-  if (markdownSyncElements.deleteModalExecuteButton) {
-    markdownSyncElements.deleteModalExecuteButton.focus();
-  }
+// 選択済み かつ 削除可能 な削除候補の件数（削除件数の内訳に使う）。
+function countSelectedDeletable() {
+  return collectSelectedDeletableItems(lastMarkdownCompareResult).length;
 }
 
-// 削除確認モーダルを閉じる（状態だけ。メッセージは出さない）。
-function hideMarkdownDeleteConfirmModal() {
-  if (markdownSyncElements.deleteModalOverlay) {
-    markdownSyncElements.deleteModalOverlay.hidden = true;
+// ボタン付近の件数内訳（追加 / 更新 / 削除）と、削除候補グループ内の選択件数ラベルを更新する。
+// 削除件数は toDeleteCandidates 全体ではなく「選択済みの削除可能候補」の件数。
+function refreshApplyBreakdown() {
+  const data = lastMarkdownCompareResult;
+  const create = Array.isArray(data?.toCreate) ? data.toCreate.length : 0;
+  const update = Array.isArray(data?.toUpdate) ? data.toUpdate.length : 0;
+  const del = countSelectedDeletable();
+
+  if (markdownSyncElements.breakdown) {
+    markdownSyncElements.breakdown.textContent = `追加: ${create}件 / 更新: ${update}件 / 削除: ${del}件`;
   }
-}
-
-// 削除確認モーダルと pending を破棄してボタンを戻す（メッセージは出さない・共通処理）。
-// 戻り値: 破棄時点でモーダルが開いていたか。
-function dismissMarkdownDeleteModal() {
-  const wasOpen = Boolean(
-    markdownSyncElements.deleteModalOverlay && !markdownSyncElements.deleteModalOverlay.hidden,
-  );
-  hideMarkdownDeleteConfirmModal();
-  pendingMarkdownDeleteData = null;
-  if (markdownSyncElements.deleteModalExecuteButton) {
-    markdownSyncElements.deleteModalExecuteButton.disabled = false;
-  }
-  return wasOpen;
-}
-
-// キャンセル: モーダルを閉じ、削除せずキャンセルメッセージを出す。
-function cancelMarkdownDeleteModal() {
-  if (!dismissMarkdownDeleteModal()) {
-    return;
-  }
-  setMarkdownSyncStatus("削除をキャンセルしました。");
-}
-
-// モーダルで「削除する」を押した後の削除処理。applyMarkdownDelete（REST DELETE）に委譲する。
-// apply 側でも独立に source/id/protected を再検証し、DB現状の md-import を再確認してから削除する。
-async function executeMarkdownDeleteAfterConfirm(items) {
-  const list = Array.isArray(items) ? items : [];
-  if (list.length === 0) {
-    pendingMarkdownDeleteData = null;
-    return;
-  }
-
-  setMarkdownSyncStatus(`削除を実行中...（対象 ${list.length}件）`);
-
-  try {
-    const { applyMarkdownDelete } = await import("./markdown-sync-apply.js");
-    const result = await applyMarkdownDelete(list, {
-      onProgress: (info) => {
-        setMarkdownSyncStatus(`削除を実行中...\n削除: ${info.result.deleted.length} / ${list.length}`);
-      },
-    });
-
-    const lines = [
-      "削除が完了しました。",
-      "",
-      `削除成功: ${result.deleted.length}件`,
-      `スキップ: ${result.skipped.length}件`,
-      `失敗: ${result.errors.length}件`,
-    ];
-    if (result.skipped.length > 0) {
-      lines.push("", "スキップ理由:");
-      for (const skip of result.skipped.slice(0, 5)) {
-        lines.push(`- ${skip.id ?? "(no id)"}: ${skip.reason ?? ""}`);
-      }
-      if (result.skipped.length > 5) {
-        lines.push(`- ほか ${result.skipped.length - 5} 件`);
-      }
-    }
-    if (result.errors.length > 0) {
-      lines.push("", "失敗理由:");
-      for (const err of result.errors.slice(0, 5)) {
-        lines.push(`- ${err.id ?? "(no id)"} [${err.phase ?? "delete"}] ${err.message ?? err.status ?? ""}`);
-      }
-      if (result.errors.length > 5) {
-        lines.push(`- ほか ${result.errors.length - 5} 件`);
-      }
-    }
-    lines.push("", "最新状態を確認するには compare JSON を再生成してください。");
-    setMarkdownSyncStatus(lines.join("\n"), {
-      isError: result.errors.length > 0,
-      commandHint: MARKDOWN_SYNC_GEN_COMMAND,
-    });
-
-    // 削除済み id は選択から除く（同じ id への重複削除を避ける）。
-    for (const done of result.deleted) {
-      selectedDeleteIds.delete(String(done.id));
-    }
-    console.log("[Markdown sync] delete result", result);
-  } catch (error) {
-    console.error("[Markdown sync] delete failed", error);
-    setMarkdownSyncStatus(`削除に失敗しました: ${error.message}`, { isError: true });
-  } finally {
-    pendingMarkdownDeleteData = null;
-    updateDeleteSelectionUi();
+  const label = markdownSyncElements.details?.querySelector(".markdown-sync-delete-selected-count");
+  if (label) {
+    label.textContent = `選択中: ${del}件`;
   }
 }
 
@@ -540,109 +338,116 @@ async function loadMarkdownCompareJson() {
 }
 
 /**
- * 追加・更新ボタン: toCreate / toUpdate を Firestore へ反映する（確認は画面内モーダル）。
- * 1) JSON再読み込み 2) 件数集計 3) 確認モーダル表示（ここまで）。
- * 「実行する」押下で executeMarkdownApplyAfterConfirm() が走る。
- * JSON読み込み失敗時はモーダルを出さず、既存のエラー表示にする。
+ * 「Markdownを反映」ボタン: 表示中の compare 結果と削除選択をまとめて確認モーダルに出す。
+ * - 追加(toCreate) / 更新(toUpdate) / 選択済み削除(toDeleteCandidates) を1つの反映として確認する。
+ * - 表示中の内容（Compare確認で読み込んだ結果）と選択状態をそのまま使う（再fetchはしない＝選択を保持）。
+ * - ここでは書き込まない。確認モーダルで「実行する」を押すまで Firestore へは一切触れない。
  */
-async function runMarkdownApplyAll() {
-  const button = markdownSyncElements.applyAllButton;
-  if (button) {
-    button.disabled = true;
-  }
-  // 開始時点のパネル表示世代を控える。await 後にこれが変わっていれば中断する。
-  const startedToken = markdownSyncPanelVisibilityToken;
-  setMarkdownSyncStatus("compare結果JSONを読み込み中...");
-
-  // 1. 最新の compare JSON を再読み込み（表示中の内容ではなく毎回読み直す）。
-  let data;
-  try {
-    data = await fetchMarkdownCompareData();
-  } catch (error) {
-    console.error("[Markdown sync] failed to load compare JSON for apply", error);
-    setMarkdownSyncStatus(
-      "compare結果JSONを読み込めませんでした。先にNodeスクリプトで --out を生成してください。",
-      { isError: true, commandHint: MARKDOWN_SYNC_GEN_COMMAND },
-    );
-    if (button) {
-      button.disabled = false;
-    }
+function runMarkdownApply() {
+  const data = lastMarkdownCompareResult;
+  if (!data) {
+    setMarkdownSyncStatus("先に「Compare確認」で差分を読み込んでください。", { isError: true });
     return;
   }
 
-  // await 中にパネルが非表示になっていないか確認する（古い async 処理の継続を防ぐ）。
-  // トークンが変わっている場合は、別世代（非表示→再表示後に開かれた新しいモーダルや
-  // pending）を壊さないよう、dismissMarkdownApplyModal() を呼ばず自分だけ終了する。
-  if (startedToken !== markdownSyncPanelVisibilityToken) {
-    return;
-  }
-  // section が無い / hidden の場合も確認モーダルは開かない。非表示化時に既存処理が
-  // モーダル破棄済みのはずなので、ここでは新しいモーダルを閉じず return のみとする。
-  if (!markdownSyncElements.section || markdownSyncElements.section.hidden) {
-    return;
-  }
-
-  // 読み込んだ最新内容で表示も更新しておく（確認内容と画面表示を一致させる）。
-  renderMarkdownSyncPreview(data);
-
-  // 2. 件数を集計。
+  // 選択済み かつ 削除可能 な削除候補だけを収集（id/source/protected を毎回チェック）。
+  const deleteItems = collectSelectedDeletableItems(data);
   const counts = {
     toCreate: data.toCreate.length,
     toUpdate: data.toUpdate.length,
-    toDeleteCandidates: data.toDeleteCandidates.length,
+    delete: deleteItems.length,
     protectedCurrentOnly: data.protectedCurrentOnly.length,
     warnings: data.warnings.length,
   };
 
-  // 3. 確認モーダルを表示（apply ボタンは閉じるまで disabled のまま）。
+  // 反映対象が3種すべて0なら、確認を出さずに案内だけ出す。
+  if (counts.toCreate === 0 && counts.toUpdate === 0 && counts.delete === 0) {
+    setMarkdownSyncStatus("反映対象がありません（追加・更新・削除いずれも0件）。");
+    return;
+  }
+
+  const button = markdownSyncElements.applyAllButton;
+  if (button) {
+    button.disabled = true;
+  }
   setMarkdownSyncStatus("");
-  showMarkdownApplyConfirmModal(data, counts);
+  showMarkdownApplyConfirmModal(data, counts, deleteItems);
 }
 
 /**
- * 反映確認モーダルを表示する。件数・実行する処理・実行しない処理・削除候補警告を出す。
+ * 統合確認モーダルを表示する。追加・更新・削除の件数と内容をまとめて出す。
+ * 削除が1件以上ある場合は物理削除の警告を明確に出す。削除0件のときは強く警告しない。
  */
-function showMarkdownApplyConfirmModal(data, counts) {
+function showMarkdownApplyConfirmModal(data, counts, deleteItems) {
   if (!markdownSyncElements.modalOverlay || !markdownSyncElements.modalBody) {
     return;
   }
-  // 反映対象データを保持（「実行する」押下時に使う）。
+  // 反映対象データ・削除対象を保持（「実行する」押下時に使う）。
   pendingMarkdownApplyData = data;
+  pendingMarkdownDeleteItems = Array.isArray(deleteItems) ? deleteItems : [];
 
-  const deleteWarning =
-    counts.toDeleteCandidates > 0
-      ? `<p class="markdown-sync-modal-danger">
-           削除候補がありますが、この「追加・更新を反映」では削除しません。<br>
-           削除は削除候補グループ内の専用ボタンから別操作で行ってください。
-         </p>`
-      : "";
+  const deletes = pendingMarkdownDeleteItems;
+  // 削除対象の ID / タイトル一覧（削除が1件以上のときだけ出す）。
+  let deleteBlock = "";
+  if (deletes.length > 0) {
+    const previewCount = Math.min(20, deletes.length);
+    const rows = deletes
+      .slice(0, previewCount)
+      .map((item) => {
+        const id = item?.id != null ? String(item.id) : "(no id)";
+        const title = item?.title != null ? String(item.title) : "(無題)";
+        return `<li><span class="markdown-sync-id">${escapeSyncHtml(id)}</span> ${escapeSyncHtml(title)}</li>`;
+      })
+      .join("");
+    const more =
+      deletes.length > previewCount
+        ? `<li class="empty-state">ほか ${deletes.length - previewCount} 件</li>`
+        : "";
+    deleteBlock = `
+      <p class="markdown-sync-modal-danger">
+        この操作にはFirestore上のタスク削除が含まれます。<br>
+        削除対象は source="md-import" の選択済み候補のみです。<br>
+        manual-poc / sourceなし / protected のタスクは削除しません。
+      </p>
+      <p class="markdown-sync-diff-label">削除対象:</p>
+      <ul class="markdown-sync-sample-list">${rows}${more}</ul>
+    `;
+  } else {
+    // 削除0件のときは強く警告しない（軽い補足のみ）。
+    deleteBlock = `<p class="markdown-sync-protected-note">削除対象は選択されていません（削除は行いません）。</p>`;
+  }
+
+  // 「実行する処理」は実際に件数があるものだけ並べる。
+  const doItems = [];
+  if (counts.toCreate > 0) doItems.push("<li>追加予定をFirestoreへ作成</li>");
+  if (counts.toUpdate > 0) doItems.push("<li>更新予定をFirestoreへ更新</li>");
+  if (counts.delete > 0) doItems.push("<li>選択した削除候補をFirestoreから物理削除（md-import のみ）</li>");
+  const doList = doItems.length > 0 ? doItems.join("") : "<li>なし</li>";
 
   markdownSyncElements.modalBody.innerHTML = `
-    <p>Markdown同期の追加・更新を反映します。</p>
+    <p>Markdownの反映（追加・更新・削除）を実行します。</p>
     <ul class="markdown-sync-modal-counts">
-      <li>追加予定: <strong>${counts.toCreate}</strong>件</li>
-      <li>更新予定: <strong>${counts.toUpdate}</strong>件</li>
-      <li>削除候補: <strong>${counts.toDeleteCandidates}</strong>件（今回は削除しません）</li>
+      <li>追加: <strong>${counts.toCreate}</strong>件</li>
+      <li>更新: <strong>${counts.toUpdate}</strong>件</li>
+      <li>削除: <strong>${counts.delete}</strong>件（選択済みの md-import のみ）</li>
       <li>保護対象: <strong>${counts.protectedCurrentOnly}</strong>件（変更しません）</li>
       <li>警告: <strong>${counts.warnings}</strong>件</li>
     </ul>
     <div class="markdown-sync-modal-cols">
       <div class="markdown-sync-modal-col">
         <h3>実行する処理</h3>
-        <ul>
-          <li>追加予定をFirestoreへ作成</li>
-          <li>更新予定をFirestoreへ更新</li>
-        </ul>
+        <ul>${doList}</ul>
       </div>
       <div class="markdown-sync-modal-col">
         <h3>実行しない処理</h3>
         <ul>
-          <li>削除候補の削除</li>
+          <li>未選択の削除候補の削除</li>
+          <li>manual-poc / sourceなし / protected の削除</li>
           <li>保護対象の変更</li>
         </ul>
       </div>
     </div>
-    ${deleteWarning}
+    ${deleteBlock}
   `;
 
   // 実行ボタンを押せる状態に戻し、モーダルを開く。
@@ -672,6 +477,7 @@ function dismissMarkdownApplyModal() {
   hideMarkdownApplyConfirmModal();
   // 古い compare JSON に対する反映が継続しないよう pending を必ず破棄する。
   pendingMarkdownApplyData = null;
+  pendingMarkdownDeleteItems = null;
   if (markdownSyncElements.modalExecuteButton) {
     markdownSyncElements.modalExecuteButton.disabled = false;
   }
@@ -681,23 +487,27 @@ function dismissMarkdownApplyModal() {
   return wasOpen;
 }
 
-// キャンセル: モーダルを閉じ、書き込みせずキャンセルメッセージを出す。apply ボタンを戻す。
+// キャンセル: モーダルを閉じ、追加・更新・削除のどれも実行せずキャンセルメッセージを出す。
 function cancelMarkdownApplyModal() {
   // モーダルが開いていなければ何もしない（メッセージも出さない）。
   if (!dismissMarkdownApplyModal()) {
     return;
   }
-  setMarkdownSyncStatus("追加・更新の反映をキャンセルしました。");
+  setMarkdownSyncStatus("Markdownの反映をキャンセルしました（追加・更新・削除は実行していません）。");
 }
 
 /**
- * モーダルで「実行する」を押した後の反映処理（既存ロジックをそのまま実行）。
- * - toCreate 作成・toUpdate 更新のみ。toDeleteCandidates は削除しない。
- * - Firestore への DELETE は一切呼ばない（apply モジュールに delete は無い）。
+ * モーダルで「実行する」を押した後の統合反映処理。
+ * 実行順（安全側）: 1) 追加・更新 → 2) 削除（選択済みのみ・削除直前に再チェック）→ 3) 結果をまとめて表示。
+ * - 追加・更新は applyMarkdownCreateAndUpdate（create/update のみ。DELETE は呼ばない）。
+ * - 削除は applyMarkdownDelete。apply 側で id/source/protected を再検証し、DB現状の md-import を再確認してから削除する。
+ *   DB現状の取得に失敗した場合は1件も削除しない（安全側）。
+ * - 追加・更新と削除のどちらが失敗しても、結果（成功/スキップ/失敗件数・理由）が分かるように集計する。
  */
-async function executeMarkdownApplyAfterConfirm(data) {
+async function executeMarkdownApplyAfterConfirm(data, deleteItems) {
   const button = markdownSyncElements.applyAllButton;
   const compareButton = markdownSyncElements.compareButton;
+  const deletes = Array.isArray(deleteItems) ? deleteItems : [];
 
   if (!data) {
     // 念のため（pending が無いケース）。
@@ -710,78 +520,114 @@ async function executeMarkdownApplyAfterConfirm(data) {
   const counts = {
     toCreate: data.toCreate.length,
     toUpdate: data.toUpdate.length,
+    delete: deletes.length,
   };
 
-  // 反映対象が無ければ書き込みせず終了。
-  if (counts.toCreate === 0 && counts.toUpdate === 0) {
-    setMarkdownSyncStatus(
-      "追加・更新の反映対象はありません。\nこの操作では削除しません（削除は削除候補グループの専用ボタンから行います）。",
-    );
+  // 反映対象（追加・更新・削除）がすべて無ければ書き込みせず終了。
+  if (counts.toCreate === 0 && counts.toUpdate === 0 && counts.delete === 0) {
+    setMarkdownSyncStatus("反映対象がありません（追加・更新・削除いずれも0件）。");
     if (button) {
       button.disabled = false;
     }
     pendingMarkdownApplyData = null;
+    pendingMarkdownDeleteItems = null;
     return;
   }
 
-  // 反映実行（apply モジュールを動的 import。この経路では create/update のみで delete は呼ばない）。
   if (compareButton) {
     compareButton.disabled = true;
   }
-  setMarkdownSyncStatus(
-    `追加・更新を反映中...\n作成: 0 / ${counts.toCreate}\n更新: 0 / ${counts.toUpdate}`,
-  );
+  // 進捗1行（作成 c/n・更新 u/m・削除 d/k）。各フェーズの実進捗（info.result）で更新する。
+  const progressLine = (created, updated, deleted) =>
+    `Markdownを反映中...\n作成: ${created} / ${counts.toCreate}\n更新: ${updated} / ${counts.toUpdate}\n削除: ${deleted} / ${counts.delete}`;
+
+  // 集計用の入れ物（追加・更新 / 削除の結果）。失敗しても結果が分かるよう個別に try する。
+  let cu = { created: [], updated: [], skipped: [], errors: [], deleteCandidatesSkipped: [] };
+  let del = { deleted: [], skipped: [], errors: [] };
+
+  setMarkdownSyncStatus(progressLine(0, 0, 0));
 
   try {
-    const { applyMarkdownCreateAndUpdate } = await import("./markdown-sync-apply.js");
-    const result = await applyMarkdownCreateAndUpdate(data, {
-      onProgress: (info) => {
-        // 進捗（作成 x/n・更新 y/m）を逐次表示する。
-        setMarkdownSyncStatus(
-          `追加・更新を反映中...\n` +
-            `作成: ${info.result.created.length} / ${counts.toCreate}\n` +
-            `更新: ${info.result.updated.length} / ${counts.toUpdate}`,
-        );
-      },
-    });
+    const { applyMarkdownCreateAndUpdate, applyMarkdownDelete } = await import(
+      "./markdown-sync-apply.js"
+    );
 
-    // 結果サマリー表示。
-    const summaryLines = [
-      "追加・更新の反映が完了しました。",
-      "",
-      `作成: ${result.created.length}件`,
-      `更新: ${result.updated.length}件`,
-      `スキップ: ${result.skipped.length}件`,
-      `エラー: ${result.errors.length}件`,
-      `削除候補: ${result.deleteCandidatesSkipped.length}件（未処理）`,
-    ];
-    // 削除候補は「追加・更新を反映」では処理しない。削除は専用ボタンから別操作で行う旨を明示する。
-    if (result.deleteCandidatesSkipped.length > 0) {
-      summaryLines.push("");
-      summaryLines.push("削除候補はこの操作では未処理です。");
-      summaryLines.push("削除する場合は削除候補グループ内の専用ボタンから行ってください（md-import のみ）。");
+    // 1. 追加・更新（あれば）。create/update のみ。DELETE は呼ばない。
+    if (counts.toCreate > 0 || counts.toUpdate > 0) {
+      try {
+        cu = await applyMarkdownCreateAndUpdate(data, {
+          onProgress: (info) =>
+            setMarkdownSyncStatus(
+              progressLine(info.result.created.length, info.result.updated.length, 0),
+            ),
+        });
+      } catch (error) {
+        cu.errors.push({ id: null, phase: "create/update", message: error.message });
+      }
     }
-    if (result.errors.length > 0) {
-      summaryLines.push("");
-      summaryLines.push("エラー詳細:");
-      for (const err of result.errors.slice(0, 5)) {
+
+    // 2. 削除（選択済みのみ）。apply 側で削除直前に id/source/protected/DB現状source を再チェックする。
+    if (counts.delete > 0) {
+      try {
+        del = await applyMarkdownDelete(deletes, {
+          onProgress: (info) =>
+            setMarkdownSyncStatus(
+              progressLine(cu.created.length, cu.updated.length, info.result.deleted.length),
+            ),
+        });
+      } catch (error) {
+        del.errors.push({ id: null, phase: "delete", message: error.message });
+      }
+    }
+
+    // 3. 結果をまとめて表示。
+    const allErrors = [...cu.errors, ...del.errors];
+    const summaryLines = [
+      "Markdownの反映が完了しました。",
+      "",
+      `追加成功: ${cu.created.length}件`,
+      `更新成功: ${cu.updated.length}件`,
+      `削除成功: ${del.deleted.length}件`,
+      `削除スキップ: ${del.skipped.length}件`,
+      `失敗: ${allErrors.length}件`,
+    ];
+    if (cu.skipped.length > 0) {
+      summaryLines.push(`追加・更新スキップ: ${cu.skipped.length}件`);
+    }
+    if (del.skipped.length > 0) {
+      summaryLines.push("", "削除スキップ理由:");
+      for (const skip of del.skipped.slice(0, 5)) {
+        summaryLines.push(`- ${skip.id ?? "(no id)"}: ${skip.reason ?? ""}`);
+      }
+      if (del.skipped.length > 5) {
+        summaryLines.push(`- ほか ${del.skipped.length - 5} 件`);
+      }
+    }
+    if (allErrors.length > 0) {
+      summaryLines.push("", "失敗理由:");
+      for (const err of allErrors.slice(0, 5)) {
         summaryLines.push(`- ${err.id ?? "(no id)"} [${err.phase ?? "-"}] ${err.message ?? err.status ?? ""}`);
       }
-      if (result.errors.length > 5) {
-        summaryLines.push(`- ほか ${result.errors.length - 5} 件`);
+      if (allErrors.length > 5) {
+        summaryLines.push(`- ほか ${allErrors.length - 5} 件`);
       }
     }
     // 反映後は compare JSON が古くなるため、再生成を案内する（画面からは実行しない）。
-    summaryLines.push("");
-    summaryLines.push("最新の差分を確認するには、compare JSON を再生成してください。");
+    summaryLines.push("", "最新の差分を確認するには、compare JSON を再生成してください。");
     setMarkdownSyncStatus(summaryLines.join("\n"), {
-      isError: result.errors.length > 0,
+      isError: allErrors.length > 0,
       commandHint: MARKDOWN_SYNC_GEN_COMMAND,
     });
-    console.log("[Markdown sync] apply result", result);
+
+    // 削除済み id を選択から除き、内訳を更新する。
+    for (const done of del.deleted) {
+      selectedDeleteIds.delete(String(done.id));
+    }
+    refreshApplyBreakdown();
+    console.log("[Markdown sync] apply result", { createUpdate: cu, delete: del });
   } catch (error) {
     console.error("[Markdown sync] apply failed", error);
-    setMarkdownSyncStatus(`追加・更新の反映に失敗しました: ${error.message}`, { isError: true });
+    setMarkdownSyncStatus(`Markdownの反映に失敗しました: ${error.message}`, { isError: true });
   } finally {
     if (button) {
       button.disabled = false;
@@ -790,6 +636,7 @@ async function executeMarkdownApplyAfterConfirm(data) {
       compareButton.disabled = false;
     }
     pendingMarkdownApplyData = null;
+    pendingMarkdownDeleteItems = null;
   }
 }
 
@@ -804,13 +651,12 @@ function setMarkdownSyncPanelVisible(visible) {
     return;
   }
   if (!visible) {
-    // 表示世代を進める。これにより、進行中の runMarkdownApplyAll() が await 後に
-    // 自分のトークンが古いと判定し、確認モーダルを開かず中断できる。
+    // 表示世代を進める（残っている可能性のある古い非同期処理の判定用に保持）。
     markdownSyncPanelVisibilityToken += 1;
     // パネル非表示時は確認モーダルも残さない（pending 破棄・ボタン復帰。メッセージは出さない）。
+    // pending には削除対象も含むため、非表示の画面から削除が継続することも防げる。
     dismissMarkdownApplyModal();
-    // 削除確認モーダルと選択状態も残さない（非表示の画面から削除が継続しないようにする）。
-    dismissMarkdownDeleteModal();
+    // 削除選択状態も残さない（再表示時は未選択から始める）。
     selectedDeleteIds = new Set();
   }
   markdownSyncElements.section.hidden = !visible;
@@ -866,6 +712,9 @@ function renderMarkdownSyncPreview(compareResult) {
   markdownSyncElements.details.innerHTML =
     blocks.join("") ||
     `<p class="empty-state">表示できる差分はありません（モックデータ未設定）。</p>`;
+
+  // 件数内訳（追加 / 更新 / 削除）を更新する。削除は選択リセット直後なので0件から始まる。
+  refreshApplyBreakdown();
 }
 
 /**
@@ -1168,9 +1017,9 @@ function renderSyncDeleteCandidate(item) {
   `;
 }
 
-// 削除候補グループ。各候補に削除可否と理由を出し、削除可能候補だけ選択・削除できるようにする。
-// 削除ボタンは「追加・更新を反映」とは別物。0件選択時は disabled（押せない）。
-// 実削除は確認モーダルで承認された後にのみ行う（このグループ描画では削除しない）。
+// 削除候補グループ。各候補に削除可否と理由を出し、削除可能候補だけ選択できるようにする。
+// 実際の削除はここでは行わない。チェックした候補は「Markdownを反映」で追加・更新と一緒に削除される
+// （確認モーダルで承認された後にのみ実削除される）。専用の削除ボタンは置かない（反映ボタンに統合）。
 function renderSyncDeleteGroup(items) {
   if (!items.length) {
     return "";
@@ -1196,14 +1045,14 @@ function renderSyncDeleteGroup(items) {
          </label>`
       : "";
 
-  // 削除可能候補があるときだけ削除ボタンを出す。初期は未選択なので disabled。
-  const actions =
+  // 選択件数の表示のみ（削除は上部の「Markdownを反映」ボタンで実行する）。
+  const selectionLine =
     shownDeletable > 0
-      ? `<div class="markdown-sync-delete-actions">
+      ? `<p class="markdown-sync-delete-selected-line">
            <span class="markdown-sync-delete-selected-count">選択中: 0件</span>
-           <button type="button" class="button compact markdown-sync-delete-button" disabled>選択したmd-import削除候補を削除</button>
-         </div>`
-      : `<p class="markdown-sync-protected-note">削除可能な md-import 候補はありません（削除ボタンは表示しません）。</p>`;
+           （チェックした候補は上部の「Markdownを反映」で追加・更新と一緒に削除されます）
+         </p>`
+      : `<p class="markdown-sync-protected-note">削除可能な md-import 候補はありません（削除は行いません）。</p>`;
 
   return `
     <div class="markdown-sync-group is-danger">
@@ -1217,7 +1066,7 @@ function renderSyncDeleteGroup(items) {
       </p>
       ${selectAll}
       ${cards}${more}
-      ${actions}
+      ${selectionLine}
     </div>
   `;
 }

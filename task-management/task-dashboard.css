@@ -922,28 +922,16 @@ p.markdown-sync-id {
   font-weight: 700;
 }
 
-.markdown-sync-delete-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin-top: 12px;
-}
-
-.markdown-sync-delete-selected-count {
+/* 削除候補グループ内の選択件数表示行（削除は上部の反映ボタンで実行する）。 */
+.markdown-sync-delete-selected-line {
+  margin: 12px 0 0;
   color: var(--muted);
   font-size: 0.82rem;
 }
 
-/* 削除ボタンは危険操作のため赤系で強調する。 */
-.markdown-sync-delete-button {
-  border-color: rgba(240, 120, 120, 0.5);
-  color: var(--red);
-}
-
-.markdown-sync-delete-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.markdown-sync-delete-selected-count {
+  color: var(--text);
+  font-weight: 700;
 }
 
 /* 反映確認モーダル（window.confirm の置き換え）。画面中央にオーバーレイ表示。 */
@@ -1047,14 +1035,17 @@ p.markdown-sync-id {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 12px;
   margin-top: 14px;
 }
 
-.markdown-sync-actions-label {
-  color: var(--muted);
-  font-size: 0.82rem;
+/* 件数内訳（追加 / 更新 / 削除）。ボタン名を短く保つ代わりに内訳をボタン付近に出す。 */
+.markdown-sync-breakdown {
+  color: var(--text);
+  font-size: 0.86rem;
   font-weight: 700;
+  /* ボタンを行の右端へ寄せる（内訳は左、反映ボタンは右）。 */
+  margin-right: auto;
 }
 
 .markdown-sync-actions .button:disabled {
