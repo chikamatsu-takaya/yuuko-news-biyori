@@ -60,3 +60,6 @@ yuuko_transfer_*.zip.enc
 # Temp / backup
 *.tmp
 *.bak
+
+# Markdown同期プレビューの生成物（compare JSON / 検証用スクリプト / 一時ログ）はコミットしない
+task-management/tmp/

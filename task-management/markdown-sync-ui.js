@@ -412,6 +412,12 @@ async function executeMarkdownApplyAfterConfirm(data) {
       `エラー: ${result.errors.length}件`,
       `削除候補: ${result.deleteCandidatesSkipped.length}件（未処理）`,
     ];
+    // 削除候補がある場合は「未処理」である理由を明示する（削除は未実装のため実行しない）。
+    if (result.deleteCandidatesSkipped.length > 0) {
+      summaryLines.push("");
+      summaryLines.push("削除候補は今回も未処理です。");
+      summaryLines.push("削除処理はまだ実装していないため、Firestoreから削除は行いません。");
+    }
     if (result.errors.length > 0) {
       summaryLines.push("");
       summaryLines.push("エラー詳細:");
@@ -422,7 +428,13 @@ async function executeMarkdownApplyAfterConfirm(data) {
         summaryLines.push(`- ほか ${result.errors.length - 5} 件`);
       }
     }
-    setMarkdownSyncStatus(summaryLines.join("\n"), { isError: result.errors.length > 0 });
+    // 反映後は compare JSON が古くなるため、再生成を案内する（画面からは実行しない）。
+    summaryLines.push("");
+    summaryLines.push("最新の差分を確認するには、compare JSON を再生成してください。");
+    setMarkdownSyncStatus(summaryLines.join("\n"), {
+      isError: result.errors.length > 0,
+      commandHint: MARKDOWN_SYNC_GEN_COMMAND,
+    });
     console.log("[Markdown sync] apply result", result);
   } catch (error) {
     console.error("[Markdown sync] apply failed", error);

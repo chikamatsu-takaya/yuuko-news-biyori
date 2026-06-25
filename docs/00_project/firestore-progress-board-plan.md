@@ -221,6 +221,7 @@ fetch("../docs/00_project/developタスクチェックリスト.md?t=...")   // 
 - 2026-06-24: §16 にタスク追加POC（§16.6）と物理削除POC（§16.7）の結果を追記。追加は `addDoc` で最小項目入力＋初期値補完（archived=false/各種 null・[]、createdAt/updatedAt=serverTimestamp、updatedBy="manual-poc"、Done 連動、order=既存最大+10→40 を確認）。削除は方針を `archived=true` 論理削除から **`deleteDoc` 物理削除**へ変更（confirm 必須・Firestore 表示時のみ・再取得再描画）。§16.8 に実装済み/当面実装しない（archived 切替）/未実装の整理、§16.9 に次候補（全件インポート / 本文編集 / Rules・認証 / Firestore 正運用 / order 採番改善）を記載。見出し・目次を「…追加・物理削除」へ更新。
 - 2026-06-24: §17「Markdown全件インポート / 再同期方針」を追記（実装はせず方針整理のみ）。一度きりでなく繰り返し可能な宣言的同期として設計。ローカルスクリプト方式・dry-run 既定/`--apply`/`--delete-missing`、決定的 ID（`category+subcategory+title` 由来・将来 `id:` 明示案）、`source="md-import"`/`"manual-poc"` 区別、12 フィールド比較（メタ・タイムスタンプは比較対象外）、物理削除は `source="md-import"` 限定＋明示オプション必須、status/completed/`completedAt` 保持方針、order/sourceLine 採番、実装ステップ・未決事項・推奨手順を記載。目次・冒頭注記を更新。
 - 2026-06-24: §17.16「メンバー向け運用と画面UI化方針」を追記（docs のみ・実装なし）。Node スクリプトは当面**開発・検証用**に限定し、最終的なメンバー操作は**画面UI化**へ寄せる方針を明記。日常の進捗更新は画面・タスク洗い出し後の一括反映は Markdown 更新＋再同期機能・Claude Code は開発/UI実装/不具合修正用、という役割分担を整理。画面UI化時の必須安全策（必ず dry-run・件数/代表データ表示・削除候補は明示チェック時のみ・反映前確認/反映後再 compare/ログ・`protectedCurrentOnly` 非自動変更・`source` 未設定/`manual-poc`/`md-import` 以外は削除しない）を規定。段階方針（短期=create-only を `--limit` で拡大検証／中期=更新・削除候補・冪等性を Node で検証／最終=同一ロジックを画面UI化）を記載。あわせて §17.15 直後に実装状況メモ（第1〜第3段階を Node スクリプトで実装・検証済み、Firestore アクセスは REST API 利用）を追記。
+- 2026-06-25: §17.17「Markdown同期プレビューUI（実装済み）の使い方と注意点」を追記（マージ前整理）。表示条件（通常URL=Markdown 表示／`?source=firestore` のみ Firestore 版＋プレビュー）、compare JSON は画面から生成せず Node で事前生成・Compare確認は `tmp/markdown-sync-compare-dry-run.json` を読むだけ、`generatedAt` 表示、追加・更新を反映は `toCreate`/`toUpdate` のみ・確認は画面内モーダル、安全ルール（削除候補は未処理で DELETE を呼ばない・`protectedCurrentOnly` 非変更・`source!=md-import` 非更新・`createdAt`/`completedAt`/`archived`/`source` 不変）、反映後は compare JSON 再生成が必要、`task-management/tmp/` は生成物でコミットしない（`.gitignore` 追加済み）を明記。あわせて反映後サマリーに再生成案内と削除未処理理由の文言を追加。
 
 ---
 
@@ -980,3 +981,37 @@ Node スクリプト（`sync-markdown-to-firestore.mjs` ほか）は、当面は
   - 同じロジックを画面UIから操作できるようにする。
   - メンバーは基本的に画面から操作する。
   - Node スクリプトは開発者向け補助ツールとして残す。
+
+### 17.17 Markdown同期プレビューUI（実装済み）の使い方と注意点
+
+§17.16 の方針に沿って、compare 結果の確認と「追加・更新の反映」を画面から行う **Markdown同期プレビューUI** を実装済み（`task-management/markdown-sync-ui.js` / `task-management/markdown-sync-apply.js`）。マージ前の利用前提と注意点を以下にまとめる。
+
+#### 17.17.1 表示条件
+- 通常URL（`http://localhost:8080/task-management/`）は**従来どおり Markdown 表示**。Markdown同期プレビューは表示されない。
+- `?source=firestore` のとき（`http://localhost:8080/task-management/?source=firestore`）だけ Firestore 版を表示し、画面上部に「Markdown同期プレビュー」パネルを表示する。
+
+#### 17.17.2 compare JSON の前提（画面からは生成しない）
+- **compare JSON は画面から生成しない**。開発者が Node スクリプトで**事前生成**する。
+- 「Compare確認」ボタンは `task-management/tmp/markdown-sync-compare-dry-run.json` を**読み取って表示するだけ**（fetch のみ。Node スクリプトの実行はしない）。
+- JSON には生成日時（`generatedAt`）が含まれ、画面に表示する（鮮度確認用）。生成日時が無い古い JSON は「不明」表示。
+- 事前生成コマンド:
+
+```bash
+node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestore --out task-management/tmp/markdown-sync-compare-dry-run.json
+```
+
+#### 17.17.3 「追加・更新を反映」ボタンの動作
+- 反映するのは **`toCreate`（追加）と `toUpdate`（更新）のみ**。
+- 押下すると compare JSON を再読み込みし、件数・実行する処理・実行しない処理を**画面内モーダル**で確認してから実行する（`window.confirm` は不使用）。
+- 安全ルール（変更しない）:
+  - **削除候補（`toDeleteCandidates`）は未処理**。削除処理は未実装で、Firestore からの削除（DELETE / `deleteDoc`）は呼ばない。
+  - **`protectedCurrentOnly` は変更しない**。
+  - **`source != "md-import"` の既存ドキュメントは更新しない**（更新前に現状を取得して source を確認）。
+  - 更新は `updateMask` で対象フィールドのみ。`createdAt` / `completedAt` / `archived` / `source` は触れない。
+
+#### 17.17.4 反映後の運用
+- 反映後の compare JSON は古くなる。**最新差分を確認するには compare JSON を再生成**する（上記コマンド）。画面側は自動再生成しない。
+- 認可は当面 `firebase-config.js` の公開値（projectId/apiKey）による REST のみ。本番運用の認可方式は §17.13 で別途確定する。
+
+#### 17.17.5 生成物の扱い
+- `task-management/tmp/` 配下（`markdown-sync-compare-dry-run.json` / `markdown-sync-dry-run.json` / 検証用 `.mjs` / 一時ログ / pid ファイルなど）は**生成物でありコミットしない**。`.gitignore` に `task-management/tmp/` を追加済み。
