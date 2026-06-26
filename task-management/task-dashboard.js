@@ -12,6 +12,10 @@ const EXCLUDED_SECTION_KEYWORDS = [
 // Firestore 表示時のみ status 更新ボタンに出す選択肢（firestore-source.js の ALLOWED_STATUSES と揃える）。
 const FIRESTORE_STATUS_OPTIONS = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
 
+// 担当者ドロップダウンの候補（暫定）。実際のメンバー名に置き換え可能。
+// 候補外の owner が既存データに入っていても消さないよう、編集時に一時 option を足して扱う。
+const TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"];
+
 const state = {
   data: null,
   showCompleted: false,
@@ -53,9 +57,59 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCategoryProgress();
     renderTaskTree();
   });
-  // status 更新ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
+  // status 更新ボタン・担当/メモ編集ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
+    // 担当者名・共有メモの編集（Firestore版のみ。表示↔編集はカードの is-editing クラスで切替）。
+    const editButton = event.target.closest(".task-edit-button");
+    if (editButton) {
+      const card = editButton.closest(".task-card");
+      if (card) {
+        card.classList.add("is-editing");
+        const ownerInput = card.querySelector(".fs-owner-input");
+        if (ownerInput) {
+          ownerInput.focus();
+        }
+      }
+      return;
+    }
+    const cancelButton = event.target.closest(".task-edit-cancel");
+    if (cancelButton) {
+      const card = cancelButton.closest(".task-card");
+      if (card) {
+        // 入力を元の値へ戻して編集状態を解除する（再描画はしない）。
+        const ownerInput = card.querySelector(".fs-owner-input");
+        const notesInput = card.querySelector(".fs-notes-input");
+        if (ownerInput) {
+          if (ownerInput.tagName === "SELECT") {
+            // select は描画時に selected だった option（defaultSelected）へ戻す。
+            Array.from(ownerInput.options).forEach((option) => {
+              option.selected = option.defaultSelected;
+            });
+          } else {
+            ownerInput.value = ownerInput.defaultValue;
+          }
+        }
+        if (notesInput) {
+          notesInput.value = notesInput.defaultValue;
+        }
+        card.classList.remove("is-editing");
+      }
+      return;
+    }
+    const saveButton = event.target.closest(".task-edit-save");
+    if (saveButton) {
+      if (saveButton.disabled) {
+        return;
+      }
+      const card = saveButton.closest(".task-card");
+      const { taskId } = saveButton.dataset;
+      if (card && taskId) {
+        void applyFirestoreOwnerNotesUpdate(taskId, card, saveButton);
+      }
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -240,6 +294,67 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
     setLoadState(`Firestoreのstatus更新に失敗しました: ${error.message}`, true);
     // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
     buttons.forEach((element) => {
+      element.disabled = false;
+    });
+  }
+}
+
+// 現在の state.data から firestoreId 一致のタスクを探す（Done判定など保存前チェックに使う）。
+function findFirestoreTaskById(taskId) {
+  if (!state.data || !Array.isArray(state.data.tasks)) {
+    return null;
+  }
+  return state.data.tasks.find((task) => task.firestoreId === taskId) ?? null;
+}
+
+// Firestore 表示時のみ呼ばれる担当者名・共有メモ保存処理（編集POC）。
+// textarea の1行=1メモ・空行除外・trim で notes を組み立て、owner と合わせて保存する。
+// 保存成功後は再取得 → 変換 → 再描画でツリーを作り直す（status更新と同じ方針）。
+async function applyFirestoreOwnerNotesUpdate(taskId, card, saveButton) {
+  if (!state.isFirestore) {
+    return;
+  }
+
+  // 保存処理側の Done 安全対策（二重防御）。UI側でも Done は編集UIを出さないが、
+  // 念のため対象タスクが Done なら Firestore 更新を行わず中断する。
+  const targetTask = findFirestoreTaskById(taskId);
+  if (targetTask && (targetTask.completed === true || targetTask.status === "Done")) {
+    setLoadState("Doneのタスクは担当者・メモを編集できません。", true);
+    return;
+  }
+
+  const ownerInput = card.querySelector(".fs-owner-input");
+  const notesInput = card.querySelector(".fs-notes-input");
+  const owner = ownerInput ? ownerInput.value.trim() : "";
+  // textarea を行分割し、各行 trim・空行除外で notes 配列にする。
+  const notes = (notesInput ? notesInput.value : "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+
+  // 二重押下を避けるため、保存・キャンセルを一旦無効化する。
+  const actionButtons = card.querySelectorAll(".task-edit-save, .task-edit-cancel");
+  actionButtons.forEach((element) => {
+    element.disabled = true;
+  });
+  setLoadState("担当者名・共有メモを保存しています...", false);
+
+  try {
+    const { updateTaskOwnerAndNotesForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await updateTaskOwnerAndNotesForPoc(taskId, owner, notes);
+
+    // 保存成功後は再取得 → 変換 → 差し替え → 再描画（編集状態も解除される）。
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("担当者名・共有メモを保存しました。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to update owner/notes", error);
+    setLoadState(`担当者名・共有メモの保存に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    actionButtons.forEach((element) => {
       element.disabled = false;
     });
   }
@@ -877,7 +992,11 @@ function renderTaskCard(task) {
         <li><strong>Sub:</strong> ${renderInline(task.subsectionTitle || "なし")}</li>
       </ul>
       ${renderLongList("Done when", task.doneWhen)}
-      ${renderLongList("Notes", task.notes)}
+      ${
+        // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
+        state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
+      }
+      ${renderFirestoreFields(task)}
       ${renderStatusControls(task)}
     </article>
   `;
@@ -898,6 +1017,120 @@ function renderSourceBadge(task) {
       <span class="source-state-text">${escapeHtml(badge.sourceText)}</span>
     </div>
   `;
+}
+
+// Firestore 表示時のみ、担当者名・更新日時・共有メモの表示と編集UIを描画する（編集POC）。
+// Markdown 通常表示や firestoreId 不在時は何も出さない（通常Markdown表示は変更しない）。
+// 外部由来の owner / notes / 日時文字列は必ずエスケープして埋め込む。
+function renderFirestoreFields(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+
+  // 表示用: owner は空なら「未設定」、notes は文字列のみ・空要素除外。
+  const owner = typeof task.owner === "string" ? task.owner : "";
+  const ownerText = owner.trim() !== "" ? escapeHtml(owner) : "未設定";
+  const updatedText = formatFirestoreUpdatedAt(task.updatedAtMillis);
+  const notes = Array.isArray(task.notes)
+    ? task.notes.filter((note) => typeof note === "string" && note.trim() !== "")
+    : [];
+  const notesView = notes.length
+    ? `<ul class="fs-notes-list">${notes.map((note) => `<li>${renderInline(note)}</li>`).join("")}</ul>`
+    : `<span class="fs-empty">メモなし</span>`;
+  // 編集用 textarea の初期値: 文字列メモを1行ずつ並べる（保存時に1行=1メモへ戻す）。
+  const notesEditValue = Array.isArray(task.notes)
+    ? task.notes.filter((note) => typeof note === "string").join("\n")
+    : "";
+  const taskId = escapeHtml(task.firestoreId);
+
+  // Done のタスクは担当者・メモを編集不可（表示のみ）。status か completed のどちらかで判定する。
+  const isDone = task.completed === true || task.status === "Done";
+
+  // 表示部（担当 / 更新 / メモ）は Done でも共通。Done のときは編集ボタンを出さず注記を出す。
+  const viewBlock = `
+    <div class="fs-view">
+      <p class="fs-line"><strong>担当:</strong> ${ownerText}</p>
+      <p class="fs-line"><strong>更新:</strong> ${escapeHtml(updatedText)}</p>
+      <div class="fs-notes"><strong>メモ:</strong> ${notesView}</div>
+      ${
+        isDone
+          ? `<p class="fs-done-note">Doneのため編集不可</p>`
+          : `<button type="button" class="button compact task-edit-button" data-task-id="${taskId}">編集</button>`
+      }
+    </div>
+  `;
+
+  // Done は編集フォーム自体を描画しない（表示のみ）。保存処理側でも Done を弾く（二重防御）。
+  if (isDone) {
+    return `<div class="fs-fields">${viewBlock}</div>`;
+  }
+
+  return `
+    <div class="fs-fields">
+      ${viewBlock}
+      <div class="fs-edit">
+        <label class="fs-edit-field">
+          <span>担当者</span>
+          ${renderOwnerSelect(owner)}
+        </label>
+        <label class="fs-edit-field">
+          <span>共有メモ（1行＝1メモ）</span>
+          <textarea class="fs-notes-input" rows="4">${escapeHtml(notesEditValue)}</textarea>
+        </label>
+        <div class="fs-edit-actions">
+          <button type="button" class="button primary compact task-edit-save" data-task-id="${taskId}">保存</button>
+          <button type="button" class="button compact task-edit-cancel">キャンセル</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// 担当者ドロップダウンを生成する。空（未設定）＋ TASK_OWNER_OPTIONS を並べる。
+// 現在の owner が候補外の非空値なら、既存データを消さないよう一時的に option を足して選択状態にする。
+function renderOwnerSelect(currentOwner) {
+  const owner = typeof currentOwner === "string" ? currentOwner.trim() : "";
+  const names = [...TASK_OWNER_OPTIONS];
+  if (owner !== "" && !names.includes(owner)) {
+    names.push(owner);
+  }
+  const options = [
+    `<option value=""${owner === "" ? " selected" : ""}>未設定</option>`,
+    ...names.map((name) => {
+      // 候補外の既存値は「（候補外）」付きラベルで明示しつつ、値はそのまま保持する。
+      const isCustom = !TASK_OWNER_OPTIONS.includes(name);
+      const label = isCustom ? `${name}（候補外）` : name;
+      return `<option value="${escapeHtml(name)}"${name === owner ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    }),
+  ].join("");
+  return `<select class="fs-owner-input">${options}</select>`;
+}
+
+// updatedAt（エポックミリ秒 or null）を日本時間「yyyy/mm/dd hh:mm」へ整形する。
+// null・不正値は「未設定」を返す。Intl が使えない環境ではフォールバックする。
+function formatFirestoreUpdatedAt(millis) {
+  if (typeof millis !== "number" || !Number.isFinite(millis)) {
+    return "未設定";
+  }
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) {
+    return "未設定";
+  }
+  try {
+    const parts = new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(date);
+    const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
+    return `${get("year")}/${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
+  } catch {
+    return date.toISOString();
+  }
 }
 
 // Firestore 表示時のみ、タスクカード内に status 更新ボタンを描画する。

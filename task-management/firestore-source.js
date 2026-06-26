@@ -4,6 +4,7 @@
 // - tasks コレクションを archived == false で読み取り、order 昇順で返す
 // - tasks/{docId} の status 更新（段階2の最小書き込みPOC）
 // - tasks コレクションへの新規タスク追加（段階3の最小書き込みPOC）
+// - tasks/{docId} の担当者名(owner)・共有メモ(notes)更新（編集POC・updatedAt も更新）
 //
 // 物理削除（過去POCの deleteDoc）は Codex 指摘対応により本マージ対象から除外した。
 // 現行実装では Firestore の物理削除は行わない（toDeleteCandidates は表示・警告のみ）。
@@ -114,6 +115,38 @@ function toFiniteNumber(value) {
   return null;
 }
 
+// updatedAt を「エポックミリ秒（number）または null」へ正規化する。
+// Firestore Timestamp（toMillis() / seconds+nanoseconds）・数値・ISO文字列のいずれにも対応。
+// 表示用の整形（日本時間など）は UI 側に任せ、ここでは値の正規化だけ行う。
+function toMillisOrNull(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "object") {
+    if (typeof value.toMillis === "function") {
+      try {
+        const ms = value.toMillis();
+        return Number.isFinite(ms) ? ms : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof value.seconds === "number" && Number.isFinite(value.seconds)) {
+      const ns = typeof value.nanoseconds === "number" ? value.nanoseconds : 0;
+      return value.seconds * 1000 + Math.floor(ns / 1e6);
+    }
+    return null;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
 // source（生成元）を正規化する。文字列なら trim、空文字・非文字列は null（＝不明）扱い。
 // 表示・分類はこの正規化済み値を基準に行う。
 function normalizeSource(source) {
@@ -220,8 +253,12 @@ export function firestoreToBoardModel(docs) {
       branch: doc.branchName ? String(doc.branchName) : "",
       issuePr: doc.issuePr ? String(doc.issuePr) : "",
       doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
-      notes: Array.isArray(doc.notes) ? doc.notes.map(String) : [],
+      // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+      notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
       includedInProgress: !section.excluded,
+      // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
+      // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
+      updatedAtMillis: toMillisOrNull(doc.updatedAt),
       // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
       // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
       // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
@@ -299,6 +336,48 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
   });
 
   console.log("[Firestore POC] updated task status", { taskId, nextStatus });
+}
+
+/**
+ * tasks/{taskId} の担当者名(owner)と共有メモ(notes)を更新する（編集POC）。
+ * 変更するのは owner / notes / updatedAt のみ。status・本文・archived・source 等は触れない。
+ * - owner: 文字列（前後空白は trim）。空文字も許容（未設定に戻す用途）。
+ * - notes: 文字列配列。文字列以外を除外し、各要素を trim、空要素を除外して保存する
+ *   （textarea の「1行=1メモ・空行除外・trim」仕様に合わせ、ここでも防御的に整形する）。
+ * - updatedAt: 現在日時（serverTimestamp）で更新する。
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ * @param {string} owner   担当者名
+ * @param {string[]} notes 共有メモ（1要素=1行）
+ */
+export async function updateTaskOwnerAndNotesForPoc(taskId, owner, notes) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+
+  const safeOwner = typeof owner === "string" ? owner.trim() : "";
+  const safeNotes = Array.isArray(notes)
+    ? notes
+        .filter((line) => typeof line === "string")
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+    : [];
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  // 変更してよいフィールドは owner / notes / updatedAt のみ（§安全方針）。
+  await updateDoc(targetRef, {
+    owner: safeOwner,
+    notes: safeNotes,
+    updatedAt: serverTimestamp(),
+  });
+
+  console.log("[Firestore POC] updated task owner/notes", {
+    taskId,
+    owner: safeOwner,
+    notesCount: safeNotes.length,
+  });
 }
 
 /**

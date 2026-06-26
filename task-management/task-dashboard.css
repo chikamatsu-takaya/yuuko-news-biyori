@@ -666,6 +666,115 @@ details[open] > summary::after {
   opacity: 0.6;
 }
 
+/* Firestore版の担当者名・更新日時・共有メモの表示/編集ブロック。 */
+.fs-fields {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.fs-line {
+  margin: 0 0 4px;
+  font-size: 0.82rem;
+}
+
+.fs-line strong {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.fs-notes {
+  font-size: 0.82rem;
+}
+
+.fs-notes > strong {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.fs-notes-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.fs-notes-list li {
+  margin: 2px 0;
+}
+
+.fs-empty {
+  color: var(--muted);
+}
+
+/* Doneタスクの編集不可注記。 */
+.fs-done-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+/* 編集フォームは既定で隠し、カードが is-editing のときだけ表示する。 */
+.fs-edit {
+  display: none;
+  margin-top: 8px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-card.is-editing .fs-edit {
+  display: flex;
+}
+
+/* 編集中は表示用ブロックの「編集」ボタンを隠す（保存/キャンセルへ誘導）。 */
+.task-card.is-editing .task-edit-button {
+  display: none;
+}
+
+.fs-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.fs-edit-field input,
+.fs-edit-field select,
+.fs-edit-field textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.84rem;
+}
+
+.fs-edit-field input,
+.fs-edit-field select {
+  min-height: 38px;
+}
+
+.fs-edit-field textarea {
+  resize: vertical;
+  min-height: 84px;
+  line-height: 1.5;
+}
+
+.fs-edit-field input:focus,
+.fs-edit-field select:focus,
+.fs-edit-field textarea:focus {
+  outline: none;
+  border-color: var(--green);
+}
+
+.fs-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .empty-state {
   color: var(--muted);
 }

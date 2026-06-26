@@ -34,6 +34,7 @@
 18. source可視化・削除可否表示（段階1・削除実行は未実装）
 19. 削除候補の選択削除（段階2・md-import 限定の物理削除）
 20. 反映UIの統合（段階3・追加/更新/削除を1操作に）
+21. 担当者名・共有メモ・更新日時の表示/編集（Firestore版）
 
 ---
 
@@ -1184,3 +1185,41 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - `task-management/task-dashboard.css` … 件数内訳（`.markdown-sync-breakdown`）と選択件数行（`.markdown-sync-delete-selected-line`）のスタイル追加。削除専用ボタン用スタイルを除去。
 - 本資料（§20）に段階3の仕様を追記。
 - `markdown-sync-apply.js` の削除処理（`applyMarkdownDelete`）は段階2のまま再利用（安全チェックは不変）。`firestore-source.js` / `task-dashboard.js` は変更しない。
+
+## 21. 担当者名・共有メモ・更新日時の表示/編集（Firestore版）
+
+Firestore版（`?source=firestore`）のタスクカードに、担当者名(`owner`)・共有メモ(`notes`)・最終更新日時(`updatedAt`)の表示と、担当者名・共有メモの編集/保存を追加する。通常URLの Markdown 表示は変更しない（表示・編集UIは `state.isFirestore && task.firestoreId` のときだけ描画する）。
+
+### 21.1 表示
+- 担当: `owner`（未設定時は「担当: 未設定」）。
+- 更新: `updatedAt` を日本時間「yyyy/mm/dd hh:mm」で表示（未設定・不正値は「更新: 未設定」）。`firestoreToBoardModel()` が `updatedAt` をエポックミリ秒へ正規化（`updatedAtMillis`）し、UI 側 `formatFirestoreUpdatedAt()` が JST 整形する。
+- メモ: `notes`（文字列配列）を箇条書き表示。未設定・空配列・文字列以外混入時は壊れないよう、文字列かつ非空の要素だけ表示し、無ければ「メモなし」。
+- Firestore版カードでは汎用 Notes 一覧は出さず、この専用ブロックに集約する。
+
+### 21.2 編集/保存
+- カードの「編集」ボタンで表示↔編集を切り替える（カードの `is-editing` クラスで制御。再描画しないので展開状態を保つ）。
+- 編集UIは担当者 select ＋ 共有メモ textarea ＋「保存」「キャンセル」。
+- 保存時の notes 仕様: textarea の1行を1要素、各行 trim、空行除外（`updateTaskOwnerAndNotesForPoc()` 側でも防御的に同じ整形を行う）。
+- キャンセルは入力を元の値へ戻して編集状態を解除（保存しない）。select は描画時に選択されていた option（`defaultSelected`）へ戻す。
+
+### 21.2.1 Doneタスクは編集不可（追加要件1）
+- `task.completed === true` または `task.status === "Done"` のタスクは、担当者・メモを編集できない。
+- UI: 編集ボタンを出さず、編集フォームも描画しない。表示部に「Doneのため編集不可」を出す（担当・更新・メモは表示のみ）。
+- 保存処理側の二重防御: `applyFirestoreOwnerNotesUpdate()` の冒頭で `findFirestoreTaskById()` により対象タスクを引き、Done なら「Doneのタスクは担当者・メモを編集できません。」を表示して **Firestore 更新を行わず中断**する。
+
+### 21.2.2 担当者ドロップダウン（追加要件2）
+- 担当者は自由入力ではなく select。候補は `TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"]`（`task-dashboard.js` の定数。実メンバー名へ置換可能）。
+- 先頭に `<option value="">未設定</option>` を置き、未設定へ戻せる。
+- 既存データの owner が候補外の非空値の場合は、消さないよう一時的にその値の option を末尾へ追加し（ラベルは「○○（候補外）」）、選択状態にする（`renderOwnerSelect()`）。
+- 表示（閲覧）側は従来どおり「担当: ○○ / 担当: 未設定」。
+
+### 21.3 Firestore で更新するフィールド
+- 担当者名・共有メモ保存（`updateTaskOwnerAndNotesForPoc()`）が書き込むのは **`owner` / `notes` / `updatedAt` のみ**。status・本文・archived・source・updatedBy 等は触れない。
+- `updatedAt` は保存時に `serverTimestamp()` で現在日時へ更新する。
+- status 更新（`updateTaskStatusForPoc()`）は従来から `updatedAt: serverTimestamp()` を更新済み（今回確認・維持）。
+
+### 21.4 変更ファイル
+- `task-management/firestore-source.js` … task へ `updatedAtMillis` 付与、`toMillisOrNull()` 追加、`updateTaskOwnerAndNotesForPoc()` 追加。（追加要件1/2では変更不要）
+- `task-management/task-dashboard.js` … `renderFirestoreFields()` / `formatFirestoreUpdatedAt()` / `applyFirestoreOwnerNotesUpdate()` 追加、タスクツリーの click 委譲に編集/保存/キャンセルを追加。追加要件で `TASK_OWNER_OPTIONS` 定数・`renderOwnerSelect()`・`findFirestoreTaskById()` 追加、Done編集不可（UI非表示＋保存処理ガード）を実装。
+- `task-management/task-dashboard.css` … 担当/更新/メモ表示・編集フォームのスタイル追加（select 対応・`.fs-done-note`）。
+- 本資料（§21）に仕様を追記。
