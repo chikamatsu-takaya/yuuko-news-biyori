@@ -316,8 +316,12 @@ async function fetchMarkdownCompareData() {
  */
 async function loadMarkdownCompareJson() {
   const button = markdownSyncElements.compareButton;
+  const applyButton = markdownSyncElements.applyAllButton;
   if (button) {
     button.disabled = true;
+  }
+  if (applyButton) {
+    applyButton.disabled = true;
   }
   setMarkdownSyncStatus("compare結果JSONを読み込み中...");
 
@@ -334,6 +338,9 @@ async function loadMarkdownCompareJson() {
   } finally {
     if (button) {
       button.disabled = false;
+    }
+    if (applyButton) {
+      applyButton.disabled = false;
     }
   }
 }
@@ -545,6 +552,8 @@ async function executeMarkdownApplyAfterConfirm(data, deleteItems) {
   // 集計用の入れ物（追加・更新 / 削除の結果）。失敗しても結果が分かるよう個別に try する。
   let cu = { created: [], updated: [], skipped: [], errors: [], deleteCandidatesSkipped: [] };
   let del = { deleted: [], skipped: [], errors: [] };
+  let dashboardRefresh = { refreshed: false, count: 0 };
+  let dashboardRefreshError = null;
 
   setMarkdownSyncStatus(progressLine(0, 0, 0));
 
@@ -613,10 +622,31 @@ async function executeMarkdownApplyAfterConfirm(data, deleteItems) {
         summaryLines.push(`- ほか ${allErrors.length - 5} 件`);
       }
     }
+
+    // Firestore 反映後は DB 側のタスク一覧を再取得し、ダッシュボード本体を最新化する。
+    // compare JSON は静的生成物なので、ここでは再生成せず「再生成が必要」状態に切り替える。
+    if (typeof refreshFirestoreDashboardAfterMarkdownSync === "function") {
+      try {
+        dashboardRefresh = await refreshFirestoreDashboardAfterMarkdownSync();
+        if (dashboardRefresh.refreshed) {
+          summaryLines.push("", `Firestore一覧を再読み込みしました（${dashboardRefresh.count}件）。`);
+        }
+      } catch (error) {
+        dashboardRefreshError = error;
+        summaryLines.push(
+          "",
+          `Firestore一覧の再読み込みに失敗しました。ページ再読み込みで確認してください: ${error.message}`,
+        );
+      }
+    } else {
+      summaryLines.push("", "Firestore一覧の再読み込み関数が見つかりませんでした。ページ再読み込みで確認してください。");
+    }
+
     // 反映後は compare JSON が古くなるため、再生成を案内する（画面からは実行しない）。
     summaryLines.push("", "最新の差分を確認するには、compare JSON を再生成してください。");
+    markMarkdownCompareResultStale();
     setMarkdownSyncStatus(summaryLines.join("\n"), {
-      isError: allErrors.length > 0,
+      isError: allErrors.length > 0 || dashboardRefreshError != null,
       commandHint: MARKDOWN_SYNC_GEN_COMMAND,
     });
 
@@ -639,6 +669,32 @@ async function executeMarkdownApplyAfterConfirm(data, deleteItems) {
     pendingMarkdownApplyData = null;
     pendingMarkdownDeleteItems = null;
   }
+}
+
+// Firestore反映後の compare JSON は古くなるため、画面上の差分操作対象から外す。
+// JSON の再生成は Node スクリプトの責務なので、ここでは古いプレビューを明示的に破棄する。
+function markMarkdownCompareResultStale() {
+  lastMarkdownCompareResult = null;
+  selectedDeleteIds = new Set();
+  updateMarkdownSyncGeneratedAt(null);
+  if (markdownSyncElements.stats) {
+    markdownSyncElements.stats.innerHTML = MARKDOWN_SYNC_CATEGORIES.map(
+      (category) => `
+        <article class="stat-card markdown-sync-stat">
+          <span class="stat-label">${escapeSyncHtml(category.label)}</span>
+          <strong class="stat-value">0</strong>
+        </article>
+      `,
+    ).join("");
+  }
+  if (markdownSyncElements.details) {
+    markdownSyncElements.details.innerHTML = `
+      <p class="empty-state">
+        Markdown反映後のため、このcompare結果は古くなりました。最新の差分を確認するには compare JSON を再生成し、「Compare確認」を押してください。
+      </p>
+    `;
+  }
+  refreshApplyBreakdown();
 }
 
 /**
