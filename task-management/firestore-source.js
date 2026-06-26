@@ -352,6 +352,10 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
  *   （textarea の「1行=1メモ・空行除外・trim」仕様に合わせ、ここでも防御的に整形する）。
  * - updatedAt: 現在日時（serverTimestamp）で更新する。
  *
+ * 安全対策（UIガードに加えた二重防御）: 保存直前に getDoc で DB 現状を再取得し、
+ * document が存在し かつ status !== "Done" かつ completed !== true のときだけ updateDoc する。
+ * それ以外（不在 / Done / completed）は更新せず理由付き Error を投げる。
+ *
  * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
  * @param {string} owner   担当者名
  * @param {string[]} notes 共有メモ（1要素=1行）
@@ -371,6 +375,18 @@ export async function updateTaskOwnerAndNotesForPoc(taskId, owner, notes) {
 
   const db = getFirestore(getApp());
   const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  // 保存直前に Firestore 現状を取得し、Done 状態を再確認する（UIガードに加えた二重防御）。
+  // 画面読み込み後に別タブ・別ユーザーが Done 化したケースで、古い編集フォームからの
+  // Done タスク更新を防ぐ。document が無い / status==="Done" / completed===true は更新しない。
+  const snapshot = await getDoc(targetRef);
+  if (!snapshot.exists()) {
+    throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+  }
+  const current = snapshot.data() ?? {};
+  if (current.status === "Done" || current.completed === true) {
+    throw new Error("DB上でDoneになっているため、担当者・メモを更新しませんでした。");
+  }
 
   // 変更してよいフィールドは owner / notes / updatedAt のみ（§安全方針）。
   await updateDoc(targetRef, {

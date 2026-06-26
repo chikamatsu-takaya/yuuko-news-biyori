@@ -1206,7 +1206,9 @@ Firestore版（`?source=firestore`）のタスクカードに、担当者名(`ow
 ### 21.2.1 Doneタスクは編集不可（追加要件1）
 - `task.completed === true` または `task.status === "Done"` のタスクは、担当者・メモを編集できない。
 - UI: 編集ボタンを出さず、編集フォームも描画しない。表示部に「Doneのため編集不可」を出す（担当・更新・メモは表示のみ）。
-- 保存処理側の二重防御: `applyFirestoreOwnerNotesUpdate()` の冒頭で `findFirestoreTaskById()` により対象タスクを引き、Done なら「Doneのタスクは担当者・メモを編集できません。」を表示して **Firestore 更新を行わず中断**する。
+- 保存処理側の二重防御（UI＋Firestore更新関数）:
+  1. UI側: `applyFirestoreOwnerNotesUpdate()` の冒頭で `findFirestoreTaskById()` により対象タスクを引き、Done なら「Doneのタスクは担当者・メモを編集できません。」を表示して **Firestore 更新を行わず中断**する。
+  2. Firestore更新関数側: `updateTaskOwnerAndNotesForPoc()` が **保存直前に `getDoc` で DB 現状を再取得**し、`document が存在し` かつ `status !== "Done"` かつ `completed !== true` のときだけ `updateDoc` する。不在 / `status === "Done"` / `completed === true` の場合は更新せず理由付き Error を投げる（例: 「DB上でDoneになっているため、担当者・メモを更新しませんでした。」）。これにより、画面読み込み後に別タブ・別ユーザーが Done 化したケースでも、古い編集フォームからの Done タスク更新を防ぐ。
 
 ### 21.2.2 担当者ドロップダウン（追加要件2）
 - 担当者は自由入力ではなく select。候補は `TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"]`（`task-dashboard.js` の定数。実メンバー名へ置換可能）。
