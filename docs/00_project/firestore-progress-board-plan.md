@@ -34,6 +34,8 @@
 18. source可視化・削除可否表示（段階1・削除実行は未実装）
 19. 削除候補の選択削除（段階2・md-import 限定の物理削除）
 20. 反映UIの統合（段階3・追加/更新/削除を1操作に）
+21. 担当者名・共有メモ・更新日時の表示/編集（Firestore版）
+22. タスクカード単位の削除（DB追加=manual-poc 限定）
 
 ---
 
@@ -1184,3 +1186,86 @@ node task-management/sync-markdown-to-firestore.mjs --dry-run --compare-firestor
 - `task-management/task-dashboard.css` … 件数内訳（`.markdown-sync-breakdown`）と選択件数行（`.markdown-sync-delete-selected-line`）のスタイル追加。削除専用ボタン用スタイルを除去。
 - 本資料（§20）に段階3の仕様を追記。
 - `markdown-sync-apply.js` の削除処理（`applyMarkdownDelete`）は段階2のまま再利用（安全チェックは不変）。`firestore-source.js` / `task-dashboard.js` は変更しない。
+
+## 21. 担当者名・共有メモ・更新日時の表示/編集（Firestore版）
+
+Firestore版（`?source=firestore`）のタスクカードに、担当者名(`owner`)・共有メモ(`notes`)・最終更新日時(`updatedAt`)の表示と、担当者名・共有メモの編集/保存を追加する。通常URLの Markdown 表示は変更しない（表示・編集UIは `state.isFirestore && task.firestoreId` のときだけ描画する）。
+
+### 21.1 表示
+- 担当: `owner`（未設定時は「担当: 未設定」）。
+- 更新: `updatedAt` を日本時間「yyyy/mm/dd hh:mm」で表示（未設定・不正値は「更新: 未設定」）。`firestoreToBoardModel()` が `updatedAt` をエポックミリ秒へ正規化（`updatedAtMillis`）し、UI 側 `formatFirestoreUpdatedAt()` が JST 整形する。
+- メモ: `notes`（文字列配列）を箇条書き表示。未設定・空配列・文字列以外混入時は壊れないよう、文字列かつ非空の要素だけ表示し、無ければ「メモなし」。
+- Firestore版カードでは汎用 Notes 一覧は出さず、この専用ブロックに集約する。
+
+### 21.2 編集/保存
+- カードの「編集」ボタンで表示↔編集を切り替える（カードの `is-editing` クラスで制御。再描画しないので展開状態を保つ）。
+- 編集UIは担当者 select ＋ 共有メモ textarea ＋「保存」「キャンセル」。
+- 保存時の notes 仕様: textarea の1行を1要素、各行 trim、空行除外（`updateTaskOwnerAndNotesForPoc()` 側でも防御的に同じ整形を行う）。
+- キャンセルは入力を元の値へ戻して編集状態を解除（保存しない）。select は描画時に選択されていた option（`defaultSelected`）へ戻す。
+
+### 21.2.1 Doneタスクは編集不可（追加要件1）
+- `task.completed === true` または `task.status === "Done"` のタスクは、担当者・メモを編集できない。
+- UI: 編集ボタンを出さず、編集フォームも描画しない。表示部に「Doneのため編集不可」を出す（担当・更新・メモは表示のみ）。
+- 保存処理側の二重防御（UI＋Firestore更新関数）:
+  1. UI側: `applyFirestoreOwnerNotesUpdate()` の冒頭で `findFirestoreTaskById()` により対象タスクを引き、Done なら「Doneのタスクは担当者・メモを編集できません。」を表示して **Firestore 更新を行わず中断**する。
+  2. Firestore更新関数側: `updateTaskOwnerAndNotesForPoc()` が **`runTransaction` 内で現状を再読込**し、`document が存在し` かつ `status !== "Done"` かつ `completed !== true` のときだけ `transaction.update` する。不在 / `status === "Done"` / `completed === true` の場合は更新せず理由付き Error を投げる（例: 「DB上でDoneになっているため、担当者・メモを更新しませんでした。」）。読込→判定→更新を同一トランザクションで原子化することで、`getDoc` 後 `updateDoc` 前の競合（別タブ・別ユーザーの Done 化）でも、古い編集フォームからの Done タスク更新を防ぐ。更新フィールドは `owner` / `notes` / `updatedAt` のみ。
+
+### 21.2.2 担当者ドロップダウン（追加要件2）
+- 担当者は自由入力ではなく select。候補は `TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"]`（`task-dashboard.js` の定数。実メンバー名へ置換可能）。
+- 先頭に `<option value="">未設定</option>` を置き、未設定へ戻せる。
+- 既存データの owner が候補外の非空値の場合は、消さないよう一時的にその値の option を末尾へ追加し（ラベルは「○○（候補外）」）、選択状態にする（`renderOwnerSelect()`）。
+- 表示（閲覧）側は従来どおり「担当: ○○ / 担当: 未設定」。
+
+### 21.3 Firestore で更新するフィールド
+- 担当者名・共有メモ保存（`updateTaskOwnerAndNotesForPoc()`）が書き込むのは **`owner` / `notes` / `updatedAt` のみ**。status・本文・archived・source・updatedBy 等は触れない。
+- `updatedAt` は保存時に `serverTimestamp()` で現在日時へ更新する。
+- status 更新（`updateTaskStatusForPoc()`）は従来から `updatedAt: serverTimestamp()` を更新済み（今回確認・維持）。
+
+### 21.4 変更ファイル
+- `task-management/firestore-source.js` … task へ `updatedAtMillis` 付与、`toMillisOrNull()` 追加、`updateTaskOwnerAndNotesForPoc()` 追加。（追加要件1/2では変更不要）
+- `task-management/task-dashboard.js` … `renderFirestoreFields()` / `formatFirestoreUpdatedAt()` / `applyFirestoreOwnerNotesUpdate()` 追加、タスクツリーの click 委譲に編集/保存/キャンセルを追加。追加要件で `TASK_OWNER_OPTIONS` 定数・`renderOwnerSelect()`・`findFirestoreTaskById()` 追加、Done編集不可（UI非表示＋保存処理ガード）を実装。
+- `task-management/task-dashboard.css` … 担当/更新/メモ表示・編集フォームのスタイル追加（select 対応・`.fs-done-note`）。
+- 本資料（§21）に仕様を追記。
+
+## 22. タスクカード単位の削除（DB追加=manual-poc 限定）
+
+Firestore版（`?source=firestore`）で、**タスクカードごとに「DB追加タスク」を削除する機能**を復活させる。これは §19/§20 の Markdown同期(md-import)削除とは**別系統**で、画面から追加したDB上だけのタスク（`source="manual-poc"`）をカード単位で消すためのもの。md-import 削除（`markdown-sync-apply.js` / REST）は変更しない。
+
+### 22.1 別機能として実装
+- md同期削除: Markdown管理タスクを md との差分（`toDeleteCandidates`）に基づき、Markdown同期プレビューから削除。
+- タスクごとの削除（本節）: 画面追加のDB上タスク（manual-poc）をカードの削除ボタンから削除。
+- 削除処理は `firestore-source.js` の `deleteManualPocTaskForPoc()`（Web SDK `runTransaction` 内で `transaction.get` + `transaction.delete`）。`markdown-sync-apply.js`（REST DELETE・md-import専用）とは混在させない。
+
+### 22.2 削除ボタンの表示条件（すべて満たす場合のみ表示）
+- Firestore版である（`state.isFirestore`）
+- `task.firestoreId` がある
+- `task.source === "manual-poc"`
+- `task.protected !== true`
+- `task.completed !== true`
+- `task.status !== "Done"`
+
+次は表示しない: `md-import` / source なし・由来不明 / manual-poc 以外 / protected / Done / firestoreId なし。特に `md-import` はカードからは削除せず、既存のMarkdown同期プレビュー経由ルートを使う。
+（`firestoreToBoardModel()` が task に `protected`（`doc.protected === true`）を付与し、表示条件判定に使う。）
+
+### 22.3 確認モーダル
+- 削除ボタン押下で即DELETEせず、確認モーダル（`task-modal-*`・Markdown同期モーダルとは独立DOM）を表示。
+- 表示内容: タスク名 / `firestoreId` / `source` ／「この操作はFirestore上のDB追加タスク（manual-poc）を物理削除します」「Markdown管理タスク（md-import）はこのボタンでは削除できません」。
+- キャンセル / 背景クリック / Escape では削除しない（`deleteDoc` を呼ばない）。`closeDeleteTaskModal()` で `hidden=true` に戻し、`pendingDeleteTaskId` を null へクリアする。
+- 初期表示で勝手にモーダルが出ないよう、CSS に `.task-modal-overlay[hidden] { display: none; }` を必ず置く。author の `display: flex` は UA の `[hidden]{display:none}` に勝つため、この打ち消しが無いと初期表示でモーダルが出っぱなしになり `hidden=true` でも閉じない（Markdown同期モーダルと同じ対処）。
+
+### 22.4 削除直前のDB現状チェック（最終防御）
+`deleteManualPocTaskForPoc()` は、UIの表示条件を信用せず、**`runTransaction` 内で現状を再読込**し、以下をすべて満たす場合だけ `transaction.delete` する（読込→判定→削除を原子化し、`getDoc` 後 `deleteDoc` 前の競合で古い判定のまま物理削除されることを防ぐ）。満たさない場合は削除せず理由付き Error を投げ、画面に理由を表示する。
+- document が存在する（無ければ「対象タスクがFirestoreに存在しません」）
+- DB現状 `source === "manual-poc"`（違えば「DB現状が manual-poc ではないため削除しません（source=…）。」）
+- DB現状 `protected !== true`（違えば「DB上で protected=true のため削除しません。」）
+- DB現状 `status !== "Done"` かつ `completed !== true`（違えば「Doneのタスクは削除できません。」）
+
+### 22.5 削除後の動き
+- 成功時: Firestore一覧を再取得 → `firestoreToBoardModel()` 変換 → 再描画（status更新・owner/notes保存と同じ流れ）。「DB追加タスクを削除しました。」を表示。
+- 失敗/スキップ時: 「DB追加タスクを削除できませんでした: …」と理由を表示（削除は行わない）。
+
+### 22.6 変更ファイル
+- `task-management/firestore-source.js` … `deleteManualPocTaskForPoc()` 追加（競合対策として `runTransaction` を使用）、task へ `protected` 付与、冒頭の責務コメント更新。owner/メモ更新（`updateTaskOwnerAndNotesForPoc()`）も `runTransaction` 化。
+- `task-management/task-dashboard.js` … 削除ボタン描画条件（`canCardDelete`）、確認モーダル（`setupDeleteTaskModal`/`openDeleteTaskModal`/`closeDeleteTaskModal`）、`executeManualPocTaskDelete()`、click委譲に削除ボタン追加。
+- `task-management/task-dashboard.css` … 削除ボタン・操作行・確認モーダルのスタイル追加。
+- `markdown-sync-apply.js`（md-import 削除）は変更しない。

@@ -4,12 +4,15 @@
 // - tasks コレクションを archived == false で読み取り、order 昇順で返す
 // - tasks/{docId} の status 更新（段階2の最小書き込みPOC）
 // - tasks コレクションへの新規タスク追加（段階3の最小書き込みPOC）
+// - tasks/{docId} の担当者名(owner)・共有メモ(notes)更新（編集POC・updatedAt も更新）
+// - tasks/{docId} の物理削除（タスクカードからの「DB追加タスク削除」専用。source="manual-poc" 限定）
 //
-// 物理削除（過去POCの deleteDoc）は Codex 指摘対応により本マージ対象から除外した。
-// 現行実装では Firestore の物理削除は行わない（toDeleteCandidates は表示・警告のみ）。
+// 物理削除は deleteManualPocTaskForPoc() のみが行う。runTransaction 内で現状を再読込し、
+// source="manual-poc" かつ 非protected かつ 未Done のときだけ transaction.delete する（競合対策・最終防御）。
+// Markdown同期(md-import)の削除は別系統（markdown-sync-apply.js / REST）であり、本ファイルとは混ぜない。
 // 制約（§14 / §15 準拠）:
-// - 書き込みは status 更新・新規タスク追加に限定する。
-//   本文編集・archived 切り替え・物理削除は行わない。
+// - 書き込みは status 更新・新規タスク追加・owner/notes更新・manual-poc削除に限定する。
+//   それ以外の本文編集・archived 切り替え・md-import の物理削除は行わない。
 // - onSnapshot（リアルタイム監視）・差分取得・localStorage キャッシュは使わない。
 //
 // 本ファイルは task-dashboard.js から `await import("./firestore-source.js")` で
@@ -26,6 +29,7 @@ import {
   doc as firestoreDoc,
   updateDoc,
   addDoc,
+  runTransaction,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
@@ -110,6 +114,38 @@ function isExcludedSection(title) {
 function toFiniteNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
+  }
+  return null;
+}
+
+// updatedAt を「エポックミリ秒（number）または null」へ正規化する。
+// Firestore Timestamp（toMillis() / seconds+nanoseconds）・数値・ISO文字列のいずれにも対応。
+// 表示用の整形（日本時間など）は UI 側に任せ、ここでは値の正規化だけ行う。
+function toMillisOrNull(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "object") {
+    if (typeof value.toMillis === "function") {
+      try {
+        const ms = value.toMillis();
+        return Number.isFinite(ms) ? ms : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof value.seconds === "number" && Number.isFinite(value.seconds)) {
+      const ns = typeof value.nanoseconds === "number" ? value.nanoseconds : 0;
+      return value.seconds * 1000 + Math.floor(ns / 1e6);
+    }
+    return null;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
   }
   return null;
 }
@@ -220,13 +256,19 @@ export function firestoreToBoardModel(docs) {
       branch: doc.branchName ? String(doc.branchName) : "",
       issuePr: doc.issuePr ? String(doc.issuePr) : "",
       doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
-      notes: Array.isArray(doc.notes) ? doc.notes.map(String) : [],
+      // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+      notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
       includedInProgress: !section.excluded,
+      // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
+      // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
+      updatedAtMillis: toMillisOrNull(doc.updatedAt),
       // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
       // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
       // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
       source: normalizeSource(doc.source),
       sourceBadge: classifySourceBadge(doc.source),
+      // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
+      protected: doc.protected === true,
     };
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
@@ -299,6 +341,117 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
   });
 
   console.log("[Firestore POC] updated task status", { taskId, nextStatus });
+}
+
+/**
+ * tasks/{taskId} の担当者名(owner)と共有メモ(notes)を更新する（編集POC）。
+ * 変更するのは owner / notes / updatedAt のみ。status・本文・archived・source 等は触れない。
+ * - owner: 文字列（前後空白は trim）。空文字も許容（未設定に戻す用途）。
+ * - notes: 文字列配列。文字列以外を除外し、各要素を trim、空要素を除外して保存する
+ *   （textarea の「1行=1メモ・空行除外・trim」仕様に合わせ、ここでも防御的に整形する）。
+ * - updatedAt: 現在日時（serverTimestamp）で更新する。
+ *
+ * 安全対策（UIガードに加えた最終防御・競合対策）: runTransaction 内で現状を再読込し、
+ * document が存在し かつ status !== "Done" かつ completed !== true のときだけ transaction.update する。
+ * それ以外（不在 / Done / completed）は更新せず理由付き Error を投げる（更新は実行されない）。
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ * @param {string} owner   担当者名
+ * @param {string[]} notes 共有メモ（1要素=1行）
+ */
+export async function updateTaskOwnerAndNotesForPoc(taskId, owner, notes) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+
+  const safeOwner = typeof owner === "string" ? owner.trim() : "";
+  const safeNotes = Array.isArray(notes)
+    ? notes
+        .filter((line) => typeof line === "string")
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+    : [];
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  // 競合対策（UIガードに加えた最終防御）: 現状読込→Done判定→更新を transaction で原子化する。
+  // 別RPC（getDoc + updateDoc）の間に別タブ・別ユーザーが Done 化しても、古い編集フォームからの
+  // Done タスク更新を防ぐ。document が無い / status==="Done" / completed===true は更新しない。
+  // 変更してよいフィールドは owner / notes / updatedAt のみ（§安全方針）。
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    if (current.status === "Done" || current.completed === true) {
+      throw new Error("DB上でDoneになっているため、担当者・メモを更新しませんでした。");
+    }
+
+    transaction.update(targetRef, {
+      owner: safeOwner,
+      notes: safeNotes,
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  console.log("[Firestore POC] updated task owner/notes", {
+    taskId,
+    owner: safeOwner,
+    notesCount: safeNotes.length,
+  });
+}
+
+/**
+ * tasks/{taskId} を物理削除する（タスクカードからの「DB追加タスク削除」専用POC）。
+ * Markdown同期(md-import)の削除（markdown-sync-apply.js / REST）とは別系統。混在させない。
+ * 削除できるのは画面から追加したDB上のタスク（source="manual-poc"）の未完了・非protected のみ。
+ *
+ * UI の表示条件だけを信用せず、runTransaction 内で Firestore 現状を再読込し、
+ * 以下をすべて満たす場合だけ transaction.delete する。満たさない場合は理由付き Error を投げる:
+ * - document が存在する
+ * - DB現状 source === "manual-poc"
+ * - DB現状 protected !== true
+ * - DB現状 status !== "Done" かつ completed !== true
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ */
+export async function deleteManualPocTaskForPoc(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  // 競合対策（UI判定を信用しない・最終防御）: 現状読込→条件確認→削除を transaction で原子化する。
+  // 別RPC（getDoc + deleteDoc）の間に別タブ・別ユーザーが protected/Done 化しても、
+  // 古い判定のまま物理削除されることを防ぐ。削除は取り返しがつかないため transaction で確実にする。
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    const source = typeof current.source === "string" ? current.source.trim() : "";
+    const isProtected = current.protected === true;
+    const isDone = current.status === "Done" || current.completed === true;
+
+    if (source !== "manual-poc") {
+      throw new Error(`DB現状が manual-poc ではないため削除しません（source=${source || "未設定"}）。`);
+    }
+    if (isProtected) {
+      throw new Error("DB上で protected=true のため削除しません。");
+    }
+    if (isDone) {
+      throw new Error("Doneのタスクは削除できません。");
+    }
+
+    transaction.delete(targetRef);
+  });
+
+  console.log("[Firestore POC] deleted manual-poc task", { taskId });
 }
 
 /**
