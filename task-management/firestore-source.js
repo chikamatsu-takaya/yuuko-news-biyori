@@ -5,12 +5,14 @@
 // - tasks/{docId} の status 更新（段階2の最小書き込みPOC）
 // - tasks コレクションへの新規タスク追加（段階3の最小書き込みPOC）
 // - tasks/{docId} の担当者名(owner)・共有メモ(notes)更新（編集POC・updatedAt も更新）
+// - tasks/{docId} の物理削除（タスクカードからの「DB追加タスク削除」専用。source="manual-poc" 限定）
 //
-// 物理削除（過去POCの deleteDoc）は Codex 指摘対応により本マージ対象から除外した。
-// 現行実装では Firestore の物理削除は行わない（toDeleteCandidates は表示・警告のみ）。
+// 物理削除は deleteManualPocTaskForPoc() のみが行う。削除直前に getDoc で DB現状を再取得し、
+// source="manual-poc" かつ 非protected かつ 未Done のときだけ deleteDoc する（最終防御）。
+// Markdown同期(md-import)の削除は別系統（markdown-sync-apply.js / REST）であり、本ファイルとは混ぜない。
 // 制約（§14 / §15 準拠）:
-// - 書き込みは status 更新・新規タスク追加に限定する。
-//   本文編集・archived 切り替え・物理削除は行わない。
+// - 書き込みは status 更新・新規タスク追加・owner/notes更新・manual-poc削除に限定する。
+//   それ以外の本文編集・archived 切り替え・md-import の物理削除は行わない。
 // - onSnapshot（リアルタイム監視）・差分取得・localStorage キャッシュは使わない。
 //
 // 本ファイルは task-dashboard.js から `await import("./firestore-source.js")` で
@@ -25,8 +27,10 @@ import {
   orderBy,
   getDocs,
   doc as firestoreDoc,
+  getDoc,
   updateDoc,
   addDoc,
+  deleteDoc,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
@@ -264,6 +268,8 @@ export function firestoreToBoardModel(docs) {
       // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
       source: normalizeSource(doc.source),
       sourceBadge: classifySourceBadge(doc.source),
+      // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
+      protected: doc.protected === true,
     };
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
@@ -378,6 +384,52 @@ export async function updateTaskOwnerAndNotesForPoc(taskId, owner, notes) {
     owner: safeOwner,
     notesCount: safeNotes.length,
   });
+}
+
+/**
+ * tasks/{taskId} を物理削除する（タスクカードからの「DB追加タスク削除」専用POC）。
+ * Markdown同期(md-import)の削除（markdown-sync-apply.js / REST）とは別系統。混在させない。
+ * 削除できるのは画面から追加したDB上のタスク（source="manual-poc"）の未完了・非protected のみ。
+ *
+ * UI の表示条件だけを信用せず、削除直前に Firestore 現状を getDoc で再取得し、
+ * 以下をすべて満たす場合だけ deleteDoc する。満たさない場合は理由付き Error を投げる:
+ * - document が存在する
+ * - DB現状 source === "manual-poc"
+ * - DB現状 protected !== true
+ * - DB現状 status !== "Done" かつ completed !== true
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ */
+export async function deleteManualPocTaskForPoc(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  // 削除直前に Firestore 現状を取得して再確認する（UI判定を信用しない・最終防御）。
+  const snapshot = await getDoc(targetRef);
+  if (!snapshot.exists()) {
+    throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+  }
+  const data = snapshot.data() ?? {};
+  const source = typeof data.source === "string" ? data.source.trim() : "";
+  const isProtected = data.protected === true;
+  const isDone = data.status === "Done" || data.completed === true;
+
+  if (source !== "manual-poc") {
+    throw new Error(`DB現状が manual-poc ではないため削除しません（source=${source || "未設定"}）。`);
+  }
+  if (isProtected) {
+    throw new Error("DB上で protected=true のため削除しません。");
+  }
+  if (isDone) {
+    throw new Error("Doneのタスクは削除できません。");
+  }
+
+  await deleteDoc(targetRef);
+  console.log("[Firestore POC] deleted manual-poc task", { taskId });
 }
 
 /**

@@ -707,10 +707,99 @@ details[open] > summary::after {
 
 /* Doneタスクの編集不可注記。 */
 .fs-done-note {
-  margin: 6px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+/* 表示部の操作ボタン行（編集 / DB追加タスク削除）。 */
+.fs-view-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* タスクカード単位の削除ボタンは危険操作のため赤系で強調する。 */
+.task-delete-button {
+  border-color: rgba(240, 120, 120, 0.5);
+  color: var(--red);
+}
+
+/* 編集中は削除ボタンを隠す（編集と削除を同時に見せない）。 */
+.task-card.is-editing .task-delete-button {
+  display: none;
+}
+
+/* 「DB追加タスク削除」確認モーダル（Markdown同期モーダルとは独立のスタイル）。 */
+.task-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* hidden 属性のときは必ず非表示にする。
+   author の display:flex は UA の [hidden]{display:none} に勝つため、明示的に打ち消す。
+   これが無いと初期表示でモーダルが出っぱなしになり、hidden=true にしても閉じない。 */
+.task-modal-overlay[hidden] {
+  display: none;
+}
+
+.task-modal {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+
+.task-modal h2 {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+}
+
+.task-modal-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 0.86rem;
+}
+
+.task-modal-list li {
+  margin: 4px 0;
+}
+
+.task-modal-id {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.task-modal-danger {
+  margin: 14px 0 0;
+  border: 1px solid rgba(240, 120, 120, 0.5);
+  border-radius: 12px;
+  background: rgba(240, 120, 120, 0.12);
+  color: var(--red);
+  padding: 10px 12px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.task-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 /* 編集フォームは既定で隠し、カードが is-editing のときだけ表示する。 */
