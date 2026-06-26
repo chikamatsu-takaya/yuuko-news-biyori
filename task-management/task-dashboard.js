@@ -567,6 +567,25 @@ async function loadDashboard() {
   }
 }
 
+// Markdown同期の反映完了後に、ページ全体を再読み込みせずFirestore表示を最新化する。
+// compare JSON は画面から再生成できないため、同期プレビュー側では別途「再生成が必要」と明示する。
+async function refreshFirestoreDashboardAfterMarkdownSync() {
+  if (!state.isFirestore) {
+    return { refreshed: false, count: 0 };
+  }
+
+  setLoadState("Firestoreを再読み込みしています...", false);
+  const { fetchFirestoreTasksForPoc, firestoreToBoardModel } = await import(
+    "./firestore-source.js"
+  );
+  const docs = await fetchFirestoreTasksForPoc();
+  state.data = firestoreToBoardModel(docs);
+  state.isFirestore = true;
+  renderDashboard({ preserveMarkdownSyncPreview: true });
+  setLoadState(`Firestoreを再読み込みしました（${docs.length}件）。`, false);
+  return { refreshed: true, count: docs.length };
+}
+
 function hideRenderedSections() {
   for (const key of [
     "overview",
@@ -795,7 +814,7 @@ function collectSectionTasks(section) {
   ];
 }
 
-function renderDashboard() {
+function renderDashboard(options = {}) {
   if (!state.data) {
     return;
   }
@@ -828,7 +847,9 @@ function renderDashboard() {
       typeof renderMarkdownSyncPreview === "function" &&
       typeof buildMockMarkdownCompareResult === "function"
     ) {
-      renderMarkdownSyncPreview(buildMockMarkdownCompareResult());
+      if (!options.preserveMarkdownSyncPreview) {
+        renderMarkdownSyncPreview(buildMockMarkdownCompareResult());
+      }
     }
   }
 }
