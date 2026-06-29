@@ -494,13 +494,20 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
   const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined;
   const raw = present ? data[key] : undefined;
   const isArray = Array.isArray(raw);
-  // Firestore はスキーマレスのため、配列内の型不一致・空要素・改行入り要素も不正として扱う。
-  // 全要素が「trim 後に非空 かつ CR/LF を含まない string」のときだけ妥当な配列とみなす。
-  // （改行を許すと Markdown へ別の属性行を注入できてしまうため拒否する）
+  // Firestore はスキーマレスのため、配列内の型不一致・空要素・改行入り要素・
+  // 属性行とみなされる要素も不正として扱う。全要素が以下を満たすときだけ妥当:
+  // - string / trim 後に非空 / CR/LF を含まない / 属性行として再 parse されない。
+  // （改行や "Status: Done" 等を許すと Markdown へ別の属性行を注入できてしまうため拒否する）
   const allValidElements =
     isArray &&
     raw.length > 0 &&
-    raw.every((el) => typeof el === "string" && el.trim() !== "" && !hasLineBreak(el));
+    raw.every(
+      (el) =>
+        typeof el === "string" &&
+        el.trim() !== "" &&
+        !hasLineBreak(el) &&
+        !isAttributeLikeText(el),
+    );
 
   // 妥当な非空配列のときだけ反映対象にする。
   if (allValidElements) {
@@ -746,6 +753,17 @@ function arraysEqual(a, b) {
  */
 function hasLineBreak(value) {
   return typeof value === "string" && /[\r\n]/.test(value);
+}
+
+/**
+ * trim 後の文字列が「タスク属性行」として再 parse されうるか。
+ * Done when / Notes の子要素に "Status: Done" のような値が入ると、
+ * 再 parse 時に属性行として解釈されてしまう（見出し/タスク数は変わらないため
+ * 検出されにくい）。これを防ぐため、属性行とみなされる値は反映しない。
+ * 判定は再 parse と同じ parseTaskAttribute を使う（規則のずれを防ぐ）。
+ */
+function isAttributeLikeText(value) {
+  return typeof value === "string" && parseTaskAttribute(value.trim()) !== null;
 }
 
 function strOrEmpty(value) {
