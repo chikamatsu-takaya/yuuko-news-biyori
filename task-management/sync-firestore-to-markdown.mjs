@@ -90,12 +90,24 @@ async function main() {
   const mode = options.apply ? "apply" : "dry-run";
 
   // apply 時のみ Markdown を書き換える（事前にバックアップを作る）。
+  // 最後の安全弁: 再 parse 検証（件数・見出し・タイトル・構造）が NG なら、
+  // 壊れた差分を書き込まない。changedTaskCount>0 だけでは不十分なため reparse.ok を必須にする。
   let backupPath = null;
-  if (options.apply) {
-    if (result.changedTaskCount > 0) {
-      backupPath = writeBackup(inputAbs, originalContent);
-      writeFileSync(inputAbs, result.newContent, "utf8");
+  if (options.apply && result.changedTaskCount > 0) {
+    if (!result.reparse.ok) {
+      console.error(
+        `[firestore-sync] reparse mismatch を検出したため apply を中止します（Markdown は書き込みません）: ${result.reparse.message}`,
+      );
+      // workflow を失敗させ、壊れた差分の PR 作成を防ぐ。
+      if (options.out) {
+        const outAbs = resolve(REPO_ROOT, options.out);
+        writeJsonOutput(outAbs, buildReport(mode, options.input, result, null));
+      }
+      process.exitCode = 1;
+      return;
     }
+    backupPath = writeBackup(inputAbs, originalContent);
+    writeFileSync(inputAbs, result.newContent, "utf8");
   }
 
   const report = buildReport(mode, options.input, result, backupPath);
@@ -332,6 +344,7 @@ export function computeSync(originalContent, firestoreTasks) {
     changedTaskCount,
     counts: { toUpdate, toComplete, toReopen },
     safeAutoMerge,
+    reparse, // apply 前の最終安全弁（構造検証）として main 側で参照する。
     firestoreTaskCount: firestoreTasks.length,
     markdownTaskCount: blocks.filter((b) => !b.excluded).length,
   };
@@ -555,7 +568,8 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
 /**
  * Firestore の複数行属性値が「妥当な非空1行文字列配列」か判定する。
  * 妥当条件: 配列 / 非空 / 全要素が string・trim 後に非空・CR/LF なし・
- *           属性行として再 parse されない（"Status: Done" 等を拒否）。
+ *           属性行として再 parse されない（"Status: Done" 等を拒否）・
+ *           チェックボックス行として再 parse されない（"[ ] foo" 等を拒否）。
  * 返却: { valid, reason, nonEmpty, values(trim後) }
  */
 function validateArrayValue(rawValue) {
@@ -569,12 +583,22 @@ function validateArrayValue(rawValue) {
       typeof el === "string" &&
       el.trim() !== "" &&
       !hasLineBreak(el) &&
-      !isAttributeLikeText(el),
+      !isAttributeLikeText(el) &&
+      !isCheckboxLikeText(el),
   );
   if (!allOk) {
     return { valid: false, reason: "invalid-element", nonEmpty: true };
   }
   return { valid: true, reason: null, nonEmpty: true, values: rawValue.map((v) => v.trim()) };
+}
+
+/**
+ * trim 後の文字列が「チェックボックス行」として再 parse されうるか。
+ * Done when / Notes の子要素に "[ ] foo" / "[x] foo" のような値が入ると、
+ * Markdown 上でタスク行として解釈されてしまうため、これを弾く。
+ */
+function isCheckboxLikeText(value) {
+  return typeof value === "string" && /^\[[ xX]\]\s+\S/.test(value.trim());
 }
 
 // ---------------------------------------------------------------------------
