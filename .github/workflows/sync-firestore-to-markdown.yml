@@ -80,7 +80,7 @@ jobs:
           node <<'NODE' >> "$GITHUB_OUTPUT"
           const dry = require("./" + process.env.DRY);
           const app = require("./" + process.env.APP);
-          const keys = ["toUpdate", "toComplete", "toReopen", "manualCandidates", "warnings"];
+          const keys = ["toUpdate", "toComplete", "toReopen", "manualCandidates", "skipped", "warnings"];
           const drySafe = dry.safeAutoMerge === true;
           const appSafe = app.safeAutoMerge === true;
           const summaryMatch = keys.every((k) => dry.summary[k] === app.summary[k]);
