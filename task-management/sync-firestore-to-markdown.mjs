@@ -445,16 +445,10 @@ function reflectTaskIntoBlock(block, data, lines) {
 function pushSingleLineAttr(block, key, desiredValue, lines, lineEdits, fields, warnings, label) {
   const attr = block.attrs[key];
   if (!attr) {
-    // 反映先の行が無い。デフォルト相当（空・未作成・未定）なら無視、それ以外は警告。
-    if (isNeutralValue(key, desiredValue)) {
-      return;
-    }
-    warnings.push({
-      type: "missing-attribute-line",
-      id: block.id,
-      title: block.title,
-      message: `「${label}」行が無いため反映できません（値: ${desiredValue}）。`,
-    });
+    // 属性行が無い既存タスク（例: 品質ゲートの `- [x] pnpm run lint`）には、
+    // 構造追加を避けるため反映しない。完了状態はチェックボックスで表現済みであり、
+    // ここで warning を出すと属性行なしタスクが多数あるだけで safeAutoMerge=false に
+    // なり続けるため、no-op（warning なし）とする。
     return;
   }
 
@@ -488,9 +482,13 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
   const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined;
   const raw = present ? data[key] : undefined;
   const isArray = Array.isArray(raw);
+  // Firestore はスキーマレスのため、配列内の型不一致・空要素も不正として扱う。
+  // 全要素が「trim 後に非空の string」のときだけ妥当な配列とみなす。
+  const allValidElements =
+    isArray && raw.length > 0 && raw.every((el) => typeof el === "string" && el.trim() !== "");
 
   // 妥当な非空配列のときだけ反映対象にする。
-  if (isArray && raw.length > 0) {
+  if (allValidElements) {
     if (!attr) {
       // ラベル行（"- Done when:" 等）が無い＝構造追加が必要。安全のため追加せず警告。
       warnings.push({
@@ -513,11 +511,17 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
     return;
   }
 
-  // ここから: 欠損 / 配列以外 / 空配列。既存 Markdown は絶対に変更しない。
+  // ここから: 欠損 / 配列以外 / 空配列 / 要素不正。既存 Markdown は絶対に変更しない。
   if (!mdHasContent) {
     return; // 消すべき既存内容が無いので no-op（空タスクでの誤警告を避ける）。
   }
-  const reason = !present ? "field-missing" : !isArray ? "not-array" : "empty-array";
+  const reason = !present
+    ? "field-missing"
+    : !isArray
+      ? "not-array"
+      : raw.length === 0
+        ? "empty-array"
+        : "invalid-element";
   warnings.push({
     type: `unsafe-${key}`,
     id: block.id,
@@ -714,19 +718,6 @@ function formatBranch(branchName) {
 function formatIssuePr(issuePr) {
   const value = typeof issuePr === "string" ? issuePr.trim() : "";
   return value === "" ? "未定" : value;
-}
-
-/**
- * 反映先の行が無いとき「無視してよい中立値」かどうか。
- * これらは行が無くても情報欠落にならないため、警告を出さずスキップする。
- */
-function isNeutralValue(key, value) {
-  if (key === "owner") return value === "" || value === "未定";
-  if (key === "branch") return value === "未作成";
-  if (key === "issuePr") return value === "未定";
-  if (key === "priority") return value === "" || value === "P2";
-  if (key === "status") return value === "" || value === "Todo";
-  return value === "";
 }
 
 function arraysEqual(a, b) {
