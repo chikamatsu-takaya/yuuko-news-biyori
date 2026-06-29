@@ -568,19 +568,19 @@ details[open] > summary::after {
   font-size: 0.86rem;
 }
 
-/* レビュー観点作成用プロンプト（read-only・開閉表示＋コピー）。既存パネルに馴染む最小スタイル。 */
-.review-prompt {
+/* レビュー時の確認観点（read-only・開閉表示＋コピー）。既存パネルに馴染む最小スタイル。 */
+.review-checklist {
   margin-top: 10px;
   font-size: 0.86rem;
 }
 
-.review-prompt > summary {
+.review-checklist > summary {
   cursor: pointer;
   color: var(--muted);
   font-weight: 600;
 }
 
-.review-prompt-text {
+.review-checklist-text {
   margin: 8px 0 0;
   padding: 10px 12px;
   max-height: 18rem;
@@ -596,14 +596,14 @@ details[open] > summary::after {
   line-height: 1.5;
 }
 
-.review-prompt-actions {
+.review-checklist-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 8px;
 }
 
-.review-prompt-hint {
+.review-checklist-hint {
   color: var(--muted);
   font-size: 0.78rem;
 }

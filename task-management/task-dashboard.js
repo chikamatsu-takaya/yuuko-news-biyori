@@ -132,14 +132,14 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // レビュー観点作成用プロンプトのコピー（read-only。DB更新・API呼び出しなし）。
-    const copyButton = event.target.closest(".review-prompt-copy");
+    // レビュー時の確認観点のコピー（read-only。DB更新・API呼び出しなし）。
+    const copyButton = event.target.closest(".review-checklist-copy");
     if (copyButton) {
-      const wrap = copyButton.closest(".review-prompt");
-      const pre = wrap ? wrap.querySelector(".review-prompt-text") : null;
-      const hint = wrap ? wrap.querySelector(".review-prompt-hint") : null;
+      const wrap = copyButton.closest(".review-checklist");
+      const pre = wrap ? wrap.querySelector(".review-checklist-text") : null;
+      const hint = wrap ? wrap.querySelector(".review-checklist-hint") : null;
       if (pre) {
-        void copyReviewPrompt(pre, hint);
+        void copyReviewChecklist(pre, hint);
       }
       return;
     }
@@ -299,9 +299,9 @@ async function handleAddTaskSubmit(form) {
   }
 }
 
-// レビュー観点プロンプトを <pre> の textContent からクリップボードへコピーする（read-only）。
+// レビュー時の確認観点を <pre> の textContent からクリップボードへコピーする（read-only）。
 // navigator.clipboard が使えない/失敗する場合は、<pre> を範囲選択して手動コピーを促す。
-async function copyReviewPrompt(pre, hint) {
+async function copyReviewChecklist(pre, hint) {
   const text = pre.textContent ?? "";
   const setHint = (message) => {
     if (hint) {
@@ -1235,7 +1235,7 @@ function renderTaskCard(task) {
         // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
         state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
       }
-      ${renderReviewPromptBlock(task)}
+      ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStatusControls(task)}
     </article>
@@ -1429,84 +1429,99 @@ function renderLongList(label, items) {
   `;
 }
 
-// レビュー観点作成用プロンプトの read-only 表示ブロック（開閉＋コピーボタン）。
-// 表示専用: DB更新・API呼び出しは行わない。プロンプト本文は必ず escapeHtml して埋め込み、
+// 「レビュー時の確認観点」の read-only 表示ブロック（開閉＋コピーボタン）。
+// 表示専用: DB更新・API呼び出しは行わない。本文は必ず escapeHtml して埋め込み、
 // コピーは <pre> の textContent 経由にする（HTMLインジェクション防止）。
-function renderReviewPromptBlock(task) {
-  const prompt = buildReviewPrompt(task);
+function renderReviewChecklistBlock(task) {
+  const checklist = buildReviewChecklist(task);
   return `
-    <details class="review-prompt">
-      <summary>レビュー観点作成用プロンプト</summary>
-      <pre class="review-prompt-text">${escapeHtml(prompt)}</pre>
-      <div class="review-prompt-actions">
-        <button type="button" class="button compact review-prompt-copy">コピー</button>
-        <span class="review-prompt-hint" aria-live="polite"></span>
+    <details class="review-checklist">
+      <summary>レビュー時の確認観点</summary>
+      <pre class="review-checklist-text">${escapeHtml(checklist)}</pre>
+      <div class="review-checklist-actions">
+        <button type="button" class="button compact review-checklist-copy">コピー</button>
+        <span class="review-checklist-hint" aria-live="polite"></span>
       </div>
     </details>
   `;
 }
 
-// タスク情報からレビュー観点作成用プロンプト（プレーンテキスト）を組み立てる純粋関数。
-// window / document に依存しないため Node からも単体検証できる。
-// 画面モデルでは branch=branchName。Markdownビューは firestoreId を持たないため「（未割当）」とし、
-// 分類・タスク名・Markdown行で一意特定できるようにする。URLの自動リンク化はしない。
-function buildReviewPrompt(task) {
-  const oneLine = (value, fallback) => {
-    const text = typeof value === "string" ? value.trim() : "";
-    return text !== "" ? text : fallback;
-  };
-  const bulletList = (items, fallback) => {
-    const arr = Array.isArray(items)
-      ? items.filter((entry) => typeof entry === "string" && entry.trim() !== "")
+// タスク情報から「レビュー担当者がそのまま使える確認観点リスト」（プレーンテキスト）を
+// 組み立てる純粋関数。AIへの依頼文は含めない。window / document 非依存で Node からも検証可能。
+// 方針:
+// - reviewPoints があれば、それを主要な確認観点として並べる。
+// - reviewPoints が無ければ、completionRule / doneWhen / notes / 分類 / branch / issuePr から
+//   最低限の確認観点を自動で組み立てる。
+// 画面モデルでは branch=branchName。URLの自動リンク化はしない。
+function buildReviewChecklist(task) {
+  const oneLine = (value) => (typeof value === "string" ? value.trim() : "");
+  const toArray = (items) =>
+    Array.isArray(items)
+      ? items.map((entry) => oneLine(entry)).filter((entry) => entry !== "")
       : [];
-    if (arr.length === 0) {
-      return `  - ${fallback}`;
-    }
-    return arr.map((entry) => `  - ${entry.trim()}`).join("\n");
-  };
 
-  const title = oneLine(task.text, "（無題）");
-  const firestoreId = oneLine(task.firestoreId, "（未割当）");
-  const line = typeof task.line === "number" ? String(task.line) : "（不明）";
-  const category = oneLine(task.sectionTitle, "（未分類）");
-  const subcategory = oneLine(task.subsectionTitle, "（なし）");
-  const priority = oneLine(task.priority, "未設定");
-  const status = task.completed ? "Done" : oneLine(task.status, "Todo");
-  const owner = oneLine(task.owner, "未定");
-  const branch = oneLine(task.branch, "未作成");
-  const issuePr = oneLine(task.issuePr, "未定");
-  const completionRule = oneLine(task.completionRule, "未設定");
+  const title = oneLine(task.text) || "（無題）";
+  const completionRule = oneLine(task.completionRule);
+  const doneWhen = toArray(task.doneWhen);
+  const notes = toArray(task.notes);
+  const reviewPoints = toArray(task.reviewPoints);
+  const category = oneLine(task.sectionTitle);
+  const subcategory = oneLine(task.subsectionTitle);
+  const branch = oneLine(task.branch);
+  const issuePr = oneLine(task.issuePr);
+
+  const points = [];
+
+  if (reviewPoints.length > 0) {
+    // reviewPoints がある場合は、それを主要な確認観点として並べる。
+    for (const point of reviewPoints) {
+      points.push(`- ${point}`);
+    }
+    // 完了判定・完了条件は、補助的な確認観点として併記する。
+    if (completionRule) {
+      points.push(`- 完了判定「${completionRule}」が満たされていること`);
+    }
+    for (const dw of doneWhen) {
+      points.push(`- 完了条件「${dw}」が満たされていること`);
+    }
+  } else {
+    // reviewPoints が無い場合は、他項目から最低限の確認観点を自動で組み立てる。
+    if (completionRule) {
+      points.push(`- 完了判定「${completionRule}」が満たされていること`);
+    }
+    for (const dw of doneWhen) {
+      points.push(`- 完了条件「${dw}」が満たされていること`);
+    }
+    for (const note of notes) {
+      points.push(`- 補足「${note}」が考慮されていること`);
+    }
+    if (category) {
+      const scope = subcategory ? `${category} / ${subcategory}` : category;
+      points.push(`- 分類（${scope}）の想定に沿った変更であること`);
+    }
+    if (branch) {
+      points.push(`- 対象ブランチ「${branch}」の変更範囲に閉じていること`);
+    }
+    if (issuePr) {
+      points.push(`- 関連 Issue/PR「${issuePr}」と整合していること`);
+    }
+  }
+
+  // 範囲外変更チェックは常に入れる。
+  points.push("- 今回のタスク範囲外の変更が含まれていないこと");
+  // 何も観点が組み立てられなかった場合の最低限のフォールバック。
+  if (points.length === 1) {
+    points.unshift("- タスク名と内容から、完了状態が妥当か確認すること");
+  }
 
   return [
-    "以下のタスクのレビュー観点を作成してください。",
+    "レビュー時の確認観点",
     "",
-    "# タスク情報",
-    `- タスク: ${title}`,
-    `- Firestore ID: ${firestoreId}`,
-    `- Markdown行: ${line}`,
-    `- 分類: ${category} / ${subcategory}`,
-    `- Priority: ${priority}`,
-    `- Status: ${status}`,
-    `- Owner: ${owner}`,
-    `- Branch: ${branch}`,
-    `- Issue/PR: ${issuePr}`,
-    `- 完了判定(Completion rule): ${completionRule}`,
+    "タスク:",
+    title,
     "",
-    "# 完了条件(Done when)",
-    bulletList(task.doneWhen, "未設定"),
-    "",
-    "# 補足(Notes)",
-    bulletList(task.notes, "なし"),
-    "",
-    "# 既存のレビュー観点(Review points)",
-    bulletList(task.reviewPoints, "未設定"),
-    "",
-    "# 依頼",
-    "このタスクのレビュー時に人が確認すべき観点を箇条書きで提案してください。",
-    "- 完了判定・完了条件を満たしたか確認できる観点を含める",
-    "- 本タスクに関係する範囲（UI崩れ/挙動/責務分離/セキュリティ境界 等）に絞る",
-    "- 既存のレビュー観点があれば重複を避け、不足を補う",
-    "出力は「- 」箇条書きのみ。各項目1行。URLは記載しない。",
+    "確認観点:",
+    ...points,
   ].join("\n");
 }
 
