@@ -25,7 +25,8 @@ import { firebaseConfig } from "./firebase-config.js";
 
 const FIRESTORE_BASE = "https://firestore.googleapis.com/v1";
 
-// 比較対象12フィールド（Node側 sync スクリプトと揃える）。
+// 比較対象フィールド（Node側 sync スクリプトと揃える）。
+// completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）を追加。
 const COMPARE_FIELDS = [
   "title",
   "category",
@@ -35,7 +36,9 @@ const COMPARE_FIELDS = [
   "owner",
   "branchName",
   "issuePr",
+  "completionRule",
   "doneWhen",
+  "reviewPoints",
   "notes",
   "order",
   "sourceLine",
@@ -333,7 +336,9 @@ function buildCreateData(item) {
     owner: source.owner ?? "",
     branchName: source.branchName ?? null,
     issuePr: source.issuePr ?? null,
+    completionRule: source.completionRule ?? null,
     doneWhen: Array.isArray(source.doneWhen) ? source.doneWhen : [],
+    reviewPoints: Array.isArray(source.reviewPoints) ? source.reviewPoints : [],
     notes: Array.isArray(source.notes) ? source.notes : [],
     order: typeof source.order === "number" ? source.order : null,
     sourceLine: typeof source.sourceLine === "number" ? source.sourceLine : null,

@@ -683,6 +683,10 @@ function parseMarkdown(markdown) {
       currentTask.doneWhen.push(childText);
       return;
     }
+    if (currentLongAttribute === "reviewPoints") {
+      currentTask.reviewPoints.push(childText);
+      return;
+    }
     if (currentLongAttribute === "notes") {
       currentTask.notes.push(childText);
       return;
@@ -751,7 +755,11 @@ function createTask({ text, completed, line, section, subsection }) {
     owner: inferOwner(text),
     branch: inferBranch(text),
     issuePr: inferIssuePr(text),
+    // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
+    // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
+    completionRule: "",
     doneWhen: [],
+    reviewPoints: [],
     notes: [],
     includedInProgress: !section.excluded,
   };
@@ -768,7 +776,7 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Done when|Notes|担当|ブランチ|完了条件|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -780,11 +788,15 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "completion rule": "completionRule",
     "done when": "doneWhen",
+    "review points": "reviewPoints",
     notes: "notes",
     担当: "owner",
     ブランチ: "branch",
+    完了判定: "completionRule",
     完了条件: "doneWhen",
+    レビュー観点: "reviewPoints",
     補足: "notes",
   };
 
@@ -798,7 +810,7 @@ function applyTaskAttribute(task, key, value) {
   if (!key) {
     return;
   }
-  if (key === "doneWhen" || key === "notes") {
+  if (key === "doneWhen" || key === "reviewPoints" || key === "notes") {
     if (value) {
       task[key].push(value);
     }
@@ -1165,11 +1177,13 @@ function renderTaskCard(task) {
         <li><strong>Owner:</strong> ${renderInline(task.owner || "未定")}</li>
         <li><strong>Branch:</strong> ${renderInline(task.branch || "未定")}</li>
         <li><strong>Issue/PR:</strong> ${renderInline(task.issuePr || "未定")}</li>
+        <li><strong>Completion rule:</strong> ${renderInline(task.completionRule || "未設定")}</li>
         <li><strong>Line:</strong> ${task.line}</li>
         <li><strong>Section:</strong> ${renderInline(task.sectionTitle)}</li>
         <li><strong>Sub:</strong> ${renderInline(task.subsectionTitle || "なし")}</li>
       </ul>
       ${renderLongList("Done when", task.doneWhen)}
+      ${renderLongList("Review points", task.reviewPoints)}
       ${
         // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
         state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)

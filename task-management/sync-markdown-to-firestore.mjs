@@ -44,14 +44,17 @@ const COMPARE_FIELDS = [
   "owner",
   "branchName",
   "issuePr",
+  "completionRule",
   "doneWhen",
+  "reviewPoints",
   "notes",
   "order",
   "sourceLine",
 ];
 
 // 空文字と null/未設定を同等扱いにするフィールド（§17 比較時の正規化）。
-const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr"]);
+// completionRule（完了判定）も空=未設定として既存ドキュメントと差分が出ないようにする。
+const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr", "completionRule"]);
 
 // update（PATCH）で書き込む（＝updateMask に載せる）フィールド。
 // 比較対象12フィールド＋ completed（status 連動）＋ updatedAt / updatedBy のみ。
@@ -753,6 +756,9 @@ function convertTask(task, order, idToTitle) {
   // branch / issuePr は取得できなければ null。解析側でバッククォート除去済み。
   const branchName = task.branch ? String(task.branch).trim() : "";
   const issuePr = task.issuePr ? String(task.issuePr).trim() : "";
+  // completionRule（完了判定・自由文字列）/ reviewPoints（レビュー観点・配列）。
+  // 未設定は空（""/[]）として持ち、既存ドキュメントと差分が出ないようにする。
+  const completionRule = task.completionRule ? String(task.completionRule).trim() : "";
 
   const data = {
     title,
@@ -763,7 +769,9 @@ function convertTask(task, order, idToTitle) {
     owner: task.owner ? String(task.owner).trim() : "",
     branchName: branchName || null,
     issuePr: issuePr || null,
+    completionRule: completionRule || null,
     doneWhen: Array.isArray(task.doneWhen) ? task.doneWhen.map(String) : [],
+    reviewPoints: Array.isArray(task.reviewPoints) ? task.reviewPoints.map(String) : [],
     notes: Array.isArray(task.notes) ? task.notes.map(String) : [],
     order,
     sourceLine: typeof task.line === "number" ? task.line : null,
@@ -974,7 +982,7 @@ function computeFieldDiffs(currentData, desiredData) {
  * - その他の文字列は trim
  */
 function normalizeForCompare(field, value) {
-  if (field === "doneWhen" || field === "notes") {
+  if (field === "doneWhen" || field === "reviewPoints" || field === "notes") {
     if (!Array.isArray(value)) {
       return [];
     }

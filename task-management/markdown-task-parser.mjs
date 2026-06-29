@@ -100,6 +100,10 @@ export function parseMarkdownTasks(markdown) {
       currentTask.doneWhen.push(childText);
       return;
     }
+    if (currentLongAttribute === "reviewPoints") {
+      currentTask.reviewPoints.push(childText);
+      return;
+    }
     if (currentLongAttribute === "notes") {
       currentTask.notes.push(childText);
       return;
@@ -168,7 +172,11 @@ function createTask({ text, completed, line, section, subsection }) {
     owner: inferOwner(text),
     branch: inferBranch(text),
     issuePr: inferIssuePr(text),
+    // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
+    // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
+    completionRule: "",
     doneWhen: [],
+    reviewPoints: [],
     notes: [],
     includedInProgress: !section.excluded,
   };
@@ -184,7 +192,7 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Done when|Notes|担当|ブランチ|完了条件|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -196,11 +204,15 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "completion rule": "completionRule",
     "done when": "doneWhen",
+    "review points": "reviewPoints",
     notes: "notes",
     担当: "owner",
     ブランチ: "branch",
+    完了判定: "completionRule",
     完了条件: "doneWhen",
+    レビュー観点: "reviewPoints",
     補足: "notes",
   };
 
@@ -214,7 +226,7 @@ function applyTaskAttribute(task, key, value) {
   if (!key) {
     return;
   }
-  if (key === "doneWhen" || key === "notes") {
+  if (key === "doneWhen" || key === "reviewPoints" || key === "notes") {
     if (value) {
       task[key].push(value);
     }

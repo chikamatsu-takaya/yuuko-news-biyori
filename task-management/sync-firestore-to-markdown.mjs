@@ -395,16 +395,21 @@ function reflectTaskIntoBlock(block, data, lines) {
     reflectSingleLineAttr(block, "status", completion.status, { allowedValues: ALLOWED_STATUSES }, "Status", lines, lineEdits, fields, warnings);
   }
 
-  // --- 単一行属性（Owner / Branch / Issue/PR / Priority）---
+  // --- 単一行属性（Owner / Branch / Issue/PR / Priority / Completion rule）---
   // 反映可否は reflectSingleLineAttr に集約（欠損/null/型不一致/空/改行を一律に保護）。
+  // completionRule（完了判定）は自由文字列。ラベル接頭辞が付くため属性行/チェックボックス
+  // 行への注入リスクは無く、owner と同じ単一行扱いでよい。
   reflectSingleLineAttr(block, "owner", data.owner, null, "Owner", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "priority", data.priority, null, "Priority", lines, lineEdits, fields, warnings);
+  reflectSingleLineAttr(block, "completionRule", data.completionRule, null, "Completion rule", lines, lineEdits, fields, warnings);
 
-  // --- 複数行属性（Done when / Notes）---
+  // --- 複数行属性（Done when / Review points / Notes）---
   // Firestore はスキーマレスのため、欠損・型不一致・空配列・不正要素で既存 Markdown を消さない。
+  // reviewPoints（レビュー観点）は doneWhen/notes と同じ配列保護（属性行風/チェックボックス風も排除）。
   reflectBlockAttr(block, "doneWhen", data, lines, splices, fields, warnings, "Done when");
+  reflectBlockAttr(block, "reviewPoints", data, lines, splices, fields, warnings, "Review points");
   reflectBlockAttr(block, "notes", data, lines, splices, fields, warnings, "Notes");
 
   return { lineEdits, splices, warnings, fields, kind };
@@ -678,8 +683,8 @@ function scanMarkdownBlocks(lines) {
     const childText = childBulletMatch[2];
     const parsed = parseTaskAttribute(childText);
     if (parsed && parsed.key) {
-      if (parsed.key === "doneWhen" || parsed.key === "notes") {
-        // ラベル行（"- Done when:" 等）。子行はこの直後から。
+      if (parsed.key === "doneWhen" || parsed.key === "reviewPoints" || parsed.key === "notes") {
+        // ラベル行（"- Done when:" / "- Review points:" 等）。子行はこの直後から。
         current.longAttrs[parsed.key] = {
           labelLine: i,
           childStart: i + 1,
@@ -700,8 +705,8 @@ function scanMarkdownBlocks(lines) {
       continue;
     }
 
-    // 属性ではない子行 → 直近の long 属性（Done when / Notes）の子要素。
-    if (longAttr === "doneWhen" || longAttr === "notes") {
+    // 属性ではない子行 → 直近の long 属性（Done when / Review points / Notes）の子要素。
+    if (longAttr === "doneWhen" || longAttr === "reviewPoints" || longAttr === "notes") {
       const la = current.longAttrs[longAttr];
       if (la) {
         if (la.childCount === 0 && la.childValues.length === 0) {
@@ -722,7 +727,7 @@ function scanMarkdownBlocks(lines) {
  */
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Done when|Notes|担当|ブランチ|完了条件|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -733,11 +738,15 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "completion rule": "completionRule",
     "done when": "doneWhen",
+    "review points": "reviewPoints",
     notes: "notes",
     担当: "owner",
     ブランチ: "branch",
+    完了判定: "completionRule",
     完了条件: "doneWhen",
+    レビュー観点: "reviewPoints",
     補足: "notes",
   };
   return {
