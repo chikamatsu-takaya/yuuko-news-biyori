@@ -452,6 +452,18 @@ function pushSingleLineAttr(block, key, desiredValue, lines, lineEdits, fields, 
     return;
   }
 
+  // CR/LF を含む値は、Markdown へ別の属性行を注入できてしまうため反映しない。
+  // 既存 Markdown は変更せず warning を出して safeAutoMerge=false にする。
+  if (hasLineBreak(desiredValue)) {
+    warnings.push({
+      type: `unsafe-${key}`,
+      id: block.id,
+      title: block.title,
+      message: `Firestore の ${key} に改行が含まれるため、既存 Markdown の「${label}」を保護し変更しません。`,
+    });
+    return;
+  }
+
   const currentValue = attr.rawValue.trim();
   if (currentValue === desiredValue) {
     return; // 変化なし。
@@ -482,10 +494,13 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
   const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined;
   const raw = present ? data[key] : undefined;
   const isArray = Array.isArray(raw);
-  // Firestore はスキーマレスのため、配列内の型不一致・空要素も不正として扱う。
-  // 全要素が「trim 後に非空の string」のときだけ妥当な配列とみなす。
+  // Firestore はスキーマレスのため、配列内の型不一致・空要素・改行入り要素も不正として扱う。
+  // 全要素が「trim 後に非空 かつ CR/LF を含まない string」のときだけ妥当な配列とみなす。
+  // （改行を許すと Markdown へ別の属性行を注入できてしまうため拒否する）
   const allValidElements =
-    isArray && raw.length > 0 && raw.every((el) => typeof el === "string" && el.trim() !== "");
+    isArray &&
+    raw.length > 0 &&
+    raw.every((el) => typeof el === "string" && el.trim() !== "" && !hasLineBreak(el));
 
   // 妥当な非空配列のときだけ反映対象にする。
   if (allValidElements) {
@@ -723,6 +738,14 @@ function formatIssuePr(issuePr) {
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   return a.every((value, index) => value === b[index]);
+}
+
+/**
+ * CR/LF を含む文字列かどうか。改行入りの値を Markdown へ反映すると、
+ * 別の属性行を注入できてしまうため、反映前のガードに使う。
+ */
+function hasLineBreak(value) {
+  return typeof value === "string" && /[\r\n]/.test(value);
 }
 
 function strOrEmpty(value) {
