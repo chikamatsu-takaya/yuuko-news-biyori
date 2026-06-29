@@ -132,6 +132,18 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // レビュー観点作成用プロンプトのコピー（read-only。DB更新・API呼び出しなし）。
+    const copyButton = event.target.closest(".review-prompt-copy");
+    if (copyButton) {
+      const wrap = copyButton.closest(".review-prompt");
+      const pre = wrap ? wrap.querySelector(".review-prompt-text") : null;
+      const hint = wrap ? wrap.querySelector(".review-prompt-hint") : null;
+      if (pre) {
+        void copyReviewPrompt(pre, hint);
+      }
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -285,6 +297,41 @@ async function handleAddTaskSubmit(form) {
       submitButton.disabled = false;
     }
   }
+}
+
+// レビュー観点プロンプトを <pre> の textContent からクリップボードへコピーする（read-only）。
+// navigator.clipboard が使えない/失敗する場合は、<pre> を範囲選択して手動コピーを促す。
+async function copyReviewPrompt(pre, hint) {
+  const text = pre.textContent ?? "";
+  const setHint = (message) => {
+    if (hint) {
+      hint.textContent = message;
+    }
+  };
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      setHint("コピーしました。");
+      return;
+    }
+    throw new Error("clipboard API 非対応");
+  } catch {
+    // フォールバック: テキストを範囲選択し、手動コピー（Ctrl + C）を促す。
+    selectPreText(pre);
+    setHint("自動コピーに失敗しました。選択範囲を Ctrl + C で手動コピーしてください。");
+  }
+}
+
+// <pre> 内テキストを選択状態にする（手動コピー用フォールバック）。
+function selectPreText(pre) {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (!selection) {
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(pre);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 // Firestore 表示時のみ呼ばれる status 更新処理（段階2の最小書き込みPOC）。
@@ -1188,6 +1235,7 @@ function renderTaskCard(task) {
         // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
         state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
       }
+      ${renderReviewPromptBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStatusControls(task)}
     </article>
@@ -1379,6 +1427,87 @@ function renderLongList(label, items) {
       <ul>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</ul>
     </div>
   `;
+}
+
+// レビュー観点作成用プロンプトの read-only 表示ブロック（開閉＋コピーボタン）。
+// 表示専用: DB更新・API呼び出しは行わない。プロンプト本文は必ず escapeHtml して埋め込み、
+// コピーは <pre> の textContent 経由にする（HTMLインジェクション防止）。
+function renderReviewPromptBlock(task) {
+  const prompt = buildReviewPrompt(task);
+  return `
+    <details class="review-prompt">
+      <summary>レビュー観点作成用プロンプト</summary>
+      <pre class="review-prompt-text">${escapeHtml(prompt)}</pre>
+      <div class="review-prompt-actions">
+        <button type="button" class="button compact review-prompt-copy">コピー</button>
+        <span class="review-prompt-hint" aria-live="polite"></span>
+      </div>
+    </details>
+  `;
+}
+
+// タスク情報からレビュー観点作成用プロンプト（プレーンテキスト）を組み立てる純粋関数。
+// window / document に依存しないため Node からも単体検証できる。
+// 画面モデルでは branch=branchName。Markdownビューは firestoreId を持たないため「（未割当）」とし、
+// 分類・タスク名・Markdown行で一意特定できるようにする。URLの自動リンク化はしない。
+function buildReviewPrompt(task) {
+  const oneLine = (value, fallback) => {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text !== "" ? text : fallback;
+  };
+  const bulletList = (items, fallback) => {
+    const arr = Array.isArray(items)
+      ? items.filter((entry) => typeof entry === "string" && entry.trim() !== "")
+      : [];
+    if (arr.length === 0) {
+      return `  - ${fallback}`;
+    }
+    return arr.map((entry) => `  - ${entry.trim()}`).join("\n");
+  };
+
+  const title = oneLine(task.text, "（無題）");
+  const firestoreId = oneLine(task.firestoreId, "（未割当）");
+  const line = typeof task.line === "number" ? String(task.line) : "（不明）";
+  const category = oneLine(task.sectionTitle, "（未分類）");
+  const subcategory = oneLine(task.subsectionTitle, "（なし）");
+  const priority = oneLine(task.priority, "未設定");
+  const status = task.completed ? "Done" : oneLine(task.status, "Todo");
+  const owner = oneLine(task.owner, "未定");
+  const branch = oneLine(task.branch, "未作成");
+  const issuePr = oneLine(task.issuePr, "未定");
+  const completionRule = oneLine(task.completionRule, "未設定");
+
+  return [
+    "以下のタスクのレビュー観点を作成してください。",
+    "",
+    "# タスク情報",
+    `- タスク: ${title}`,
+    `- Firestore ID: ${firestoreId}`,
+    `- Markdown行: ${line}`,
+    `- 分類: ${category} / ${subcategory}`,
+    `- Priority: ${priority}`,
+    `- Status: ${status}`,
+    `- Owner: ${owner}`,
+    `- Branch: ${branch}`,
+    `- Issue/PR: ${issuePr}`,
+    `- 完了判定(Completion rule): ${completionRule}`,
+    "",
+    "# 完了条件(Done when)",
+    bulletList(task.doneWhen, "未設定"),
+    "",
+    "# 補足(Notes)",
+    bulletList(task.notes, "なし"),
+    "",
+    "# 既存のレビュー観点(Review points)",
+    bulletList(task.reviewPoints, "未設定"),
+    "",
+    "# 依頼",
+    "このタスクのレビュー時に人が確認すべき観点を箇条書きで提案してください。",
+    "- 完了判定・完了条件を満たしたか確認できる観点を含める",
+    "- 本タスクに関係する範囲（UI崩れ/挙動/責務分離/セキュリティ境界 等）に絞る",
+    "- 既存のレビュー観点があれば重複を避け、不足を補う",
+    "出力は「- 」箇条書きのみ。各項目1行。URLは記載しない。",
+  ].join("\n");
 }
 
 function summarizeTasks(tasks) {
