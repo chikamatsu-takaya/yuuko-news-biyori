@@ -5,8 +5,10 @@
 #   → safeAutoMerge を満たす場合だけ自動マージ。
 #
 # 安全方針:
+# - 同期元・同期先とも develop 固定（checkout も base も develop）。
+#   feature/main などから手動実行しても、develop 以外のチェックリスト差分が混ざらない。
 # - 変更は developタスクチェックリスト.md の1ファイルのみ（add 対象を限定）。
-# - 自動マージは sync スクリプトの safeAutoMerge=true かつ「変更が当該ファイルのみ」のときだけ。
+# - 自動マージは dry-run/apply の safeAutoMerge=true・両レポート一致・「変更が当該ファイルのみ」のときだけ。
 # - サービスアカウント JSON は Secret から $RUNNER_TEMP へ書き出し、リポジトリには絶対に含めない。
 #
 # 必要な GitHub Secret:
@@ -31,9 +33,11 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # 1. checkout（書き込みするため token を保持）。
+      # 1. checkout（同期元は develop 固定。書き込みするため token を保持）。
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: develop
 
       # 2. Node セットアップ（sync スクリプトは Node 標準 API のみ使用）。
       - name: Setup Node
@@ -69,8 +73,10 @@ jobs:
           node task-management/sync-firestore-to-markdown.mjs --apply --out "$APPLY_OUT"
 
       # 7.5 マージ可否判定: dry-run と apply の両方が safeAutoMerge=true で、かつ
-      #     主要 summary 件数が一致するときだけ merge_ok=true にする。
-      #     dry-run と apply の間に DB が変わって判定がズレた場合は自動マージしない。
+      #     実行ごとに変わる値（generatedAt/mode/パス等）を除いた内容が完全一致する
+      #     ときだけ merge_ok=true にする。件数一致だけでは内容のすり替わりを検知できないため、
+      #     summary / changes / manualCandidates / skipped / warnings を丸ごと比較する。
+      #     dry-run と apply の間に DB が変わって内容がズレた場合は自動マージしない。
       - name: Evaluate merge gate
         id: eval
         env:
@@ -80,17 +86,27 @@ jobs:
           node <<'NODE' >> "$GITHUB_OUTPUT"
           const dry = require("./" + process.env.DRY);
           const app = require("./" + process.env.APP);
-          const keys = ["toUpdate", "toComplete", "toReopen", "manualCandidates", "skipped", "warnings"];
+          // 実行ごとに変わる値（generatedAt/mode/applied/backupPath/input 等）を除いた安定表現。
+          function stableReport(r) {
+            return JSON.stringify({
+              safeAutoMerge: r.safeAutoMerge,
+              summary: r.summary,
+              changes: r.changes,
+              manualCandidates: r.manualCandidates,
+              skipped: r.skipped,
+              warnings: r.warnings,
+            });
+          }
           const drySafe = dry.safeAutoMerge === true;
           const appSafe = app.safeAutoMerge === true;
-          const summaryMatch = keys.every((k) => dry.summary[k] === app.summary[k]);
-          const mergeOk = drySafe && appSafe && summaryMatch;
+          const reportsMatch = stableReport(dry) === stableReport(app);
+          const mergeOk = drySafe && appSafe && reportsMatch;
           console.log("dry_safe=" + drySafe);
           console.log("apply_safe=" + appSafe);
-          console.log("summary_match=" + summaryMatch);
+          console.log("reports_match=" + reportsMatch);
           console.log("merge_ok=" + mergeOk);
           NODE
-          echo "判定: dry/apply の safeAutoMerge と summary 一致をもとに merge_ok を決定しました。"
+          echo "判定: dry/apply の safeAutoMerge と stableReport 完全一致をもとに merge_ok を決定しました。"
 
       # 8. 差分判定: Markdown に変化が無ければ以降をスキップする。
       - name: Detect changes
@@ -141,7 +157,7 @@ jobs:
             "Firestore tasks を \`${MARKDOWN_PATH}\` へ反映した自動同期PRです。" \
             "" \
             "- base: develop" \
-            "- merge_ok (dry/apply 両方 safeAutoMerge かつ summary 一致): ${MERGE_OK}" \
+            "- merge_ok (dry/apply 両方 safeAutoMerge かつ レポート完全一致): ${MERGE_OK}" \
             "- dry-run / apply 結果は Actions の artifact (firestore-to-markdown-reports) を参照。" \
             "" \
             "merge_ok=false の場合は自動マージせず、人手レビューで取り込んでください。")"

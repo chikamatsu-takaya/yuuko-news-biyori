@@ -430,8 +430,9 @@ function reflectTaskIntoBlock(block, data, lines) {
   );
 
   // --- 複数行属性（Done when / Notes）---
-  pushBlockAttr(block, "doneWhen", toStringArray(data.doneWhen), lines, splices, fields, warnings, "Done when");
-  pushBlockAttr(block, "notes", toStringArray(data.notes), lines, splices, fields, warnings, "Notes");
+  // Firestore はスキーマレスのため、欠損・型不一致・空配列で既存 Markdown を消さない。
+  reflectBlockAttr(block, "doneWhen", data, lines, splices, fields, warnings, "Done when");
+  reflectBlockAttr(block, "notes", data, lines, splices, fields, warnings, "Notes");
 
   return { lineEdits, splices, warnings, fields, kind };
 }
@@ -470,37 +471,59 @@ function pushSingleLineAttr(block, key, desiredValue, lines, lineEdits, fields, 
 }
 
 /**
- * 複数行属性（Done when / Notes）の差分を計算する。
- * - 既存のラベル行配下の子行を、Firestore 配列の内容で置き換える。
- * - ラベル行が無い場合は、構造変更を避けて警告（ラベル行は追加しない）。
+ * 複数行属性（Done when / Notes）を安全に反映する。
+ *
+ * Firestore はスキーマレスのため、md-import doc が壊れている（フィールド欠損・
+ * 型不一致・空配列）と、既存 Markdown の完了条件/メモを誤って全削除しかねない。
+ * Markdown 正本を守るため、以下の方針で扱う:
+ * - 妥当な「非空配列」のときだけ、既存ラベル行配下の子行を置き換える。
+ * - 欠損 / 配列以外 / 空配列 のときは Markdown を一切変更しない。
+ *   それが既存内容（子行）の削除に当たる場合だけ warning を出し safeAutoMerge=false にする。
+ *   （Markdown 側にも中身が無ければ no-op。空タスクで誤警告を出さない）
  */
-function pushBlockAttr(block, key, desiredValues, lines, splices, fields, warnings, label) {
+function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, label) {
   const attr = block.longAttrs[key];
-  if (!attr) {
-    if (desiredValues.length === 0) {
-      return; // 反映先も中身も無いなら何もしない。
+  const mdHasContent = !!attr && attr.childValues.length > 0;
+
+  const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined;
+  const raw = present ? data[key] : undefined;
+  const isArray = Array.isArray(raw);
+
+  // 妥当な非空配列のときだけ反映対象にする。
+  if (isArray && raw.length > 0) {
+    if (!attr) {
+      // ラベル行（"- Done when:" 等）が無い＝構造追加が必要。安全のため追加せず警告。
+      warnings.push({
+        type: "missing-attribute-block",
+        id: block.id,
+        title: block.title,
+        message: `「${label}:」行が無いため反映できません（${raw.length}件）。`,
+      });
+      return;
     }
-    warnings.push({
-      type: "missing-attribute-block",
-      id: block.id,
-      title: block.title,
-      message: `「${label}:」行が無いため反映できません（${desiredValues.length}件）。`,
-    });
+    const currentValues = attr.childValues.map((v) => v.trim());
+    const nextValues = raw.map((v) => String(v ?? "").trim());
+    if (arraysEqual(currentValues, nextValues)) {
+      return; // 変化なし。
+    }
+    // 子行のインデントは既存子行に合わせる（無ければラベル行 + 2スペース）。
+    const newLines = nextValues.map((value) => `${attr.childIndent}- ${value}`);
+    splices.push({ start: attr.childStart, deleteCount: attr.childCount, newLines });
+    fields.push({ field: key, before: currentValues, after: nextValues });
     return;
   }
 
-  const currentValues = attr.childValues.map((v) => v.trim());
-  const nextValues = desiredValues.map((v) => v.trim());
-  if (arraysEqual(currentValues, nextValues)) {
-    return; // 変化なし。
+  // ここから: 欠損 / 配列以外 / 空配列。既存 Markdown は絶対に変更しない。
+  if (!mdHasContent) {
+    return; // 消すべき既存内容が無いので no-op（空タスクでの誤警告を避ける）。
   }
-
-  // 子行のインデント: 既存子行があればそれに合わせ、無ければラベル行 + 2スペース。
-  const childIndent = attr.childIndent;
-  const newLines = nextValues.map((value) => `${childIndent}- ${value}`);
-  const start = attr.childStart; // ラベル行の直後（子が無い場合はラベル行+1）。
-  splices.push({ start, deleteCount: attr.childCount, newLines });
-  fields.push({ field: key, before: currentValues, after: nextValues });
+  const reason = !present ? "field-missing" : !isArray ? "not-array" : "empty-array";
+  warnings.push({
+    type: `unsafe-${key}`,
+    id: block.id,
+    title: block.title,
+    message: `Firestore の ${key} が不完全（${reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -704,13 +727,6 @@ function isNeutralValue(key, value) {
   if (key === "priority") return value === "" || value === "P2";
   if (key === "status") return value === "" || value === "Todo";
   return value === "";
-}
-
-function toStringArray(value) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.map((entry) => String(entry ?? ""));
 }
 
 function arraysEqual(a, b) {
