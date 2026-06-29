@@ -1,0 +1,203 @@
+# Firestore → Markdown 逆同期（§17）の手動実行ワークフロー。
+#
+# 流れ:
+#   Firestore tasks → developタスクチェックリスト.md へ反映 → 同期PR作成
+#   → safeAutoMerge を満たす場合だけ自動マージ。
+#
+# 安全方針:
+# - 同期元・同期先とも develop 固定（checkout も base も develop）。
+#   feature/main などから手動実行しても、develop 以外のチェックリスト差分が混ざらない。
+# - 変更は developタスクチェックリスト.md の1ファイルのみ（add 対象を限定）。
+# - 自動マージは dry-run/apply の safeAutoMerge=true・両レポート一致・「変更が当該ファイルのみ」のときだけ。
+# - サービスアカウント JSON は Secret から $RUNNER_TEMP へ書き出し、リポジトリには絶対に含めない。
+#
+# 必要な GitHub Secret:
+#   FIREBASE_SERVICE_ACCOUNT_JSON … Firestore 読み取り権限を持つサービスアカウントの JSON 全文。
+
+name: Sync Firestore to Markdown
+
+on:
+  workflow_dispatch:
+
+# 最小権限: Markdown のコミット（contents）と PR 作成・マージ（pull-requests）のみ。
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  MARKDOWN_PATH: docs/00_project/developタスクチェックリスト.md
+  DRY_RUN_OUT: task-management/tmp/firestore-to-markdown-dry-run.json
+  APPLY_OUT: task-management/tmp/firestore-to-markdown-apply-result.json
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. checkout（同期元は develop 固定。書き込みするため token を保持）。
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      # 2. Node セットアップ（sync スクリプトは Node 標準 API のみ使用）。
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3. 依存インストール: sync スクリプトは npm 依存ゼロ（Node 標準のみ）のため不要。
+      #    将来依存が増えた場合に備えて、ここに pnpm install を追加する。
+
+      # 4. Firestore 認証: Secret の JSON を $RUNNER_TEMP に書き出し、認証パスを設定する。
+      - name: Write service account credentials
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Secret FIREBASE_SERVICE_ACCOUNT_JSON が未設定です。" >&2
+            exit 1
+          fi
+          CRED_PATH="$RUNNER_TEMP/firebase-sa.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CRED_PATH"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$CRED_PATH" >> "$GITHUB_ENV"
+
+      # 5. dry-run: Markdown を書き換えず差分 JSON を出力する。
+      - name: Dry run
+        run: |
+          node task-management/sync-firestore-to-markdown.mjs --dry-run --out "$DRY_RUN_OUT"
+
+      # 7. apply: Markdown を書き換える（バックアップは tmp 配下に作成）。
+      #    dry-run と apply の safeAutoMerge / summary は次の Evaluate ステップで突き合わせる。
+      - name: Apply
+        run: |
+          node task-management/sync-firestore-to-markdown.mjs --apply --out "$APPLY_OUT"
+
+      # 7.5 マージ可否判定: dry-run と apply の両方が safeAutoMerge=true で、かつ
+      #     実行ごとに変わる値（generatedAt/mode/パス等）を除いた内容が完全一致する
+      #     ときだけ merge_ok=true にする。件数一致だけでは内容のすり替わりを検知できないため、
+      #     summary / changes / manualCandidates / skipped / warnings を丸ごと比較する。
+      #     dry-run と apply の間に DB が変わって内容がズレた場合は自動マージしない。
+      - name: Evaluate merge gate
+        id: eval
+        env:
+          DRY: ${{ env.DRY_RUN_OUT }}
+          APP: ${{ env.APPLY_OUT }}
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const dry = require("./" + process.env.DRY);
+          const app = require("./" + process.env.APP);
+          // 実行ごとに変わる値（generatedAt/mode/applied/backupPath/input 等）を除いた安定表現。
+          function stableReport(r) {
+            return JSON.stringify({
+              safeAutoMerge: r.safeAutoMerge,
+              summary: r.summary,
+              changes: r.changes,
+              manualCandidates: r.manualCandidates,
+              skipped: r.skipped,
+              warnings: r.warnings,
+            });
+          }
+          const drySafe = dry.safeAutoMerge === true;
+          const appSafe = app.safeAutoMerge === true;
+          const reportsMatch = stableReport(dry) === stableReport(app);
+          const mergeOk = drySafe && appSafe && reportsMatch;
+          console.log("dry_safe=" + drySafe);
+          console.log("apply_safe=" + appSafe);
+          console.log("reports_match=" + reportsMatch);
+          console.log("merge_ok=" + mergeOk);
+          NODE
+          echo "判定: dry/apply の safeAutoMerge と stableReport 完全一致をもとに merge_ok を決定しました。"
+
+      # 8. 差分判定: Markdown に変化が無ければ以降をスキップする。
+      - name: Detect changes
+        id: diff
+        run: |
+          git config core.quotepath false
+          if git diff --quiet -- "$MARKDOWN_PATH"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Markdown に変更はありません。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Markdown に変更があります。"
+          fi
+
+      # 9-11. ブランチ作成 → Markdown のみ commit → push → PR 作成。
+      - name: Create sync PR
+        id: pr
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_OK: ${{ steps.eval.outputs.merge_ok }}
+        run: |
+          set -euo pipefail
+          git config core.quotepath false
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # base は develop 固定（developタスクチェックリスト.md を develop へ同期する用途）。
+          BASE_BRANCH="develop"
+          STAMP="$(date -u +%Y%m%d-%H%M%S)"
+          SYNC_BRANCH="sync/firestore-to-markdown-${STAMP}"
+          git switch -c "$SYNC_BRANCH"
+
+          # 安全のため、同期対象の Markdown 1ファイルだけを add する。
+          git add -- "$MARKDOWN_PATH"
+
+          # 念のため staged の変更が当該ファイルのみであることを検証する。
+          STAGED="$(git diff --cached --name-only)"
+          if [ "$STAGED" != "$MARKDOWN_PATH" ]; then
+            echo "::error::想定外の staged 変更があります: $STAGED" >&2
+            exit 1
+          fi
+
+          git commit -m "chore: Firestore→Markdown タスク同期 (${STAMP})"
+          git push origin "$SYNC_BRANCH"
+
+          PR_BODY="$(printf '%s\n' \
+            "Firestore tasks を \`${MARKDOWN_PATH}\` へ反映した自動同期PRです。" \
+            "" \
+            "- base: develop" \
+            "- merge_ok (dry/apply 両方 safeAutoMerge かつ レポート完全一致): ${MERGE_OK}" \
+            "- dry-run / apply 結果は Actions の artifact (firestore-to-markdown-reports) を参照。" \
+            "" \
+            "merge_ok=false の場合は自動マージせず、人手レビューで取り込んでください。")"
+          PR_URL="$(gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "chore: Firestore→Markdown タスク同期 (${STAMP})" \
+            --body "$PR_BODY")"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "作成した PR: $PR_URL"
+
+      # 12. 自動マージ: merge_ok=true（dry/apply 両方 safeAutoMerge かつ summary 一致）
+      #     かつ「変更が当該ファイルのみ」のときだけ。
+      #     失敗（必須チェック等でブロック）してもPRは残す（continue-on-error）。
+      - name: Auto merge (only when safe)
+        if: steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+
+          # 変更ファイルが Markdown 1ファイルのみであることを PR の差分でも再確認する。
+          PR_FILES="$(gh pr view "$PR_URL" --json files --jq '.files[].path')"
+          if [ "$PR_FILES" != "$MARKDOWN_PATH" ]; then
+            echo "::warning::変更ファイルが $MARKDOWN_PATH 以外を含むため自動マージしません: $PR_FILES"
+            exit 0
+          fi
+
+          echo "merge_ok=true。自動マージします。"
+          gh pr merge "$PR_URL" --squash --delete-branch
+
+      # 13. dry-run / apply の結果を artifact として保存する（人手確認用）。
+      - name: Upload sync reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-to-markdown-reports
+          path: |
+            ${{ env.DRY_RUN_OUT }}
+            ${{ env.APPLY_OUT }}
+          if-no-files-found: ignore
