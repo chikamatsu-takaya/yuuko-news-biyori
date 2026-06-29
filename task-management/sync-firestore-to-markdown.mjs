@@ -347,30 +347,43 @@ function reflectTaskIntoBlock(block, data, lines) {
   const warnings = [];
   const fields = [];
 
-  // --- 完了状態（checkbox + Status）---
-  // completed===true または status==="Done" のときは [x] / Status: Done。
-  const fbStatusRaw = typeof data.status === "string" ? data.status.trim() : "";
-  const desiredCompleted = data.completed === true || fbStatusRaw === "Done";
-  const desiredCheckboxChar = desiredCompleted ? "x" : " ";
-  const currentCheckboxChar = block.completedChar.toLowerCase() === "x" ? "x" : " ";
-
   let kind = "update";
-  if (desiredCheckboxChar !== currentCheckboxChar) {
-    // checkbox 行の [ ]/[x] のみ置換（タイトルやインデントは保持）。
-    const original = lines[block.checkboxLine];
-    lineEdits.push({
-      index: block.checkboxLine,
-      text: original.replace(/\[([ xX])\]/, `[${desiredCheckboxChar}]`),
+
+  // --- 完了状態（checkbox + Status）---
+  // completed と status はセットで検証する。欠損・null・型不一致・許可値外・
+  // 両者の矛盾（completed=true なのに status!=="Done" 等）のときは、
+  // checkbox も Status も変更せず warning（safeAutoMerge=false）。
+  const completion = validateCompletionState(data);
+  if (!completion.valid) {
+    warnings.push({
+      type: "unsafe-completion",
+      id: block.id,
+      title: block.title,
+      message: `Firestore の completed/status が不正（${completion.reason}）のため、完了状態と Status を反映しません。`,
     });
-    fields.push({ field: "completed", before: currentCheckboxChar === "x", after: desiredCompleted });
-    kind = desiredCompleted ? "complete" : "reopen";
+  } else {
+    const desiredCheckboxChar = completion.completed ? "x" : " ";
+    const currentCheckboxChar = block.completedChar.toLowerCase() === "x" ? "x" : " ";
+    if (desiredCheckboxChar !== currentCheckboxChar) {
+      // checkbox 行の [ ]/[x] のみ置換（タイトルやインデントは保持）。
+      const original = lines[block.checkboxLine];
+      lineEdits.push({
+        index: block.checkboxLine,
+        text: original.replace(/\[([ xX])\]/, `[${desiredCheckboxChar}]`),
+      });
+      fields.push({
+        field: "completed",
+        before: currentCheckboxChar === "x",
+        after: completion.completed,
+      });
+      kind = completion.completed ? "complete" : "reopen";
+    }
+    // Status 行（許可値・整合性は検証済み）。属性行が無ければ no-op。
+    reflectSingleLineAttr(block, "status", completion.status, { allowedValues: ALLOWED_STATUSES }, "Status", lines, lineEdits, fields, warnings);
   }
 
-  // --- 単一行属性（Status / Owner / Branch / Issue/PR / Priority）---
+  // --- 単一行属性（Owner / Branch / Issue/PR / Priority）---
   // 反映可否は reflectSingleLineAttr に集約（欠損/null/型不一致/空/改行を一律に保護）。
-  // Status は completed と連動するため、反映値を先に決めてから渡す（許可値チェック付き）。
-  const statusRawValue = desiredCompleted ? "Done" : data.status;
-  reflectSingleLineAttr(block, "status", statusRawValue, { allowedValues: ALLOWED_STATUSES }, "Status", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "owner", data.owner, null, "Owner", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
@@ -432,6 +445,40 @@ function reflectSingleLineAttr(block, key, rawValue, opts, label, lines, lineEdi
   const replaced = original.replace(/^(\s*-\s+[^:]+:\s*).*$/, (_m, prefix) => `${prefix}${desiredValue}`);
   lineEdits.push({ index: attr.line, text: replaced });
   fields.push({ field: key, before: currentValue, after: desiredValue });
+}
+
+/**
+ * Firestore の completed / status を「セットで」検証する。
+ * status だけ・completed だけで判定すると、不完全な doc（completed=true・status欠損 等）が
+ * すり抜けるため、両者の妥当性と整合性をまとめて確認する。
+ *
+ * 妥当条件:
+ * - status が妥当な1行文字列（string / trim非空 / CR/LF なし）かつ ALLOWED_STATUSES に含まれる
+ * - completed が boolean
+ * - 整合性: completed===true ⟺ status==="Done"
+ *
+ * @returns {{valid:true, completed:boolean, status:string} | {valid:false, reason:string}}
+ */
+function validateCompletionState(data) {
+  const check = validateSingleLineValue(data.status);
+  if (!check.valid) {
+    return { valid: false, reason: `status-${check.reason}` };
+  }
+  const status = check.value;
+  if (!ALLOWED_STATUSES.includes(status)) {
+    return { valid: false, reason: "status-invalid-value" };
+  }
+  if (typeof data.completed !== "boolean") {
+    return { valid: false, reason: "completed-not-boolean" };
+  }
+  // completed と status の矛盾を弾く（true⟺Done）。
+  if (data.completed === true && status !== "Done") {
+    return { valid: false, reason: "completed-status-mismatch" };
+  }
+  if (data.completed === false && status === "Done") {
+    return { valid: false, reason: "completed-status-mismatch" };
+  }
+  return { valid: true, completed: data.completed, status };
 }
 
 /**
