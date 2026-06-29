@@ -67,9 +67,18 @@ const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updat
 // 比較・updateMask から除外して Firestore の既存値を保持する（null/空での上書き事故を防ぐ）。
 const CONDITIONAL_SYNC_FIELDS = new Set(["completionRule", "reviewPoints"]);
 
+// reviewPoints を「trim 後に非空の文字列だけ」へ正規化する（空白のみ・非文字列要素は除外）。
+// 比較・書き込み・同期対象判定で共通利用し、" " のような空白要素での上書き事故を防ぐ。
+function cleanReviewPoints(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item) => typeof item === "string" && item.trim() !== "").map((item) => item.trim());
+}
+
 // Markdown 由来の desired 値が「明示的な値あり」かどうか（同期対象にするか）を判定する。
 // - completionRule: 非空文字列（convertTask は空を null にするため null は未設定）
-// - reviewPoints: 要素が1つ以上ある配列
+// - reviewPoints: trim 後に非空の文字列が1件以上ある配列（空白だけの箇条書きは未設定扱い）
 // 条件付きでないフィールドは常に同期対象（true）。
 function isSyncableField(field, desiredData) {
   if (field === "completionRule") {
@@ -77,7 +86,7 @@ function isSyncableField(field, desiredData) {
     return typeof value === "string" && value.trim() !== "";
   }
   if (field === "reviewPoints") {
-    return Array.isArray(desiredData?.reviewPoints) && desiredData.reviewPoints.length > 0;
+    return cleanReviewPoints(desiredData?.reviewPoints).length > 0;
   }
   return true;
 }
@@ -561,7 +570,9 @@ async function runApplyUpdateOnly(options, items) {
       if (CONDITIONAL_SYNC_FIELDS.has(field) && !isSyncableField(field, desired.data)) {
         continue;
       }
-      writeData[field] = desired.data[field];
+      // reviewPoints は空白だけの要素を除外して書き込む（[" 観点A ", " ", ""] → ["観点A"]）。
+      writeData[field] =
+        field === "reviewPoints" ? cleanReviewPoints(desired.data.reviewPoints) : desired.data[field];
     }
     // completed は status 連動（Done→true / それ以外→false）。completedAt は触れない。
     writeData.completed = status === "Done";
@@ -1013,11 +1024,16 @@ function computeFieldDiffs(currentData, desiredData) {
  * - undefined/null は同等（null へ寄せる）
  * - subcategory/branchName/issuePr は空文字も null 扱い
  * - doneWhen/notes は配列（未設定は []、各要素は文字列 trim）
+ * - reviewPoints は trim 後に非空の文字列だけの配列（空白要素は除外）
  * - order/sourceLine は数値（数値化できなければ null）
  * - その他の文字列は trim
  */
 function normalizeForCompare(field, value) {
-  if (field === "doneWhen" || field === "reviewPoints" || field === "notes") {
+  if (field === "reviewPoints") {
+    // 空白だけの要素は無視して比較する（current/desired 両側に適用）。
+    return cleanReviewPoints(value);
+  }
+  if (field === "doneWhen" || field === "notes") {
     if (!Array.isArray(value)) {
       return [];
     }
