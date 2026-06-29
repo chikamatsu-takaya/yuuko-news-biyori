@@ -366,71 +366,18 @@ function reflectTaskIntoBlock(block, data, lines) {
     kind = desiredCompleted ? "complete" : "reopen";
   }
 
-  // Status の表示文字列を決める。
-  let desiredStatus = null;
-  if (desiredCompleted) {
-    desiredStatus = "Done";
-  } else if (ALLOWED_STATUSES.includes(fbStatusRaw)) {
-    desiredStatus = fbStatusRaw;
-  } else if (fbStatusRaw === "") {
-    desiredStatus = "Todo"; // 未設定は Todo を既定にする。
-  } else {
-    // 未対応 status は反映せず警告（安全側）。
-    warnings.push({
-      type: "invalid-status",
-      id: block.id,
-      title: block.title,
-      message: `未対応 status「${fbStatusRaw}」を反映しません。`,
-    });
-  }
-  if (desiredStatus != null) {
-    pushSingleLineAttr(block, "status", desiredStatus, lines, lineEdits, fields, warnings, "Status");
-  }
-
-  // --- 単一行属性（Owner / Branch / Issue/PR / Priority）---
-  pushSingleLineAttr(
-    block,
-    "owner",
-    typeof data.owner === "string" ? data.owner.trim() : "",
-    lines,
-    lineEdits,
-    fields,
-    warnings,
-    "Owner",
-  );
-  pushSingleLineAttr(
-    block,
-    "branch",
-    formatBranch(data.branchName),
-    lines,
-    lineEdits,
-    fields,
-    warnings,
-    "Branch",
-  );
-  pushSingleLineAttr(
-    block,
-    "issuePr",
-    formatIssuePr(data.issuePr),
-    lines,
-    lineEdits,
-    fields,
-    warnings,
-    "Issue/PR",
-  );
-  pushSingleLineAttr(
-    block,
-    "priority",
-    typeof data.priority === "string" ? data.priority.trim() : "",
-    lines,
-    lineEdits,
-    fields,
-    warnings,
-    "Priority",
-  );
+  // --- 単一行属性（Status / Owner / Branch / Issue/PR / Priority）---
+  // 反映可否は reflectSingleLineAttr に集約（欠損/null/型不一致/空/改行を一律に保護）。
+  // Status は completed と連動するため、反映値を先に決めてから渡す（許可値チェック付き）。
+  const statusRawValue = desiredCompleted ? "Done" : data.status;
+  reflectSingleLineAttr(block, "status", statusRawValue, { allowedValues: ALLOWED_STATUSES }, "Status", lines, lineEdits, fields, warnings);
+  reflectSingleLineAttr(block, "owner", data.owner, null, "Owner", lines, lineEdits, fields, warnings);
+  reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
+  reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
+  reflectSingleLineAttr(block, "priority", data.priority, null, "Priority", lines, lineEdits, fields, warnings);
 
   // --- 複数行属性（Done when / Notes）---
-  // Firestore はスキーマレスのため、欠損・型不一致・空配列で既存 Markdown を消さない。
+  // Firestore はスキーマレスのため、欠損・型不一致・空配列・不正要素で既存 Markdown を消さない。
   reflectBlockAttr(block, "doneWhen", data, lines, splices, fields, warnings, "Done when");
   reflectBlockAttr(block, "notes", data, lines, splices, fields, warnings, "Notes");
 
@@ -438,32 +385,43 @@ function reflectTaskIntoBlock(block, data, lines) {
 }
 
 /**
- * 単一行属性（Status / Owner / Branch / Issue/PR / Priority）の差分を計算する。
- * - 既存行があれば、ラベルとインデントを保持して値だけ置き換える。
- * - 既存行が無く、かつ値を変える必要がある場合は構造変更を避けて警告（行は追加しない）。
+ * 単一行属性（Status / Owner / Branch / Issue/PR / Priority）を安全に反映する。
+ *
+ * 入力検証方針（Firestore はスキーマレスのため一律に保護）:
+ * - Markdown 側に該当属性行が無い既存タスクは、構造追加を避けて no-op（warning なし）。
+ *   （品質ゲートのように属性行を持たない完了タスクが多数あり、ここで warning を出すと
+ *     safeAutoMerge が常に false になってしまうため）
+ * - 属性行があるとき、Firestore 値が「妥当な1行文字列」（string / trim非空 / CR/LF なし、
+ *   opts.allowedValues 指定時はその許可値）でなければ warning + no-op（既存値を保護）。
+ * - 妥当なときだけ、ラベル・インデントを保持して値部分を置換する。
+ *
+ * @param {object|null} opts { allowedValues?: string[], format?: (v:string)=>string }
  */
-function pushSingleLineAttr(block, key, desiredValue, lines, lineEdits, fields, warnings, label) {
+function reflectSingleLineAttr(block, key, rawValue, opts, label, lines, lineEdits, fields, warnings) {
   const attr = block.attrs[key];
   if (!attr) {
-    // 属性行が無い既存タスク（例: 品質ゲートの `- [x] pnpm run lint`）には、
-    // 構造追加を避けるため反映しない。完了状態はチェックボックスで表現済みであり、
-    // ここで warning を出すと属性行なしタスクが多数あるだけで safeAutoMerge=false に
-    // なり続けるため、no-op（warning なし）とする。
-    return;
+    return; // 属性行が無い既存タスクには反映しない（warning なし）。
   }
 
-  // CR/LF を含む値は、Markdown へ別の属性行を注入できてしまうため反映しない。
-  // 既存 Markdown は変更せず warning を出して safeAutoMerge=false にする。
-  if (hasLineBreak(desiredValue)) {
+  const check = validateSingleLineValue(rawValue);
+  let valid = check.valid;
+  let reason = check.reason;
+  // 許可値が指定されている属性（Status）は、許可リスト外も不正として扱う。
+  if (valid && opts && opts.allowedValues && !opts.allowedValues.includes(check.value)) {
+    valid = false;
+    reason = "invalid-value";
+  }
+  if (!valid) {
     warnings.push({
       type: `unsafe-${key}`,
       id: block.id,
       title: block.title,
-      message: `Firestore の ${key} に改行が含まれるため、既存 Markdown の「${label}」を保護し変更しません。`,
+      message: `Firestore の ${key} が不正（${reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
     });
     return;
   }
 
+  const desiredValue = opts && opts.format ? opts.format(check.value) : check.value;
   const currentValue = attr.rawValue.trim();
   if (currentValue === desiredValue) {
     return; // 変化なし。
@@ -477,52 +435,53 @@ function pushSingleLineAttr(block, key, desiredValue, lines, lineEdits, fields, 
 }
 
 /**
+ * Firestore の単一行属性値が「妥当な1行文字列」か判定する。
+ * 妥当条件: string 型 / trim 後に非空 / CR/LF を含まない。
+ * 返却: { valid, reason, value(trim後) }
+ */
+function validateSingleLineValue(rawValue) {
+  if (rawValue === undefined) return { valid: false, reason: "field-missing" };
+  if (rawValue === null) return { valid: false, reason: "null" };
+  if (typeof rawValue !== "string") return { valid: false, reason: "not-string" };
+  if (hasLineBreak(rawValue)) return { valid: false, reason: "has-linebreak" };
+  const trimmed = rawValue.trim();
+  if (trimmed === "") return { valid: false, reason: "empty" };
+  return { valid: true, reason: null, value: trimmed };
+}
+
+/**
  * 複数行属性（Done when / Notes）を安全に反映する。
  *
- * Firestore はスキーマレスのため、md-import doc が壊れている（フィールド欠損・
- * 型不一致・空配列）と、既存 Markdown の完了条件/メモを誤って全削除しかねない。
- * Markdown 正本を守るため、以下の方針で扱う:
- * - 妥当な「非空配列」のときだけ、既存ラベル行配下の子行を置き換える。
- * - 欠損 / 配列以外 / 空配列 のときは Markdown を一切変更しない。
- *   それが既存内容（子行）の削除に当たる場合だけ warning を出し safeAutoMerge=false にする。
- *   （Markdown 側にも中身が無ければ no-op。空タスクで誤警告を出さない）
+ * 入力検証方針（Firestore はスキーマレスのため一律に保護）:
+ * - 妥当な「非空1行文字列配列」のときだけ、既存ラベル行配下の子行を置き換える。
+ * - 不正値（欠損 / null / 配列以外 / 空配列 / 不正要素）は Markdown を一切変更しない。
+ * - warning の出し方:
+ *   - 「不正な非空配列」（要素が不正）は、Markdown 側に中身が無くても warning
+ *     （不正値があるのに safeAutoMerge=true になるのを避けるため）。
+ *   - それ以外（欠損 / null / 配列以外 / 空配列）は、既存内容の削除に当たる場合だけ warning。
+ *     Markdown 側に中身が無ければ no-op（空タスクでの誤警告を避ける）。
  */
 function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, label) {
   const attr = block.longAttrs[key];
   const mdHasContent = !!attr && attr.childValues.length > 0;
 
-  const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined;
-  const raw = present ? data[key] : undefined;
-  const isArray = Array.isArray(raw);
-  // Firestore はスキーマレスのため、配列内の型不一致・空要素・改行入り要素・
-  // 属性行とみなされる要素も不正として扱う。全要素が以下を満たすときだけ妥当:
-  // - string / trim 後に非空 / CR/LF を含まない / 属性行として再 parse されない。
-  // （改行や "Status: Done" 等を許すと Markdown へ別の属性行を注入できてしまうため拒否する）
-  const allValidElements =
-    isArray &&
-    raw.length > 0 &&
-    raw.every(
-      (el) =>
-        typeof el === "string" &&
-        el.trim() !== "" &&
-        !hasLineBreak(el) &&
-        !isAttributeLikeText(el),
-    );
+  const raw = Object.prototype.hasOwnProperty.call(data, key) ? data[key] : undefined;
+  const check = validateArrayValue(raw);
 
   // 妥当な非空配列のときだけ反映対象にする。
-  if (allValidElements) {
+  if (check.valid) {
     if (!attr) {
       // ラベル行（"- Done when:" 等）が無い＝構造追加が必要。安全のため追加せず警告。
       warnings.push({
         type: "missing-attribute-block",
         id: block.id,
         title: block.title,
-        message: `「${label}:」行が無いため反映できません（${raw.length}件）。`,
+        message: `「${label}:」行が無いため反映できません（${check.values.length}件）。`,
       });
       return;
     }
     const currentValues = attr.childValues.map((v) => v.trim());
-    const nextValues = raw.map((v) => String(v ?? "").trim());
+    const nextValues = check.values;
     if (arraysEqual(currentValues, nextValues)) {
       return; // 変化なし。
     }
@@ -533,23 +492,42 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
     return;
   }
 
-  // ここから: 欠損 / 配列以外 / 空配列 / 要素不正。既存 Markdown は絶対に変更しない。
-  if (!mdHasContent) {
-    return; // 消すべき既存内容が無いので no-op（空タスクでの誤警告を避ける）。
+  // 不正値。既存 Markdown は絶対に変更しない。
+  // 「不正な非空配列」は中身が無くても warning。それ以外は消す内容がある場合だけ warning。
+  if (!check.nonEmpty && !mdHasContent) {
+    return; // 消すべき既存内容が無く、非空不正配列でもない → no-op。
   }
-  const reason = !present
-    ? "field-missing"
-    : !isArray
-      ? "not-array"
-      : raw.length === 0
-        ? "empty-array"
-        : "invalid-element";
   warnings.push({
     type: `unsafe-${key}`,
     id: block.id,
     title: block.title,
-    message: `Firestore の ${key} が不完全（${reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
+    message: `Firestore の ${key} が不正（${check.reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
   });
+}
+
+/**
+ * Firestore の複数行属性値が「妥当な非空1行文字列配列」か判定する。
+ * 妥当条件: 配列 / 非空 / 全要素が string・trim 後に非空・CR/LF なし・
+ *           属性行として再 parse されない（"Status: Done" 等を拒否）。
+ * 返却: { valid, reason, nonEmpty, values(trim後) }
+ */
+function validateArrayValue(rawValue) {
+  if (rawValue === undefined) return { valid: false, reason: "field-missing", nonEmpty: false };
+  if (rawValue === null) return { valid: false, reason: "null", nonEmpty: false };
+  if (!Array.isArray(rawValue)) return { valid: false, reason: "not-array", nonEmpty: false };
+  if (rawValue.length === 0) return { valid: false, reason: "empty-array", nonEmpty: false };
+
+  const allOk = rawValue.every(
+    (el) =>
+      typeof el === "string" &&
+      el.trim() !== "" &&
+      !hasLineBreak(el) &&
+      !isAttributeLikeText(el),
+  );
+  if (!allOk) {
+    return { valid: false, reason: "invalid-element", nonEmpty: true };
+  }
+  return { valid: true, reason: null, nonEmpty: true, values: rawValue.map((v) => v.trim()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -718,28 +696,13 @@ function isExcludedSection(title) {
 // ---------------------------------------------------------------------------
 
 /**
- * branchName を Markdown 表示文字列へ整形する。
- * - 空/null → "未作成"（既存プレースホルダーに合わせる）。
+ * 妥当な branchName（非空1行文字列）を Markdown 表示文字列へ整形する。
  * - 実ブランチ名（feature/... 等）→ バッククォートで囲む。
  * - それ以外（"未作成" など）→ 素のまま。
+ * 空/null など不正値は呼び出し側（reflectSingleLineAttr）で弾くため、ここには来ない。
  */
-function formatBranch(branchName) {
-  const value = typeof branchName === "string" ? branchName.trim() : "";
-  if (value === "") {
-    return "未作成";
-  }
-  if (BRANCH_PATTERN.test(value)) {
-    return `\`${value}\``;
-  }
-  return value;
-}
-
-/**
- * issuePr を Markdown 表示文字列へ整形する。空/null は "未定"。
- */
-function formatIssuePr(issuePr) {
-  const value = typeof issuePr === "string" ? issuePr.trim() : "";
-  return value === "" ? "未定" : value;
+function formatBranchValue(value) {
+  return BRANCH_PATTERN.test(value) ? `\`${value}\`` : value;
 }
 
 function arraysEqual(a, b) {
