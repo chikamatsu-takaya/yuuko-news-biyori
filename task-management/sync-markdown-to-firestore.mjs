@@ -61,6 +61,27 @@ const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr", 
 // createdAt / completedAt / archived / source は mask に含めず一切触れない。
 const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
 
+// 条件付き同期フィールド: completionRule / reviewPoints。
+// これらは主に Firestore（ダッシュボード）側で編集され、Firestore→Markdown で反映される。
+// Markdown 側に明示の値が無い（行なし・空）状態を「未設定（=消す意図なし）」とみなし、
+// 比較・updateMask から除外して Firestore の既存値を保持する（null/空での上書き事故を防ぐ）。
+const CONDITIONAL_SYNC_FIELDS = new Set(["completionRule", "reviewPoints"]);
+
+// Markdown 由来の desired 値が「明示的な値あり」かどうか（同期対象にするか）を判定する。
+// - completionRule: 非空文字列（convertTask は空を null にするため null は未設定）
+// - reviewPoints: 要素が1つ以上ある配列
+// 条件付きでないフィールドは常に同期対象（true）。
+function isSyncableField(field, desiredData) {
+  if (field === "completionRule") {
+    const value = desiredData?.completionRule;
+    return typeof value === "string" && value.trim() !== "";
+  }
+  if (field === "reviewPoints") {
+    return Array.isArray(desiredData?.reviewPoints) && desiredData.reviewPoints.length > 0;
+  }
+  return true;
+}
+
 // status の許可値（firestore-source.js の ALLOWED_STATUSES と揃える）。
 const ALLOWED_STATUSES = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
 
@@ -532,10 +553,14 @@ async function runApplyUpdateOnly(options, items) {
       continue;
     }
 
-    // 5. 書き込みデータ（12フィールド＋completed＋updatedAt/updatedBy のみ）。
+    // 5. 書き込みデータ＋updateMask。条件付き同期フィールド（completionRule/reviewPoints）は
+    //    Markdown 側に明示の値が無ければ mask・writeData から除外し、Firestore の既存値を保持する。
     const status = String(desired.data.status ?? "Todo");
     const writeData = {};
     for (const field of COMPARE_FIELDS) {
+      if (CONDITIONAL_SYNC_FIELDS.has(field) && !isSyncableField(field, desired.data)) {
+        continue;
+      }
       writeData[field] = desired.data[field];
     }
     // completed は status 連動（Done→true / それ以外→false）。completedAt は触れない。
@@ -543,11 +568,16 @@ async function runApplyUpdateOnly(options, items) {
     writeData.updatedAt = new Date().toISOString();
     writeData.updatedBy = "md-import";
 
+    // updateMask も同じ条件で絞る（除外フィールドは Firestore 側で変更されない）。
+    const updateMaskFields = UPDATE_WRITE_FIELDS.filter(
+      (field) => !CONDITIONAL_SYNC_FIELDS.has(field) || isSyncableField(field, desired.data),
+    );
+
     try {
       const res = await updateFirestoreTaskFields(
         target.id,
         writeData,
-        UPDATE_WRITE_FIELDS,
+        updateMaskFields,
         timestampFields,
       );
       if (res.ok) {
@@ -964,6 +994,11 @@ function compareDesiredAndCurrent(desiredItems, currentDocs) {
 function computeFieldDiffs(currentData, desiredData) {
   const diffs = [];
   for (const field of COMPARE_FIELDS) {
+    // 条件付き同期フィールド（completionRule/reviewPoints）は、Markdown 側に明示の値が
+    // 無ければ比較しない（Firestore の既存値を保持し、null/空での上書きを防ぐ）。
+    if (CONDITIONAL_SYNC_FIELDS.has(field) && !isSyncableField(field, desiredData)) {
+      continue;
+    }
     const before = normalizeForCompare(field, currentData?.[field]);
     const after = normalizeForCompare(field, desiredData?.[field]);
     if (!valuesEqual(before, after)) {
