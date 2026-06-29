@@ -395,15 +395,17 @@ function reflectTaskIntoBlock(block, data, lines) {
     reflectSingleLineAttr(block, "status", completion.status, { allowedValues: ALLOWED_STATUSES }, "Status", lines, lineEdits, fields, warnings);
   }
 
-  // --- 単一行属性（Owner / Branch / Issue/PR / Priority / Completion rule）---
-  // 反映可否は reflectSingleLineAttr に集約（欠損/null/型不一致/空/改行を一律に保護）。
-  // completionRule（完了判定）は自由文字列。ラベル接頭辞が付くため属性行/チェックボックス
-  // 行への注入リスクは無く、owner と同じ単一行扱いでよい。
+  // --- 単一行属性（Owner / Branch / Issue/PR / Priority）---
+  // これらは reflectSingleLineAttr で「既存行の更新のみ」を扱う（欠損/null/型不一致/空/改行は
+  // 一律に保護）。Markdown 側に該当属性行が無い場合は構造追加せず no-op（行の挿入はしない）。
   reflectSingleLineAttr(block, "owner", data.owner, null, "Owner", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "priority", data.priority, null, "Priority", lines, lineEdits, fields, warnings);
-  reflectSingleLineAttr(block, "completionRule", data.completionRule, null, "Completion rule", lines, lineEdits, fields, warnings);
+  // completionRule は例外的に reflectCompletionRule で「更新と挿入の両方」を扱う。
+  // Markdown 側に Completion rule 行が無くても、Firestore 側に有効値があれば
+  // 安全な位置（Issue/PR の後・Done when/Review points/Notes の前）へ挿入する。
+  reflectCompletionRule(block, data, lines, lineEdits, splices, fields, warnings);
 
   // --- 複数行属性（Done when / Review points / Notes）---
   // Firestore はスキーマレスのため、欠損・型不一致・空配列・不正要素で既存 Markdown を消さない。
@@ -463,6 +465,103 @@ function reflectSingleLineAttr(block, key, rawValue, opts, label, lines, lineEdi
   const replaced = original.replace(/^(\s*-\s+[^:]+:\s*).*$/, (_m, prefix) => `${prefix}${desiredValue}`);
   lineEdits.push({ index: attr.line, text: replaced });
   fields.push({ field: key, before: currentValue, after: desiredValue });
+}
+
+/**
+ * completionRule（完了判定）を反映する。他の単一行属性と違い、行が無く有効値があれば
+ * 安全に「- Completion rule: …」行を挿入する（未設定タスクへも取りこぼさず反映するため）。
+ * - 既存行あり: 従来の更新処理（不正値は既存値を保護して warning）。
+ * - 既存行なし × 有効値: Issue/PR の後・Done when/Review points/Notes の前へ挿入。
+ * - 既存行なし × 未設定（欠損/null/空）: 何もしない（既存タスク全般。warning なし）。
+ * - 既存行なし × 値はあるが不正（型不一致/改行）: 挿入せず warning（safeAutoMerge=false）。
+ */
+function reflectCompletionRule(block, data, lines, lineEdits, splices, fields, warnings) {
+  // 既存行があれば従来の単一行更新に委譲する（保護・warning も既存挙動どおり）。
+  if (block.attrs.completionRule) {
+    reflectSingleLineAttr(
+      block,
+      "completionRule",
+      data.completionRule,
+      null,
+      "Completion rule",
+      lines,
+      lineEdits,
+      fields,
+      warnings,
+    );
+    return;
+  }
+
+  const check = validateSingleLineValue(data.completionRule);
+  if (check.valid) {
+    // 有効値 → 安全な位置に属性行を挿入する。
+    const insertAt = completionRuleInsertIndex(block);
+    const indentWs = attrIndent(block, lines);
+    splices.push({
+      start: insertAt,
+      deleteCount: 0,
+      newLines: [`${indentWs}- Completion rule: ${check.value}`],
+    });
+    fields.push({ field: "completionRule", before: null, after: check.value });
+    return;
+  }
+
+  // 未設定（欠損/null/空）は no-op（既存タスク全般。誤警告を避ける）。
+  if (check.reason === "field-missing" || check.reason === "null" || check.reason === "empty") {
+    return;
+  }
+  // 値はあるが不正（型不一致/改行）→ 挿入せず warning。
+  warnings.push({
+    type: "unsafe-completionRule",
+    id: block.id,
+    title: block.title,
+    message: `Firestore の completionRule が不正（${check.reason}）のため、Completion rule 行を挿入しません。`,
+  });
+}
+
+/**
+ * completionRule 行の挿入位置（元の lines のインデックス）を決める。
+ * 優先: Issue/PR 行の直後 → 最初の複数行ラベル（Done when/Review points/Notes）の直前
+ *       → 最後の単一行属性の直後 → チェックボックス行の直後。
+ */
+function completionRuleInsertIndex(block) {
+  if (block.attrs.issuePr) {
+    return block.attrs.issuePr.line + 1;
+  }
+  const labelLines = ["doneWhen", "reviewPoints", "notes"]
+    .map((key) => block.longAttrs[key]?.labelLine)
+    .filter((n) => typeof n === "number");
+  if (labelLines.length > 0) {
+    return Math.min(...labelLines);
+  }
+  const attrLines = Object.values(block.attrs).map((a) => a.line);
+  if (attrLines.length > 0) {
+    return Math.max(...attrLines) + 1;
+  }
+  return block.checkboxLine + 1;
+}
+
+/**
+ * 挿入する属性行のインデント（"- " の前の空白）を、既存の属性/ラベル行に合わせて決める。
+ * 無ければチェックボックスのインデント + 2スペース。
+ */
+function attrIndent(block, lines) {
+  const leading = (index) => {
+    const m = typeof lines[index] === "string" ? lines[index].match(/^(\s*)-\s/) : null;
+    return m ? m[1] : null;
+  };
+  for (const a of Object.values(block.attrs)) {
+    const ws = leading(a.line);
+    if (ws != null) return ws;
+  }
+  for (const key of ["doneWhen", "reviewPoints", "notes"]) {
+    const la = block.longAttrs[key];
+    if (la) {
+      const ws = leading(la.labelLine);
+      if (ws != null) return ws;
+    }
+  }
+  return `${block.indent}  `;
 }
 
 /**
