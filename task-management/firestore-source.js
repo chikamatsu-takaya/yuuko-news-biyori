@@ -255,7 +255,13 @@ export function firestoreToBoardModel(docs) {
       owner: doc.owner ? String(doc.owner) : "",
       branch: doc.branchName ? String(doc.branchName) : "",
       issuePr: doc.issuePr ? String(doc.issuePr) : "",
+      // 完了判定（自由文字列）。未設定・文字列以外は空表示にする（read-only）。
+      completionRule: typeof doc.completionRule === "string" ? doc.completionRule : "",
       doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
+      // レビュー観点。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+      reviewPoints: Array.isArray(doc.reviewPoints)
+        ? doc.reviewPoints.filter((p) => typeof p === "string")
+        : [],
       // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
       notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
       includedInProgress: !section.excluded,

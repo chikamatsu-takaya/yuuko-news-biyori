@@ -306,7 +306,10 @@ export function computeSync(originalContent, firestoreTasks) {
   for (const [index, text] of lineEdits) {
     newLines[index] = text;
   }
-  blockSplices.sort((a, b) => b.start - a.start);
+  // 同一 start に複数挿入がある場合（例: Completion rule と Review points を同時新規挿入）、
+  // order が小さいものほど最終的に上に来るようにする。挿入は「後に適用したものが上」へ入るため、
+  // 同一 start では order 降順に並べて適用する（order 大→先に適用＝下、order 小→後で適用＝上）。
+  blockSplices.sort((a, b) => b.start - a.start || (b.order ?? 0) - (a.order ?? 0));
   for (const splice of blockSplices) {
     newLines.splice(splice.start, splice.deleteCount, ...splice.newLines);
   }
@@ -396,15 +399,22 @@ function reflectTaskIntoBlock(block, data, lines) {
   }
 
   // --- 単一行属性（Owner / Branch / Issue/PR / Priority）---
-  // 反映可否は reflectSingleLineAttr に集約（欠損/null/型不一致/空/改行を一律に保護）。
+  // これらは reflectSingleLineAttr で「既存行の更新のみ」を扱う（欠損/null/型不一致/空/改行は
+  // 一律に保護）。Markdown 側に該当属性行が無い場合は構造追加せず no-op（行の挿入はしない）。
   reflectSingleLineAttr(block, "owner", data.owner, null, "Owner", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "priority", data.priority, null, "Priority", lines, lineEdits, fields, warnings);
+  // completionRule は例外的に reflectCompletionRule で「更新と挿入の両方」を扱う。
+  // Markdown 側に Completion rule 行が無くても、Firestore 側に有効値があれば
+  // 安全な位置（Issue/PR の後・Done when/Review points/Notes の前）へ挿入する。
+  reflectCompletionRule(block, data, lines, lineEdits, splices, fields, warnings);
 
-  // --- 複数行属性（Done when / Notes）---
+  // --- 複数行属性（Done when / Review points / Notes）---
   // Firestore はスキーマレスのため、欠損・型不一致・空配列・不正要素で既存 Markdown を消さない。
   reflectBlockAttr(block, "doneWhen", data, lines, splices, fields, warnings, "Done when");
+  // reviewPoints は completionRule と同様、ブロックが無く有効値があれば「挿入」する。
+  reflectReviewPoints(block, data, lines, splices, fields, warnings);
   reflectBlockAttr(block, "notes", data, lines, splices, fields, warnings, "Notes");
 
   return { lineEdits, splices, warnings, fields, kind };
@@ -458,6 +468,103 @@ function reflectSingleLineAttr(block, key, rawValue, opts, label, lines, lineEdi
   const replaced = original.replace(/^(\s*-\s+[^:]+:\s*).*$/, (_m, prefix) => `${prefix}${desiredValue}`);
   lineEdits.push({ index: attr.line, text: replaced });
   fields.push({ field: key, before: currentValue, after: desiredValue });
+}
+
+/**
+ * completionRule（完了判定）を反映する。他の単一行属性と違い、行が無く有効値があれば
+ * 安全に「- Completion rule: …」行を挿入する（未設定タスクへも取りこぼさず反映するため）。
+ * - 既存行あり: 従来の更新処理（不正値は既存値を保護して warning）。
+ * - 既存行なし × 有効値: Issue/PR の後・Done when/Review points/Notes の前へ挿入。
+ * - 既存行なし × 未設定（欠損/null/空）: 何もしない（既存タスク全般。warning なし）。
+ * - 既存行なし × 値はあるが不正（型不一致/改行）: 挿入せず warning（safeAutoMerge=false）。
+ */
+function reflectCompletionRule(block, data, lines, lineEdits, splices, fields, warnings) {
+  // 既存行があれば従来の単一行更新に委譲する（保護・warning も既存挙動どおり）。
+  if (block.attrs.completionRule) {
+    reflectSingleLineAttr(
+      block,
+      "completionRule",
+      data.completionRule,
+      null,
+      "Completion rule",
+      lines,
+      lineEdits,
+      fields,
+      warnings,
+    );
+    return;
+  }
+
+  const check = validateSingleLineValue(data.completionRule);
+  if (check.valid) {
+    // 有効値 → 安全な位置に属性行を挿入する。
+    const insertAt = completionRuleInsertIndex(block);
+    const indentWs = attrIndent(block, lines);
+    splices.push({
+      start: insertAt,
+      deleteCount: 0,
+      newLines: [`${indentWs}- Completion rule: ${check.value}`],
+    });
+    fields.push({ field: "completionRule", before: null, after: check.value });
+    return;
+  }
+
+  // 未設定（欠損/null/空）は no-op（既存タスク全般。誤警告を避ける）。
+  if (check.reason === "field-missing" || check.reason === "null" || check.reason === "empty") {
+    return;
+  }
+  // 値はあるが不正（型不一致/改行）→ 挿入せず warning。
+  warnings.push({
+    type: "unsafe-completionRule",
+    id: block.id,
+    title: block.title,
+    message: `Firestore の completionRule が不正（${check.reason}）のため、Completion rule 行を挿入しません。`,
+  });
+}
+
+/**
+ * completionRule 行の挿入位置（元の lines のインデックス）を決める。
+ * 優先: Issue/PR 行の直後 → 最初の複数行ラベル（Done when/Review points/Notes）の直前
+ *       → 最後の単一行属性の直後 → チェックボックス行の直後。
+ */
+function completionRuleInsertIndex(block) {
+  if (block.attrs.issuePr) {
+    return block.attrs.issuePr.line + 1;
+  }
+  const labelLines = ["doneWhen", "reviewPoints", "notes"]
+    .map((key) => block.longAttrs[key]?.labelLine)
+    .filter((n) => typeof n === "number");
+  if (labelLines.length > 0) {
+    return Math.min(...labelLines);
+  }
+  const attrLines = Object.values(block.attrs).map((a) => a.line);
+  if (attrLines.length > 0) {
+    return Math.max(...attrLines) + 1;
+  }
+  return block.checkboxLine + 1;
+}
+
+/**
+ * 挿入する属性行のインデント（"- " の前の空白）を、既存の属性/ラベル行に合わせて決める。
+ * 無ければチェックボックスのインデント + 2スペース。
+ */
+function attrIndent(block, lines) {
+  const leading = (index) => {
+    const m = typeof lines[index] === "string" ? lines[index].match(/^(\s*)-\s/) : null;
+    return m ? m[1] : null;
+  };
+  for (const a of Object.values(block.attrs)) {
+    const ws = leading(a.line);
+    if (ws != null) return ws;
+  }
+  for (const key of ["doneWhen", "reviewPoints", "notes"]) {
+    const la = block.longAttrs[key];
+    if (la) {
+      const ws = leading(la.labelLine);
+      if (ws != null) return ws;
+    }
+  }
+  return `${block.indent}  `;
 }
 
 /**
@@ -563,6 +670,97 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
     title: block.title,
     message: `Firestore の ${key} が不正（${check.reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
   });
+}
+
+/**
+ * reviewPoints を反映する。reflectBlockAttr と違い、Markdown 側に Review points ブロックが
+ * 無く有効値があれば「挿入」する（completionRule の挿入対応と同じ考え方）。
+ * - 既存ブロックあり: 従来どおり reflectBlockAttr に委譲（更新・保護・warning）。
+ * - 既存ブロックなし:
+ *   - null/undefined/[]/空白だけ → no-op（消す意図なし）。
+ *   - 非配列/改行/属性行風/チェックボックス行風/非文字列要素 → 挿入せず warning。
+ *   - trim 後に非空の文字列が1件以上 → その値で Review points ブロックを安全な位置に挿入。
+ */
+function reflectReviewPoints(block, data, lines, splices, fields, warnings) {
+  if (block.longAttrs.reviewPoints) {
+    // 既存ブロックあり → 従来どおり（更新／不正値は保護して warning）。
+    reflectBlockAttr(block, "reviewPoints", data, lines, splices, fields, warnings, "Review points");
+    return;
+  }
+
+  const raw = Object.prototype.hasOwnProperty.call(data, "reviewPoints") ? data.reviewPoints : undefined;
+  if (raw === undefined || raw === null) {
+    return; // 未設定 → no-op。
+  }
+  if (!Array.isArray(raw)) {
+    warnReviewPointsInsert(block, warnings, "not-array");
+    return;
+  }
+  if (raw.length === 0) {
+    return; // 空配列 → no-op。
+  }
+  // 不正要素（非文字列 / 改行 / 属性行風 / チェックボックス行風）があれば挿入せず warning。
+  // 空白だけの要素は「無視」であって不正ではない（後段で除外する）。
+  const hasInvalid = raw.some((el) => {
+    if (typeof el !== "string") return true;
+    if (el.trim() === "") return false;
+    return hasLineBreak(el) || isAttributeLikeText(el) || isCheckboxLikeText(el);
+  });
+  if (hasInvalid) {
+    warnReviewPointsInsert(block, warnings, "invalid-element");
+    return;
+  }
+  // 有効値（trim 後に非空の文字列）だけ抽出。
+  const cleaned = raw.filter((el) => typeof el === "string" && el.trim() !== "").map((el) => el.trim());
+  if (cleaned.length === 0) {
+    return; // 全要素が空白 → no-op。
+  }
+
+  // 安全な位置へ Review points ブロックを挿入する。
+  const insertAt = reviewPointsInsertIndex(block);
+  const indentWs = attrIndent(block, lines);
+  const childIndentWs = `${indentWs}  `;
+  const newLines = [
+    `${indentWs}- Review points:`,
+    ...cleaned.map((value) => `${childIndentWs}- ${value}`),
+  ];
+  // order=1: 同一 start に Completion rule(order 既定0) の新規挿入があるとき、
+  // Review points がその「後ろ（下）」に来るようにする（Completion rule → Review points の順）。
+  splices.push({ start: insertAt, deleteCount: 0, newLines, order: 1 });
+  fields.push({ field: "reviewPoints", before: null, after: cleaned });
+}
+
+function warnReviewPointsInsert(block, warnings, reason) {
+  warnings.push({
+    type: "unsafe-reviewPoints",
+    id: block.id,
+    title: block.title,
+    message: `Firestore の reviewPoints が不正（${reason}）のため、Review points ブロックを挿入しません。`,
+  });
+}
+
+/**
+ * Review points ブロックの挿入位置（元の lines のインデックス）を決める。
+ * 優先: Done when ブロックの後 → Notes ブロックの前 → Completion rule 行の後
+ *       → 最後の単一行属性の後 → チェックボックス行の直後。
+ */
+function reviewPointsInsertIndex(block) {
+  const dw = block.longAttrs.doneWhen;
+  if (dw) {
+    return dw.labelLine + dw.childCount + 1; // Done when の最終子行の直後。
+  }
+  const notes = block.longAttrs.notes;
+  if (notes) {
+    return notes.labelLine; // Notes ラベルの直前。
+  }
+  if (block.attrs.completionRule) {
+    return block.attrs.completionRule.line + 1;
+  }
+  const attrLines = Object.values(block.attrs).map((a) => a.line);
+  if (attrLines.length > 0) {
+    return Math.max(...attrLines) + 1;
+  }
+  return block.checkboxLine + 1;
 }
 
 /**
@@ -678,8 +876,8 @@ function scanMarkdownBlocks(lines) {
     const childText = childBulletMatch[2];
     const parsed = parseTaskAttribute(childText);
     if (parsed && parsed.key) {
-      if (parsed.key === "doneWhen" || parsed.key === "notes") {
-        // ラベル行（"- Done when:" 等）。子行はこの直後から。
+      if (parsed.key === "doneWhen" || parsed.key === "reviewPoints" || parsed.key === "notes") {
+        // ラベル行（"- Done when:" / "- Review points:" 等）。子行はこの直後から。
         current.longAttrs[parsed.key] = {
           labelLine: i,
           childStart: i + 1,
@@ -700,8 +898,8 @@ function scanMarkdownBlocks(lines) {
       continue;
     }
 
-    // 属性ではない子行 → 直近の long 属性（Done when / Notes）の子要素。
-    if (longAttr === "doneWhen" || longAttr === "notes") {
+    // 属性ではない子行 → 直近の long 属性（Done when / Review points / Notes）の子要素。
+    if (longAttr === "doneWhen" || longAttr === "reviewPoints" || longAttr === "notes") {
       const la = current.longAttrs[longAttr];
       if (la) {
         if (la.childCount === 0 && la.childValues.length === 0) {
@@ -722,7 +920,7 @@ function scanMarkdownBlocks(lines) {
  */
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Done when|Notes|担当|ブランチ|完了条件|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -733,11 +931,15 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "completion rule": "completionRule",
     "done when": "doneWhen",
+    "review points": "reviewPoints",
     notes: "notes",
     担当: "owner",
     ブランチ: "branch",
+    完了判定: "completionRule",
     完了条件: "doneWhen",
+    レビュー観点: "reviewPoints",
     補足: "notes",
   };
   return {

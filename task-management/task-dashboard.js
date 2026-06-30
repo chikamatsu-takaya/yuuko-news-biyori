@@ -132,6 +132,18 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // レビュー時の確認観点のコピー（read-only。DB更新・API呼び出しなし）。
+    const copyButton = event.target.closest(".review-checklist-copy");
+    if (copyButton) {
+      const wrap = copyButton.closest(".review-checklist");
+      const pre = wrap ? wrap.querySelector(".review-checklist-text") : null;
+      const hint = wrap ? wrap.querySelector(".review-checklist-hint") : null;
+      if (pre) {
+        void copyReviewChecklist(pre, hint);
+      }
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -285,6 +297,41 @@ async function handleAddTaskSubmit(form) {
       submitButton.disabled = false;
     }
   }
+}
+
+// レビュー時の確認観点を <pre> の textContent からクリップボードへコピーする（read-only）。
+// navigator.clipboard が使えない/失敗する場合は、<pre> を範囲選択して手動コピーを促す。
+async function copyReviewChecklist(pre, hint) {
+  const text = pre.textContent ?? "";
+  const setHint = (message) => {
+    if (hint) {
+      hint.textContent = message;
+    }
+  };
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      setHint("コピーしました。");
+      return;
+    }
+    throw new Error("clipboard API 非対応");
+  } catch {
+    // フォールバック: テキストを範囲選択し、手動コピー（Ctrl + C）を促す。
+    selectPreText(pre);
+    setHint("自動コピーに失敗しました。選択範囲を Ctrl + C で手動コピーしてください。");
+  }
+}
+
+// <pre> 内テキストを選択状態にする（手動コピー用フォールバック）。
+function selectPreText(pre) {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (!selection) {
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(pre);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 // Firestore 表示時のみ呼ばれる status 更新処理（段階2の最小書き込みPOC）。
@@ -683,6 +730,10 @@ function parseMarkdown(markdown) {
       currentTask.doneWhen.push(childText);
       return;
     }
+    if (currentLongAttribute === "reviewPoints") {
+      currentTask.reviewPoints.push(childText);
+      return;
+    }
     if (currentLongAttribute === "notes") {
       currentTask.notes.push(childText);
       return;
@@ -751,7 +802,11 @@ function createTask({ text, completed, line, section, subsection }) {
     owner: inferOwner(text),
     branch: inferBranch(text),
     issuePr: inferIssuePr(text),
+    // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
+    // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
+    completionRule: "",
     doneWhen: [],
+    reviewPoints: [],
     notes: [],
     includedInProgress: !section.excluded,
   };
@@ -768,7 +823,7 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Done when|Notes|担当|ブランチ|完了条件|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -780,11 +835,15 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "completion rule": "completionRule",
     "done when": "doneWhen",
+    "review points": "reviewPoints",
     notes: "notes",
     担当: "owner",
     ブランチ: "branch",
+    完了判定: "completionRule",
     完了条件: "doneWhen",
+    レビュー観点: "reviewPoints",
     補足: "notes",
   };
 
@@ -798,7 +857,7 @@ function applyTaskAttribute(task, key, value) {
   if (!key) {
     return;
   }
-  if (key === "doneWhen" || key === "notes") {
+  if (key === "doneWhen" || key === "reviewPoints" || key === "notes") {
     if (value) {
       task[key].push(value);
     }
@@ -1165,15 +1224,18 @@ function renderTaskCard(task) {
         <li><strong>Owner:</strong> ${renderInline(task.owner || "未定")}</li>
         <li><strong>Branch:</strong> ${renderInline(task.branch || "未定")}</li>
         <li><strong>Issue/PR:</strong> ${renderInline(task.issuePr || "未定")}</li>
+        <li><strong>Completion rule:</strong> ${renderInline(task.completionRule || "未設定")}</li>
         <li><strong>Line:</strong> ${task.line}</li>
         <li><strong>Section:</strong> ${renderInline(task.sectionTitle)}</li>
         <li><strong>Sub:</strong> ${renderInline(task.subsectionTitle || "なし")}</li>
       </ul>
       ${renderLongList("Done when", task.doneWhen)}
+      ${renderLongList("Review points", task.reviewPoints)}
       ${
         // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
         state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
       }
+      ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStatusControls(task)}
     </article>
@@ -1365,6 +1427,102 @@ function renderLongList(label, items) {
       <ul>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</ul>
     </div>
   `;
+}
+
+// 「レビュー時の確認観点」の read-only 表示ブロック（開閉＋コピーボタン）。
+// 表示専用: DB更新・API呼び出しは行わない。本文は必ず escapeHtml して埋め込み、
+// コピーは <pre> の textContent 経由にする（HTMLインジェクション防止）。
+function renderReviewChecklistBlock(task) {
+  const checklist = buildReviewChecklist(task);
+  return `
+    <details class="review-checklist">
+      <summary>レビュー時の確認観点</summary>
+      <pre class="review-checklist-text">${escapeHtml(checklist)}</pre>
+      <div class="review-checklist-actions">
+        <button type="button" class="button compact review-checklist-copy">コピー</button>
+        <span class="review-checklist-hint" aria-live="polite"></span>
+      </div>
+    </details>
+  `;
+}
+
+// タスク情報から「レビュー担当者がそのまま使える確認観点リスト」（プレーンテキスト）を
+// 組み立てる純粋関数。AIへの依頼文は含めない。window / document 非依存で Node からも検証可能。
+// 方針:
+// - reviewPoints があれば、それを主要な確認観点として並べる。
+// - reviewPoints が無ければ、completionRule / doneWhen / notes / 分類 / branch / issuePr から
+//   最低限の確認観点を自動で組み立てる。
+// 画面モデルでは branch=branchName。URLの自動リンク化はしない。
+function buildReviewChecklist(task) {
+  const oneLine = (value) => (typeof value === "string" ? value.trim() : "");
+  const toArray = (items) =>
+    Array.isArray(items)
+      ? items.map((entry) => oneLine(entry)).filter((entry) => entry !== "")
+      : [];
+
+  const title = oneLine(task.text) || "（無題）";
+  const completionRule = oneLine(task.completionRule);
+  const doneWhen = toArray(task.doneWhen);
+  const notes = toArray(task.notes);
+  const reviewPoints = toArray(task.reviewPoints);
+  const category = oneLine(task.sectionTitle);
+  const subcategory = oneLine(task.subsectionTitle);
+  const branch = oneLine(task.branch);
+  const issuePr = oneLine(task.issuePr);
+
+  const points = [];
+
+  if (reviewPoints.length > 0) {
+    // reviewPoints がある場合は、それを主要な確認観点として並べる。
+    for (const point of reviewPoints) {
+      points.push(`- ${point}`);
+    }
+    // 完了判定・完了条件は、補助的な確認観点として併記する。
+    if (completionRule) {
+      points.push(`- 完了判定「${completionRule}」が満たされていること`);
+    }
+    for (const dw of doneWhen) {
+      points.push(`- 完了条件「${dw}」が満たされていること`);
+    }
+  } else {
+    // reviewPoints が無い場合は、他項目から最低限の確認観点を自動で組み立てる。
+    if (completionRule) {
+      points.push(`- 完了判定「${completionRule}」が満たされていること`);
+    }
+    for (const dw of doneWhen) {
+      points.push(`- 完了条件「${dw}」が満たされていること`);
+    }
+    for (const note of notes) {
+      points.push(`- 補足「${note}」が考慮されていること`);
+    }
+    if (category) {
+      const scope = subcategory ? `${category} / ${subcategory}` : category;
+      points.push(`- 分類（${scope}）の想定に沿った変更であること`);
+    }
+    if (branch) {
+      points.push(`- 対象ブランチ「${branch}」の変更範囲に閉じていること`);
+    }
+    if (issuePr) {
+      points.push(`- 関連 Issue/PR「${issuePr}」と整合していること`);
+    }
+  }
+
+  // 範囲外変更チェックは常に入れる。
+  points.push("- 今回のタスク範囲外の変更が含まれていないこと");
+  // 何も観点が組み立てられなかった場合の最低限のフォールバック。
+  if (points.length === 1) {
+    points.unshift("- タスク名と内容から、完了状態が妥当か確認すること");
+  }
+
+  return [
+    "レビュー時の確認観点",
+    "",
+    "タスク:",
+    title,
+    "",
+    "確認観点:",
+    ...points,
+  ].join("\n");
 }
 
 function summarizeTasks(tasks) {
