@@ -505,6 +505,10 @@ export async function startTaskForPoc(taskId, branchName) {
     if (current.status === "Done" || current.completed === true) {
       throw new Error("DB上でDoneになっているため、作業開始できません。");
     }
+    // Review からは「Review→Done」のみ許可。Review→Doing への巻き戻しは拒否する。
+    if (current.status === "Review") {
+      throw new Error("DB上でReviewになっているため、作業開始できません（Review→Doneのみ可）。");
+    }
 
     transaction.update(targetRef, {
       status: "Doing",
@@ -516,6 +520,53 @@ export async function startTaskForPoc(taskId, branchName) {
   });
 
   console.log("[Firestore POC] started task", { taskId, branchName: safeBranch });
+}
+
+/**
+ * 「レビュー完了」用の最小書き込み（Review のタスクを手動で Done にする）。
+ * 更新するのは status / completed / completedAt / updatedAt / updatedBy のみ。
+ * owner / branchName / taskCode / doneWhen / reviewPoints / notes / completionRule / archived /
+ * createdAt / source 等は一切触れない。
+ *
+ * 安全対策（UIガードに加えた最終防御・競合対策）: runTransaction 内で現状を再読込し、
+ * 以下をすべて満たすときだけ Done 化する。満たさない場合は理由付き Error を投げる:
+ * - document が存在する
+ * - DB現状が既に completed===true ではない
+ * - DB現状 status === "Review"（Review 以外からの Done 化は不可）
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ */
+export async function completeReviewTaskForPoc(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    if (current.completed === true) {
+      throw new Error("既に完了済みのため、変更しません。");
+    }
+    if (current.status !== "Review") {
+      throw new Error("status が Review ではないため、Done にできません。");
+    }
+
+    transaction.update(targetRef, {
+      status: "Done",
+      completed: true,
+      completedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      updatedBy: "manual-poc",
+    });
+  });
+
+  console.log("[Firestore POC] completed review task", { taskId });
 }
 
 /**

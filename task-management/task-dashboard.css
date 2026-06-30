@@ -690,6 +690,11 @@ details[open] > summary::after {
   gap: 8px;
 }
 
+/* レビュー完了（Review → Done）ボタン。Review のタスクにのみ表示する。 */
+.review-done {
+  margin-top: 10px;
+}
+
 .work-prompt {
   font-size: 0.86rem;
 }
