@@ -245,6 +245,8 @@ export function firestoreToBoardModel(docs) {
     // firestoreId は status 更新時に対象ドキュメントを指すために保持する（UI 表示には使わない）。
     const task = {
       firestoreId: doc.id,
+      // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
+      taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
       text: String(doc.title ?? ""),
       completed: doc.completed === true,
       line,

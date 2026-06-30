@@ -172,6 +172,8 @@ function createTask({ text, completed, line, section, subsection }) {
     owner: inferOwner(text),
     branch: inferBranch(text),
     issuePr: inferIssuePr(text),
+    // 人間向けの識別コード（例: TASK-023）。Markdown 未記載なら空のまま壊さない。
+    taskCode: "",
     // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
     // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
     completionRule: "",
@@ -192,13 +194,14 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
+    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
   }
 
   const keyMap = {
+    "task code": "taskCode",
     priority: "priority",
     status: "status",
     owner: "owner",
@@ -208,6 +211,7 @@ function parseTaskAttribute(text) {
     "done when": "doneWhen",
     "review points": "reviewPoints",
     notes: "notes",
+    タスクコード: "taskCode",
     担当: "owner",
     ブランチ: "branch",
     完了判定: "completionRule",
