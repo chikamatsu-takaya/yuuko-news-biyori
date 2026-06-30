@@ -27,7 +27,6 @@ import {
   orderBy,
   getDocs,
   doc as firestoreDoc,
-  updateDoc,
   addDoc,
   runTransaction,
   serverTimestamp,
@@ -325,6 +324,14 @@ const ALLOWED_STATUSES = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
  * - updatedBy:    POC では固定値 "manual-poc"
  * status 以外のフィールド（本文・archived 等）は変更しない。
  *
+ * 安全対策（UIガードに加えた最終防御・競合対策）: runTransaction 内で現状を再読込し、
+ * DB現状 status === "Review" の場合は更新を拒否する（理由付き Error を投げる）。
+ * Review からの遷移は専用フローに限定する方針のため、汎用status更新からは行わせない:
+ * - Review → Done は completeReviewTaskForPoc() 経由のみ許可する
+ * - Review → Doing 等への巻き戻しは許可しない
+ * これにより、別タブ・別ユーザーが先に Review 化した後に古い画面の汎用Status変更ボタンを
+ * 押しても、DB現状を見て拒否できる（描画時点の task.status だけに依存しない）。
+ *
  * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
  * @param {string} nextStatus  ALLOWED_STATUSES のいずれか
  */
@@ -340,12 +347,27 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
   const targetRef = firestoreDoc(db, "tasks", taskId);
 
   const isDone = nextStatus === "Done";
-  await updateDoc(targetRef, {
-    status: nextStatus,
-    completed: isDone,
-    completedAt: isDone ? serverTimestamp() : null,
-    updatedAt: serverTimestamp(),
-    updatedBy: "manual-poc",
+  // 現状読込→Reviewチェック→更新を transaction で原子化する。
+  // 別RPC（getDoc + updateDoc）の間に Review 化されても、古い画面からの汎用更新を確実に弾く。
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    if (current.status === "Review") {
+      throw new Error(
+        "Review のタスクは汎用Status変更できません。Done にするには「レビュー完了」を使ってください。",
+      );
+    }
+
+    transaction.update(targetRef, {
+      status: nextStatus,
+      completed: isDone,
+      completedAt: isDone ? serverTimestamp() : null,
+      updatedAt: serverTimestamp(),
+      updatedBy: "manual-poc",
+    });
   });
 
   console.log("[Firestore POC] updated task status", { taskId, nextStatus });
