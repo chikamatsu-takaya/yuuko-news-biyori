@@ -1608,28 +1608,50 @@ function buildBranchName(task) {
   return `feature/${base}`;
 }
 
+// branchName で許可する prefix（最初の "/" の前の部分）。firestore-source.js 側と同一に保つ。
+// Codex指摘の許可リスト＋既存 parser(inferBranch) の ui/rust を合わせた和集合。
+// 既存運用の branchName（codex/... 等）を尊重しつつ、保護ブランチ系（main/develop/release）は弾く。
+const ALLOWED_BRANCH_PREFIXES = [
+  "feature",
+  "fix",
+  "hotfix",
+  "chore",
+  "docs",
+  "refactor",
+  "test",
+  "ci",
+  "build",
+  "perf",
+  "style",
+  "codex",
+  "ui",
+  "rust",
+];
+
 // branchName の形式検証（保存前の最終ガード。firestore-source.js 側と同一ルールを保つ）。
-// 許可: feature/ で始まり、小文字英数字と . _ / - のみ。空白・大文字・非ASCII・制御文字は不可。
+// 許可: 許可 prefix で始まり、小文字英数字と . _ / - のみ。空白・大文字・非ASCII・制御文字は不可。
 // 危険な連続記号（.. / //）・末尾の / . / .lock・空コンポーネント・先頭が . や - のコンポーネントを弾く。
 function isValidBranchName(value) {
   if (typeof value !== "string") {
     return false;
   }
   const name = value;
-  if (!name.startsWith("feature/")) {
-    return false;
-  }
   // 許可文字のみ（空白・大文字・非ASCII・制御文字をまとめて排除）。
   if (!/^[a-z0-9._/-]+$/.test(name)) {
+    return false;
+  }
+  // prefix（最初の "/" の前）が許可リストにあり、かつその後ろが空でないこと。
+  const slashIndex = name.indexOf("/");
+  if (slashIndex <= 0 || !ALLOWED_BRANCH_PREFIXES.includes(name.slice(0, slashIndex))) {
+    return false;
+  }
+  if (name.slice(slashIndex + 1).length === 0) {
     return false;
   }
   if (name.includes("..") || name.includes("//")) {
     return false;
   }
   if (name.endsWith("/") || name.endsWith(".") || name.endsWith(".lock")) {
-    return false;
-  }
-  if (name.slice("feature/".length).length === 0) {
     return false;
   }
   for (const component of name.split("/")) {
