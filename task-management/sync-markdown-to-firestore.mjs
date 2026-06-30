@@ -68,12 +68,19 @@ const NULLABLE_STRING_FIELDS = new Set([
 // createdAt / completedAt / archived / source は mask に含めず一切触れない。
 const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
 
-// 条件付き同期フィールド: completionRule / reviewPoints / taskCode。
+// 条件付き同期フィールド: completionRule / reviewPoints / taskCode / branchName。
 // Markdown 側に明示の値が無い（行なし・空）状態を「未設定（=消す意図なし）」とみなし、
 // 比較・updateMask から除外して Firestore の既存値を保持する（null/空での上書き事故を防ぐ）。
 // taskCode は人間向け識別子で、Markdown を正として Firestore へ反映するが、
 // Markdown 未記載のときに既存 taskCode を消さないため条件付きにする。
-const CONDITIONAL_SYNC_FIELDS = new Set(["completionRule", "reviewPoints", "taskCode"]);
+// branchName は画面の「作業開始」で Firestore に保存されるため、Markdown 側に有効値が
+// 無いとき（未記載・空・"未作成"）に既存 branchName を消さないよう条件付きにする。
+const CONDITIONAL_SYNC_FIELDS = new Set([
+  "completionRule",
+  "reviewPoints",
+  "taskCode",
+  "branchName",
+]);
 
 // reviewPoints を「trim 後に非空の文字列だけ」へ正規化する（空白のみ・非文字列要素は除外）。
 // 比較・書き込み・同期対象判定で共通利用し、" " のような空白要素での上書き事故を防ぐ。
@@ -93,6 +100,12 @@ function isSyncableField(field, desiredData) {
     // 単一行文字列: trim 後に非空のときだけ同期対象（空/null は未設定＝既存値保持）。
     const value = desiredData?.[field];
     return typeof value === "string" && value.trim() !== "";
+  }
+  if (field === "branchName") {
+    // branchName も単一行文字列。ただし Markdown の "未作成" は未設定プレースホルダーなので
+    // 同期対象外にし、画面の作業開始で保存した branchName を消さないようにする。
+    const value = desiredData?.branchName;
+    return typeof value === "string" && value.trim() !== "" && value.trim() !== "未作成";
   }
   if (field === "reviewPoints") {
     return cleanReviewPoints(desiredData?.reviewPoints).length > 0;

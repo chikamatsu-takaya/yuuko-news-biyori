@@ -144,8 +144,65 @@ document.addEventListener("DOMContentLoaded", () => {
       const pre = wrap ? wrap.querySelector(".review-checklist-text") : null;
       const hint = wrap ? wrap.querySelector(".review-checklist-hint") : null;
       if (pre) {
-        void copyReviewChecklist(pre, hint);
+        void copyPreToClipboard(pre, hint);
       }
+      return;
+    }
+
+    // AI作業プロンプトのコピー（read-only。DB更新・API呼び出しなし）。
+    const promptCopyButton = event.target.closest(".work-prompt-copy");
+    if (promptCopyButton) {
+      const wrap = promptCopyButton.closest(".work-prompt");
+      const pre = wrap ? wrap.querySelector(".work-prompt-text") : null;
+      const hint = wrap ? wrap.querySelector(".work-prompt-hint") : null;
+      if (pre) {
+        void copyPreToClipboard(pre, hint);
+      }
+      return;
+    }
+
+    // 作業開始（branchName を確認・編集 → status:Doing + branchName を保存）。
+    const startButton = event.target.closest(".task-start-button");
+    if (startButton) {
+      if (startButton.disabled) {
+        return;
+      }
+      const taskId = startButton.dataset.taskId;
+      const task = taskId ? findFirestoreTaskById(taskId) : null;
+      if (!task) {
+        return;
+      }
+      // owner 未設定でも止めないが、軽い確認だけ出す（誤って未割当のまま開始しないように）。
+      if ((task.owner || "").trim() === "" && !window.confirm("担当者(owner)が未設定です。このまま作業開始しますか？")) {
+        return;
+      }
+      // 既存の branchName があればそれを初期値にし、再生成値で上書きしないようにする。
+      // "未作成"（Markdown 由来の未設定プレースホルダー）は候補生成に回す。
+      const currentBranch = typeof task.branch === "string" ? task.branch.trim() : "";
+      const initialBranchName =
+        currentBranch !== "" && currentBranch !== "未作成" ? currentBranch : buildBranchName(task);
+      // branchName を確認・編集してもらう（キャンセルで中止＝Firestore更新しない）。
+      const branchName = window.prompt(
+        "作業ブランチ名を確認・編集してください（キャンセルで中止）",
+        initialBranchName,
+      );
+      if (branchName === null) {
+        return; // キャンセル → 更新しない。
+      }
+      const trimmed = branchName.trim();
+      if (trimmed === "") {
+        setLoadState("ブランチ名が空のため作業開始を中止しました。", true);
+        return;
+      }
+      // 形式検証（空白・非ASCII・危険な連続記号などを弾く）。不正なら Firestore 更新しない。
+      if (!isValidBranchName(trimmed)) {
+        setLoadState(
+          "ブランチ名の形式が不正です。feature/task-023-xxxx のような形式にしてください。",
+          true,
+        );
+        return;
+      }
+      void applyTaskStart(taskId, trimmed, startButton);
       return;
     }
 
@@ -335,9 +392,10 @@ async function handleAddTaskSubmit(form) {
   }
 }
 
-// レビュー時の確認観点を <pre> の textContent からクリップボードへコピーする（read-only）。
+// <pre> の textContent をクリップボードへコピーする汎用処理（read-only）。
+// レビュー観点・AI作業プロンプトの両方で使う。
 // navigator.clipboard が使えない/失敗する場合は、<pre> を範囲選択して手動コピーを促す。
-async function copyReviewChecklist(pre, hint) {
+async function copyPreToClipboard(pre, hint) {
   const text = pre.textContent ?? "";
   const setHint = (message) => {
     if (hint) {
@@ -403,6 +461,33 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
     buttons.forEach((element) => {
       element.disabled = false;
     });
+  }
+}
+
+// 「作業開始」保存処理。status を Doing にし、確定した branchName を保存する（owner は変更しない）。
+// 保存成功後は再取得 → 変換 → 再描画でツリーを作り直す（status更新と同じ方針）。
+async function applyTaskStart(taskId, branchName, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  button.disabled = true;
+  setLoadState(`作業開始を保存しています（${branchName}）...`, false);
+
+  try {
+    const { startTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await startTaskForPoc(taskId, branchName);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState(`作業を開始しました（Doing / ${branchName}）。`, false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to start task", error);
+    setLoadState(`作業開始に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    button.disabled = false;
   }
 }
 
@@ -1309,6 +1394,7 @@ function renderTaskCard(task) {
       }
       ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
+      ${renderStartControls(task)}
       ${renderStatusControls(task)}
     </article>
   `;
@@ -1473,6 +1559,183 @@ function formatFirestoreUpdatedAt(millis) {
 
 // Firestore 表示時のみ、タスクカード内に status 更新ボタンを描画する。
 // Markdown 表示時（state.isFirestore === false）や firestoreId 不在時は何も出さない。
+// 「作業開始」ボタンと「AI作業プロンプト」コピーUI（Firestore 由来タスクのみ）。
+// Done タスクには作業開始ボタンを出さない（プロンプトのコピーは可能）。
+function renderStartControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+  const isDone = task.completed || task.status === "Done";
+  const startButton = isDone
+    ? ""
+    : `<button type="button" class="button primary compact task-start-button" data-task-id="${escapeHtml(
+        task.firestoreId,
+      )}">作業開始</button>`;
+  const prompt = buildWorkPrompt(task);
+  return `
+    <div class="task-start">
+      ${startButton}
+      <details class="work-prompt">
+        <summary>AI作業プロンプト</summary>
+        <pre class="work-prompt-text">${escapeHtml(prompt)}</pre>
+        <div class="work-prompt-actions">
+          <button type="button" class="button compact work-prompt-copy">AI作業プロンプトをコピー</button>
+          <span class="work-prompt-hint" aria-live="polite"></span>
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+// taskCode と title から作業ブランチ名候補を生成する純粋関数（window/document 非依存）。
+// 例: TASK-023 + "Notification Cooldown" → feature/task-023-notification-cooldown
+//     TASK-023-R → feature/task-023-r-...
+// 日本語のみ等で title の ASCII slug が作れない場合は taskCode だけ（feature/task-023）。
+// taskCode も無ければ title slug、それも無ければ安全な短い代替（feature/task）。md-... は使わない。
+function buildBranchName(task) {
+  const codeSlug = slugifyAscii(task.taskCode || "");
+  const titleSlug = slugifyAscii(task.text || "");
+  let base;
+  if (codeSlug && titleSlug) {
+    base = `${codeSlug}-${titleSlug}`;
+  } else if (codeSlug) {
+    base = codeSlug;
+  } else if (titleSlug) {
+    base = titleSlug;
+  } else {
+    base = "task";
+  }
+  return `feature/${base}`;
+}
+
+// branchName で許可する prefix（最初の "/" の前の部分）。firestore-source.js 側と同一に保つ。
+// Codex指摘の許可リスト＋既存 parser(inferBranch) の ui/rust を合わせた和集合。
+// 既存運用の branchName（codex/... 等）を尊重しつつ、保護ブランチ系（main/develop/release）は弾く。
+const ALLOWED_BRANCH_PREFIXES = [
+  "feature",
+  "fix",
+  "hotfix",
+  "chore",
+  "docs",
+  "refactor",
+  "test",
+  "ci",
+  "build",
+  "perf",
+  "style",
+  "codex",
+  "ui",
+  "rust",
+];
+
+// branchName の形式検証（保存前の最終ガード。firestore-source.js 側と同一ルールを保つ）。
+// 許可: 許可 prefix で始まり、小文字英数字と . _ / - のみ。空白・大文字・非ASCII・制御文字は不可。
+// 危険な連続記号（.. / //）・末尾の / . / .lock・空コンポーネント・先頭が . や - のコンポーネントを弾く。
+function isValidBranchName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const name = value;
+  // 許可文字のみ（空白・大文字・非ASCII・制御文字をまとめて排除）。
+  if (!/^[a-z0-9._/-]+$/.test(name)) {
+    return false;
+  }
+  // prefix（最初の "/" の前）が許可リストにあり、かつその後ろが空でないこと。
+  const slashIndex = name.indexOf("/");
+  if (slashIndex <= 0 || !ALLOWED_BRANCH_PREFIXES.includes(name.slice(0, slashIndex))) {
+    return false;
+  }
+  if (name.slice(slashIndex + 1).length === 0) {
+    return false;
+  }
+  if (name.includes("..") || name.includes("//")) {
+    return false;
+  }
+  if (name.endsWith("/") || name.endsWith(".") || name.endsWith(".lock")) {
+    return false;
+  }
+  for (const component of name.split("/")) {
+    if (component === "" || component.startsWith(".") || component.startsWith("-")) {
+      return false;
+    }
+    if (component.endsWith(".lock")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 文字列を ASCII の安全な slug にする（小文字化・英数字以外は "-"・前後/連続 "-" 整理・長さ制限）。
+function slugifyAscii(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "");
+}
+
+// AI 作業用プロンプト（プレーンテキスト）を組み立てる純粋関数（window/document 非依存）。
+// 画面モデルでは branch=branchName。空項目は「未設定/なし」で安全に埋める。
+function buildWorkPrompt(task) {
+  const oneLine = (value, fallback) => {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text !== "" ? text : fallback;
+  };
+  const bulletList = (items, fallback) => {
+    const arr = Array.isArray(items)
+      ? items.filter((entry) => typeof entry === "string" && entry.trim() !== "")
+      : [];
+    return arr.length === 0 ? `- ${fallback}` : arr.map((entry) => `- ${entry.trim()}`).join("\n");
+  };
+
+  const category = oneLine(task.sectionTitle, "（未分類）");
+  const subcategory = oneLine(task.subsectionTitle, "なし");
+
+  return [
+    "以下のタスクを実装してください。",
+    "",
+    "Task code:",
+    oneLine(task.taskCode, "未設定"),
+    "",
+    "タスク名:",
+    oneLine(task.text, "（無題）"),
+    "",
+    "作業ブランチ:",
+    oneLine(task.branch, "未設定"),
+    "",
+    "Status:",
+    task.completed ? "Done" : oneLine(task.status, "Todo"),
+    "",
+    "Owner:",
+    oneLine(task.owner, "未設定"),
+    "",
+    "Priority:",
+    oneLine(task.priority, "未設定"),
+    "",
+    "Category:",
+    `${category} / ${subcategory}`,
+    "",
+    "Issue/PR:",
+    oneLine(task.issuePr, "未定"),
+    "",
+    "Completion rule:",
+    oneLine(task.completionRule, "未設定"),
+    "",
+    "Done when:",
+    bulletList(task.doneWhen, "未設定"),
+    "",
+    "Review points:",
+    bulletList(task.reviewPoints, "未設定"),
+    "",
+    "Notes:",
+    bulletList(task.notes, "なし"),
+    "",
+    "注意:",
+    "実装後はコミットせず、変更内容・検証結果・残る懸念を報告してください。",
+  ].join("\n");
+}
+
 function renderStatusControls(task) {
   if (!state.isFirestore || !task.firestoreId) {
     return "";

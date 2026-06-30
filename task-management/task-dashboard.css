@@ -651,6 +651,52 @@ details[open] > summary::after {
   font-size: 0.78rem;
 }
 
+/* 作業開始ボタン＋AI作業プロンプト（Firestore 表示時のみ）。既存UIに馴染む最小スタイル。 */
+.task-start {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.work-prompt {
+  font-size: 0.86rem;
+}
+
+.work-prompt > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.work-prompt-text {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 20rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.work-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.work-prompt-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 /* Firestore 表示時のみ出るタスク追加フォーム（POC段階3）。既存パネルに馴染む最小スタイル。 */
 .add-task-form {
   display: grid;
