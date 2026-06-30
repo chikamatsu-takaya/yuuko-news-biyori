@@ -1848,6 +1848,13 @@ function renderStatusControls(task) {
     return "";
   }
 
+  // Review状態では汎用Status変更UIを出さない。
+  // Review → Done は専用の「レビュー完了」ボタン（completeReviewTaskForPoc）経由に限定し、
+  // Review → Doing への巻き戻しもこの導線を残さないことで防ぐ。
+  if (task.status === "Review") {
+    return "";
+  }
+
   const current = task.completed ? "Done" : task.status || "Todo";
   const buttons = FIRESTORE_STATUS_OPTIONS.map((status) => {
     const isCurrent = status === current;
