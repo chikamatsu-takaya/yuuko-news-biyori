@@ -176,10 +176,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if ((task.owner || "").trim() === "" && !window.confirm("担当者(owner)が未設定です。このまま作業開始しますか？")) {
         return;
       }
-      // branchName 候補を生成し、確認・編集を求める（キャンセルで中止＝Firestore更新しない）。
+      // 既存の branchName があればそれを初期値にし、再生成値で上書きしないようにする。
+      // "未作成"（Markdown 由来の未設定プレースホルダー）は候補生成に回す。
+      const currentBranch = typeof task.branch === "string" ? task.branch.trim() : "";
+      const initialBranchName =
+        currentBranch !== "" && currentBranch !== "未作成" ? currentBranch : buildBranchName(task);
+      // branchName を確認・編集してもらう（キャンセルで中止＝Firestore更新しない）。
       const branchName = window.prompt(
         "作業ブランチ名を確認・編集してください（キャンセルで中止）",
-        buildBranchName(task),
+        initialBranchName,
       );
       if (branchName === null) {
         return; // キャンセル → 更新しない。
