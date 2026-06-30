@@ -37,6 +37,7 @@ import { parseMarkdownTasks, collectSectionTasks, isExcludedSection } from "./ma
 // archived/source/completed）は差分判定に使わない。
 const COMPARE_FIELDS = [
   "title",
+  "taskCode",
   "category",
   "subcategory",
   "priority",
@@ -53,19 +54,26 @@ const COMPARE_FIELDS = [
 ];
 
 // 空文字と null/未設定を同等扱いにするフィールド（§17 比較時の正規化）。
-// completionRule（完了判定）も空=未設定として既存ドキュメントと差分が出ないようにする。
-const NULLABLE_STRING_FIELDS = new Set(["subcategory", "branchName", "issuePr", "completionRule"]);
+// completionRule（完了判定）/ taskCode（識別コード）も空=未設定として既存ドキュメントと差分が出ないようにする。
+const NULLABLE_STRING_FIELDS = new Set([
+  "subcategory",
+  "branchName",
+  "issuePr",
+  "completionRule",
+  "taskCode",
+]);
 
 // update（PATCH）で書き込む（＝updateMask に載せる）フィールド。
 // 比較対象12フィールド＋ completed（status 連動）＋ updatedAt / updatedBy のみ。
 // createdAt / completedAt / archived / source は mask に含めず一切触れない。
 const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
 
-// 条件付き同期フィールド: completionRule / reviewPoints。
-// これらは主に Firestore（ダッシュボード）側で編集され、Firestore→Markdown で反映される。
+// 条件付き同期フィールド: completionRule / reviewPoints / taskCode。
 // Markdown 側に明示の値が無い（行なし・空）状態を「未設定（=消す意図なし）」とみなし、
 // 比較・updateMask から除外して Firestore の既存値を保持する（null/空での上書き事故を防ぐ）。
-const CONDITIONAL_SYNC_FIELDS = new Set(["completionRule", "reviewPoints"]);
+// taskCode は人間向け識別子で、Markdown を正として Firestore へ反映するが、
+// Markdown 未記載のときに既存 taskCode を消さないため条件付きにする。
+const CONDITIONAL_SYNC_FIELDS = new Set(["completionRule", "reviewPoints", "taskCode"]);
 
 // reviewPoints を「trim 後に非空の文字列だけ」へ正規化する（空白のみ・非文字列要素は除外）。
 // 比較・書き込み・同期対象判定で共通利用し、" " のような空白要素での上書き事故を防ぐ。
@@ -81,8 +89,9 @@ function cleanReviewPoints(value) {
 // - reviewPoints: trim 後に非空の文字列が1件以上ある配列（空白だけの箇条書きは未設定扱い）
 // 条件付きでないフィールドは常に同期対象（true）。
 function isSyncableField(field, desiredData) {
-  if (field === "completionRule") {
-    const value = desiredData?.completionRule;
+  if (field === "completionRule" || field === "taskCode") {
+    // 単一行文字列: trim 後に非空のときだけ同期対象（空/null は未設定＝既存値保持）。
+    const value = desiredData?.[field];
     return typeof value === "string" && value.trim() !== "";
   }
   if (field === "reviewPoints") {
@@ -800,9 +809,12 @@ function convertTask(task, order, idToTitle) {
   // completionRule（完了判定・自由文字列）/ reviewPoints（レビュー観点・配列）。
   // 未設定は空（""/[]）として持ち、既存ドキュメントと差分が出ないようにする。
   const completionRule = task.completionRule ? String(task.completionRule).trim() : "";
+  // taskCode（人間向け識別コード）。trim 後の非空文字列だけを値とし、空は null（未設定）。
+  const taskCode = task.taskCode ? String(task.taskCode).trim() : "";
 
   const data = {
     title,
+    taskCode: taskCode || null,
     category,
     subcategory,
     priority,
