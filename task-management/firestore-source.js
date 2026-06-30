@@ -412,6 +412,92 @@ export async function updateTaskOwnerAndNotesForPoc(taskId, owner, notes) {
 }
 
 /**
+ * branchName の形式検証（task-dashboard.js の同名関数と同一ルールを保つこと）。
+ * 許可: feature/ で始まり、小文字英数字と . _ / - のみ。空白・大文字・非ASCII・制御文字は不可。
+ * 危険な連続記号（.. / //）・末尾の / . / .lock・空コンポーネント・先頭が . や - のコンポーネントを弾く。
+ */
+function isValidBranchName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const name = value;
+  if (!name.startsWith("feature/")) {
+    return false;
+  }
+  if (!/^[a-z0-9._/-]+$/.test(name)) {
+    return false;
+  }
+  if (name.includes("..") || name.includes("//")) {
+    return false;
+  }
+  if (name.endsWith("/") || name.endsWith(".") || name.endsWith(".lock")) {
+    return false;
+  }
+  if (name.slice("feature/".length).length === 0) {
+    return false;
+  }
+  for (const component of name.split("/")) {
+    if (component === "" || component.startsWith(".") || component.startsWith("-")) {
+      return false;
+    }
+    if (component.endsWith(".lock")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 「作業開始」フロー用の最小書き込み（status を Doing にし、作業ブランチ名を保存する）。
+ * 更新するのは status / completed / branchName / updatedAt / updatedBy のみ。
+ * owner / notes / 本文 / archived / source / completedAt 等は触れない（owner は強制変更しない）。
+ *
+ * 安全対策（UIガードに加えた最終防御・競合対策）: runTransaction 内で現状を再読込し、
+ * document が存在し かつ DB現状が Done でないときだけ update する。
+ * 既に Done のタスクを誤って作業開始（Doing 化＋branchName 上書き）しないようにする。
+ *
+ * @param {string} taskId      Firestore のドキュメントID（task.firestoreId）
+ * @param {string} branchName  確定した作業ブランチ名（前後空白は trim・空は不可）
+ */
+export async function startTaskForPoc(taskId, branchName) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+  const safeBranch = typeof branchName === "string" ? branchName.trim() : "";
+  if (safeBranch === "") {
+    throw new Error("branchName が空です。");
+  }
+  // 形式検証（UIガードに加えた最終防御）。不正値は Firestore に保存しない。
+  if (!isValidBranchName(safeBranch)) {
+    throw new Error(`branchName の形式が不正です: ${safeBranch}`);
+  }
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    if (current.status === "Done" || current.completed === true) {
+      throw new Error("DB上でDoneになっているため、作業開始できません。");
+    }
+
+    transaction.update(targetRef, {
+      status: "Doing",
+      completed: false,
+      branchName: safeBranch,
+      updatedAt: serverTimestamp(),
+      updatedBy: "manual-poc",
+    });
+  });
+
+  console.log("[Firestore POC] started task", { taskId, branchName: safeBranch });
+}
+
+/**
  * tasks/{taskId} を物理削除する（タスクカードからの「DB追加タスク削除」専用POC）。
  * Markdown同期(md-import)の削除（markdown-sync-apply.js / REST）とは別系統。混在させない。
  * 削除できるのは画面から追加したDB上のタスク（source="manual-poc"）の未完了・非protected のみ。
