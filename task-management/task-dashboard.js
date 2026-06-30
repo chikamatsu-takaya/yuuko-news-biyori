@@ -223,6 +223,23 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // レビュー完了（Review → Done）。確認ダイアログでOKのときだけ Firestore 更新する。
+    const reviewDoneButton = event.target.closest(".review-done-button");
+    if (reviewDoneButton) {
+      if (reviewDoneButton.disabled) {
+        return;
+      }
+      const taskId = reviewDoneButton.dataset.taskId;
+      if (!taskId) {
+        return;
+      }
+      if (!window.confirm("このタスクをDoneにしますか？")) {
+        return; // キャンセル → 更新しない。
+      }
+      void applyReviewDone(taskId, reviewDoneButton);
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -510,6 +527,32 @@ async function applyTaskStart(taskId, branchName, button) {
   } catch (error) {
     console.error("[Firestore POC] failed to start task", error);
     setLoadState(`作業開始に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    button.disabled = false;
+  }
+}
+
+// 「レビュー完了」保存処理。Review のタスクを Done にする（status更新と同じ方針で再取得→再描画）。
+async function applyReviewDone(taskId, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  button.disabled = true;
+  setLoadState("レビュー完了（Done化）を保存しています...", false);
+
+  try {
+    const { completeReviewTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await completeReviewTaskForPoc(taskId);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("レビュー完了：Doneにしました。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to complete review task", error);
+    setLoadState(`Done化に失敗しました: ${error.message}`, true);
     // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
     button.disabled = false;
   }
@@ -1419,6 +1462,7 @@ function renderTaskCard(task) {
       ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStartControls(task)}
+      ${renderReviewDoneControls(task)}
       ${renderStatusControls(task)}
     </article>
   `;
@@ -1606,8 +1650,11 @@ function renderStartControls(task) {
   if (!state.isFirestore || !task.firestoreId) {
     return "";
   }
-  const isDone = task.completed || task.status === "Done";
-  const startButton = isDone
+  // Review は「レビュー完了（Done）」だけに進める段階なので作業開始ボタンは出さない。
+  // Done も出さない。Doing は既存方針どおり（branchName 再確認・再編集用途）表示維持。
+  const hideStartButton =
+    task.completed || task.status === "Done" || task.status === "Review";
+  const startButton = hideStartButton
     ? ""
     : `<button type="button" class="button primary compact task-start-button" data-task-id="${escapeHtml(
         task.firestoreId,
@@ -1624,6 +1671,25 @@ function renderStartControls(task) {
           <span class="work-prompt-hint" aria-live="polite"></span>
         </div>
       </details>
+    </div>
+  `;
+}
+
+// 「レビュー完了（Doneにする）」ボタン（Firestore 由来・status==="Review" のタスクのみ）。
+// 手動確認が必要として Review に回ったタスクを、確認後に Done へ進める補助ボタン。
+// Todo / Doing / Done や Markdown 通常表示には出さない（Done への再表示も防ぐ）。
+function renderReviewDoneControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+  if (task.completed || task.status !== "Review") {
+    return "";
+  }
+  return `
+    <div class="review-done">
+      <button type="button" class="button primary compact review-done-button" data-task-id="${escapeHtml(
+        task.firestoreId,
+      )}">レビュー完了（Doneにする）</button>
     </div>
   `;
 }
@@ -1779,6 +1845,13 @@ function buildWorkPrompt(task) {
 
 function renderStatusControls(task) {
   if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+
+  // Review状態では汎用Status変更UIを出さない。
+  // Review → Done は専用の「レビュー完了」ボタン（completeReviewTaskForPoc）経由に限定し、
+  // Review → Doing への巻き戻しもこの導線を残さないことで防ぐ。
+  if (task.status === "Review") {
     return "";
   }
 
