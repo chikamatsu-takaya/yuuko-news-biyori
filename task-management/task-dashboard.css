@@ -605,6 +605,37 @@ details[open] > summary::after {
   color: var(--text);
 }
 
+/* branchName のコピーボタン（Branch セル内・横幅を圧迫しない小型）。値だけをコピーする。 */
+.branch-value {
+  word-break: break-all;
+}
+
+.branch-copy-button {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 7px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--blue);
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.branch-copy-button:hover {
+  border-color: var(--blue);
+}
+
+.branch-copy-hint {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
 .task-notes {
   margin-top: 10px;
   color: var(--muted);

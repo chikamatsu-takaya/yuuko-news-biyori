@@ -137,6 +137,23 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // branchName のコピー（read-only。DB更新・API呼び出しなし）。値だけをコピーする。
+    const branchCopyButton = event.target.closest(".branch-copy-button");
+    if (branchCopyButton) {
+      const branch = branchCopyButton.dataset.branch || "";
+      const li = branchCopyButton.closest("li");
+      const hint = li ? li.querySelector(".branch-copy-hint") : null;
+      const valueEl = li ? li.querySelector(".branch-value") : null;
+      if (branch) {
+        void writeTextToClipboard(branch, hint, () => {
+          if (valueEl) {
+            selectPreText(valueEl);
+          }
+        });
+      }
+      return;
+    }
+
     // レビュー時の確認観点のコピー（read-only。DB更新・API呼び出しなし）。
     const copyButton = event.target.closest(".review-checklist-copy");
     if (copyButton) {
@@ -396,7 +413,13 @@ async function handleAddTaskSubmit(form) {
 // レビュー観点・AI作業プロンプトの両方で使う。
 // navigator.clipboard が使えない/失敗する場合は、<pre> を範囲選択して手動コピーを促す。
 async function copyPreToClipboard(pre, hint) {
-  const text = pre.textContent ?? "";
+  await writeTextToClipboard(pre.textContent ?? "", hint, () => selectPreText(pre));
+}
+
+// 文字列をクリップボードへ書き込む共通処理（read-only）。
+// レビュー観点・AI作業プロンプト・branchName のコピーで共用する。
+// navigator.clipboard が使えない/失敗する場合は onFallback（範囲選択など）を呼び、手動コピーを促す。
+async function writeTextToClipboard(text, hint, onFallback) {
   const setHint = (message) => {
     if (hint) {
       hint.textContent = message;
@@ -410,8 +433,9 @@ async function copyPreToClipboard(pre, hint) {
     }
     throw new Error("clipboard API 非対応");
   } catch {
-    // フォールバック: テキストを範囲選択し、手動コピー（Ctrl + C）を促す。
-    selectPreText(pre);
+    if (typeof onFallback === "function") {
+      onFallback();
+    }
     setHint("自動コピーに失敗しました。選択範囲を Ctrl + C で手動コピーしてください。");
   }
 }
@@ -1379,7 +1403,7 @@ function renderTaskCard(task) {
         <li><strong>Priority:</strong> ${renderInline(task.priority || "未定")}</li>
         <li><strong>Status:</strong> ${renderInline(task.status || "Todo")}</li>
         <li><strong>Owner:</strong> ${renderInline(task.owner || "未定")}</li>
-        <li><strong>Branch:</strong> ${renderInline(task.branch || "未定")}</li>
+        ${renderBranchMeta(task)}
         <li><strong>Issue/PR:</strong> ${renderInline(task.issuePr || "未定")}</li>
         <li><strong>Completion rule:</strong> ${renderInline(task.completionRule || "未設定")}</li>
         <li><strong>Line:</strong> ${task.line}</li>
@@ -1413,6 +1437,23 @@ function renderTaskCodeBadge(task) {
     return "";
   }
   return `<span class="task-code-badge">${escapeHtml(code)}</span>`;
+}
+
+// Branch 表示の <li>。有効な branchName のときだけ、値の横にコピーボタンを出す。
+// コピー対象はラベルではなく branchName の値そのもの（data-branch に保持）。
+// 空 / 未作成 / 未設定 / 未定 のような未設定相当はコピーボタンを出さない。
+function renderBranchMeta(task) {
+  const branch = typeof task.branch === "string" ? task.branch.trim() : "";
+  const display = branch || "未定";
+  const copyable = branch !== "" && !["未作成", "未設定", "未定"].includes(branch);
+  const copyUi = copyable
+    ? `<button type="button" class="branch-copy-button" data-branch="${escapeHtml(
+        branch,
+      )}" title="ブランチ名をコピー" aria-label="ブランチ名をコピー">コピー</button><span class="branch-copy-hint" aria-live="polite"></span>`
+    : "";
+  return `<li><strong>Branch:</strong> <span class="branch-value">${renderInline(
+    display,
+  )}</span>${copyUi}</li>`;
 }
 
 function renderSourceBadge(task) {
