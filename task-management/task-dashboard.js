@@ -19,6 +19,8 @@ const TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"];
 const state = {
   data: null,
   showCompleted: false,
+  // taskCode 等のクライアント側検索文字列（DB再取得はしない・取得済みデータを絞り込む）。
+  searchQuery: "",
   // ?source=firestore で読み込んだときだけ true。status 更新UIの表示可否に使う。
   isFirestore: false,
 };
@@ -68,6 +70,9 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCategoryProgress();
     renderTaskTree();
   });
+  // taskCode 等の検索欄を動的生成し、操作群（すべて開く/閉じる・完了済み表示）の先頭に置く。
+  // 検索は取得済みデータをクライアント側で絞り込むだけ（DBへは問い合わせない）。
+  setupSearchInput();
   // status 更新ボタン・担当/メモ編集ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
@@ -165,6 +170,37 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   void loadDashboard();
 });
+
+// index.html を変更せずに検索欄を差し込む。Markdown / Firestore どちらのビューでも使える。
+// 入力のたびに renderTaskTree() で取得済みデータを絞り込むだけ（DB再取得はしない）。
+function setupSearchInput() {
+  const actions = document.querySelector("#taskListSection .task-actions");
+  if (!actions || actions.querySelector("#taskSearchInput")) {
+    return;
+  }
+  const wrap = document.createElement("label");
+  wrap.className = "task-search";
+
+  const labelText = document.createElement("span");
+  labelText.className = "task-search-label";
+  labelText.textContent = "検索";
+
+  const input = document.createElement("input");
+  input.type = "search";
+  input.id = "taskSearchInput";
+  input.autocomplete = "off";
+  input.placeholder = "TASK-023 / タスク名 / 担当 など";
+  input.addEventListener("input", (event) => {
+    state.searchQuery = event.target.value;
+    renderTaskTree();
+  });
+
+  wrap.appendChild(labelText);
+  wrap.appendChild(input);
+  // 操作群の先頭（すべて開く/閉じる・完了済み表示の前）に置く。
+  actions.insertBefore(wrap, actions.firstChild);
+  elements.searchInput = input;
+}
 
 // index.html を変更せずにタスク追加フォームを差し込む（段階3の最小書き込みPOC）。
 // 生成は1度だけで、表示/非表示は state.isFirestore に応じて renderDashboard 側で切り替える。
@@ -802,6 +838,8 @@ function createTask({ text, completed, line, section, subsection }) {
     owner: inferOwner(text),
     branch: inferBranch(text),
     issuePr: inferIssuePr(text),
+    // 人間向けの識別コード（例: TASK-023）。Markdown 未記載なら空のまま壊さない。
+    taskCode: "",
     // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
     // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
     completionRule: "",
@@ -823,13 +861,14 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
+    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
   );
   if (!match) {
     return null;
   }
 
   const keyMap = {
+    "task code": "taskCode",
     priority: "priority",
     status: "status",
     owner: "owner",
@@ -839,6 +878,7 @@ function parseTaskAttribute(text) {
     "done when": "doneWhen",
     "review points": "reviewPoints",
     notes: "notes",
+    タスクコード: "taskCode",
     担当: "owner",
     ブランチ: "branch",
     完了判定: "completionRule",
@@ -1086,7 +1126,8 @@ function renderQualityList(tasks) {
 
 function renderCategoryProgress() {
   const rows = state.data.sections
-    .filter(shouldRenderSection)
+    // 進捗は検索条件に依存させない（カテゴリ全体の進捗を固定表示する）。
+    .filter(shouldRenderSectionForProgress)
     .map((section) => {
       const tasks = collectSectionTasks(section);
       const summary = summarizeTasks(tasks);
@@ -1192,7 +1233,19 @@ function renderSubsectionDetails(subsection) {
   `;
 }
 
+// タスク一覧（renderTaskTree）用のセクション表示判定。検索条件と完了フィルタを反映する。
+// 表示可能なタスクが1件以上あるときだけ表示する（検索なし時は従来挙動と等価）。
 function shouldRenderSection(section) {
+  if (section.excluded) {
+    return false;
+  }
+  return collectSectionTasks(section).some(shouldRenderTaskCard);
+}
+
+// カテゴリ進捗（renderCategoryProgress）用のセクション表示判定。検索条件には依存しない。
+// 進捗はカテゴリ全体を示すため、検索でカテゴリの出現有無や進捗率が変わらないようにする。
+// 完了フィルタ（完了済みを表示）には従来どおり連動する。
+function shouldRenderSectionForProgress(section) {
   if (section.excluded) {
     return false;
   }
@@ -1201,12 +1254,31 @@ function shouldRenderSection(section) {
 }
 
 function shouldRenderSubsection(subsection) {
-  const summary = summarizeTasks(subsection.tasks);
-  return summary.total > 0 && (state.showCompleted || summary.progress < 100);
+  return subsection.tasks.some(shouldRenderTaskCard);
 }
 
 function shouldRenderTaskCard(task) {
-  return state.showCompleted || !task.completed;
+  // 完了済み表示チェックと検索条件を AND で組み合わせる。
+  return (state.showCompleted || !task.completed) && taskMatchesSearch(task);
+}
+
+// 取得済みタスクをクライアント側で絞り込む（DBへは問い合わせない）。
+// - taskCode: 前方一致（"TASK-023" で TASK-023 / TASK-023-R / TASK-023-R1 をまとめて表示）
+// - title / owner / status / branch(=branchName) / issuePr: 部分一致
+// いずれも大文字小文字を無視。空クエリは全件一致。
+function taskMatchesSearch(task) {
+  const query = state.searchQuery.trim().toLowerCase();
+  if (query === "") {
+    return true;
+  }
+  const code = typeof task.taskCode === "string" ? task.taskCode.toLowerCase() : "";
+  if (code !== "" && code.startsWith(query)) {
+    return true;
+  }
+  const partialFields = [task.text, task.owner, task.status, task.branch, task.issuePr];
+  return partialFields.some(
+    (value) => typeof value === "string" && value.toLowerCase().includes(query),
+  );
 }
 
 function renderTaskCard(task) {
@@ -1214,7 +1286,7 @@ function renderTaskCard(task) {
   return `
     <article class="task-card ${task.completed ? "is-complete" : ""}">
       <div class="task-title-row">
-        <p class="task-title">${renderInline(task.text)}</p>
+        <p class="task-title">${renderTaskCodeBadge(task)}${renderInline(task.text)}</p>
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
       ${renderSourceBadge(task)}
@@ -1246,6 +1318,17 @@ function renderTaskCard(task) {
 // Markdown 通常表示（state.isFirestore === false）や sourceBadge 不在時は何も出さない。
 // ?source=firestore で読み込んだときだけ意味があるため、通常URLのMarkdown表示は変更しない。
 // badge.label / badge.sourceText は外部由来 source を含みうるため必ずエスケープして埋め込む。
+// 人間向けの識別コード（taskCode）をタスク名の前にバッジ表示する。
+// 未設定（空）の場合はバッジを出さない（既存UIを崩さない）。
+// FirestoreドキュメントID（md-...）は分かりにくいため主表示には使わない。
+function renderTaskCodeBadge(task) {
+  const code = typeof task.taskCode === "string" ? task.taskCode.trim() : "";
+  if (code === "") {
+    return "";
+  }
+  return `<span class="task-code-badge">${escapeHtml(code)}</span>`;
+}
+
 function renderSourceBadge(task) {
   if (!state.isFirestore || !task.sourceBadge) {
     return "";
