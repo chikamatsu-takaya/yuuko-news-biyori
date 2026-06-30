@@ -812,7 +812,8 @@ function convertTask(task, order, idToTitle) {
     issuePr: issuePr || null,
     completionRule: completionRule || null,
     doneWhen: Array.isArray(task.doneWhen) ? task.doneWhen.map(String) : [],
-    reviewPoints: Array.isArray(task.reviewPoints) ? task.reviewPoints.map(String) : [],
+    // reviewPoints は新規作成時も空白だけ・非文字列要素を除外し trim して保存する（[" "] → []）。
+    reviewPoints: cleanReviewPoints(task.reviewPoints),
     notes: Array.isArray(task.notes) ? task.notes.map(String) : [],
     order,
     sourceLine: typeof task.line === "number" ? task.line : null,

@@ -306,7 +306,10 @@ export function computeSync(originalContent, firestoreTasks) {
   for (const [index, text] of lineEdits) {
     newLines[index] = text;
   }
-  blockSplices.sort((a, b) => b.start - a.start);
+  // 同一 start に複数挿入がある場合（例: Completion rule と Review points を同時新規挿入）、
+  // order が小さいものほど最終的に上に来るようにする。挿入は「後に適用したものが上」へ入るため、
+  // 同一 start では order 降順に並べて適用する（order 大→先に適用＝下、order 小→後で適用＝上）。
+  blockSplices.sort((a, b) => b.start - a.start || (b.order ?? 0) - (a.order ?? 0));
   for (const splice of blockSplices) {
     newLines.splice(splice.start, splice.deleteCount, ...splice.newLines);
   }
@@ -409,9 +412,9 @@ function reflectTaskIntoBlock(block, data, lines) {
 
   // --- 複数行属性（Done when / Review points / Notes）---
   // Firestore はスキーマレスのため、欠損・型不一致・空配列・不正要素で既存 Markdown を消さない。
-  // reviewPoints（レビュー観点）は doneWhen/notes と同じ配列保護（属性行風/チェックボックス風も排除）。
   reflectBlockAttr(block, "doneWhen", data, lines, splices, fields, warnings, "Done when");
-  reflectBlockAttr(block, "reviewPoints", data, lines, splices, fields, warnings, "Review points");
+  // reviewPoints は completionRule と同様、ブロックが無く有効値があれば「挿入」する。
+  reflectReviewPoints(block, data, lines, splices, fields, warnings);
   reflectBlockAttr(block, "notes", data, lines, splices, fields, warnings, "Notes");
 
   return { lineEdits, splices, warnings, fields, kind };
@@ -667,6 +670,97 @@ function reflectBlockAttr(block, key, data, lines, splices, fields, warnings, la
     title: block.title,
     message: `Firestore の ${key} が不正（${check.reason}）のため、既存 Markdown の「${label}」を保護し変更しません。`,
   });
+}
+
+/**
+ * reviewPoints を反映する。reflectBlockAttr と違い、Markdown 側に Review points ブロックが
+ * 無く有効値があれば「挿入」する（completionRule の挿入対応と同じ考え方）。
+ * - 既存ブロックあり: 従来どおり reflectBlockAttr に委譲（更新・保護・warning）。
+ * - 既存ブロックなし:
+ *   - null/undefined/[]/空白だけ → no-op（消す意図なし）。
+ *   - 非配列/改行/属性行風/チェックボックス行風/非文字列要素 → 挿入せず warning。
+ *   - trim 後に非空の文字列が1件以上 → その値で Review points ブロックを安全な位置に挿入。
+ */
+function reflectReviewPoints(block, data, lines, splices, fields, warnings) {
+  if (block.longAttrs.reviewPoints) {
+    // 既存ブロックあり → 従来どおり（更新／不正値は保護して warning）。
+    reflectBlockAttr(block, "reviewPoints", data, lines, splices, fields, warnings, "Review points");
+    return;
+  }
+
+  const raw = Object.prototype.hasOwnProperty.call(data, "reviewPoints") ? data.reviewPoints : undefined;
+  if (raw === undefined || raw === null) {
+    return; // 未設定 → no-op。
+  }
+  if (!Array.isArray(raw)) {
+    warnReviewPointsInsert(block, warnings, "not-array");
+    return;
+  }
+  if (raw.length === 0) {
+    return; // 空配列 → no-op。
+  }
+  // 不正要素（非文字列 / 改行 / 属性行風 / チェックボックス行風）があれば挿入せず warning。
+  // 空白だけの要素は「無視」であって不正ではない（後段で除外する）。
+  const hasInvalid = raw.some((el) => {
+    if (typeof el !== "string") return true;
+    if (el.trim() === "") return false;
+    return hasLineBreak(el) || isAttributeLikeText(el) || isCheckboxLikeText(el);
+  });
+  if (hasInvalid) {
+    warnReviewPointsInsert(block, warnings, "invalid-element");
+    return;
+  }
+  // 有効値（trim 後に非空の文字列）だけ抽出。
+  const cleaned = raw.filter((el) => typeof el === "string" && el.trim() !== "").map((el) => el.trim());
+  if (cleaned.length === 0) {
+    return; // 全要素が空白 → no-op。
+  }
+
+  // 安全な位置へ Review points ブロックを挿入する。
+  const insertAt = reviewPointsInsertIndex(block);
+  const indentWs = attrIndent(block, lines);
+  const childIndentWs = `${indentWs}  `;
+  const newLines = [
+    `${indentWs}- Review points:`,
+    ...cleaned.map((value) => `${childIndentWs}- ${value}`),
+  ];
+  // order=1: 同一 start に Completion rule(order 既定0) の新規挿入があるとき、
+  // Review points がその「後ろ（下）」に来るようにする（Completion rule → Review points の順）。
+  splices.push({ start: insertAt, deleteCount: 0, newLines, order: 1 });
+  fields.push({ field: "reviewPoints", before: null, after: cleaned });
+}
+
+function warnReviewPointsInsert(block, warnings, reason) {
+  warnings.push({
+    type: "unsafe-reviewPoints",
+    id: block.id,
+    title: block.title,
+    message: `Firestore の reviewPoints が不正（${reason}）のため、Review points ブロックを挿入しません。`,
+  });
+}
+
+/**
+ * Review points ブロックの挿入位置（元の lines のインデックス）を決める。
+ * 優先: Done when ブロックの後 → Notes ブロックの前 → Completion rule 行の後
+ *       → 最後の単一行属性の後 → チェックボックス行の直後。
+ */
+function reviewPointsInsertIndex(block) {
+  const dw = block.longAttrs.doneWhen;
+  if (dw) {
+    return dw.labelLine + dw.childCount + 1; // Done when の最終子行の直後。
+  }
+  const notes = block.longAttrs.notes;
+  if (notes) {
+    return notes.labelLine; // Notes ラベルの直前。
+  }
+  if (block.attrs.completionRule) {
+    return block.attrs.completionRule.line + 1;
+  }
+  const attrLines = Object.values(block.attrs).map((a) => a.line);
+  if (attrLines.length > 0) {
+    return Math.max(...attrLines) + 1;
+  }
+  return block.checkboxLine + 1;
 }
 
 /**
