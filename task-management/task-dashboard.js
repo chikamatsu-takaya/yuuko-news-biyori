@@ -240,6 +240,40 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Doing → Review（レビューに回す）。確認ダイアログでOKのときだけ Firestore 更新する。
+    const doingToReviewButton = event.target.closest(".doing-to-review-button");
+    if (doingToReviewButton) {
+      if (doingToReviewButton.disabled) {
+        return;
+      }
+      const taskId = doingToReviewButton.dataset.taskId;
+      if (!taskId) {
+        return;
+      }
+      if (!window.confirm("このタスクをReviewに回しますか？")) {
+        return; // キャンセル → 更新しない。
+      }
+      void applyDoingToReview(taskId, doingToReviewButton);
+      return;
+    }
+
+    // Doing → Done（問題なしでDone）。確認ダイアログでOKのときだけ Firestore 更新する。
+    const doingToDoneButton = event.target.closest(".doing-to-done-button");
+    if (doingToDoneButton) {
+      if (doingToDoneButton.disabled) {
+        return;
+      }
+      const taskId = doingToDoneButton.dataset.taskId;
+      if (!taskId) {
+        return;
+      }
+      if (!window.confirm("このタスクを問題なしとしてDoneにしますか？")) {
+        return; // キャンセル → 更新しない。
+      }
+      void applyDoingToDone(taskId, doingToDoneButton);
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -552,6 +586,58 @@ async function applyReviewDone(taskId, button) {
     setLoadState("レビュー完了：Doneにしました。", false);
   } catch (error) {
     console.error("[Firestore POC] failed to complete review task", error);
+    setLoadState(`Done化に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    button.disabled = false;
+  }
+}
+
+// 「レビューに回す」保存処理（Doing → Review）。status更新と同じ方針で再取得→再描画する。
+async function applyDoingToReview(taskId, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  button.disabled = true;
+  setLoadState("レビューに回しています（Review化）...", false);
+
+  try {
+    const { sendDoingTaskToReviewForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await sendDoingTaskToReviewForPoc(taskId);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("レビューに回しました（Review）。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to send doing task to review", error);
+    setLoadState(`Review化に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
+    button.disabled = false;
+  }
+}
+
+// 「問題なしでDone」保存処理（Doing → Done）。status更新と同じ方針で再取得→再描画する。
+async function applyDoingToDone(taskId, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  button.disabled = true;
+  setLoadState("問題なしとしてDoneにしています...", false);
+
+  try {
+    const { completeDoingTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await completeDoingTaskForPoc(taskId);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("問題なしでDoneにしました。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to complete doing task", error);
     setLoadState(`Done化に失敗しました: ${error.message}`, true);
     // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
     button.disabled = false;
@@ -1462,6 +1548,7 @@ function renderTaskCard(task) {
       ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStartControls(task)}
+      ${renderDoingTransitionControls(task)}
       ${renderReviewDoneControls(task)}
       ${renderStatusControls(task)}
     </article>
@@ -1690,6 +1777,25 @@ function renderReviewDoneControls(task) {
       <button type="button" class="button primary compact review-done-button" data-task-id="${escapeHtml(
         task.firestoreId,
       )}">レビュー完了（Doneにする）</button>
+    </div>
+  `;
+}
+
+// Doing タスクの手動遷移ボタン（Firestore 由来・status==="Doing" のタスクのみ）。
+// 自動化前の開発・確認用補助: AIレビュー結果に応じた「Review送り」「問題なしでDone」を手動で行う。
+// Todo / Review / Done や Markdown 通常表示には出さない（completed のときも出さない）。
+function renderDoingTransitionControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+  if (task.completed || task.status !== "Doing") {
+    return "";
+  }
+  const taskId = escapeHtml(task.firestoreId);
+  return `
+    <div class="doing-transition">
+      <button type="button" class="button compact doing-to-review-button" data-task-id="${taskId}">レビューに回す</button>
+      <button type="button" class="button primary compact doing-to-done-button" data-task-id="${taskId}">問題なしでDone</button>
     </div>
   `;
 }
