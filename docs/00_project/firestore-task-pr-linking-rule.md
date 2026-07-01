@@ -83,6 +83,29 @@
 
 ---
 
+## 紐づけキーと突き合わせキーは別軸（重要）
+「PR ↔ Firestore タスクの紐づけ」と「Firestore ↔ `developタスクチェックリスト.md` の突き合わせ」は **目的も使うキーも異なる別軸** である。将来自動化する際に、両者を同一キーで扱えると誤解しないよう明記する。
+
+### PR と Firestore タスクの紐づけ
+- PR と Firestore タスクを結びつけるときは、`branchName` / `taskCode` / `issuePr` を使う（本ドキュメントの「紐づけ方針」で定義したとおり）。
+- これらは **PR ↔ Firestore タスク** を対応づけるための情報である。
+
+### Firestore と Markdown タスクの突き合わせ
+- Firestore と `developタスクチェックリスト.md` の **既存タスクを突き合わせる同期処理では、`branchName` / `taskCode` / `issuePr` を主キーとして使わない**。
+- 現在の Firestore → Markdown 同期処理（`task-management/sync-firestore-to-markdown.mjs`）では、Markdown 由来タスクの対応付けに **`category + subcategory + title` から生成する決定的 ID** を使用する。
+- したがって、`title` / `category` / `subcategory` を変更すると、Firestore と Markdown の対応関係が変わる可能性がある（決定的 ID がずれるため）。
+- 対応先が特定できない場合は warning となり、`safeAutoMerge` は false になって手動確認へ回る（誤って別タスクへ反映されない安全設計）。
+- `branchName` / `taskCode` / `issuePr` は **PR と Firestore タスクを結びつけるための情報** であり、**Markdown 同期の主キーではない**。
+
+### 用途別に使うキーの整理
+| 用途 | 主に使う情報 |
+|---|---|
+| PRとFirestoreタスクの紐づけ | `branchName` / `taskCode` / `issuePr` |
+| FirestoreとMarkdownタスクの突き合わせ | `category + subcategory + title` 由来の決定的ID |
+| Git上の表示・確認 | `Branch:` / `Issue/PR:` / `Status:` |
+
+---
+
 ## PR 本文テンプレート例
 中期方針として、PR 本文に以下を必須記載する。`taskCode` と `branchName` は自動更新の紐づけキーになるため、正確に書く。
 
