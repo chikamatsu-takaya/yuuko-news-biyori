@@ -592,12 +592,34 @@ async function applyReviewDone(taskId, button) {
   }
 }
 
+// 押下ボタンが属するタスクカード内の操作要素をまとめて無効化する（Doing専用遷移中の競合防止）。
+// Firestore応答待ちの間に同カードの汎用Status変更/作業開始/owner保存等が走ると、
+// 専用遷移とdocが競合して結果が上書きされ得るため、同一カード内だけを一時停止する。
+// 戻り値: このとき新たに無効化した要素の配列（失敗時に呼び出し側で元へ戻すために使う）。
+function disableCardControlsFor(button) {
+  const card = button.closest(".task-card");
+  if (!card) {
+    // カードが特定できない場合でも、最低限押下ボタンだけは無効化しておく。
+    button.disabled = true;
+    return [button];
+  }
+  const disabled = [];
+  card.querySelectorAll("button, select, input, textarea").forEach((control) => {
+    if (!control.disabled) {
+      control.disabled = true;
+      disabled.push(control);
+    }
+  });
+  return disabled;
+}
+
 // 「レビューに回す」保存処理（Doing → Review）。status更新と同じ方針で再取得→再描画する。
 async function applyDoingToReview(taskId, button) {
   if (!state.isFirestore) {
     return;
   }
-  button.disabled = true;
+  // 専用遷移中は同一カード内の他操作も止める（競合防止）。失敗時に戻すため戻り値を保持する。
+  const disabledControls = disableCardControlsFor(button);
   setLoadState("レビューに回しています（Review化）...", false);
 
   try {
@@ -613,8 +635,10 @@ async function applyDoingToReview(taskId, button) {
   } catch (error) {
     console.error("[Firestore POC] failed to send doing task to review", error);
     setLoadState(`Review化に失敗しました: ${error.message}`, true);
-    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
-    button.disabled = false;
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
+    });
   }
 }
 
@@ -623,7 +647,8 @@ async function applyDoingToDone(taskId, button) {
   if (!state.isFirestore) {
     return;
   }
-  button.disabled = true;
+  // 専用遷移中は同一カード内の他操作も止める（競合防止）。失敗時に戻すため戻り値を保持する。
+  const disabledControls = disableCardControlsFor(button);
   setLoadState("問題なしとしてDoneにしています...", false);
 
   try {
@@ -639,8 +664,10 @@ async function applyDoingToDone(taskId, button) {
   } catch (error) {
     console.error("[Firestore POC] failed to complete doing task", error);
     setLoadState(`Done化に失敗しました: ${error.message}`, true);
-    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
-    button.disabled = false;
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
+    });
   }
 }
 
