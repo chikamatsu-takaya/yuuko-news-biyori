@@ -510,12 +510,10 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
     return;
   }
 
-  // 二重押下を避けるため、同じタスクの操作ボタンを一旦すべて無効化する。
-  const controls = button.closest(".status-update");
-  const buttons = controls ? controls.querySelectorAll("button") : [button];
-  buttons.forEach((element) => {
-    element.disabled = true;
-  });
+  // 二重押下・同一カード内の競合を避けるため、同じ .task-card 内の操作要素を一旦すべて無効化する。
+  // 汎用Status更新待ちの間に同カードの専用遷移ボタン（レビューに回す/問題なしでDone）等が走ると、
+  // 同一docに複数更新が重なり結果が上書きされ得るため、専用遷移側と同じ範囲で止める。
+  const disabledControls = disableCardControlsFor(button);
   setLoadState(`Firestoreのstatusを更新しています（${nextStatus}）...`, false);
 
   try {
@@ -532,9 +530,9 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
   } catch (error) {
     console.error("[Firestore POC] failed to update status", error);
     setLoadState(`Firestoreのstatus更新に失敗しました: ${error.message}`, true);
-    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
-    buttons.forEach((element) => {
-      element.disabled = false;
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
     });
   }
 }
