@@ -695,6 +695,15 @@ details[open] > summary::after {
   margin-top: 10px;
 }
 
+/* Doing タスクの手動遷移ボタン（レビューに回す / 問題なしでDone）。Doing のタスクにのみ表示する。 */
+/* 横幅を壊さないよう wrap 可能な横並びにする。 */
+.doing-transition {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .work-prompt {
   font-size: 0.86rem;
 }

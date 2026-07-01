@@ -240,6 +240,40 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Doing → Review（レビューに回す）。確認ダイアログでOKのときだけ Firestore 更新する。
+    const doingToReviewButton = event.target.closest(".doing-to-review-button");
+    if (doingToReviewButton) {
+      if (doingToReviewButton.disabled) {
+        return;
+      }
+      const taskId = doingToReviewButton.dataset.taskId;
+      if (!taskId) {
+        return;
+      }
+      if (!window.confirm("このタスクをReviewに回しますか？")) {
+        return; // キャンセル → 更新しない。
+      }
+      void applyDoingToReview(taskId, doingToReviewButton);
+      return;
+    }
+
+    // Doing → Done（問題なしでDone）。確認ダイアログでOKのときだけ Firestore 更新する。
+    const doingToDoneButton = event.target.closest(".doing-to-done-button");
+    if (doingToDoneButton) {
+      if (doingToDoneButton.disabled) {
+        return;
+      }
+      const taskId = doingToDoneButton.dataset.taskId;
+      if (!taskId) {
+        return;
+      }
+      if (!window.confirm("このタスクを問題なしとしてDoneにしますか？")) {
+        return; // キャンセル → 更新しない。
+      }
+      void applyDoingToDone(taskId, doingToDoneButton);
+      return;
+    }
+
     const button = event.target.closest(".status-update-button");
     if (!button || button.disabled) {
       return;
@@ -476,12 +510,10 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
     return;
   }
 
-  // 二重押下を避けるため、同じタスクの操作ボタンを一旦すべて無効化する。
-  const controls = button.closest(".status-update");
-  const buttons = controls ? controls.querySelectorAll("button") : [button];
-  buttons.forEach((element) => {
-    element.disabled = true;
-  });
+  // 二重押下・同一カード内の競合を避けるため、同じ .task-card 内の操作要素を一旦すべて無効化する。
+  // 汎用Status更新待ちの間に同カードの専用遷移ボタン（レビューに回す/問題なしでDone）等が走ると、
+  // 同一docに複数更新が重なり結果が上書きされ得るため、専用遷移側と同じ範囲で止める。
+  const disabledControls = disableCardControlsFor(button);
   setLoadState(`Firestoreのstatusを更新しています（${nextStatus}）...`, false);
 
   try {
@@ -498,9 +530,9 @@ async function applyFirestoreStatusUpdate(taskId, nextStatus, button) {
   } catch (error) {
     console.error("[Firestore POC] failed to update status", error);
     setLoadState(`Firestoreのstatus更新に失敗しました: ${error.message}`, true);
-    // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
-    buttons.forEach((element) => {
-      element.disabled = false;
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
     });
   }
 }
@@ -555,6 +587,85 @@ async function applyReviewDone(taskId, button) {
     setLoadState(`Done化に失敗しました: ${error.message}`, true);
     // 失敗時は再描画しないため、無効化したボタンを戻して再操作できるようにする。
     button.disabled = false;
+  }
+}
+
+// 押下ボタンが属するタスクカード内の操作要素をまとめて無効化する（Doing専用遷移中の競合防止）。
+// Firestore応答待ちの間に同カードの汎用Status変更/作業開始/owner保存等が走ると、
+// 専用遷移とdocが競合して結果が上書きされ得るため、同一カード内だけを一時停止する。
+// 戻り値: このとき新たに無効化した要素の配列（失敗時に呼び出し側で元へ戻すために使う）。
+function disableCardControlsFor(button) {
+  const card = button.closest(".task-card");
+  if (!card) {
+    // カードが特定できない場合でも、最低限押下ボタンだけは無効化しておく。
+    button.disabled = true;
+    return [button];
+  }
+  const disabled = [];
+  card.querySelectorAll("button, select, input, textarea").forEach((control) => {
+    if (!control.disabled) {
+      control.disabled = true;
+      disabled.push(control);
+    }
+  });
+  return disabled;
+}
+
+// 「レビューに回す」保存処理（Doing → Review）。status更新と同じ方針で再取得→再描画する。
+async function applyDoingToReview(taskId, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  // 専用遷移中は同一カード内の他操作も止める（競合防止）。失敗時に戻すため戻り値を保持する。
+  const disabledControls = disableCardControlsFor(button);
+  setLoadState("レビューに回しています（Review化）...", false);
+
+  try {
+    const { sendDoingTaskToReviewForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await sendDoingTaskToReviewForPoc(taskId);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("レビューに回しました（Review）。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to send doing task to review", error);
+    setLoadState(`Review化に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
+// 「問題なしでDone」保存処理（Doing → Done）。status更新と同じ方針で再取得→再描画する。
+async function applyDoingToDone(taskId, button) {
+  if (!state.isFirestore) {
+    return;
+  }
+  // 専用遷移中は同一カード内の他操作も止める（競合防止）。失敗時に戻すため戻り値を保持する。
+  const disabledControls = disableCardControlsFor(button);
+  setLoadState("問題なしとしてDoneにしています...", false);
+
+  try {
+    const { completeDoingTaskForPoc, fetchFirestoreTasksForPoc, firestoreToBoardModel } =
+      await import("./firestore-source.js");
+    await completeDoingTaskForPoc(taskId);
+
+    const docs = await fetchFirestoreTasksForPoc();
+    state.data = firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState("問題なしでDoneにしました。", false);
+  } catch (error) {
+    console.error("[Firestore POC] failed to complete doing task", error);
+    setLoadState(`Done化に失敗しました: ${error.message}`, true);
+    // 失敗時は再描画しないため、無効化した同一カード内操作を元へ戻して再操作できるようにする。
+    disabledControls.forEach((control) => {
+      control.disabled = false;
+    });
   }
 }
 
@@ -1462,6 +1573,7 @@ function renderTaskCard(task) {
       ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStartControls(task)}
+      ${renderDoingTransitionControls(task)}
       ${renderReviewDoneControls(task)}
       ${renderStatusControls(task)}
     </article>
@@ -1694,6 +1806,25 @@ function renderReviewDoneControls(task) {
   `;
 }
 
+// Doing タスクの手動遷移ボタン（Firestore 由来・status==="Doing" のタスクのみ）。
+// 自動化前の開発・確認用補助: AIレビュー結果に応じた「Review送り」「問題なしでDone」を手動で行う。
+// Todo / Review / Done や Markdown 通常表示には出さない（completed のときも出さない）。
+function renderDoingTransitionControls(task) {
+  if (!state.isFirestore || !task.firestoreId) {
+    return "";
+  }
+  if (task.completed || task.status !== "Doing") {
+    return "";
+  }
+  const taskId = escapeHtml(task.firestoreId);
+  return `
+    <div class="doing-transition">
+      <button type="button" class="button compact doing-to-review-button" data-task-id="${taskId}">レビューに回す</button>
+      <button type="button" class="button primary compact doing-to-done-button" data-task-id="${taskId}">問題なしでDone</button>
+    </div>
+  `;
+}
+
 // taskCode と title から作業ブランチ名候補を生成する純粋関数（window/document 非依存）。
 // 例: TASK-023 + "Notification Cooldown" → feature/task-023-notification-cooldown
 //     TASK-023-R → feature/task-023-r-...
@@ -1856,7 +1987,16 @@ function renderStatusControls(task) {
   }
 
   const current = task.completed ? "Done" : task.status || "Todo";
-  const buttons = FIRESTORE_STATUS_OPTIONS.map((status) => {
+
+  // Doing 状態では、Review / Done への遷移は専用ボタン（transitionDoingTaskForPoc 経由）に限定する。
+  // 汎用Status変更UI自体は作業中断・差し戻し（Doing → Todo 等）用に残すが、
+  // Review / Done ボタンだけは除外して専用処理の安全条件を迂回させない。
+  const statusOptions =
+    task.status === "Doing"
+      ? FIRESTORE_STATUS_OPTIONS.filter((status) => status !== "Review" && status !== "Done")
+      : FIRESTORE_STATUS_OPTIONS;
+
+  const buttons = statusOptions.map((status) => {
     const isCurrent = status === current;
     return `
       <button

@@ -360,6 +360,13 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
         "Review のタスクは汎用Status変更できません。Done にするには「レビュー完了」を使ってください。",
       );
     }
+    // Doing → Review / Done は専用ボタン（sendDoingTaskToReviewForPoc / completeDoingTaskForPoc）
+    // 経由に限定する。stale 画面に残った汎用Status変更ボタンからの迂回を DB現状で最終防御する。
+    if (current.status === "Doing" && (nextStatus === "Review" || nextStatus === "Done")) {
+      throw new Error(
+        "Doing から Review / Done への変更は専用ボタン（レビューに回す / 問題なしでDone）から行ってください。",
+      );
+    }
 
     transaction.update(targetRef, {
       status: nextStatus,
@@ -589,6 +596,85 @@ export async function completeReviewTaskForPoc(taskId) {
   });
 
   console.log("[Firestore POC] completed review task", { taskId });
+}
+
+/**
+ * Doing のタスクを次状態（Review / Done）へ手動遷移させる内部共通処理（開発・確認用の補助）。
+ * 「レビューに回す」「問題なしでDone」の2ボタンから呼ばれる。外部公開は用途別ラッパー側で行う。
+ *
+ * 更新するのは status / completed / completedAt / updatedAt / updatedBy のみ。
+ * owner / branchName / taskCode / title / category / subcategory / priority / issuePr /
+ * doneWhen / completionRule / reviewPoints / notes / archived / createdAt / source は一切触れない。
+ *
+ * 安全対策（UIガードに加えた最終防御・競合対策）: runTransaction 内で現状を再読込し、
+ * 以下をすべて満たすときだけ遷移する。満たさない場合は理由付き Error を投げる（更新しない）:
+ * - document が存在する
+ * - DB現状 status === "Doing"（Doing 以外からの遷移は不可）
+ * - DB現状 completed !== true（完了済みは遷移させない）
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ * @param {"Review"|"Done"} nextStatus  遷移先 status
+ */
+async function transitionDoingTaskForPoc(taskId, nextStatus) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+  // この内部関数は Doing からの Review / Done 限定。想定外の遷移先は書き込まない。
+  if (nextStatus !== "Review" && nextStatus !== "Done") {
+    throw new Error(`未対応の遷移先です: ${nextStatus}`);
+  }
+
+  const db = getFirestore(getApp());
+  const targetRef = firestoreDoc(db, "tasks", taskId);
+
+  const isDone = nextStatus === "Done";
+  // 現状読込→Doingチェック→更新を transaction で原子化する。
+  // 別タブ・別ユーザーが先に状態を変えても、古い画面の Doing 用ボタンからの誤更新を弾く。
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(targetRef);
+    if (!snapshot.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const current = snapshot.data() ?? {};
+    if (current.completed === true) {
+      throw new Error("既に完了済みのため、変更しません。");
+    }
+    if (current.status !== "Doing") {
+      throw new Error("status が Doing ではないため、この操作はできません。");
+    }
+
+    transaction.update(targetRef, {
+      status: nextStatus,
+      completed: isDone,
+      completedAt: isDone ? serverTimestamp() : null,
+      updatedAt: serverTimestamp(),
+      updatedBy: "manual-poc",
+    });
+  });
+
+  console.log("[Firestore POC] transitioned doing task", { taskId, nextStatus });
+}
+
+/**
+ * 「レビューに回す」用（Doing → Review）。手動確認が必要なタスクをレビュー段階へ送る補助POC。
+ * status="Review" / completed=false / completedAt=null にする。条件・対象外フィールドは
+ * transitionDoingTaskForPoc を参照（DB現状 Doing かつ未完了のときだけ更新）。
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ */
+export async function sendDoingTaskToReviewForPoc(taskId) {
+  await transitionDoingTaskForPoc(taskId, "Review");
+}
+
+/**
+ * 「問題なしでDone」用（Doing → Done）。レビュー不要と判断したタスクを直接 Done にする補助POC。
+ * status="Done" / completed=true / completedAt=serverTimestamp() にする。条件・対象外フィールドは
+ * transitionDoingTaskForPoc を参照（DB現状 Doing かつ未完了のときだけ更新）。
+ *
+ * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
+ */
+export async function completeDoingTaskForPoc(taskId) {
+  await transitionDoingTaskForPoc(taskId, "Done");
 }
 
 /**
