@@ -360,6 +360,13 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
         "Review のタスクは汎用Status変更できません。Done にするには「レビュー完了」を使ってください。",
       );
     }
+    // Doing → Review / Done は専用ボタン（sendDoingTaskToReviewForPoc / completeDoingTaskForPoc）
+    // 経由に限定する。stale 画面に残った汎用Status変更ボタンからの迂回を DB現状で最終防御する。
+    if (current.status === "Doing" && (nextStatus === "Review" || nextStatus === "Done")) {
+      throw new Error(
+        "Doing から Review / Done への変更は専用ボタン（レビューに回す / 問題なしでDone）から行ってください。",
+      );
+    }
 
     transaction.update(targetRef, {
       status: nextStatus,
