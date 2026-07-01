@@ -1962,7 +1962,16 @@ function renderStatusControls(task) {
   }
 
   const current = task.completed ? "Done" : task.status || "Todo";
-  const buttons = FIRESTORE_STATUS_OPTIONS.map((status) => {
+
+  // Doing 状態では、Review / Done への遷移は専用ボタン（transitionDoingTaskForPoc 経由）に限定する。
+  // 汎用Status変更UI自体は作業中断・差し戻し（Doing → Todo 等）用に残すが、
+  // Review / Done ボタンだけは除外して専用処理の安全条件を迂回させない。
+  const statusOptions =
+    task.status === "Doing"
+      ? FIRESTORE_STATUS_OPTIONS.filter((status) => status !== "Review" && status !== "Done")
+      : FIRESTORE_STATUS_OPTIONS;
+
+  const buttons = statusOptions.map((status) => {
     const isCurrent = status === current;
     return `
       <button
