@@ -84,7 +84,7 @@ diff に以下の領域を含む場合、Review シグナルとして扱う。**
 
 | ID | 変更内容 | パス例 |
 |---|---|---|
-| R1 | UI 変更あり | `src/**`, `task-management/**/*.js`（表示・画面系）, `**/*.css` |
+| R1 | UI 変更あり | `app/**`, `components/**`, `components/screens/**/*.tsx`, `styles/**`, `**/*.css`, `task-management/**/*.js`（表示・画面系）, `src/**`（将来追加分） |
 | R2 | Firestore 読み書き変更あり | `task-management/firestore-source.js` ほか読み書き処理 |
 | R3 | 状態遷移ロジック変更あり | status/遷移を扱う関数（例: `updateTaskStatusForPoc` / `transitionDoingTaskForPoc` など） |
 | R4 | Tauri command 変更あり | `src-tauri/**/commands/**`, command 登録箇所 |
