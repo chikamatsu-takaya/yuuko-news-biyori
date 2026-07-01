@@ -1,6 +1,17 @@
 ## 目的 / 背景
 - このPRで解決したいことを1〜3行で記載
 
+## Firestoreタスク連携
+<!-- 詳細は docs/00_project/firestore-task-pr-linking-rule.md を参照 -->
+- taskCode:
+- branchName:
+- issuePr:
+
+- [ ] Firestore task.branchName と PR head branch が一致している
+- [ ] PR本文に taskCode / branchName を記載した
+- [ ] Firestore task.issuePr にPR番号を記録した
+- [ ] 複数タスクPRの場合は、自動更新対象外・手動確認扱いとして本文に記載した
+
 ## PR向き先
 - [ ] 作業ブランチから `develop` へのPRである
 - [ ] 例外的に `main` へ出す場合は理由を本文に記載した
