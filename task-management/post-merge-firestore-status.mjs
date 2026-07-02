@@ -56,7 +56,31 @@ async function main() {
   const report = buildReport(pr, result);
 
   // apply（--apply 指定時のみ・done_candidate のみ書き込み）。既定は report-only。
-  report.apply = await computeApply(report, firestoreTasks, options);
+  // 例外（再読込失敗・認証失敗・ネットワーク例外等）が起きても main().catch へ落とさず、
+  // 失敗情報を report.apply に入れてから JSON artifact / Step Summary を必ず出力する。
+  let applyFailed = false;
+  try {
+    report.apply = await computeApply(report, firestoreTasks, options);
+    // PATCH 応答が 4xx/5xx（例: 412 競合 / 403 権限）なら失敗扱い（httpStatus/reason は保持済み）。
+    if (
+      report.apply?.attempted &&
+      report.apply?.applied === false &&
+      typeof report.apply?.httpStatus === "number" &&
+      report.apply.httpStatus >= 400
+    ) {
+      applyFailed = true;
+    }
+  } catch (error) {
+    applyFailed = true;
+    // error.message には access_token / private_key 等の秘密情報を含めない設計（非ログ方針）。
+    report.apply = {
+      attempted: true,
+      mode: options.apply ? "apply" : "report-only",
+      applied: false,
+      error: true,
+      reason: `apply処理で例外が発生しました: ${error.message}`,
+    };
+  }
 
   if (options.out) {
     writeJsonOutput(resolve(REPO_ROOT, options.out), report);
@@ -70,6 +94,12 @@ async function main() {
     writeFileSync(resolve(REPO_ROOT, options.summaryOut), summaryMd, "utf8");
   } else if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, summaryMd, "utf8");
+  }
+
+  // 出力後にのみ workflow を失敗扱いにする（apply 例外 or 4xx/5xx の PATCH 応答時）。
+  // JSON artifact / Step Summary は上で必ず出力済み。
+  if (applyFailed) {
+    process.exitCode = 1;
   }
 }
 
