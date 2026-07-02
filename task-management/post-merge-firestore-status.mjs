@@ -94,6 +94,16 @@ function parseArgs(argv) {
 function loadPrContext(prJsonAbs) {
   const raw = readFileSync(prJsonAbs, "utf8");
   const data = JSON.parse(raw);
+  const files = Array.isArray(data.files) ? data.files.map((f) => String(f)) : [];
+  // ファイル一覧の不完全さ（gh の100件上限など）を PR context から引き継ぐ。
+  // 明示指定が無い旧形式では未切り詰め扱い（取得=期待）にフォールバックする。
+  const fileCountFetched = Number.isFinite(Number(data.fileCountFetched))
+    ? Number(data.fileCountFetched)
+    : files.length;
+  const fileCountExpected = Number.isFinite(Number(data.fileCountExpected))
+    ? Number(data.fileCountExpected)
+    : fileCountFetched;
+  const filesTruncated = data.filesTruncated === true || fileCountExpected > fileCountFetched;
   return {
     number: Number(data.number),
     headRef: strOrEmpty(data.headRef),
@@ -101,7 +111,10 @@ function loadPrContext(prJsonAbs) {
     merged: data.merged === true,
     author: strOrEmpty(data.author),
     body: strOrEmpty(data.body),
-    files: Array.isArray(data.files) ? data.files.map((f) => String(f)) : [],
+    files,
+    fileCountExpected,
+    fileCountFetched,
+    filesTruncated,
   };
 }
 
@@ -262,13 +275,29 @@ function noChange(matchedTaskId, matchedBy, candidates, reasonIds, summary) {
  */
 function decide(pr, bodyReviewReasonIds) {
   const fileEval = evaluateFilePaths(pr.files);
-  const reviewReasonIds = uniq([...bodyReviewReasonIds, ...fileEval.reasonIds]);
+  // X2: 変更ファイル一覧が不完全（取得件数 < 実際の変更件数）。全件を見られないため Done に倒さない。
+  const truncated = pr.filesTruncated === true;
+  const reviewReasonIds = uniq([
+    ...bodyReviewReasonIds,
+    ...fileEval.reasonIds,
+    ...(truncated ? ["X2"] : []),
+  ]);
 
-  if (bodyReviewReasonIds.length > 0 || fileEval.hasReviewSignal) {
+  if (truncated || bodyReviewReasonIds.length > 0 || fileEval.hasReviewSignal) {
+    let summary;
+    if (bodyReviewReasonIds.length > 0 || fileEval.hasReviewSignal) {
+      summary = "目視・動作・仕様確認が必要なシグナル（PR本文または変更ファイル）を含みます。";
+      if (truncated) {
+        summary += ` また、変更ファイル一覧が不完全な可能性（取得 ${pr.fileCountFetched} 件 < 実際 ${pr.fileCountExpected} 件）があります。`;
+      }
+    } else {
+      // Done/Review シグナルは無いが、ファイル一覧が不完全なため安全側で Review にする。
+      summary = `変更ファイル一覧が不完全な可能性（取得 ${pr.fileCountFetched} 件 < 実際 ${pr.fileCountExpected} 件）のため、全件を確認できず安全側で Review にします。`;
+    }
     return {
       result: "review_candidate",
       reasonIds: reviewReasonIds,
-      summary: "目視・動作・仕様確認が必要なシグナル（PR本文または変更ファイル）を含みます。",
+      summary,
       nextAction: "human_review",
     };
   }
@@ -468,6 +497,9 @@ function buildReport(pr, result) {
       merged: pr.merged,
       author: pr.author,
       changedFileCount: pr.files.length,
+      fileCountExpected: pr.fileCountExpected,
+      fileCountFetched: pr.fileCountFetched,
+      filesTruncated: pr.filesTruncated,
     },
     match: result.match,
     decision: result.decision,
@@ -494,10 +526,13 @@ function buildSummaryMarkdown(report) {
     `- nextAction: ${d.nextAction}`,
     `- proposedStatus（未適用）: ${report.wouldUpdate.proposedStatus ?? "（なし）"}`,
     `- 概要: ${d.summary}`,
-    "",
-    "> フェーズ0のため Firestore は変更していません。",
-    "",
   ];
+  if (report.pr.filesTruncated) {
+    lines.push(
+      `- ⚠️ 変更ファイル一覧が不完全な可能性: 取得 ${report.pr.fileCountFetched} 件 / 実際 ${report.pr.fileCountExpected} 件（全件確認できないため安全側で Review 候補にしています）`,
+    );
+  }
+  lines.push("", "> フェーズ0のため Firestore は変更していません。", "");
   return lines.join("\n");
 }
 

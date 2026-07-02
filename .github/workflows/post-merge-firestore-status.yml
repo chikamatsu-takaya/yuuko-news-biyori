@@ -94,7 +94,12 @@ jobs:
           BODY: ${{ github.event.pull_request.body }}
         run: |
           mkdir -p task-management/tmp
-          FILES_JSON="$(gh pr view "$PR_NUMBER" --json files --jq '[.files[].path]')"
+          # gh pr view --json files は CLI 側で先頭100件までに制限される可能性がある。
+          # 実際の変更件数（changedFiles）も取得し、取得件数との差でファイル一覧の不完全さを検知する。
+          PR_JSON="$(gh pr view "$PR_NUMBER" --json files,changedFiles)"
+          FILES_JSON="$(printf '%s' "$PR_JSON" | jq '[.files[].path]')"
+          EXPECTED="$(printf '%s' "$PR_JSON" | jq '.changedFiles')"
+          FETCHED="$(printf '%s' "$FILES_JSON" | jq 'length')"
           jq -n \
             --argjson number "$PR_NUMBER" \
             --arg headRef "$HEAD_REF" \
@@ -103,7 +108,15 @@ jobs:
             --arg author "$AUTHOR" \
             --arg body "${BODY:-}" \
             --argjson files "$FILES_JSON" \
-            '{number:$number, headRef:$headRef, baseRef:$baseRef, merged:$merged, author:$author, body:$body, files:$files}' \
+            --argjson fileCountExpected "$EXPECTED" \
+            --argjson fileCountFetched "$FETCHED" \
+            '{
+              number:$number, headRef:$headRef, baseRef:$baseRef, merged:$merged, author:$author, body:$body,
+              files:$files,
+              fileCountExpected:$fileCountExpected,
+              fileCountFetched:$fileCountFetched,
+              filesTruncated: ($fileCountExpected > $fileCountFetched)
+            }' \
             > "$PR_CONTEXT"
 
       # 6. 判定（report-only）: 対象特定 → Done/Review/no_change 判定 → JSON と Step Summary へ出力。
