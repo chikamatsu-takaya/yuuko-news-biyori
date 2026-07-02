@@ -57,11 +57,14 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 
 ## 安全対策（楽観ロック）
 - apply 直前に **対象ドキュメントを再読込**し、最新の `status` / `completed` / `archived` と `updateTime` を取得する。
+- **フェーズ1aでは、再読込後の現状 `status` が `"Doing"` の場合のみ自動 Done 化する。**
+  `Todo` / `Next` / `Blocked` / `Review` / 空 / 不明な status は自動 Done 化しない（安全側）。
 - 再読込時点で次のいずれかなら **書き込まない**:
   - ドキュメントが存在しない
   - `archived === true`
   - `completed === true`
   - `status === "Done"`
+  - `status` が `"Doing"` 以外（上記の Todo / Next / Blocked / Review / 空 / 不明を含む）
 - 書き込みは **`currentDocument.updateTime` による楽観ロック付き PATCH** で行う。再読込〜書き込みの間に別の更新（手動編集など）が入って `updateTime` が変わっていた場合、書き込みは失敗し、上書き事故を防ぐ。
 
 ---
@@ -103,6 +106,7 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 - **既定は report-only。Firestore は変更されない。**
 - `POST_MERGE_ENABLE_APPLY` が **厳密に `"true"`** のときだけ `--apply` が付く。
 - apply 対象は **done_candidate のみ**。`no_change` / `review_candidate` は書き込まない。
+- 自動 Done 化は **再読込後の現状 status が Doing のときだけ**（Todo / Next / Blocked / Review / 空 / 不明は対象外）。
 - 更新は **5フィールドのみ**。owner / branchName / taskCode などは触らない。
 - **楽観ロック（`currentDocument.updateTime`）** で競合時は書き込まない。
 - 変数を `true` にする前に **関係者へ共有**する。

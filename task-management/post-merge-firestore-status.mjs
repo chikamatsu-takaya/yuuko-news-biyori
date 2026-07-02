@@ -685,7 +685,15 @@ function planDoneApply(fresh) {
   if (strOrEmpty(d.status) === "Done") {
     return { shouldWrite: false, reason: "再読込時に status=Done のため書き込みません。" };
   }
-  return { shouldWrite: true, reason: "done_candidate かつ再読込後も未完了のため Done へ更新します。" };
+  // フェーズ1aの自動applyでは、現状 status が "Doing" のときだけ Done 化を許可する。
+  // Todo / Next / Blocked / Review / 空status / 不明status は自動 Done 化しない（安全側）。
+  if (strOrEmpty(d.status) !== "Doing") {
+    return {
+      shouldWrite: false,
+      reason: `再読込時の status=${strOrEmpty(d.status) || "（空）"} は自動Done化対象外です（フェーズ1aは現状 Doing のみ自動Done化）。`,
+    };
+  }
+  return { shouldWrite: true, reason: "done_candidate かつ再読込後も現状 Doing のため Done へ更新します。" };
 }
 
 // ---------------------------------------------------------------------------
