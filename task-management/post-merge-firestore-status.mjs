@@ -793,6 +793,11 @@ function applyClosingNote(a) {
   if (a.attempted && !a.applied) {
     return "> 書き込み条件未達／失敗のため Firestore は変更していません。";
   }
+  // --apply 有効だが判定が done_candidate 以外（no_change / review_candidate）で書き込み対象外のケース。
+  if (!a.attempted && a.mode === "apply") {
+    return "> apply指定済みだが done_candidate 対象外のため Firestore は変更していません。";
+  }
+  // --apply 未指定の純粋な report-only。
   return "> report-only のため Firestore は変更していません（--apply 未指定）。";
 }
 
