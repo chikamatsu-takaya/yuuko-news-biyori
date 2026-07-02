@@ -162,29 +162,43 @@ function evaluate(pr, firestoreTasks) {
   }
   const candidates = [...candidateMap.values()].map(toCandidateView);
 
-  // 一意に絞れるキー（ちょうど1件を指すもの）。
-  const resolving = keys.filter((k) => k.targets.length === 1);
-  const resolvedIds = new Set(resolving.map((k) => k.targets[0].id));
-
+  // 優先順に評価し、安全に一意特定できたときだけ matched にする。
+  // - どれかのキーで候補が複数（targets.length > 1）→ その時点で no_change（G7）。
+  //   後続キーで1件に絞れても、複数候補キーが存在した時点で採用しない。
+  // - 1件候補どうしが別タスクを指す（矛盾）→ no_change（G2）。
+  // - どのキーも 0件 → no_change（G1）。
   let matched = null;
   let matchedBy = null;
-  if (resolving.length > 0 && resolvedIds.size === 1) {
-    matched = resolving[0].targets[0]; // 優先順で最初に解決したキーを採用。
-    matchedBy = resolving[0].by;
+  for (const key of keys) {
+    if (key.targets.length > 1) {
+      return noChange(
+        null,
+        null,
+        candidates,
+        ["G7"],
+        `照合キー（${key.by}）で候補が複数あり一意に絞れないため、更新候補にしません（手動確認）。`,
+      );
+    }
+    if (key.targets.length === 1) {
+      const target = key.targets[0];
+      if (matched && matched.id !== target.id) {
+        return noChange(
+          null,
+          null,
+          candidates,
+          ["G2"],
+          "複数キーが別々のタスクを指しており矛盾するため、更新候補にしません。",
+        );
+      }
+      if (!matched) {
+        matched = target; // 優先順で最初に解決したキーを採用。
+        matchedBy = key.by;
+      }
+    }
   }
 
   if (!matched) {
-    // 0件 / 複数 / 矛盾を区別して no_change。
-    let reason = "G1";
-    let msg = "対応する Firestore タスクを特定できませんでした（0件）。";
-    if (resolving.length > 0 && resolvedIds.size > 1) {
-      reason = "G2";
-      msg = "複数キーが別々のタスクを指しており矛盾するため、更新候補にしません。";
-    } else if (keys.some((k) => k.targets.length > 1)) {
-      reason = "G7";
-      msg = "候補が複数あり一意に絞れないため、更新候補にしません（手動確認）。";
-    }
-    return noChange(null, null, candidates, [reason], msg);
+    return noChange(null, null, candidates, ["G1"], "対応する Firestore タスクを特定できませんでした（0件）。");
   }
 
   // --- タスク側ガード ---
@@ -197,11 +211,24 @@ function evaluate(pr, firestoreTasks) {
     return noChange(matched.id, matchedBy, candidates, ["G3"], "対象タスクは既に Done のため更新候補にしません。");
   }
 
-  // --- Done / Review 判定（変更ファイルパス中心の最小実装） ---
-  const decided = decideByFiles(pr.files);
+  // --- PR本文シグナルの評価（Done 判定より前・優先） ---
+  const bodySignals = detectBodyReviewSignals(pr.body);
+  // 本文で複数タスクPR（自動更新対象外・手動確認扱い）と示されていれば no_change に倒す。
+  if (bodySignals.multiTask) {
+    return noChange(
+      matched.id,
+      matchedBy,
+      candidates,
+      ["G7"],
+      "PR本文で複数タスクPR（自動更新対象外・手動確認扱い）と示されているため、更新候補にしません。",
+    );
+  }
+
+  // --- Done / Review 判定（本文Reviewシグナルを優先し、次に変更ファイルパス） ---
+  const decision = decide(pr, bodySignals.reviewReasonIds);
   return {
     match: { matchedTaskId: matched.id, matchedBy, candidateCount: candidates.length, candidates },
-    decision: decided.decision,
+    decision,
   };
 }
 
@@ -223,12 +250,50 @@ function noChange(matchedTaskId, matchedBy, candidates, reasonIds, summary) {
 }
 
 /**
- * 変更ファイルパスから Done / Review を判定する（フェーズ0の最小実装）。
- * - Review シグナル（UI/Firestore/Tauri/Rust/外部通信/セキュリティ）を1つでも含めば review_candidate。
- * - すべて Done 寄り（docs/md/PRテンプレ/README 等）かつ Review 非該当なら done_candidate。
- * - ファイル無し / 混在で判定不能なら review_candidate（安全側）。
+ * Done / Review を判定する（フェーズ0の最小実装）。
+ * 優先順:
+ * 1. PR本文の Review シグナル（R8〜R11相当）があれば review_candidate（docsのみ変更の Done より優先）。
+ * 2. 変更ファイルパスの Review シグナル（R1/R2/R5/R7）があれば review_candidate。
+ * 3. すべて Done 寄り（docs/md/PRテンプレ/README）かつ Review 非該当なら done_candidate。
+ * 4. 判定不能/混在なら review_candidate（安全側）。
+ *
+ * @param {object} pr  PR コンテキスト（body / files を参照）
+ * @param {string[]} bodyReviewReasonIds  本文由来の Review reasonId（呼び出し側で検出済み）
  */
-function decideByFiles(files) {
+function decide(pr, bodyReviewReasonIds) {
+  const fileEval = evaluateFilePaths(pr.files);
+  const reviewReasonIds = uniq([...bodyReviewReasonIds, ...fileEval.reasonIds]);
+
+  if (bodyReviewReasonIds.length > 0 || fileEval.hasReviewSignal) {
+    return {
+      result: "review_candidate",
+      reasonIds: reviewReasonIds,
+      summary: "目視・動作・仕様確認が必要なシグナル（PR本文または変更ファイル）を含みます。",
+      nextAction: "human_review",
+    };
+  }
+  if (fileEval.allDoneLike) {
+    return {
+      result: "done_candidate",
+      reasonIds: ["D3"],
+      summary: "docs / Markdown / テンプレ等のみの変更で、Review 条件（本文・ファイル）に該当しません。",
+      nextAction: "mark_done_candidate",
+    };
+  }
+  // 判定不能（ファイル無し or 混在）→ 安全側。
+  return {
+    result: "review_candidate",
+    reasonIds: ["X1"],
+    summary: "Done 条件だけで構成されていない/判定材料が不足のため、安全側で Review にします。",
+    nextAction: "human_review",
+  };
+}
+
+/**
+ * 変更ファイルパスから Review シグナルを評価する。
+ * 返却: { hasReviewSignal, reasonIds, allDoneLike }
+ */
+function evaluateFilePaths(files) {
   const reasonIds = [];
   const addReason = (id) => {
     if (!reasonIds.includes(id)) reasonIds.push(id);
@@ -276,35 +341,56 @@ function decideByFiles(files) {
     }
   }
 
-  if (hasReviewSignal) {
-    return {
-      decision: {
-        result: "review_candidate",
-        reasonIds,
-        summary: "目視・動作・仕様確認が必要な変更（UI/Firestore/Rust/外部通信/セキュリティ等）を含みます。",
-        nextAction: "human_review",
-      },
-    };
-  }
-  if (allDoneLike) {
-    return {
-      decision: {
-        result: "done_candidate",
-        reasonIds: ["D3"],
-        summary: "docs / Markdown / テンプレ等のみの変更で、Review 条件に該当しません。",
-        nextAction: "mark_done_candidate",
-      },
-    };
-  }
-  // 判定不能（ファイル無し or 混在）→ 安全側。
-  return {
-    decision: {
-      result: "review_candidate",
-      reasonIds: ["X1"],
-      summary: "Done 条件だけで構成されていない/判定材料が不足のため、安全側で Review にします。",
-      nextAction: "human_review",
-    },
+  return { hasReviewSignal, reasonIds, allDoneLike };
+}
+
+/**
+ * PR本文から Review 方向のシグナル（R8〜R11相当）と複数タスク宣言を検出する。
+ * テンプレの定型文で誤検出しないよう保守的に判定する（例: "あり・なし" は未選択として除外）。
+ * 返却: { reviewReasonIds: string[], multiTask: boolean }
+ */
+function detectBodyReviewSignals(body) {
+  const text = String(body ?? "");
+  const reviewReasonIds = [];
+  const add = (id) => {
+    if (!reviewReasonIds.includes(id)) reviewReasonIds.push(id);
   };
+
+  // R11: Tauri command / 外部通信先が「あり」。テンプレ既定の "あり・なし"（両方含む＝未選択）は除外。
+  if (labelIndicatesAri(text, "Tauri\\s*command") || labelIndicatesAri(text, "外部通信先")) {
+    add("R11");
+  }
+  // R9: 動作確認が未実施・未確認・不明。
+  if (/動作確認[^\n]{0,12}(未実施|未確認|不明|していない)/.test(text) || /動作未確認/.test(text)) {
+    add("R9");
+  }
+  // R8: 確認項目の不足・未記入。
+  if (/確認項目[^\n]{0,12}(不足|未記入|未記載|不十分)/.test(text)) {
+    add("R8");
+  }
+  // R10: 懸念・要レビュー・レビュー依頼・仕様判断（テンプレ定型の「判断に迷った箇所を記載」は拾わない書き方）。
+  if (/懸念点\s*[:：]?\s*あり/.test(text) || /要レビュー/.test(text) || /レビュー(してほしい|お願いします|依頼)/.test(text) || /仕様判断が必要/.test(text)) {
+    add("R10");
+  }
+
+  // 複数タスクPR（自動更新対象外・手動確認扱い）。チェック済み or 明示記載を保守的に検出する。
+  const multiTask =
+    /-\s*\[x\][^\n]*複数タスク/i.test(text) || /複数タスク[^\n]*(含む|またが|あり)/.test(text);
+
+  return { reviewReasonIds, multiTask };
+}
+
+/** ラベル行が「あり」を示すか。テンプレ既定の「あり・なし」（両方含む＝未選択）は false。 */
+function labelIndicatesAri(text, labelPattern) {
+  const re = new RegExp(`${labelPattern}[^\\n]*`, "i");
+  const m = text.match(re);
+  if (!m) return false;
+  const seg = m[0];
+  return /あり/.test(seg) && !/なし/.test(seg);
+}
+
+function uniq(arr) {
+  return [...new Set(arr)];
 }
 
 // ---------------------------------------------------------------------------
@@ -449,4 +535,4 @@ function strOrEmpty(value) {
 }
 
 // ALLOWED_STATUSES は将来のバリデーション拡張に備えて公開的に保持する（現状は参照のみ）。
-export { ALLOWED_STATUSES, evaluate, decideByFiles };
+export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals };
