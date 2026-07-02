@@ -175,6 +175,29 @@ function evaluate(pr, firestoreTasks) {
   }
   const candidates = [...candidateMap.values()].map(toCandidateView);
 
+  // 本文キーの記載ミス検出: 「未記載」と「記載済みだが Firestore で0件一致」を区別する。
+  // 記載済みで0件なら記載ミスの疑いとして no_change に倒す（head branch だけの一致を採用しない）。
+  const taskCodeBodyKey = keys.find((k) => k.by === "taskCodeBody");
+  if (body.taskCode && taskCodeBodyKey.targets.length === 0) {
+    return noChange(
+      null,
+      null,
+      candidates,
+      ["G2"],
+      "PR本文の taskCode が Firestore のどのタスクにも一致しません（記載ミスの疑い）。",
+    );
+  }
+  const branchNameBodyKey = keys.find((k) => k.by === "branchNameBody");
+  if (body.branchName && branchNameBodyKey.targets.length === 0) {
+    return noChange(
+      null,
+      null,
+      candidates,
+      ["G2"],
+      "PR本文の branchName が Firestore のどのタスクにも一致しません（記載ミスの疑い）。",
+    );
+  }
+
   // 優先順に評価し、安全に一意特定できたときだけ matched にする。
   // - どれかのキーで候補が複数（targets.length > 1）→ その時点で no_change（G7）。
   //   後続キーで1件に絞れても、複数候補キーが存在した時点で採用しない。
@@ -409,13 +432,19 @@ function detectBodyReviewSignals(body) {
   return { reviewReasonIds, multiTask };
 }
 
-/** ラベル行が「あり」を示すか。テンプレ既定の「あり・なし」（両方含む＝未選択）は false。 */
+/**
+ * ラベル（例: 確認項目の「Tauri commandの追加/変更」）に一致する行を「全て」確認し、
+ * どれか1行でも明示的に「あり」を示していれば true を返す。
+ * - テンプレ既定の「あり・なし」（両方含む＝未選択）は該当行として数えない。
+ * - 「非対象」節などに語だけ現れる行（"あり" を含まない）は該当しない。
+ * 最初の一致行だけを見ると、前半の別節に同じ語が先に出た場合に後段の確認項目行を
+ * 取りこぼすため、g フラグで全一致行を走査する。
+ */
 function labelIndicatesAri(text, labelPattern) {
-  const re = new RegExp(`${labelPattern}[^\\n]*`, "i");
-  const m = text.match(re);
-  if (!m) return false;
-  const seg = m[0];
-  return /あり/.test(seg) && !/なし/.test(seg);
+  const re = new RegExp(`${labelPattern}[^\\n]*`, "gi");
+  const segments = String(text).match(re);
+  if (!segments) return false;
+  return segments.some((seg) => /あり/.test(seg) && !/なし/.test(seg));
 }
 
 function uniq(arr) {
@@ -445,9 +474,11 @@ function matchByIssuePr(tasks, prNumber) {
 
 /** PR 本文から taskCode / branchName を取り出す（PRテンプレの「Firestoreタスク連携」節を想定）。 */
 function parseBodyFields(body) {
+  const branchName = stripBackticks(extractLabeledValue(body, "branchName"));
   return {
     taskCode: stripBackticks(extractLabeledValue(body, "taskCode")),
-    branchName: stripBackticks(extractLabeledValue(body, "branchName")),
+    // "未作成" はプレースホルダーのため未記載扱い（記載ミス判定の誤発火を避ける）。
+    branchName: branchName === "未作成" ? "" : branchName,
   };
 }
 
