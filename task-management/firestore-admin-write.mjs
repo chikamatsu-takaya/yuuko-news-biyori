@@ -219,6 +219,51 @@ export async function updateTaskFieldsWithServiceAccount({
   return { ok: response.ok, status: response.status, body };
 }
 
+/**
+ * apply 直前の再読込用: tasks/{taskId} を1件だけ読み、ガード判定に必要なフィールド
+ * （status / completed / archived）と updateTime（楽観ロック用）を返す（読み取り専用）。
+ * 存在しなければ exists:false。呼ばない限り通信は発生しない。
+ *
+ * @param {string} taskId
+ * @returns {Promise<{ exists: boolean, data: { status: string|null, completed: boolean, archived: boolean }, updateTime: string|null }>}
+ */
+export async function fetchTaskForApply(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+  const credentials = loadServiceAccount();
+  const projectId = credentials.project_id;
+  if (!projectId) {
+    throw new Error("サービスアカウント JSON に project_id がありません。");
+  }
+  const accessToken = await fetchAccessToken(credentials);
+  const url = `${FIRESTORE_BASE}/projects/${projectId}/databases/(default)/documents/tasks/${encodeURIComponent(
+    taskId,
+  )}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
+  });
+  if (response.status === 404) {
+    return { exists: false, data: { status: null, completed: false, archived: false }, updateTime: null };
+  }
+  if (!response.ok) {
+    const body = await safeReadText(response);
+    throw new Error(`再読込に失敗しました (HTTP ${response.status}). ${body}`);
+  }
+  const json = await response.json();
+  const fields = json.fields ?? {};
+  return {
+    exists: true,
+    data: {
+      status: fields.status?.stringValue ?? null,
+      completed: fields.completed?.booleanValue ?? false,
+      archived: fields.archived?.booleanValue ?? false,
+    },
+    updateTime: json.updateTime ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // REST 値変換（firestore-sync-source.mjs と同方針）
 // ---------------------------------------------------------------------------

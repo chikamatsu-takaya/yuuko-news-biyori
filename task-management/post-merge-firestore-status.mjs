@@ -55,6 +55,9 @@ async function main() {
   const result = evaluate(pr, firestoreTasks);
   const report = buildReport(pr, result);
 
+  // apply（--apply 指定時のみ・done_candidate のみ書き込み）。既定は report-only。
+  report.apply = await computeApply(report, firestoreTasks, options);
+
   if (options.out) {
     writeJsonOutput(resolve(REPO_ROOT, options.out), report);
     console.log(`レポートを書き出しました: ${options.out}`);
@@ -75,11 +78,12 @@ async function main() {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const options = { prJson: null, firestoreJson: null, out: null, summaryOut: null };
+  const options = { prJson: null, firestoreJson: null, out: null, summaryOut: null, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => argv[(i += 1)] ?? null;
-    if (arg === "--pr-json") options.prJson = next();
+    if (arg === "--apply") options.apply = true;
+    else if (arg === "--pr-json") options.prJson = next();
     else if (arg.startsWith("--pr-json=")) options.prJson = arg.slice("--pr-json=".length);
     else if (arg === "--firestore-json") options.firestoreJson = next();
     else if (arg.startsWith("--firestore-json=")) options.firestoreJson = arg.slice("--firestore-json=".length);
@@ -128,7 +132,8 @@ async function loadFirestoreTasks(options) {
     const raw = readFileSync(resolve(REPO_ROOT, options.firestoreJson), "utf8");
     const parsed = JSON.parse(raw);
     const docs = Array.isArray(parsed) ? parsed : parsed.documents ?? parsed.tasks ?? [];
-    return docs.map((doc) => ({ id: String(doc.id), data: doc.data ?? {} }));
+    // updateTime があれば保持する（offline dry-apply の楽観ロック値確認に使う。live 取得では未設定）。
+    return docs.map((doc) => ({ id: String(doc.id), data: doc.data ?? {}, updateTime: doc.updateTime ?? null }));
   }
   const { fetchFirestoreTasksWithServiceAccount } = await import("./firestore-admin-source.mjs");
   return fetchFirestoreTasksWithServiceAccount();
@@ -537,6 +542,123 @@ function toCandidateView(task) {
 }
 
 // ---------------------------------------------------------------------------
+// apply（フェーズ1a: done_candidate のみ・--apply 指定時のみ書き込み）
+// ---------------------------------------------------------------------------
+
+/**
+ * apply 情報を組み立てる。既定（--apply なし）は report-only で書き込みしない。
+ * no_change / review_candidate は絶対に書き込まない（done_candidate のみ apply へ進む）。
+ * 書き込みモジュールの import は applyPhase 内（done_candidate かつ --apply のとき）だけで行う。
+ */
+async function computeApply(report, firestoreTasks, options) {
+  if (!options.apply) {
+    return { attempted: false, mode: "report-only" };
+  }
+  const result = report.decision.result;
+  if (result !== "done_candidate") {
+    // no_change / review_candidate は書き込み対象外（安全側）。
+    return {
+      attempted: false,
+      mode: "apply",
+      reason: `result=${result} は書き込み対象外です（done_candidate のみ apply）。`,
+    };
+  }
+  if (!report.match.matchedTaskId) {
+    return { attempted: false, mode: "apply", reason: "対象タスクが特定できていないため apply しません。" };
+  }
+  return applyPhase(report, firestoreTasks, options);
+}
+
+/**
+ * done_candidate のタスクを Done へ更新する（apply 直前に再読込 → ガード → 楽観ロック付き PATCH）。
+ * - offline（--firestore-json）は dump を再読込に使い、実書き込みはしない（dry-apply シミュレート）。
+ * - live は SA 認証で単一ドキュメント再読込（updateTime 取得）→ 条件を満たせば PATCH。
+ * 更新フィールドは status / completed / completedAt / updatedAt / updatedBy のみ（buildDoneUpdatePayload）。
+ */
+async function applyPhase(report, firestoreTasks, options) {
+  const taskId = report.match.matchedTaskId;
+  // 書き込みモジュールは done_candidate かつ --apply のときだけ import する。
+  const writeMod = await import("./firestore-admin-write.mjs");
+
+  // apply 直前の再読込（updateTime を取得）。offline は dump、live は SA GET。
+  let fresh;
+  let simulated = false;
+  if (options.firestoreJson) {
+    simulated = true; // オフラインは実書き込みしない。
+    const found = firestoreTasks.find((t) => t.id === taskId);
+    fresh = found
+      ? { exists: true, data: found.data ?? {}, updateTime: found.updateTime ?? null }
+      : { exists: false, data: {}, updateTime: null };
+  } else {
+    fresh = await writeMod.fetchTaskForApply(taskId);
+  }
+
+  const currentUpdateTime = fresh.updateTime ?? null;
+  const plan = planDoneApply(fresh);
+  if (!plan.shouldWrite) {
+    return { attempted: true, mode: "apply", applied: false, simulated, reason: plan.reason, currentUpdateTime };
+  }
+
+  const payload = writeMod.buildDoneUpdatePayload(new Date().toISOString(), "post-merge-bot");
+  const record = {
+    updateMaskFields: payload.updateMaskFields,
+    proposed: payload.data,
+    currentUpdateTime,
+  };
+
+  if (simulated) {
+    return {
+      attempted: true,
+      mode: "apply",
+      applied: false,
+      simulated: true,
+      reason: "オフライン(dry-apply)のため書き込みません（実書き込みは live のみ）。",
+      ...record,
+    };
+  }
+
+  // live: 楽観ロック付き PATCH（updateTime 不一致なら 412 で書き込まれない）。
+  const res = await writeMod.updateTaskFieldsWithServiceAccount({
+    taskId,
+    data: payload.data,
+    updateMaskFields: payload.updateMaskFields,
+    currentUpdateTime,
+  });
+  return {
+    attempted: true,
+    mode: "apply",
+    applied: res.ok === true,
+    simulated: false,
+    httpStatus: res.status,
+    reason: res.ok
+      ? "Done へ更新しました。"
+      : `更新に失敗しました (HTTP ${res.status})。競合(412)や権限を確認してください。`,
+    ...record,
+  };
+}
+
+/**
+ * 再読込した現状（fresh）に対する Done 書き込み可否を判定する純粋関数（楽観ロックの前段ガード）。
+ * done_candidate であっても、再読込時点で不在 / archived / completed / status=Done なら書き込まない。
+ */
+function planDoneApply(fresh) {
+  if (!fresh || fresh.exists === false) {
+    return { shouldWrite: false, reason: "対象ドキュメントが存在しません（再読込時）。書き込みません。" };
+  }
+  const d = fresh.data ?? {};
+  if (d.archived === true) {
+    return { shouldWrite: false, reason: "再読込時に archived=true のため書き込みません。" };
+  }
+  if (d.completed === true) {
+    return { shouldWrite: false, reason: "再読込時に completed=true のため書き込みません。" };
+  }
+  if (strOrEmpty(d.status) === "Done") {
+    return { shouldWrite: false, reason: "再読込時に status=Done のため書き込みません。" };
+  }
+  return { shouldWrite: true, reason: "done_candidate かつ再読込後も未完了のため Done へ更新します。" };
+}
+
+// ---------------------------------------------------------------------------
 // 出力
 // ---------------------------------------------------------------------------
 
@@ -576,7 +698,7 @@ function buildSummaryMarkdown(report) {
   const d = report.decision;
   const m = report.match;
   const lines = [
-    "## PRマージ後 Firestore状態 判定（report-only）",
+    "## PRマージ後 Firestore状態 判定",
     "",
     `- PR: #${report.pr.number}`,
     `- head / base: \`${report.pr.headRef}\` / \`${report.pr.baseRef}\``,
@@ -593,16 +715,64 @@ function buildSummaryMarkdown(report) {
       `- ⚠️ 変更ファイル一覧が不完全な可能性: 取得 ${report.pr.fileCountFetched} 件 / 実際 ${report.pr.fileCountExpected} 件（全件確認できないため安全側で Review 候補にしています）`,
     );
   }
-  lines.push("", "> フェーズ0のため Firestore は変更していません。", "");
+
+  // apply セクション（既定は report-only。--apply かつ done_candidate のときだけ書き込みを試みる）。
+  const a = report.apply ?? { attempted: false, mode: "report-only" };
+  lines.push("", "### apply");
+  if (!a.attempted) {
+    lines.push(`- mode: ${a.mode ?? "report-only"}（書き込みなし）`);
+    if (a.reason) {
+      lines.push(`- 理由: ${a.reason}`);
+    }
+  } else {
+    const state = a.applied ? "実行(成功)" : a.simulated ? "シミュレート(未書き込み)" : "未実行";
+    lines.push("- mode: apply（done_candidate のみ）");
+    lines.push(`- 書き込み: ${state}`);
+    lines.push(`- 理由: ${a.reason ?? "（なし）"}`);
+    if (a.updateMaskFields) {
+      lines.push(`- updateMask: ${a.updateMaskFields.join(", ")}`);
+    }
+    if ("currentUpdateTime" in a) {
+      lines.push(`- currentDocument.updateTime: ${a.currentUpdateTime ?? "（なし）"}`);
+    }
+    if ("httpStatus" in a) {
+      lines.push(`- HTTP: ${a.httpStatus}`);
+    }
+  }
+
+  lines.push("", applyClosingNote(a), "");
   return lines.join("\n");
 }
 
+/** apply 状態に応じた末尾の一言（Firestore を変更したか否かを明示）。 */
+function applyClosingNote(a) {
+  if (a.attempted && a.applied) {
+    return "> Firestore を Done に更新しました。";
+  }
+  if (a.attempted && a.simulated) {
+    return "> オフライン(dry-apply)のため Firestore は変更していません。";
+  }
+  if (a.attempted && !a.applied) {
+    return "> 書き込み条件未達／失敗のため Firestore は変更していません。";
+  }
+  return "> report-only のため Firestore は変更していません（--apply 未指定）。";
+}
+
 function printSummaryToConsole(report) {
-  console.log("Post-merge Firestore status (report-only)");
+  console.log("Post-merge Firestore status");
   console.log(`PR: #${report.pr.number} head=${report.pr.headRef} base=${report.pr.baseRef}`);
   console.log(`matchedTaskId: ${report.match.matchedTaskId ?? "(none)"} (by ${report.match.matchedBy ?? "-"})`);
   console.log(`result: ${report.decision.result} reasonIds=[${report.decision.reasonIds.join(",")}]`);
   console.log(`proposedStatus: ${report.wouldUpdate.proposedStatus ?? "(none)"}`);
+  const a = report.apply ?? { attempted: false };
+  const applyState = !a.attempted
+    ? "report-only"
+    : a.applied
+      ? "applied"
+      : a.simulated
+        ? "simulated"
+        : "not-applied";
+  console.log(`apply: ${applyState}${a.reason ? ` (${a.reason})` : ""}`);
 }
 
 function writeJsonOutput(outAbs, payload) {
@@ -631,4 +801,4 @@ function strOrEmpty(value) {
 }
 
 // ALLOWED_STATUSES は将来のバリデーション拡張に備えて公開的に保持する（現状は参照のみ）。
-export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals };
+export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply };
