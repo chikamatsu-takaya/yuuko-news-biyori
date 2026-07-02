@@ -60,7 +60,7 @@ async function main() {
   // 失敗情報を report.apply に入れてから JSON artifact / Step Summary を必ず出力する。
   let applyFailed = false;
   try {
-    report.apply = await computeApply(report, firestoreTasks, options);
+    report.apply = await computeApply(report, pr, firestoreTasks, options);
     // PATCH 応答が 4xx/5xx（例: 412 競合 / 403 権限）なら失敗扱い（httpStatus/reason は保持済み）。
     if (
       report.apply?.attempted &&
@@ -580,7 +580,7 @@ function toCandidateView(task) {
  * no_change / review_candidate は絶対に書き込まない（done_candidate のみ apply へ進む）。
  * 書き込みモジュールの import は applyPhase 内（done_candidate かつ --apply のとき）だけで行う。
  */
-async function computeApply(report, firestoreTasks, options) {
+async function computeApply(report, pr, firestoreTasks, options) {
   if (!options.apply) {
     return { attempted: false, mode: "report-only" };
   }
@@ -596,7 +596,7 @@ async function computeApply(report, firestoreTasks, options) {
   if (!report.match.matchedTaskId) {
     return { attempted: false, mode: "apply", reason: "対象タスクが特定できていないため apply しません。" };
   }
-  return applyPhase(report, firestoreTasks, options);
+  return applyPhase(report, pr, firestoreTasks, options);
 }
 
 /**
@@ -605,7 +605,7 @@ async function computeApply(report, firestoreTasks, options) {
  * - live は SA 認証で単一ドキュメント再読込（updateTime 取得）→ 条件を満たせば PATCH。
  * 更新フィールドは status / completed / completedAt / updatedAt / updatedBy のみ（buildDoneUpdatePayload）。
  */
-async function applyPhase(report, firestoreTasks, options) {
+async function applyPhase(report, pr, firestoreTasks, options) {
   const taskId = report.match.matchedTaskId;
   // 書き込みモジュールは done_candidate かつ --apply のときだけ import する。
   const writeMod = await import("./firestore-admin-write.mjs");
@@ -627,6 +627,21 @@ async function applyPhase(report, firestoreTasks, options) {
   const plan = planDoneApply(fresh);
   if (!plan.shouldWrite) {
     return { attempted: true, mode: "apply", applied: false, simulated, reason: plan.reason, currentUpdateTime };
+  }
+
+  // 紐づけキーの再検証（PATCH前）: 最初の全件取得〜PATCH の間に、対象 doc の branchName / taskCode /
+  // issuePr が別PR向けに変更されていないかを、matchedBy に応じて確認する。不一致なら書き込まない
+  // （楽観ロックは updateTime しか見ないため、キー差し替えは別途ここで防ぐ）。安全にスキップできるため exit は成功扱い。
+  const link = verifyLinkStillMatches(report.match.matchedBy, fresh.data, pr);
+  if (!link.ok) {
+    return {
+      attempted: true,
+      mode: "apply",
+      applied: false,
+      simulated,
+      reason: `再読込時に紐づけキー（${report.match.matchedBy ?? "不明"}）が一致しないため書き込みません（期待=${link.expected || "（空）"} / 実際=${link.actual || "（空）"}）。`,
+      currentUpdateTime,
+    };
   }
 
   const payload = writeMod.buildDoneUpdatePayload(new Date().toISOString(), "post-merge-bot");
@@ -694,6 +709,49 @@ function planDoneApply(fresh) {
     };
   }
   return { shouldWrite: true, reason: "done_candidate かつ再読込後も現状 Doing のため Done へ更新します。" };
+}
+
+/**
+ * apply 直前の再読込データ（fresh）が、最初にマッチしたときの紐づけキーと今も一致するか再検証する。
+ * matchedBy に応じて、PR の期待値（head branch / 本文 taskCode・branchName / PR番号）と突き合わせる。
+ * 不一致（別PR向けに差し替えられた等）なら ok:false を返し、書き込みをスキップさせる。
+ *
+ * @param {string|null} matchedBy  "branchName" | "branchNameBody" | "taskCodeBody" | "issuePr"
+ * @param {object} freshData  再読込した data（branchName / taskCode / issuePr を含む）
+ * @param {object} pr  PR コンテキスト（headRef / body / number）
+ * @returns {{ ok: boolean, expected: string, actual: string }}
+ */
+function verifyLinkStillMatches(matchedBy, freshData, pr) {
+  const fresh = freshData ?? {};
+  const body = parseBodyFields(pr.body);
+  switch (matchedBy) {
+    case "branchName": {
+      // PR head branch と一致していたケース。
+      const expected = normalizeBranch(pr.headRef);
+      const actual = normalizeBranch(fresh.branchName);
+      return { ok: expected !== "" && actual === expected, expected: pr.headRef ?? "", actual: strOrEmpty(fresh.branchName) };
+    }
+    case "branchNameBody": {
+      // PR本文 branchName と一致していたケース。
+      const expected = normalizeBranch(body.branchName);
+      const actual = normalizeBranch(fresh.branchName);
+      return { ok: expected !== "" && actual === expected, expected: body.branchName, actual: strOrEmpty(fresh.branchName) };
+    }
+    case "taskCodeBody": {
+      // PR本文 taskCode と一致していたケース。
+      const expected = normalize(body.taskCode);
+      const actual = normalize(fresh.taskCode);
+      return { ok: expected !== "" && actual === expected, expected: body.taskCode, actual: strOrEmpty(fresh.taskCode) };
+    }
+    case "issuePr": {
+      // PR番号が issuePr に含まれていたケース。
+      const ok = issuePrNumbers(fresh.issuePr).includes(pr.number);
+      return { ok, expected: `#${pr.number}`, actual: strOrEmpty(fresh.issuePr) };
+    }
+    default:
+      // 想定外の matchedBy は安全側で不一致扱い（書き込ませない）。
+      return { ok: false, expected: `(unknown matchedBy: ${matchedBy ?? "null"})`, actual: "" };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -844,4 +902,4 @@ function strOrEmpty(value) {
 }
 
 // ALLOWED_STATUSES は将来のバリデーション拡張に備えて公開的に保持する（現状は参照のみ）。
-export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply };
+export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply, verifyLinkStillMatches };

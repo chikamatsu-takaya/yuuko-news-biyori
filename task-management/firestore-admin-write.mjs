@@ -224,8 +224,10 @@ export async function updateTaskFieldsWithServiceAccount({
  * （status / completed / archived）と updateTime（楽観ロック用）を返す（読み取り専用）。
  * 存在しなければ exists:false。呼ばない限り通信は発生しない。
  *
+ * 紐づけキー（branchName / taskCode / issuePr）も返し、apply 直前の再検証に使えるようにする。
+ *
  * @param {string} taskId
- * @returns {Promise<{ exists: boolean, data: { status: string|null, completed: boolean, archived: boolean }, updateTime: string|null }>}
+ * @returns {Promise<{ exists: boolean, data: { status: string|null, completed: boolean, archived: boolean, branchName: string|null, taskCode: string|null, issuePr: string|null }, updateTime: string|null }>}
  */
 export async function fetchTaskForApply(taskId) {
   if (!taskId) {
@@ -245,7 +247,11 @@ export async function fetchTaskForApply(taskId) {
     headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
   });
   if (response.status === 404) {
-    return { exists: false, data: { status: null, completed: false, archived: false }, updateTime: null };
+    return {
+      exists: false,
+      data: { status: null, completed: false, archived: false, branchName: null, taskCode: null, issuePr: null },
+      updateTime: null,
+    };
   }
   if (!response.ok) {
     const body = await safeReadText(response);
@@ -259,6 +265,10 @@ export async function fetchTaskForApply(taskId) {
       status: fields.status?.stringValue ?? null,
       completed: fields.completed?.booleanValue ?? false,
       archived: fields.archived?.booleanValue ?? false,
+      // 紐づけキー: apply 直前の再検証（別PR向けに変更されていないか）に使う。
+      branchName: fields.branchName?.stringValue ?? null,
+      taskCode: fields.taskCode?.stringValue ?? null,
+      issuePr: fields.issuePr?.stringValue ?? null,
     },
     updateTime: json.updateTime ?? null,
   };
