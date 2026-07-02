@@ -178,7 +178,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [ ] 余白・横幅・はみ出し・スクロール領域・文字潰れの微修正
   - Priority: P2
   - Status: Todo
-  - Owner: 未定
+  - Owner: @dry-run-test
   - Branch: 未作成
   - Issue/PR: 未定
   - Done when:
