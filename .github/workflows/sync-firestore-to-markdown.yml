@@ -9,6 +9,7 @@
 #   feature/main などから手動実行しても、develop 以外のチェックリスト差分が混ざらない。
 # - 変更は developタスクチェックリスト.md の1ファイルのみ（add 対象を限定）。
 # - 自動マージは dry-run/apply の safeAutoMerge=true・両レポート一致・「変更が当該ファイルのみ」のときだけ。
+#   さらに手動実行の enable_auto_merge=true を明示したときのみ実行する。既定では同期PR作成で停止する。
 # - サービスアカウント JSON は Secret から $RUNNER_TEMP へ書き出し、リポジトリには絶対に含めない。
 #
 # 必要な GitHub Secret:
@@ -18,6 +19,13 @@ name: Sync Firestore to Markdown
 
 on:
   workflow_dispatch:
+    inputs:
+      # 自動マージは enable_auto_merge=true を明示したときのみ実行する。既定では同期PR作成で停止する。
+      enable_auto_merge:
+        description: "自動マージまで実行する（オフ=同期PR作成で停止）"
+        type: boolean
+        default: false
+        required: false
 
 # 最小権限: Markdown のコミット（contents）と PR 作成・マージ（pull-requests）のみ。
 permissions:
@@ -172,8 +180,10 @@ jobs:
       # 12. 自動マージ: merge_ok=true（dry/apply 両方 safeAutoMerge かつ summary 一致）
       #     かつ「変更が当該ファイルのみ」のときだけ。
       #     失敗（必須チェック等でブロック）してもPRは残す（continue-on-error）。
+      #     さらに enable_auto_merge=true を明示したときのみ実行する（既定は同期PR作成で停止）。
+      #     safeAutoMerge / merge_ok の判定ロジックは変えず、実行可否だけを追加ゲートする。
       - name: Auto merge (only when safe)
-        if: steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true'
+        if: steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true' && github.event.inputs.enable_auto_merge == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
