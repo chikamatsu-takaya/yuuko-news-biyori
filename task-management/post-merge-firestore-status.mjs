@@ -370,8 +370,21 @@ function evaluateFilePaths(files) {
       addReason("R5"); // Rust / Tauri
       isReview = true;
     }
-    if (/allowlist|network|csp|capabilit|security|secret/i.test(p)) {
-      addReason("R7"); // 外部通信 / セキュリティ
+    if (/allowlist|network|csp|capabilit|security|secret|セキュリティ/i.test(p)) {
+      addReason("R7"); // 外部通信 / セキュリティ（日本語「セキュリティ」も含む）
+      isReview = true;
+    }
+    // 仕様・設計・データ構造・判定/運用ルール系の docs は Markdown でも Done に倒さない。
+    // README・単純な手順メモ・検証結果レポートは下の Done 判定へ回す（ここでは拾わない）。
+    if (
+      /^docs\/02_design\//.test(p) ||
+      /データ設計|データ構造/.test(p) ||
+      /設計/.test(p) ||
+      /要件|MVP|スコープ|仕様/.test(p) ||
+      /(decision|post-merge)/i.test(p) ||
+      /判定ガイド|運用ルール/.test(p)
+    ) {
+      addReason("R10"); // 仕様・設計・データ構造・判定/運用ルール系ドキュメント
       isReview = true;
     }
 
@@ -416,8 +429,8 @@ function detectBodyReviewSignals(body) {
   if (/動作確認[^\n]{0,12}(未実施|未確認|不明|していない)/.test(text) || /動作未確認/.test(text)) {
     add("R9");
   }
-  // R8: 確認項目の不足・未記入。
-  if (/確認項目[^\n]{0,12}(不足|未記入|未記載|不十分)/.test(text)) {
+  // R8: 確認項目の不足・未記入（明示語）、または重要な確認項目が未チェックのまま。
+  if (/確認項目[^\n]{0,12}(不足|未記入|未記載|不十分)/.test(text) || hasUncheckedImportantItem(text)) {
     add("R8");
   }
   // R10: 懸念・要レビュー・レビュー依頼・仕様判断（テンプレ定型の「判断に迷った箇所を記載」は拾わない書き方）。
@@ -445,6 +458,22 @@ function labelIndicatesAri(text, labelPattern) {
   const segments = String(text).match(re);
   if (!segments) return false;
   return segments.some((seg) => /あり/.test(seg) && !/なし/.test(seg));
+}
+
+/**
+ * 重要な確認項目（安全・実行確認系）が未チェック `- [ ]` のまま残っているか。
+ * 安全側の最小判定として、以下の語を含む未チェック項目を Review シグナル（R8）とする:
+ *   APIキー/秘密情報・Tauri command・外部通信先・lint/build/cargo(check)・ローカル起動(pnpm dev 等)。
+ * UI変更時限定の条件付き項目（スクリーンショット添付 等）は対象にしない（過剰必須化を避ける）。
+ * 「docs追加のみのため未実施」等の補足があっても、今回は安全側で Review 扱いにする。
+ */
+function hasUncheckedImportantItem(text) {
+  const importantRe = /(APIキー|秘密情報|Tauri\s*command|外部通信先|lint|build|cargo|ローカル起動|pnpm\s+(?:tauri\s+)?dev)/i;
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = line.match(/^\s*-\s*\[\s\]\s*(.+)$/); // 未チェックのチェックボックス行のみ。
+    if (m && importantRe.test(m[1])) return true;
+  }
+  return false;
 }
 
 function uniq(arr) {
@@ -484,7 +513,8 @@ function parseBodyFields(body) {
 
 function extractLabeledValue(body, label) {
   // "- taskCode: VALUE" / "taskCode: VALUE" の行を拾う（全角コロンも許容）。
-  const re = new RegExp(`(?:^|\\n)\\s*-?\\s*${label}\\s*[:：]\\s*([^\\n]*)`, "i");
+  // 空値（"taskCode:" のみ）で次行を巻き込まないよう、コロン前後は改行を含まない空白のみ許容する。
+  const re = new RegExp(`(?:^|\\n)[ \\t]*-?[ \\t]*${label}[ \\t]*[:：][ \\t]*([^\\n]*)`, "i");
   const m = String(body).match(re);
   return m ? m[1].trim() : "";
 }
