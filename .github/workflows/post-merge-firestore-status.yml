@@ -119,14 +119,32 @@ jobs:
             }' \
             > "$PR_CONTEXT"
 
-      # 6. 判定（report-only）: 対象特定 → Done/Review/no_change 判定 → JSON と Step Summary へ出力。
-      #    スクリプトは GITHUB_STEP_SUMMARY へ直接追記する（--summary-out は使わない）。
-      - name: Run report-only judgment
+      # 6. 判定 → JSON と Step Summary へ出力。スクリプトは GITHUB_STEP_SUMMARY へ直接追記する。
+      #    Firestore 更新（--apply）は Repository Variable POST_MERGE_ENABLE_APPLY == 'true' のときだけ付ける。
+      #    未設定 / false / その他の値は --apply を付けない（＝既定 report-only、書き込みなし）。
+      #    Firestore 書き込みはサービスアカウント経由のため GITHUB_TOKEN 権限は増やさない。
+      - name: Run judgment (apply gated by POST_MERGE_ENABLE_APPLY)
         if: steps.guard.outputs.skip == 'false'
+        env:
+          ENABLE_APPLY: ${{ vars.POST_MERGE_ENABLE_APPLY }}
         run: |
+          if [ "$ENABLE_APPLY" = "true" ]; then
+            APPLY_FLAG="--apply"
+            GATE="ENABLED（POST_MERGE_ENABLE_APPLY=true）: Firestore を更新します"
+          else
+            APPLY_FLAG=""
+            GATE="DISABLED（report-only, POST_MERGE_ENABLE_APPLY='${ENABLE_APPLY:-未設定}'）: Firestore は変更しません"
+          fi
+          echo "apply gate: $GATE"
+          {
+            echo "### apply gate"
+            echo "- $GATE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # APPLY_FLAG は未設定時に空文字（トークンなし）になるよう意図的にクォートしない。
           node task-management/post-merge-firestore-status.mjs \
             --pr-json "$PR_CONTEXT" \
-            --out "$REPORT_OUT"
+            --out "$REPORT_OUT" \
+            $APPLY_FLAG
 
       # 7. 判定レポートを artifact として保存する（人手確認用）。
       - name: Upload report
