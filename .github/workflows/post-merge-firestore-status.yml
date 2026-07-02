@@ -1,0 +1,138 @@
+# PRマージ後 Firestoreタスク状態「判定のみ（report-only）」ワークフロー（フェーズ0）。
+#
+# 流れ:
+#   PR が develop にマージされる → PR情報＋Firestore現状（読み取り専用）から
+#   対象タスク候補を特定し、Done / Review / no_change を判定 → JSON artifact と Step Summary に出す。
+#
+# 安全方針（重要・フェーズ0）:
+# - Firestore への書き込みは一切しない（読み取り専用）。enable_apply 等の実行トグルもまだ持たない。
+# - PRコメント投稿・Markdown更新はしない。出力は artifact と Step Summary のみ。
+# - 同期用ブランチ（sync/*）や bot（github-actions[bot]）の PR は早期スキップ（フィードバックループ防止）。
+# - 権限は最小（contents: read / pull-requests: read）。
+#
+# 必要な GitHub Secret:
+#   FIREBASE_SERVICE_ACCOUNT_JSON … Firestore 読み取り権限を持つサービスアカウントの JSON 全文。
+
+name: Post-merge Firestore Status (report-only)
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+# 最小権限: リポジトリ読み取りと PR 情報参照のみ（書き込み権限は持たせない）。
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  PR_CONTEXT: task-management/tmp/post-merge-pr-context.json
+  REPORT_OUT: task-management/tmp/post-merge-status-report.json
+
+jobs:
+  report:
+    # マージされたPRのみ対象（クローズのみは除外）。
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 早期スキップ判定: sync/* ブランチ or bot PR は以降を全てスキップする。
+      - name: Early skip (sync/* or bot PR)
+        id: guard
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [[ "$HEAD_REF" == sync/* || "$AUTHOR" == "github-actions[bot]" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## PRマージ後 Firestore状態 判定（report-only）"
+              echo ""
+              echo "- 早期スキップ: head=\`$HEAD_REF\` author=\`$AUTHOR\`（sync/* または bot PR）"
+              echo ""
+              echo "> フェーズ0のため Firestore は変更していません。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 2. checkout（スクリプトと読み取りモジュールを使うため）。
+      - name: Checkout
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/checkout@v4
+
+      # 3. Node セットアップ（スクリプトは Node 標準 API のみ使用）。
+      - name: Setup Node
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 4. Firestore 認証: Secret の JSON を $RUNNER_TEMP へ書き出し、認証パスを設定する（読み取り専用用途）。
+      - name: Write service account credentials
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Secret FIREBASE_SERVICE_ACCOUNT_JSON が未設定です。" >&2
+            exit 1
+          fi
+          CRED_PATH="$RUNNER_TEMP/firebase-sa.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CRED_PATH"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$CRED_PATH" >> "$GITHUB_ENV"
+
+      # 5. PR情報の組み立て: イベントペイロード＋変更ファイル一覧を PR コンテキスト JSON に出力する。
+      - name: Build PR context JSON
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          mkdir -p task-management/tmp
+          # gh pr view --json files は CLI 側で先頭100件までに制限される可能性がある。
+          # 実際の変更件数（changedFiles）も取得し、取得件数との差でファイル一覧の不完全さを検知する。
+          PR_JSON="$(gh pr view "$PR_NUMBER" --json files,changedFiles)"
+          FILES_JSON="$(printf '%s' "$PR_JSON" | jq '[.files[].path]')"
+          EXPECTED="$(printf '%s' "$PR_JSON" | jq '.changedFiles')"
+          FETCHED="$(printf '%s' "$FILES_JSON" | jq 'length')"
+          jq -n \
+            --argjson number "$PR_NUMBER" \
+            --arg headRef "$HEAD_REF" \
+            --arg baseRef "$BASE_REF" \
+            --argjson merged "$MERGED" \
+            --arg author "$AUTHOR" \
+            --arg body "${BODY:-}" \
+            --argjson files "$FILES_JSON" \
+            --argjson fileCountExpected "$EXPECTED" \
+            --argjson fileCountFetched "$FETCHED" \
+            '{
+              number:$number, headRef:$headRef, baseRef:$baseRef, merged:$merged, author:$author, body:$body,
+              files:$files,
+              fileCountExpected:$fileCountExpected,
+              fileCountFetched:$fileCountFetched,
+              filesTruncated: ($fileCountExpected > $fileCountFetched)
+            }' \
+            > "$PR_CONTEXT"
+
+      # 6. 判定（report-only）: 対象特定 → Done/Review/no_change 判定 → JSON と Step Summary へ出力。
+      #    スクリプトは GITHUB_STEP_SUMMARY へ直接追記する（--summary-out は使わない）。
+      - name: Run report-only judgment
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          node task-management/post-merge-firestore-status.mjs \
+            --pr-json "$PR_CONTEXT" \
+            --out "$REPORT_OUT"
+
+      # 7. 判定レポートを artifact として保存する（人手確認用）。
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-merge-status-report
+          path: ${{ env.REPORT_OUT }}
+          if-no-files-found: ignore
