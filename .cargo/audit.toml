@@ -1,0 +1,13 @@
+# cargo-audit（RustSec）設定ファイル。
+# Security CI の `cargo audit --file src-tauri/Cargo.lock`（リポジトリルートで実行）が参照する。
+
+[advisories]
+# 一時ignore: RUSTSEC-2026-0194 / RUSTSEC-2026-0195（いずれも quick-xml）
+# 理由（両 advisory 共通）:
+# - rss 2.0.13 / atom_syndication 0.12.8 が quick-xml "^0.39" を要求しており、
+#   quick-xml を 0.40 以上へ更新できない（依存制約上、解決不可）。
+# - どちらの advisory も RustSec の解決条件は quick-xml >= 0.41.0。現時点では上記制約により満たせない。
+# - upstream（rss / atom_syndication）が quick-xml >= 0.41 に対応したら、
+#   これらの ignore を外して quick-xml を >= 0.41.0 へ更新する。
+# 補足: quick-xml は制約内で可能な最新パッチ 0.39.4 に更新済み（advisory自体の解消にはならない）。
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
