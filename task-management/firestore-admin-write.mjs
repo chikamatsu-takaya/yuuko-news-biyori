@@ -27,13 +27,17 @@ const TOKEN_URI_FALLBACK = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/datastore";
 
 // このモジュールが書き込みを許可する唯一のフィールド集合（安全境界）。
-// ここに無いフィールドを updateMask に渡すと throw する（owner 等の巻き込み更新を防ぐ）。
+// ここに無いフィールドを updateMask に渡すと throw する（owner / branchName / taskCode / title 等の
+// 巻き込み更新を防ぐ）。
+// - status/completed/completedAt/updatedAt/updatedBy: Done 自動更新（buildDoneUpdatePayload）用。
+// - issuePr: issuePr 書き戻し（buildIssuePrWritebackPayload）用。Done 更新とは別の更新種別として使う。
 export const ALLOWED_WRITE_FIELDS = new Set([
   "status",
   "completed",
   "completedAt",
   "updatedAt",
   "updatedBy",
+  "issuePr",
 ]);
 
 // timestampValue として書き込むフィールド。
@@ -169,6 +173,31 @@ export function buildReviewUpdatePayload(nowIso = new Date().toISOString(), upda
       status: "Review",
       completed: false,
       completedAt: null,
+      updatedAt: nowIso,
+      updatedBy,
+    },
+  };
+}
+
+/**
+ * issuePr 書き戻し用の更新ペイロード（data + updateMaskFields）を組み立てる補助。
+ * Done 更新（5項目）とは別の更新種別として、issuePr / updatedAt / updatedBy の3項目のみ更新する。
+ * status / completed / completedAt などには一切触れない。
+ *
+ * @param {number} prNumber  正の整数のPR番号
+ */
+export function buildIssuePrWritebackPayload(
+  prNumber,
+  nowIso = new Date().toISOString(),
+  updatedBy = "post-merge-bot",
+) {
+  if (!Number.isFinite(prNumber) || prNumber <= 0) {
+    throw new Error(`PR番号が不正です: ${String(prNumber)}`);
+  }
+  return {
+    updateMaskFields: ["issuePr", "updatedAt", "updatedBy"],
+    data: {
+      issuePr: `#${prNumber}`,
       updatedAt: nowIso,
       updatedBy,
     },

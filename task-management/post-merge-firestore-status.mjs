@@ -82,10 +82,46 @@ async function main() {
     };
   }
 
-  // issuePr 書き戻し「候補」の計算（表示のみ）。このPRでは Firestore へは書き込まず、
-  // allow-list も変更しない（--apply が付いていても issuePr は書き込まない）。既存の
-  // マッチング結果（matchedTaskId / matchedBy / decision.result）だけを使う。
-  report.issuePrWriteback = computeIssuePrWriteback(report, pr, firestoreTasks);
+  // issuePr 書き戻し候補の計算（既存マッチング結果のみ使用）。
+  report.issuePrWriteback = computeIssuePrWriteback(report, pr, firestoreTasks, options);
+
+  // issuePr 書き戻しは「Done apply 成功時だけ」実行する（初回実装は安全側）。
+  // Done apply がスキップ/失敗/未実行のときに issuePr だけ書き戻すと、Summary 末尾の
+  // applyClosingNote（Done の結果基準）と実 Firestore 変更が矛盾しうるため、それを避ける。
+  // 実行条件: --apply / done_candidate / Done apply.applied===true / action==="would_write" / taskId あり。
+  if (
+    options.apply &&
+    report.decision.result === "done_candidate" &&
+    report.issuePrWriteback.action === "would_write" &&
+    report.issuePrWriteback.taskId
+  ) {
+    if (report.apply?.applied === true) {
+      try {
+        report.issuePrWriteback = await applyIssuePrWriteback(report.issuePrWriteback, pr, firestoreTasks, options);
+      } catch (error) {
+        applyFailed = true;
+        report.issuePrWriteback = {
+          ...report.issuePrWriteback,
+          applied: false,
+          error: true,
+          reason: `issuePr書き戻しで例外が発生しました: ${error.message}`,
+        };
+      }
+      const wb = report.issuePrWriteback;
+      if (wb.applied === false && typeof wb.httpStatus === "number" && wb.httpStatus >= 400) {
+        applyFailed = true;
+      }
+    } else {
+      // Done apply が成功していない（スキップ/失敗/未実行）→ issuePr は書き戻さない。
+      report.issuePrWriteback = {
+        ...report.issuePrWriteback,
+        action: "skip",
+        candidate: false,
+        applied: false,
+        reason: "Done apply が成功していないため、issuePr は書き戻しません。",
+      };
+    }
+  }
 
   if (options.out) {
     writeJsonOutput(resolve(REPO_ROOT, options.out), report);
@@ -773,8 +809,14 @@ function verifyLinkStillMatches(matchedBy, freshData, pr) {
  * - "already_present" … 既に同じPR番号が記録済み → 何もしない
  * - "skip"            … 対象外（no_change/review_candidate/PR番号なし/別PR番号あり 等）
  */
-function computeIssuePrWriteback(report, pr, firestoreTasks) {
-  const base = { enabled: false, mode: "report-only" };
+function computeIssuePrWriteback(report, pr, firestoreTasks, options) {
+  // enabled/mode は --apply の有無を反映。applied/simulated は既定 false（実書き戻しは applyIssuePrWriteback で上書き）。
+  const base = {
+    enabled: options?.apply === true,
+    mode: options?.apply ? "apply" : "report-only",
+    applied: false,
+    simulated: false,
+  };
   const result = report.decision.result;
   const taskId = report.match.matchedTaskId ?? null;
   const matchedBy = report.match.matchedBy ?? null;
@@ -815,6 +857,84 @@ function getCurrentIssuePr(firestoreTasks, taskId) {
   const t = firestoreTasks.find((x) => x.id === taskId);
   const v = t?.data?.issuePr;
   return v == null ? null : String(v);
+}
+
+/**
+ * issuePr の実書き戻し（--apply かつ action==="would_write" のときだけ呼ぶ）。
+ * apply 直前に再読込し、紐づけ再検証・archived・issuePr が空のままかを再確認してから
+ * currentDocument.updateTime 付きで issuePr / updatedAt / updatedBy のみを PATCH する。
+ * Done 更新とは別の更新種別（別 updateMask）として扱う。offline は実書き込みせず simulate。
+ * 返却は candidate オブジェクトに applied/simulated/httpStatus/updateMaskFields/currentUpdateTime を足したもの。
+ */
+async function applyIssuePrWriteback(candidate, pr, firestoreTasks, options) {
+  const taskId = candidate.taskId;
+  const writeMod = await import("./firestore-admin-write.mjs");
+
+  // apply 直前の再読込（updateTime 取得）。offline は dump、live は SA GET。
+  let fresh;
+  let simulated = false;
+  if (options.firestoreJson) {
+    simulated = true;
+    const found = firestoreTasks.find((t) => t.id === taskId);
+    fresh = found
+      ? { exists: true, data: found.data ?? {}, updateTime: found.updateTime ?? null }
+      : { exists: false, data: {}, updateTime: null };
+  } else {
+    fresh = await writeMod.fetchTaskForApply(taskId);
+  }
+  const currentUpdateTime = fresh.updateTime ?? null;
+
+  // 再読込ガード（Done とは独立。issuePr は status に依存しない）。
+  if (!fresh.exists) {
+    return { ...candidate, applied: false, simulated, action: "skip", reason: "再読込時に対象ドキュメントが存在しないため書き戻しません。", currentUpdateTime };
+  }
+  if (fresh.data?.archived === true) {
+    return { ...candidate, applied: false, simulated, action: "skip", reason: "再読込時に archived=true のため書き戻しません。", currentUpdateTime };
+  }
+  // 紐づけキー再検証（別PR向けに差し替えられていないか）。
+  const link = verifyLinkStillMatches(candidate.matchedBy, fresh.data, pr);
+  if (!link.ok) {
+    return {
+      ...candidate,
+      applied: false,
+      simulated,
+      action: "skip",
+      reason: `再読込時に紐づけキー（${candidate.matchedBy ?? "不明"}）が一致しないため書き戻しません（期待=${link.expected || "（空）"} / 実際=${link.actual || "（空）"}）。`,
+      currentUpdateTime,
+    };
+  }
+  // issuePr が空のままか再確認（レースで別/同PR番号が入っていたら上書きしない）。
+  const freshIssue = strOrEmpty(fresh.data?.issuePr).trim();
+  if (freshIssue !== "") {
+    if (issuePrNumbers(freshIssue).includes(candidate.prNumber)) {
+      return { ...candidate, applied: false, simulated, action: "already_present", currentIssuePr: freshIssue, reason: "再読込時に既に同じPR番号が入っているため書き戻し不要です。", currentUpdateTime };
+    }
+    return { ...candidate, applied: false, simulated, action: "skip", currentIssuePr: freshIssue, reason: "再読込時に別PR番号が入っているため自動上書きしません。", currentUpdateTime };
+  }
+
+  const payload = writeMod.buildIssuePrWritebackPayload(candidate.prNumber, new Date().toISOString(), "post-merge-bot");
+  const record = { updateMaskFields: payload.updateMaskFields, currentUpdateTime };
+
+  if (simulated) {
+    return { ...candidate, applied: false, simulated: true, reason: "オフライン(dry-apply)のため issuePr を書き戻しません（実書き込みは live のみ）。", ...record };
+  }
+
+  const res = await writeMod.updateTaskFieldsWithServiceAccount({
+    taskId,
+    data: payload.data,
+    updateMaskFields: payload.updateMaskFields,
+    currentUpdateTime,
+  });
+  return {
+    ...candidate,
+    applied: res.ok === true,
+    simulated: false,
+    httpStatus: res.status,
+    reason: res.ok
+      ? "issuePr を書き戻しました。"
+      : `issuePr 書き戻しに失敗しました (HTTP ${res.status})。競合(412)や権限を確認してください。`,
+    ...record,
+  };
 }
 
 function buildReport(pr, result) {
@@ -895,23 +1015,48 @@ function buildSummaryMarkdown(report) {
     }
   }
 
-  // issuePr 書き戻し候補セクション（表示のみ・このPRでは Firestore へ書き込まない）。
+  // issuePr 書き戻しセクション。report-only 時は候補表示のみ、apply 時は書き込み結果を出す。
   const w = report.issuePrWriteback;
   if (w) {
-    lines.push("", "### issuePr書き戻し候補（表示のみ）");
-    if (w.candidate && w.action === "would_write") {
-      lines.push("- `issuePr` 書き戻し候補: あり（表示のみ）");
-      lines.push(`- 対象タスク: ${w.taskId}`);
-      lines.push(`- matchedBy: ${w.matchedBy ?? "（なし）"}`);
-      lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\``);
-      lines.push(`- 現在の issuePr: ${w.currentIssuePr ? `\`${w.currentIssuePr}\`` : "（空）"}`);
-      lines.push("- 注意: このPRでは Firestore へ書き込みません（report-only）。");
-    } else if (w.action === "already_present") {
-      lines.push("- `issuePr` 書き戻し: 対応済み（既に同じPR番号あり）");
-      lines.push(`- 対象タスク: ${w.taskId} / 現在の issuePr: \`${w.currentIssuePr}\``);
+    if (!w.enabled) {
+      // report-only（--apply なし）: 候補表示のみ・Firestore へ書き込まない。
+      lines.push("", "### issuePr書き戻し候補（表示のみ）");
+      if (w.candidate && w.action === "would_write") {
+        lines.push("- `issuePr` 書き戻し候補: あり（表示のみ）");
+        lines.push(`- 対象タスク: ${w.taskId} / matchedBy: ${w.matchedBy ?? "（なし）"}`);
+        lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\` / 現在: ${w.currentIssuePr ? `\`${w.currentIssuePr}\`` : "（空）"}`);
+        lines.push("- 注意: このPRでは Firestore へ書き込みません（report-only）。");
+      } else if (w.action === "already_present") {
+        lines.push("- `issuePr` 書き戻し: 対応済み（既に同じPR番号あり）");
+      } else {
+        lines.push("- `issuePr` 書き戻し候補: なし");
+        lines.push(`- 理由: ${w.reason}`);
+      }
     } else {
-      lines.push("- `issuePr` 書き戻し候補: なし");
-      lines.push(`- 理由: ${w.reason}`);
+      // apply（--apply あり）: 書き込み成功 / 書き込み不要 / 対象外 / 失敗 を明示。
+      lines.push("", "### issuePr書き戻し");
+      if (w.action === "would_write") {
+        const state = w.applied ? "書き込み成功" : w.simulated ? "シミュレート(未書き込み)" : "未書き込み/失敗";
+        lines.push(`- \`issuePr\` 書き戻し: ${state}`);
+        lines.push(`- 対象タスク: ${w.taskId} / matchedBy: ${w.matchedBy ?? "（なし）"}`);
+        lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\``);
+        if (w.updateMaskFields) {
+          lines.push(`- updateMask: ${w.updateMaskFields.join(", ")}`);
+        }
+        if ("currentUpdateTime" in w) {
+          lines.push(`- currentDocument.updateTime: ${w.currentUpdateTime ?? "（なし）"}`);
+        }
+        if ("httpStatus" in w) {
+          lines.push(`- HTTP: ${w.httpStatus}`);
+        }
+        lines.push(`- 理由: ${w.reason}`);
+      } else if (w.action === "already_present") {
+        lines.push("- `issuePr` 書き戻し: 書き込み不要（対応済み）");
+        lines.push(`- 理由: ${w.reason}`);
+      } else {
+        lines.push("- `issuePr` 書き戻し: 対象外");
+        lines.push(`- 理由: ${w.reason}`);
+      }
     }
   }
 
