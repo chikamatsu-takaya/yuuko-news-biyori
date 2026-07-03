@@ -361,3 +361,51 @@ pnpm test
 - **`--apply` の実書き込みなし**。
 - **issuePr の実書き戻しなし**。
 - **report-only の判定結果確認のみ**（判定ロジック・reasonLabels の回帰）。
+
+---
+
+## Actions Summary / artifact JSON の見方
+
+PRマージ後、GitHub Actions の実行結果（Step Summary）と artifact（`post-merge-status-report`）で、
+判定理由・Done apply結果・issuePr書き戻し結果を確認できる。
+
+### Summary の表示順と各セクションで確認すること
+Summary は上から次の順で並ぶ。
+
+1. **PR情報**
+   - PR番号 / head・base / 変更ファイル数
+2. **apply gate**
+   - `report-only`（`--apply` 未指定・書き込みなし）か `apply`（`--apply` 指定）か
+3. **タスク紐づけ**
+   - `matchedTaskId`（一致タスク） / `matchedBy`（一致キー） / 候補件数
+4. **判定結果**
+   - `result`: `done_candidate` / `review_candidate` / `no_change`
+   - `proposedStatus`（未適用） / 概要
+5. **判定理由**
+   - `reasonIds` と、その **日本語ラベル**
+6. **Done apply**
+   - Done 更新の 成功 / 未実行 / 失敗、`HTTP` ステータス、`updateMask`（更新フィールド）、`currentDocument.updateTime`
+7. **issuePr書き戻し**
+   - report-only 時: 書き戻し**候補の表示のみ**
+   - apply 時: **書き込み成功 / skip（対象外） / already_present（書き込み不要） / 失敗**
+8. **次の対応**
+   - `nextAction` と、Firestore を変更したか否かの一言
+
+### result 別に見るポイント
+- **`no_change`**: 「**自動更新しなかった理由**」を見る（対象タスクなし / 複数候補 / archived / 既にDone / 紐づけ曖昧 など）。
+- **`review_candidate`**: 「**人手確認が必要な理由**」を見る（UI変更 / 設計・セキュリティ・外部通信・Firestore関連 / 重要項目の未チェック など）。
+- **`done_candidate`**: **Done apply** と **issuePr書き戻し** の結果を見る。
+
+### 注意（自動更新の前提）
+- **apply 有効時でも、`result` が `done_candidate` 以外なら Firestore は変更されない**。
+- **issuePr 書き戻しは Done apply 成功時だけ実行される**（Done apply がスキップ/失敗した場合は issuePr も書き戻さない）。
+
+### artifact JSON の主な確認項目
+artifact の `post-merge-status-report.json` は、最上位キーが読みやすい順に並ぶ。
+
+- `pr`: PR情報（番号 / head・base / 変更ファイル数 / 一覧の切り詰め有無）
+- `match`: 紐づけ結果（`matchedTaskId` / `matchedBy` / 候補一覧）
+- `decision`: 判定（`result` / `reasonIds` / `reasonLabels` / `summary` / `nextAction`）
+- `apply`: Done apply の結果（`applied` / `simulated` / `httpStatus` / `updateMaskFields` / `currentUpdateTime` / `reason`）
+- `issuePrWriteback`: issuePr 書き戻しの候補・結果（`action` / `applied` / `httpStatus` / `updateMaskFields` / `reason` など）
+- `wouldUpdate`: 参考（提案 status など）
