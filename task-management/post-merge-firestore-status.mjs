@@ -82,6 +82,11 @@ async function main() {
     };
   }
 
+  // issuePr 書き戻し「候補」の計算（表示のみ）。このPRでは Firestore へは書き込まず、
+  // allow-list も変更しない（--apply が付いていても issuePr は書き込まない）。既存の
+  // マッチング結果（matchedTaskId / matchedBy / decision.result）だけを使う。
+  report.issuePrWriteback = computeIssuePrWriteback(report, pr, firestoreTasks);
+
   if (options.out) {
     writeJsonOutput(resolve(REPO_ROOT, options.out), report);
     console.log(`レポートを書き出しました: ${options.out}`);
@@ -758,6 +763,60 @@ function verifyLinkStillMatches(matchedBy, freshData, pr) {
 // 出力
 // ---------------------------------------------------------------------------
 
+/**
+ * issuePr 書き戻し「候補」を計算する（表示のみ・Firestore へは書き込まない）。
+ * 既存のマッチング結果（matchedTaskId / matchedBy / decision.result）だけを使い、新しいマッチングは増やさない。
+ * 対象は done_candidate かつ対象タスク1件確定の場合のみ。no_change / review_candidate は対象外。
+ *
+ * action の意味:
+ * - "would_write"     … 対象タスクの issuePr が空/未設定 → 将来書き戻す候補（今回は書き込まない）
+ * - "already_present" … 既に同じPR番号が記録済み → 何もしない
+ * - "skip"            … 対象外（no_change/review_candidate/PR番号なし/別PR番号あり 等）
+ */
+function computeIssuePrWriteback(report, pr, firestoreTasks) {
+  const base = { enabled: false, mode: "report-only" };
+  const result = report.decision.result;
+  const taskId = report.match.matchedTaskId ?? null;
+  const matchedBy = report.match.matchedBy ?? null;
+  // PR番号は正の整数のときだけ有効（0 や未取得は「取得できない」扱い）。
+  const prNumber = Number.isFinite(pr.number) && pr.number > 0 ? pr.number : null;
+  const proposedIssuePr = prNumber ? `#${prNumber}` : null;
+
+  // done_candidate 以外（no_change / review_candidate）は対象外。既存挙動は変えず表示のみ。
+  if (result !== "done_candidate") {
+    const reason =
+      result === "no_change"
+        ? "no_change のため issuePr 書き戻し対象外です。"
+        : "review_candidate は初回実装では issuePr 書き戻し対象外です。";
+    return { ...base, candidate: false, action: "skip", taskId, matchedBy, prNumber, currentIssuePr: null, proposedIssuePr, reason };
+  }
+  if (!taskId) {
+    return { ...base, candidate: false, action: "skip", taskId: null, matchedBy, prNumber, currentIssuePr: null, proposedIssuePr, reason: "対象タスクが1件に特定できないため対象外です。" };
+  }
+  const currentIssuePr = getCurrentIssuePr(firestoreTasks, taskId);
+  if (!prNumber) {
+    return { ...base, candidate: false, action: "skip", taskId, matchedBy, prNumber: null, currentIssuePr, proposedIssuePr: null, reason: "PR番号が取得できないため issuePr 書き戻し対象外です。" };
+  }
+  const currentTrim = strOrEmpty(currentIssuePr).trim();
+  if (currentTrim === "") {
+    // issuePr が空/null/未設定 → 書き戻し候補（表示のみ）。
+    return { ...base, candidate: true, action: "would_write", taskId, matchedBy, prNumber, currentIssuePr: currentIssuePr ?? null, proposedIssuePr, reason: "対象タスクの issuePr が空のため書き戻し候補です（このPRでは Firestore へ書き込みません）。" };
+  }
+  if (issuePrNumbers(currentTrim).includes(prNumber)) {
+    // 既に同じPR番号あり → 何もしない。
+    return { ...base, candidate: false, action: "already_present", taskId, matchedBy, prNumber, currentIssuePr: currentTrim, proposedIssuePr, reason: "既に同じPR番号が issuePr に記録済みです。" };
+  }
+  // 別PR番号あり → 自動上書きしないため対象外。
+  return { ...base, candidate: false, action: "skip", taskId, matchedBy, prNumber, currentIssuePr: currentTrim, proposedIssuePr, reason: "既存 issuePr に別PR番号があり、自動上書きしないため対象外です。" };
+}
+
+/** firestoreTasks から taskId の現在の issuePr を取り出す（文字列 or null）。 */
+function getCurrentIssuePr(firestoreTasks, taskId) {
+  const t = firestoreTasks.find((x) => x.id === taskId);
+  const v = t?.data?.issuePr;
+  return v == null ? null : String(v);
+}
+
 function buildReport(pr, result) {
   const proposedStatus =
     result.decision.result === "done_candidate"
@@ -833,6 +892,26 @@ function buildSummaryMarkdown(report) {
     }
     if ("httpStatus" in a) {
       lines.push(`- HTTP: ${a.httpStatus}`);
+    }
+  }
+
+  // issuePr 書き戻し候補セクション（表示のみ・このPRでは Firestore へ書き込まない）。
+  const w = report.issuePrWriteback;
+  if (w) {
+    lines.push("", "### issuePr書き戻し候補（表示のみ）");
+    if (w.candidate && w.action === "would_write") {
+      lines.push("- `issuePr` 書き戻し候補: あり（表示のみ）");
+      lines.push(`- 対象タスク: ${w.taskId}`);
+      lines.push(`- matchedBy: ${w.matchedBy ?? "（なし）"}`);
+      lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\``);
+      lines.push(`- 現在の issuePr: ${w.currentIssuePr ? `\`${w.currentIssuePr}\`` : "（空）"}`);
+      lines.push("- 注意: このPRでは Firestore へ書き込みません（report-only）。");
+    } else if (w.action === "already_present") {
+      lines.push("- `issuePr` 書き戻し: 対応済み（既に同じPR番号あり）");
+      lines.push(`- 対象タスク: ${w.taskId} / 現在の issuePr: \`${w.currentIssuePr}\``);
+    } else {
+      lines.push("- `issuePr` 書き戻し候補: なし");
+      lines.push(`- 理由: ${w.reason}`);
     }
   }
 
