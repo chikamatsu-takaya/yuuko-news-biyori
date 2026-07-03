@@ -224,3 +224,78 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 - コード、workflow、Firestore に触れないためリスクが低い
 - フェーズ1aの検証結果を前提に、次の改善範囲をチームで確認しやすい
 - その後の Step Summary 改善や `issuePr` 書き戻し検討を小さなPRに分けやすい
+
+---
+
+## issuePr書き戻し設計
+
+### 目的
+- PRマージ後に、対象FirestoreタスクへPR番号を記録する
+- 後から「どのPRで対応されたタスクか」を進捗管理表上で追いやすくする
+- branchName だけに依存せず、将来的に PR番号ベースの紐づけ精度を上げる
+
+### 期待する効果
+- タスクとPRの対応関係が明確になる
+- マージ後の確認が進捗管理表だけでしやすくなる
+- 将来の自動判定で `issuePr` を最も確実な紐づけキーとして使いやすくなる
+
+### Done自動更新との関係
+- Done自動更新とは別機能として扱う
+- `status=Doing` のタスクを Done にする処理と、`issuePr` にPR番号を記録する処理は責務が異なる
+- 最初から同時に大きく変更せず、段階を分ける
+
+### 書き戻し対象候補
+- 対象タスクが1件だけに特定できる場合
+- `matchedBy` が `branchName` / `taskCodeBody` / `branchNameBody` / `issuePr` のいずれかで安全に一致している場合
+- Firestoreタスクが `archived=false` の場合
+- PR番号が取得できている場合
+
+### 書き戻ししない条件
+- 対象タスクが0件の場合
+- 対象候補が複数件ある場合
+- `archived=true` の場合
+- PR本文やbranchNameから見て紐づけが曖昧な場合
+- `review_candidate` で、対象タスクの確定に不安がある場合
+- 既存の `issuePr` に別PR番号が入っていて、上書きになる場合
+
+### 既存 issuePr がある場合の扱い
+- 既に同じPR番号が入っている場合は何もしない
+- 空または null の場合のみ書き戻す案を第一候補にする
+- 別PR番号が入っている場合は自動上書きしない
+- 複数PR番号を保存したい場合は、文字列運用を続けるか、将来的に配列化するかを別途検討する
+
+### review_candidate / no_change との関係
+- `no_change` は書き戻し対象外
+- `review_candidate` は原則書き戻し対象外から始める
+- ただし、将来的には「対象タスクが1件に確定しているreview_candidateのみ issuePr だけ書き戻す」案も検討可能
+- 初回実装では安全側に倒し、`done_candidate` または安全に1件確定したケースに限定する
+
+### Firestore更新フィールド
+- issuePrを書き戻す場合は、現在の allow-list に `issuePr` を追加する必要がある
+- `updatedAt` / `updatedBy` も同時に更新するか検討する
+- Done更新の5項目とは別の更新種別として扱う
+
+### リスク
+- 誤ったタスクにPR番号を書き戻すリスク
+- 既存の `issuePr` を上書きして履歴を壊すリスク
+- Done更新と同時に実装すると、失敗時の原因切り分けが難しくなる
+- 複数タスクPRや大きなPRでは自動化条件が複雑になる
+
+### 推奨方針
+- 最初は docs で設計だけ整理する
+- 次に report-only で「issuePrを書き戻すならこのタスク」という候補表示だけ追加する
+- 実書き込みはその後のPRで、条件を限定して実装する
+- 初回書き込み対象は、空の `issuePr` を持つ単一タスクに限定する
+- 既存 `issuePr` の上書きはしない
+
+### おすすめPR分割
+1. docsで issuePr 書き戻し設計を追記する
+   - 今回のPR
+2. report-onlyで issuePr 書き戻し候補をSummary/artifactに表示する
+   - Firestore書き込みなし
+3. allow-list と書き戻し処理を追加する
+   - `issuePr` / `updatedAt` / `updatedBy` のみ
+   - 既存 `issuePr` が空の場合だけ
+4. テスト用タスクで issuePr 書き戻し確認を行う
+   - `POST_MERGE_ENABLE_APPLY=true` は短時間のみ
+5. 実運用ルールを更新する
