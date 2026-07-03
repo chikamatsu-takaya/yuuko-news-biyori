@@ -130,7 +130,8 @@ async function main() {
   }
 
   if (options.out) {
-    writeJsonOutput(resolve(REPO_ROOT, options.out), report);
+    // 最上位キーを読みやすい順（PR→紐づけ→判定→apply→issuePr）へ整えて書き出す（フィールドは削除しない）。
+    writeJsonOutput(resolve(REPO_ROOT, options.out), orderReportForOutput(report));
     console.log(`レポートを書き出しました: ${options.out}`);
   }
   printSummaryToConsole(report);
@@ -1019,20 +1020,41 @@ function buildReport(pr, result) {
 function buildSummaryMarkdown(report) {
   const d = report.decision;
   const m = report.match;
-  const lines = [
-    "## PRマージ後 Firestore状態 判定",
-    "",
-    `- PR: #${report.pr.number}`,
-    `- head / base: \`${report.pr.headRef}\` / \`${report.pr.baseRef}\``,
-    `- 一致タスク: ${m.matchedTaskId ?? "（なし）"}`,
-    `- matchedBy: ${m.matchedBy ?? "（なし）"}（候補 ${m.candidateCount} 件）`,
-    `- 判定 result: **${d.result}**`,
-    `- reasonIds: ${d.reasonIds.length ? d.reasonIds.join(", ") : "（なし）"}`,
-    `- nextAction: ${d.nextAction}`,
-    `- proposedStatus（未適用）: ${report.wouldUpdate.proposedStatus ?? "（なし）"}`,
-    `- 概要: ${d.summary}`,
-  ];
-  // 判定理由を運用者向けに日本語ラベルで列挙する（no_change / review_candidate を追いやすくする）。
+  const a = report.apply ?? { attempted: false, mode: "report-only" };
+  const w = report.issuePrWriteback;
+  const lines = ["## PRマージ後 Firestore状態 判定"];
+
+  // 1. PR情報
+  lines.push("", "### PR情報");
+  lines.push(`- PR: #${report.pr.number}`);
+  lines.push(`- head / base: \`${report.pr.headRef}\` / \`${report.pr.baseRef}\``);
+  lines.push(`- 変更ファイル数: ${report.pr.changedFileCount}`);
+  if (report.pr.filesTruncated) {
+    lines.push(
+      `- ⚠️ 変更ファイル一覧が不完全な可能性: 取得 ${report.pr.fileCountFetched} 件 / 実際 ${report.pr.fileCountExpected} 件（全件確認できないため安全側で Review 候補にしています）`,
+    );
+  }
+
+  // 2. apply gate状態（--apply の有無＝Repository Variable POST_MERGE_ENABLE_APPLY を反映）
+  lines.push("", "### apply gate");
+  lines.push(
+    `- mode: ${a.mode ?? "report-only"}${a.mode === "apply" ? "（--apply 指定）" : "（--apply 未指定・書き込みなし）"}`,
+  );
+
+  // 3. タスク紐づけ結果
+  lines.push("", "### タスク紐づけ");
+  lines.push(`- 一致タスク: ${m.matchedTaskId ?? "（なし）"}`);
+  lines.push(`- matchedBy: ${m.matchedBy ?? "（なし）"}（候補 ${m.candidateCount} 件）`);
+
+  // 4. 判定結果
+  lines.push("", "### 判定結果");
+  lines.push(`- result: **${d.result}**`);
+  lines.push(`- proposedStatus（未適用）: ${report.wouldUpdate.proposedStatus ?? "（なし）"}`);
+  lines.push(`- 概要: ${d.summary}`);
+
+  // 5. 判定理由（no_change / review_candidate / done_candidate の理由を日本語ラベルで列挙）
+  lines.push("", "### 判定理由");
+  lines.push(`- reasonIds: ${d.reasonIds.length ? d.reasonIds.join(", ") : "（なし）"}`);
   if (d.reasonIds.length) {
     const heading =
       d.result === "no_change"
@@ -1045,23 +1067,16 @@ function buildSummaryMarkdown(report) {
       lines.push(`  - ${id}: ${reasonLabel(id)}`);
     }
   }
-  if (report.pr.filesTruncated) {
-    lines.push(
-      `- ⚠️ 変更ファイル一覧が不完全な可能性: 取得 ${report.pr.fileCountFetched} 件 / 実際 ${report.pr.fileCountExpected} 件（全件確認できないため安全側で Review 候補にしています）`,
-    );
-  }
 
-  // apply セクション（既定は report-only。--apply かつ done_candidate のときだけ書き込みを試みる）。
-  const a = report.apply ?? { attempted: false, mode: "report-only" };
-  lines.push("", "### apply");
+  // 6. Done apply結果
+  lines.push("", "### Done apply");
   if (!a.attempted) {
-    lines.push(`- mode: ${a.mode ?? "report-only"}（書き込みなし）`);
+    lines.push(`- 書き込み: なし（${a.mode ?? "report-only"}）`);
     if (a.reason) {
       lines.push(`- 理由: ${a.reason}`);
     }
   } else {
     const state = a.applied ? "実行(成功)" : a.simulated ? "シミュレート(未書き込み)" : "未実行";
-    lines.push("- mode: apply（done_candidate のみ）");
     lines.push(`- 書き込み: ${state}`);
     lines.push(`- 理由: ${a.reason ?? "（なし）"}`);
     if (a.updateMaskFields) {
@@ -1075,12 +1090,10 @@ function buildSummaryMarkdown(report) {
     }
   }
 
-  // issuePr 書き戻しセクション。report-only 時は候補表示のみ、apply 時は書き込み結果を出す。
-  const w = report.issuePrWriteback;
+  // 7. issuePr書き戻し結果（report-only 時は候補表示のみ、apply 時は成功/不要/対象外/失敗）
   if (w) {
+    lines.push("", w.enabled ? "### issuePr書き戻し" : "### issuePr書き戻し（候補・表示のみ）");
     if (!w.enabled) {
-      // report-only（--apply なし）: 候補表示のみ・Firestore へ書き込まない。
-      lines.push("", "### issuePr書き戻し候補（表示のみ）");
       if (w.candidate && w.action === "would_write") {
         lines.push("- `issuePr` 書き戻し候補: あり（表示のみ）");
         lines.push(`- 対象タスク: ${w.taskId} / matchedBy: ${w.matchedBy ?? "（なし）"}`);
@@ -1092,35 +1105,35 @@ function buildSummaryMarkdown(report) {
         lines.push("- `issuePr` 書き戻し候補: なし");
         lines.push(`- 理由: ${w.reason}`);
       }
-    } else {
-      // apply（--apply あり）: 書き込み成功 / 書き込み不要 / 対象外 / 失敗 を明示。
-      lines.push("", "### issuePr書き戻し");
-      if (w.action === "would_write") {
-        const state = w.applied ? "書き込み成功" : w.simulated ? "シミュレート(未書き込み)" : "未書き込み/失敗";
-        lines.push(`- \`issuePr\` 書き戻し: ${state}`);
-        lines.push(`- 対象タスク: ${w.taskId} / matchedBy: ${w.matchedBy ?? "（なし）"}`);
-        lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\``);
-        if (w.updateMaskFields) {
-          lines.push(`- updateMask: ${w.updateMaskFields.join(", ")}`);
-        }
-        if ("currentUpdateTime" in w) {
-          lines.push(`- currentDocument.updateTime: ${w.currentUpdateTime ?? "（なし）"}`);
-        }
-        if ("httpStatus" in w) {
-          lines.push(`- HTTP: ${w.httpStatus}`);
-        }
-        lines.push(`- 理由: ${w.reason}`);
-      } else if (w.action === "already_present") {
-        lines.push("- `issuePr` 書き戻し: 書き込み不要（対応済み）");
-        lines.push(`- 理由: ${w.reason}`);
-      } else {
-        lines.push("- `issuePr` 書き戻し: 対象外");
-        lines.push(`- 理由: ${w.reason}`);
+    } else if (w.action === "would_write") {
+      const state = w.applied ? "書き込み成功" : w.simulated ? "シミュレート(未書き込み)" : "未書き込み/失敗";
+      lines.push(`- \`issuePr\` 書き戻し: ${state}`);
+      lines.push(`- 対象タスク: ${w.taskId} / matchedBy: ${w.matchedBy ?? "（なし）"}`);
+      lines.push(`- proposed issuePr: \`${w.proposedIssuePr}\``);
+      if (w.updateMaskFields) {
+        lines.push(`- updateMask: ${w.updateMaskFields.join(", ")}`);
       }
+      if ("currentUpdateTime" in w) {
+        lines.push(`- currentDocument.updateTime: ${w.currentUpdateTime ?? "（なし）"}`);
+      }
+      if ("httpStatus" in w) {
+        lines.push(`- HTTP: ${w.httpStatus}`);
+      }
+      lines.push(`- 理由: ${w.reason}`);
+    } else if (w.action === "already_present") {
+      lines.push("- `issuePr` 書き戻し: 書き込み不要（対応済み）");
+      lines.push(`- 理由: ${w.reason}`);
+    } else {
+      lines.push("- `issuePr` 書き戻し: 対象外");
+      lines.push(`- 理由: ${w.reason}`);
     }
   }
 
-  lines.push("", applyClosingNote(a), "");
+  // 8. 次の対応
+  lines.push("", "### 次の対応");
+  lines.push(`- nextAction: ${d.nextAction}`);
+  lines.push(applyClosingNote(a));
+  lines.push("");
   return lines.join("\n");
 }
 
@@ -1158,6 +1171,16 @@ function printSummaryToConsole(report) {
         ? "simulated"
         : "not-applied";
   console.log(`apply: ${applyState}${a.reason ? ` (${a.reason})` : ""}`);
+}
+
+/**
+ * artifact JSON の最上位キーを、運用者が上から読みやすい順へ整える（表示整理）。
+ * 既存フィールドは削除・改名しない（未知キーも ...rest で保持）。中身の構造は変えない。
+ * 順序: generatedAt → mode → pr → match → decision → apply → issuePrWriteback → wouldUpdate。
+ */
+function orderReportForOutput(report) {
+  const { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest } = report;
+  return { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest };
 }
 
 function writeJsonOutput(outAbs, payload) {
