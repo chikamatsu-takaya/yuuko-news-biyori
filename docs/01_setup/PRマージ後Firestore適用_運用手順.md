@@ -325,3 +325,39 @@ Done 更新後に `issuePr` へPR番号が書き戻されることを実確認�
 - テスト用タスクとテスト用ファイルは **後片付け対象**。
 - テスト用タスクは **手動削除**する運用とする。
 - テスト用ファイルは **後片付けPRで削除**する運用とする。
+
+---
+
+## post-merge判定 回帰テストの実行方法
+
+### 目的
+- PRマージ後Firestore状態更新スクリプト（`task-management/post-merge-firestore-status.mjs`）の
+  **report-only 判定が壊れていないこと**を確認する。
+- `done_candidate` / `review_candidate` / `no_change` / `reasonLabels` の**最低限の回帰確認**を行う。
+- テストは `task-management/post-merge-firestore-status.test.mjs`（Node 標準テストランナー）。
+
+### ローカルで個別実行する
+```bash
+pnpm run test:post-merge-status
+```
+- 内容: `node --test task-management/post-merge-firestore-status.test.mjs`
+- このテストだけを素早く回したいときに使う。
+
+### 全体テストとして実行する
+```bash
+pnpm test
+```
+- 内容: `node --test`（`*.test.mjs` を自動検出して実行）。
+- `post-merge-firestore-status.test.mjs` もこの自動検出に含まれる。
+
+### CI での扱い
+- 既存の Test CI（`frontend-tests` ジョブ）が **`pnpm test`（= `node --test`）** を実行する。
+- `node --test` は `*.test.mjs` を自動検出するため、CI では
+  `post-merge-firestore-status.test.mjs` も**自動的に実行**される。
+- そのため、**専用の workflow ステップは追加していない**（二重実行を避ける）。
+
+### テストの範囲（範囲外）
+- **Firestore 実通信なし**（固定のタスク配列だけを使う）。
+- **`--apply` の実書き込みなし**。
+- **issuePr の実書き戻しなし**。
+- **report-only の判定結果確認のみ**（判定ロジック・reasonLabels の回帰）。
