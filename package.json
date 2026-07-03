@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "test": "node --test",
+    "test:post-merge-status": "node --test task-management/post-merge-firestore-status.test.mjs",
     "test:ui": "playwright test",
     "test:ui:headed": "playwright test --headed",
     "test:ui:report": "playwright show-report",
