@@ -409,3 +409,49 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - `apply`: Done apply の結果（`applied` / `simulated` / `httpStatus` / `updateMaskFields` / `currentUpdateTime` / `reason`）
 - `issuePrWriteback`: issuePr 書き戻しの候補・結果（`action` / `applied` / `httpStatus` / `updateMaskFields` / `reason` など）
 - `wouldUpdate`: 参考（提案 status など）
+
+---
+
+## no_change になった場合の対応手順
+
+### 基本方針
+- **`no_change` の場合、Firestore は自動更新されない**。
+- **apply 有効時（`--apply`）でも `no_change` なら書き込み対象外**。
+- まず **Summary の「判定理由」** と **artifact JSON の `decision` / `match`** を確認し、なぜ紐づかなかったのかを特定する。
+
+### reasonId 別の確認ポイントと対応例
+- **G1: 対象タスクが見つからない**
+  - Firestore tasks に該当タスクがあるか確認する。
+  - `branchName` / `taskCode` / `issuePr` の未設定・typo を確認する。
+- **G2: 紐づけが曖昧 / 矛盾**
+  - PR本文の `taskCode` / `branchName` と Firestore の値を確認する。
+  - 複数キーが別タスクを指していないか確認する。
+- **G3: 既に Done**
+  - Firestore 側で `status` / `completed` を確認する。
+  - 既に完了済みなら **対応不要**。
+- **G4: archived=true**
+  - archived の理由を確認する。
+  - 必要なら手動で別タスクを作成・確認する。
+- **G5: base が develop ではない**
+  - develop 向けPRではないため対象外。
+- **G6: 未マージ**
+  - closed だが未マージなどの場合は対象外。
+- **G7: 候補タスクが複数 / 複数タスクPR**
+  - 自動更新せず、人手で対象タスクを確認する。
+  - 複数タスクPRの場合は各タスクを手動更新する。
+- **skip-sync-branch**
+  - `sync/*` ブランチのPRは対象外。
+- **skip-bot-pr**
+  - `github-actions[bot]` のPRは対象外。
+
+### no_change 時に見る場所
+- Actions Summary の **「判定理由」**
+- artifact JSON の **`decision.reasonIds` / `decision.reasonLabels`**
+- artifact JSON の **`match.candidates`**
+- Firestore の対象タスク候補
+
+### 手動対応の例
+- `branchName` を正しいPRブランチ名に直す。
+- `taskCode` をPR本文と Firestore で揃える。
+- `issuePr` に PR番号を手動で記録する。
+- 複数タスクPRの場合は、対象タスクを手動で Done / Review にする。
