@@ -113,3 +113,46 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 - 更新は **5フィールドのみ**。owner / branchName / taskCode などは触らない。
 - **楽観ロック（`currentDocument.updateTime`）** で競合時は書き込まない。
 - 変数を `true` にする前に **関係者へ共有**する。
+
+---
+
+## 初回実書き込み確認結果（フェーズ1a・完了）
+初回の実書き込み確認を実施し、**成功**した。
+
+- テストPRの判定は **`done_candidate`** になった。
+- **`branchName`** で Firestore のテストタスクに一致した（matchedBy=branchName）。
+- apply が実行され、**Firestore PATCH が成功**（**HTTP 200**）した。
+
+### Firestore で確認した更新内容
+- 対象タスク: **`apply-write-check-test`**
+- `status`: `Doing` → **`Done`**
+- `completed`: `false` → **`true`**
+- `completedAt`: **timestamp が設定された**
+- `updatedAt`: **timestamp が更新された**
+- `updatedBy`: **`post-merge-bot`** に更新された
+- `branchName` / `taskCode` / `owner` / `source` など **更新対象外フィールドは維持**された（5フィールドのみ更新）。
+
+### 後片付け（完了）
+- `POST_MERGE_ENABLE_APPLY` は確認後 **`false` に戻し済み**。
+- Firestore のテストタスクは **削除済み**。
+- テスト用メモファイル `docs/03_test/自動適用テストメモ.md` は **削除済み**。
+- 削除PRも **マージ済み**。
+
+---
+
+## 今後の運用注意（実書き込みを行う場合）
+- `POST_MERGE_ENABLE_APPLY=true` は **マージ直前にだけ**設定する。
+- `true` の間は **他の develop 向けPRをマージしない**（全人手PRで apply が走るため）。
+- 確認後は **必ず `false` に戻す、または削除する**。
+- 自動 Done 化の対象は **`done_candidate` かつ Firestore 側 `status=Doing`** のタスクのみ。
+- **`review_candidate` / `no_change` は書き込み対象外**。
+- **`branchName` / `taskCode` / `issuePr`** の紐づけ値は、PR本文および Firestore と一致させる（apply 直前にも再検証される）。
+
+---
+
+## RustSec 対応の補足（後片付けPR時の対応記録）
+- 実書き込み確認後の後片付けPRで、**Security CI / RustSec Audit が既存依存により失敗**した。
+- 別PRで **RustSec Audit 対応**を行い、**先に develop へマージ**した。
+- `anyhow` は **更新済み**。
+- `quick-xml` は **依存元（`rss` / `atom_syndication` が `quick-xml "^0.39"` を要求）の制約により `>= 0.41.0` へ上げられない**ため、**理由付きで一時 ignore**している（`.cargo/audit.toml`）。
+- **upstream 対応後に、ignore 解除と依存更新（`quick-xml >= 0.41.0`）が必要**。
