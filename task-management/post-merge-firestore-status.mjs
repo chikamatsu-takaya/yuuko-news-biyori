@@ -85,23 +85,41 @@ async function main() {
   // issuePr 書き戻し候補の計算（既存マッチング結果のみ使用）。
   report.issuePrWriteback = computeIssuePrWriteback(report, pr, firestoreTasks, options);
 
-  // --apply かつ書き戻し候補（would_write）のときだけ実書き戻しを行う（Done 更新とは別の更新種別）。
-  // review_candidate / no_change / already_present / skip では書き込まない。失敗時も出力後に exit 1。
-  if (options.apply && report.issuePrWriteback.action === "would_write" && report.issuePrWriteback.taskId) {
-    try {
-      report.issuePrWriteback = await applyIssuePrWriteback(report.issuePrWriteback, pr, firestoreTasks, options);
-    } catch (error) {
-      applyFailed = true;
+  // issuePr 書き戻しは「Done apply 成功時だけ」実行する（初回実装は安全側）。
+  // Done apply がスキップ/失敗/未実行のときに issuePr だけ書き戻すと、Summary 末尾の
+  // applyClosingNote（Done の結果基準）と実 Firestore 変更が矛盾しうるため、それを避ける。
+  // 実行条件: --apply / done_candidate / Done apply.applied===true / action==="would_write" / taskId あり。
+  if (
+    options.apply &&
+    report.decision.result === "done_candidate" &&
+    report.issuePrWriteback.action === "would_write" &&
+    report.issuePrWriteback.taskId
+  ) {
+    if (report.apply?.applied === true) {
+      try {
+        report.issuePrWriteback = await applyIssuePrWriteback(report.issuePrWriteback, pr, firestoreTasks, options);
+      } catch (error) {
+        applyFailed = true;
+        report.issuePrWriteback = {
+          ...report.issuePrWriteback,
+          applied: false,
+          error: true,
+          reason: `issuePr書き戻しで例外が発生しました: ${error.message}`,
+        };
+      }
+      const wb = report.issuePrWriteback;
+      if (wb.applied === false && typeof wb.httpStatus === "number" && wb.httpStatus >= 400) {
+        applyFailed = true;
+      }
+    } else {
+      // Done apply が成功していない（スキップ/失敗/未実行）→ issuePr は書き戻さない。
       report.issuePrWriteback = {
         ...report.issuePrWriteback,
+        action: "skip",
+        candidate: false,
         applied: false,
-        error: true,
-        reason: `issuePr書き戻しで例外が発生しました: ${error.message}`,
+        reason: "Done apply が成功していないため、issuePr は書き戻しません。",
       };
-    }
-    const wb = report.issuePrWriteback;
-    if (wb.applied === false && typeof wb.httpStatus === "number" && wb.httpStatus >= 400) {
-      applyFailed = true;
     }
   }
 
