@@ -937,6 +937,45 @@ async function applyIssuePrWriteback(candidate, pr, firestoreTasks, options) {
   };
 }
 
+// reasonId → 運用者向けの日本語ラベル（表示専用。判定ロジックには影響しない）。
+// no_change / review_candidate がなぜその判定になったかを Summary / artifact で追いやすくする。
+const REASON_LABELS = {
+  // 更新しない（ガード）
+  G1: "対象タスクが見つからない（0件）",
+  G2: "紐づけが曖昧/矛盾（本文キー不一致や別タスクを指す）",
+  G3: "既に Done",
+  G4: "archived=true",
+  G5: "base が develop ではない",
+  G6: "未マージ",
+  G7: "候補タスクが複数（一意に絞れない）/複数タスクPR",
+  "skip-sync-branch": "同期用ブランチ（sync/*）のPRのため対象外",
+  "skip-bot-pr": "bot（github-actions[bot]）のPRのため対象外",
+  // Review（人手確認が必要）
+  R1: "UI変更を含む",
+  R2: "Firestore 読み書きを含む",
+  R5: "Rust / Tauri 実装を含む",
+  R7: "外部通信 / セキュリティ関連を含む",
+  R8: "重要な確認項目が未チェック/確認項目不足",
+  R9: "動作確認結果が不明",
+  R10: "仕様・設計・データ構造・判定/運用ルール等の判断が必要",
+  R11: "Tauri command / 外部通信先が「あり」",
+  // 安全側（判定不能）
+  X1: "Done条件だけで構成されず判定不能のため安全側で Review",
+  X2: "変更ファイル一覧が不完全なため安全側で Review",
+  // Done候補
+  D3: "docs / Markdown / テンプレ等のみで Review 条件に非該当",
+};
+
+/** reasonId を日本語ラベルへ変換（未知IDはそのまま返す）。 */
+function reasonLabel(id) {
+  return REASON_LABELS[id] ?? id;
+}
+
+/** reasonIds を {id, label} 配列へ変換（artifact JSON 用）。 */
+function reasonLabelsFor(reasonIds) {
+  return (reasonIds ?? []).map((id) => ({ id, label: reasonLabel(id) }));
+}
+
 function buildReport(pr, result) {
   const proposedStatus =
     result.decision.result === "done_candidate"
@@ -960,7 +999,9 @@ function buildReport(pr, result) {
       filesTruncated: pr.filesTruncated,
     },
     match: result.match,
-    decision: result.decision,
+    // decision は判定ロジックの結果をそのまま保持しつつ、表示用に reasonLabels を追加する
+    // （result / reasonIds / summary / nextAction は変更しない）。
+    decision: { ...result.decision, reasonLabels: reasonLabelsFor(result.decision.reasonIds) },
     wouldUpdate: {
       targetTaskId: result.match.matchedTaskId,
       proposedStatus,
@@ -985,6 +1026,19 @@ function buildSummaryMarkdown(report) {
     `- proposedStatus（未適用）: ${report.wouldUpdate.proposedStatus ?? "（なし）"}`,
     `- 概要: ${d.summary}`,
   ];
+  // 判定理由を運用者向けに日本語ラベルで列挙する（no_change / review_candidate を追いやすくする）。
+  if (d.reasonIds.length) {
+    const heading =
+      d.result === "no_change"
+        ? "- 自動更新しなかった理由:"
+        : d.result === "review_candidate"
+          ? "- 人手確認が必要な理由:"
+          : "- 判定理由:";
+    lines.push(heading);
+    for (const id of d.reasonIds) {
+      lines.push(`  - ${id}: ${reasonLabel(id)}`);
+    }
+  }
   if (report.pr.filesTruncated) {
     lines.push(
       `- ⚠️ 変更ファイル一覧が不完全な可能性: 取得 ${report.pr.fileCountFetched} 件 / 実際 ${report.pr.fileCountExpected} 件（全件確認できないため安全側で Review 候補にしています）`,
