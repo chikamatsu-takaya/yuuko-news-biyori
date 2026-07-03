@@ -156,3 +156,71 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 - `anyhow` は **更新済み**。
 - `quick-xml` は **依存元（`rss` / `atom_syndication` が `quick-xml "^0.39"` を要求）の制約により `>= 0.41.0` へ上げられない**ため、**理由付きで一時 ignore**している（`.cargo/audit.toml`）。
 - **upstream 対応後に、ignore 解除と依存更新（`quick-xml >= 0.41.0`）が必要**。
+
+---
+
+## フェーズ1b計画
+
+### フェーズ1aで完了していること
+- report-only が既定で動作する
+- `POST_MERGE_ENABLE_APPLY` が厳密に `true` のときだけ apply が有効になる
+- `done_candidate` かつ Firestore 側 `status=Doing` のタスクだけ `Done` に自動更新する
+- apply 直前に Firestore タスクを再読込する
+- `branchName` / `taskCode` / `issuePr` の紐づけを apply 直前に再検証する
+- `currentDocument.updateTime` による楽観ロックを行う
+- 更新フィールドは `status` / `completed` / `completedAt` / `updatedAt` / `updatedBy` の5項目に制限する
+- 例外やHTTPエラー時も artifact / Step Summary を出力してから失敗させる
+- 初回実書き込み確認は成功済み
+- 運用手順にも検証結果を追記済み
+
+### 現状の弱点
+- `review_candidate` になったときに、人が次に何をすればよいかがまだ分かりづらい
+- `no_change` の理由が運用者向けにはやや分かりづらい
+- Step Summary / artifact JSON は確認できるが、実運用向けの見やすさに改善余地がある
+- `issuePr` へのPR番号書き戻しは未対応
+- 実タスクでの小規模運用手順はまだ十分に整理されていない
+
+### フェーズ1bの候補
+- `review_candidate` の表示改善
+  - なぜ手動確認になったかを分かりやすくする
+  - 次に見るべき観点を Summary に出す
+- `no_change` の理由表示改善
+  - タスク未一致、複数候補、既にDone、archived、状態不一致などを分かりやすく表示する
+- Step Summary の見やすさ改善
+  - 判定結果、対象タスク、apply結果、次アクションを見やすく整理する
+- artifact JSON の運用向け整理
+  - 人が確認しやすいキー名や補足情報を追加する
+- `issuePr` へのPR番号書き戻し検討
+  - 実装する場合は allow-list 拡張が必要
+  - Done更新とは別扱いにするか検討する
+- 実タスクでの小規模運用テスト手順の整理
+  - `POST_MERGE_ENABLE_APPLY=true` を短時間だけ有効化する運用を前提にする
+
+### フェーズ1bでまだやらないこと
+- `review_candidate` の自動書き込み
+- 複数タスクPRの自動更新
+- `branchName` 不一致時の強制更新
+- `POST_MERGE_ENABLE_APPLY=true` の常時運用
+- Firestore スキーマの広範囲な変更
+- `issuePr` 書き戻しと Done 更新を同時に大きく変更すること
+
+### おすすめのPR分割
+1. docsのみでフェーズ1b計画を追記する
+   - 今回のPR
+   - コード変更なしで方針を共有する
+2. Step Summary / reason表示を改善する
+   - 判定ロジックは変えず、表示だけ改善する
+3. artifact JSON の補足情報を整理する
+   - 自動処理ではなく人間の確認しやすさを改善する
+4. `issuePr` 書き戻しの設計をdocsで整理する
+   - 実装前に allow-list、競合、PR番号の扱いを決める
+5. 実タスクでの小規模運用テスト手順を追記する
+   - apply gate を短時間だけ有効化する前提で手順化する
+
+### フェーズ1bの最初にやるべきこと
+最初は docs のみで計画を追記する。
+
+理由:
+- コード、workflow、Firestore に触れないためリスクが低い
+- フェーズ1aの検証結果を前提に、次の改善範囲をチームで確認しやすい
+- その後の Step Summary 改善や `issuePr` 書き戻し検討を小さなPRに分けやすい
