@@ -299,3 +299,29 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 4. テスト用タスクで issuePr 書き戻し確認を行う
    - `POST_MERGE_ENABLE_APPLY=true` は短時間のみ
 5. 実運用ルールを更新する
+
+---
+
+## issuePr書き戻し 実書き込み確認結果（完了）
+Done 更新後に `issuePr` へPR番号が書き戻されることを実確認し、**成功**した。
+
+### 実施内容
+- テストPR番号: **#127**
+- テストブランチ: **`test/issuepr-writeback-check`**
+- Firestore対象タスク: **`issuepr-writeback-check-test`**
+- matchedBy: **`branchName`**
+- 判定 result: **`done_candidate`**
+- **Done 更新が HTTP 200 で成功**した。
+- **issuePr 書き戻しが HTTP 200 で成功**した（Done 更新成功後に実行）。
+
+### Firestore で確認した内容
+- `status`: **`Done`**
+- `completed`: **`true`**
+- `issuePr`: **`"#127"`**
+- `updatedBy`: **`post-merge-bot`**
+
+### 後片付け
+- 確認後、`POST_MERGE_ENABLE_APPLY` は **`false` に戻す**運用とする。
+- テスト用タスクとテスト用ファイルは **後片付け対象**。
+- テスト用タスクは **手動削除**する運用とする。
+- テスト用ファイルは **後片付けPRで削除**する運用とする。
