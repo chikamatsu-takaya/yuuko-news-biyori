@@ -20,7 +20,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -28,10 +28,16 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 // status 許可値（firestore-source.js / 同期スクリプト群と揃える）。
 const ALLOWED_STATUSES = ["Todo", "Next", "Doing", "Review", "Blocked", "Done"];
 
-main().catch((error) => {
-  console.error(`[post-merge] 想定外のエラー: ${error.message}`);
-  process.exitCode = 1;
-});
+// CLI として直接実行されたときだけ main() を走らせる（テスト等で import しても副作用を起こさない）。
+// workflow は `node post-merge-firestore-status.mjs ...` で実行するため、従来どおり main() が走る。
+const isDirectRun =
+  Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(`[post-merge] 想定外のエラー: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -1180,4 +1186,4 @@ function strOrEmpty(value) {
 }
 
 // ALLOWED_STATUSES は将来のバリデーション拡張に備えて公開的に保持する（現状は参照のみ）。
-export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply, verifyLinkStillMatches };
+export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply, verifyLinkStillMatches, buildReport, reasonLabelsFor };
