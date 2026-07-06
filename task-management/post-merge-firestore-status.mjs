@@ -119,13 +119,8 @@ async function main() {
       }
     } else {
       // Done apply が成功していない（スキップ/失敗/未実行）→ issuePr は書き戻さない。
-      report.issuePrWriteback = {
-        ...report.issuePrWriteback,
-        action: "skip",
-        candidate: false,
-        applied: false,
-        reason: "Done apply が成功していないため、issuePr は書き戻しません。",
-      };
+      // 判定は純粋関数へ切り出し（回帰テストで直接検証できるようにする）。
+      report.issuePrWriteback = guardIssuePrWritebackAfterApply(report.issuePrWriteback, report.apply, options);
     }
   }
 
@@ -859,6 +854,39 @@ function computeIssuePrWriteback(report, pr, firestoreTasks, options) {
   return { ...base, candidate: false, action: "skip", taskId, matchedBy, prNumber, currentIssuePr: currentTrim, proposedIssuePr, reason: "既存 issuePr に別PR番号があり、自動上書きしないため対象外です。" };
 }
 
+/**
+ * Done apply の結果を踏まえて issuePr 書き戻し候補を「確定」させる純粋関数（書き込みはしない）。
+ * main() の「Done apply 成功時だけ issuePr を書き戻す」ガードを切り出したもの。
+ * これにより「Done apply 未成立なら issuePr を書き戻さない」不変条件を回帰テストで直接検証できる。
+ *
+ * 挙動:
+ * - report-only（--apply なし）: 表示用候補をそのまま返す（変更しない）。
+ * - --apply かつ action="would_write" かつ Done apply 未成功（applied!==true）: skip に落とす
+ *   （issuePr は書き戻さない。reason は既存 main の文言に合わせる）。
+ * - --apply かつ Done apply 成功（applied===true）: would_write を維持（呼び出し側で実書き戻しへ進む）。
+ * - would_write 以外（already_present / skip 等）: そのまま返す。
+ *
+ * @param {object} writeback  computeIssuePrWriteback の結果
+ * @param {object|undefined} apply  report.apply（Done apply の結果）
+ * @param {object} options  { apply: boolean } を含む
+ */
+function guardIssuePrWritebackAfterApply(writeback, apply, options) {
+  // report-only 表示用の候補は既存挙動を壊さない。
+  if (options?.apply !== true) return writeback;
+  // 実書き戻し対象は would_write のみ。それ以外はそのまま。
+  if (writeback?.action !== "would_write") return writeback;
+  // Done apply 成功時は would_write を維持（呼び出し側で applyIssuePrWriteback へ進める）。
+  if (apply?.applied === true) return writeback;
+  // Done apply 未成立（スキップ/失敗/未実行）→ issuePr は書き戻さない。
+  return {
+    ...writeback,
+    action: "skip",
+    candidate: false,
+    applied: false,
+    reason: "Done apply が成功していないため、issuePr は書き戻しません。",
+  };
+}
+
 /** firestoreTasks から taskId の現在の issuePr を取り出す（文字列 or null）。 */
 function getCurrentIssuePr(firestoreTasks, taskId) {
   const t = firestoreTasks.find((x) => x.id === taskId);
@@ -1222,4 +1250,5 @@ export {
   reasonLabelsFor,
   computeApply,
   computeIssuePrWriteback,
+  guardIssuePrWritebackAfterApply,
 };

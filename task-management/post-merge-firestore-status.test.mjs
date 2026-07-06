@@ -16,6 +16,7 @@ import {
   planDoneApply,
   computeApply,
   computeIssuePrWriteback,
+  guardIssuePrWritebackAfterApply,
 } from "./post-merge-firestore-status.mjs";
 
 // Firestore タスク（Doing・issuePr 空）。実通信はせず、この配列だけを使う。
@@ -220,16 +221,47 @@ test("done_candidate + apply(offline) + Doing + issuePr空 → Done apply成立(
   assert.equal(wb.proposedIssuePr, "#123");
 });
 
-test("Done apply 未成立（status非Doing）→ Done apply しない前提が成立（issuePr書き戻しの前提が崩れる）", async () => {
+test("Done apply 未成立（status非Doing）→ guardで issuePr書き戻しが skip になる（main分岐を直接検証）", async () => {
   // done_candidate だが Firestore 側 status が Review → 再読込ガードで Done apply しない。
-  // main() は「Done apply.applied===true のときだけ」issuePr を書き戻すため、この前提崩れで issuePr も書き戻されない。
+  // main() は「Done apply.applied===true のときだけ」issuePr を書き戻す。その分岐を
+  // guardIssuePrWritebackAfterApply() 経由で直接通し、issuePr が skip になることを担保する。
   const pr = makePr({ files: ["docs/a.md"] });
   const tasks = tasksWith({ status: "Review" }); // Done/completed/archived ではないので evaluate は done_candidate のまま
   const report = reportFor(pr, tasks);
   assert.equal(report.decision.result, "done_candidate");
 
+  // 1) Done apply は未成立（status非Doing）。
   const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
   assert.equal(apply.attempted, true);
   assert.notEqual(apply.applied, true, "status非Doingでは Done apply が成功しない");
   assert.match(apply.reason ?? "", /自動Done化対象外/);
+
+  // 2) computeIssuePrWriteback 単体では would_write（issuePr 空のため候補になる）。
+  const wb = computeIssuePrWriteback(report, pr, tasks, { apply: true });
+  assert.equal(wb.action, "would_write", "単体では would_write（候補）");
+
+  // 3) guard を通すと、Done apply 未成立なので skip へ落ちる（＝ main のガード相当）。
+  const guarded = guardIssuePrWritebackAfterApply(wb, apply, { apply: true });
+  assert.equal(guarded.action, "skip", "Done apply 未成立なら issuePr は skip");
+  assert.equal(guarded.applied, false, "issuePr を書き戻さない");
+  assert.equal(guarded.candidate, false);
+  assert.match(guarded.reason ?? "", /Done apply が成功していないため/);
+});
+
+test("guardIssuePrWritebackAfterApply: Done apply 成功時は would_write を維持", () => {
+  const wb = { action: "would_write", candidate: true, taskId: "t1", proposedIssuePr: "#123" };
+  const guarded = guardIssuePrWritebackAfterApply(wb, { applied: true }, { apply: true });
+  assert.equal(guarded.action, "would_write", "Done apply 成功なら候補を維持（実書き戻しへ進む）");
+});
+
+test("guardIssuePrWritebackAfterApply: report-only は表示候補をそのまま返す", () => {
+  const wb = { action: "would_write", candidate: true, taskId: "t1", proposedIssuePr: "#123" };
+  const guarded = guardIssuePrWritebackAfterApply(wb, { attempted: false, mode: "report-only" }, { apply: false });
+  assert.deepEqual(guarded, wb, "report-only は候補表示を壊さない");
+});
+
+test("guardIssuePrWritebackAfterApply: would_write 以外（already_present）はそのまま", () => {
+  const wb = { action: "already_present", candidate: false, taskId: "t1" };
+  const guarded = guardIssuePrWritebackAfterApply(wb, { applied: false }, { apply: true });
+  assert.deepEqual(guarded, wb, "would_write 以外は変更しない");
 });
