@@ -559,6 +559,54 @@ function uniq(arr) {
 }
 
 // ---------------------------------------------------------------------------
+// PR本文 Done許可チェックボックス（apply の追加ゲート）
+// ---------------------------------------------------------------------------
+//
+// PR単位で「このPRのマージ後、紐づく Firestore タスクを Done にしてよいか」を明示するための
+// チェックボックスを検出する。AI はPR本文生成時に初期判定として付け、人間はマージ前に修正できる。
+// Actions は最終チェック状態だけを見る（判定理由は人間確認用で、検出には使わない）。
+// 検出はテンプレの固定文言に限定し、文言揺れを広く許容しない（前後の空白程度のみ許容）。
+
+const PR_DONE_APPLY_CHECKBOX_TEXT = "このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
+
+/**
+ * PR本文から Done 許可チェックボックス行を探す。
+ * 固定文言に一致する `- [ ]` / `- [x]` / `- [X]` 行のみ対象。見つからなければ present=false。
+ * 文言が異なるチェックボックスは対象外（present=false）とする。
+ * @returns {{ present: boolean, checked: boolean }}
+ */
+function findPrDoneApplyCheckbox(body) {
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(/^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$/);
+    if (m && m[2].trim() === PR_DONE_APPLY_CHECKBOX_TEXT) {
+      return { present: true, checked: m[1] === "x" || m[1] === "X" };
+    }
+  }
+  return { present: false, checked: false };
+}
+
+/** PR本文の Done 許可チェックが「チェック済み」か（apply 条件・テストで使用）。 */
+function isPrDoneApplyChecked(body) {
+  return findPrDoneApplyCheckbox(body).checked;
+}
+
+/**
+ * PR本文の Done 許可チェック状態を report 用に評価する。
+ * checked / present の3状態に応じて人間向けの reason を付ける（source は常に "pr_body"）。
+ * @returns {{ checked: boolean, source: "pr_body", reason: string }}
+ */
+function evaluatePrDoneApplyConsent(body) {
+  const found = findPrDoneApplyCheckbox(body);
+  if (found.checked) {
+    return { checked: true, source: "pr_body", reason: "PR本文のDone許可チェックがチェック済みです。" };
+  }
+  if (found.present) {
+    return { checked: false, source: "pr_body", reason: "PR本文のDone許可チェックが未チェックです。" };
+  }
+  return { checked: false, source: "pr_body", reason: "PR本文にDone許可チェックが見つかりません。" };
+}
+
+// ---------------------------------------------------------------------------
 // 照合ヘルパー
 // ---------------------------------------------------------------------------
 
@@ -638,6 +686,15 @@ async function computeApply(report, pr, firestoreTasks, options) {
   }
   if (!report.match.matchedTaskId) {
     return { attempted: false, mode: "apply", reason: "対象タスクが特定できていないため apply しません。" };
+  }
+  // PR本文の Done 許可チェック（追加ゲート）。未チェック/項目なしなら done_candidate でも書き込まない。
+  // 大きいタスクの途中PR等を、PR単位の明示的同意なしに Done 化しないための安全条件。
+  if (report.prDoneApplyConsent?.checked !== true) {
+    return {
+      attempted: false,
+      mode: "apply",
+      reason: "PR本文のDone許可チェックが未チェックのため自動更新しません（Done にするには PR本文のチェックが必要です）。",
+    };
   }
   return applyPhase(report, pr, firestoreTasks, options);
 }
@@ -1037,6 +1094,8 @@ function buildReport(pr, result) {
     // decision は判定ロジックの結果をそのまま保持しつつ、表示用に reasonLabels を追加する
     // （result / reasonIds / summary / nextAction は変更しない）。
     decision: { ...result.decision, reasonLabels: reasonLabelsFor(result.decision.reasonIds) },
+    // PR本文の Done 許可チェック状態（apply の追加ゲート・Summary/artifact 表示用）。
+    prDoneApplyConsent: evaluatePrDoneApplyConsent(pr.body),
     wouldUpdate: {
       targetTaskId: result.match.matchedTaskId,
       proposedStatus,
@@ -1094,6 +1153,15 @@ function buildSummaryMarkdown(report) {
     for (const id of d.reasonIds) {
       lines.push(`  - ${id}: ${reasonLabel(id)}`);
     }
+  }
+
+  // 5.5 PR本文 Done許可チェック（apply の追加ゲート状態）
+  const consent = report.prDoneApplyConsent;
+  if (consent) {
+    lines.push("", "### PR本文 Done許可チェック");
+    lines.push(`- checked: ${consent.checked}`);
+    lines.push(`- source: ${consent.source}`);
+    lines.push(`- reason: ${consent.reason}`);
   }
 
   // 6. Done apply結果
@@ -1204,11 +1272,12 @@ function printSummaryToConsole(report) {
 /**
  * artifact JSON の最上位キーを、運用者が上から読みやすい順へ整える（表示整理）。
  * 既存フィールドは削除・改名しない（未知キーも ...rest で保持）。中身の構造は変えない。
- * 順序: generatedAt → mode → pr → match → decision → apply → issuePrWriteback → wouldUpdate。
+ * 順序: generatedAt → mode → pr → match → decision → prDoneApplyConsent → apply → issuePrWriteback → wouldUpdate。
  */
 function orderReportForOutput(report) {
-  const { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest } = report;
-  return { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest };
+  const { generatedAt, mode, pr, match, decision, prDoneApplyConsent, apply, issuePrWriteback, wouldUpdate, ...rest } =
+    report;
+  return { generatedAt, mode, pr, match, decision, prDoneApplyConsent, apply, issuePrWriteback, wouldUpdate, ...rest };
 }
 
 function writeJsonOutput(outAbs, payload) {
@@ -1251,4 +1320,6 @@ export {
   computeApply,
   computeIssuePrWriteback,
   guardIssuePrWritebackAfterApply,
+  isPrDoneApplyChecked,
+  evaluatePrDoneApplyConsent,
 };
