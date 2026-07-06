@@ -22,7 +22,18 @@ import {
   computeApply,
   computeIssuePrWriteback,
   guardIssuePrWritebackAfterApply,
+  isPrDoneApplyChecked,
+  evaluatePrDoneApplyConsent,
 } from "./post-merge-firestore-status.mjs";
+
+// PR本文 Done許可チェックボックスの固定文言（本番テンプレートと一致させる）。
+const CONSENT_CHECKED_LINE = "- [x] このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
+const CONSENT_UNCHECKED_LINE = "- [ ] このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
+
+// branchName 行 + Done許可チェック（済/未）を含むPR本文を作る。
+function bodyWithConsent(checked) {
+  return `- branchName: feature/x\n${checked ? CONSENT_CHECKED_LINE : CONSENT_UNCHECKED_LINE}`;
+}
 
 // Firestore タスク（Doing・issuePr 空）。実通信はせず、この配列だけを使う。
 const TASKS = [
@@ -202,11 +213,13 @@ test("archived=true → 自動更新対象にしない（evaluate=G4 / planDoneA
   assert.equal(plan.shouldWrite, false, "再読込時 archived=true は書き込まない");
 });
 
-test("done_candidate + apply(offline) + Doing + issuePr空 → Done apply成立(未書き込み) & issuePr書き戻し候補あり", async () => {
-  const pr = makePr({ files: ["docs/a.md"] }); // done_candidate / number=123
+test("done_candidate + apply(offline) + Doing + issuePr空 + チェック済み → Done apply成立(未書き込み) & issuePr書き戻し候補あり", async () => {
+  // 新仕様: PR本文の Done 許可チェックが済んでいないと apply しない。ここでは checked=true にする。
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(true) }); // done_candidate / number=123
   const tasks = tasksWith({ issuePr: "" });
   const report = reportFor(pr, tasks);
   assert.equal(report.decision.result, "done_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, true, "チェック済みで apply ゲートを通す");
 
   // offline は simulated（実書き込みなし）だが、Done 更新の条件は成立し updateMask が Done5項目になる。
   const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
@@ -230,7 +243,8 @@ test("Done apply 未成立（status非Doing）→ guardで issuePr書き戻し�
   // done_candidate だが Firestore 側 status が Review → 再読込ガードで Done apply しない。
   // main() は「Done apply.applied===true のときだけ」issuePr を書き戻す。その分岐を
   // guardIssuePrWritebackAfterApply() 経由で直接通し、issuePr が skip になることを担保する。
-  const pr = makePr({ files: ["docs/a.md"] });
+  // チェック済みにして apply ゲートを通し、status ゲート（Doing以外）で止まることを検証する。
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(true) });
   const tasks = tasksWith({ status: "Review" }); // Done/completed/archived ではないので evaluate は done_candidate のまま
   const report = reportFor(pr, tasks);
   assert.equal(report.decision.result, "done_candidate");
@@ -272,6 +286,183 @@ test("guardIssuePrWritebackAfterApply: would_write 以外（already_present）�
 });
 
 // ---------------------------------------------------------------------------
+// PR本文 Done許可チェックボックス（apply の追加ゲート）の回帰テスト
+// ---------------------------------------------------------------------------
+
+test("isPrDoneApplyChecked: [x] なら checked=true", () => {
+  assert.equal(isPrDoneApplyChecked(`前置き\n${CONSENT_CHECKED_LINE}\n後書き`), true);
+});
+
+test("isPrDoneApplyChecked: [X]（大文字）なら checked=true", () => {
+  assert.equal(
+    isPrDoneApplyChecked("- [X] このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい"),
+    true,
+  );
+});
+
+test("isPrDoneApplyChecked: [ ] なら checked=false", () => {
+  assert.equal(isPrDoneApplyChecked(CONSENT_UNCHECKED_LINE), false);
+});
+
+test("isPrDoneApplyChecked: 項目なしなら checked=false", () => {
+  assert.equal(isPrDoneApplyChecked("- branchName: feature/x\n判定理由:\n- なし"), false);
+});
+
+test("isPrDoneApplyChecked: 文言が違うチェックボックスは checked=false", () => {
+  // チェックは付いているが固定文言と異なる → 対象外。
+  assert.equal(isPrDoneApplyChecked("- [x] このPRでFirestoreをDoneにしてOK"), false);
+});
+
+test("isPrDoneApplyChecked: fenced code block（```）内の [x] は checked=false", () => {
+  const body = ["説明:", "```md", CONSENT_CHECKED_LINE, "```", "本文続き"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ~~~ code fence 内の [x] は checked=false", () => {
+  const body = ["説明:", "~~~", CONSENT_CHECKED_LINE, "~~~"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: 4スペースインデントのコードブロック行は checked=false", () => {
+  const body = ["例:", "", `    ${CONSENT_CHECKED_LINE}`, "", "本文"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: コードブロック外の通常 [x] は checked=true のまま", () => {
+  const body = ["```md", CONSENT_UNCHECKED_LINE, "```", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: コード内 [x] の後に通常本文 [ ] → checked=false", () => {
+  const body = ["```md", CONSENT_CHECKED_LINE, "```", "", CONSENT_UNCHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: コード内 [ ] の後に通常本文 [x] → checked=true", () => {
+  const body = ["```md", CONSENT_UNCHECKED_LINE, "```", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: タブインデント（先頭タブ）の固定チェック行は checked=false", () => {
+  assert.equal(isPrDoneApplyChecked(`例:\n\t${CONSENT_CHECKED_LINE}`), false);
+});
+
+test("isPrDoneApplyChecked: 0〜3スペース + タブ インデントの固定チェック行は checked=false", () => {
+  assert.equal(isPrDoneApplyChecked(`例:\n  \t${CONSENT_CHECKED_LINE}`), false);
+  assert.equal(isPrDoneApplyChecked(`例:\n\t  ${CONSENT_CHECKED_LINE}`), false);
+});
+
+test("isPrDoneApplyChecked: タブインデントを挟んでも通常本文の [x] は checked=true", () => {
+  const body = [`\t${CONSENT_UNCHECKED_LINE}`, "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: ```` で開いた fence 内に ``` が出ても閉じず、その後ろの [x] は checked=false", () => {
+  const body = ["````md", "```md", CONSENT_CHECKED_LINE, "```"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ```` で開き ```` で閉じた後の通常本文 [x] は checked=true", () => {
+  const body = ["````md", CONSENT_UNCHECKED_LINE, "````", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: ~~~~ で開いた fence 内に ~~~ が出ても閉じず、その後ろの [x] は checked=false", () => {
+  const body = ["~~~~", "~~~", CONSENT_CHECKED_LINE, "~~~"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ~~~~ で開き ~~~~ で閉じた後の通常本文 [x] は checked=true", () => {
+  const body = ["~~~~", CONSENT_UNCHECKED_LINE, "~~~~", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("evaluatePrDoneApplyConsent: 3状態の checked / reason / source", () => {
+  const checked = evaluatePrDoneApplyConsent(CONSENT_CHECKED_LINE);
+  assert.deepEqual(
+    { checked: checked.checked, source: checked.source },
+    { checked: true, source: "pr_body" },
+  );
+  assert.match(checked.reason, /チェック済み/);
+
+  const unchecked = evaluatePrDoneApplyConsent(CONSENT_UNCHECKED_LINE);
+  assert.equal(unchecked.checked, false);
+  assert.match(unchecked.reason, /未チェック/);
+
+  const missing = evaluatePrDoneApplyConsent("- branchName: feature/x");
+  assert.equal(missing.checked, false);
+  assert.match(missing.reason, /見つかりません/);
+});
+
+test("buildReport に prDoneApplyConsent が含まれる（Summary/artifact 用）", () => {
+  const report = reportFor(makePr({ files: ["docs/a.md"], body: bodyWithConsent(false) }), tasksWith());
+  assert.equal(report.prDoneApplyConsent.checked, false);
+  assert.equal(report.prDoneApplyConsent.source, "pr_body");
+  assert.match(report.prDoneApplyConsent.reason, /未チェック/);
+});
+
+test("未チェック + done_candidate + apply=true → Done apply しない（Done許可チェック未済）", async () => {
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(false) });
+  const tasks = tasksWith();
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "done_candidate");
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, false, "未チェックでは apply を試みない");
+  assert.notEqual(apply.applied, true, "Firestore へ書き込まない");
+  assert.match(apply.reason ?? "", /未チェック/);
+});
+
+test("チェック項目なし + done_candidate + apply=true → Done apply しない", async () => {
+  const pr = makePr({ files: ["docs/a.md"], body: "- branchName: feature/x" }); // チェック項目なし
+  const tasks = tasksWith();
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "done_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, false);
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, false, "チェック項目なしでは apply を試みない");
+  assert.notEqual(apply.applied, true);
+});
+
+test("チェック済み + review_candidate + apply=true → Done apply しない（result優先）", async () => {
+  // チェックが付いていても review_candidate は書き込み対象外（result ゲートが先に効く）。
+  const pr = makePr({ files: ["components/screens/MainScreen.tsx"], body: bodyWithConsent(true) });
+  const tasks = tasksWith();
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "review_candidate");
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, false);
+  assert.match(apply.reason ?? "", /書き込み対象外/);
+});
+
+test("チェック済み + no_change + apply=true → Done apply しない（result優先）", async () => {
+  const pr = makePr({ headRef: "feature/unknown", body: `no keys\n${CONSENT_CHECKED_LINE}`, files: ["docs/a.md"] });
+  const tasks = tasksWith();
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "no_change");
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, false);
+  assert.match(apply.reason ?? "", /書き込み対象外/);
+});
+
+test("未チェックで Done apply が skip されると issuePr書き戻しも skip（guard 経由）", async () => {
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(false) });
+  const tasks = tasksWith({ issuePr: "" });
+  const report = reportFor(pr, tasks);
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.notEqual(apply.applied, true, "未チェックなので Done apply しない");
+
+  const wb = computeIssuePrWriteback(report, pr, tasks, { apply: true });
+  assert.equal(wb.action, "would_write", "単体では候補になる");
+  const guarded = guardIssuePrWritebackAfterApply(wb, apply, { apply: true });
+  assert.equal(guarded.action, "skip", "Done apply 未成立なので issuePr も書き戻さない");
+});
+
+// ---------------------------------------------------------------------------
 // CLI / main 実行経路の回帰テスト
 //
 // 目的:
@@ -284,8 +475,9 @@ test("guardIssuePrWritebackAfterApply: would_write 以外（already_present）�
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "post-merge-firestore-status.mjs");
 
-test("CLI: --apply + offline dump で status=Review の done_candidate → issuePr書き戻しが skip（main実行経路）", () => {
-  // リポジトリ内に一時ファイルを残さないよう、OS の一時ディレクトリを使う。
+// CLI を offline（--firestore-json）で実行し、出力 artifact JSON を読み込むヘルパー。
+// 実 Firestore へは接続しない。一時ファイルは OS tmp に作り、必ず後片付けする。
+function runCliOffline({ prBody, taskStatus }) {
   const workDir = mkdtempSync(join(tmpdir(), "post-merge-cli-"));
   try {
     const prJsonPath = join(workDir, "pr.json");
@@ -293,7 +485,6 @@ test("CLI: --apply + offline dump で status=Review の done_candidate → issue
     const outPath = join(workDir, "report.json");
     const summaryPath = join(workDir, "summary.md");
 
-    // PR: docs のみ変更 → done_candidate。branchName / taskCode ともに t1 に一致。
     writeFileSync(
       prJsonPath,
       JSON.stringify({
@@ -302,13 +493,11 @@ test("CLI: --apply + offline dump で status=Review の done_candidate → issue
         baseRef: "develop",
         headRef: "feature/x",
         author: "someuser",
-        body: "- branchName: feature/x\n- taskCode: TASK-1",
+        body: prBody,
         files: ["docs/a.md"],
       }),
       "utf8",
     );
-
-    // Firestore dump: status=Review（Doing でない）→ Done apply は未成立になる想定。issuePr は空。
     writeFileSync(
       dumpPath,
       JSON.stringify([
@@ -317,7 +506,7 @@ test("CLI: --apply + offline dump で status=Review の done_candidate → issue
           data: {
             taskCode: "TASK-1",
             branchName: "feature/x",
-            status: "Review",
+            status: taskStatus,
             completed: false,
             archived: false,
             issuePr: "",
@@ -327,7 +516,6 @@ test("CLI: --apply + offline dump で status=Review の done_candidate → issue
       "utf8",
     );
 
-    // 実 Firestore へ行かないよう offline dump を指定し、--apply 経路を通す。
     const res = spawnSync(
       process.execPath,
       [
@@ -340,30 +528,58 @@ test("CLI: --apply + offline dump で status=Review の done_candidate → issue
       ],
       { encoding: "utf8" },
     );
-
-    // 書き込み未達（simulated）は失敗扱いにならない設計 → 正常終了（exit 0）。
-    assert.equal(res.status, 0, `CLI は正常終了する（stderr: ${res.stderr}）`);
-
     const report = JSON.parse(readFileSync(outPath, "utf8"));
-
-    // 判定: docs のみ → done_candidate。
-    assert.equal(report.decision.result, "done_candidate");
-
-    // Done apply: 試みるが、status=Review のため成立しない（offline simulated）。
-    assert.equal(report.apply.attempted, true, "apply を試みる");
-    assert.notEqual(report.apply.applied, true, "Done apply は成立しない");
-    assert.match(report.apply.reason ?? "", /自動Done化対象外/);
-
-    // issuePr 書き戻し: Done apply 未成立なので main のガードで skip になる。
-    assert.equal(report.issuePrWriteback.action, "skip", "main実行経路でも issuePr は skip");
-    assert.notEqual(report.issuePrWriteback.applied, true, "issuePr を書き戻さない");
-    assert.match(
-      report.issuePrWriteback.reason ?? "",
-      /Done apply が成功していないため/,
-      "skip 理由が main の文言に一致する",
-    );
+    const summary = readFileSync(summaryPath, "utf8");
+    return { res, report, summary };
   } finally {
-    // 一時ディレクトリを必ず後片付けする（リポジトリ外・OS tmp のみ）。
     rmSync(workDir, { recursive: true, force: true });
   }
+}
+
+test("CLI: --apply + offline + 未チェック + done_candidate + Doing → Done apply しない / issuePr skip（main実行経路）", () => {
+  // PR本文の Done 許可チェックが未チェック。status は Doing だが、チェック未済のため自動更新しない。
+  const { res, report, summary } = runCliOffline({
+    prBody: bodyWithConsent(false),
+    taskStatus: "Doing",
+  });
+
+  // 書き込み未達は失敗扱いにならない設計 → 正常終了（exit 0）。
+  assert.equal(res.status, 0, `CLI は正常終了する（stderr: ${res.stderr}）`);
+
+  assert.equal(report.decision.result, "done_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, false, "artifact に未チェックが記録される");
+
+  // Done apply: 未チェックゲートで試みない。
+  assert.equal(report.apply.attempted, false, "未チェックのため apply を試みない");
+  assert.notEqual(report.apply.applied, true, "Firestore へ書き込まない");
+  assert.match(report.apply.reason ?? "", /未チェック/);
+
+  // issuePr 書き戻し: Done apply 未成立なので main のガードで skip。
+  assert.equal(report.issuePrWriteback.action, "skip", "main実行経路でも issuePr は skip");
+  assert.notEqual(report.issuePrWriteback.applied, true);
+
+  // Summary にチェック状態が表示される。
+  assert.match(summary, /### PR本文 Done許可チェック/);
+  assert.match(summary, /checked: false/);
+});
+
+test("CLI: --apply + offline + チェック済み + done_candidate + Doing → apply を試みる（simulated・実書き込みなし）", () => {
+  const { res, report } = runCliOffline({
+    prBody: bodyWithConsent(true),
+    taskStatus: "Doing",
+  });
+
+  assert.equal(res.status, 0, `CLI は正常終了する（stderr: ${res.stderr}）`);
+  assert.equal(report.decision.result, "done_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, true, "artifact にチェック済みが記録される");
+
+  // チェック済み・status=Doing なので apply を試みる。offline のため実書き込みはしない（simulated）。
+  assert.equal(report.apply.attempted, true, "チェック済みなら apply を試みる");
+  assert.equal(report.apply.simulated, true, "offline は実書き込みしない");
+  assert.notEqual(report.apply.applied, true, "offline では applied=true にしない");
+  assert.deepEqual(
+    report.apply.updateMaskFields,
+    ["status", "completed", "completedAt", "updatedAt", "updatedBy"],
+    "Done 更新は5項目のみ",
+  );
 });

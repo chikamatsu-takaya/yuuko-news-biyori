@@ -559,6 +559,87 @@ function uniq(arr) {
 }
 
 // ---------------------------------------------------------------------------
+// PR本文 Done許可チェックボックス（apply の追加ゲート）
+// ---------------------------------------------------------------------------
+//
+// PR単位で「このPRのマージ後、紐づく Firestore タスクを Done にしてよいか」を明示するための
+// チェックボックスを検出する。AI はPR本文生成時に初期判定として付け、人間はマージ前に修正できる。
+// Actions は最終チェック状態だけを見る（判定理由は人間確認用で、検出には使わない）。
+// 検出はテンプレの固定文言に限定し、文言揺れを広く許容しない（前後の空白程度のみ許容）。
+
+const PR_DONE_APPLY_CHECKBOX_TEXT = "このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
+
+/**
+ * PR本文から Done 許可チェックボックス行を探す。
+ * 固定文言に一致する `- [ ]` / `- [x]` / `- [X]` 行のみ対象。見つからなければ present=false。
+ * 文言が異なるチェックボックスは対象外（present=false）とする。
+ *
+ * Markdown のコード内に書かれた「例示のチェックボックス」を誤検出しないよう、以下は対象外にする:
+ * - fenced code block（``` / ~~~ で囲まれた範囲）の中の行
+ *   （開始フェンスの記号と長さを保持し、同じ記号かつ開始以上の長さの終了フェンスでのみ閉じる。
+ *    例: ```` で開いたら ``` では閉じない。終了フェンスは記号の後ろが空白のみのときだけ閉じる。）
+ * - 4スペース（以上）インデント、またはタブインデント（先頭タブ / 0〜3スペース + タブ）のコードブロック行
+ * 通常の本文上にあるチェックボックスだけを検出する。
+ * @returns {{ present: boolean, checked: boolean }}
+ */
+function findPrDoneApplyCheckbox(body) {
+  let inFence = false; // fenced code block の内側か
+  let fenceChar = ""; // 開始フェンスの記号（` または ~）
+  let fenceLen = 0; // 開始フェンスの長さ（終了はこの長さ以上でのみ閉じる）
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    // fenced code block の開始・終了を追跡する（先頭3スペースまでの字下げは許容）。
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      const marker = fence[1];
+      const char = marker[0];
+      const rest = fence[2];
+      if (!inFence) {
+        // 開始フェンス（情報文字列つきでも可）。記号と長さを保持する。
+        inFence = true;
+        fenceChar = char;
+        fenceLen = marker.length;
+      } else if (char === fenceChar && marker.length >= fenceLen && /^\s*$/.test(rest)) {
+        // 終了は「同じ記号 / 開始以上の長さ / 記号の後ろが空白のみ」のときだけ。
+        inFence = false;
+        fenceChar = "";
+        fenceLen = 0;
+      }
+      continue; // フェンス行自体は対象外。
+    }
+    if (inFence) continue; // フェンス内は対象外。
+    // インデントされたコードブロック行は対象外（4スペース以上 / 先頭タブ / 0〜3スペース + タブ）。
+    if (/^ {4,}/.test(line) || /^ {0,3}\t/.test(line)) continue;
+
+    const m = line.match(/^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$/);
+    if (m && m[2].trim() === PR_DONE_APPLY_CHECKBOX_TEXT) {
+      return { present: true, checked: m[1] === "x" || m[1] === "X" };
+    }
+  }
+  return { present: false, checked: false };
+}
+
+/** PR本文の Done 許可チェックが「チェック済み」か（apply 条件・テストで使用）。 */
+function isPrDoneApplyChecked(body) {
+  return findPrDoneApplyCheckbox(body).checked;
+}
+
+/**
+ * PR本文の Done 許可チェック状態を report 用に評価する。
+ * checked / present の3状態に応じて人間向けの reason を付ける（source は常に "pr_body"）。
+ * @returns {{ checked: boolean, source: "pr_body", reason: string }}
+ */
+function evaluatePrDoneApplyConsent(body) {
+  const found = findPrDoneApplyCheckbox(body);
+  if (found.checked) {
+    return { checked: true, source: "pr_body", reason: "PR本文のDone許可チェックがチェック済みです。" };
+  }
+  if (found.present) {
+    return { checked: false, source: "pr_body", reason: "PR本文のDone許可チェックが未チェックです。" };
+  }
+  return { checked: false, source: "pr_body", reason: "PR本文にDone許可チェックが見つかりません。" };
+}
+
+// ---------------------------------------------------------------------------
 // 照合ヘルパー
 // ---------------------------------------------------------------------------
 
@@ -638,6 +719,15 @@ async function computeApply(report, pr, firestoreTasks, options) {
   }
   if (!report.match.matchedTaskId) {
     return { attempted: false, mode: "apply", reason: "対象タスクが特定できていないため apply しません。" };
+  }
+  // PR本文の Done 許可チェック（追加ゲート）。未チェック/項目なしなら done_candidate でも書き込まない。
+  // 大きいタスクの途中PR等を、PR単位の明示的同意なしに Done 化しないための安全条件。
+  if (report.prDoneApplyConsent?.checked !== true) {
+    return {
+      attempted: false,
+      mode: "apply",
+      reason: "PR本文のDone許可チェックが未チェックのため自動更新しません（Done にするには PR本文のチェックが必要です）。",
+    };
   }
   return applyPhase(report, pr, firestoreTasks, options);
 }
@@ -1037,6 +1127,8 @@ function buildReport(pr, result) {
     // decision は判定ロジックの結果をそのまま保持しつつ、表示用に reasonLabels を追加する
     // （result / reasonIds / summary / nextAction は変更しない）。
     decision: { ...result.decision, reasonLabels: reasonLabelsFor(result.decision.reasonIds) },
+    // PR本文の Done 許可チェック状態（apply の追加ゲート・Summary/artifact 表示用）。
+    prDoneApplyConsent: evaluatePrDoneApplyConsent(pr.body),
     wouldUpdate: {
       targetTaskId: result.match.matchedTaskId,
       proposedStatus,
@@ -1094,6 +1186,15 @@ function buildSummaryMarkdown(report) {
     for (const id of d.reasonIds) {
       lines.push(`  - ${id}: ${reasonLabel(id)}`);
     }
+  }
+
+  // 5.5 PR本文 Done許可チェック（apply の追加ゲート状態）
+  const consent = report.prDoneApplyConsent;
+  if (consent) {
+    lines.push("", "### PR本文 Done許可チェック");
+    lines.push(`- checked: ${consent.checked}`);
+    lines.push(`- source: ${consent.source}`);
+    lines.push(`- reason: ${consent.reason}`);
   }
 
   // 6. Done apply結果
@@ -1204,11 +1305,12 @@ function printSummaryToConsole(report) {
 /**
  * artifact JSON の最上位キーを、運用者が上から読みやすい順へ整える（表示整理）。
  * 既存フィールドは削除・改名しない（未知キーも ...rest で保持）。中身の構造は変えない。
- * 順序: generatedAt → mode → pr → match → decision → apply → issuePrWriteback → wouldUpdate。
+ * 順序: generatedAt → mode → pr → match → decision → prDoneApplyConsent → apply → issuePrWriteback → wouldUpdate。
  */
 function orderReportForOutput(report) {
-  const { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest } = report;
-  return { generatedAt, mode, pr, match, decision, apply, issuePrWriteback, wouldUpdate, ...rest };
+  const { generatedAt, mode, pr, match, decision, prDoneApplyConsent, apply, issuePrWriteback, wouldUpdate, ...rest } =
+    report;
+  return { generatedAt, mode, pr, match, decision, prDoneApplyConsent, apply, issuePrWriteback, wouldUpdate, ...rest };
 }
 
 function writeJsonOutput(outAbs, payload) {
@@ -1251,4 +1353,6 @@ export {
   computeApply,
   computeIssuePrWriteback,
   guardIssuePrWritebackAfterApply,
+  isPrDoneApplyChecked,
+  evaluatePrDoneApplyConsent,
 };
