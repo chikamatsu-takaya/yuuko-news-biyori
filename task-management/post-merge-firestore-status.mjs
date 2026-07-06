@@ -1209,4 +1209,17 @@ function strOrEmpty(value) {
 }
 
 // ALLOWED_STATUSES は将来のバリデーション拡張に備えて公開的に保持する（現状は参照のみ）。
-export { ALLOWED_STATUSES, evaluate, decide, detectBodyReviewSignals, planDoneApply, verifyLinkStillMatches, buildReport, reasonLabelsFor };
+// computeApply / computeIssuePrWriteback は回帰テスト（apply安全条件の検証）用に公開する。
+// いずれも既存の内部関数で、export しても実行時の挙動は変わらない（テスト容易化のための最小公開）。
+export {
+  ALLOWED_STATUSES,
+  evaluate,
+  decide,
+  detectBodyReviewSignals,
+  planDoneApply,
+  verifyLinkStillMatches,
+  buildReport,
+  reasonLabelsFor,
+  computeApply,
+  computeIssuePrWriteback,
+};
