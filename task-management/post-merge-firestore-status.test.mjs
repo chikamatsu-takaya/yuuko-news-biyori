@@ -9,6 +9,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   evaluate,
@@ -264,4 +269,101 @@ test("guardIssuePrWritebackAfterApply: would_write 以外（already_present）�
   const wb = { action: "already_present", candidate: false, taskId: "t1" };
   const guarded = guardIssuePrWritebackAfterApply(wb, { applied: false }, { apply: true });
   assert.deepEqual(guarded, wb, "would_write 以外は変更しない");
+});
+
+// ---------------------------------------------------------------------------
+// CLI / main 実行経路の回帰テスト
+//
+// 目的:
+// - 純粋関数だけでなく、実際に `node post-merge-firestore-status.mjs --apply --firestore-json ...`
+//   を子プロセスで走らせ、main の issuePr 書き戻しガードが実行経路上でも効くことを確認する。
+//   （main からガード呼び出しが抜けたり条件が変わったら、この artifact 検証で検知できる。）
+// - 実 Firestore へは接続しない。offline dump（--firestore-json）を使い、simulated（未書き込み）で動く。
+//   サービスアカウント / secrets は使わない（offline 経路は認証を呼ばない）。
+// ---------------------------------------------------------------------------
+
+const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "post-merge-firestore-status.mjs");
+
+test("CLI: --apply + offline dump で status=Review の done_candidate → issuePr書き戻しが skip（main実行経路）", () => {
+  // リポジトリ内に一時ファイルを残さないよう、OS の一時ディレクトリを使う。
+  const workDir = mkdtempSync(join(tmpdir(), "post-merge-cli-"));
+  try {
+    const prJsonPath = join(workDir, "pr.json");
+    const dumpPath = join(workDir, "firestore-dump.json");
+    const outPath = join(workDir, "report.json");
+    const summaryPath = join(workDir, "summary.md");
+
+    // PR: docs のみ変更 → done_candidate。branchName / taskCode ともに t1 に一致。
+    writeFileSync(
+      prJsonPath,
+      JSON.stringify({
+        number: 123,
+        merged: true,
+        baseRef: "develop",
+        headRef: "feature/x",
+        author: "someuser",
+        body: "- branchName: feature/x\n- taskCode: TASK-1",
+        files: ["docs/a.md"],
+      }),
+      "utf8",
+    );
+
+    // Firestore dump: status=Review（Doing でない）→ Done apply は未成立になる想定。issuePr は空。
+    writeFileSync(
+      dumpPath,
+      JSON.stringify([
+        {
+          id: "t1",
+          data: {
+            taskCode: "TASK-1",
+            branchName: "feature/x",
+            status: "Review",
+            completed: false,
+            archived: false,
+            issuePr: "",
+          },
+        },
+      ]),
+      "utf8",
+    );
+
+    // 実 Firestore へ行かないよう offline dump を指定し、--apply 経路を通す。
+    const res = spawnSync(
+      process.execPath,
+      [
+        SCRIPT_PATH,
+        "--pr-json", prJsonPath,
+        "--firestore-json", dumpPath,
+        "--out", outPath,
+        "--summary-out", summaryPath,
+        "--apply",
+      ],
+      { encoding: "utf8" },
+    );
+
+    // 書き込み未達（simulated）は失敗扱いにならない設計 → 正常終了（exit 0）。
+    assert.equal(res.status, 0, `CLI は正常終了する（stderr: ${res.stderr}）`);
+
+    const report = JSON.parse(readFileSync(outPath, "utf8"));
+
+    // 判定: docs のみ → done_candidate。
+    assert.equal(report.decision.result, "done_candidate");
+
+    // Done apply: 試みるが、status=Review のため成立しない（offline simulated）。
+    assert.equal(report.apply.attempted, true, "apply を試みる");
+    assert.notEqual(report.apply.applied, true, "Done apply は成立しない");
+    assert.match(report.apply.reason ?? "", /自動Done化対象外/);
+
+    // issuePr 書き戻し: Done apply 未成立なので main のガードで skip になる。
+    assert.equal(report.issuePrWriteback.action, "skip", "main実行経路でも issuePr は skip");
+    assert.notEqual(report.issuePrWriteback.applied, true, "issuePr を書き戻さない");
+    assert.match(
+      report.issuePrWriteback.reason ?? "",
+      /Done apply が成功していないため/,
+      "skip 理由が main の文言に一致する",
+    );
+  } finally {
+    // 一時ディレクトリを必ず後片付けする（リポジトリ外・OS tmp のみ）。
+    rmSync(workDir, { recursive: true, force: true });
+  }
 });
