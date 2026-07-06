@@ -501,3 +501,69 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - 追加確認が必要なら **Review / Doing のまま**にする。
 - `issuePr` が未記録なら、必要に応じて **手動で PR番号を記録**する。
 - 複数タスクにまたがる場合は、**対象タスクごとに手動更新**する。
+
+---
+
+## 小規模運用確認結果
+
+実データの Firestore タスクを使い、report-only と apply の2段階で小規模運用確認を行った。いずれも想定どおりに動作した。
+
+### 第1段階: report-only確認
+
+確認内容:
+- 実データのタスクに `branchName` で正しく紐づくこと
+- docs / Markdown のみ変更で `done_candidate` / `D3` になること
+- `POST_MERGE_ENABLE_APPLY=false` のため Firestore が変更されないこと
+- `issuePr` 書き戻し候補が表示のみになること
+
+結果:
+- PR: #138
+- branchName: `ops/post-merge-small-rollout-report-only`
+- matchedTaskId: `post-merge-small-rollout-report-only`
+- matchedBy: `branchName`
+- candidateCount: 1
+- result: `done_candidate`
+- reasonIds: `D3`
+- issuePr書き戻し候補: あり（表示のみ）
+- Firestore変更: なし
+- 判断: 成功。判定調整は不要。
+
+### 第2段階: apply確認
+
+確認内容:
+- `POST_MERGE_ENABLE_APPLY=true` の状態で、実データに Done apply が行われること
+- Done apply 成功後に `issuePr` が書き戻されること
+- 更新対象外フィールドが維持されること
+
+結果:
+- PR: #139
+- branchName: `ops/post-merge-small-rollout-apply`
+- matchedTaskId: `post-merge-small-rollout-report-only`
+- matchedBy: `branchName`
+- candidateCount: 1
+- result: `done_candidate`
+- reasonIds: `D3`
+- Done apply: 成功 HTTP 200
+- issuePr書き戻し: 成功 HTTP 200
+- Firestore更新:
+  - `status`: `Done`
+  - `completed`: `true`
+  - `completedAt`: timestamp設定
+  - `issuePr`: `#139`
+  - `updatedBy`: `post-merge-bot`
+- 判断: 成功。判定調整・apply条件調整は不要。
+
+### 運用上の注意
+- 通常時は **`POST_MERGE_ENABLE_APPLY=false`** にする。
+- apply確認や実適用を行う場合のみ、**マージ直前に `POST_MERGE_ENABLE_APPLY=true`** にする。
+- `true` にしている間は、**他の develop 向けPRをマージしない**（全人手PRで apply が走るため）。
+- 対象PRのマージ後、**Actions Summary と Firestore 更新結果を確認**する。
+- 確認後、**すぐ `POST_MERGE_ENABLE_APPLY=false` に戻す**。
+- **`no_change` / `review_candidate` では `apply=true` でも Firestore を更新しない設計**。
+- 今後追加確認する場合は、実Firestoreで何度も試すより **回帰テスト追加を優先**する。
+
+### 今後の候補
+- apply / `issuePr` 書き戻しの回帰テスト追加。
+- `no_change` / `review_candidate` 時に `apply=true` でも書き込まれないことのテスト追加。
+- `issuePr` が既にある場合に上書きしないことのテスト追加。
+- apply gate をより安全にする方法の検討。
