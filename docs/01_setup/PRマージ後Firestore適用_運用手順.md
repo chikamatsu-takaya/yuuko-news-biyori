@@ -455,3 +455,49 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - `taskCode` をPR本文と Firestore で揃える。
 - `issuePr` に PR番号を手動で記録する。
 - 複数タスクPRの場合は、対象タスクを手動で Done / Review にする。
+
+---
+
+## review_candidate になった場合の対応手順
+
+### 基本方針
+- **`review_candidate` の場合、Firestore は自動更新されない**。
+- **apply 有効時（`--apply`）でも `review_candidate` は書き込み対象外**。
+- 自動判定では Done にせず、**人手で確認して、必要に応じて Firestore タスクを手動更新する**。
+- まず **Summary の「人手確認が必要な理由」** と **artifact JSON の `decision` / `match`** を確認し、なぜ人手確認になったのかを特定する。
+
+### reasonId 別の確認ポイントと対応例
+- **R1: UI変更を含む**
+  - 画面表示・操作・スクリーンショット・レイアウト崩れを確認する。
+- **R2: Firestore 読み書きを含む**
+  - 読み取り/書き込み対象・`updateMask`・権限・データ破壊リスクを確認する。
+- **R5: Rust / Tauri 実装を含む**
+  - Tauri command・Rust側のエラー処理・`cargo check` / `cargo test` を確認する。
+- **R7: 外部通信 / セキュリティ関連を含む**
+  - CSP・allowlist・secret / APIキー混入・外部通信先を確認する。
+- **R8: 重要な確認項目が未チェック / 確認項目不足**
+  - PR本文のチェック漏れ・動作確認不足を確認する。
+- **R9: 動作確認結果が不明**
+  - ローカル起動・テスト結果・確認ログを確認する。
+- **R10: 仕様・設計・データ構造・判定/運用ルール等の判断が必要**
+  - docs や設計との整合・仕様変更の妥当性を確認する。
+- **R11: Tauri command / 外部通信先が「あり」**
+  - 追加/変更された command や通信先の安全性を確認する。
+- **X1: Done条件だけで構成されず判定不能**
+  - 変更内容を人手で見て Done / Review / no_change を判断する。
+- **X2: 変更ファイル一覧が不完全**
+  - artifact や PR の Files changed で全変更ファイルを確認する。
+
+### review_candidate 時に見る場所
+- Actions Summary の **「判定理由」**
+- artifact JSON の **`decision.reasonIds` / `decision.reasonLabels`**
+- artifact JSON の **`match`**
+- **PR本文**
+- **Files changed**
+- 必要に応じて **Firestore の対象タスク**
+
+### 人手確認後の対応例
+- 問題なければ Firestore タスクを **手動で Done** にする。
+- 追加確認が必要なら **Review / Doing のまま**にする。
+- `issuePr` が未記録なら、必要に応じて **手動で PR番号を記録**する。
+- 複数タスクにまたがる場合は、**対象タスクごとに手動更新**する。
