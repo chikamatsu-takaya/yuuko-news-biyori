@@ -313,6 +313,36 @@ test("isPrDoneApplyChecked: 文言が違うチェックボックスは checked=f
   assert.equal(isPrDoneApplyChecked("- [x] このPRでFirestoreをDoneにしてOK"), false);
 });
 
+test("isPrDoneApplyChecked: fenced code block（```）内の [x] は checked=false", () => {
+  const body = ["説明:", "```md", CONSENT_CHECKED_LINE, "```", "本文続き"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ~~~ code fence 内の [x] は checked=false", () => {
+  const body = ["説明:", "~~~", CONSENT_CHECKED_LINE, "~~~"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: 4スペースインデントのコードブロック行は checked=false", () => {
+  const body = ["例:", "", `    ${CONSENT_CHECKED_LINE}`, "", "本文"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: コードブロック外の通常 [x] は checked=true のまま", () => {
+  const body = ["```md", CONSENT_UNCHECKED_LINE, "```", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: コード内 [x] の後に通常本文 [ ] → checked=false", () => {
+  const body = ["```md", CONSENT_CHECKED_LINE, "```", "", CONSENT_UNCHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: コード内 [ ] の後に通常本文 [x] → checked=true", () => {
+  const body = ["```md", CONSENT_UNCHECKED_LINE, "```", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
 test("evaluatePrDoneApplyConsent: 3状態の checked / reason / source", () => {
   const checked = evaluatePrDoneApplyConsent(CONSENT_CHECKED_LINE);
   assert.deepEqual(

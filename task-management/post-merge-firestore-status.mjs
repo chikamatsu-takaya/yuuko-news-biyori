@@ -573,10 +573,33 @@ const PR_DONE_APPLY_CHECKBOX_TEXT = "このPRのマージ後、紐づくFirestor
  * PR本文から Done 許可チェックボックス行を探す。
  * 固定文言に一致する `- [ ]` / `- [x]` / `- [X]` 行のみ対象。見つからなければ present=false。
  * 文言が異なるチェックボックスは対象外（present=false）とする。
+ *
+ * Markdown のコード内に書かれた「例示のチェックボックス」を誤検出しないよう、以下は対象外にする:
+ * - fenced code block（``` / ~~~ で囲まれた範囲）の中の行
+ * - 4スペース（以上）インデントのコードブロック行
+ * 通常の本文上にあるチェックボックスだけを検出する。
  * @returns {{ present: boolean, checked: boolean }}
  */
 function findPrDoneApplyCheckbox(body) {
+  let inFence = false; // fenced code block の内側か
+  let fenceChar = ""; // 開始フェンスの記号（` または ~）。同種でのみ閉じる。
   for (const line of String(body ?? "").split(/\r?\n/)) {
+    // fenced code block の開始・終了を追跡する（先頭3スペースまでの字下げは許容）。
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      const char = fence[1][0];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = char;
+      } else if (char === fenceChar) {
+        inFence = false;
+        fenceChar = "";
+      }
+      continue; // フェンス行自体は対象外。
+    }
+    if (inFence) continue; // フェンス内は対象外。
+    if (/^ {4,}/.test(line)) continue; // 4スペース以上インデントのコードブロック行は対象外。
+
     const m = line.match(/^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$/);
     if (m && m[2].trim() === PR_DONE_APPLY_CHECKBOX_TEXT) {
       return { present: true, checked: m[1] === "x" || m[1] === "X" };
