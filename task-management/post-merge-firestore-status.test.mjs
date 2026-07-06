@@ -343,6 +343,40 @@ test("isPrDoneApplyChecked: コード内 [ ] の後に通常本文 [x] → check
   assert.equal(isPrDoneApplyChecked(body), true);
 });
 
+test("isPrDoneApplyChecked: タブインデント（先頭タブ）の固定チェック行は checked=false", () => {
+  assert.equal(isPrDoneApplyChecked(`例:\n\t${CONSENT_CHECKED_LINE}`), false);
+});
+
+test("isPrDoneApplyChecked: 0〜3スペース + タブ インデントの固定チェック行は checked=false", () => {
+  assert.equal(isPrDoneApplyChecked(`例:\n  \t${CONSENT_CHECKED_LINE}`), false);
+  assert.equal(isPrDoneApplyChecked(`例:\n\t  ${CONSENT_CHECKED_LINE}`), false);
+});
+
+test("isPrDoneApplyChecked: タブインデントを挟んでも通常本文の [x] は checked=true", () => {
+  const body = [`\t${CONSENT_UNCHECKED_LINE}`, "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: ```` で開いた fence 内に ``` が出ても閉じず、その後ろの [x] は checked=false", () => {
+  const body = ["````md", "```md", CONSENT_CHECKED_LINE, "```"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ```` で開き ```` で閉じた後の通常本文 [x] は checked=true", () => {
+  const body = ["````md", CONSENT_UNCHECKED_LINE, "````", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
+test("isPrDoneApplyChecked: ~~~~ で開いた fence 内に ~~~ が出ても閉じず、その後ろの [x] は checked=false", () => {
+  const body = ["~~~~", "~~~", CONSENT_CHECKED_LINE, "~~~"].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), false);
+});
+
+test("isPrDoneApplyChecked: ~~~~ で開き ~~~~ で閉じた後の通常本文 [x] は checked=true", () => {
+  const body = ["~~~~", CONSENT_UNCHECKED_LINE, "~~~~", "", CONSENT_CHECKED_LINE].join("\n");
+  assert.equal(isPrDoneApplyChecked(body), true);
+});
+
 test("evaluatePrDoneApplyConsent: 3状態の checked / reason / source", () => {
   const checked = evaluatePrDoneApplyConsent(CONSENT_CHECKED_LINE);
   assert.deepEqual(

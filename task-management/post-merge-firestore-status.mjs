@@ -576,29 +576,39 @@ const PR_DONE_APPLY_CHECKBOX_TEXT = "このPRのマージ後、紐づくFirestor
  *
  * Markdown のコード内に書かれた「例示のチェックボックス」を誤検出しないよう、以下は対象外にする:
  * - fenced code block（``` / ~~~ で囲まれた範囲）の中の行
- * - 4スペース（以上）インデントのコードブロック行
+ *   （開始フェンスの記号と長さを保持し、同じ記号かつ開始以上の長さの終了フェンスでのみ閉じる。
+ *    例: ```` で開いたら ``` では閉じない。終了フェンスは記号の後ろが空白のみのときだけ閉じる。）
+ * - 4スペース（以上）インデント、またはタブインデント（先頭タブ / 0〜3スペース + タブ）のコードブロック行
  * 通常の本文上にあるチェックボックスだけを検出する。
  * @returns {{ present: boolean, checked: boolean }}
  */
 function findPrDoneApplyCheckbox(body) {
   let inFence = false; // fenced code block の内側か
-  let fenceChar = ""; // 開始フェンスの記号（` または ~）。同種でのみ閉じる。
+  let fenceChar = ""; // 開始フェンスの記号（` または ~）
+  let fenceLen = 0; // 開始フェンスの長さ（終了はこの長さ以上でのみ閉じる）
   for (const line of String(body ?? "").split(/\r?\n/)) {
     // fenced code block の開始・終了を追跡する（先頭3スペースまでの字下げは許容）。
-    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
-      const char = fence[1][0];
+      const marker = fence[1];
+      const char = marker[0];
+      const rest = fence[2];
       if (!inFence) {
+        // 開始フェンス（情報文字列つきでも可）。記号と長さを保持する。
         inFence = true;
         fenceChar = char;
-      } else if (char === fenceChar) {
+        fenceLen = marker.length;
+      } else if (char === fenceChar && marker.length >= fenceLen && /^\s*$/.test(rest)) {
+        // 終了は「同じ記号 / 開始以上の長さ / 記号の後ろが空白のみ」のときだけ。
         inFence = false;
         fenceChar = "";
+        fenceLen = 0;
       }
       continue; // フェンス行自体は対象外。
     }
     if (inFence) continue; // フェンス内は対象外。
-    if (/^ {4,}/.test(line)) continue; // 4スペース以上インデントのコードブロック行は対象外。
+    // インデントされたコードブロック行は対象外（4スペース以上 / 先頭タブ / 0〜3スペース + タブ）。
+    if (/^ {4,}/.test(line) || /^ {0,3}\t/.test(line)) continue;
 
     const m = line.match(/^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$/);
     if (m && m[2].trim() === PR_DONE_APPLY_CHECKBOX_TEXT) {
