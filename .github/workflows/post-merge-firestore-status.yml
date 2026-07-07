@@ -160,9 +160,12 @@ jobs:
       # 6.5 apply 成功判定: レポート JSON の apply.applied === true のときだけ、
       #     後続の Firestore → Markdown 同期を走らせる。report-only / no_change /
       #     review_candidate / 未チェック / apply失敗 では applied=false になり同期しない。
+      #     always(): Done apply 成功後に issuePr 書き戻しなど後続処理が失敗して前段 step が
+      #     非ゼロ終了しても、Firestore が Done 済みなら md 同期条件を評価できるようにする。
+      #     （早期スキップ時は skip=='false' で false になり、この step 自体は動かない。）
       - name: Detect apply success
         id: applied
-        if: steps.guard.outputs.skip == 'false'
+        if: always() && steps.guard.outputs.skip == 'false'
         run: |
           APPLIED=false
           if [ -f "$REPORT_OUT" ]; then
@@ -182,10 +185,13 @@ jobs:
 
   # post-merge の Done apply が実際に成功（apply.applied === true）したときだけ、
   # 既存の Firestore → Markdown 同期ワークフローを再利用して呼ぶ（同期ロジックは新規作成しない）。
-  # 以下では起動しない: report-only / no_change / review_candidate / 未チェック / apply失敗。
+  # 以下では起動しない: report-only / no_change / review_candidate / 未チェック / apply失敗 /
+  # sync/* ブランチ / bot PR（いずれも applied != 'true' になる）。
+  # always(): Done apply は成功したが issuePr 書き戻し等で report job が failure になった場合でも、
+  # Firestore は Done 済みなので md 同期PRは作られるべき。applied=='true' ゲートで安全側は維持する。
   sync-md:
     needs: report
-    if: needs.report.outputs.applied == 'true'
+    if: always() && needs.report.outputs.applied == 'true'
     # 再利用ワークフロー（sync）は commit/PR 作成のため write が必要。この job にだけ付与する。
     permissions:
       contents: write
