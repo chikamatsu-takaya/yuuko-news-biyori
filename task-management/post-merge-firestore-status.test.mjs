@@ -561,6 +561,10 @@ test("CLI: --apply + offline + 未チェック + done_candidate + Doing → Done
   // Summary にチェック状態が表示される。
   assert.match(summary, /### PR本文 Done許可チェック/);
   assert.match(summary, /checked: false/);
+
+  // 末尾の一言は「未チェックのため」と明示され、「done_candidate 対象外」とは表示しない（誤解防止）。
+  assert.match(summary, /apply指定済みだが PR本文 Done許可チェックが未チェックのため Firestore は変更していません。/);
+  assert.doesNotMatch(summary, /done_candidate 対象外/);
 });
 
 test("CLI: --apply + offline + チェック済み + done_candidate + Doing → apply を試みる（simulated・実書き込みなし）", () => {
