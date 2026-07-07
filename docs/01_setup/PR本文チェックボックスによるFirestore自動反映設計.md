@@ -105,3 +105,8 @@ apply 条件にチェック済み判定を追加する。
 7. 実データで report-only 確認
 8. 実データで apply 確認
 9. 問題なければ `POST_MERGE_ENABLE_APPLY=true` 常時運用に近づけるか検討
+
+## 実確認済み（追記）
+- **`checked:true` + `apply=true`** で Done apply 成功を確認済み（PR #149）。
+- **`checked:false` + `apply=true`** で Firestore が更新されないことを確認済み（PR #150）。
+- 詳細は `docs/01_setup/PRマージ後Firestore適用_運用手順.md`「PR本文 Done許可チェック方式の確認結果」を参照。
