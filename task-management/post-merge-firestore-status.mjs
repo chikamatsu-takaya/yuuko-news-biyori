@@ -1261,13 +1261,17 @@ function buildSummaryMarkdown(report) {
   // 8. 次の対応
   lines.push("", "### 次の対応");
   lines.push(`- nextAction: ${d.nextAction}`);
-  lines.push(applyClosingNote(a));
+  lines.push(applyClosingNote(a, report));
   lines.push("");
   return lines.join("\n");
 }
 
-/** apply 状態に応じた末尾の一言（Firestore を変更したか否かを明示）。 */
-function applyClosingNote(a) {
+/**
+ * apply 状態に応じた末尾の一言（Firestore を変更したか否かを明示）。
+ * done_candidate だが PR本文 Done許可チェック未チェックで書き込まなかったケースは、
+ * 「done_candidate 対象外」ではなく「Done許可チェック未チェック」と明示する（誤解防止）。
+ */
+function applyClosingNote(a, report) {
   if (a.attempted && a.applied) {
     return "> Firestore を Done に更新しました。";
   }
@@ -1277,8 +1281,13 @@ function applyClosingNote(a) {
   if (a.attempted && !a.applied) {
     return "> 書き込み条件未達／失敗のため Firestore は変更していません。";
   }
-  // --apply 有効だが判定が done_candidate 以外（no_change / review_candidate）で書き込み対象外のケース。
   if (!a.attempted && a.mode === "apply") {
+    // done_candidate かつ PR本文 Done許可チェック未チェックで書き込み対象外になったケース。
+    // （result は done_candidate なので「done_candidate 対象外」は不正確。未チェックが理由と明示する。）
+    if (report?.decision?.result === "done_candidate" && report?.prDoneApplyConsent?.checked !== true) {
+      return "> apply指定済みだが PR本文 Done許可チェックが未チェックのため Firestore は変更していません。";
+    }
+    // それ以外（no_change / review_candidate 等）で書き込み対象外のケース。
     return "> apply指定済みだが done_candidate 対象外のため Firestore は変更していません。";
   }
   // --apply 未指定の純粋な report-only。
