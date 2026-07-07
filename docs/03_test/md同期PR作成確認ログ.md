@@ -95,3 +95,52 @@ Firestore を正本、mdファイルを履歴・バックアップ・AI参照用
 - Firestore→md 同期スクリプト変更なし
 - apply成功後のmd同期PR作成確認あり
 ```
+
+---
+
+## md-importタスク対応版: post-merge apply → md同期PR作成確認
+
+### 確認対象
+
+- Firestore docId: `md-8427ff1bfe36ee48`
+- taskCode: `OPS-MD-SYNC-CHECK-001`
+- branchName: `ops/md-sync-apply-confirm`
+- 対象Markdown: `docs/00_project/developタスクチェックリスト.md`
+
+### 確認したいこと
+
+この確認PRを `develop` へマージした後、以下が順に実行されることを確認する。
+
+1. post-merge workflow が PR本文の Done許可チェック `[x]` を検出する
+2. Firestore `task.branchName` と PR head branch（`ops/md-sync-apply-confirm`）の一致により、対象タスクを特定する
+3. Firestore 上の対象タスクが `status: Done` / `completed: true` に更新される
+4. `issuePr` にこのPR番号が書き戻される
+5. apply 成功により md同期workflowが呼ばれる
+6. `docs/00_project/developタスクチェックリスト.md` を更新する同期PRが作成される
+
+### 期待する同期PRの差分
+
+- 対象タスク（`md-8427ff1bfe36ee48`）のチェックボックスが `[ ]` から `[x]` に更新される
+- `Status: Doing` が `Status: Done` に更新される
+- `Issue/PR` にこのPR番号が反映される
+- 変更は `docs/00_project/developタスクチェックリスト.md` の1ファイルのみ
+
+### 注意
+
+- この確認PRでは `docs/00_project/developタスクチェックリスト.md` を直接Doneにしない
+- md側の更新は、マージ後に作成されるmd同期PRで確認する
+- 確認後は `POST_MERGE_ENABLE_APPLY=false` に戻す
+- 確認完了後、テストタスクの削除または整理を別途行う
+
+### 確認実施記録
+
+- 確認PR番号:
+- apply gate:
+- matchedTaskId / matchedBy:
+- result / checked:
+- Done apply:
+- issuePr 書き戻し:
+- md同期workflow起動:
+- 作成された同期PR:
+- 同期PR差分:
+- 総合判定:
