@@ -20,7 +20,10 @@ on:
     types: [closed]
     branches: [develop]
 
-# 最小権限: リポジトリ読み取りと PR 情報参照のみ（書き込み権限は持たせない）。
+# 既定は最小権限（read）。write が要る後続の sync-md ジョブだけ job 単位で write を付ける。
+# top-level を read に保つことで、将来 job を追加しても不要な write が広がらないようにする。
+# apply 成功時に呼ぶ再利用ワークフロー（sync）は commit/PR 作成のため write が必要だが、
+# その付与は sync-md ジョブの job 単位 permissions に限定する。
 permissions:
   contents: read
   pull-requests: read
@@ -34,6 +37,14 @@ jobs:
     # マージされたPRのみ対象（クローズのみは除外）。
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    # report ジョブは従来どおり最小権限（読み取りのみ）に制限する。Firestore 書き込みは
+    # サービスアカウント経由で GITHUB_TOKEN は使わないため、write は不要。
+    permissions:
+      contents: read
+      pull-requests: read
+    # apply が実際に成功したか（apply.applied === true）を後続ジョブへ渡す。
+    outputs:
+      applied: ${{ steps.applied.outputs.applied }}
     steps:
       # 1. 早期スキップ判定: sync/* ブランチ or bot PR は以降を全てスキップする。
       - name: Early skip (sync/* or bot PR)
@@ -146,6 +157,23 @@ jobs:
             --out "$REPORT_OUT" \
             $APPLY_FLAG
 
+      # 6.5 apply 成功判定: レポート JSON の apply.applied === true のときだけ、
+      #     後続の Firestore → Markdown 同期を走らせる。report-only / no_change /
+      #     review_candidate / 未チェック / apply失敗 では applied=false になり同期しない。
+      #     always(): Done apply 成功後に issuePr 書き戻しなど後続処理が失敗して前段 step が
+      #     非ゼロ終了しても、Firestore が Done 済みなら md 同期条件を評価できるようにする。
+      #     （早期スキップ時は skip=='false' で false になり、この step 自体は動かない。）
+      - name: Detect apply success
+        id: applied
+        if: always() && steps.guard.outputs.skip == 'false'
+        run: |
+          APPLIED=false
+          if [ -f "$REPORT_OUT" ]; then
+            APPLIED="$(node -e "try{const r=require('./'+process.env.REPORT_OUT);process.stdout.write(String(r.apply&&r.apply.applied===true))}catch(e){process.stdout.write('false')}")"
+          fi
+          echo "apply.applied=$APPLIED"
+          echo "applied=$APPLIED" >> "$GITHUB_OUTPUT"
+
       # 7. 判定レポートを artifact として保存する（人手確認用）。
       - name: Upload report
         if: always()
@@ -154,3 +182,24 @@ jobs:
           name: post-merge-status-report
           path: ${{ env.REPORT_OUT }}
           if-no-files-found: ignore
+
+  # post-merge の Done apply が実際に成功（apply.applied === true）したときだけ、
+  # 既存の Firestore → Markdown 同期ワークフローを再利用して呼ぶ（同期ロジックは新規作成しない）。
+  # 以下では起動しない: report-only / no_change / review_candidate / 未チェック / apply失敗 /
+  # sync/* ブランチ / bot PR（いずれも applied != 'true' になる）。
+  # always(): Done apply は成功したが issuePr 書き戻し等で report job が failure になった場合でも、
+  # Firestore は Done 済みなので md 同期PRは作られるべき。applied=='true' ゲートで安全側は維持する。
+  sync-md:
+    needs: report
+    if: always() && needs.report.outputs.applied == 'true'
+    # 再利用ワークフロー（sync）は commit/PR 作成のため write が必要。この job にだけ付与する。
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/sync-firestore-to-markdown.yml
+    with:
+      # 既定は自動マージしない（同期PR作成で停止）。危険な自動マージを避ける安全側。
+      enable_auto_merge: false
+    # Firestore 読み取り用のサービスアカウントを明示的に受け渡す（inherit はしない＝最小受け渡し）。
+    secrets:
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
