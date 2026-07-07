@@ -567,3 +567,100 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - `no_change` / `review_candidate` 時に `apply=true` でも書き込まれないことのテスト追加。
 - `issuePr` が既にある場合に上書きしないことのテスト追加。
 - apply gate をより安全にする方法の検討。
+
+---
+
+## PR本文 Done許可チェック方式の確認結果
+
+PR本文の固定チェックボックス「このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい」を、
+Firestore 自動反映（Done apply）の**追加ゲート**として使う方式について、以下のパターンを実確認した。
+
+### 確認済みのパターン
+
+1. **未チェック + report-only**
+   - PR本文 Done許可チェックが **`checked:false`** として Summary に表示されることを確認。
+   - Firestore 変更なし。
+
+2. **チェック済み + report-only**
+   - PR本文 Done許可チェックが **`checked:true`** として Summary に表示されることを確認。
+   - Firestore 変更なし。
+
+3. **実タスクあり + checked:true + done_candidate + report-only**
+   - matchedTaskId: `post-merge-small-rollout-report-only`
+   - matchedBy: `branchName`
+   - result: `done_candidate`
+   - `checked:true`
+   - report-only のため **Firestore 変更なし**。
+   - `issuePr` 書き戻しは**候補表示のみ**。
+
+4. **実タスクあり + checked:true + done_candidate + apply=true**
+   - PR: **#149**
+   - apply gate: **ENABLED**
+   - result: `done_candidate`
+   - `checked:true`
+   - **Done apply 成功**。
+   - **`issuePr` 書き戻し成功**。
+   - Firestore 更新後:
+     - status: `Done`
+     - completed: `true`
+     - completedAt: 設定済み
+     - issuePr: `#149`
+     - updatedBy: `post-merge-bot`
+
+5. **実タスクあり + checked:false + done_candidate + apply=true**
+   - PR: **#150**
+   - apply gate: **ENABLED**
+   - result: `done_candidate`
+   - `checked:false`
+   - **Done apply は実行されない**。
+   - **`issuePr` も書き戻されない**。
+   - Firestore は以下のまま:
+     - status: `Doing`
+     - completed: `false`
+     - completedAt: `null`
+     - issuePr: `null`
+     - updatedBy: `manual-unchecked-apply-guard`
+
+### 運用上の結論
+- **`checked:true` の場合のみ**、`done_candidate` かつ他条件を満たすと Done apply される。
+- **`checked:false` の場合は、`POST_MERGE_ENABLE_APPLY=true` でも Firestore は更新されない**。
+- これにより、`POST_MERGE_ENABLE_APPLY=true` 運用に近づけるための**安全条件として、PR本文チェックボックスが機能する**ことを確認した。
+- ただし、**不要なPRで誤って `checked:true` にすると Done apply される可能性**があるため、**マージ前にチェック状態を必ず確認する**。
+
+### POST_MERGE_ENABLE_APPLY=true の扱い
+- 通常は **false 推奨**。
+- 検証中や、運用者が限定されている時間帯のみ **true** にする。
+- true のまま運用する場合は、**develop 向けPRのマージ前に必ず Done許可チェック状態を確認**する。
+- 他メンバーが作業・マージする可能性がある場合は **false に戻す**。
+- 作業終了時は **false に戻す**。
+
+### マージ前チェック
+マージ前に見る項目:
+- PR本文の `taskCode`
+- PR本文の `branchName`
+- PR本文の Done許可チェック
+- 判定理由
+- Firestore 側の対象タスク状態
+  - `branchName`
+  - `status`
+  - `completed`
+  - `completedAt`
+  - `issuePr`
+  - `archived`
+
+### Summaryで見る項目
+- apply gate が **ENABLED / DISABLED** どちらか
+- `matchedTaskId`
+- `matchedBy`
+- `result`
+- `reasonIds`
+- PR本文 Done許可チェック（`checked: true/false`）
+- Done apply の結果
+- `issuePr` 書き戻しの結果
+- Firestore 更新有無
+
+### 注意点
+- **変更ファイルパスに `firestore` を含むと R2 判定で `review_candidate`** になる。
+- `done_candidate` を狙う確認ログでは、**ファイル名に `Firestore` を含めない**。
+- **PR本文中のコードブロック内チェックボックスは同意扱いにしない**（実装済み）。
+- **タブインデントや長い code fence の例示も同意扱いにしない**（実装済み）。
