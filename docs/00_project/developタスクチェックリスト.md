@@ -725,6 +725,23 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - 想定（画面詳細設計書 §6：用語解説導線＝「**範囲選択後表示**」／「文字列選択→解説ボタン表示→解説ポップアップ」）：本文の任意文字列を範囲選択 → 解説ボタン表示 → 押下で選択範囲をゆうこが解説。
   - 補足：Rust側 `explain_selected_term` は `selectedText` を受け取れる（**バックエンド対応済み**）。フロントで選択取得（`window.getSelection` 等）→ ボタン表示 → `selectedText` 受け渡しを実装すればよい。
 
+### P2: Firestore進捗管理・md同期運用確認
+- [ ] post-merge apply後にFirestore→Markdown同期PRが作成されることを確認する
+  - Task code: OPS-MD-SYNC-CHECK-001
+  - Priority: P2
+  - Status: Doing
+  - Owner: @test
+  - Branch: 未作成
+  - Issue/PR: 未定
+  - Done when:
+    - PR本文Done許可チェックを `[x]` にした確認PRのマージ後、対象FirestoreタスクがDoneになる
+    - post-merge workflowからFirestore→Markdown同期workflowが呼ばれる
+    - `docs/00_project/developタスクチェックリスト.md` を更新する同期PRが作成される
+    - 同期PRの差分でこのタスクのチェックボックス、Status、Issue/PRが更新されている
+  - Notes:
+    - md同期PR作成確認用の一時タスク。確認完了後に削除または検証済みログへ移動する。
+    - Firestore側は `source=md-import` とし、Markdown側の決定的IDに対応するdocIdで作成する。
+
 ## 9. 作業テンプレート
 以下をコピーして追加する:
 
