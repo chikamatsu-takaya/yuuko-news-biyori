@@ -1809,20 +1809,31 @@ function renderReviewDoneControls(task) {
 // Doing タスクの手動遷移ボタン（Firestore 由来・status==="Doing" のタスクのみ）。
 // 自動化前の開発・確認用補助: AIレビュー結果に応じた「Review送り」「問題なしでDone」を手動で行う。
 // Todo / Review / Done や Markdown 通常表示には出さない（completed のときも出さない）。
+//
+// 現在は非表示: PRマージ後の post-merge 判定 / PR本文 Done許可チェック / Actions Summary を
+// 確認して Firestore を更新する運用フローが確立したため、Doing からの手動遷移ボタン
+// （Doing→Review / Doing→Done）は運用フローと競合しないよう画面に出さない。
+// 書き込み関数（sendDoingTaskToReviewForPoc / completeDoingTaskForPoc）や
+// クリックハンドラは削除せず残す（将来の再有効化や他経路からの利用に備える）。
 function renderDoingTransitionControls(task) {
-  if (!state.isFirestore || !task.firestoreId) {
-    return "";
-  }
-  if (task.completed || task.status !== "Doing") {
-    return "";
-  }
-  const taskId = escapeHtml(task.firestoreId);
-  return `
-    <div class="doing-transition">
-      <button type="button" class="button compact doing-to-review-button" data-task-id="${taskId}">レビューに回す</button>
-      <button type="button" class="button primary compact doing-to-done-button" data-task-id="${taskId}">問題なしでDone</button>
-    </div>
-  `;
+  // UI 上の操作口を無効化（常に非表示）。将来再有効化する場合の元描画ロジックは参照用にコメントで残す。
+  void task;
+  return "";
+
+  // --- 旧描画ロジック（参照用・現在は無効） ---
+  // if (!state.isFirestore || !task.firestoreId) {
+  //   return "";
+  // }
+  // if (task.completed || task.status !== "Doing") {
+  //   return "";
+  // }
+  // const taskId = escapeHtml(task.firestoreId);
+  // return `
+  //   <div class="doing-transition">
+  //     <button type="button" class="button compact doing-to-review-button" data-task-id="${taskId}">レビューに回す</button>
+  //     <button type="button" class="button primary compact doing-to-done-button" data-task-id="${taskId}">問題なしでDone</button>
+  //   </div>
+  // `;
 }
 
 // taskCode と title から作業ブランチ名候補を生成する純粋関数（window/document 非依存）。
