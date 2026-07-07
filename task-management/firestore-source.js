@@ -562,6 +562,7 @@ export async function startTaskForPoc(taskId, branchName) {
  * - document が存在する
  * - DB現状が既に completed===true ではない
  * - DB現状 status === "Review"（Review 以外からの Done 化は不可）
+ * - DB現状 archived !== true（取得後に archived 化されたタスクは Done 化しない）
  *
  * @param {string} taskId  Firestore のドキュメントID（task.firestoreId）
  */
@@ -584,6 +585,10 @@ export async function completeReviewTaskForPoc(taskId) {
     }
     if (current.status !== "Review") {
       throw new Error("status が Review ではないため、Done にできません。");
+    }
+    // 取得後に別経路で archived 化された場合の最終防御（一覧取得は archived=false のみだが競合対策）。
+    if (current.archived === true) {
+      throw new Error("archived のタスクは Done にできません。");
     }
 
     transaction.update(targetRef, {
