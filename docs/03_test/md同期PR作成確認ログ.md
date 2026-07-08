@@ -218,9 +218,17 @@ Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMet
 
 - Firestore meta doc: `taskSyncMeta/markdown`
 - 判定条件: `syncRevision > lastSyncedRevision`
-- 実行間隔: 15分（`schedule: "*/15 * * * *"`）
+- 実行間隔: 15分（`schedule: "7,22,37,52 * * * *"`）
 - 対象workflow: `.github/workflows/sync-firestore-to-markdown.yml`
 - 補助モジュール: `task-management/firestore-sync-meta.mjs`
+
+### schedule 時刻をずらした理由
+
+- **15分間隔は維持**する（同期の鮮度は変えない）。
+- 毎時 **00 / 15 / 30 / 45 分ちょうどを避け**、7分オフセットの `7,22,37,52 * * * *` にする。
+- GitHub Actions の schedule は**定時（特に 00 分）に混雑して遅延・スキップしやすい**ため、その影響を受けにくくする。
+- 定時集中を避けることで、**schedule 発火の確認をしやすくする**（発火タイミングが読みやすくなる）。
+- 変更後の cron: **`7,22,37,52 * * * *`**（変更前は `*/15 * * * *`）。
 
 ### 使用トークン（SYNC_PR_TOKEN 前提）
 

@@ -45,8 +45,10 @@ on:
   # 15分ごとの定期実行。実行時はまず taskSyncMeta/markdown を読み、
   # syncRevision > lastSyncedRevision（＝レビュー完了ボタン等で同期要求が出ている）ときだけ同期する。
   # schedule では自動マージを有効化する（safe な同期PRのみ実際にマージされる）。
+  # 時刻は毎時 00/15/30/45 ちょうどを避け、7分オフセット（07/22/37/52）にする。
+  # GitHub Actions の schedule は定時（特に 00 分）に混雑して遅延・スキップしやすいため、間隔は15分のままずらす。
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,22,37,52 * * * *"
 
 # 同時実行を直列化する（schedule と post-merge call が重なって固定同期ブランチを競合させないため）。
 # cancel-in-progress: false で、実行中のものは止めずに後続をキューする。
