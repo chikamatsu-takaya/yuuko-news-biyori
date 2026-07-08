@@ -284,6 +284,9 @@ schedule実行時に同じtarget revisionの同期PRがすでにopenの場合、
 
 取得成功かつ0件の場合のみ「既存PRなし」と扱う。
 
+`gh pr list --jq` は open PR が0件のとき `.[0].url` が `null` 文字列を返し、`[ -n "null" ]` で既存PRあり誤判定になるため、
+`if length == 0 then "" else .[0].url // "" end` で0件を明示的に空文字へ正規化する。
+
 - `Read sync meta (schedule gate)` step と `Create or update sync PR` step の両方で、`gh pr list ... || true` を使わず、
   `if ! EXISTING="$(gh pr list ...)"; then echo "::error::…"; exit 1; fi` の形にして失敗を検知する。
 - schedule gate 側は取得失敗で schedule 同期を中止（workflow 失敗として可視化）。

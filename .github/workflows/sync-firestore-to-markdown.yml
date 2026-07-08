@@ -115,7 +115,9 @@ jobs:
           # force-push より前に、固定同期ブランチの既存 open PR を確認する（重複 head 書き換え防止）。
           # gh pr list の失敗（API障害・認証失敗 等）は || true で握りつぶさず、明示的に失敗させる。
           # 既存PR有無が確認できない状態で同期を進める（＝「既存PRなし」と誤判定して force-push する）のを避ける。
-          if ! EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url')"; then
+          # open PR が0件のとき .[0].url は null 文字列になるため、length==0 は空文字に正規化する
+          # （EXISTING_PR="null" による既存PRあり誤判定を防ぐ）。
+          if ! EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq 'if length == 0 then "" else .[0].url // "" end')"; then
             echo "::error::既存open同期PRの確認に失敗したため、schedule同期を中止します。"
             exit 1
           fi
@@ -273,7 +275,9 @@ jobs:
           # （schedule 限定でなく PR 更新処理側に置く: dispatch / call も同じ固定ブランチPRを更新しうるため。）
           # gh pr list の失敗（API障害・認証失敗 等）を || true で握りつぶさない。取得成功かつ0件のときだけ
           # 「既存PRなし」と扱う。取得失敗時は既存PR有無が不明なので、安全側で force-push を中止する。
-          if ! EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url')"; then
+          # open PR が0件のとき .[0].url は null 文字列になるため、length==0 は空文字に正規化する
+          # （EXISTING="null" による既存PRあり誤判定を防ぐ）。
+          if ! EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq 'if length == 0 then "" else .[0].url // "" end')"; then
             echo "::error::既存open同期PRの確認に失敗したため、force-pushを中止します。"
             exit 1
           fi
