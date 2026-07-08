@@ -276,6 +276,19 @@ schedule実行時に同じtarget revisionの同期PRがすでにopenの場合、
 - `gh pr view --json autoMergeRequest` で auto-merge の有無を先に確認し、有効な場合だけ `gh pr merge --disable-auto` する（未設定PRへの解除失敗を避ける）。
 - 解除に失敗した場合・状態を確認できなかった場合は、安全側で **force-push を中止**する（古い予約を残したまま head を差し替えない）。
 
+### 既存open同期PR確認に失敗した場合
+
+既存open同期PRの有無を確認できない場合は、固定同期ブランチへforce-pushしない。
+
+`gh pr list` の失敗を空文字として扱うと、既存PRが存在するにもかかわらず「既存PRなし」と誤判定する可能性があるため、一覧取得失敗時はworkflowを失敗させる。
+
+取得成功かつ0件の場合のみ「既存PRなし」と扱う。
+
+- `Read sync meta (schedule gate)` step と `Create or update sync PR` step の両方で、`gh pr list ... || true` を使わず、
+  `if ! EXISTING="$(gh pr list ...)"; then echo "::error::…"; exit 1; fi` の形にして失敗を検知する。
+- schedule gate 側は取得失敗で schedule 同期を中止（workflow 失敗として可視化）。
+- PR 更新処理側は取得失敗で `git push --force` に到達させない（`workflow_dispatch` / `workflow_call` でも同じ保護が効く）。
+
 ### 非対象
 
 - PR本文Done許可チェックの判定変更（`done_candidate` 判定条件・固定文言・`POST_MERGE_ENABLE_APPLY` ゲート・Done化条件は不変）。

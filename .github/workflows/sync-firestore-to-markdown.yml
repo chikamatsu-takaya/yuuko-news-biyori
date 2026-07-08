@@ -113,7 +113,12 @@ jobs:
           META_BRANCH="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).lastSyncBranch))")"
 
           # force-push より前に、固定同期ブランチの既存 open PR を確認する（重複 head 書き換え防止）。
-          EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+          # gh pr list の失敗（API障害・認証失敗 等）は || true で握りつぶさず、明示的に失敗させる。
+          # 既存PR有無が確認できない状態で同期を進める（＝「既存PRなし」と誤判定して force-push する）のを避ける。
+          if ! EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url')"; then
+            echo "::error::既存open同期PRの確認に失敗したため、schedule同期を中止します。"
+            exit 1
+          fi
 
           # 「同じ target revision の同期PRが未処理で open 中」なら、schedule では push しない（後述の should_run=false）。
           # 判定: 既存 open PR がある かつ 今回の syncRevision == 記録済み lastSyncTargetRevision かつ branch 一致。
@@ -266,7 +271,12 @@ jobs:
           # 残っていると、今回 merge_ok=false の差分がチェック通過後に自動マージされ得る。これを防ぐため
           # head 更新前に明示解除する。解除できない場合は安全側で force-push を中止する。
           # （schedule 限定でなく PR 更新処理側に置く: dispatch / call も同じ固定ブランチPRを更新しうるため。）
-          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+          # gh pr list の失敗（API障害・認証失敗 等）を || true で握りつぶさない。取得成功かつ0件のときだけ
+          # 「既存PRなし」と扱う。取得失敗時は既存PR有無が不明なので、安全側で force-push を中止する。
+          if ! EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url')"; then
+            echo "::error::既存open同期PRの確認に失敗したため、force-pushを中止します。"
+            exit 1
+          fi
           if [ -n "$EXISTING" ]; then
             # auto-merge 未設定PRへの --disable-auto 失敗を避けるため、先に状態を確認する。
             AUTO_ENABLED="$(gh pr view "$EXISTING" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "false" else "true" end' || echo "unknown")"
