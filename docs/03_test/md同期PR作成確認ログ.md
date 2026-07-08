@@ -209,3 +209,49 @@ Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMet
 ```
 
 `orderBy('order') failed, retrying without orderBy` の警告は既存のFirestoreインデックス不足時フォールバックであり、今回の確認結果には影響しない。
+
+---
+
+## 15分定期実行によるMarkdown同期自動化確認
+
+### 確認対象
+
+- Firestore meta doc: `taskSyncMeta/markdown`
+- 判定条件: `syncRevision > lastSyncedRevision`
+- 実行間隔: 15分（`schedule: "*/15 * * * *"`）
+- 対象workflow: `.github/workflows/sync-firestore-to-markdown.yml`
+- 補助モジュール: `task-management/firestore-sync-meta.mjs`
+
+### 期待する動作
+
+1. `syncRevision <= lastSyncedRevision` の場合は同期をスキップする（schedule ゲートで `should_run=false`）。
+2. `syncRevision > lastSyncedRevision` の場合だけ Firestore→Markdown同期を実行する。
+3. Markdown差分がなければ `lastSyncedRevision` を今回の `syncRevision` まで更新して終了する（`lastSyncState=no-diff`）。
+4. Markdown差分があれば同期PRを作成する（固定ブランチ `sync/firestore-to-markdown`）。
+5. safeな同期PR（`merge_ok=true` かつ変更が対象md1ファイルのみ）は auto-merge 対象にする（`--auto`：CI必須チェック通過後にマージ）。
+6. 固定ブランチ＋既存 open PR チェックにより、同じ同期PRが大量に作られない。
+
+### 判定タイミングと lastSyncedRevision
+
+- **差分なし（schedule）**: `lastSyncedRevision = 読んだ syncRevision` / `lastSyncedAt` / `lastSyncedBy=github-actions` / `lastSyncState=no-diff` を更新。
+- **差分あり（schedule）**: 同期PR作成時点では `lastSyncedRevision` を更新しない。`lastSyncTargetRevision` / `lastSyncPr` / `lastSyncBranch` / `lastSyncState=pr-created` のみ記録する。
+- **同期PRが develop へ取り込まれた後の `lastSyncedRevision` 更新は後続課題**。当面は固定ブランチ＋open PR チェックで多重PR作成を抑える。
+
+### トリガー別の挙動
+
+- **schedule**: メタゲートで `syncRevision>lastSyncedRevision` のときだけ実行。auto_merge=true。
+- **workflow_call（post-merge apply 成功後）**: メタゲートを通さず常に同期（Done apply は `syncRevision` を増やさないため）。`enable_auto_merge=true` で呼ばれ、safe なら auto-merge。
+- **workflow_dispatch（手動）**: 既存挙動維持。`enable_auto_merge` input を尊重（既定 false）。
+
+### 維持している安全条件（変更なし）
+
+- `safeAutoMerge=false` / reparse mismatch / manualCandidates / warnings / dry-run≠apply / 変更が対象md以外を含む場合は自動マージしない（`merge_ok` 判定ロジックは不変）。
+- 変更対象は `docs/00_project/developタスクチェックリスト.md` の1ファイルのみ（add 対象限定＋PR差分再確認）。
+- `firestore-sync-meta.mjs` は `syncRevision` を書き換えない（ブックキーピング用フィールドのみ許可）。tasks コレクションには触れない。
+
+### 非対象
+
+- PR本文Done許可チェックの判定変更（`done_candidate` 判定条件・固定文言・`POST_MERGE_ENABLE_APPLY` ゲート・Done化条件は不変）。
+- post-merge Done apply条件の変更。
+- Review完了ボタン自体の挙動変更。
+- 同期PRマージ後の `lastSyncedRevision` 更新（後続課題）。

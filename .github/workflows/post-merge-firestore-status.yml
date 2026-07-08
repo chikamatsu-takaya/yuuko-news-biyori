@@ -198,8 +198,9 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/sync-firestore-to-markdown.yml
     with:
-      # 既定は自動マージしない（同期PR作成で停止）。危険な自動マージを避ける安全側。
-      enable_auto_merge: false
+      # Done apply 成功後の同期は safe なら自動マージ寄りにする（safeAutoMerge / merge_ok /
+      # 変更1ファイル の既存安全ゲートは維持。CI 必須チェック通過後に --auto でマージ）。
+      enable_auto_merge: true
     # Firestore 読み取り用のサービスアカウントを明示的に受け渡す（inherit はしない＝最小受け渡し）。
     secrets:
       FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}

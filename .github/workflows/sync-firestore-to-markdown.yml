@@ -39,6 +39,17 @@ on:
       FIREBASE_SERVICE_ACCOUNT_JSON:
         description: "Firestore 読み取り権限を持つサービスアカウントの JSON 全文。"
         required: true
+  # 15分ごとの定期実行。実行時はまず taskSyncMeta/markdown を読み、
+  # syncRevision > lastSyncedRevision（＝レビュー完了ボタン等で同期要求が出ている）ときだけ同期する。
+  # schedule では自動マージを有効化する（safe な同期PRのみ実際にマージされる）。
+  schedule:
+    - cron: "*/15 * * * *"
+
+# 同時実行を直列化する（schedule と post-merge call が重なって固定同期ブランチを競合させないため）。
+# cancel-in-progress: false で、実行中のものは止めずに後続をキューする。
+concurrency:
+  group: sync-firestore-to-markdown
+  cancel-in-progress: false
 
 # 最小権限: Markdown のコミット（contents）と PR 作成・マージ（pull-requests）のみ。
 permissions:
@@ -49,6 +60,9 @@ env:
   MARKDOWN_PATH: docs/00_project/developタスクチェックリスト.md
   DRY_RUN_OUT: task-management/tmp/firestore-to-markdown-dry-run.json
   APPLY_OUT: task-management/tmp/firestore-to-markdown-apply-result.json
+  META_OUT: task-management/tmp/sync-meta.json
+  # 重複PR防止のため同期ブランチは固定名にする（案A）。既存 open PR があれば更新し、新規作成しない。
+  SYNC_BRANCH: sync/firestore-to-markdown
 
 jobs:
   sync:
@@ -82,14 +96,52 @@ jobs:
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$CRED_PATH"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$CRED_PATH" >> "$GITHUB_ENV"
 
+      # 4.5 定期実行ゲート（schedule のみ）: taskSyncMeta/markdown を読み、
+      #     syncRevision > lastSyncedRevision のときだけ以降の同期を走らせる。
+      #     dispatch / call（post-merge apply 後）はこのゲートを通さず常に同期する
+      #     （Done apply は syncRevision を増やさないため、メタ差分ではなく明示呼び出しで同期する）。
+      - name: Read sync meta (schedule gate)
+        id: meta
+        if: github.event_name == 'schedule'
+        run: |
+          node task-management/firestore-sync-meta.mjs read --out "$META_OUT"
+          NEEDS="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).needsSync===true))")"
+          REV="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).syncRevision))")"
+          echo "needs_sync=$NEEDS" >> "$GITHUB_OUTPUT"
+          echo "target_revision=$REV" >> "$GITHUB_OUTPUT"
+          echo "schedule gate: needsSync=$NEEDS targetRevision=$REV"
+
+      # 4.6 実行可否・自動マージ可否フラグを決める。
+      #     should_run: schedule は needs_sync=true のときだけ。dispatch/call は常に実行。
+      #     auto_merge: schedule は有効。dispatch/call は enable_auto_merge input を尊重。
+      - name: Compute run and auto-merge flags
+        id: flags
+        env:
+          EVENT: ${{ github.event_name }}
+          NEEDS_SYNC: ${{ steps.meta.outputs.needs_sync }}
+          ENABLE_AUTO_MERGE: ${{ inputs.enable_auto_merge }}
+        run: |
+          if [ "$EVENT" = "schedule" ]; then
+            [ "$NEEDS_SYNC" = "true" ] && RUN="true" || RUN="false"
+            AUTO="true"
+          else
+            RUN="true"
+            [ "$ENABLE_AUTO_MERGE" = "true" ] && AUTO="true" || AUTO="false"
+          fi
+          echo "should_run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "auto_merge=$AUTO" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT should_run=$RUN auto_merge=$AUTO"
+
       # 5. dry-run: Markdown を書き換えず差分 JSON を出力する。
       - name: Dry run
+        if: steps.flags.outputs.should_run == 'true'
         run: |
           node task-management/sync-firestore-to-markdown.mjs --dry-run --out "$DRY_RUN_OUT"
 
       # 7. apply: Markdown を書き換える（バックアップは tmp 配下に作成）。
       #    dry-run と apply の safeAutoMerge / summary は次の Evaluate ステップで突き合わせる。
       - name: Apply
+        if: steps.flags.outputs.should_run == 'true'
         run: |
           node task-management/sync-firestore-to-markdown.mjs --apply --out "$APPLY_OUT"
 
@@ -100,6 +152,7 @@ jobs:
       #     dry-run と apply の間に DB が変わって内容がズレた場合は自動マージしない。
       - name: Evaluate merge gate
         id: eval
+        if: steps.flags.outputs.should_run == 'true'
         env:
           DRY: ${{ env.DRY_RUN_OUT }}
           APP: ${{ env.APPLY_OUT }}
@@ -132,6 +185,7 @@ jobs:
       # 8. 差分判定: Markdown に変化が無ければ以降をスキップする。
       - name: Detect changes
         id: diff
+        if: steps.flags.outputs.should_run == 'true'
         run: |
           git config core.quotepath false
           if git diff --quiet -- "$MARKDOWN_PATH"; then
@@ -142,10 +196,19 @@ jobs:
             echo "Markdown に変更があります。"
           fi
 
-      # 9-11. ブランチ作成 → Markdown のみ commit → push → PR 作成。
-      - name: Create sync PR
+      # 8.5 差分なし同期（schedule のみ）: syncRevision > lastSyncedRevision を検知して同期したが
+      #     Markdown 差分が生じなかった場合は、lastSyncedRevision を今回の syncRevision まで進めて
+      #     完了扱いにする（次の15分でまた無駄に走らないようにする）。タスク本体は一切触らない。
+      - name: Mark synced when no diff (schedule)
+        if: steps.flags.outputs.should_run == 'true' && github.event_name == 'schedule' && steps.diff.outputs.changed == 'false'
+        run: |
+          node task-management/firestore-sync-meta.mjs mark-no-diff --revision "${{ steps.meta.outputs.target_revision }}"
+
+      # 9-11. 固定ブランチへ Markdown のみ commit → push → PR 作成 or 既存 open PR 更新。
+      #       固定ブランチ名（SYNC_BRANCH）で重複PRを防ぐ（案A）。既存 open PR があれば新規作成しない。
+      - name: Create or update sync PR
         id: pr
-        if: steps.diff.outputs.changed == 'true'
+        if: steps.flags.outputs.should_run == 'true' && steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_OK: ${{ steps.eval.outputs.merge_ok }}
@@ -157,9 +220,8 @@ jobs:
 
           # base は develop 固定（developタスクチェックリスト.md を develop へ同期する用途）。
           BASE_BRANCH="develop"
-          STAMP="$(date -u +%Y%m%d-%H%M%S)"
-          SYNC_BRANCH="sync/firestore-to-markdown-${STAMP}"
-          git switch -c "$SYNC_BRANCH"
+          # 固定ブランチ（このworkflow専用）。develop から作り直し、常に「develop + 最新同期」にする。
+          git switch -c "$SYNC_BRANCH" 2>/dev/null || git switch "$SYNC_BRANCH"
 
           # 安全のため、同期対象の Markdown 1ファイルだけを add する。
           git add -- "$MARKDOWN_PATH"
@@ -171,32 +233,53 @@ jobs:
             exit 1
           fi
 
+          STAMP="$(date -u +%Y%m%d-%H%M%S)"
           git commit -m "chore: Firestore→Markdown タスク同期 (${STAMP})"
-          git push origin "$SYNC_BRANCH"
+          # 固定ブランチを毎回 develop から作り直して push する（常に「develop + 最新同期1コミット」）。
+          # このブランチはこの workflow 専用で、concurrency で直列化しているため force で上書きする。
+          git push --force origin "$SYNC_BRANCH"
 
-          PR_BODY="$(printf '%s\n' \
-            "Firestore tasks を \`${MARKDOWN_PATH}\` へ反映した自動同期PRです。" \
-            "" \
-            "- base: develop" \
-            "- merge_ok (dry/apply 両方 safeAutoMerge かつ レポート完全一致): ${MERGE_OK}" \
-            "- dry-run / apply 結果は Actions の artifact (firestore-to-markdown-reports) を参照。" \
-            "" \
-            "merge_ok=false の場合は自動マージせず、人手レビューで取り込んでください。")"
-          PR_URL="$(gh pr create \
-            --base "$BASE_BRANCH" \
-            --head "$SYNC_BRANCH" \
-            --title "chore: Firestore→Markdown タスク同期 (${STAMP})" \
-            --body "$PR_BODY")"
+          # 重複防止: 既に同ブランチの open PR があればそれを更新扱いにし、新規作成しない。
+          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+          if [ -n "$EXISTING" ]; then
+            echo "既存の open 同期PRを更新しました（新規作成しない）: $EXISTING"
+            PR_URL="$EXISTING"
+          else
+            PR_BODY="$(printf '%s\n' \
+              "Firestore tasks を \`${MARKDOWN_PATH}\` へ反映した自動同期PRです。" \
+              "" \
+              "- base: develop" \
+              "- merge_ok (dry/apply 両方 safeAutoMerge かつ レポート完全一致): ${MERGE_OK}" \
+              "- dry-run / apply 結果は Actions の artifact (firestore-to-markdown-reports) を参照。" \
+              "" \
+              "merge_ok=false の場合は自動マージせず、人手レビューで取り込んでください。")"
+            PR_URL="$(gh pr create \
+              --base "$BASE_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --title "chore: Firestore→Markdown タスク同期" \
+              --body "$PR_BODY")"
+            echo "作成した PR: $PR_URL"
+          fi
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-          echo "作成した PR: $PR_URL"
+
+      # 11.5 同期PR作成の記録（schedule のみ）: lastSyncedRevision は「まだ」更新しない。
+      #      重複防止・追跡のため lastSyncTargetRevision / lastSyncPr / lastSyncBranch / state を残す。
+      #      lastSyncedRevision の更新は「PR が develop へ取り込まれた確認後」＝後続課題。
+      - name: Record sync PR in meta (schedule)
+        if: steps.flags.outputs.should_run == 'true' && github.event_name == 'schedule' && steps.diff.outputs.changed == 'true' && steps.pr.outputs.pr_url != ''
+        run: |
+          node task-management/firestore-sync-meta.mjs mark-pr \
+            --revision "${{ steps.meta.outputs.target_revision }}" \
+            --pr "${{ steps.pr.outputs.pr_url }}" \
+            --branch "$SYNC_BRANCH"
 
       # 12. 自動マージ: merge_ok=true（dry/apply 両方 safeAutoMerge かつ summary 一致）
-      #     かつ「変更が当該ファイルのみ」のときだけ。
-      #     失敗（必須チェック等でブロック）してもPRは残す（continue-on-error）。
-      #     さらに enable_auto_merge=true を明示したときのみ実行する（既定は同期PR作成で停止）。
-      #     safeAutoMerge / merge_ok の判定ロジックは変えず、実行可否だけを追加ゲートする。
+      #     かつ「変更が当該ファイルのみ」かつ auto_merge=true（schedule / call の true / dispatch input）のとき。
+      #     safeAutoMerge / merge_ok の判定ロジックは変えず、実行可否だけをゲートする。
+      #     `--auto` で CI 必須チェック通過後にマージ（PR作成直後に無理やりマージしない）。
+      #     失敗（--auto 非対応・必須チェック未設定・権限ブロック等）してもPRは残す（continue-on-error）。
       - name: Auto merge (only when safe)
-        if: steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true' && (inputs.enable_auto_merge == true || inputs.enable_auto_merge == 'true')
+        if: steps.flags.outputs.should_run == 'true' && steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true' && steps.flags.outputs.auto_merge == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -211,8 +294,11 @@ jobs:
             exit 0
           fi
 
-          echo "merge_ok=true。自動マージします。"
-          gh pr merge "$PR_URL" --squash --delete-branch
+          echo "merge_ok=true。CI必須チェック通過後の自動マージを有効化します（--auto）。"
+          # --auto: リポジトリで auto-merge が有効なら、必須チェック通過後にマージされる。
+          #         auto-merge 未対応/未設定の環境では失敗しうるが、continue-on-error で PR は残す
+          #         （safe な同期PR作成までは必ず維持する）。
+          gh pr merge "$PR_URL" --squash --auto --delete-branch
 
       # 13. dry-run / apply の結果を artifact として保存する（人手確認用）。
       - name: Upload sync reports
