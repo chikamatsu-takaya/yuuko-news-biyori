@@ -144,3 +144,68 @@ Firestore を正本、mdファイルを履歴・バックアップ・AI参照用
 - 作成された同期PR:
 - 同期PR差分:
 - 総合判定:
+
+---
+
+## Review完了ボタン起点のMarkdown同期要求メタ更新確認
+
+### 確認対象
+
+- Firestore meta doc: `taskSyncMeta/markdown`
+- 更新契機: 進捗管理画面の「レビュー完了（Doneにする）」ボタン
+- 今回の範囲: `syncRevision` の更新まで
+- 非対象: GitHub Actions定期実行、自動マージ、Firestore→Markdown同期PR作成
+
+### 期待する動作
+
+Review完了ボタン押下時に、対象タスクがDoneになることに加えて、`taskSyncMeta/markdown.syncRevision` が増える。
+（Done 更新とメタ更新は同一トランザクションで行うため、両方成功または両方失敗となる。）
+
+### 後続
+
+次PRで、GitHub Actionsの15分定期実行により `syncRevision > lastSyncedRevision` を検知し、Firestore→Markdown同期を自動実行する。
+
+### 実機確認結果
+
+- 確認日時: 2026-07-08 09:37
+- 対象タスク: `md-8427ff1bfe36ee48`
+- taskCode: `OPS-MD-SYNC-CHECK-001`
+- 操作: 進捗管理画面（`?source=firestore`）で「レビュー完了（Doneにする）」を押下
+
+#### 対象タスクの更新結果
+
+`tasks/md-8427ff1bfe36ee48` が以下の状態に更新された。
+
+- `status: Done`
+- `completed: true`
+- `completedAt: 2026-07-08 09:37:25`
+- `updatedAt: 2026-07-08 09:37:25`
+- `updatedBy: manual-poc`
+
+#### Markdown同期要求メタの更新結果
+
+`taskSyncMeta/markdown` が作成され、以下の状態になった。
+
+- `syncRevision: 1`
+- `lastSyncedRevision: 0`
+- `requestedAt: 2026-07-08 09:37:25`
+- `requestedBy: dashboard`
+- `reason: review-complete`
+- `updatedAt: 2026-07-08 09:37:25`
+- `updatedBy: dashboard`
+
+#### 判定
+
+Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMeta/markdown.syncRevision` の更新が同時に行われることを確認した。
+
+第1段階は成功。
+
+#### 補足
+
+初回確認では `taskSyncMeta/markdown` が見えなかったが、ブラウザ側で古いJavaScriptを参照していた可能性が高い。サーバー再起動および画面再読み込み後、コンソールに以下のログが出力され、メタ更新も確認できた。
+
+```text
+[Firestore POC] completed review task { taskId: "md-8427ff1bfe36ee48", syncMeta: "taskSyncMeta/markdown updated" }
+```
+
+`orderBy('order') failed, retrying without orderBy` の警告は既存のFirestoreインデックス不足時フォールバックであり、今回の確認結果には影響しない。
