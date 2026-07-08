@@ -209,3 +209,100 @@ Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMet
 ```
 
 `orderBy('order') failed, retrying without orderBy` の警告は既存のFirestoreインデックス不足時フォールバックであり、今回の確認結果には影響しない。
+
+---
+
+## 15分定期実行によるMarkdown同期自動化確認
+
+### 確認対象
+
+- Firestore meta doc: `taskSyncMeta/markdown`
+- 判定条件: `syncRevision > lastSyncedRevision`
+- 実行間隔: 15分（`schedule: "*/15 * * * *"`）
+- 対象workflow: `.github/workflows/sync-firestore-to-markdown.yml`
+- 補助モジュール: `task-management/firestore-sync-meta.mjs`
+
+### 使用トークン（SYNC_PR_TOKEN 前提）
+
+- 同期PRの作成・更新・auto-merge予約・`git push` は、`GITHUB_TOKEN` ではなく Repository secret **`SYNC_PR_TOKEN`**（CIを起動できる専用トークン/PAT）で行う。
+  - `GITHUB_TOKEN` で作成したPRは push イベントの CI が起動せず、CI必須チェック通過後の auto-merge が永久に待つため。
+- `actions/checkout` は `persist-credentials: false` とし、`git push` 前に remote URL を `SYNC_PR_TOKEN` 使用に差し替える。
+- **`SYNC_PR_TOKEN` が未設定の場合は `GITHUB_TOKEN` へフォールバックせず、workflow を明示的に失敗させる**（`Verify SYNC_PR_TOKEN is set` step）。
+- `post-merge-firestore-status.yml` から `workflow_call` で呼ぶ際も `SYNC_PR_TOKEN` を受け渡す。
+
+### 期待する動作
+
+1. `syncRevision <= lastSyncedRevision` の場合は同期をスキップする（schedule ゲートで `should_run=false`）。
+2. `syncRevision > lastSyncedRevision` の場合だけ Firestore→Markdown同期を実行する。
+3. Markdown差分がなければ `lastSyncedRevision` を今回の `syncRevision` まで更新して終了する（`lastSyncState=no-diff`）。
+4. Markdown差分があれば同期PRを作成する（固定ブランチ `sync/firestore-to-markdown`）。
+5. safeな同期PR（`merge_ok=true` かつ変更が対象md1ファイルのみ）は auto-merge 対象にする（`--auto`：CI必須チェック通過後にマージ）。
+6. 固定ブランチ＋既存 open PR チェックにより、同じ同期PRが大量に作られない。
+
+### 判定タイミングと lastSyncedRevision
+
+- **差分なし（schedule）**: `lastSyncedRevision = 読んだ syncRevision` / `lastSyncedAt` / `lastSyncedBy=github-actions` / `lastSyncState=no-diff` を更新。
+- **差分あり（schedule）**: 同期PR作成時点では `lastSyncedRevision` を更新しない。`lastSyncTargetRevision` / `lastSyncPr` / `lastSyncBranch` / `lastSyncState=pr-created` のみ記録する。
+- **同期PRが develop へ取り込まれた後の `lastSyncedRevision` 更新は後続課題**。当面は固定ブランチ＋open PR チェックで多重PR作成を抑える。
+
+### トリガー別の挙動
+
+- **schedule**: メタゲートで `syncRevision>lastSyncedRevision` のときだけ実行。auto_merge=true。
+- **workflow_call（post-merge apply 成功後）**: メタゲートを通さず常に同期（Done apply は `syncRevision` を増やさないため）。`enable_auto_merge=true` で呼ばれ、safe なら auto-merge。
+- **workflow_dispatch（手動）**: 既存挙動維持。`enable_auto_merge` input を尊重（既定 false）。
+
+### 維持している安全条件（変更なし）
+
+- `safeAutoMerge=false` / reparse mismatch / manualCandidates / warnings / dry-run≠apply / 変更が対象md以外を含む場合は自動マージしない（`merge_ok` 判定ロジックは不変）。
+- 変更対象は `docs/00_project/developタスクチェックリスト.md` の1ファイルのみ（add 対象限定＋PR差分再確認）。
+- `firestore-sync-meta.mjs` は `syncRevision` を書き換えない（ブックキーピング用フィールドのみ許可）。tasks コレクションには触れない。
+
+### 既存open同期PRがある場合の扱い
+
+schedule実行時に同じtarget revisionの同期PRがすでにopenの場合、固定同期ブランチへ再度force-pushしない。
+
+これにより、15分ごとのscheduleで同一PRのheadが書き換わり続け、CIやauto-merge、人手レビューを妨げることを避ける。
+
+- 判定: `Read sync meta (schedule gate)` step で force-push より前に既存 open PR を確認し、
+  `今回の syncRevision == 記録済み lastSyncTargetRevision` かつ `lastSyncBranch == sync/firestore-to-markdown`
+  かつ `open PR が存在` のとき `pending_same_revision=true` とする。
+- `pending_same_revision=true` のときは `should_run=false` にし、dry-run / apply / commit / force-push を走らせない。
+- 新しい `syncRevision` が来た場合（`syncRevision != lastSyncTargetRevision`）は `pending_same_revision=false` となり、
+  次回 schedule で固定ブランチを更新して同期PRに反映する。
+- 安全側の方針として、同一 revision の open PR がある間は auto-merge の再有効化も行わない
+  （dry/apply を再実行しないと `merge_ok` を再検証できないため）。open PR が閉じた後の次回 schedule で再同期する。
+
+### 既存同期PRを更新する場合のauto-merge解除
+
+既存open同期PRを新しい `syncRevision` の内容で更新する場合、固定ブランチへforce-pushする前に既存PRのauto-merge予約を明示的に解除する。
+
+これにより、前回のsafeな同期で有効化されたauto-merge予約が残ったまま、今回の `merge_ok=false` の差分へheadが差し替わり、自動マージされることを防ぐ。
+
+更新後は、今回の同期結果で `merge_ok=true` の場合のみ、後続のAuto merge stepでauto-mergeを再有効化する。
+
+- 解除は `Create or update sync PR` step 内、`git push --force` より前に行う（schedule 限定ではなく、dispatch / call も同じ固定ブランチPRを更新しうるため PR 更新処理側に置く）。
+- `gh pr view --json autoMergeRequest` で auto-merge の有無を先に確認し、有効な場合だけ `gh pr merge --disable-auto` する（未設定PRへの解除失敗を避ける）。
+- 解除に失敗した場合・状態を確認できなかった場合は、安全側で **force-push を中止**する（古い予約を残したまま head を差し替えない）。
+
+### 既存open同期PR確認に失敗した場合
+
+既存open同期PRの有無を確認できない場合は、固定同期ブランチへforce-pushしない。
+
+`gh pr list` の失敗を空文字として扱うと、既存PRが存在するにもかかわらず「既存PRなし」と誤判定する可能性があるため、一覧取得失敗時はworkflowを失敗させる。
+
+取得成功かつ0件の場合のみ「既存PRなし」と扱う。
+
+`gh pr list --jq` は open PR が0件のとき `.[0].url` が `null` 文字列を返し、`[ -n "null" ]` で既存PRあり誤判定になるため、
+`if length == 0 then "" else .[0].url // "" end` で0件を明示的に空文字へ正規化する。
+
+- `Read sync meta (schedule gate)` step と `Create or update sync PR` step の両方で、`gh pr list ... || true` を使わず、
+  `if ! EXISTING="$(gh pr list ...)"; then echo "::error::…"; exit 1; fi` の形にして失敗を検知する。
+- schedule gate 側は取得失敗で schedule 同期を中止（workflow 失敗として可視化）。
+- PR 更新処理側は取得失敗で `git push --force` に到達させない（`workflow_dispatch` / `workflow_call` でも同じ保護が効く）。
+
+### 非対象
+
+- PR本文Done許可チェックの判定変更（`done_candidate` 判定条件・固定文言・`POST_MERGE_ENABLE_APPLY` ゲート・Done化条件は不変）。
+- post-merge Done apply条件の変更。
+- Review完了ボタン自体の挙動変更。
+- 同期PRマージ後の `lastSyncedRevision` 更新（後続課題）。
