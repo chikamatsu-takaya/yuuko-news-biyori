@@ -91,6 +91,10 @@ async function runRead(options) {
     lastSyncedRevision,
     // 同期が必要か: 正本側の要求番号が最後に同期した番号より進んでいるとき。
     needsSync: syncRevision > lastSyncedRevision,
+    // 直近で同期PRを作成したときの target revision / branch（重複 force-push 防止の判定に使う）。
+    // 未記録なら 0 / 空文字。
+    lastSyncTargetRevision: toIntOrZero(meta.data.lastSyncTargetRevision),
+    lastSyncBranch: meta.data.lastSyncBranch != null ? String(meta.data.lastSyncBranch) : "",
   };
   const json = `${JSON.stringify(result, null, 2)}\n`;
   if (options.out) {

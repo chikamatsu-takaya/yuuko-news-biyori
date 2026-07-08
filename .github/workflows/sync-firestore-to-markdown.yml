@@ -103,26 +103,51 @@ jobs:
       - name: Read sync meta (schedule gate)
         id: meta
         if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node task-management/firestore-sync-meta.mjs read --out "$META_OUT"
           NEEDS="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).needsSync===true))")"
           REV="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).syncRevision))")"
+          TARGET="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).lastSyncTargetRevision))")"
+          META_BRANCH="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).lastSyncBranch))")"
+
+          # force-push より前に、固定同期ブランチの既存 open PR を確認する（重複 head 書き換え防止）。
+          EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+
+          # 「同じ target revision の同期PRが未処理で open 中」なら、schedule では push しない（後述の should_run=false）。
+          # 判定: 既存 open PR がある かつ 今回の syncRevision == 記録済み lastSyncTargetRevision かつ branch 一致。
+          PENDING_SAME="false"
+          if [ -n "$EXISTING_PR" ] && [ "$REV" = "$TARGET" ] && [ "$META_BRANCH" = "$SYNC_BRANCH" ]; then
+            PENDING_SAME="true"
+          fi
+
           echo "needs_sync=$NEEDS" >> "$GITHUB_OUTPUT"
           echo "target_revision=$REV" >> "$GITHUB_OUTPUT"
-          echo "schedule gate: needsSync=$NEEDS targetRevision=$REV"
+          echo "existing_pr=$EXISTING_PR" >> "$GITHUB_OUTPUT"
+          echo "pending_same_revision=$PENDING_SAME" >> "$GITHUB_OUTPUT"
+          echo "schedule gate: needsSync=$NEEDS rev=$REV target=$TARGET metaBranch=$META_BRANCH existingPR=${EXISTING_PR:-（なし）} pendingSame=$PENDING_SAME"
 
       # 4.6 実行可否・自動マージ可否フラグを決める。
-      #     should_run: schedule は needs_sync=true のときだけ。dispatch/call は常に実行。
+      #     should_run: schedule は「needs_sync=true」かつ「同じ target revision の open PR が未処理で
+      #                 残っていない（pending_same_revision!=true）」ときだけ。dispatch/call は常に実行。
+      #                 → 同一 revision の open PR がある間は schedule で force-push せず、PR が閉じた
+      #                   後の次回 schedule で再同期する（重複 head 書き換え・CI再実行の抑止）。
       #     auto_merge: schedule は有効。dispatch/call は enable_auto_merge input を尊重。
       - name: Compute run and auto-merge flags
         id: flags
         env:
           EVENT: ${{ github.event_name }}
           NEEDS_SYNC: ${{ steps.meta.outputs.needs_sync }}
+          PENDING_SAME: ${{ steps.meta.outputs.pending_same_revision }}
           ENABLE_AUTO_MERGE: ${{ inputs.enable_auto_merge }}
         run: |
           if [ "$EVENT" = "schedule" ]; then
-            [ "$NEEDS_SYNC" = "true" ] && RUN="true" || RUN="false"
+            if [ "$NEEDS_SYNC" = "true" ] && [ "$PENDING_SAME" != "true" ]; then
+              RUN="true"
+            else
+              RUN="false"
+            fi
             AUTO="true"
           else
             RUN="true"
@@ -130,7 +155,7 @@ jobs:
           fi
           echo "should_run=$RUN" >> "$GITHUB_OUTPUT"
           echo "auto_merge=$AUTO" >> "$GITHUB_OUTPUT"
-          echo "event=$EVENT should_run=$RUN auto_merge=$AUTO"
+          echo "event=$EVENT should_run=$RUN auto_merge=$AUTO pending_same=${PENDING_SAME:-false}"
 
       # 5. dry-run: Markdown を書き換えず差分 JSON を出力する。
       - name: Dry run

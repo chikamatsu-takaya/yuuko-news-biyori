@@ -249,6 +249,21 @@ Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMet
 - 変更対象は `docs/00_project/developタスクチェックリスト.md` の1ファイルのみ（add 対象限定＋PR差分再確認）。
 - `firestore-sync-meta.mjs` は `syncRevision` を書き換えない（ブックキーピング用フィールドのみ許可）。tasks コレクションには触れない。
 
+### 既存open同期PRがある場合の扱い
+
+schedule実行時に同じtarget revisionの同期PRがすでにopenの場合、固定同期ブランチへ再度force-pushしない。
+
+これにより、15分ごとのscheduleで同一PRのheadが書き換わり続け、CIやauto-merge、人手レビューを妨げることを避ける。
+
+- 判定: `Read sync meta (schedule gate)` step で force-push より前に既存 open PR を確認し、
+  `今回の syncRevision == 記録済み lastSyncTargetRevision` かつ `lastSyncBranch == sync/firestore-to-markdown`
+  かつ `open PR が存在` のとき `pending_same_revision=true` とする。
+- `pending_same_revision=true` のときは `should_run=false` にし、dry-run / apply / commit / force-push を走らせない。
+- 新しい `syncRevision` が来た場合（`syncRevision != lastSyncTargetRevision`）は `pending_same_revision=false` となり、
+  次回 schedule で固定ブランチを更新して同期PRに反映する。
+- 安全側の方針として、同一 revision の open PR がある間は auto-merge の再有効化も行わない
+  （dry/apply を再実行しないと `merge_ok` を再検証できないため）。open PR が閉じた後の次回 schedule で再同期する。
+
 ### 非対象
 
 - PR本文Done許可チェックの判定変更（`done_candidate` 判定条件・固定文言・`POST_MERGE_ENABLE_APPLY` ゲート・Done化条件は不変）。
