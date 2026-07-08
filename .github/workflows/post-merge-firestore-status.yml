@@ -201,6 +201,8 @@ jobs:
       # Done apply 成功後の同期は safe なら自動マージ寄りにする（safeAutoMerge / merge_ok /
       # 変更1ファイル の既存安全ゲートは維持。CI 必須チェック通過後に --auto でマージ）。
       enable_auto_merge: true
-    # Firestore 読み取り用のサービスアカウントを明示的に受け渡す（inherit はしない＝最小受け渡し）。
+    # Firestore 読み取り用のサービスアカウントと、同期PRのCIを起動できる専用トークンを明示的に受け渡す
+    # （inherit はしない＝最小受け渡し）。SYNC_PR_TOKEN は sync 側で必須（未設定なら失敗する）。
     secrets:
       FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+      SYNC_PR_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}

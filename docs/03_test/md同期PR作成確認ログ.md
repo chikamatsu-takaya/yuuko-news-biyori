@@ -222,6 +222,14 @@ Review完了ボタン押下時に、対象タスクのDone更新と `taskSyncMet
 - 対象workflow: `.github/workflows/sync-firestore-to-markdown.yml`
 - 補助モジュール: `task-management/firestore-sync-meta.mjs`
 
+### 使用トークン（SYNC_PR_TOKEN 前提）
+
+- 同期PRの作成・更新・auto-merge予約・`git push` は、`GITHUB_TOKEN` ではなく Repository secret **`SYNC_PR_TOKEN`**（CIを起動できる専用トークン/PAT）で行う。
+  - `GITHUB_TOKEN` で作成したPRは push イベントの CI が起動せず、CI必須チェック通過後の auto-merge が永久に待つため。
+- `actions/checkout` は `persist-credentials: false` とし、`git push` 前に remote URL を `SYNC_PR_TOKEN` 使用に差し替える。
+- **`SYNC_PR_TOKEN` が未設定の場合は `GITHUB_TOKEN` へフォールバックせず、workflow を明示的に失敗させる**（`Verify SYNC_PR_TOKEN is set` step）。
+- `post-merge-firestore-status.yml` から `workflow_call` で呼ぶ際も `SYNC_PR_TOKEN` を受け渡す。
+
 ### 期待する動作
 
 1. `syncRevision <= lastSyncedRevision` の場合は同期をスキップする（schedule ゲートで `should_run=false`）。

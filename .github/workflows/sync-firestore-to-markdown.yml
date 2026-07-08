@@ -39,6 +39,9 @@ on:
       FIREBASE_SERVICE_ACCOUNT_JSON:
         description: "Firestore 読み取り権限を持つサービスアカウントの JSON 全文。"
         required: true
+      SYNC_PR_TOKEN:
+        description: "同期PRの作成・更新・auto-merge予約に使う、CIを起動できる専用トークン（PAT）。GITHUB_TOKEN では作成PRの CI が起動しないため使う。"
+        required: true
   # 15分ごとの定期実行。実行時はまず taskSyncMeta/markdown を読み、
   # syncRevision > lastSyncedRevision（＝レビュー完了ボタン等で同期要求が出ている）ときだけ同期する。
   # schedule では自動マージを有効化する（safe な同期PRのみ実際にマージされる）。
@@ -68,11 +71,26 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # 1. checkout（同期元は develop 固定。書き込みするため token を保持）。
+      # 1. checkout（同期元は develop 固定）。
+      #    persist-credentials: false: GITHUB_TOKEN を .git/config に残さない。
+      #    push は後段で SYNC_PR_TOKEN を使う remote URL に差し替えて行う（GITHUB_TOKEN を使わない）。
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: develop
+          persist-credentials: false
+
+      # 1.5 SYNC_PR_TOKEN 必須チェック: 未設定なら GITHUB_TOKEN へフォールバックせず明示的に失敗する。
+      #     （GITHUB_TOKEN で作成したPRは CI が起動せず auto-merge が永久に待つため、専用トークンを必須にする。）
+      - name: Verify SYNC_PR_TOKEN is set
+        env:
+          SYNC_PR_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
+        run: |
+          if [ -z "$SYNC_PR_TOKEN" ]; then
+            echo "::error::SYNC_PR_TOKEN が未設定です。GITHUB_TOKEN にフォールバックせず中止します（同期PRのCI起動に専用トークンが必要）。"
+            exit 1
+          fi
+          echo "SYNC_PR_TOKEN is configured."
 
       # 2. Node セットアップ（sync スクリプトは Node 標準 API のみ使用）。
       - name: Setup Node
@@ -104,7 +122,7 @@ jobs:
         id: meta
         if: github.event_name == 'schedule'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
         run: |
           node task-management/firestore-sync-meta.mjs read --out "$META_OUT"
           NEEDS="$(node -e "process.stdout.write(String(require('./'+process.env.META_OUT).needsSync===true))")"
@@ -242,13 +260,18 @@ jobs:
         id: pr
         if: steps.flags.outputs.should_run == 'true' && steps.diff.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
+          SYNC_PR_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
           MERGE_OK: ${{ steps.eval.outputs.merge_ok }}
         run: |
           set -euo pipefail
           git config core.quotepath false
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # persist-credentials: false のため push 用の認証が無い。SYNC_PR_TOKEN を使う remote URL に差し替える
+          # （GITHUB_TOKEN は使わない）。token は URL 埋め込みだが Actions が secret をログでマスクする。
+          git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           # base は develop 固定（developタスクチェックリスト.md を develop へ同期する用途）。
           BASE_BRANCH="develop"
@@ -346,7 +369,7 @@ jobs:
         if: steps.flags.outputs.should_run == 'true' && steps.diff.outputs.changed == 'true' && steps.eval.outputs.merge_ok == 'true' && steps.flags.outputs.auto_merge == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
         run: |
           set -euo pipefail
           PR_URL="${{ steps.pr.outputs.pr_url }}"
