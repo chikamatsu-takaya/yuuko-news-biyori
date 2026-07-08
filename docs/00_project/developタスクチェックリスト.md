@@ -740,7 +740,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
     - 同期PRの差分でこのタスクのチェックボックス、Status、Issue/PRが更新されている
   - Notes:
     - md同期PR作成確認用の一時タスク。確認完了後に削除または検証済みログへ移動する。
-    - Firestore側は `source=md-import` とし、Markdown側の決定的IDに対応するdocIdで作成する。
+    - Firestore側はmd-import由来のテストタスク。
 
 ## 9. 作業テンプレート
 以下をコピーして追加する:
