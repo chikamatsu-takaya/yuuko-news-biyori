@@ -260,12 +260,37 @@ jobs:
 
           STAMP="$(date -u +%Y%m%d-%H%M%S)"
           git commit -m "chore: Firestore→Markdown タスク同期 (${STAMP})"
+
+          # --- force-push より前に既存 open 同期PRを確認し、auto-merge 予約を解除する ---
+          # 既存PRの head を今回の差分へ差し替える前に、前回 safe な同期で有効化された auto-merge が
+          # 残っていると、今回 merge_ok=false の差分がチェック通過後に自動マージされ得る。これを防ぐため
+          # head 更新前に明示解除する。解除できない場合は安全側で force-push を中止する。
+          # （schedule 限定でなく PR 更新処理側に置く: dispatch / call も同じ固定ブランチPRを更新しうるため。）
+          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+          if [ -n "$EXISTING" ]; then
+            # auto-merge 未設定PRへの --disable-auto 失敗を避けるため、先に状態を確認する。
+            AUTO_ENABLED="$(gh pr view "$EXISTING" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "false" else "true" end' || echo "unknown")"
+            if [ "$AUTO_ENABLED" = "true" ]; then
+              echo "既存 open 同期PRの auto-merge 予約を解除します（head 更新前）: $EXISTING"
+              gh pr merge "$EXISTING" --disable-auto || {
+                echo "::error::既存同期PRのauto-merge解除に失敗したため、force-pushを中止します。"
+                exit 1
+              }
+            elif [ "$AUTO_ENABLED" = "unknown" ]; then
+              echo "::error::既存同期PRのauto-merge状態を確認できませんでした。安全のためforce-pushを中止します。"
+              exit 1
+            else
+              echo "既存PRにauto-merge予約はありません（head 更新のみ）。"
+            fi
+          fi
+
           # 固定ブランチを毎回 develop から作り直して push する（常に「develop + 最新同期1コミット」）。
           # このブランチはこの workflow 専用で、concurrency で直列化しているため force で上書きする。
+          # 上で既存PRの auto-merge は解除済み（or 既存PRなし）。
           git push --force origin "$SYNC_BRANCH"
 
           # 重複防止: 既に同ブランチの open PR があればそれを更新扱いにし、新規作成しない。
-          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url' || true)"
+          # merge_ok=true のときだけ、後続の Auto merge step で auto-merge を再有効化する（ここでは有効化しない）。
           if [ -n "$EXISTING" ]; then
             echo "既存の open 同期PRを更新しました（新規作成しない）: $EXISTING"
             PR_URL="$EXISTING"

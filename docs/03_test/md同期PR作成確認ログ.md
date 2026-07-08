@@ -264,6 +264,18 @@ schedule実行時に同じtarget revisionの同期PRがすでにopenの場合、
 - 安全側の方針として、同一 revision の open PR がある間は auto-merge の再有効化も行わない
   （dry/apply を再実行しないと `merge_ok` を再検証できないため）。open PR が閉じた後の次回 schedule で再同期する。
 
+### 既存同期PRを更新する場合のauto-merge解除
+
+既存open同期PRを新しい `syncRevision` の内容で更新する場合、固定ブランチへforce-pushする前に既存PRのauto-merge予約を明示的に解除する。
+
+これにより、前回のsafeな同期で有効化されたauto-merge予約が残ったまま、今回の `merge_ok=false` の差分へheadが差し替わり、自動マージされることを防ぐ。
+
+更新後は、今回の同期結果で `merge_ok=true` の場合のみ、後続のAuto merge stepでauto-mergeを再有効化する。
+
+- 解除は `Create or update sync PR` step 内、`git push --force` より前に行う（schedule 限定ではなく、dispatch / call も同じ固定ブランチPRを更新しうるため PR 更新処理側に置く）。
+- `gh pr view --json autoMergeRequest` で auto-merge の有無を先に確認し、有効な場合だけ `gh pr merge --disable-auto` する（未設定PRへの解除失敗を避ける）。
+- 解除に失敗した場合・状態を確認できなかった場合は、安全側で **force-push を中止**する（古い予約を残したまま head を差し替えない）。
+
 ### 非対象
 
 - PR本文Done許可チェックの判定変更（`done_candidate` 判定条件・固定文言・`POST_MERGE_ENABLE_APPLY` ゲート・Done化条件は不変）。
