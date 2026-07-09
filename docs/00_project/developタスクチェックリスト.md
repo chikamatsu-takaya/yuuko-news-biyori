@@ -415,7 +415,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Priority: P1.5
   - Status: Doing
   - Owner: 近松
-  - Branch: `feature/mvp`
+  - Branch: `feature/mvp-settings-save-load-screen-check`
   - Issue/PR: 未定
   - Done when:
     - 関心カテゴリ、通知ON/OFF、通知時間帯、通知上限、解説レベル、AI Provider、テーマ枠が読み込み時に現在設定を反映する
