@@ -730,7 +730,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - Task code: OPS-MD-SYNC-CHECK-001
   - Priority: P2
   - Status: Done
-  - Owner: @schedule-test
+  - Owner: @test
   - Branch: ops/md-sync-apply-confirm
   - Issue/PR: #157
   - Done when:
