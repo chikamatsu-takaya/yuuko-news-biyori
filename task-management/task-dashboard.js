@@ -219,6 +219,15 @@ document.addEventListener("DOMContentLoaded", () => {
         );
         return;
       }
+      // 他の未完了タスクと branchName が重複していたら、必ず保存を中止する（続行させない）。
+      // branchName は PRマージ後の自動紐づけに使うため、未完了タスク間の重複は事故につながる。
+      if (isBranchNameUsedByOtherActiveTask(trimmed, taskId)) {
+        setLoadState(
+          "このブランチ名は他の未完了タスクでも使われています。別の名前に変更してください。",
+          true,
+        );
+        return;
+      }
       void applyTaskStart(taskId, trimmed, startButton);
       return;
     }
@@ -675,6 +684,28 @@ function findFirestoreTaskById(taskId) {
     return null;
   }
   return state.data.tasks.find((task) => task.firestoreId === taskId) ?? null;
+}
+
+// 指定 branchName が、対象タスク以外の「未完了タスク」で既に使われているかを返す。
+// PRマージ後の自動紐づけは branchName 一致で行うため、未完了タスク間の重複は事故のもと。
+// 対象: 一覧は取得時点で archived=false のみ。ここでは completed でも status=Done でもないものに限る。
+function isBranchNameUsedByOtherActiveTask(branchName, selfTaskId) {
+  if (!state.data || !Array.isArray(state.data.tasks)) {
+    return false;
+  }
+  const target = String(branchName ?? "").trim();
+  if (target === "") {
+    return false;
+  }
+  return state.data.tasks.some((task) => {
+    if (task.firestoreId === selfTaskId) {
+      return false; // 自分自身は除外。
+    }
+    if (task.completed === true || task.status === "Done") {
+      return false; // 完了タスクは紐づけ対象外なので重複扱いしない。
+    }
+    return String(task.branch ?? "").trim() === target;
+  });
 }
 
 // Firestore 表示時のみ呼ばれる担当者名・共有メモ保存処理（編集POC）。
@@ -1836,14 +1867,126 @@ function renderDoingTransitionControls(task) {
   // `;
 }
 
+// タイトルの日本語主要キーワードを英語 slug 部品へ変換する簡易辞書（外部ライブラリなし）。
+// 日本語のみのタイトルでも実用的なブランチ名候補を作るために使う。
+// ASCII 語（MVP / Firebase 等）は下の抽出で拾うため、ここは主に日本語→英語の対応を持つ。
+const BRANCH_KEYWORD_DICTIONARY = {
+  MVP: "mvp",
+  設定: "settings",
+  保存: "save",
+  読み込み: "load",
+  読込: "load",
+  画面: "screen",
+  確認: "check",
+  通知: "notification",
+  同期: "sync",
+  進捗: "progress",
+  タスク: "task",
+  レビュー: "review",
+  自動: "auto",
+  マージ: "merge",
+  作業: "work",
+  ブランチ: "branch",
+  Firebase: "firebase",
+  Firestore: "firestore",
+  Markdown: "markdown",
+  AI: "ai",
+  Provider: "provider",
+  プロバイダー: "provider",
+  テーマ: "theme",
+  カテゴリ: "category",
+  上限: "limit",
+  時間帯: "time-range",
+  解説: "explanation",
+};
+
+// 単独では範囲が広すぎて重複しやすい汎用 slug 部品（これだけだと補強が必要）。
+const GENERIC_BRANCH_PARTS = new Set([
+  "mvp",
+  "test",
+  "fix",
+  "task",
+  "update",
+  "settings",
+  "screen",
+]);
+
+// タイトル文字列を左から走査し、ASCII 英数字の連なり／辞書キーワードを順に slug 部品へ変換する。
+// 出現順を保ちつつ重複部品を除去して返す（例: 設定が2回出ても settings は1回）。
+function extractBranchSlugParts(title) {
+  const text = String(title ?? "");
+  // 辞書キーは長い順に試す（"読み込み" を "読込" より先に、部分一致の取りこぼしを防ぐ）。
+  const dictKeys = Object.keys(BRANCH_KEYWORD_DICTIONARY).sort((a, b) => b.length - a.length);
+  const parts = [];
+  const seen = new Set();
+  const pushPart = (slug) => {
+    if (slug && !seen.has(slug)) {
+      seen.add(slug);
+      parts.push(slug);
+    }
+  };
+
+  let i = 0;
+  while (i < text.length) {
+    // ASCII 英数字の連なりは1部品（小文字化）として取り込む（MVP → mvp 等）。
+    const ascii = /^[A-Za-z0-9]+/.exec(text.slice(i));
+    if (ascii) {
+      pushPart(ascii[0].toLowerCase());
+      i += ascii[0].length;
+      continue;
+    }
+    // 辞書キーワード（日本語など）に一致すれば対応 slug を取り込む。
+    let matched = null;
+    for (const key of dictKeys) {
+      if (text.startsWith(key, i)) {
+        matched = key;
+        break;
+      }
+    }
+    if (matched) {
+      pushPart(BRANCH_KEYWORD_DICTIONARY[matched]);
+      i += matched.length;
+      continue;
+    }
+    i += 1; // 対象外の文字（助詞・記号等）は読み飛ばす。
+  }
+  return parts;
+}
+
+// Firestore document id から短い識別子を作る（重複回避の補強に使う）。
+// 例: "md-8427ff1bfe36ee48" → "md8427ff"
+function shortenDocId(id) {
+  const s = slugifyAscii(String(id ?? "")).replace(/-/g, "");
+  return s.slice(0, 8);
+}
+
+// title 由来の slug 部品が「弱い（短すぎ／汎用すぎ／1部品のみ）」かを判定する。
+function isWeakBranchTitle(titleParts) {
+  if (titleParts.length <= 1) {
+    return true; // 部品が0〜1個は範囲が広すぎる。
+  }
+  if (titleParts.every((p) => GENERIC_BRANCH_PARTS.has(p))) {
+    return true; // 汎用語だけで構成されている。
+  }
+  if (titleParts.join("-").length < 6) {
+    return true; // slug 本体が短すぎる。
+  }
+  return false;
+}
+
 // taskCode と title から作業ブランチ名候補を生成する純粋関数（window/document 非依存）。
-// 例: TASK-023 + "Notification Cooldown" → feature/task-023-notification-cooldown
-//     TASK-023-R → feature/task-023-r-...
-// 日本語のみ等で title の ASCII slug が作れない場合は taskCode だけ（feature/task-023）。
-// taskCode も無ければ title slug、それも無ければ安全な短い代替（feature/task）。md-... は使わない。
+// 方針:
+// - title の ASCII 語＋日本語キーワードを slug 部品にして、日本語のみでも実用的な候補を作る。
+// - taskCode があれば先頭に含める（それだけで十分特定的になる）。
+// - taskCode が無く title 由来が弱い（feature/mvp のような広すぎる名前）場合は、
+//   document id の短縮値で補強し、重複しにくい候補にする（feature/mvp-md8427ff 等）。
+// 例: "MVP設定項目の保存・読み込みを設定画面で確認する" → feature/mvp-settings-save-load-screen-check
 function buildBranchName(task) {
   const codeSlug = slugifyAscii(task.taskCode || "");
-  const titleSlug = slugifyAscii(task.text || "");
+  const titleParts = extractBranchSlugParts(task.text || "");
+  // title slug は既存の最大長ルール（40文字）に合わせて切り詰める。
+  const titleSlug = titleParts.join("-").slice(0, 40).replace(/-+$/g, "");
+
   let base;
   if (codeSlug && titleSlug) {
     base = `${codeSlug}-${titleSlug}`;
@@ -1852,7 +1995,20 @@ function buildBranchName(task) {
   } else if (titleSlug) {
     base = titleSlug;
   } else {
-    base = "task";
+    base = "";
+  }
+
+  // taskCode が無く、title 由来が弱い場合は document id 短縮値で補強する。
+  if (!codeSlug && isWeakBranchTitle(titleParts)) {
+    const shortId = shortenDocId(task.firestoreId);
+    if (titleSlug && shortId) {
+      base = `${titleSlug}-${shortId}`; // 例: feature/mvp-md8427ff
+    } else if (shortId) {
+      base = `task-${shortId}`; // 例: feature/task-md8427ff
+    }
+  }
+  if (!base) {
+    base = "task"; // 最後の砦（id も無い等）。
   }
   return `feature/${base}`;
 }
