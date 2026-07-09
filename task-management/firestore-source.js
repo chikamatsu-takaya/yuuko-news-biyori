@@ -537,6 +537,18 @@ export async function startTaskForPoc(taskId, branchName) {
   const db = getFirestore(getApp());
   const targetRef = firestoreDoc(db, "tasks", taskId);
 
+  // 保存直前に Firestore の最新状態で branchName 重複を再確認する（別タブ・別ユーザー対策）。
+  // UI 側の state.data だけに頼らず、DB を直接クエリして確実に弾く。
+  // post-merge の紐づけ（matchByBranch）は completed/status を見ないため、Done済み/archived も含め、
+  // 対象タスク以外で同じ branchName が存在したら拒否する（一意インデックスdoc方式は今回使わない簡易対策）。
+  // 注: transaction 内ではクエリできないため、transaction の前に getDocs で確認する。
+  const dupSnapshot = await getDocs(
+    query(collection(db, "tasks"), where("branchName", "==", safeBranch)),
+  );
+  if (dupSnapshot.docs.some((docSnap) => docSnap.id !== taskId)) {
+    throw new Error("このブランチ名は他のタスクで既に使われています。別の名前に変更してください。");
+  }
+
   await runTransaction(db, async (transaction) => {
     const snapshot = await transaction.get(targetRef);
     if (!snapshot.exists()) {
