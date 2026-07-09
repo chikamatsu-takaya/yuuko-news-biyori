@@ -346,6 +346,8 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
 
   const db = getFirestore(getApp());
   const targetRef = firestoreDoc(db, "tasks", taskId);
+  // Done 化のときは Markdown 同期要求メタ（syncRevision +1）も同一 transaction で更新する。
+  const syncMetaRef = firestoreDoc(db, "taskSyncMeta", "markdown");
 
   const isDone = nextStatus === "Done";
   // 現状読込→Reviewチェック→更新を transaction で原子化する。
@@ -369,6 +371,9 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
       );
     }
 
+    // Done 化のときだけ、同期メタを write より前に読む（read→write 順序制約のため）。
+    const metaSnapshot = isDone ? await transaction.get(syncMetaRef) : null;
+
     transaction.update(targetRef, {
       status: nextStatus,
       completed: isDone,
@@ -376,9 +381,15 @@ export async function updateTaskStatusForPoc(taskId, nextStatus) {
       updatedAt: serverTimestamp(),
       updatedBy: "manual-poc",
     });
+
+    // Done 操作が成功したときだけ syncRevision を +1（Todo/Next/Blocked → Done の汎用ボタン経由）。
+    // Done 以外の status 変更（差し戻し等）では同期要求を出さない。
+    if (isDone) {
+      bumpMarkdownSyncRevision(transaction, syncMetaRef, metaSnapshot, "status-done");
+    }
   });
 
-  console.log("[Firestore POC] updated task status", { taskId, nextStatus });
+  console.log("[Firestore POC] updated task status", { taskId, nextStatus, syncMeta: isDone ? "syncRevision +1" : "none" });
 }
 
 /**
@@ -614,29 +625,48 @@ export async function completeReviewTaskForPoc(taskId) {
       updatedBy: "manual-poc",
     });
 
-    // 同期要求メタ更新: syncRevision を increment(1) で進め、契機情報を残す。
-    const syncMetaFields = {
-      syncRevision: increment(1),
-      requestedAt: serverTimestamp(),
-      requestedBy: "dashboard",
-      reason: "review-complete",
-      updatedAt: serverTimestamp(),
-      updatedBy: "dashboard",
-    };
-    if (!metaSnapshot.exists()) {
-      // 初回作成。syncRevision は increment(1) で 1、lastSyncedRevision は初期値 0。
-      transaction.set(syncMetaRef, { ...syncMetaFields, lastSyncedRevision: 0 });
-    } else {
-      // 既存 lastSyncedRevision は上書きしない。未設定のときだけ 0 を補う。
-      const metaData = metaSnapshot.data() ?? {};
-      if (metaData.lastSyncedRevision === undefined) {
-        syncMetaFields.lastSyncedRevision = 0;
-      }
-      transaction.update(syncMetaRef, syncMetaFields);
-    }
+    // 同期要求メタ更新: Done 化と同一 transaction で syncRevision を +1 する（契機は Review完了）。
+    bumpMarkdownSyncRevision(transaction, syncMetaRef, metaSnapshot, "review-complete");
   });
 
   console.log("[Firestore POC] completed review task", { taskId, syncMeta: "taskSyncMeta/markdown updated" });
+}
+
+/**
+ * Markdown 同期要求メタ（taskSyncMeta/markdown）の syncRevision を +1 する共通処理。
+ * Done 操作（Review→Done / Doing→Done / 汎用Status→Done）成功時に、task 更新と「同一 transaction 内」で
+ * 呼び、「task は Done になったのに Markdown 同期要求（syncRevision）が出ない」状態を防ぐ。
+ * - syncRevision: increment(1)（未存在フィールドなら 1 になる）
+ * - lastSyncedRevision: 既存があれば上書きせず、未設定のときだけ 0 で初期化（画面操作では前進させない＝CI側の責務）
+ * - lastSyncTargetRevision 等の CI 用ブックキーピングは触らない
+ * 注意: Firestore transaction は「全 read → 全 write」制約のため、metaSnapshot は
+ *       呼び出し側で write より前に取得しておくこと。
+ *
+ * @param {object} transaction    runTransaction のトランザクション
+ * @param {object} syncMetaRef    taskSyncMeta/markdown への DocumentReference
+ * @param {object} metaSnapshot   write より前に取得済みの現状スナップショット
+ * @param {string} reason         同期要求の契機（"review-complete" / "doing-done" / "status-done" 等）
+ */
+function bumpMarkdownSyncRevision(transaction, syncMetaRef, metaSnapshot, reason) {
+  const syncMetaFields = {
+    syncRevision: increment(1),
+    requestedAt: serverTimestamp(),
+    requestedBy: "dashboard",
+    reason,
+    updatedAt: serverTimestamp(),
+    updatedBy: "dashboard",
+  };
+  if (!metaSnapshot.exists()) {
+    // 初回作成。syncRevision は increment(1) で 1、lastSyncedRevision は初期値 0。
+    transaction.set(syncMetaRef, { ...syncMetaFields, lastSyncedRevision: 0 });
+  } else {
+    // 既存 lastSyncedRevision は上書きしない。未設定のときだけ 0 を補う。
+    const metaData = metaSnapshot.data() ?? {};
+    if (metaData.lastSyncedRevision === undefined) {
+      syncMetaFields.lastSyncedRevision = 0;
+    }
+    transaction.update(syncMetaRef, syncMetaFields);
+  }
 }
 
 /**
@@ -667,6 +697,8 @@ async function transitionDoingTaskForPoc(taskId, nextStatus) {
 
   const db = getFirestore(getApp());
   const targetRef = firestoreDoc(db, "tasks", taskId);
+  // Done 化のときは Markdown 同期要求メタ（syncRevision +1）も同一 transaction で更新する。
+  const syncMetaRef = firestoreDoc(db, "taskSyncMeta", "markdown");
 
   const isDone = nextStatus === "Done";
   // 現状読込→Doingチェック→更新を transaction で原子化する。
@@ -684,6 +716,9 @@ async function transitionDoingTaskForPoc(taskId, nextStatus) {
       throw new Error("status が Doing ではないため、この操作はできません。");
     }
 
+    // Done 化のときだけ、同期メタを write より前に読む（read→write 順序制約のため）。
+    const metaSnapshot = isDone ? await transaction.get(syncMetaRef) : null;
+
     transaction.update(targetRef, {
       status: nextStatus,
       completed: isDone,
@@ -691,9 +726,14 @@ async function transitionDoingTaskForPoc(taskId, nextStatus) {
       updatedAt: serverTimestamp(),
       updatedBy: "manual-poc",
     });
+
+    // Done 操作（問題なしでDone）成功時だけ syncRevision を +1。Doing→Review では出さない。
+    if (isDone) {
+      bumpMarkdownSyncRevision(transaction, syncMetaRef, metaSnapshot, "doing-done");
+    }
   });
 
-  console.log("[Firestore POC] transitioned doing task", { taskId, nextStatus });
+  console.log("[Firestore POC] transitioned doing task", { taskId, nextStatus, syncMeta: isDone ? "syncRevision +1" : "none" });
 }
 
 /**
