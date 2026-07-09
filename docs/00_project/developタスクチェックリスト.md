@@ -413,9 +413,9 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、辞書とランクが育つ」体験が途切れないことを確認する。
 - [ ] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: 近松
+  - Branch: `feature/mvp`
   - Issue/PR: 未定
   - Done when:
     - 関心カテゴリ、通知ON/OFF、通知時間帯、通知上限、解説レベル、AI Provider、テーマ枠が読み込み時に現在設定を反映する
