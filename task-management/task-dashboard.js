@@ -219,11 +219,11 @@ document.addEventListener("DOMContentLoaded", () => {
         );
         return;
       }
-      // 他の未完了タスクと branchName が重複していたら、必ず保存を中止する（続行させない）。
-      // branchName は PRマージ後の自動紐づけに使うため、未完了タスク間の重複は事故につながる。
-      if (isBranchNameUsedByOtherActiveTask(trimmed, taskId)) {
+      // 他のタスクと branchName が重複していたら、必ず保存を中止する（続行させない）。
+      // branchName は PRマージ後の自動紐づけに使うため、Done済みも含め他タスクとの重複は事故につながる。
+      if (isBranchNameUsedByOtherTask(trimmed, taskId)) {
         setLoadState(
-          "このブランチ名は他の未完了タスクでも使われています。別の名前に変更してください。",
+          "このブランチ名は他のタスクで既に使われています。別の名前に変更してください。",
           true,
         );
         return;
@@ -686,10 +686,11 @@ function findFirestoreTaskById(taskId) {
   return state.data.tasks.find((task) => task.firestoreId === taskId) ?? null;
 }
 
-// 指定 branchName が、対象タスク以外の「未完了タスク」で既に使われているかを返す。
-// PRマージ後の自動紐づけは branchName 一致で行うため、未完了タスク間の重複は事故のもと。
-// 対象: 一覧は取得時点で archived=false のみ。ここでは completed でも status=Done でもないものに限る。
-function isBranchNameUsedByOtherActiveTask(branchName, selfTaskId) {
+// 指定 branchName が、対象タスク以外の「他のタスク」で既に使われているかを返す。
+// PRマージ後の自動紐づけ（post-merge の matchByBranch）は completed/status を見ず branchName 一致の
+// タスクを全件候補にするため、Done済みタスクと branchName が重複していても候補が複数になり得る。
+// そのため Done済み/completed も含めて、他タスクに同じ branchName があれば重複扱いにする。
+function isBranchNameUsedByOtherTask(branchName, selfTaskId) {
   if (!state.data || !Array.isArray(state.data.tasks)) {
     return false;
   }
@@ -700,9 +701,6 @@ function isBranchNameUsedByOtherActiveTask(branchName, selfTaskId) {
   return state.data.tasks.some((task) => {
     if (task.firestoreId === selfTaskId) {
       return false; // 自分自身は除外。
-    }
-    if (task.completed === true || task.status === "Done") {
-      return false; // 完了タスクは紐づけ対象外なので重複扱いしない。
     }
     return String(task.branch ?? "").trim() === target;
   });
