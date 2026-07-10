@@ -47,6 +47,7 @@ import {
   resetUserSettings,
   type WorkTimeRangeDto,
   type UserSettingsDto,
+  type ExplanationLevel,
 } from "@/lib/tauri/settings";
 import {
   AlertDialog,
@@ -277,6 +278,32 @@ const maxPerDayToFrequency = (maxPerDay: number): string => {
   return "制限なし";
 };
 
+// 解説レベル（DTO: simple/normal/detailed）と「解説の詳しさ」ドロップダウン表示の対応。
+// UI 表示ラベルを explanationLevel として保存・復元する（独立フィールドは増やさない）。
+const explanationLevelToLabel = (level: ExplanationLevel): string => {
+  switch (level) {
+    case "simple":
+      return "簡潔に";
+    case "detailed":
+      return "詳しく";
+    case "normal":
+    default:
+      return "ふつう";
+  }
+};
+
+const labelToExplanationLevel = (label: string): ExplanationLevel => {
+  switch (label) {
+    case "簡潔に":
+      return "simple";
+    case "詳しく":
+      return "detailed";
+    case "ふつう":
+    default:
+      return "normal";
+  }
+};
+
 const mapSettingsFromDto = (
   base: SettingsState,
   dto: UserSettingsDto
@@ -303,6 +330,8 @@ const mapSettingsFromDto = (
       ...base.ai,
       provider: dto.aiProvider,
       providerStatus: dto.aiProvider,
+      // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
+      explanationDetail: explanationLevelToLabel(dto.explanationLevel),
     },
     user: {
       ...base.user,
@@ -347,7 +376,8 @@ const buildDtoForSave = (
     suppressDuringMicUse: settingsState.suppression.suppressWhenMicInUse,
     suppressDuringFullscreen: settingsState.suppression.suppressWhenFullscreen,
     autoStartOnPcBoot: settingsState.integration.autoStartOnPcBoot,
-    explanationLevel: source.explanationLevel,
+    // 解説の詳しさドロップダウンの表示値を explanationLevel として保存する（画面値と保存値を一致させる）。
+    explanationLevel: labelToExplanationLevel(settingsState.ai.explanationDetail),
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
     selectedPersonalityId: source.selectedPersonalityId,
@@ -992,6 +1022,24 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
+                  <SettingRow label="AIプロバイダー">
+                    <Select
+                      value={settings.ai.provider}
+                      onValueChange={(v) => updateAi("provider", v)}
+                    >
+                      <SelectTrigger className="w-48">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
+                        <SelectItem value="gemini">Gemini</SelectItem>
+                        {/* openai / local は enum 上は保存できるが、実AI呼び出しは未実装（常に mock 動作）。 */}
+                        {/* MVP 未検証のため「準備中」と明示し、選んでも安全側で mock で動くことを案内する。 */}
+                        <SelectItem value="openai">OpenAI（準備中）</SelectItem>
+                        <SelectItem value="local">ローカル（準備中）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </SettingRow>
                   <SettingRow label="解説の詳しさ">
                     <Select
                       value={settings.ai.explanationDetail}
@@ -1046,6 +1094,11 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
+                  {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
+                  {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
+                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
+                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。現在、実際の外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。OpenAI・ローカルは準備中のため、選んでも現在は MockProvider で動作します。
+                  </p>
                 </CardContent>
               </Card>
             )}
