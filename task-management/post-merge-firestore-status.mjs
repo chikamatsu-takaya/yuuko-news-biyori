@@ -61,7 +61,7 @@ async function main() {
   const result = evaluate(pr, firestoreTasks);
   const report = buildReport(pr, result);
 
-  // apply（--apply 指定時のみ・done_candidate のみ書き込み）。既定は report-only。
+  // apply（--apply 指定時のみ・done_candidate→Done / review_candidate→Review を書き込み）。既定は report-only。
   // 例外（再読込失敗・認証失敗・ネットワーク例外等）が起きても main().catch へ落とさず、
   // 失敗情報を report.apply に入れてから JSON artifact / Step Summary を必ず出力する。
   let applyFailed = false;
@@ -696,51 +696,56 @@ function toCandidateView(task) {
 }
 
 // ---------------------------------------------------------------------------
-// apply（フェーズ1a: done_candidate のみ・--apply 指定時のみ書き込み）
+// apply（done_candidate→Done / review_candidate→Review・--apply 指定時のみ書き込み）
 // ---------------------------------------------------------------------------
 
 /**
  * apply 情報を組み立てる。既定（--apply なし）は report-only で書き込みしない。
- * no_change / review_candidate は絶対に書き込まない（done_candidate のみ apply へ進む）。
- * 書き込みモジュールの import は applyPhase 内（done_candidate かつ --apply のとき）だけで行う。
+ * 書き込み対象は done_candidate（→ Done）と review_candidate（→ Review）のみ。no_change は書き込まない。
+ * 書き込みモジュールの import は applyPhase 内（apply 対象かつ --apply のとき）だけで行う。
  */
 async function computeApply(report, pr, firestoreTasks, options) {
   if (!options.apply) {
     return { attempted: false, mode: "report-only" };
   }
   const result = report.decision.result;
-  if (result !== "done_candidate") {
-    // no_change / review_candidate は書き込み対象外（安全側）。
+  // done_candidate → Done / review_candidate → Review のみ apply 対象。no_change 等は書き込まない（安全側）。
+  if (result !== "done_candidate" && result !== "review_candidate") {
     return {
       attempted: false,
       mode: "apply",
-      reason: `result=${result} は書き込み対象外です（done_candidate のみ apply）。`,
+      reason: `result=${result} は書き込み対象外です（done_candidate は Done / review_candidate は Review へ更新）。`,
     };
   }
   if (!report.match.matchedTaskId) {
     return { attempted: false, mode: "apply", reason: "対象タスクが特定できていないため apply しません。" };
   }
-  // PR本文の Done 許可チェック（追加ゲート）。未チェック/項目なしなら done_candidate でも書き込まない。
-  // 大きいタスクの途中PR等を、PR単位の明示的同意なしに Done 化しないための安全条件。
+  // PR本文の Done 許可チェック（done_candidate / review_candidate 共通の追加ゲート）。
+  // 未チェック/項目なしなら、判定に関わらず書き込まない（PR単位の明示的同意なしに更新しない）。
   if (report.prDoneApplyConsent?.checked !== true) {
     return {
       attempted: false,
       mode: "apply",
-      reason: "PR本文のDone許可チェックが未チェックのため自動更新しません（Done にするには PR本文のチェックが必要です）。",
+      reason: "PR本文のDone許可チェックが未チェックのため自動更新しません（更新には PR本文のチェックが必要です）。",
     };
   }
   return applyPhase(report, pr, firestoreTasks, options);
 }
 
 /**
- * done_candidate のタスクを Done へ更新する（apply 直前に再読込 → ガード → 楽観ロック付き PATCH）。
+ * 対象タスクを判定結果に応じて更新する（apply 直前に再読込 → ガード → 楽観ロック付き PATCH）。
+ * - done_candidate → Done（completed=true / completedAt 設定）: buildDoneUpdatePayload
+ * - review_candidate → Review（completed=false / completedAt=null）: buildReviewUpdatePayload
+ * どちらも「現状 Doing のときだけ」更新する（planStatusApplyFromDoing）。Done にするのは done_candidate のみ。
  * - offline（--firestore-json）は dump を再読込に使い、実書き込みはしない（dry-apply シミュレート）。
  * - live は SA 認証で単一ドキュメント再読込（updateTime 取得）→ 条件を満たせば PATCH。
- * 更新フィールドは status / completed / completedAt / updatedAt / updatedBy のみ（buildDoneUpdatePayload）。
+ * 更新フィールドは status / completed / completedAt / updatedAt / updatedBy のみ。
  */
 async function applyPhase(report, pr, firestoreTasks, options) {
   const taskId = report.match.matchedTaskId;
-  // 書き込みモジュールは done_candidate かつ --apply のときだけ import する。
+  // done_candidate → Done / review_candidate → Review。target により payload と遷移先を切り替える。
+  const targetStatus = report.decision.result === "review_candidate" ? "Review" : "Done";
+  // 書き込みモジュールは apply 対象かつ --apply のときだけ import する。
   const writeMod = await import("./firestore-admin-write.mjs");
 
   // apply 直前の再読込（updateTime を取得）。offline は dump、live は SA GET。
@@ -757,9 +762,17 @@ async function applyPhase(report, pr, firestoreTasks, options) {
   }
 
   const currentUpdateTime = fresh.updateTime ?? null;
-  const plan = planDoneApply(fresh);
+  const plan = planStatusApplyFromDoing(fresh, targetStatus);
   if (!plan.shouldWrite) {
-    return { attempted: true, mode: "apply", applied: false, simulated, reason: plan.reason, currentUpdateTime };
+    return {
+      attempted: true,
+      mode: "apply",
+      applied: false,
+      simulated,
+      reason: plan.reason,
+      currentUpdateTime,
+      proposedStatus: targetStatus,
+    };
   }
 
   // 紐づけキーの再検証（PATCH前）: 最初の全件取得〜PATCH の間に、対象 doc の branchName / taskCode /
@@ -774,13 +787,18 @@ async function applyPhase(report, pr, firestoreTasks, options) {
       simulated,
       reason: `再読込時に紐づけキー（${report.match.matchedBy ?? "不明"}）が一致しないため書き込みません（期待=${link.expected || "（空）"} / 実際=${link.actual || "（空）"}）。`,
       currentUpdateTime,
+      proposedStatus: targetStatus,
     };
   }
 
-  const payload = writeMod.buildDoneUpdatePayload(new Date().toISOString(), "post-merge-bot");
+  const payload =
+    targetStatus === "Review"
+      ? writeMod.buildReviewUpdatePayload(new Date().toISOString(), "post-merge-bot")
+      : writeMod.buildDoneUpdatePayload(new Date().toISOString(), "post-merge-bot");
   const record = {
     updateMaskFields: payload.updateMaskFields,
     proposed: payload.data,
+    proposedStatus: targetStatus,
     currentUpdateTime,
   };
 
@@ -809,17 +827,21 @@ async function applyPhase(report, pr, firestoreTasks, options) {
     simulated: false,
     httpStatus: res.status,
     reason: res.ok
-      ? "Done へ更新しました。"
+      ? `${targetStatus} へ更新しました。`
       : `更新に失敗しました (HTTP ${res.status})。競合(412)や権限を確認してください。`,
     ...record,
   };
 }
 
 /**
- * 再読込した現状（fresh）に対する Done 書き込み可否を判定する純粋関数（楽観ロックの前段ガード）。
- * done_candidate であっても、再読込時点で不在 / archived / completed / status=Done なら書き込まない。
+ * 再読込した現状（fresh）に対する書き込み可否を判定する純粋関数（楽観ロックの前段ガード）。
+ * Done / Review のどちらへ更新する場合も共通で、再読込時点で不在 / archived / completed /
+ * status=Done なら書き込まない。かつ「現状 Doing のときだけ」更新を許可する（安全側）。
+ * Todo / Next / Blocked / Review / 空status / 不明status は自動更新しない。
+ * @param {object} fresh  再読込結果（exists / data.status / data.archived / data.completed）
+ * @param {"Done"|"Review"} targetStatus  更新先 status（reason 表示に使う）
  */
-function planDoneApply(fresh) {
+function planStatusApplyFromDoing(fresh, targetStatus = "Done") {
   if (!fresh || fresh.exists === false) {
     return { shouldWrite: false, reason: "対象ドキュメントが存在しません（再読込時）。書き込みません。" };
   }
@@ -833,15 +855,14 @@ function planDoneApply(fresh) {
   if (strOrEmpty(d.status) === "Done") {
     return { shouldWrite: false, reason: "再読込時に status=Done のため書き込みません。" };
   }
-  // フェーズ1aの自動applyでは、現状 status が "Doing" のときだけ Done 化を許可する。
-  // Todo / Next / Blocked / Review / 空status / 不明status は自動 Done 化しない（安全側）。
+  // 現状 status が "Doing" のときだけ自動更新を許可する（安全側）。
   if (strOrEmpty(d.status) !== "Doing") {
     return {
       shouldWrite: false,
-      reason: `再読込時の status=${strOrEmpty(d.status) || "（空）"} は自動Done化対象外です（フェーズ1aは現状 Doing のみ自動Done化）。`,
+      reason: `再読込時の status=${strOrEmpty(d.status) || "（空）"} は自動更新対象外です（現状 Doing のときだけ ${targetStatus} 化）。`,
     };
   }
-  return { shouldWrite: true, reason: "done_candidate かつ再読込後も現状 Doing のため Done へ更新します。" };
+  return { shouldWrite: true, reason: `再読込後も現状 Doing のため ${targetStatus} へ更新します。` };
 }
 
 /**
@@ -1197,8 +1218,8 @@ function buildSummaryMarkdown(report) {
     lines.push(`- reason: ${consent.reason}`);
   }
 
-  // 6. Done apply結果
-  lines.push("", "### Done apply");
+  // 6. Firestore status apply結果（done_candidate→Done / review_candidate→Review）
+  lines.push("", "### Firestore status apply（Done / Review）");
   if (!a.attempted) {
     lines.push(`- 書き込み: なし（${a.mode ?? "report-only"}）`);
     if (a.reason) {
@@ -1207,6 +1228,9 @@ function buildSummaryMarkdown(report) {
   } else {
     const state = a.applied ? "実行(成功)" : a.simulated ? "シミュレート(未書き込み)" : "未実行";
     lines.push(`- 書き込み: ${state}`);
+    if (a.proposedStatus) {
+      lines.push(`- 更新先: ${a.proposedStatus}`);
+    }
     lines.push(`- 理由: ${a.reason ?? "（なし）"}`);
     if (a.updateMaskFields) {
       lines.push(`- updateMask: ${a.updateMaskFields.join(", ")}`);
@@ -1267,13 +1291,17 @@ function buildSummaryMarkdown(report) {
 }
 
 /**
- * apply 状態に応じた末尾の一言（Firestore を変更したか否かを明示）。
- * done_candidate だが PR本文 Done許可チェック未チェックで書き込まなかったケースは、
- * 「done_candidate 対象外」ではなく「Done許可チェック未チェック」と明示する（誤解防止）。
+ * apply 状態に応じた末尾の一言（Firestore を変更したか否か・遷移先を明示）。
+ * done_candidate → Done / review_candidate → Review。
+ * done_candidate / review_candidate だが PR本文 Done許可チェック未チェックで書き込まなかったケースは、
+ * 「対象外」ではなく「Done許可チェック未チェック」と明示する（誤解防止）。
  */
 function applyClosingNote(a, report) {
   if (a.attempted && a.applied) {
-    return "> Firestore を Done に更新しました。";
+    // 遷移先（Done / Review）を明示する。apply.proposedStatus を優先し、無ければ result から導く。
+    const target =
+      a.proposedStatus ?? (report?.decision?.result === "review_candidate" ? "Review" : "Done");
+    return `> Firestore を ${target} に更新しました。`;
   }
   if (a.attempted && a.simulated) {
     return "> オフライン(dry-apply)のため Firestore は変更していません。";
@@ -1282,13 +1310,16 @@ function applyClosingNote(a, report) {
     return "> 書き込み条件未達／失敗のため Firestore は変更していません。";
   }
   if (!a.attempted && a.mode === "apply") {
-    // done_candidate かつ PR本文 Done許可チェック未チェックで書き込み対象外になったケース。
-    // （result は done_candidate なので「done_candidate 対象外」は不正確。未チェックが理由と明示する。）
-    if (report?.decision?.result === "done_candidate" && report?.prDoneApplyConsent?.checked !== true) {
+    const result = report?.decision?.result;
+    // done_candidate / review_candidate だが PR本文 Done許可チェック未チェックで書き込み対象外になったケース。
+    if (
+      (result === "done_candidate" || result === "review_candidate") &&
+      report?.prDoneApplyConsent?.checked !== true
+    ) {
       return "> apply指定済みだが PR本文 Done許可チェックが未チェックのため Firestore は変更していません。";
     }
-    // それ以外（no_change / review_candidate 等）で書き込み対象外のケース。
-    return "> apply指定済みだが done_candidate 対象外のため Firestore は変更していません。";
+    // それ以外（no_change 等・done_candidate/review_candidate 以外）で書き込み対象外のケース。
+    return "> apply指定済みだが 書き込み対象外（done_candidate / review_candidate 以外）のため Firestore は変更していません。";
   }
   // --apply 未指定の純粋な report-only。
   return "> report-only のため Firestore は変更していません（--apply 未指定）。";
@@ -1355,7 +1386,7 @@ export {
   evaluate,
   decide,
   detectBodyReviewSignals,
-  planDoneApply,
+  planStatusApplyFromDoing,
   verifyLinkStillMatches,
   buildReport,
   reasonLabelsFor,

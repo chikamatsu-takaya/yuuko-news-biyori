@@ -19,6 +19,7 @@ token.json
 
 # Common ignores
 node_modules/
+.pnpm-store/
 .next/
 next-env.d.ts
 .DS_Store

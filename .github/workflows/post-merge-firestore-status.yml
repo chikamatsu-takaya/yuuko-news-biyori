@@ -157,11 +157,13 @@ jobs:
             --out "$REPORT_OUT" \
             $APPLY_FLAG
 
-      # 6.5 apply 成功判定: レポート JSON の apply.applied === true のときだけ、
-      #     後続の Firestore → Markdown 同期を走らせる。report-only / no_change /
-      #     review_candidate / 未チェック / apply失敗 では applied=false になり同期しない。
-      #     always(): Done apply 成功後に issuePr 書き戻しなど後続処理が失敗して前段 step が
-      #     非ゼロ終了しても、Firestore が Done 済みなら md 同期条件を評価できるようにする。
+      # 6.5 post-merge status apply 成功判定: レポート JSON の apply.applied === true のときだけ、
+      #     後続の Firestore → Markdown 同期を走らせる。apply.applied は done_candidate→Done /
+      #     review_candidate→Review のどちらの更新成功でも true になる（どちらも Firestore の
+      #     status が変わり md 同期対象になるため）。report-only / no_change / 未チェック /
+      #     status非Doing / apply失敗 では applied=false になり同期しない。
+      #     always(): apply 成功後に issuePr 書き戻しなど後続処理が失敗して前段 step が
+      #     非ゼロ終了しても、Firestore が更新済みなら md 同期条件を評価できるようにする。
       #     （早期スキップ時は skip=='false' で false になり、この step 自体は動かない。）
       - name: Detect apply success
         id: applied
@@ -183,12 +185,13 @@ jobs:
           path: ${{ env.REPORT_OUT }}
           if-no-files-found: ignore
 
-  # post-merge の Done apply が実際に成功（apply.applied === true）したときだけ、
-  # 既存の Firestore → Markdown 同期ワークフローを再利用して呼ぶ（同期ロジックは新規作成しない）。
-  # 以下では起動しない: report-only / no_change / review_candidate / 未チェック / apply失敗 /
+  # post-merge の status apply（done_candidate→Done / review_candidate→Review）が実際に成功
+  # （apply.applied === true）したときだけ、既存の Firestore → Markdown 同期ワークフローを再利用して呼ぶ
+  # （同期ロジックは新規作成しない）。
+  # 以下では起動しない: report-only / no_change / 未チェック / status非Doing / apply失敗 /
   # sync/* ブランチ / bot PR（いずれも applied != 'true' になる）。
-  # always(): Done apply は成功したが issuePr 書き戻し等で report job が failure になった場合でも、
-  # Firestore は Done 済みなので md 同期PRは作られるべき。applied=='true' ゲートで安全側は維持する。
+  # always(): apply は成功したが issuePr 書き戻し等で report job が failure になった場合でも、
+  # Firestore は更新済みなので md 同期PRは作られるべき。applied=='true' ゲートで安全側は維持する。
   sync-md:
     needs: report
     if: always() && needs.report.outputs.applied == 'true'
