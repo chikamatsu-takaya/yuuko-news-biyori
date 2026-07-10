@@ -14,7 +14,7 @@ const FIRESTORE_STATUS_OPTIONS = ["Todo", "Next", "Doing", "Review", "Blocked", 
 
 // 担当者ドロップダウンの候補（暫定）。実際のメンバー名に置き換え可能。
 // 候補外の owner が既存データに入っていても消さないよう、編集時に一時 option を足して扱う。
-const TASK_OWNER_OPTIONS = ["近松", "担当者A", "担当者B"];
+const TASK_OWNER_OPTIONS = ["小柳", "近松", "藤井"];
 
 const state = {
   data: null,
@@ -1487,16 +1487,14 @@ function renderSectionDetails(section) {
     <details>
       <summary>
         <span>${renderInline(section.title)}</span>
-        <span>${summary.done}/${summary.total}・${summary.progress}% ${
-          section.excluded ? "・集計除外" : ""
-        }</span>
+        <span>${summary.done}/${summary.total}・${summary.progress}% ${section.excluded ? "・集計除外" : ""
+    }</span>
       </summary>
       <div class="details-body">
-        ${
-          directTasks
-            ? `<div class="direct-task-list">${directTasks}</div>`
-            : ""
-        }
+        ${directTasks
+      ? `<div class="direct-task-list">${directTasks}</div>`
+      : ""
+    }
         ${subsections || `<p class="empty-state">中分類はありません。</p>`}
       </div>
     </details>
@@ -1512,14 +1510,13 @@ function renderSubsectionDetails(subsection) {
         <span>${summary.done}/${summary.total}・${summary.progress}%</span>
       </summary>
       <div class="details-body">
-        ${
-          subsection.tasks.length
-            ? `<div class="subsection-task-list">${subsection.tasks
-                .filter(shouldRenderTaskCard)
-                .map(renderTaskCard)
-                .join("")}</div>`
-            : `<p class="empty-state">タスクはありません。</p>`
-        }
+        ${subsection.tasks.length
+      ? `<div class="subsection-task-list">${subsection.tasks
+        .filter(shouldRenderTaskCard)
+        .map(renderTaskCard)
+        .join("")}</div>`
+      : `<p class="empty-state">タスクはありません。</p>`
+    }
       </div>
     </details>
   `;
@@ -1596,9 +1593,9 @@ function renderTaskCard(task) {
       ${renderLongList("Done when", task.doneWhen)}
       ${renderLongList("Review points", task.reviewPoints)}
       ${
-        // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
-        state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
-      }
+    // Firestore版は担当/更新/メモを専用ブロックで表示・編集するため、汎用Notes一覧は出さない。
+    state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
+    }
       ${renderReviewChecklistBlock(task)}
       ${renderFirestoreFields(task)}
       ${renderStartControls(task)}
@@ -1633,8 +1630,8 @@ function renderBranchMeta(task) {
   const copyable = branch !== "" && !["未作成", "未設定", "未定"].includes(branch);
   const copyUi = copyable
     ? `<button type="button" class="branch-copy-button" data-branch="${escapeHtml(
-        branch,
-      )}" title="ブランチ名をコピー" aria-label="ブランチ名をコピー">コピー</button><span class="branch-copy-hint" aria-live="polite"></span>`
+      branch,
+    )}" title="ブランチ名をコピー" aria-label="ブランチ名をコピー">コピー</button><span class="branch-copy-hint" aria-live="polite"></span>`
     : "";
   return `<li><strong>Branch:</strong> <span class="branch-value">${renderInline(
     display,
@@ -1700,11 +1697,10 @@ function renderFirestoreFields(task) {
       <p class="fs-line"><strong>更新:</strong> ${escapeHtml(updatedText)}</p>
       <div class="fs-notes"><strong>メモ:</strong> ${notesView}</div>
       <div class="fs-view-actions">
-        ${
-          isDone
-            ? `<p class="fs-done-note">Doneのため編集不可</p>`
-            : `<button type="button" class="button compact task-edit-button" data-task-id="${taskId}">編集</button>`
-        }
+        ${isDone
+      ? `<p class="fs-done-note">Doneのため編集不可</p>`
+      : `<button type="button" class="button compact task-edit-button" data-task-id="${taskId}">編集</button>`
+    }
         ${cardDeleteButton}
       </div>
     </div>
@@ -1798,8 +1794,8 @@ function renderStartControls(task) {
   const startButton = hideStartButton
     ? ""
     : `<button type="button" class="button primary compact task-start-button" data-task-id="${escapeHtml(
-        task.firestoreId,
-      )}">作業開始</button>`;
+      task.firestoreId,
+    )}">作業開始</button>`;
   const prompt = buildWorkPrompt(task);
   return `
     <div class="task-start">
@@ -1829,8 +1825,8 @@ function renderReviewDoneControls(task) {
   return `
     <div class="review-done">
       <button type="button" class="button primary compact review-done-button" data-task-id="${escapeHtml(
-        task.firestoreId,
-      )}">レビュー完了（Doneにする）</button>
+    task.firestoreId,
+  )}">レビュー完了（Doneにする）</button>
     </div>
   `;
 }
