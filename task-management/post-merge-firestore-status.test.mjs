@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   evaluate,
   buildReport,
-  planDoneApply,
+  planStatusApplyFromDoing,
   computeApply,
   computeIssuePrWriteback,
   guardIssuePrWritebackAfterApply,
@@ -110,7 +110,7 @@ test("対象タスクが見つからない → no_change / G1 / ラベルあり"
 // - 実 Firestore へは接続しない。offline（--firestore-json 相当）と純粋関数のみで確認する。
 //   - computeApply は done_candidate 以外なら書き込みモジュールを import せず早期 return する。
 //   - done_candidate の offline 経路は firestoreJson を truthy にして simulated（未書き込み）で確認する。
-//   - planDoneApply / computeIssuePrWriteback は純粋関数で、通信しない。
+//   - planStatusApplyFromDoing / computeIssuePrWriteback は純粋関数で、通信しない。
 // ---------------------------------------------------------------------------
 
 // タスク1件のダンプを作る（issuePr / status / archived を上書き可能）。
@@ -152,17 +152,18 @@ test("no_change + apply=true → Done apply しない（書き込み対象外）
   assert.match(apply.reason ?? "", /書き込み対象外/);
 });
 
-test("review_candidate + apply=true → Done apply しない（書き込み対象外）", async () => {
-  // UI変更（R1）→ review_candidate。
+test("review_candidate + 未チェック + apply=true → 書き込まない（Done許可チェック未チェック）", async () => {
+  // UI変更（R1）→ review_candidate。既定 body は Done許可チェック未チェックなので書き込まない。
   const pr = makePr({ files: ["components/screens/MainScreen.tsx"] });
   const tasks = tasksWith();
   const report = reportFor(pr, tasks);
   assert.equal(report.decision.result, "review_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, false, "既定 body は未チェック");
 
   const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
-  assert.equal(apply.attempted, false, "review_candidate では apply を試みない");
+  assert.equal(apply.attempted, false, "未チェックでは apply を試みない");
   assert.notEqual(apply.applied, true, "Firestore へ書き込まない");
-  assert.match(apply.reason ?? "", /書き込み対象外/);
+  assert.match(apply.reason ?? "", /未チェック/);
 });
 
 test("issuePr が既に同PR番号 → 書き戻さない（already_present）", () => {
@@ -190,17 +191,17 @@ test("issuePr に別PR番号 → 自動上書きしない（skip）", () => {
   assert.match(wb.reason ?? "", /別PR番号/);
 });
 
-test("planDoneApply: status が Doing 以外は Done 化しない", () => {
+test("planStatusApplyFromDoing: status が Doing 以外は Done 化しない", () => {
   for (const status of ["Todo", "Next", "Blocked", "Review", ""]) {
-    const plan = planDoneApply({ exists: true, data: { status, archived: false, completed: false } });
-    assert.equal(plan.shouldWrite, false, `status=${status || "（空）"} は自動Done化しない`);
+    const plan = planStatusApplyFromDoing({ exists: true, data: { status, archived: false, completed: false } });
+    assert.equal(plan.shouldWrite, false, `status=${status || "（空）"} は自動更新しない`);
   }
   // 対照: Doing なら書き込み可。
-  const ok = planDoneApply({ exists: true, data: { status: "Doing", archived: false, completed: false } });
-  assert.equal(ok.shouldWrite, true, "Doing のみ自動Done化する");
+  const ok = planStatusApplyFromDoing({ exists: true, data: { status: "Doing", archived: false, completed: false } });
+  assert.equal(ok.shouldWrite, true, "Doing のみ自動更新する");
 });
 
-test("archived=true → 自動更新対象にしない（evaluate=G4 / planDoneApply=書き込まない）", () => {
+test("archived=true → 自動更新対象にしない（evaluate=G4 / planStatusApplyFromDoing=書き込まない）", () => {
   // evaluate 段階で archived タスクは no_change（G4）。
   const pr = makePr({ files: ["docs/a.md"] });
   const tasks = tasksWith({ archived: true });
@@ -209,7 +210,7 @@ test("archived=true → 自動更新対象にしない（evaluate=G4 / planDoneA
   assert.ok(d.reasonIds.includes("G4"), "reasonIds に archived(G4) を含む");
 
   // 再読込ガードでも archived は書き込まない（多重防御）。
-  const plan = planDoneApply({ exists: true, data: { status: "Doing", archived: true, completed: false } });
+  const plan = planStatusApplyFromDoing({ exists: true, data: { status: "Doing", archived: true, completed: false } });
   assert.equal(plan.shouldWrite, false, "再読込時 archived=true は書き込まない");
 });
 
@@ -253,7 +254,7 @@ test("Done apply 未成立（status非Doing）→ guardで issuePr書き戻し�
   const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
   assert.equal(apply.attempted, true);
   assert.notEqual(apply.applied, true, "status非Doingでは Done apply が成功しない");
-  assert.match(apply.reason ?? "", /自動Done化対象外/);
+  assert.match(apply.reason ?? "", /自動更新対象外/);
 
   // 2) computeIssuePrWriteback 単体では would_write（issuePr 空のため候補になる）。
   const wb = computeIssuePrWriteback(report, pr, tasks, { apply: true });
@@ -425,16 +426,46 @@ test("チェック項目なし + done_candidate + apply=true → Done apply し�
   assert.notEqual(apply.applied, true);
 });
 
-test("チェック済み + review_candidate + apply=true → Done apply しない（result優先）", async () => {
-  // チェックが付いていても review_candidate は書き込み対象外（result ゲートが先に効く）。
+test("チェック済み + review_candidate + Doing + apply(offline) → Review 更新を試みる（Done にしない・issuePr 書き戻さない）", async () => {
+  // UI変更（R1）→ review_candidate。チェック済み＋現状 Doing なら Review へ更新する。
   const pr = makePr({ files: ["components/screens/MainScreen.tsx"], body: bodyWithConsent(true) });
   const tasks = tasksWith();
   const report = reportFor(pr, tasks);
   assert.equal(report.decision.result, "review_candidate");
+  assert.equal(report.prDoneApplyConsent.checked, true);
 
   const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
-  assert.equal(apply.attempted, false);
-  assert.match(apply.reason ?? "", /書き込み対象外/);
+  assert.equal(apply.attempted, true, "review_candidate（チェック済み）では apply を試みる");
+  assert.equal(apply.simulated, true, "offline は実書き込みしない（simulate）");
+  assert.notEqual(apply.applied, true, "offline では applied=true にしない");
+  // 更新先は Review（Done ではない）。payload は Review（completed=false / completedAt=null）。
+  assert.equal(apply.proposedStatus, "Review", "更新先は Review");
+  assert.equal(apply.proposed.status, "Review");
+  assert.equal(apply.proposed.completed, false);
+  assert.equal(apply.proposed.completedAt, null);
+  assert.deepEqual(
+    apply.updateMaskFields,
+    ["status", "completed", "completedAt", "updatedAt", "updatedBy"],
+    "更新は5項目のみ",
+  );
+
+  // review_candidate では issuePr 書き戻しは対象外（skip）。
+  const wb = computeIssuePrWriteback(report, pr, tasks, { apply: true });
+  assert.notEqual(wb.action, "would_write", "review_candidate では issuePr 書き戻し候補にしない");
+  assert.notEqual(wb.applied, true);
+});
+
+test("review_candidate + チェック済み + status非Doing → Review 更新しない（現状 Doing のみ）", async () => {
+  const pr = makePr({ files: ["components/screens/MainScreen.tsx"], body: bodyWithConsent(true) });
+  const tasks = tasksWith({ status: "Todo" }); // Doing 以外
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "review_candidate");
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, true);
+  assert.notEqual(apply.applied, true, "Doing 以外は更新しない");
+  assert.equal(apply.proposedStatus, "Review");
+  assert.match(apply.reason ?? "", /自動更新対象外/);
 });
 
 test("チェック済み + no_change + apply=true → Done apply しない（result優先）", async () => {

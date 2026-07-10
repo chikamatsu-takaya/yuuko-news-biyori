@@ -162,9 +162,10 @@ export function buildDoneUpdatePayload(nowIso = new Date().toISOString(), update
 }
 
 /**
- * 更新ペイロード（data + updateMaskFields）を組み立てる補助（将来の review_candidate 用）。
+ * 更新ペイロード（data + updateMaskFields）を組み立てる補助（review_candidate 用）。
  * status=Review / completed=false / completedAt=null / updatedAt=now / updatedBy を最小マスクで返す。
- * ※フェーズ1a では Review 自動更新は行わない想定。将来利用のために定義だけ用意する。
+ * review_candidate かつ PR本文 Done許可チェック済み・現状 Doing のとき、対象タスクを Review へ更新する。
+ * Done（buildDoneUpdatePayload）とは別の更新種別で、completed は false のままにする。
  */
 export function buildReviewUpdatePayload(nowIso = new Date().toISOString(), updatedBy = "post-merge-bot") {
   return {
