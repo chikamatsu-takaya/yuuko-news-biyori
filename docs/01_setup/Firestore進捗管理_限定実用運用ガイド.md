@@ -5,9 +5,9 @@
 
 - **Firestore を正本（マスター）として進捗タスクを管理する**。
 - PRマージ後に、GitHub Actions が対象 Firestore タスクとの**紐づけ判定**を行う。
-- 通常運用では **report-only** として、判定結果（候補）を確認するだけにする。
-- 判定結果を見て、**必要に応じて Firestore を手動更新**する。
-- Firestore への**自動反映（apply）は、管理者が必要なときだけ使う限定機能**とする。
+- 通常運用では **自動反映（apply）を常時有効（`POST_MERGE_ENABLE_APPLY=true`）** とし、安全条件を満たすタスクだけ自動更新する。
+- 安全条件を満たさない場合は自動更新されないので、判定結果（候補）を見て**必要に応じて Firestore を手動更新**する。
+- 自動反映を一時停止したいときだけ `POST_MERGE_ENABLE_APPLY=false`（report-only）に戻す。
 
 ---
 
@@ -17,8 +17,8 @@
 - **`branchName`** でPRと Firestore タスクを紐づけられる（基本キー）。
 - **`taskCode`** でも補助的に紐づけられる。
 - **`issuePr`** に、対応したPR番号を記録できる。
-- **`POST_MERGE_ENABLE_APPLY=false`** の場合、Firestore は自動更新されない（report-only）。
-- **`POST_MERGE_ENABLE_APPLY=true`** の場合、条件を満たすタスクだけ自動更新できるが、**管理者限定運用**とする。
+- **`POST_MERGE_ENABLE_APPLY=true`（通常運用）** の場合、安全条件を満たすタスクだけ自動更新される（`done_candidate`→Done / `review_candidate`→Review）。
+- **`POST_MERGE_ENABLE_APPLY=false`** の場合、Firestore は自動更新されない（report-only）。自動更新を一時停止したいときに使う。
 
 ---
 
@@ -29,9 +29,9 @@
 4. PR を作成する。
 5. PR を **develop** へマージする。
 6. マージ後の **Actions Summary** を確認する。
-7. **`done_candidate`** なら、内容に問題がなければ Firestore を**手動で Done** にする。
-8. **`review_candidate`** なら、**人が内容を確認してから**更新する。
-9. **`no_change`** なら、`branchName` / `taskCode` / タスク状態を確認する。
+7. **`done_candidate`** かつ安全条件（PR本文 Done許可チェック済み・現状 Doing など）を満たせば、Firestore タスクが**自動で Done** になる。満たさない場合は内容確認のうえ**手動で Done** にする。
+8. **`review_candidate`** かつ安全条件を満たせば、Firestore タスクが**自動で Review** になる。最終的な Review→Done は**人が内容を確認してから**行う。
+9. **`no_change`** なら自動更新されないので、`branchName` / `taskCode` / タスク状態を確認する。
 
 ---
 
@@ -69,8 +69,8 @@
   - `done_candidate` / `review_candidate` / `no_change`。
 - **`reasonIds`**
   - 判定理由（IDと日本語ラベル）。
-- **`Done apply`**
-  - 自動 Done 更新が実行されたか（report-only では実行されない）。
+- **`Done apply` / `Review apply`**
+  - 自動更新（Done / Review）が実行されたか（一時停止中の report-only では実行されない）。
 - **`issuePr書き戻し`**
   - PR番号の書き戻し候補、または書き戻し結果。
 - **`nextAction`**
@@ -82,14 +82,13 @@
 
 ### done_candidate
 - docs や軽微変更など、**Done 候補**。
-- report-only の場合は **Firestore を自動更新しない**。
-- 内容に問題がなければ、**手動で Done** にする。
-- apply 有効時は、条件を満たす場合のみ自動 Done 化される。
+- 通常運用（apply 有効）では、安全条件を満たすと**自動で Done** になる。
+- 安全条件を満たさない場合（Done許可チェック未・現状 Doing でない等）や、一時停止中の report-only では自動更新されないので、内容確認のうえ**手動で Done** にする。
 
 ### review_candidate
 - UI / Firestore / Rust / Tauri / セキュリティ / 外部通信など、**人の確認が必要な変更**。
-- **自動更新しない**。
-- 内容確認後に、**手動で Done / Review / Doing** を判断する。
+- 通常運用（apply 有効）では、安全条件を満たすと**自動で Review** になる（Done にはしない）。
+- 最終的な Review→Done は、内容確認後に**手動で判断**する。安全条件を満たさない場合は Firestore は更新されない。
 
 ### no_change
 - 対象タスクが見つからない、候補が曖昧、既に Done、archived など。
@@ -99,23 +98,23 @@
 ---
 
 ## 自動反映 apply の扱い
-- **通常時は `POST_MERGE_ENABLE_APPLY=false`**。
-- 自動反映 apply は、**管理者限定の補助機能**。
-- true / false を切り替えられる人が限られるため、**通常運用では手動更新を基本**にする。
-- apply を使う場合は、次の手順で行う:
-  1. 対象PRの **CI が通っている**ことを確認する。
-  2. Firestore タスクが **`status=Doing` / `completed=false` / `archived=false` / `issuePr` 空**であることを確認する。
-  3. **マージ直前に** `POST_MERGE_ENABLE_APPLY=true` にする。
-  4. **他の develop 向けPRをマージしない**（全人手PRで apply が走るため）。
-  5. 対象PRをマージする。
-  6. **Actions Summary と Firestore 更新結果**を確認する。
-  7. **すぐ `POST_MERGE_ENABLE_APPLY=false` に戻す**。
+- **通常運用では `POST_MERGE_ENABLE_APPLY=true`（自動反映を常時有効）** とする。
+- `true` でも**無条件では更新しない**。以下の安全条件をすべて満たしたタスクだけ自動更新される:
+  - develop へマージされたPRである（sync系ブランチ・自動同期PRは対象外）。
+  - 対象タスクが一意に特定できる。
+  - PR本文の Done許可チェックが**チェック済み**。
+  - Firestore の対象タスクが **`status=Doing` / `completed !== true` / `archived !== true`**。
+  - apply 直前の再読込でも紐づけが一致し、楽観ロック条件を満たす。
+- 上記を満たすと、`done_candidate`→**Done**、`review_candidate`→**Review** に更新される。`no_change` は更新しない。
+- **PRごとに `true` / `false` を切り替えない。** `true` の間でも、他の develop 向けPRを通常どおりマージできる（安全条件を満たさないPRは更新されない）。
+- 短時間に複数PRをマージした場合は GitHub Actions が連続実行されるため、**各実行の Summary と Firestore 更新結果を確認**する。
+- 自動反映を止めたいとき（問題発生時・保守作業時など）だけ `POST_MERGE_ENABLE_APPLY=false` に戻し、対応後に `true` へ戻す。
 
 ---
 
 ## 注意点
-- **`POST_MERGE_ENABLE_APPLY=true` のまま放置しない**。
-- **複数タスクにまたがるPR**は、自動更新ではなく**手動確認**にする。
+- **`POST_MERGE_ENABLE_APPLY=false` に戻したら、対応後は `true` に戻す**（通常運用は常時有効）。
+- **複数タスクにまたがるPR**は自動更新の対象になりにくいので、必要に応じて**手動確認**する。
 - **`branchName` が未設定・不一致**だと、タスクに紐づかない可能性がある。
 - **`issuePr` という名前だが、GitHub Issues 必須ではない**。
 - **md ファイルは自動更新対象ではない**。

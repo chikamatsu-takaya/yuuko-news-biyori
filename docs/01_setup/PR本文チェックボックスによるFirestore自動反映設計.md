@@ -1,7 +1,7 @@
 # PR本文チェックボックスによるFirestore自動反映設計
 
 ## 背景
-- 現在は `POST_MERGE_ENABLE_APPLY=true` の場合、条件を満たす `done_candidate` が Firestore に自動反映される。
+- 通常運用（`POST_MERGE_ENABLE_APPLY=true` 常時有効）では、条件を満たす `done_candidate` が Firestore に自動反映（Done）される（`review_candidate` は Review に自動更新される）。
 - ただし、**大きいタスクを分割して途中PRをマージする場合**、タスク全体は未完了なのに `done_candidate` になる可能性がある。
 - push だけでは反映されないが、**develop へマージしたタイミング**で反映される。
 - そのため、**PR単位で「このPRのマージ後にタスクを Done にしてよいか」を明示**する必要がある。
@@ -58,13 +58,13 @@
 - 不要なときにチェックが付いていれば、**違和感に気づきやすい**。
 - Done でよいのに未チェックなら、**人間が付け直せる**。
 - AI用/人間用で項目を分けないため、**判定ズレを別途管理しなくてよい**。
-- `POST_MERGE_ENABLE_APPLY=true` の常時運用に近づけるための**安全条件**になる。
+- `POST_MERGE_ENABLE_APPLY=true` の常時運用における**安全条件**として機能する。
 
 ## 注意点
 - AIがチェックを付ける場合でも、**最終責任はマージ前の確認者**が持つ。
 - **大きいタスクの途中PRではチェックしない**。
 - **複数タスクにまたがるPRでは基本チェックしない**。
-- **`review_candidate` になるような変更では、チェックがあっても自動更新しない**設計にする。
+- **`review_candidate` の場合は、チェック済みなら Done ではなく `Review` に自動更新する**（最終的な Review→Done は人手確認）。
 - チェックボックス文言は Actions が検出するため、**文言を固定する**。
 - 文言を変える場合は、**検出ロジックも変更する必要がある**。
 
@@ -89,8 +89,8 @@ apply 条件にチェック済み判定を追加する。
 - チェック済み + `done_candidate` + `apply=true` → **Done apply 対象**
 - 未チェック + `done_candidate` + `apply=true` → **Done apply しない**
 - チェック項目なし + `done_candidate` + `apply=true` → **Done apply しない**
-- チェック済み + `review_candidate` + `apply=true` → **Done apply しない**
-- チェック済み + `no_change` + `apply=true` → **Done apply しない**
+- チェック済み + `review_candidate` + `apply=true`（現状 Doing）→ **Review に更新（Done にはしない）**
+- チェック済み + `no_change` + `apply=true` → **書き込みしない**
 - **`[X]` でもチェック済み**として扱う
 - **文言が違うチェックボックスは対象外**にする
 - **Summary にチェック状態が表示**される
@@ -104,7 +104,7 @@ apply 条件にチェック済み判定を追加する。
 6. 回帰テスト追加
 7. 実データで report-only 確認
 8. 実データで apply 確認
-9. 問題なければ `POST_MERGE_ENABLE_APPLY=true` 常時運用に近づけるか検討
+9. 問題なく確認できたため、`POST_MERGE_ENABLE_APPLY=true` の常時運用へ移行済み
 
 ## 実確認済み（追記）
 - **`checked:true` + `apply=true`** で Done apply 成功を確認済み（PR #149）。

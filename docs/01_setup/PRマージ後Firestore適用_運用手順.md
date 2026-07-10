@@ -1,8 +1,9 @@
 # PRマージ後 Firestore 適用（apply）運用手順
 
 ## このドキュメントの目的
-- フェーズ1aで追加した、PRマージ後 Firestore 状態更新の **`--apply` 分岐** と **workflow の apply ゲート** の運用方法を明文化する。
-- 誰が見ても「既定は report-only（書き込みなし）」であり、明示的に有効化したときだけ Firestore を更新する、という前提を共有できるようにする。
+- PRマージ後 Firestore 状態更新の **`--apply` 分岐** と **workflow の apply ゲート** の運用方法を明文化する。
+- 現行の通常運用は **`POST_MERGE_ENABLE_APPLY=true`（自動更新を常時有効）** である。誰が見ても「安全条件を満たすときだけ Firestore を更新する」という前提を共有できるようにする。
+- `false` に戻すのは、**問題発生時・保守作業時・一時的に自動更新を止めたいとき**に限る（PRごとの切り替えはしない）。
 
 対象:
 - workflow: `.github/workflows/post-merge-firestore-status.yml`
@@ -17,34 +18,36 @@
 
 ---
 
-## フェーズ1aの目的
+## フェーズ1aの目的（当時の段階的導入方針）
 - PRが develop にマージされたときに、対象 Firestore タスクを **done_candidate のときだけ Done へ自動更新**できるようにする。
-- ただし、いきなり自動書き込みを有効化せず、**既定は report-only（判定結果の出力のみ）** とし、明示的に有効化した場合だけ書き込む段階的な仕組みにする。
+- 導入当初は、いきなり自動書き込みを有効化せず、**report-only（判定結果の出力のみ）を既定**とし、明示的に有効化した場合だけ書き込む段階的な仕組みとした。
+- その後、安全条件が揃ったため、現在は **`POST_MERGE_ENABLE_APPLY=true` を常時有効**とする運用へ移行済み（「通常運用は apply 有効（重要）」を参照）。
 
 ---
 
-## 既定は report-only（重要）
-- **既定では Firestore を一切変更しない。** workflow は今までどおり自動発火するが、判定結果を JSON artifact と Step Summary に出すだけである。
+## 通常運用は apply 有効（重要）
+- **通常運用では `POST_MERGE_ENABLE_APPLY=true` とし、PRマージ後の Firestore 自動更新を常時有効にする。**
+- ただし `true` でも**無条件では更新しない**。後述の安全条件（Done許可チェック済み・対象タスク一意・現状 Doing など）をすべて満たしたときだけ、workflow が `--apply` を付けて Firestore を更新する。
 - Firestore 更新は、**Repository Variable `POST_MERGE_ENABLE_APPLY` が `"true"` の場合だけ** workflow が `--apply` を付けて実行する。
-- 以下のときは `--apply` を付けない＝**Firestore を変更しない**:
+- 以下のときは `--apply` を付けない＝**Firestore を変更しない**（＝自動更新を一時停止したいときの戻し先）:
   - `POST_MERGE_ENABLE_APPLY` が未設定
   - `false`
   - `true` 以外のその他の値（例: `TRUE` / `1` / 空文字 など。**厳密に `"true"` のみ**有効）
+- `false` に戻すのは、**問題発生時・保守作業時・一時停止したいとき**に限る。PRごとに `true` / `false` を切り替える運用はしない。
 
 ---
 
 ## 書き込み対象と条件
-### apply 対象は done_candidate のみ
-- 判定結果が **`done_candidate` のときだけ** Firestore を更新する。
-- **`no_change` / `review_candidate` は絶対に書き込まない**（`--apply` を付けても書き込み対象外として扱う）。
+### apply 対象は done_candidate / review_candidate
+- 判定結果が **`done_candidate` のとき** → 対象タスクを **Done** に更新する。
+- 判定結果が **`review_candidate` のとき** → 対象タスクを **Review** に更新する。
+- **`no_change` は書き込まない**（`--apply` を付けても書き込み対象外）。
+- いずれも **PR本文の Done許可チェックが済み**かつ **現状 status が Doing** のときだけ更新する（後述の安全対策）。
 
 ### 更新対象フィールド（5項目のみ）
-Done へ更新する際に書き込むのは、次の5フィールドだけである。
-- `status`（→ `"Done"`）
-- `completed`（→ `true`）
-- `completedAt`（→ 更新時刻）
-- `updatedAt`（→ 更新時刻）
-- `updatedBy`（→ `"post-merge-bot"`）
+更新する際に書き込むのは、次の5フィールドだけである（Done / Review 共通のマスク）。
+- `done_candidate → Done`: `status="Done"` / `completed=true` / `completedAt=更新時刻` / `updatedAt=更新時刻` / `updatedBy="post-merge-bot"`
+- `review_candidate → Review`: `status="Review"` / `completed=false` / `completedAt=null` / `updatedAt=更新時刻` / `updatedBy="post-merge-bot"`
 
 ### 更新しないフィールド
 以下は **updateMask に載せず、一切更新しない**:
@@ -79,21 +82,20 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 ---
 
 ## 運用手順
-### 初回運用（推奨・既定）
-1. **`POST_MERGE_ENABLE_APPLY` は未設定のままにする**（＝ report-only）。
-2. PRマージのたびに workflow が自動発火し、判定結果と apply ゲート状態（`### apply gate` / `apply gate: DISABLED ...`）が Step Summary に出る。
-3. しばらくは **書き込みせずに判定の妥当性を観察**する（対象特定の精度、done_candidate/Review/no_change の分類が想定どおりか）。
+### 通常運用（現行）
+1. **`POST_MERGE_ENABLE_APPLY=true` を維持する**（自動更新を常時有効）。
+2. PRマージのたびに workflow が自動発火し、判定結果と apply ゲート状態（`### apply gate` / `apply gate: ENABLED ...`）が Step Summary に出る。
+3. 安全条件（Done許可チェック済み・対象タスク一意・現状 Doing など）を満たした PR だけ、Firestore が自動更新される。満たさない PR は `true` でも更新されない。
+4. マージ後は Step Summary / artifact で **どのタスクが更新されたか（または更新されなかった理由）** を確認する。
 
-### 実書き込みを確認する場合（慎重に）
-1. **対象タスクを事前に決める**（1件の done_candidate になる見込みの PR を用意）。
-2. その PR が確実に **done_candidate** になることを、report-only（未設定のまま）の Step Summary で先に確認する。
-3. **Repository Variable を `true` にする前に、必ず関係者へ共有する**（誰が/いつ/どの PR で確認するか）。
-4. `POST_MERGE_ENABLE_APPLY` を `true` に設定 → 対象 PR をマージ → workflow の apply 結果（Step Summary / artifact）を確認。
-5. 確認後は、必要に応じて `POST_MERGE_ENABLE_APPLY` を未設定 / `false` に戻す（常時 apply を避けたい場合）。
+### 自動更新を一時停止する場合
+1. 問題発生時・保守作業時など、一時的に自動更新を止めたいときは `POST_MERGE_ENABLE_APPLY` を **`false`** に戻す（または未設定にする）。
+2. 停止中は workflow は report-only（判定結果の出力のみ）で動作し、Firestore は変更されない。
+3. 対応が済んだら **`true` に戻して常時有効へ復帰**する。
 
 ### Repository Variable の場所
 - GitHub リポジトリ → Settings → Secrets and variables → Actions → Variables タブ → `POST_MERGE_ENABLE_APPLY`。
-- ※本手順書の作成時点では、この変数は**まだ作成しない**（初回は未設定＝report-only を維持）。
+- 通常運用では **`true`** を設定しておく。
 
 ---
 
@@ -106,13 +108,14 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 ---
 
 ## 注意点まとめ
-- **既定は report-only。Firestore は変更されない。**
-- `POST_MERGE_ENABLE_APPLY` が **厳密に `"true"`** のときだけ `--apply` が付く。
-- apply 対象は **done_candidate のみ**。`no_change` / `review_candidate` は書き込まない。
-- 自動 Done 化は **再読込後の現状 status が Doing のときだけ**（Todo / Next / Blocked / Review / 空 / 不明は対象外）。
+- **通常運用は `POST_MERGE_ENABLE_APPLY=true`（自動更新を常時有効）。** ただし安全条件を満たさない PR は更新されない。
+- `POST_MERGE_ENABLE_APPLY` が **厳密に `"true"`** のときだけ `--apply` が付く。`false` / 未設定に戻すと report-only（Firestore 変更なし）になる。
+- apply 対象は **done_candidate（→ Done）と review_candidate（→ Review）**。`no_change` は書き込まない。
+- 自動更新は **PR本文 Done許可チェック済み** かつ **再読込後の現状 status が Doing のときだけ**（Todo / Next / Blocked / Review / 空 / 不明は対象外）。
 - 更新は **5フィールドのみ**。owner / branchName / taskCode などは触らない。
+- **issuePr 書き戻しは done_candidate（Done 更新成功時）のみ**。review_candidate では行わない。
 - **楽観ロック（`currentDocument.updateTime`）** で競合時は書き込まない。
-- 変数を `true` にする前に **関係者へ共有**する。
+- `false` に戻す／`true` に戻すなど apply ゲートを切り替えるときは **関係者へ共有**する。
 
 ---
 
@@ -140,12 +143,13 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 
 ---
 
-## 今後の運用注意（実書き込みを行う場合）
-- `POST_MERGE_ENABLE_APPLY=true` は **マージ直前にだけ**設定する。
-- `true` の間は **他の develop 向けPRをマージしない**（全人手PRで apply が走るため）。
-- 確認後は **必ず `false` に戻す、または削除する**。
-- 自動 Done 化の対象は **`done_candidate` かつ Firestore 側 `status=Doing`** のタスクのみ。
-- **`review_candidate` / `no_change` は書き込み対象外**。
+## 運用注意
+- 通常運用では `POST_MERGE_ENABLE_APPLY=true` を維持する。**PRごとに `true` / `false` を切り替えない**。
+- `true` の間でも、**他の develop 向けPRを通常どおりマージできる**。安全条件を満たさない PR は自動更新されない。
+- 短時間に複数PRをマージした場合は GitHub Actions が連続実行されるため、**各実行の Summary と Firestore 更新結果を確認**する。
+- `false` に戻すのは **問題発生時・保守作業時・一時停止したいとき**に限る。対応後は `true` に戻す。
+- 自動更新の対象は **`done_candidate`（→ Done）/ `review_candidate`（→ Review）かつ Firestore 側 `status=Doing`** のタスクのみ。
+- **`no_change` は書き込み対象外**。
 - **`branchName` / `taskCode` / `issuePr`** の紐づけ値は、PR本文および Firestore と一致させる（apply 直前にも再検証される）。
 
 ---
@@ -196,13 +200,16 @@ Done へ更新する際に書き込むのは、次の5フィールドだけで�
 - 実タスクでの小規模運用テスト手順の整理
   - `POST_MERGE_ENABLE_APPLY=true` を短時間だけ有効化する運用を前提にする
 
-### フェーズ1bでまだやらないこと
+### フェーズ1bでまだやらないこと（当時の計画）
 - `review_candidate` の自動書き込み
 - 複数タスクPRの自動更新
 - `branchName` 不一致時の強制更新
 - `POST_MERGE_ENABLE_APPLY=true` の常時運用
 - Firestore スキーマの広範囲な変更
 - `issuePr` 書き戻しと Done 更新を同時に大きく変更すること
+
+> 補足（現状）: 上記はフェーズ1b時点の計画である。その後、**`review_candidate` → Review の自動書き込み**に対応し、
+> **`POST_MERGE_ENABLE_APPLY=true` の常時運用**へ移行済み。最新の運用は「通常運用は apply 有効（重要）」を参照する。
 
 ### おすすめのPR分割
 1. docsのみでフェーズ1b計画を追記する
@@ -461,10 +468,11 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 ## review_candidate になった場合の対応手順
 
 ### 基本方針
-- **`review_candidate` の場合、Firestore は自動更新されない**。
-- **apply 有効時（`--apply`）でも `review_candidate` は書き込み対象外**。
-- 自動判定では Done にせず、**人手で確認して、必要に応じて Firestore タスクを手動更新する**。
-- まず **Summary の「人手確認が必要な理由」** と **artifact JSON の `decision` / `match`** を確認し、なぜ人手確認になったのかを特定する。
+- **`review_candidate` は、条件を満たすと Firestore タスクを自動で `Review` に更新する**（`Done` にはしない）。
+  条件: `--apply` 有効 / PR本文 Done許可チェック済み / 対象タスク一意 / 現状 status=Doing / archived・completed でない / 紐づけキー再検証OK。
+- 上記条件を満たさない場合（**未チェック / 現状 Doing 以外 / 紐づけ失敗 / 対象複数** など）は **自動更新されない**。その場合は、**人手で内容を確認し、必要に応じて Firestore タスクを手動更新する**。
+- Review へ更新されても、**最終的な `Review → Done` は人手で確認**する（自動では Done にしない）。
+- まず **Summary の「人手確認が必要な理由」** と **artifact JSON の `decision` / `match` / `apply`** を確認し、自動更新されたか・されなかった理由を特定する。
 
 ### reasonId 別の確認ポイントと対応例
 - **R1: UI変更を含む**
@@ -554,17 +562,21 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - 判断: 成功。判定調整・apply条件調整は不要。
 
 ### 運用上の注意
-- 通常時は **`POST_MERGE_ENABLE_APPLY=false`** にする。
-- apply確認や実適用を行う場合のみ、**マージ直前に `POST_MERGE_ENABLE_APPLY=true`** にする。
-- `true` にしている間は、**他の develop 向けPRをマージしない**（全人手PRで apply が走るため）。
-- 対象PRのマージ後、**Actions Summary と Firestore 更新結果を確認**する。
-- 確認後、**すぐ `POST_MERGE_ENABLE_APPLY=false` に戻す**。
-- **`no_change` / `review_candidate` では `apply=true` でも Firestore を更新しない設計**。
+- 通常運用では **`POST_MERGE_ENABLE_APPLY=true`** を維持する（自動更新を常時有効）。
+- `true` の間でも、**他の develop 向けPRを通常どおりマージできる**。安全条件を満たさない PR は自動更新されない。
+- 短時間に複数PRをマージした場合は GitHub Actions が連続実行されるため、**各実行の Summary と Firestore 更新結果を確認**する。
+- 自動更新を止めたいときだけ **`POST_MERGE_ENABLE_APPLY=false`** に戻し、対応後に `true` へ戻す。
+- **`done_candidate` は Done、`review_candidate` は Review に更新する設計**（現状 Doing かつ Done許可チェック済みのときのみ）。**`no_change` は `apply=true` でも Firestore を更新しない**。
 - 今後追加確認する場合は、実Firestoreで何度も試すより **回帰テスト追加を優先**する。
+
+> 補足（仕様・運用更新）: 上記「確認結果」は、当時 `POST_MERGE_ENABLE_APPLY` をマージ前後で手動切り替えしていた
+> 検証段階の記録であり、また `review_candidate` を書き込み対象外（report-only）としていた当時の done_candidate 検証記録である。
+> 現在は **`POST_MERGE_ENABLE_APPLY=true` を常時有効**とし、**`review_candidate` → Review 更新**にも対応した。
+> 最新の運用・挙動は本節および「通常運用は apply 有効（重要）」「書き込み対象と条件」を参照する。
 
 ### 今後の候補
 - apply / `issuePr` 書き戻しの回帰テスト追加。
-- `no_change` / `review_candidate` 時に `apply=true` でも書き込まれないことのテスト追加。
+- `no_change` 時に `apply=true` でも書き込まれないこと、`review_candidate` 時に Review へ更新されることのテスト（実装済み。今後も維持）。
 - `issuePr` が既にある場合に上書きしないことのテスト追加。
 - apply gate をより安全にする方法の検討。
 
@@ -624,15 +636,14 @@ Firestore 自動反映（Done apply）の**追加ゲート**として使う方�
 ### 運用上の結論
 - **`checked:true` の場合のみ**、`done_candidate` かつ他条件を満たすと Done apply される。
 - **`checked:false` の場合は、`POST_MERGE_ENABLE_APPLY=true` でも Firestore は更新されない**。
-- これにより、`POST_MERGE_ENABLE_APPLY=true` 運用に近づけるための**安全条件として、PR本文チェックボックスが機能する**ことを確認した。
+- これにより、`POST_MERGE_ENABLE_APPLY=true` の常時運用における**安全条件として、PR本文チェックボックスが機能する**ことを確認した。
 - ただし、**不要なPRで誤って `checked:true` にすると Done apply される可能性**があるため、**マージ前にチェック状態を必ず確認する**。
 
 ### POST_MERGE_ENABLE_APPLY=true の扱い
-- 通常は **false 推奨**。
-- 検証中や、運用者が限定されている時間帯のみ **true** にする。
-- true のまま運用する場合は、**develop 向けPRのマージ前に必ず Done許可チェック状態を確認**する。
-- 他メンバーが作業・マージする可能性がある場合は **false に戻す**。
-- 作業終了時は **false に戻す**。
+- 通常運用では **`true` を維持**する（自動更新を常時有効）。
+- `true` の間も、安全条件（Done許可チェック済み・対象タスク一意・現状 Doing など）を満たさない PR は自動更新されない。
+- **develop 向けPRのマージ前に、Done許可チェック状態を必ず確認**する（誤チェックによる意図しない更新を防ぐため）。
+- `false` に戻すのは、**問題発生時・保守作業時・一時停止したいとき**に限る。対応後は `true` に戻す。
 
 ### マージ前チェック
 マージ前に見る項目:
