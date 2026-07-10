@@ -99,11 +99,17 @@
 
 ---
 
-## 今回やらないこと（スコープ外）
-- Firestore への実書き込み。
-- GitHub Actions の実行。
-- Repository Variable `POST_MERGE_ENABLE_APPLY` の作成。
-- workflow / スクリプトの変更（本コミットは docs 追加のみ）。
+## フェーズ1a当時にやらなかったこと（過去のスコープ記録）
+
+> この節は、report-only で導入した**フェーズ1a当時のスコープ**を記録したものである。
+> 現在は `POST_MERGE_ENABLE_APPLY=true` の通常運用へ移行し、Firestore への実書き込み・GitHub Actions による
+> post-merge 処理・workflow / スクリプトの実装（`done_candidate`→Done / `review_candidate`→Review）は**すべて実装・運用済み**である。
+> 以下は「当時この docs 追加コミットでは行わなかった」という経緯の記録であり、**現在のスコープ外事項ではない**。
+
+- Firestore への実書き込み。（→ 現在は実装・運用済み）
+- GitHub Actions の実行。（→ 現在は post-merge workflow が自動発火）
+- Repository Variable `POST_MERGE_ENABLE_APPLY` の作成。（→ 現在は作成し、通常運用で `true`）
+- workflow / スクリプトの変更（当時のコミットは docs 追加のみ）。（→ 現在は workflow / スクリプトを実装済み）
 
 ---
 
@@ -400,12 +406,12 @@ Summary は上から次の順で並ぶ。
 
 ### result 別に見るポイント
 - **`no_change`**: 「**自動更新しなかった理由**」を見る（対象タスクなし / 複数候補 / archived / 既にDone / 紐づけ曖昧 など）。
-- **`review_candidate`**: 「**人手確認が必要な理由**」を見る（UI変更 / 設計・セキュリティ・外部通信・Firestore関連 / 重要項目の未チェック など）。
+- **`review_candidate`**: 「**人手確認が必要な理由**」を見る（UI変更 / 設計・セキュリティ・外部通信・Firestore関連 / 重要項目の未チェック など）。条件を満たせば **Review apply** の結果も見る。
 - **`done_candidate`**: **Done apply** と **issuePr書き戻し** の結果を見る。
 
 ### 注意（自動更新の前提）
-- **apply 有効時でも、`result` が `done_candidate` 以外なら Firestore は変更されない**。
-- **issuePr 書き戻しは Done apply 成功時だけ実行される**（Done apply がスキップ/失敗した場合は issuePr も書き戻さない）。
+- **apply 有効時でも、`result` が `no_change` なら Firestore は変更されない**。`done_candidate`→Done / `review_candidate`→Review は、安全条件（Done許可チェック済み・現状 Doing など）を満たしたときだけ更新される。
+- **issuePr 書き戻しは done_candidate の Done apply 成功時だけ実行される**（review_candidate では書き戻さない。Done apply がスキップ/失敗した場合も issuePr は書き戻さない）。
 
 ### artifact JSON の主な確認項目
 artifact の `post-merge-status-report.json` は、最上位キーが読みやすい順に並ぶ。

@@ -32,24 +32,44 @@
 ```
 
 ## Actions側の判定ルール
-- 自動 Done 化には、**従来条件に加えて PR本文チェックが必要**とする。
+- Firestore 自動更新には、**従来条件に加えて PR本文チェックが必要**とする。
 - **チェックありの場合のみ apply 対象**にする。
-- **チェックなしの場合は `done_candidate` でも Firestore を更新しない**。
+- **チェックなしの場合は `done_candidate` / `review_candidate` のどちらでも Firestore を更新しない**。
 - 判定理由は **Actions の判断材料ではなく、人間が確認するための説明**として扱う。
 
-自動 Done 化する条件:
+### 共通の安全条件
+以下をすべて満たした場合のみ、Firestore を自動更新する（`done_candidate` / `review_candidate` 共通）:
 
 1. `POST_MERGE_ENABLE_APPLY=true`
-2. 対象 Firestore タスクが1件に特定できる
-3. `result=done_candidate`
+2. PR本文の「このPRのマージ後、紐づく Firestore タスクを Done にしてよい」が**チェック済み**
+3. 対象 Firestore タスクが1件に特定できる
 4. Firestore タスクが `status=Doing`
-5. `archived=false`
-6. PR本文の「このPRのマージ後、紐づく Firestore タスクを Done にしてよい」が**チェック済み**
+5. `archived !== true`
+6. `completed !== true`
+7. apply 直前の再読込・紐づけ再検証・楽観ロックが成功
+
+### `done_candidate`
+共通の安全条件を満たす場合、対象タスクを次のように更新する:
+- `status=Done`
+- `completed=true`
+- `completedAt` を設定
+- 既存条件に従って **`issuePr` を書き戻す**
+
+### `review_candidate`
+共通の安全条件を満たす場合、対象タスクを次のように更新する:
+- `status=Review`
+- `completed=false`
+- `completedAt=null`
+- **`issuePr` は書き戻さない**
+- 最終的な **Review→Done は人手で確認**する
+
+### `no_change`
+- **Firestore は更新しない**。
 
 ## チェックボックス未チェック時の挙動
-- `result=done_candidate` でも、**チェックが未チェックなら Firestore は更新しない**。
+- チェックが未チェックなら、**`done_candidate` でも `review_candidate` でも Firestore は更新しない**。
 - Actions Summary には「**PR本文の Done 許可チェックが未チェックのため自動更新しない**」と表示する。
-- **`issuePr` 書き戻しも、Done apply が成功しないため実行しない**。
+- **`issuePr` 書き戻しも、apply が成功しないため実行しない**。
 - `nextAction` は**手動確認を促す内容**にする。
 
 ## チェックボックス方式のメリット
@@ -90,6 +110,7 @@ apply 条件にチェック済み判定を追加する。
 - 未チェック + `done_candidate` + `apply=true` → **Done apply しない**
 - チェック項目なし + `done_candidate` + `apply=true` → **Done apply しない**
 - チェック済み + `review_candidate` + `apply=true`（現状 Doing）→ **Review に更新（Done にはしない）**
+- 未チェック + `review_candidate` + `apply=true` → **更新しない**
 - チェック済み + `no_change` + `apply=true` → **書き込みしない**
 - **`[X]` でもチェック済み**として扱う
 - **文言が違うチェックボックスは対象外**にする
