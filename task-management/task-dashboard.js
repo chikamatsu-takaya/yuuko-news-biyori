@@ -77,13 +77,13 @@ document.addEventListener("DOMContentLoaded", () => {
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
     // 「AIで分割」ボタン（Firestore版・親候補条件を満たすタスクのみ表示）。
-    // 押したタスクを親として固定して取込モーダルを開く（このPRでは登録・親更新はしない）。
+    // 押したタスクIDから最新1件を再取得し、最新状態で候補判定してからモーダルを開く
+    // （一覧の古いデータで候補外タスクを開かないため。このPRでは登録・親更新はしない）。
     const aiSubtaskSplitButton = event.target.closest(".ai-subtask-split-button");
     if (aiSubtaskSplitButton) {
       const taskId = aiSubtaskSplitButton.dataset.taskId;
-      const task = taskId ? findFirestoreTaskById(taskId) : null;
-      if (task) {
-        void openAiSubtaskImportModal(task);
+      if (taskId) {
+        void openAiSubtaskImportModal(taskId);
       }
       return;
     }
@@ -1012,37 +1012,45 @@ function setupAiSubtaskImportModal() {
   });
 }
 
-// 「AIで分割」ボタンで渡された親タスクを固定してモーダルを開く。
-// 親は引数のタスクで固定（モーダル内で選び直さない）。開く直前に候補条件を再確認し、
-// 候補外（一覧再取得等）なら開かずに案内する。
-async function openAiSubtaskImportModal(parentTask) {
-  if (!state.isFirestore || !aiSubtaskModalElements.overlay || !parentTask || !parentTask.firestoreId) {
+// 「AIで分割」ボタンの taskId から、最新の親タスク1件を再取得して固定しモーダルを開く。
+// 一覧取得時の古いデータは使わず、Firestore から tasks/{taskId} を1件再読込し、最新値で候補判定する。
+// 候補外 / 未存在 / 取得失敗のときは開かず、古いデータへフォールバックしない（読み取りのみ・書き込みなし）。
+async function openAiSubtaskImportModal(taskId) {
+  if (!state.isFirestore || !aiSubtaskModalElements.overlay || !taskId) {
     return;
   }
-  const { isEligibleAiSubtaskParent, shouldWarnSplitParentAutoUpdate } = await import(
-    "./ai-subtask-import-parent.mjs"
-  );
-  if (!isEligibleAiSubtaskParent(parentTask)) {
-    // 表示から時間が経ち候補外になった場合は開かない（誤操作防止）。
-    setLoadState("このタスクは分割元の対象外になったため、AI分割を開始できません。一覧を更新してください。", true);
+  const [{ resolveEligibleParentForModal, shouldWarnSplitParentAutoUpdate }, { fetchFirestoreTaskById }] =
+    await Promise.all([import("./ai-subtask-import-parent.mjs"), import("./firestore-source.js")]);
+
+  // 最新1件を再取得し、最新値で候補判定（判定は ai-subtask-import-parent.mjs に集約）。
+  const resolved = await resolveEligibleParentForModal(taskId, fetchFirestoreTaskById);
+  if (!resolved.ok) {
+    if (resolved.reason === "ineligible") {
+      setLoadState("このタスクは最新状態ではAI分割の対象外です。一覧を更新して確認してください。", true);
+    } else {
+      // fetch-error / not-found / invalid はまとめて「最新状態を確認できなかった」として開かない。
+      setLoadState("タスクの最新状態を確認できなかったため、AI分割を開始できませんでした。", true);
+    }
     return;
   }
+  // 以降の概要・注意・固定はすべて再取得した最新タスク（freshTask）を使う。
+  const freshTask = resolved.task;
 
   const { summary, warning, nextButton, nextNote } = aiSubtaskModalElements;
-  // 親を固定する。
-  aiSubtaskParentTaskId = parentTask.firestoreId;
+  // 親を固定する（最新の firestoreId）。
+  aiSubtaskParentTaskId = freshTask.firestoreId;
   if (nextNote) {
     nextNote.hidden = true;
     nextNote.textContent = "";
   }
 
-  // 親の概要を表示（全値エスケープ・URL自動リンクなし）。
-  summary.innerHTML = renderAiSubtaskParentSummary(parentTask);
+  // 親の概要を表示（最新値・全値エスケープ・URL自動リンクなし）。
+  summary.innerHTML = renderAiSubtaskParentSummary(freshTask);
   summary.hidden = false;
 
   // Doing かつ branchName 設定済みなら、分割で post-merge 自動更新対象外になる旨を案内する
-  // （このPRでは親フィールドの実設定は行わない）。
-  if (shouldWarnSplitParentAutoUpdate(parentTask)) {
+  // （このPRでは親フィールドの実設定は行わない）。判定・表示とも最新値を使う。
+  if (shouldWarnSplitParentAutoUpdate(freshTask)) {
     warning.textContent =
       "このタスクを分割すると分割親となり、post-merge による Done / Review 自動更新の対象外になります（このPRでは実際の設定は行いません）。";
     warning.hidden = false;

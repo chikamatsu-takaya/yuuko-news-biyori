@@ -75,3 +75,35 @@ export function shouldWarnSplitParentAutoUpdate(task) {
   const branch = String(t.branch ?? t.branchName ?? "").trim();
   return t.status === "Doing" && branch !== "";
 }
+
+/**
+ * 「AIで分割」ボタン押下時に、最新の親タスク1件を再取得して候補可否を判定する（依存注入でテスト可能）。
+ * 一覧取得時の古いデータではなく、fetchTaskById で最新1件を取り、その最新値で候補判定する。
+ * 取得失敗・未存在・候補外ではモーダルを開かせない（古いデータへフォールバックしない）。
+ *
+ * @param {string} taskId 対象ドキュメントID
+ * @param {(taskId: string) => Promise<object|null>} fetchTaskById 最新1件を返す取得関数（null=未存在）
+ * @returns {Promise<{ ok: boolean, reason?: "invalid"|"fetch-error"|"not-found"|"ineligible", task?: object }>}
+ *   ok:true のとき task に最新の画面用モデル（概要・注意表示にもこれを使う）。
+ */
+export async function resolveEligibleParentForModal(taskId, fetchTaskById) {
+  if (!taskId || typeof fetchTaskById !== "function") {
+    return { ok: false, reason: "invalid" };
+  }
+  let fresh;
+  try {
+    fresh = await fetchTaskById(taskId);
+  } catch {
+    // 取得失敗時は古いデータへフォールバックせず、開かせない。
+    return { ok: false, reason: "fetch-error" };
+  }
+  if (!fresh) {
+    // 削除済み等でドキュメントが無い。
+    return { ok: false, reason: "not-found" };
+  }
+  if (!isEligibleAiSubtaskParent(fresh)) {
+    // 最新状態で候補外（Review/Done/archived/completed/分割済み親 等）。
+    return { ok: false, reason: "ineligible", task: fresh };
+  }
+  return { ok: true, task: fresh };
+}

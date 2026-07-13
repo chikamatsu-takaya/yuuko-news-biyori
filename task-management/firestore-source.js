@@ -27,6 +27,7 @@ import {
   orderBy,
   getDocs,
   doc as firestoreDoc,
+  getDoc,
   addDoc,
   runTransaction,
   serverTimestamp,
@@ -212,6 +213,71 @@ export function classifySourceBadge(source) {
  *
  * @param {Array<Record<string, unknown>>} docs fetchFirestoreTasksForPoc() の結果
  */
+/**
+ * Firestore ドキュメント（{ id, ...data }）1件を画面用タスクモデルへ変換する（キー別名の吸収を1箇所に集約）。
+ * firestoreToBoardModel と単一取得（fetchFirestoreTaskById）で同じ変換を使い、判定・表示のズレを防ぐ。
+ * line は呼び出し側の文脈（一覧の出現順 or 単一取得の order/sourceLine）で決めて渡す。
+ *
+ * @param {Record<string, unknown>} doc `{ id, ...data }` 形式のドキュメント
+ * @param {{ line: number }} ctx 表示順に使う line
+ */
+function firestoreDocToTaskModel(doc, { line }) {
+  const category = String(doc.category ?? "未分類");
+  const subcategory =
+    doc.subcategory === null || doc.subcategory === undefined ? "" : String(doc.subcategory);
+
+  const task = {
+    firestoreId: doc.id,
+    // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
+    taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
+    text: String(doc.title ?? ""),
+    completed: doc.completed === true,
+    // 論理削除フラグ。一覧は archived=false のみ取得するため通常 false だが、単一取得では
+    // archived=true の可能性があるため保持する（AI分割の候補判定 archived!==true に使う）。
+    archived: doc.archived === true,
+    line,
+    sectionTitle: category,
+    subsectionTitle: subcategory,
+    priority: doc.priority ? String(doc.priority) : "",
+    status: doc.status ? String(doc.status) : doc.completed === true ? "Done" : "Todo",
+    owner: doc.owner ? String(doc.owner) : "",
+    branch: doc.branchName ? String(doc.branchName) : "",
+    issuePr: doc.issuePr ? String(doc.issuePr) : "",
+    // 完了判定（自由文字列）。未設定・文字列以外は空表示にする（read-only）。
+    completionRule: typeof doc.completionRule === "string" ? doc.completionRule : "",
+    doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
+    // レビュー観点。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+    reviewPoints: Array.isArray(doc.reviewPoints)
+      ? doc.reviewPoints.filter((p) => typeof p === "string")
+      : [],
+    // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+    notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
+    includedInProgress: !isExcludedSection(category),
+    // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
+    // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
+    updatedAtMillis: toMillisOrNull(doc.updatedAt),
+    // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
+    // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
+    // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
+    source: normalizeSource(doc.source),
+    sourceBadge: classifySourceBadge(doc.source),
+    // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
+    protected: doc.protected === true,
+    // AI分割タスク取込の親候補判定用（読み取りのみ・書き込みは今回しない）。
+    // taskRole="split-parent" / splitChildCount>0 は「分割済み親」で追加分割の対象外にする。
+    // 未設定・型不正は安全側（taskRole="" / splitChildCount=0）へ寄せる。
+    taskRole: typeof doc.taskRole === "string" ? doc.taskRole : "",
+    splitChildCount:
+      typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
+        ? doc.splitChildCount
+        : 0,
+  };
+  // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
+  // 判定ロジックは ai-subtask-import-parent.mjs に集約（ここでは呼ぶだけ・重複実装しない）。
+  task.aiSubtaskEligible = isEligibleAiSubtaskParent(task);
+  return task;
+}
+
 export function firestoreToBoardModel(docs) {
   const sections = [];
   // category 単位・(category, subcategory) 単位の生成済みノードを引くための索引。
@@ -220,14 +286,12 @@ export function firestoreToBoardModel(docs) {
 
   // 取得順（order 昇順）で出現順にセクション/サブセクションを組み立てる。
   docs.forEach((doc, index) => {
-    const category = String(doc.category ?? "未分類");
-    const subcategory =
-      doc.subcategory === null || doc.subcategory === undefined
-        ? ""
-        : String(doc.subcategory);
     // task.line は order ?? sourceLine ?? 連番 の優先順で決める（§13.5）。
     // 外部由来値はHTML注入防止のため有限数値のみ採用し、それ以外は連番へフォールバック。
     const line = toFiniteNumber(doc.order) ?? toFiniteNumber(doc.sourceLine) ?? index + 1;
+    const task = firestoreDocToTaskModel(doc, { line });
+    const category = task.sectionTitle;
+    const subcategory = task.subsectionTitle;
 
     // セクションを必要に応じて生成（除外判定は category 名で行う）。
     let section = sectionByTitle.get(category);
@@ -243,55 +307,6 @@ export function firestoreToBoardModel(docs) {
       sectionByTitle.set(category, section);
       sections.push(section);
     }
-
-    // 既存 createTask と同じ形のタスクオブジェクトを作る（キー別名はここで吸収）。
-    // firestoreId は status 更新時に対象ドキュメントを指すために保持する（UI 表示には使わない）。
-    const task = {
-      firestoreId: doc.id,
-      // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
-      taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
-      text: String(doc.title ?? ""),
-      completed: doc.completed === true,
-      line,
-      sectionTitle: category,
-      subsectionTitle: subcategory,
-      priority: doc.priority ? String(doc.priority) : "",
-      status: doc.status ? String(doc.status) : doc.completed === true ? "Done" : "Todo",
-      owner: doc.owner ? String(doc.owner) : "",
-      branch: doc.branchName ? String(doc.branchName) : "",
-      issuePr: doc.issuePr ? String(doc.issuePr) : "",
-      // 完了判定（自由文字列）。未設定・文字列以外は空表示にする（read-only）。
-      completionRule: typeof doc.completionRule === "string" ? doc.completionRule : "",
-      doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
-      // レビュー観点。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
-      reviewPoints: Array.isArray(doc.reviewPoints)
-        ? doc.reviewPoints.filter((p) => typeof p === "string")
-        : [],
-      // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
-      notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
-      includedInProgress: !section.excluded,
-      // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
-      // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
-      updatedAtMillis: toMillisOrNull(doc.updatedAt),
-      // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
-      // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
-      // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
-      source: normalizeSource(doc.source),
-      sourceBadge: classifySourceBadge(doc.source),
-      // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
-      protected: doc.protected === true,
-      // AI分割タスク取込の親候補判定用（読み取りのみ・書き込みは今回しない）。
-      // taskRole="split-parent" / splitChildCount>0 は「分割済み親」で追加分割の対象外にする。
-      // 未設定・型不正は安全側（taskRole="" / splitChildCount=0）へ寄せる。
-      taskRole: typeof doc.taskRole === "string" ? doc.taskRole : "",
-      splitChildCount:
-        typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
-          ? doc.splitChildCount
-          : 0,
-    };
-    // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
-    // 取得済みタスクは archived=false 前提だが、判定関数側でも防御的に確認する。
-    task.aiSubtaskEligible = isEligibleAiSubtaskParent(task);
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
     if (subcategory) {
@@ -325,6 +340,32 @@ export function firestoreToBoardModel(docs) {
     qualityGate: sections.find((section) => normalizeTitle(section.title).includes("品質ゲート")),
     today: sections.find((section) => normalizeTitle(section.title).includes("今日見る場所")),
   };
+}
+
+/**
+ * tasks/{taskId} を1件だけ読み取り、画面用タスクモデルへ変換して返す（読み取り専用・書き込みなし）。
+ * AI分割の「AIで分割」ボタン押下時に、一覧取得時の古い state.data ではなく最新の1件で
+ * 候補判定・親概要を行うために使う（stale な候補外タスクの受理を防ぐ）。
+ * - ドキュメントが存在しない（削除済み等）場合は null を返す（呼び出し側はモーダルを開かない）。
+ * - 変換は firestoreToBoardModel と同じ firestoreDocToTaskModel を使う（判定・表示のズレ防止）。
+ *
+ * @param {string} taskId Firestore のドキュメントID
+ * @returns {Promise<object|null>} 画面用タスクモデル、存在しなければ null
+ */
+export async function fetchFirestoreTaskById(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+  const db = getFirestore(getApp());
+  const snapshot = await getDoc(firestoreDoc(db, "tasks", taskId));
+  if (!snapshot.exists()) {
+    return null;
+  }
+  const data = snapshot.data() ?? {};
+  const doc = { id: snapshot.id, ...data };
+  // 単一取得は一覧の出現順を持たないため、line は order ?? sourceLine ?? 0 で決める。
+  const line = toFiniteNumber(data.order) ?? toFiniteNumber(data.sourceLine) ?? 0;
+  return firestoreDocToTaskModel(doc, { line });
 }
 
 // status 更新で許可する値（UI 側のボタンと揃える）。想定外の値は書き込まない。

@@ -16,6 +16,7 @@ import {
   isEligibleAiSubtaskParent,
   formatParentTaskLabel,
   shouldWarnSplitParentAutoUpdate,
+  resolveEligibleParentForModal,
   AI_SUBTASK_PARENT_ELIGIBLE_STATUSES,
 } from "./ai-subtask-import-parent.mjs";
 
@@ -177,4 +178,101 @@ test("ボタン表示判定: Review / Done / completed / archived / 分割済み
 
 test("ボタン表示判定: autoStatusUpdateDisabled=true だけでは表示対象外にしない（Todo なら表示できる）", () => {
   assert.equal(isEligibleAiSubtaskParent(parentTask({ autoStatusUpdateDisabled: true })), true);
+});
+
+// --- resolveEligibleParentForModal（最新1件を再取得して候補判定・依存注入でテスト） ---
+
+// 呼び出し記録付きの fetch スタブ（返すタスク or throw を差し替えられる）。
+function makeFetch(result) {
+  const calls = [];
+  const fetchTaskById = async (id) => {
+    calls.push(id);
+    if (typeof result === "function") return result(id);
+    return result;
+  };
+  return { fetchTaskById, calls };
+}
+
+test("再判定: 一覧Todo→再読込Review はモーダルを開かない（ineligible・最新値で判定）", async () => {
+  // fetch は最新値（Review）を返す。stale な Todo は使わない。
+  const { fetchTaskById } = makeFetch(parentTask({ status: "Review" }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test("再判定: 一覧Doing→再読込Done はモーダルを開かない", async () => {
+  const { fetchTaskById } = makeFetch(parentTask({ status: "Done" }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test("再判定: 再読込で archived=true はモーダルを開かない", async () => {
+  const { fetchTaskById } = makeFetch(parentTask({ archived: true }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test("再判定: 再読込で completed=true はモーダルを開かない", async () => {
+  const { fetchTaskById } = makeFetch(parentTask({ completed: true }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test('再判定: 再読込で taskRole="split-parent" はモーダルを開かない', async () => {
+  const { fetchTaskById } = makeFetch(parentTask({ taskRole: "split-parent" }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test("再判定: 再読込で splitChildCount>0 はモーダルを開かない", async () => {
+  const { fetchTaskById } = makeFetch(parentTask({ splitChildCount: 5 }));
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "ineligible");
+});
+
+test("再判定: 再読込でも eligible なら再取得した freshTask を親として使う", async () => {
+  const fresh = parentTask({ status: "Doing", text: "最新タイトル", branch: "feature/new" });
+  const { fetchTaskById, calls } = makeFetch(fresh);
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, true);
+  assert.equal(r.task, fresh, "返すのは再取得した最新タスク");
+  assert.deepEqual(calls, ["t1"], "対象IDで1件だけ再取得する");
+});
+
+test("再判定: 一覧と再読込で title / branchName が変わっていたら最新値を返す", async () => {
+  // 一覧時（stale）は古い値でも、resolve は fetch の最新値（fresh）だけを返す。
+  const fresh = parentTask({ status: "Doing", text: "新タイトル", branch: "feature/renamed" });
+  const { fetchTaskById } = makeFetch(fresh);
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, true);
+  assert.equal(r.task.text, "新タイトル");
+  assert.equal(r.task.branch, "feature/renamed");
+});
+
+test("再判定: 対象ドキュメントが存在しない（null）はモーダルを開かない", async () => {
+  const { fetchTaskById } = makeFetch(null);
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "not-found");
+});
+
+test("再判定: 再取得エラーは古いデータへフォールバックせず開かない", async () => {
+  const fetchTaskById = async () => {
+    throw new Error("network error");
+  };
+  const r = await resolveEligibleParentForModal("t1", fetchTaskById);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "fetch-error");
+  assert.equal(r.task, undefined, "古いデータを task として返さない");
+});
+
+test("再判定: taskId 空 / fetch 未指定は invalid（開かない）", async () => {
+  assert.equal((await resolveEligibleParentForModal("", async () => null)).reason, "invalid");
+  assert.equal((await resolveEligibleParentForModal("t1", null)).reason, "invalid");
 });
