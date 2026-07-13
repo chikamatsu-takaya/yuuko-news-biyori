@@ -250,14 +250,41 @@ export async function updateTaskFieldsWithServiceAccount({
 }
 
 /**
+ * Firestore REST の fields オブジェクトを、apply ガード判定用の data 形へ変換する純粋関数。
+ * 型付き値（stringValue / booleanValue）から素の値を取り出す。ネットワーク非依存でテスト可能にするため
+ * fetchTaskForApply から切り出した（通信結果の整形ロジックだけを回帰テストできるようにする）。
+ *
+ * - status: stringValue（未設定は null）
+ * - completed / archived: booleanValue（未設定は false）
+ * - autoStatusUpdateDisabled: **boolean true のときだけ true**（booleanValue===true で厳密判定）。
+ *   未設定・false・文字列 "true"（stringValue で booleanValue は undefined）はすべて false 扱い。
+ *   post-merge の二段目ガード fresh.data.autoStatusUpdateDisabled === true を live でも機能させる正本。
+ * - branchName / taskCode / issuePr: stringValue（未設定は null）。apply 直前の紐づけ再検証に使う。
+ *
+ * @param {object} fields Firestore ドキュメントの fields（未指定は空 {}）
+ */
+export function mapTaskFieldsToApplyData(fields = {}) {
+  const f = fields ?? {};
+  return {
+    status: f.status?.stringValue ?? null,
+    completed: f.completed?.booleanValue ?? false,
+    archived: f.archived?.booleanValue ?? false,
+    autoStatusUpdateDisabled: f.autoStatusUpdateDisabled?.booleanValue === true,
+    branchName: f.branchName?.stringValue ?? null,
+    taskCode: f.taskCode?.stringValue ?? null,
+    issuePr: f.issuePr?.stringValue ?? null,
+  };
+}
+
+/**
  * apply 直前の再読込用: tasks/{taskId} を1件だけ読み、ガード判定に必要なフィールド
- * （status / completed / archived）と updateTime（楽観ロック用）を返す（読み取り専用）。
+ * （status / completed / archived / autoStatusUpdateDisabled）と updateTime（楽観ロック用）を返す（読み取り専用）。
  * 存在しなければ exists:false。呼ばない限り通信は発生しない。
  *
  * 紐づけキー（branchName / taskCode / issuePr）も返し、apply 直前の再検証に使えるようにする。
  *
  * @param {string} taskId
- * @returns {Promise<{ exists: boolean, data: { status: string|null, completed: boolean, archived: boolean, branchName: string|null, taskCode: string|null, issuePr: string|null }, updateTime: string|null }>}
+ * @returns {Promise<{ exists: boolean, data: { status: string|null, completed: boolean, archived: boolean, autoStatusUpdateDisabled: boolean, branchName: string|null, taskCode: string|null, issuePr: string|null }, updateTime: string|null }>}
  */
 export async function fetchTaskForApply(taskId) {
   if (!taskId) {
@@ -277,29 +304,18 @@ export async function fetchTaskForApply(taskId) {
     headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
   });
   if (response.status === 404) {
-    return {
-      exists: false,
-      data: { status: null, completed: false, archived: false, branchName: null, taskCode: null, issuePr: null },
-      updateTime: null,
-    };
+    // 空 fields から生成（status:null / completed:false / archived:false /
+    // autoStatusUpdateDisabled:false / 紐づけキー:null）。exists:false で呼び出し側は早期に扱う。
+    return { exists: false, data: mapTaskFieldsToApplyData({}), updateTime: null };
   }
   if (!response.ok) {
     const body = await safeReadText(response);
     throw new Error(`再読込に失敗しました (HTTP ${response.status}). ${body}`);
   }
   const json = await response.json();
-  const fields = json.fields ?? {};
   return {
     exists: true,
-    data: {
-      status: fields.status?.stringValue ?? null,
-      completed: fields.completed?.booleanValue ?? false,
-      archived: fields.archived?.booleanValue ?? false,
-      // 紐づけキー: apply 直前の再検証（別PR向けに変更されていないか）に使う。
-      branchName: fields.branchName?.stringValue ?? null,
-      taskCode: fields.taskCode?.stringValue ?? null,
-      issuePr: fields.issuePr?.stringValue ?? null,
-    },
+    data: mapTaskFieldsToApplyData(json.fields ?? {}),
     updateTime: json.updateTime ?? null,
   };
 }

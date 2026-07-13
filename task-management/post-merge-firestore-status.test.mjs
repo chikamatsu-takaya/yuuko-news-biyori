@@ -25,6 +25,8 @@ import {
   isPrDoneApplyChecked,
   evaluatePrDoneApplyConsent,
 } from "./post-merge-firestore-status.mjs";
+// live 再読込経路の整形（Firestore REST fields → data）を通して二段目ガードを検証するために import。
+import { mapTaskFieldsToApplyData } from "./firestore-admin-write.mjs";
 
 // PR本文 Done許可チェックボックスの固定文言（本番テンプレートと一致させる）。
 const CONSENT_CHECKED_LINE = "- [x] このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
@@ -750,6 +752,41 @@ test("結合(apply直前でtrue): evaluate未設定→再読込でtrue の stale
   // 注: apply.reason は Summary の「### Firestore status apply」節へそのまま出力される除外理由。
   //     この stale 経路の Summary 全体描画は buildSummaryMarkdown（未export）だが、
   //     evaluate 時点でフラグが見える経路の Summary は別途 CLI 統合テストで検証済み。
+});
+
+test("結合(live再読込): fetchTaskForApply の整形結果(autoStatusUpdateDisabled=true)で二段目ガードが効く", () => {
+  // P1修正の要点: live 再読込は firestore-admin-write.mapTaskFieldsToApplyData で
+  // Firestore REST fields → data に整形される。ここに autoStatusUpdateDisabled が含まれるようになったため、
+  // 「evaluate 時は未設定でも、live 再読込で true」なら planStatusApplyFromDoing が書き込みを止める。
+  //
+  // Firestore の boolean true フィールドを模した fields（status は Doing・除外フラグ true）。
+  const fields = {
+    status: { stringValue: "Doing" },
+    completed: { booleanValue: false },
+    archived: { booleanValue: false },
+    autoStatusUpdateDisabled: { booleanValue: true },
+    branchName: { stringValue: "feature/x" },
+  };
+  // fetchTaskForApply が返す data 形（live 経路と同じ整形）。
+  const data = mapTaskFieldsToApplyData(fields);
+  assert.equal(data.autoStatusUpdateDisabled, true, "live 整形結果にフラグ true が含まれる");
+
+  // 二段目ガード（PATCH 直前）に fresh として渡す → 書き込みしない（Done / Review 双方）。
+  const done = planStatusApplyFromDoing({ exists: true, data }, "Done");
+  assert.equal(done.shouldWrite, false, "live 再読込で true なら Done 書き込まない（PATCHなし）");
+  assert.match(done.reason, /自動status更新無効のため適用しなかった/);
+
+  const review = planStatusApplyFromDoing({ exists: true, data }, "Review");
+  assert.equal(review.shouldWrite, false, "live 再読込で true なら Review 書き込まない（PATCHなし）");
+
+  // 対照: 文字列 "true"（誤保存）は true 扱いにならず、Doing なら従来どおり書き込み対象になる。
+  const strData = mapTaskFieldsToApplyData({ ...fields, autoStatusUpdateDisabled: { stringValue: "true" } });
+  assert.equal(strData.autoStatusUpdateDisabled, false, '文字列 "true" は除外フラグ扱いしない');
+  assert.equal(
+    planStatusApplyFromDoing({ exists: true, data: strData }, "Done").shouldWrite,
+    true,
+    "誤保存の文字列では従来どおり（Doing なら書き込み対象）",
+  );
 });
 
 test("CLI: --apply + offline + チェック済み + autoStatusUpdateDisabled=true + Doing → 除外(no_change/G8)・無変更・issuePr skip・理由表示", () => {
