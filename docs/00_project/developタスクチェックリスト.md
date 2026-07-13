@@ -413,7 +413,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、辞書とランクが育つ」体験が途切れないことを確認する。
 - [ ] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
-  - Status: Doing
+  - Status: Review
   - Owner: 近松
   - Branch: `feature/mvp-settings-save-load-screen-check`
   - Issue/PR: 未定
@@ -453,7 +453,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36、フロント配線はPR #67で完了
 - [ ] ゆうこ通知・軽量プレビューの操作結果をフロントへ接続する
   - Priority: P1.5
-  - Status: Doing
+  - Status: Todo
   - Owner: バックエンド=@claude（#61完了）/ フロント=メンバー（#46）
   - Branch: `feature/yuuko-notification-state`（マージ済み）
   - Issue/PR: #61（候補3バックエンド・完了）／ 残り画面接続は #46
