@@ -82,9 +82,10 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 ### 3.2 JSONから受け付けないシステム管理項目（含まれていたら検証エラー）
 次のキーがJSON（ルート/各タスクいずれか）に含まれていた場合は、**黙って無視せず「入力できないシステム管理項目」として検証エラー**にする。
 
-`parentTaskId` / `category` / `subcategory` / `priority` / `owner` / `status` / `branchName` / `completed` / `completedAt` / `archived` / `source` / `order` / `taskCode` / `issuePr` / `createdAt` / `updatedAt` / `updatedBy` / `protected` / `importBatchId`
+`parentTaskId` / `category` / `subcategory` / `priority` / `owner` / `status` / `branchName` / `completed` / `completedAt` / `archived` / `source` / `order` / `taskCode` / `issuePr` / `createdAt` / `updatedAt` / `updatedBy` / `protected` / `importBatchId` / `autoStatusUpdateDisabled` / `taskRole` / `splitChildCount`
 
 - 上記に該当しない未知キーも一律**検証エラー**（§3.4）。
+- `autoStatusUpdateDisabled` / `taskRole` / `splitChildCount` は**親タスクへシステム側が設定する管理項目**（§3.9・§5.2）であり、**AI生成JSONからは受け付けない**（含まれていたら検証エラー）。
 - 目的：AIがシステム項目を出力しても、それが登録値に混入しない・利用者が誤解しない（明示的にエラーで気づける）。
 
 ### 3.3 親タスクからの継承・登録時の固定値
@@ -110,6 +111,7 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 | `order` | §3.6の採番 |
 
 - `issuePr` / `taskCode` / `sourceLine` は初期MVPでは付与しない（`issuePr=null` / `taskCode=""` / `sourceLine=null` を既存追加と揃える）。
+- **親タスク**へは、上記とは別に管理フィールド `autoStatusUpdateDisabled` / `taskRole` / `splitChildCount` を同一トランザクションで設定する（§3.9・§5.2）。子タスク自身には `splitChildCount` を持たせない。
 
 ### 3.4 JSONバリデーション（初期値）
 - `schemaVersion`：**`1` のみ**許可。それ以外は拒否。
@@ -161,25 +163,32 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 - 実装は既存 `deleteManualPocTaskForPoc` とは**別関数/別条件**で明確に分ける（`manual-poc` 判定に `ai-subtask-import` を混ぜない）。削除時も `runTransaction` で現状再読込→条件確認→物理削除（既存と同じ最終防御）。
 
 #### 個別削除（1件ずつ・最後の子で親フラグ解除）
-個別削除を繰り返して**最後のAI分割子タスクを削除した場合も、親管理フィールドを解除**する。一覧表示時点の状態を信用せず、**削除直前にトランザクション内で再読込・再検証**して原子的に処理する。
+「最後の子か」の判定は、**事前取得した `DocumentReference` 集合ではなく、親ドキュメントの `splitChildCount` を正本**として行う。トランザクション外のクエリはその後に追加された子を取りこぼすため、判定には使わない（§3.9）。
 
-1. **トランザクション外**で、削除対象と**同じ `parentTaskId` を持つAI分割子タスク**（`where("parentTaskId","==",親id)` かつ `source==="ai-subtask-import"`）を検索し、**確認対象の `DocumentReference` 一覧**（削除対象を含む）と親IDを確定する（クエリはトランザクション内で不可のため）。
-2. `runTransaction` を開始し、**書き込み前に次をすべて `transaction.get` で再読込**する：削除対象／同じ親に属する確認対象の子タスク／親タスク。
-3. **削除対象が既存の個別削除条件（上記5条件：`ai-subtask-import`＋`Todo`＋`completed!==true`＋`branchName`未設定＋`protected!==true`）を満たすか再検証**する。満たさなければ Error を投げて中止（**子も親も変更しない**・Firestoreは無変更）。
-4. **削除後も別のAI分割子タスクが残る場合**（確認対象のうち削除対象以外に、削除対象と同条件かは問わず**AI分割子が1件以上残る**）：
-   - **削除対象だけを `transaction.delete`** する。
-   - **親管理フィールドは変更しない**。
-5. **削除対象が最後のAI分割子タスクである場合**（削除後に `parentTaskId` 一致のAI分割子が0件になる）：
-   - 削除対象を `transaction.delete` する。
+1. **トランザクション外**で、削除対象の子タスク `DocumentReference` と親IDを確定する（表示・調査用に子検索してよいが、**最後の子判定の正本にはしない**）。
+2. `runTransaction` を開始し、**書き込み前に次を `transaction.get` で再読込**する：削除対象の子タスク／親タスク。
+3. **書き込み前に次を検証**する。満たさなければ Error を投げて中止（**子も親も変更しない**・Firestoreは無変更）：
+   - 子タスクが削除可能条件（`ai-subtask-import`＋`Todo`＋`completed!==true`＋`branchName`未設定＋`protected!==true`）を満たす。
+   - 子タスクの `parentTaskId` が親と一致する。
+   - 親の `splitChildCount` が **1以上の整数**。
+   - 親の `taskRole` が `"split-parent"`。
+   - 親の `autoStatusUpdateDisabled` が `true`。
+4. `newCount = splitChildCount - 1` を計算する。
+5. **`newCount > 0` の場合**：
+   - 子タスクを `transaction.delete` する。
+   - 親の `splitChildCount` を `newCount` へ更新する。
+   - `autoStatusUpdateDisabled` / `taskRole` は**維持**する。
+6. **`newCount === 0` の場合**（最後の子）：
+   - 子タスクを `transaction.delete` する。
+   - 親の `splitChildCount` を `deleteField()` で削除する。
    - 親の `autoStatusUpdateDisabled` を `deleteField()` で削除する。
    - 親の `taskRole` を `deleteField()` で削除する。
-6. **親の `status` / `branchName` / `issuePr` は変更しない**（管理フィールドのみ削除）。
-7. 子削除と親管理フィールド解除は**同一トランザクション**で、**全件成功または全件失敗**とする。
-8. **トランザクション内ではUI状態や外部変数を変更しない**（再試行で不整合になるため。UI更新はcommit成功後のみ・§7と同方針）。手順1で確定した確認対象の集合は再試行時も同じものを再読込・再判定する。
+7. **親の `status` / `branchName` / `issuePr` は変更しない**。
+8. 子削除と親管理フィールド更新/解除は**同一トランザクション**で、**全件成功または全件失敗**とする。
+9. **トランザクション内ではUI状態や外部変数を変更しない**（再試行で不整合になるため。UI更新はcommit成功後のみ・§7と同方針）。
 
-- **「最後の子か」の判定**は、手順2で再読込した確認対象子タスクの現状（削除対象を除いて未削除のAI分割子が残るか）で行う。手順1のクエリ結果だけに頼らず、トランザクション内の再読込で最終判定する（別タブで子が増減していても原子的に正しく判定するため）。
-- **初期MVPでこの方式を採用する前提**：`taskRole="split-parent"` の親への**追加分割は基本的に許可しない**（§3.10）ため、「1親に紐づくAI分割子は単一バッチ由来」で、削除進行に伴う子件数は素直に0へ収束する。子件数カウンタを別途持たなくても、削除直前の再読込で「最後の子か」を安全に判定できる。
-- **将来課題**：同じ親への**追加分割を許可する**場合は、複数バッチの子が混在し「最後の子」の判定・親フラグ解除タイミングが複雑になるため、**子件数の原子的な管理（カウンタドキュメント等）を後続課題として再設計**する。
+- **整合性エラー時は削除を中止する**：`splitChildCount` が**未設定・不正値（非整数・数値でない）・0以下**の場合は、整合性エラーとして削除を中止し、**不整合状態で親フラグを解除しない**（子も削除しない）。
+- **原子性の担保**：`splitChildCount` を親ドキュメントと**同一トランザクション**で読み・更新するため、別タブ/別処理が同時に子を追加・削除して `splitChildCount` を変えた場合は、トランザクションが**再試行または失敗**し、中途半端な状態（子だけ消えて親フラグが残る／件数がずれる）を作らない。
 
 #### 一括取り消し（同一 importBatchId 単位）
 - **一括取り消し可能条件**（バッチ内の**全タスク**が満たすこと）：
@@ -189,28 +198,31 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
   - 全タスクの `branchName` が未設定
   - 全タスクが `protected !== true`
 
-**原子的な処理方針（削除直前に再読込・再検証）**：一覧表示時点の状態を信用せず、**削除直前に対象子タスク（と親）をトランザクション内で再読込・再検証**し、原子的に処理する。
-1. 対象 `importBatchId` の子タスクを特定するため、トランザクション**外**で `where("importBatchId","==", id)` の docId 集合と親IDを確定する（クエリはトランザクション内で不可のため）。
-2. `runTransaction` を開始し、**対象子タスクをすべて `transaction.get` で再読込**する（親も後続判定のため再読込）。
-3. **1件でも削除条件（上記5条件）を満たさなければ、Error を投げて全件中止**（対象タスクと理由を表示。Firestoreは無変更）。
-4. 全件が条件を満たす場合だけ、**全子タスクを `transaction.delete`** する。
-5. **同じ親に他のAI分割子タスク（`parentTaskId` 一致で、今回削除対象に含まれない未削除子）が残らない場合だけ、親管理フィールドを解除**する。残る場合は解除しない。
-6. 子削除と親フィールド解除は**同一トランザクション**なので全件成功/全件失敗。
+**原子的な処理方針（削除直前に再読込・再検証・`splitChildCount` 正本）**：一覧表示時点の状態を信用せず、**削除直前に対象子タスク全件と親をトランザクション内で再読込・再検証**し、親フラグ解除の判断は **`splitChildCount`** で行う。
+1. 対象 `importBatchId` の子タスクを特定するため、トランザクション**外**で `where("importBatchId","==", id)` の docId 一覧と親IDを確定する（表示・調査用。親フラグ解除判断の正本にはしない）。
+2. `runTransaction` を開始し、**書き込み前に次をすべて `transaction.get` で再読込**する：削除対象となる子タスク全件／親タスク。
+3. **全子タスクの削除条件（上記5条件）を検証**する。1件でも満たさなければ Error を投げて**全件中止**（対象と理由を表示。Firestoreは無変更・部分削除しない）。子の `parentTaskId` が親と一致することも確認する。
+4. `newCount = splitChildCount - 削除対象件数` を計算する。
+5. **`newCount < 0` の場合**：整合性エラーとして**全件中止**（`splitChildCount` と削除件数が矛盾。親フラグは解除しない）。
+6. **`newCount > 0` の場合**：対象子タスクを**全件 `transaction.delete`**し、親の `splitChildCount` を `newCount` へ更新、親フラグ（`autoStatusUpdateDisabled` / `taskRole`）は**維持**。
+7. **`newCount === 0` の場合**：対象子タスクを**全件 `transaction.delete`**し、親の `splitChildCount` / `autoStatusUpdateDisabled` / `taskRole` を **`deleteField()`** で削除。
+8. 子削除と親更新は**同一トランザクション**で、**全件成功または全件失敗**とする。
 - **1件でも条件を満たさない場合は一括削除せず**、対象タスクと理由（例：`status=Doing` / `branchName設定済み`）を表示する（手順3）。
-- 手順1で確定した削除対象 docId 集合はトランザクション内で変えない（再試行時も同じ集合を再検証する）。トランザクション中はUI状態・外部変数を変更しない（§7と同方針）。
-- **親タスクの管理フィールドの解除方法（推奨：フィールド削除で未設定へ戻す）**：
-  - `autoStatusUpdateDisabled`：**フィールド削除**（`deleteField()`）。
-  - `taskRole`：**フィールド削除**（`deleteField()`）。
-  - 理由：分割前の**未設定状態へ完全に戻す**ため。`false` や空文字を残すと「明示的に自動更新有効化した」等と誤解され得る・`taskRole==="split-parent"` 以外の値が残ると表示判定が曖昧になるため、**残さず削除**する。
-  - 解除時も親の `status` / `branchName` / `issuePr` は変更しない（管理フィールドのみ削除）。
+- **整合性エラー時は解除しない**：`splitChildCount` が未設定・不正値・0以下、または `newCount < 0` のときは中止し、不整合状態で親フラグを解除しない。
+- トランザクション中はUI状態・外部変数を変更しない（§7と同方針）。
+- **親フラグ解除方法**：`autoStatusUpdateDisabled` / `taskRole` / `splitChildCount` を **`deleteField()`** で削除し、分割前の**未設定状態へ完全に戻す**。`false` や空文字を残さない（「明示的に有効化した」等の誤解や表示判定の曖昧化を避けるため）。親の `status` / `branchName` / `issuePr` は変更しない。
 
 #### 削除・一括取り消しのテスト観点
 削除・一括取り消しPR（§11-7）で最低限確認する観点：
-- **子が2件以上残る個別削除では親フラグを解除しない**（削除対象を除いてAI分割子が1件以上残る → `autoStatusUpdateDisabled` / `taskRole` は不変）。
-- **最後の子を個別削除した場合は親フラグを解除する**（削除後にAI分割子が0件 → 親の `autoStatusUpdateDisabled` / `taskRole` を `deleteField()` で削除）。
-- **削除条件を満たさない場合は子も親も変更しない**（`status!==Todo` / `branchName`設定済み / `completed` / `protected` / `source`不一致 のいずれか → Firestore無変更でError）。
+- **子3件の親から1件削除** → `splitChildCount` が 2 になり、親フラグ（`autoStatusUpdateDisabled` / `taskRole`）は維持。
+- **子1件の親から最後の1件を削除** → `splitChildCount` と親フラグ（`autoStatusUpdateDisabled` / `taskRole`）を `deleteField()` で削除。
+- **バッチ3件を一括取り消しし、他の子が2件残る** → `splitChildCount` が 2 になり、親フラグ維持。
+- **全子を一括取り消し** → `splitChildCount` と親フラグを `deleteField()` で削除。
+- **`splitChildCount` が削除対象件数より小さい**（`newCount < 0`）→ 整合性エラーとして全件中止（子も親も変更しない）。
+- **`splitChildCount` が未設定または不正値（非整数・0以下）** → 削除中止・親フラグ維持（不整合状態で解除しない）。
+- **同時登録・削除で親 `splitChildCount` が変更された** → トランザクション再試行または失敗となり、不完全な状態（子だけ消えて親フラグ/件数がずれる）を作らない。
+- **削除条件を満たさない場合は子も親も変更しない**（`status!==Todo` / `branchName`設定済み / `completed` / `protected` / `source`不一致 / `parentTaskId`不一致 のいずれか → Firestore無変更でError）。
 - **親フラグ解除時も `status` / `branchName` / `issuePr` を維持する**（管理フィールドのみ削除され、他フィールドは不変）。
-- **競合更新時はトランザクションが失敗または再試行され、不完全な状態にならない**（削除・親フラグ解除は同一トランザクションで全件成功/全件失敗。子だけ消えて親フラグが残る等の中途半端な状態を作らない）。
 - （一括取り消し）**バッチ内1件でも条件を満たさなければ全件中止**し、対象と理由を表示（部分削除しない）。
 
 ### 3.8 親タスクの扱い
@@ -226,23 +238,43 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 ### 3.9 分割親タスクの post-merge 自動更新防止（重要）
 作業中タスクを分割する場合、親タスクには既に `status=Doing` と `branchName` が設定されている可能性がある。このままだと**元PRのマージ時に post-merge 処理が、管理用として残した親タスクを Done / Review へ自動更新してしまう**恐れがある。これを防ぐため、分割時に親へ管理フィールドを設定する。
 
-**親へ設定する管理フィールド（両方併用）**：
+**親へ設定する管理フィールド**：
 
 | フィールド | 値 | 役割 |
 |---|---|---|
-| `autoStatusUpdateDisabled` | `true` | **意図が明確な機能フラグ**。post-merge の自動 Done/Review 判定から除外する根拠。 |
-| `taskRole` | `"split-parent"` | **画面表示用**。「分割親タスク」であることをUIで識別する。 |
+| `autoStatusUpdateDisabled` | `true` | **判定の正本となる機能フラグ**。post-merge の自動 Done/Review 判定・apply直前ガードから除外する根拠。 |
+| `taskRole` | `"split-parent"` | **画面表示・理由説明用**。「分割親タスク」であることをUIで識別する（判定の正本にはしない）。 |
+| `splitChildCount` | number | **その親に現在紐づくAI分割子タスク数**。**最後の子を削除したかの判定の正本**（§3.7）。親ドキュメントと同一トランザクションで増減し、事前クエリ結果に依存させない。 |
 
-- **両方が必要かの評価**：post-merge 側は `autoStatusUpdateDisabled` 単独でも除外判定は成立する。ただし `autoStatusUpdateDisabled` は「なぜ更新対象外か」を画面で説明しづらいため、**表示用の `taskRole="split-parent"` を併用**して、親タスクの役割を人が一目で把握できるようにする。→ **併用を採用**（機能フラグ＝`autoStatusUpdateDisabled`、表示ラベル＝`taskRole`）。
+- **役割分担**：**判定の正本は `autoStatusUpdateDisabled`**（post-merge の除外根拠）。`taskRole` は画面表示・理由説明用。`splitChildCount` は「最後の子か」を親ドキュメント自身の値で原子的に判定するための正本。
+- **`autoStatusUpdateDisabled` 単独でも post-merge 除外は成立する**が、画面で「なぜ更新対象外か」を説明するために `taskRole="split-parent"` を併用する。
 
 **設計上の動作**：
-- 子タスク一括登録と**同じ `runTransaction` 内**で、親を再読込・再検証したうえで親タスクへ `autoStatusUpdateDisabled=true` / `taskRole="split-parent"` / `updatedAt=serverTimestamp` / `updatedBy="ai-subtask-import"` を設定する（親は `transaction.update`、子は `transaction.set`。全件成功/全件失敗。詳細は §7）。
+- 子タスク一括登録と**同じ `runTransaction` 内**で、親を再読込・再検証したうえで親へ `autoStatusUpdateDisabled=true` / `taskRole="split-parent"` / `splitChildCount=登録する子タスク数` / `updatedAt=serverTimestamp` / `updatedBy="ai-subtask-import"` を設定する（親は `transaction.update`、子は `transaction.set`。全件成功/全件失敗。詳細は §7）。
 - **親タスクの `status` は変更しない**。
 - 親タスクの `branchName` / `issuePr` も**勝手に消さない**。
-- **post-merge 処理では `autoStatusUpdateDisabled=true` のタスクを Done / Review 自動更新の対象外**にする（後続PR §11-2 で実装。**一括登録 §11-6 より先に実装**。今回は実装しない）。
+- **post-merge 処理では `autoStatusUpdateDisabled=true` のタスクを Done / Review 自動更新の対象外**にする。**初回 evaluate 時だけでなく、apply 直前の Firestore 再読込ガードでも `autoStatusUpdateDisabled===true` を確認**して更新・issuePr書き戻し・Markdown同期起動を中止する（後続PR §11-2 で実装。**一括登録 §11-6 より先に実装**。今回は実装しない）。
 - 親タスクの最終 `Done` は、**子タスクの完了状況を人が確認**して行う。
 - 子タスクは §3.3 どおり `Todo` で作成し、**個別に `branchName` を設定**する（通常の post-merge 自動更新対象）。
-- 既に分割済み（親が `taskRole="split-parent"` / `autoStatusUpdateDisabled=true`）のタスクに追加の分割バッチを登録する場合は、管理フィールドを**冪等に再設定**（同値上書き）してよい。
+- **初期MVPでは分割済み親への追加分割を禁止する**（§3.10）。一括登録時、親の `splitChildCount > 0` または `taskRole==="split-parent"` の場合は**登録を拒否**する（§7）。安全性は「UI上の禁止」だけに頼らず、**`splitChildCount` を親ドキュメントと同一トランザクションで確認・更新すること**で担保する。
+- **将来課題**：同じ親への追加分割を許可する場合は、一括登録時に**同一トランザクションで `splitChildCount` へ追加件数を加算**する設計へ変更する（削除側の「最後の子」判定も加算後の値で成立する）。後続課題として再設計する。
+
+**post-merge 除外の実装ポイント（後続PR §11-2・初回判定＋apply直前の二段構え）**：
+初回判定だけでは、evaluate 後〜apply の間に別処理で `autoStatusUpdateDisabled` が付与された場合を取りこぼす。**初回判定と apply 直前の両方**で確認する。
+- **初回判定（evaluate時）**：対象タスク取得時または evaluate 時に `autoStatusUpdateDisabled === true` のタスクを **`done_candidate` / `review_candidate` の適用対象外**にする。
+- **apply直前**：`applyPhase` で Firestore タスクを再読込した後にも `autoStatusUpdateDisabled === true` を確認し、true なら **Done / Review 更新を中止**・**`issuePr` を書き戻さない**・**Firestore→Markdown 同期を起動しない**・**Summary / report に「自動status更新無効のため適用しなかった」を表示**する。
+- 最終 Firestore 書き込みが別関数内のトランザクションで行われる場合は、**その最終再読込ガードにも `autoStatusUpdateDisabled` の確認を含める**（描画時点の値だけに依存しない・既存の Done/Review ガードと同じ最終防御の位置）。
+- **判定の正本は `autoStatusUpdateDisabled`**。`taskRole` は画面表示・理由説明用に使い、除外判定の条件そのものには使わない。
+
+**post-merge 除外の回帰テスト観点（後続PR §11-2）**：
+- 初回取得時から `autoStatusUpdateDisabled=true` → **`done_candidate` でも適用しない**。
+- 初回取得時から `autoStatusUpdateDisabled=true` → **`review_candidate` でも適用しない**。
+- evaluate 時は未設定だが、**apply直前の再読込時に `true`** → **Done 更新しない**。
+- evaluate 時は未設定だが、**apply直前の再読込時に `true`** → **Review 更新しない**。
+- 除外時は **`issuePr` を書き戻さない**。
+- 除外時は **Markdown 同期を起動しない**。
+- **除外理由が Summary / report に表示される**。
+- **`false` またはフィールド未設定の既存タスクは、従来の安全条件を満たせば従来どおり動作する**（既存挙動を壊さない）。
 
 ### 3.10 親タスクとして選択できる条件
 親タスク候補は、**画面選択リストに出す時点で**次を満たすものに限定する。
@@ -338,13 +370,14 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 
 | フィールド | 型 | 備考 |
 |---|---|---|
-| `autoStatusUpdateDisabled` | boolean | `true`。post-merge の Done/Review 自動更新の対象外にする機能フラグ。 |
-| `taskRole` | string | `"split-parent"`。分割親であることの表示用ラベル。 |
+| `autoStatusUpdateDisabled` | boolean | `true`。**判定の正本**。post-merge の Done/Review 自動更新（初回判定・apply直前ガード）の対象外にする機能フラグ。 |
+| `taskRole` | string | `"split-parent"`。分割親であることの表示・理由説明用ラベル（判定の正本にはしない）。 |
+| `splitChildCount` | number | その親に現在紐づくAI分割子タスク数。**最後の子を削除したかの判定の正本**（§3.7）。同一トランザクションで増減・削除する。 |
 
-- 一括取り消しで、その親に他のAI分割子が残らない場合は解除する（§3.7）。
+- 個別削除・一括取り消しで、削除後に `splitChildCount` が 0 になる（最後の子）場合は、3フィールドとも `deleteField()` で解除する（§3.7）。0 より大きい場合は `splitChildCount` を更新し親フラグは維持。
 
 ### 5.3 Markdown同期との関係
-- 追加フィールド・`parentTaskId` / `importBatchId` / 親の `autoStatusUpdateDisabled` / `taskRole` は同期対象外（§3.12）。Firestore上は保持されるがmdへは出ない。将来のmd新規追加機能で別途対応。
+- 追加フィールド・`parentTaskId` / `importBatchId` / 親の `autoStatusUpdateDisabled` / `taskRole` / `splitChildCount` は同期対象外（§3.12）。Firestore上は保持されるがmdへは出ない。将来のmd新規追加機能で別途対応。
 
 ---
 
@@ -370,14 +403,16 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
   1. トランザクション**外**で上記4点を確定する（`importBatchId`・子`DocumentReference`・確定入力値・`base`）。
   2. `runTransaction` を開始する。
   3. トランザクション内で**親タスクを再読込**する（`transaction.get(parentRef)`）。
-  4. 親が次を満たすか**再検証**する：`archived !== true` / `completed !== true` / `status` が `Todo` / `Doing` / `Blocked` のいずれか（`Review` / `Done` は不可）/ 初期MVPでは `taskRole !== "split-parent"`。
+  4. 親が次を満たすか**再検証**する：`archived !== true` / `completed !== true` / `status` が `Todo` / `Doing` / `Blocked` のいずれか（`Review` / `Done` は不可）/ **初期MVPでは `taskRole !== "split-parent"` かつ `splitChildCount` が未設定または 0**（＝分割済み親への追加分割を拒否）。
   5. 満たさない場合は**理由付き Error を投げて全件中止**（Firestoreは無変更）。
-  6. `transaction.update(parentRef, { autoStatusUpdateDisabled:true, taskRole:"split-parent", updatedAt:serverTimestamp, updatedBy:"ai-subtask-import" })`（親の `status` / `branchName` / `issuePr` は変更しない）。
+  6. `transaction.update(parentRef, { autoStatusUpdateDisabled:true, taskRole:"split-parent", splitChildCount:登録する子タスク数, updatedAt:serverTimestamp, updatedBy:"ai-subtask-import" })`（親の `status` / `branchName` / `issuePr` は変更しない）。
   7. 各子を `transaction.set(childRefs[i], child)` で登録（`child` は手順1で確定した値＋`parentTaskId`＋`importBatchId`＋`order = base + 10*(i+1)`）。
   8. 親更新と全子登録は**同一トランザクション**内なので**全件成功または全件失敗**。commit 成功→再取得→`firestoreToBoardModel`→再描画。失敗→Firestore無変更・エラー表示。
 - **再試行時の不変性（重要）**：`runTransaction` は競合時に**コールバックが再実行される**ため、`importBatchId` と 子 `DocumentReference` は**トランザクション内で生成しない**（手順1で確定した同じ値を使う）。これにより再試行されても docId・batchId が変わらず、二重docや別batchIdを作らない。
 - **副作用の禁止**：トランザクションのコールバック内で**UI状態や外部変数を変更しない**（再実行で不整合になるため）。UI更新は commit 成功後にのみ行う。
 - **order の方針維持**：`order` は初期MVPでは**トランザクション外で取得**し、同時登録時の重複可能性を許容する既存方針（§3.6）を維持する。
+- **分割済み親への追加分割の拒否（初期MVP）**：手順4で `splitChildCount > 0` または `taskRole==="split-parent"` を検出したら拒否する。安全性は「UI上の禁止（§3.10）」だけに頼らず、**この同一トランザクション内の `splitChildCount` 確認**で担保する。
+- **将来課題（追加分割許可時）**：`splitChildCount` を上書きではなく**同一トランザクションで追加件数を加算**（`newTotal = 既存splitChildCount + 追加件数`）する設計へ変更する。削除側の「最後の子」判定（`newCount === 0`）も加算後の値で成立する。
 - `taskSyncMeta`（Markdown同期要求 `syncRevision`）は**bumpしない**（既存 `addTaskForPoc` と同様。`Todo` 新規追加はmd同期契機にしない）。
 
 ---
@@ -472,12 +507,12 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 | # | PR | 依存 | 完了条件 | 主な変更対象 |
 |---|---|---|---|---|
 | 1 | JSON解析・バリデーションと単体テスト | 本設計PR | 前処理（trim/BOM/1組フェンス除去）＋§3.4検証＋§3.2システム項目エラーを純粋関数で実装。正常/異常系の単体テストが緑。**Firestore書き込みなし**。 | `task-management/` に検証モジュール新規＋テスト（例 `*.test.mjs`）。`pnpm test` |
-| 2 | post-merge の分割親除外対応 | **本設計PRのみ** | post-merge 処理で **`autoStatusUpdateDisabled=true` のタスクを Done/Review 自動更新の対象外**にする（§3.9）。判定に除外条件を追加し、Summary/理由表示にも反映。回帰テスト追加。**一括登録（#6）より先に実装し、運用投入時に除外が有効な状態にする**。 | `task-management/post-merge-firestore-status.mjs`、同 `*.test.mjs`（＋必要なら関連docs） |
+| 2 | post-merge の分割親除外対応 | **本設計PRのみ** | post-merge 処理で **`autoStatusUpdateDisabled=true` のタスクを Done/Review 自動更新の対象外**にする（§3.9）。**初回判定（evaluate時）と apply直前の再読込ガードの両方**で `autoStatusUpdateDisabled===true` を確認し、true なら Done/Review 更新中止・issuePr書き戻しなし・Markdown同期起動なし・Summary/reportに「自動status更新無効のため適用しなかった」を表示。最終書き込みが別関数のトランザクションなら**その最終再読込ガードにも確認を含める**。判定の正本は `autoStatusUpdateDisabled`（`taskRole`は表示・理由用）。下記回帰テストを追加。**一括登録（#6）より先に実装し、運用投入時に除外が有効な状態にする**。 | `task-management/post-merge-firestore-status.mjs`、同 `*.test.mjs`（＋必要なら関連docs） |
 | 3 | AI分割タスク追加モーダルの土台と親タスク選択 | 1 | `?source=firestore` 時のみ、`index.html`非変更でモーダル/パネルを動的生成。親タスク選択（§3.10条件）まで動作。登録処理は未接続。 | `task-dashboard.js`（UI生成）、CSS |
 | 4 | JSON貼り付け・検証結果・プレビュー表示 | 1,3 | JSON貼付→検証→プレビュー（件数/親/各子/継承値/警告/エラー）表示。**書き込みなし**。URL自動リンクなし・`escapeHtml`。 | `task-dashboard.js`、CSS |
 | 5 | プレビュー編集・タスク除外 | 4 | 編集対象（作業内容11項目＋継承4項目・§8.2）の修正と、取込対象タスクの除外が可能。編集後値がプレビューへ反映。**書き込みなし**。 | `task-dashboard.js` |
 | 6 | Firestore runTransaction一括登録・importBatchId・order付与 | 4,5,**2** | §7手順（`runTransaction`で親再検証→親更新＋子登録）で全件成功/全件失敗の一括登録。`importBatchId`生成・`order`採番（§3.6）・固定値（§3.3）付与。成功後再取得→再描画。**#2完了を依存条件とする**。 | `firestore-source.js`（一括登録API新規）、`task-dashboard.js` |
-| 7 | AI分割タスクの安全な削除・一括取り消し | 6 | §3.7条件（`ai-subtask-import`＋Todo＋未完了＋branch未設定＋非protected）でのみ**個別削除**。個別削除は `runTransaction` で削除対象＋同じ親の確認対象子＋親を再読込・再検証し、**削除後に別のAI分割子が残れば親フラグ非変更／最後の子なら親の`autoStatusUpdateDisabled`・`taskRole`を`deleteField()`で解除**（§3.7 個別削除）。加えて**同一`importBatchId`単位の一括取り消し**（削除直前に全子＋親を再読込・再検証／全件条件充足時のみ／全件成功・失敗／不可時は対象と理由を表示／親に他のAI分割子が残らなければ`deleteField()`で解除）。親の`status`/`branchName`/`issuePr`は変更しない。**既存`manual-poc`条件は不変**。**下記テスト観点を満たす単体/結合テストを追加**。 | `firestore-source.js`（削除・一括取消API新規・別関数）、`task-dashboard.js` |
+| 7 | AI分割タスクの安全な削除・一括取り消し | 6 | §3.7条件（`ai-subtask-import`＋Todo＋未完了＋branch未設定＋非protected）でのみ**個別削除**。**最後の子判定は親の`splitChildCount`を正本**とし、`runTransaction`で削除対象子＋親を再読込・再検証、`newCount=splitChildCount-1`。**`newCount>0`は子削除＋`splitChildCount`更新（親フラグ維持）／`newCount===0`は子削除＋`splitChildCount`・`autoStatusUpdateDisabled`・`taskRole`を`deleteField()`**。`splitChildCount`が未設定/不正値/0以下は整合性エラーで中止。加えて**同一`importBatchId`単位の一括取り消し**（削除直前に全子＋親を再読込・再検証／`newCount=splitChildCount-削除件数`／`<0`は中止／`>0`は件数更新・親フラグ維持／`===0`は解除／不可時は対象と理由を表示）。親の`status`/`branchName`/`issuePr`は変更しない。**既存`manual-poc`条件は不変**。**下記テスト観点を満たす単体/結合テストを追加**。 | `firestore-source.js`（削除・一括取消API新規・別関数）、`task-dashboard.js` |
 | 8 | 親子関係表示・source表示・分割親表示 | 6 | `source="ai-subtask-import"`を「AI分割タスク/Markdown未反映」で区別表示（§3.13）。親子（`parentTaskId`）の関連が画面で分かる。**親の`taskRole="split-parent"`（自動更新対象外）を識別表示**。 | `firestore-source.js`（`classifySourceBadge`分岐）、`task-dashboard.js`、CSS |
 | 9 | 実装プロンプト・レビュー用プロンプトの表示とコピー | 6,8 | 保存済み`implementationPrompt`/`reviewPrompt`等をカードで表示・コピー（既存の動的生成プロンプトとは別枠）。プレーンテキスト・URL自動リンクなし。 | `task-dashboard.js`、CSS |
 | 10 | 運用手順書と総合確認 | 1–9 | 運用手順（docs）整備、主要フローの総合確認、確認観点の記録。 | `docs/`（運用手順）、確認ログ |
@@ -489,6 +524,7 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 ---
 
 ## 12. 影響範囲（実装時の想定・参考）
-- 追加（新規）：JSON検証モジュール＋テスト、分割インポート用UI（`task-dashboard.js`）、一括登録API・AI分割削除/一括取消API（`firestore-source.js`／いずれも `runTransaction` で原子的に処理）、`classifySourceBadge` の分岐。
-- 後続で変更予定（別PR）：**post-merge 処理**（`post-merge-firestore-status.mjs`）に `autoStatusUpdateDisabled=true` の除外を追加（§11-2・**一括登録より先に実装**）。**本設計PRでは変更しない**。
+- 追加（新規）：JSON検証モジュール＋テスト、分割インポート用UI（`task-dashboard.js`）、一括登録API・AI分割削除/一括取消API（`firestore-source.js`／いずれも `runTransaction` で原子的に処理。親の `autoStatusUpdateDisabled` / `taskRole` / `splitChildCount` を同一トランザクションで設定・増減・`deleteField()`）、`classifySourceBadge` の分岐。
+- 後続で変更予定（別PR）：**post-merge 処理**（`post-merge-firestore-status.mjs`）に `autoStatusUpdateDisabled=true` の除外を追加。**初回 evaluate と `applyPhase` の apply直前再読込ガードの両方**に確認を入れる（§11-2・**一括登録より先に実装**）。**本設計PRでは変更しない**。
+- 新規Firestoreフィールド：子＝`parentTaskId` / `importBatchId` / `purpose` / `splitReason` / `scope` / `outOfScope` / `implementationPrompt` / `reviewPrompt` / `verificationCommands`、親＝`autoStatusUpdateDisabled` / `taskRole` / `splitChildCount`。いずれもMarkdown同期対象外（§3.12）。
 - 変更しない：既存の追加/更新/`manual-poc`削除API、`firestoreToBoardModel` の既存キー、`index.html`、Markdown同期処理、`package.json`/`pnpm-lock.yaml`。**本設計PRでは post-merge 処理も変更しない**。
