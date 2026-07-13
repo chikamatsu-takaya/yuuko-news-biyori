@@ -324,6 +324,18 @@ function evaluate(pr, firestoreTasks) {
   if (status === "Done" || data.completed === true) {
     return noChange(matched.id, matchedBy, candidates, ["G3"], "対象タスクは既に Done のため更新候補にしません。");
   }
+  // 分割親タスク等で自動status更新を無効化している場合は、done_candidate / review_candidate に
+  // せず no_change（G8）にする。判定の正本は autoStatusUpdateDisabled（taskRole は表示用で判定に使わない）。
+  // これにより元PRのマージで管理用の親タスクが誤って Done / Review 化されるのを防ぐ。
+  if (data.autoStatusUpdateDisabled === true) {
+    return noChange(
+      matched.id,
+      matchedBy,
+      candidates,
+      ["G8"],
+      "自動status更新無効のため適用しなかった（autoStatusUpdateDisabled=true・分割親タスク等）。done_candidate / review_candidate へ適用せず、issuePr書き戻し・Markdown同期も行いません。",
+    );
+  }
 
   // --- PR本文シグナルの評価（Done 判定より前・優先） ---
   const bodySignals = detectBodyReviewSignals(pr.body);
@@ -846,6 +858,16 @@ function planStatusApplyFromDoing(fresh, targetStatus = "Done") {
     return { shouldWrite: false, reason: "対象ドキュメントが存在しません（再読込時）。書き込みません。" };
   }
   const d = fresh.data ?? {};
+  // apply 直前の再読込ガード（最終防御）: evaluate 時は未設定でも、この再読込で
+  // autoStatusUpdateDisabled=true になっていれば stale な done/review 判定に関わらず一切書き込まない。
+  // 実際の PATCH はこの純粋関数が shouldWrite:true を返したときだけ行われるため、
+  // ここで止めれば status / completed / completedAt の更新も走らない（部分更新も発生しない）。
+  if (d.autoStatusUpdateDisabled === true) {
+    return {
+      shouldWrite: false,
+      reason: `再読込時に autoStatusUpdateDisabled=true のため、自動status更新無効のため適用しなかった（${targetStatus}・completed・completedAt を更新せず、issuePr書き戻し・Markdown同期も行いません）。`,
+    };
+  }
   if (d.archived === true) {
     return { shouldWrite: false, reason: "再読込時に archived=true のため書き込みません。" };
   }
@@ -1094,6 +1116,7 @@ const REASON_LABELS = {
   G5: "base が develop ではない",
   G6: "未マージ",
   G7: "候補タスクが複数（一意に絞れない）/複数タスクPR",
+  G8: "自動status更新が無効（autoStatusUpdateDisabled=true・分割親タスク等）",
   "skip-sync-branch": "同期用ブランチ（sync/*）のPRのため対象外",
   "skip-bot-pr": "bot（github-actions[bot]）のPRのため対象外",
   // Review（人手確認が必要）
