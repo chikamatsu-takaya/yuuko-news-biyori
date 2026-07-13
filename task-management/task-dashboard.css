@@ -1435,3 +1435,56 @@ p.markdown-sync-id {
   font-size: 0.82rem;
   font-weight: 700;
 }
+
+/* AIで分割: タスクカード内の起動ボタン（親候補条件を満たすカードにのみ表示） */
+.ai-subtask-split {
+  margin-top: 10px;
+}
+
+/* 親固定の取込モーダル（.task-modal-* を再利用しつつ、本機能固有の要素を追加） */
+.ai-subtask-step {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.ai-subtask-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-subtask-summary {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+
+.ai-subtask-summary-title {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Doing + branchName 設定済み時の注意（危険ではなく警告色） */
+.ai-subtask-warning {
+  border: 1px solid rgba(240, 200, 120, 0.5);
+  border-radius: 12px;
+  background: rgba(240, 200, 120, 0.12);
+  color: var(--amber);
+  padding: 10px 12px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.ai-subtask-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-note-info {
+  color: var(--amber);
+}

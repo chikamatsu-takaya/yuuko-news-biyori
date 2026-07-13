@@ -34,6 +34,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 import { firebaseConfig } from "./firebase-config.js";
+// AI分割タスク取込: 親候補判定（§3.10）。カード描画時に同期利用できるよう、変換時に判定して
+// 各タスクへ aiSubtaskEligible を持たせる（判定の正本は本モジュールに一本化する）。
+import { isEligibleAiSubtaskParent } from "./ai-subtask-import-parent.mjs";
 
 // Firebase アプリは多重初期化を避けるためモジュール内で1度だけ生成する。
 let appInstance = null;
@@ -277,7 +280,18 @@ export function firestoreToBoardModel(docs) {
       sourceBadge: classifySourceBadge(doc.source),
       // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
       protected: doc.protected === true,
+      // AI分割タスク取込の親候補判定用（読み取りのみ・書き込みは今回しない）。
+      // taskRole="split-parent" / splitChildCount>0 は「分割済み親」で追加分割の対象外にする。
+      // 未設定・型不正は安全側（taskRole="" / splitChildCount=0）へ寄せる。
+      taskRole: typeof doc.taskRole === "string" ? doc.taskRole : "",
+      splitChildCount:
+        typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
+          ? doc.splitChildCount
+          : 0,
     };
+    // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
+    // 取得済みタスクは archived=false 前提だが、判定関数側でも防御的に確認する。
+    task.aiSubtaskEligible = isEligibleAiSubtaskParent(task);
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
     if (subcategory) {
