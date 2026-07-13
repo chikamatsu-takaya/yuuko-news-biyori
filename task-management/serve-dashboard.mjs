@@ -8,6 +8,10 @@ const contentTypes = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
+  // ESM モジュール（.mjs）も .js と同じ JavaScript MIME で配信する。
+  // これが無いと application/octet-stream になり、ブラウザが module script として読み込めず、
+  // import（例: firestore-source.js → ai-subtask-import-parent.mjs）が失敗する。
+  [".mjs", "text/javascript; charset=utf-8"],
   [".md", "text/markdown; charset=utf-8"],
 ]);
 

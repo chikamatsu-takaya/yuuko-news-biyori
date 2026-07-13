@@ -76,6 +76,17 @@ document.addEventListener("DOMContentLoaded", () => {
   // status 更新ボタン・担当/メモ編集ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
+    // 「AIで分割」ボタン（Firestore版・親候補条件を満たすタスクのみ表示）。
+    // 押したタスクIDから最新1件を再取得し、最新状態で候補判定してからモーダルを開く
+    // （一覧の古いデータで候補外タスクを開かないため。このPRでは登録・親更新はしない）。
+    const aiSubtaskSplitButton = event.target.closest(".ai-subtask-split-button");
+    if (aiSubtaskSplitButton) {
+      const taskId = aiSubtaskSplitButton.dataset.taskId;
+      if (taskId) {
+        void openAiSubtaskImportModal(taskId);
+      }
+      return;
+    }
     // 「DB追加タスク削除」ボタン（Firestore版・manual-poc・未完了・非protected のみ表示）。
     // すぐには削除せず、確認モーダルを開く（実削除は承認後・DB現状再チェック付き）。
     const deleteButton = event.target.closest(".task-delete-button");
@@ -297,6 +308,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setupAddTaskForm();
   // 「DB追加タスク削除」確認モーダルも JS から1度だけ動的生成する。
   setupDeleteTaskModal();
+  // 「AIで分割タスクを追加」起動ボタン＋親タスク選択モーダルも JS から動的生成する（Firestore表示時のみ）。
+  setupAiSubtaskImportUi();
   // Markdown同期プレビューのパネルも JS から動的生成する（Firestore表示時のみ表示）。
   // 別ファイル markdown-sync-ui.js が読み込まれている場合のみ呼ぶ（安全側）。
   if (typeof setupMarkdownSyncPanel === "function") {
@@ -889,6 +902,198 @@ async function executeManualPocTaskDelete(taskId) {
     setLoadState(`DB追加タスクを削除できませんでした: ${error.message}`, true);
   } finally {
     pendingDeleteTaskId = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AIで分割タスクを追加（後続PR #3・親タスク固定の土台）
+//
+// 責務（docs/00_project/ai-subtask-import-spec.md §3.10 / §3.11 / §8 / §11-3）:
+// - 既存の通常「タスクを追加」は残したまま、親候補条件を満たす各タスクカードに「AIで分割」ボタンを出す。
+// - 押したタスクを親として固定してモーダルを開く（モーダル内で親を選び直さない＝select なし）。
+// - このPRでは「親の概要を表示する」ところまで。JSON貼付・検証・Firestore登録・親フィールド設定
+//   （autoStatusUpdateDisabled / taskRole / splitChildCount）は行わない（後続PRで実装）。
+// - 候補判定・ラベル・注意要否は純粋モジュール ai-subtask-import-parent.mjs に委譲する。
+//   カード表示可否は firestoreToBoardModel が付ける task.aiSubtaskEligible を使う（同期利用）。
+// ---------------------------------------------------------------------------
+
+// 取込モーダルの要素参照（1度だけ生成・index.html は変更しない）。
+const aiSubtaskModalElements = {
+  overlay: null,
+  summary: null,
+  warning: null,
+  nextButton: null,
+  nextNote: null,
+};
+
+// モーダルで固定中の親タスクID（未オープンは null）。「次へ」の進行可否の正本にする。
+let aiSubtaskParentTaskId = null;
+
+// 取込モーダルを1度だけ動的生成する。
+function setupAiSubtaskImportUi() {
+  setupAiSubtaskImportModal();
+}
+
+// 「AIで分割」ボタンのタスクカード用HTMLを返す。
+// Firestore 表示時かつ親候補条件（task.aiSubtaskEligible）を満たすタスクにだけ出す。
+// autoStatusUpdateDisabled は候補条件に含めない（判定は ai-subtask-import-parent.mjs 側）。
+function renderAiSubtaskSplitButton(task) {
+  if (!state.isFirestore || !task.firestoreId || task.aiSubtaskEligible !== true) {
+    return "";
+  }
+  return `
+    <div class="ai-subtask-split">
+      <button type="button" class="button compact ai-subtask-split-button" data-task-id="${escapeHtml(
+    task.firestoreId,
+  )}">AIで分割</button>
+    </div>
+  `;
+}
+
+// 親固定の取込モーダルのDOMを1度だけ生成し、閉じる操作を配線する（初期は hidden・select なし）。
+function setupAiSubtaskImportModal() {
+  if (aiSubtaskModalElements.overlay) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "aiSubtaskModalOverlay";
+  overlay.className = "task-modal-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = `
+    <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="aiSubtaskModalTitle">
+      <h2 id="aiSubtaskModalTitle">AIで分割タスクを追加</h2>
+      <p class="ai-subtask-step">ステップ 1 / 2：分割元の親タスク（このタスクで固定）</p>
+      <div class="ai-subtask-body">
+        <div id="aiSubtaskParentSummary" class="ai-subtask-summary" hidden></div>
+        <div id="aiSubtaskParentWarning" class="ai-subtask-warning" role="note" hidden></div>
+        <p class="ai-subtask-note">このステップでは Firestore への登録は行いません（親の確認のみ）。</p>
+        <p id="aiSubtaskNextNote" class="ai-subtask-note ai-subtask-note-info" hidden></p>
+      </div>
+      <div class="task-modal-actions">
+        <button id="aiSubtaskCancel" type="button" class="button compact">キャンセル</button>
+        <button id="aiSubtaskNext" type="button" class="button primary compact" disabled>次へ</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  aiSubtaskModalElements.overlay = overlay;
+  aiSubtaskModalElements.summary = overlay.querySelector("#aiSubtaskParentSummary");
+  aiSubtaskModalElements.warning = overlay.querySelector("#aiSubtaskParentWarning");
+  aiSubtaskModalElements.nextButton = overlay.querySelector("#aiSubtaskNext");
+  aiSubtaskModalElements.nextNote = overlay.querySelector("#aiSubtaskNextNote");
+
+  // キャンセル / 背景クリック / Escape で閉じる（Firestore は変更しない）。
+  overlay.querySelector("#aiSubtaskCancel").addEventListener("click", () => {
+    closeAiSubtaskImportModal();
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeAiSubtaskImportModal();
+    }
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeAiSubtaskImportModal();
+    }
+  });
+
+  // 「次へ」は後続PR（JSON貼付）へ接続しない。押しても副作用を起こさず、未実装であることだけ知らせる。
+  // 進行可否の正本は「親タスクが固定済みか」（aiSubtaskParentTaskId）とし、未固定では進めない。
+  aiSubtaskModalElements.nextButton.addEventListener("click", () => {
+    if (aiSubtaskModalElements.nextButton.disabled || !aiSubtaskParentTaskId) {
+      return;
+    }
+    if (aiSubtaskModalElements.nextNote) {
+      aiSubtaskModalElements.nextNote.hidden = false;
+      aiSubtaskModalElements.nextNote.textContent =
+        "次のステップ（AI生成JSONの貼り付け）は後続PRで実装予定です。このPRでは登録は行いません。";
+    }
+  });
+}
+
+// 「AIで分割」ボタンの taskId から、最新の親タスク1件を再取得して固定しモーダルを開く。
+// 一覧取得時の古いデータは使わず、Firestore から tasks/{taskId} を1件再読込し、最新値で候補判定する。
+// 候補外 / 未存在 / 取得失敗のときは開かず、古いデータへフォールバックしない（読み取りのみ・書き込みなし）。
+async function openAiSubtaskImportModal(taskId) {
+  if (!state.isFirestore || !aiSubtaskModalElements.overlay || !taskId) {
+    return;
+  }
+  const [{ resolveEligibleParentForModal, shouldWarnSplitParentAutoUpdate }, { fetchFirestoreTaskById }] =
+    await Promise.all([import("./ai-subtask-import-parent.mjs"), import("./firestore-source.js")]);
+
+  // 最新1件を再取得し、最新値で候補判定（判定は ai-subtask-import-parent.mjs に集約）。
+  const resolved = await resolveEligibleParentForModal(taskId, fetchFirestoreTaskById);
+  if (!resolved.ok) {
+    if (resolved.reason === "ineligible") {
+      setLoadState("このタスクは最新状態ではAI分割の対象外です。一覧を更新して確認してください。", true);
+    } else {
+      // fetch-error / not-found / invalid はまとめて「最新状態を確認できなかった」として開かない。
+      setLoadState("タスクの最新状態を確認できなかったため、AI分割を開始できませんでした。", true);
+    }
+    return;
+  }
+  // 以降の概要・注意・固定はすべて再取得した最新タスク（freshTask）を使う。
+  const freshTask = resolved.task;
+
+  const { summary, warning, nextButton, nextNote } = aiSubtaskModalElements;
+  // 親を固定する（最新の firestoreId）。
+  aiSubtaskParentTaskId = freshTask.firestoreId;
+  if (nextNote) {
+    nextNote.hidden = true;
+    nextNote.textContent = "";
+  }
+
+  // 親の概要を表示（最新値・全値エスケープ・URL自動リンクなし）。
+  summary.innerHTML = renderAiSubtaskParentSummary(freshTask);
+  summary.hidden = false;
+
+  // Doing かつ branchName 設定済みなら、分割で post-merge 自動更新対象外になる旨を案内する
+  // （このPRでは親フィールドの実設定は行わない）。判定・表示とも最新値を使う。
+  if (shouldWarnSplitParentAutoUpdate(freshTask)) {
+    warning.textContent =
+      "このタスクを分割すると分割親となり、post-merge による Done / Review 自動更新の対象外になります（このPRでは実際の設定は行いません）。";
+    warning.hidden = false;
+  } else {
+    warning.hidden = true;
+    warning.textContent = "";
+  }
+
+  // 親が固定できているので「次へ」を活性化（押しても登録はせず、未実装案内のみ）。
+  nextButton.disabled = false;
+
+  aiSubtaskModalElements.overlay.hidden = false;
+  // フォーカスは「次へ」へ（親は固定済みで選び直さないため）。
+  nextButton.focus();
+}
+
+// 固定中の親タスクの概要を組み立てる（全値を escapeHtml し、innerHTML への直接埋め込みを避ける）。
+function renderAiSubtaskParentSummary(task) {
+  const rows = [
+    ["taskCode", task.taskCode],
+    ["title", task.text],
+    ["status", task.status],
+    ["category", task.sectionTitle],
+    ["subcategory", task.subsectionTitle],
+    ["priority", task.priority],
+    ["owner", task.owner],
+    ["branchName", task.branch],
+  ];
+  const items = rows
+    .map(([label, value]) => {
+      const v = String(value ?? "").trim();
+      // URL 等が含まれても自動リンク化しない（プレーンにエスケープ表示するだけ）。
+      return `<li><strong>${escapeHtml(label)}:</strong> ${v ? escapeHtml(v) : "（未設定）"}</li>`;
+    })
+    .join("");
+  return `<p class="ai-subtask-summary-title">分割元の親タスク</p><ul class="task-modal-list">${items}</ul>`;
+}
+
+// モーダルを閉じる（固定した親は破棄する。Firestore は変更しない）。
+function closeAiSubtaskImportModal() {
+  aiSubtaskParentTaskId = null;
+  if (aiSubtaskModalElements.overlay) {
+    aiSubtaskModalElements.overlay.hidden = true;
   }
 }
 
@@ -1602,6 +1807,7 @@ function renderTaskCard(task) {
       ${renderDoingTransitionControls(task)}
       ${renderReviewDoneControls(task)}
       ${renderStatusControls(task)}
+      ${renderAiSubtaskSplitButton(task)}
     </article>
   `;
 }
