@@ -1073,7 +1073,12 @@ function setupAiSubtaskImportModal() {
     void handleAiSubtaskPromptCopy();
   });
   // JSON入力の文字数表示と「検証」ボタンの活性制御。
-  els.jsonInput.addEventListener("input", () => updateAiSubtaskJsonMeta());
+  // 入力が変わったら直前の検証結果を無効化する（古い結果を現在の入力の結果と誤認させない）。
+  // 入力内容自体は変更しない・自動修正しない。文字数/バイト数表示と検証ボタン活性は更新する。
+  els.jsonInput.addEventListener("input", () => {
+    clearAiSubtaskValidationResult();
+    updateAiSubtaskJsonMeta();
+  });
   // JSONを検証（既存バリデータを呼ぶ・独自検証は作らない）。
   els.validateButton.addEventListener("click", () => handleAiSubtaskValidate());
   // 入力をクリア（入力と検証結果を消す）。
@@ -1230,15 +1235,23 @@ function handleAiSubtaskValidate() {
   }
 }
 
-// 「入力をクリア」ハンドラ: JSON入力と検証結果を消す（プロンプト・固定親は維持）。
-function handleAiSubtaskClear() {
-  const { jsonInput, result } = aiSubtaskModalElements;
-  if (jsonInput) {
-    jsonInput.value = "";
-  }
+// 直前の検証結果表示（成功プレビュー / 失敗エラー一覧）を消して「未検証」状態へ戻す。
+// 検証済みデータを JS 変数へ保持する状態は現状ないため、DOM表示のクリアで足りる
+// （将来そうした変数を持つ場合は、ここで併せて破棄すること）。
+function clearAiSubtaskValidationResult() {
+  const { result } = aiSubtaskModalElements;
   if (result) {
     result.innerHTML = "";
   }
+}
+
+// 「入力をクリア」ハンドラ: JSON入力と検証結果を消す（プロンプト・固定親は維持）。
+function handleAiSubtaskClear() {
+  const { jsonInput } = aiSubtaskModalElements;
+  if (jsonInput) {
+    jsonInput.value = "";
+  }
+  clearAiSubtaskValidationResult();
   updateAiSubtaskJsonMeta();
   if (jsonInput) {
     jsonInput.focus();
@@ -1263,7 +1276,7 @@ function resetAiSubtaskStep2Fields() {
   if (els.promptCopyHint) els.promptCopyHint.textContent = "";
   if (els.step2Parent) els.step2Parent.textContent = "";
   if (els.jsonInput) els.jsonInput.value = "";
-  if (els.result) els.result.innerHTML = "";
+  clearAiSubtaskValidationResult();
   updateAiSubtaskJsonMeta();
 }
 
