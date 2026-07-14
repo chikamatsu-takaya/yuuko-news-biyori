@@ -66,6 +66,35 @@ test("UI連携: JSON全体の上限超過で失敗（TOO_LARGE）", () => {
   assert.ok(hasCode(validateAiSubtaskImport(text), ERROR_CODES.TOO_LARGE));
 });
 
+test("UI連携: 許可11項目すべてを持つ正常JSONは成功し、value.tasks に11項目が欠落なく残る（プレビュー表示元）", () => {
+  // 読み取り専用プレビューは validation.value.tasks の各フィールドを表示する。
+  // scope / outOfScope / notes / verificationCommands 等が黙って落ちないことをデータレベルで確認する。
+  const child = {
+    title: "子タスク",
+    purpose: "目的",
+    splitReason: "分割理由",
+    scope: ["対象1", "対象2"],
+    outOfScope: ["非対象1"],
+    doneWhen: ["完了条件1"],
+    notes: ["メモ1"],
+    implementationPrompt: "実装指示",
+    reviewPoints: ["観点1"],
+    reviewPrompt: "レビュー依頼",
+    verificationCommands: ["pnpm lint", "pnpm build"],
+  };
+  const r = validateAiSubtaskImport(json(validObject({ tasks: [child] })));
+  assert.equal(r.ok, true);
+  const t = r.value.tasks[0];
+  for (const key of Object.keys(child)) {
+    assert.ok(key in t, `value に ${key} が残る`);
+  }
+  // 配列項目の内容が保持される（切り詰め・除外されない）。
+  assert.deepEqual(t.scope, ["対象1", "対象2"]);
+  assert.deepEqual(t.outOfScope, ["非対象1"]);
+  assert.deepEqual(t.notes, ["メモ1"]);
+  assert.deepEqual(t.verificationCommands, ["pnpm lint", "pnpm build"]);
+});
+
 test("UI連携: 失敗時に入力を自動修正しない（value を返さず errors を返す・入力文字列は不変）", () => {
   const input = json(validObject({ schemaVersion: 2 }));
   const r = validateAiSubtaskImport(input);

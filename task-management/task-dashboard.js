@@ -1276,26 +1276,40 @@ function renderAiSubtaskValidationResult(validation) {
       value.splitSummary != null
         ? `<p class="ai-subtask-result-summary"><strong>splitSummary:</strong> ${escapeHtml(String(value.splitSummary))}</p>`
         : "";
+    // 描画補助（すべて escapeHtml 済みの文字列を返す・URL自動リンクなし・値は実行しない）。
+    // 文字列配列を「ラベル（N件）:」＋箇条書きにする（空配列は 0件 とだけ表示）。
+    const arrayField = (label, arr) => {
+      const items = Array.isArray(arr) ? arr : [];
+      const list = items.length
+        ? `<ul class="ai-subtask-sublist">${items.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+        : "";
+      return `<p class="ai-subtask-result-meta">${escapeHtml(label)}（${items.length}件）:</p>${list}`;
+    };
+    // 通常テキスト項目（未設定は「（未設定）」）。
+    const scalarField = (label, value) => {
+      const v = value != null && String(value).trim() !== "" ? escapeHtml(String(value)) : "（未設定）";
+      return `<p class="ai-subtask-result-meta">${escapeHtml(label)}: ${v}</p>`;
+    };
+    // 長文（implementationPrompt / reviewPrompt）は details で折りたたみ＋スクロール。
+    const details = (label, text) =>
+      text != null && String(text).trim() !== ""
+        ? `<details class="ai-subtask-result-details"><summary>${escapeHtml(label)}</summary><pre class="ai-subtask-result-pre">${escapeHtml(String(text))}</pre></details>`
+        : "";
+
     const taskItems = tasks
       .map((t, index) => {
-        const title = escapeHtml(String(t.title ?? ""));
-        const purpose = t.purpose != null && String(t.purpose).trim() !== "" ? escapeHtml(String(t.purpose)) : "（未設定）";
-        const doneWhen = Array.isArray(t.doneWhen) ? t.doneWhen : [];
-        const reviewPoints = Array.isArray(t.reviewPoints) ? t.reviewPoints : [];
-        const listOf = (arr) =>
-          arr.length
-            ? `<ul class="ai-subtask-sublist">${arr.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
-            : "";
-        const details = (label, text) =>
-          text != null && String(text).trim() !== ""
-            ? `<details class="ai-subtask-result-details"><summary>${escapeHtml(label)}</summary><pre class="ai-subtask-result-pre">${escapeHtml(String(text))}</pre></details>`
-            : "";
+        // 許可11項目をすべて確認できるように表示する（読み取り専用）。
         return `
           <li class="ai-subtask-result-task">
-            <p class="ai-subtask-result-task-title"><strong>#${index + 1} ${title}</strong></p>
-            <p class="ai-subtask-result-meta">purpose: ${purpose}</p>
-            <p class="ai-subtask-result-meta">doneWhen（${doneWhen.length}件）:</p>${listOf(doneWhen)}
-            <p class="ai-subtask-result-meta">reviewPoints（${reviewPoints.length}件）:</p>${listOf(reviewPoints)}
+            <p class="ai-subtask-result-task-title"><strong>#${index + 1} ${escapeHtml(String(t.title ?? ""))}</strong></p>
+            ${scalarField("purpose", t.purpose)}
+            ${scalarField("splitReason", t.splitReason)}
+            ${arrayField("scope", t.scope)}
+            ${arrayField("outOfScope", t.outOfScope)}
+            ${arrayField("doneWhen", t.doneWhen)}
+            ${arrayField("notes", t.notes)}
+            ${arrayField("reviewPoints", t.reviewPoints)}
+            ${arrayField("verificationCommands", t.verificationCommands)}
             ${details("implementationPrompt", t.implementationPrompt)}
             ${details("reviewPrompt", t.reviewPrompt)}
           </li>`;

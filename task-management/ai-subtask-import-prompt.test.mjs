@@ -67,6 +67,26 @@ test("tasks は 1〜20 件である旨を含む（バリデータの上限を再
   assert.match(p, /tasks は1件以上20件以下/);
 });
 
+test("purpose の制約文が LIMITS.PURPOSE_MAX を使用する", () => {
+  const p = buildAiSubtaskImportPrompt(parentTask());
+  assert.ok(p.includes(`- purpose は${LIMITS.PURPOSE_MAX}文字以内。`));
+});
+
+test("splitReason の制約文が LIMITS.SPLIT_REASON_MAX を使用する", () => {
+  const p = buildAiSubtaskImportPrompt(parentTask());
+  assert.ok(p.includes(`- splitReason は${LIMITS.SPLIT_REASON_MAX}文字以内。`));
+});
+
+test("purpose と splitReason は別々の定数から制約文を生成する（値が異なっても各々正しい）", () => {
+  // 定数を差し替え（PURPOSE_MAX と SPLIT_REASON_MAX を異なる値に）。
+  const limits = { ...LIMITS, PURPOSE_MAX: 111, SPLIT_REASON_MAX: 222 };
+  const p = buildAiSubtaskImportPrompt(parentTask(), limits);
+  assert.ok(p.includes("- purpose は111文字以内。"), "purpose は PURPOSE_MAX 由来");
+  assert.ok(p.includes("- splitReason は222文字以内。"), "splitReason は SPLIT_REASON_MAX 由来");
+  // 取り違え（両方同じ値）になっていないこと。
+  assert.ok(!p.includes("- splitReason は111文字以内。"), "splitReason に PURPOSE_MAX を使っていない");
+});
+
 test("JSON以外を返さない・コードフェンスを付けない旨を含む", () => {
   const p = buildAiSubtaskImportPrompt(parentTask());
   assert.ok(p.includes("JSONのみ") || p.includes("JSONだけ"), "JSONのみ返す指示");

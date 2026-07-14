@@ -43,10 +43,13 @@ function listLines(label, value) {
 
 /**
  * 固定した親タスクから、AIへ渡すプロンプト（プレーンテキスト）を生成する。
+ * 制約値はバリデータの LIMITS を正本に使う（数値の直書きはしない）。
+ * limits は既定で LIMITS。テストで各制約が対応する定数から生成されることを検証するため差し替え可能にしている。
  * @param {object} parentTask 画面用モデルの親タスク（text/branch 等のキー別名に対応）
+ * @param {typeof LIMITS} [limits] 制約定数（既定は既存バリデータの LIMITS）
  * @returns {string} プロンプト全文
  */
-export function buildAiSubtaskImportPrompt(parentTask) {
+export function buildAiSubtaskImportPrompt(parentTask, limits = LIMITS) {
   const task = parentTask ?? {};
 
   // 親情報（キー別名を吸収して取得）。
@@ -124,11 +127,12 @@ export function buildAiSubtaskImportPrompt(parentTask) {
     `次のシステム項目やその他のキーは出力しないでください（許可された11個以外は一切出力しない）: ${forbiddenFields}`,
     "",
     "制約:",
-    `- tasks は${LIMITS.MIN_TASKS}件以上${LIMITS.MAX_TASKS}件以下。`,
-    `- title は${LIMITS.TITLE_MAX}文字以内。`,
-    `- purpose / splitReason は各${LIMITS.PURPOSE_MAX}文字以内。`,
-    `- implementationPrompt / reviewPrompt は各${LIMITS.PROMPT_MAX}文字以内。`,
-    `- 配列（scope / outOfScope / doneWhen / notes / reviewPoints / verificationCommands）は各${LIMITS.ARRAY_MAX_ITEMS}要素以内・各要素${LIMITS.ARRAY_ELEMENT_MAX}文字以内。`,
+    `- tasks は${limits.MIN_TASKS}件以上${limits.MAX_TASKS}件以下。`,
+    `- title は${limits.TITLE_MAX}文字以内。`,
+    `- purpose は${limits.PURPOSE_MAX}文字以内。`,
+    `- splitReason は${limits.SPLIT_REASON_MAX}文字以内。`,
+    `- implementationPrompt / reviewPrompt は各${limits.PROMPT_MAX}文字以内。`,
+    `- 配列（scope / outOfScope / doneWhen / notes / reviewPoints / verificationCommands）は各${limits.ARRAY_MAX_ITEMS}要素以内・各要素${limits.ARRAY_ELEMENT_MAX}文字以内。`,
     "- 1つの子タスクが大きくなりすぎないよう分割し、各子タスクが独立して実装・レビュー・確認できる粒度にする。",
     "- タイトルだけを言い換えた重複タスクを作らない。",
     "- 親タスクの完了条件（doneWhen）を子タスク全体で満たせるようにする。",
