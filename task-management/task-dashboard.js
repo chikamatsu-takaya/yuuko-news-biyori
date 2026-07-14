@@ -1215,7 +1215,8 @@ function handleAiSubtaskValidate() {
   try {
     // 既存の純粋バリデータをそのまま呼ぶ（独自検証を作らない）。同期関数。
     const validation = aiSubtaskValidatorModule.validateAiSubtaskImport(raw);
-    result.innerHTML = renderAiSubtaskValidationResult(validation);
+    // 継承4項目（category/subcategory/priority/owner）は最新の固定親から表示する（AI生成JSONは使わない）。
+    result.innerHTML = renderAiSubtaskValidationResult(validation, aiSubtaskParentTask);
   } catch {
     // JSON全文はログに出さない（秘密情報混入・肥大化を避ける）。
     console.error("[AI分割] JSON検証で予期しないエラーが発生しました");
@@ -1266,9 +1267,38 @@ function resetAiSubtaskStep2Fields() {
   updateAiSubtaskJsonMeta();
 }
 
+// 全子タスクへ継承される共通値（category/subcategory/priority/owner）の共通欄を作る。
+// 値は最新の固定親（parentTask=aiSubtaskParentTask）のみを正本に使う（AI生成JSONは使わない）。
+// 親未設定なら空文字を返して欄を出さない。全値 escapeHtml・URL自動リンクなし。
+function renderAiSubtaskInheritedBlock(parentTask) {
+  if (!parentTask) {
+    return "";
+  }
+  const rows = [
+    ["category", parentTask.sectionTitle],
+    ["subcategory", parentTask.subsectionTitle],
+    ["priority", parentTask.priority],
+    ["owner", parentTask.owner],
+  ];
+  const items = rows
+    .map(([label, value]) => {
+      const v = String(value ?? "").trim();
+      return `<li><strong>${escapeHtml(label)}:</strong> ${v ? escapeHtml(v) : "（未設定）"}</li>`;
+    })
+    .join("");
+  return `
+    <div class="ai-subtask-inherited">
+      <p class="ai-subtask-inherited-title">全子タスクに継承される値（固定した親タスク由来）</p>
+      <ul class="task-modal-list">${items}</ul>
+    </div>
+  `;
+}
+
 // 検証結果を描画する（成功=読み取り専用の確認表示 / 失敗=path付きエラー一覧）。
 // 動的値はすべて escapeHtml してから埋め込む（HTML実行・注入を防ぐ）。
-function renderAiSubtaskValidationResult(validation) {
+// parentTask（最新の固定親）が渡されたときは、全子タスクへ継承される category/subcategory/priority/owner を
+// 上部の共通欄に1回だけ表示する（AI生成JSONやvalidation.valueには一切書き戻さない・表示のみ）。
+function renderAiSubtaskValidationResult(validation, parentTask) {
   if (validation.ok) {
     const value = validation.value ?? {};
     const tasks = Array.isArray(value.tasks) ? value.tasks : [];
@@ -1276,6 +1306,8 @@ function renderAiSubtaskValidationResult(validation) {
       value.splitSummary != null
         ? `<p class="ai-subtask-result-summary"><strong>splitSummary:</strong> ${escapeHtml(String(value.splitSummary))}</p>`
         : "";
+    // 継承される共通値は最新の固定親（aiSubtaskParentTask）を正本にする。親未設定なら欄を出さない。
+    const inheritedBlock = renderAiSubtaskInheritedBlock(parentTask);
     // 描画補助（すべて escapeHtml 済みの文字列を返す・URL自動リンクなし・値は実行しない）。
     // 文字列配列を「ラベル（N件）:」＋箇条書きにする（空配列は 0件 とだけ表示）。
     const arrayField = (label, arr) => {
@@ -1317,6 +1349,7 @@ function renderAiSubtaskValidationResult(validation) {
       .join("");
     return `
       <p class="ai-subtask-result-ok">検証成功：子タスク ${tasks.length} 件</p>
+      ${inheritedBlock}
       ${summaryLine}
       <ul class="ai-subtask-result-list">${taskItems}</ul>
       <p class="ai-subtask-note">読み取り専用の確認表示です（子タスクの編集・除外・並べ替え・登録は後続PR）。</p>

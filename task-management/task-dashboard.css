@@ -1598,6 +1598,22 @@ p.markdown-sync-id {
   font-weight: 700;
 }
 
+/* 検証成功プレビュー上部の「全子タスクに継承される値」共通欄 */
+.ai-subtask-inherited {
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  padding: 8px 12px;
+}
+
+.ai-subtask-inherited-title {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
 .ai-subtask-result-ng {
   margin: 0 0 8px;
   color: var(--red);
