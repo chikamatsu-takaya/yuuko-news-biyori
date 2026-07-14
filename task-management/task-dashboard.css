@@ -1666,3 +1666,166 @@ p.markdown-sync-id {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 未再検証などの注記（エラー赤ではない中立色） */
+.ai-subtask-result-note {
+  margin: 0;
+  color: var(--amber);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+/* ステップ2: 編集可能プレビュー */
+.ai-subtask-preview:empty {
+  display: none;
+}
+
+.ai-subtask-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ai-subtask-preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-preview-status {
+  margin: 0;
+  font-weight: 700;
+  font-size: 0.84rem;
+}
+
+.ai-subtask-preview-status.is-validated,
+.ai-subtask-preview-status.is-revalidated-ok {
+  color: var(--green, #7bd88f);
+}
+
+.ai-subtask-preview-status.is-edited {
+  color: var(--amber);
+}
+
+.ai-subtask-preview-status.is-revalidated-ng {
+  color: var(--red);
+}
+
+.ai-subtask-preview-counts {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.ai-subtask-preview-summary {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.ai-subtask-preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-subtask-preview-item.is-excluded {
+  opacity: 0.6;
+}
+
+.ai-subtask-preview-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 6px 10px;
+}
+
+.ai-subtask-preview-item.is-excluded .ai-subtask-preview-card {
+  border-style: dashed;
+}
+
+.ai-subtask-preview-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+
+.ai-subtask-preview-order {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.ai-subtask-preview-item-title {
+  flex: 1 1 auto;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-subtask-preview-state {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.ai-subtask-preview-item.is-excluded .ai-subtask-preview-state {
+  color: var(--red);
+}
+
+.ai-subtask-preview-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ai-subtask-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-include-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-row > span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+}
+
+.ai-subtask-edit-field {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  color: inherit;
+  padding: 6px 8px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-array {
+  resize: vertical;
+  min-height: 56px;
+  font-family: var(--mono);
+  white-space: pre;
+}
