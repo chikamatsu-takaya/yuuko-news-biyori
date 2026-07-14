@@ -148,6 +148,37 @@ test("編集: taskCode / status 等のシステム項目を追加できない", 
   }
 });
 
+test("編集: implementationPrompt / reviewPrompt に改行を含む文字列を設定でき、改行が保持される", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask()]));
+  const id = state.items[0].previewId;
+  const multi = "1行目\n2行目\n\n4行目";
+  let next = setAiSubtaskPreviewField(state, id, "implementationPrompt", multi);
+  next = setAiSubtaskPreviewField(next, id, "reviewPrompt", multi);
+  assert.equal(next.items[0].task.implementationPrompt, multi, "implementationPrompt の改行が保持される");
+  assert.equal(next.items[0].task.reviewPrompt, multi, "reviewPrompt の改行が保持される");
+});
+
+test("再検証用: implementationPrompt / reviewPrompt の改行が保持される", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask()]));
+  const id = state.items[0].previewId;
+  const multi = "手順1\n手順2\n手順3";
+  let next = setAiSubtaskPreviewField(state, id, "implementationPrompt", multi);
+  next = setAiSubtaskPreviewField(next, id, "reviewPrompt", multi);
+  const input = toAiSubtaskRevalidationInput(next);
+  assert.equal(input.tasks[0].implementationPrompt, multi, "再検証データでも改行保持");
+  assert.equal(input.tasks[0].reviewPrompt, multi, "再検証データでも改行保持");
+});
+
+test("編集: prompt 改行編集は元 state / validation.value を破壊しない", () => {
+  const value = validatedValue([fullTask()]);
+  const snapshot = JSON.parse(JSON.stringify(value));
+  const state = createAiSubtaskPreviewState(value);
+  const before = JSON.parse(JSON.stringify(state.items[0].task));
+  setAiSubtaskPreviewField(state, state.items[0].previewId, "implementationPrompt", "a\nb");
+  assert.deepEqual(state.items[0].task, before, "元 item.task は不変");
+  assert.deepEqual(value, snapshot, "validation.value は不変");
+});
+
 test("編集: 元の task を破壊しない", () => {
   const state = createAiSubtaskPreviewState(validatedValue([fullTask()]));
   const id = state.items[0].previewId;

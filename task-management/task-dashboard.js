@@ -1478,6 +1478,18 @@ function renderAiSubtaskPreviewCard(item, index, total) {
           data-kind="string" value="${value}" autocomplete="off" spellcheck="false" />
       </label>`;
   };
+  // 長文の文字列項目（implementationPrompt / reviewPrompt）は textarea で改行を保持して編集する。
+  // data-kind="string" / ai-subtask-edit-field は input と同じにして、既存の input イベント処理を再利用する。
+  // textarea 本体に既存の改行をそのまま（escapeHtml して）表示する。編集後の改行は削除・単一行化しない。
+  const promptField = (field) => {
+    const text = escapeHtml(String(t[field] ?? ""));
+    return `
+      <label class="ai-subtask-edit-row">
+        <span>${escapeHtml(field)}</span>
+        <textarea class="ai-subtask-edit-field ai-subtask-edit-prompt" data-preview-id="${id}" data-field="${escapeHtml(field)}"
+          data-kind="string" rows="6" spellcheck="false">${text}</textarea>
+      </label>`;
+  };
   // 配列項目（1行1要素の textarea）。値は arrayToLines で複数行テキスト化してエスケープ。
   const arrayField = (field) => {
     const text = escapeHtml(mod.arrayToLines(Array.isArray(t[field]) ? t[field] : []));
@@ -1517,8 +1529,8 @@ function renderAiSubtaskPreviewCard(item, index, total) {
           ${arrayField("notes")}
           ${arrayField("reviewPoints")}
           ${arrayField("verificationCommands")}
-          ${stringField("implementationPrompt")}
-          ${stringField("reviewPrompt")}
+          ${promptField("implementationPrompt")}
+          ${promptField("reviewPrompt")}
         </div>
       </details>
     </li>`;

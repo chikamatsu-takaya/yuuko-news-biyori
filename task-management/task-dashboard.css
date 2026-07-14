@@ -1829,3 +1829,13 @@ p.markdown-sync-id {
   font-family: var(--mono);
   white-space: pre;
 }
+
+/* 長文プロンプト項目（implementationPrompt / reviewPrompt）は複数行を確認できる高さで縦リサイズ可 */
+.ai-subtask-edit-prompt {
+  resize: vertical;
+  min-height: 120px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+}
