@@ -934,7 +934,14 @@ const aiSubtaskModalElements = {
   validateButton: null,
   result: null,
   preview: null,
+  cancelButton: null,
+  modal: null,
+  dragHandle: null,
 };
+
+// AI分割モーダルの移動位置専用の状態（他のプレビュー/登録状態とは混ぜない）。
+// x/y は中央基準の translate オフセット（px）。開くたびに 0（中央）へ戻す。
+const aiSubtaskDragState = { x: 0, y: 0, dragging: false, pointerId: null, startX: 0, startY: 0, baseX: 0, baseY: 0 };
 
 // 再取得した最新の親タスクオブジェクト（「次へ」の進行可否の正本）と、生成したプロンプト。
 let aiSubtaskParentTask = null;
@@ -1009,7 +1016,7 @@ function setupAiSubtaskImportModal() {
   overlay.hidden = true;
   overlay.innerHTML = `
     <div class="task-modal ai-subtask-modal" role="dialog" aria-modal="true" aria-labelledby="aiSubtaskModalTitle">
-      <h2 id="aiSubtaskModalTitle">AIで分割タスクを追加</h2>
+      <h2 id="aiSubtaskModalTitle" class="ai-subtask-drag-handle" title="上部をドラッグして移動できます">AIで分割タスクを追加<span class="ai-subtask-drag-hint">⠿ ドラッグで移動</span></h2>
 
       <section id="aiSubtaskStep1" class="ai-subtask-step-panel">
         <p class="ai-subtask-step">ステップ 1 / 2：分割元の親タスク（このタスクで固定）</p>
@@ -1073,19 +1080,28 @@ function setupAiSubtaskImportModal() {
   els.validateButton = overlay.querySelector("#aiSubtaskValidate");
   els.result = overlay.querySelector("#aiSubtaskResult");
   els.preview = overlay.querySelector("#aiSubtaskPreview");
+  els.modal = overlay.querySelector(".ai-subtask-modal");
+  els.dragHandle = overlay.querySelector(".ai-subtask-drag-handle");
 
-  // 閉じる / 背景クリック / Escape で閉じる（Firestore は変更しない）。
-  overlay.querySelector("#aiSubtaskCancel").addEventListener("click", () => closeAiSubtaskImportModal());
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) {
-      closeAiSubtaskImportModal();
+  // 閉じるボタンで閉じる（Firestore は変更しない）。背景（オーバーレイ）クリックでは閉じない。
+  els.cancelButton = overlay.querySelector("#aiSubtaskCancel");
+  els.cancelButton.addEventListener("click", () => closeAiSubtaskImportModal());
+
+  // Escape で閉じる: overlay ではなく document へ1度だけ登録する。
+  // プレビュー再描画で focus が body へ移ると overlay の keydown に届かないため（Escape が効かない原因）。
+  // モーダル表示中（overlay 非 hidden）だけ処理し、他画面の Escape 操作は妨げない。閉じるは既存関数へ集約。
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
     }
-  });
-  overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      closeAiSubtaskImportModal();
+    if (!aiSubtaskModalElements.overlay || aiSubtaskModalElements.overlay.hidden) {
+      return; // モーダル非表示時は何もしない。
     }
+    closeAiSubtaskImportModal();
   });
+
+  // ダイアログ本体をヘッダー（h2）ドラッグで移動できるようにする（Pointer Events・外部ライブラリなし）。
+  setupAiSubtaskModalDrag();
 
   // 「次へ」→ プロンプト生成してステップ2へ。固定親が無ければ進めない。
   els.nextButton.addEventListener("click", () => {
@@ -1159,6 +1175,119 @@ function showAiSubtaskStep(step) {
   if (step2Panel) step2Panel.hidden = step !== 2;
 }
 
+// ---- モーダルのドラッグ移動（ヘッダーのみ・Pointer Events・外部ライブラリなし）----
+
+// translate オフセット(nx,ny)を viewport 内へ clamp して modal へ適用する。
+// 通常サイズの viewport では、ヘッダーもフッター（閉じるボタン）も含めダイアログ全体を画面内へ収める。
+// ダイアログが viewport より大きい場合は、左上（＝ヘッダー）を優先して画面内に残す（.task-modal の
+// max-height/overflow-y により内部スクロールで閉じるボタンへ到達できる）。
+function applyAiSubtaskModalPosition(nx, ny) {
+  const modal = aiSubtaskModalElements.modal;
+  if (!modal) {
+    return;
+  }
+  const rect = modal.getBoundingClientRect();
+  // 現在の transform を差し引いて、未移動時（中央）の左上位置を求める。
+  const naturalLeft = rect.left - aiSubtaskDragState.x;
+  const naturalTop = rect.top - aiSubtaskDragState.y;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const edge = 8; // 画面端に残す余白
+  // ダイアログ全体を [edge, viewport-edge] に収める translate 範囲。
+  // translatedLeft = naturalLeft + nx を [edge, vw-edge-width] に収める。
+  const minX = edge - naturalLeft;
+  const maxX = vw - edge - naturalLeft - rect.width;
+  const minY = edge - naturalTop;
+  const maxY = vh - edge - naturalTop - rect.height;
+  // 通常は [min,max] へ clamp。ダイアログが viewport より大きく max<min になる場合は左上(min)を優先。
+  const clampedX = maxX >= minX ? Math.min(Math.max(nx, minX), maxX) : minX;
+  const clampedY = maxY >= minY ? Math.min(Math.max(ny, minY), maxY) : minY;
+  aiSubtaskDragState.x = clampedX;
+  aiSubtaskDragState.y = clampedY;
+  modal.style.transform = clampedX === 0 && clampedY === 0 ? "" : `translate(${clampedX}px, ${clampedY}px)`;
+}
+
+// 位置を中央（オフセット0）へ戻す。開くとき・閉じるときに呼ぶ。
+// ドラッグ中に閉じた場合に備え、Pointer Capture と is-dragging クラスも確実に後始末する。
+function resetAiSubtaskModalPosition() {
+  // pointerId を null へ戻す前に元の値を保持し、残っている Pointer Capture を解除する。
+  const pointerId = aiSubtaskDragState.pointerId;
+  const handle = aiSubtaskModalElements.dragHandle;
+  if (
+    pointerId !== null &&
+    handle &&
+    typeof handle.releasePointerCapture === "function" &&
+    handle.hasPointerCapture?.(pointerId)
+  ) {
+    handle.releasePointerCapture(pointerId);
+  }
+  handle?.classList.remove("is-dragging");
+  aiSubtaskDragState.x = 0;
+  aiSubtaskDragState.y = 0;
+  aiSubtaskDragState.dragging = false;
+  aiSubtaskDragState.pointerId = null;
+  if (aiSubtaskModalElements.modal) {
+    aiSubtaskModalElements.modal.style.transform = "";
+  }
+}
+
+// ヘッダー（h2）ドラッグの配線を1度だけ行う。
+function setupAiSubtaskModalDrag() {
+  const handle = aiSubtaskModalElements.dragHandle;
+  if (!handle) {
+    return;
+  }
+  handle.addEventListener("pointerdown", (event) => {
+    // 主ポインタ・主ボタンのみ。ハンドル内に将来ボタン等があってもドラッグ開始しない（防御）。
+    if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) {
+      return;
+    }
+    if (event.target.closest("button, input, textarea, select, a, [contenteditable]")) {
+      return;
+    }
+    aiSubtaskDragState.dragging = true;
+    aiSubtaskDragState.pointerId = event.pointerId;
+    aiSubtaskDragState.startX = event.clientX;
+    aiSubtaskDragState.startY = event.clientY;
+    aiSubtaskDragState.baseX = aiSubtaskDragState.x;
+    aiSubtaskDragState.baseY = aiSubtaskDragState.y;
+    // 以降の move/up をハンドルで受け取る（ポインタがハンドル外へ出ても追従）。
+    if (typeof handle.setPointerCapture === "function") {
+      handle.setPointerCapture(event.pointerId);
+    }
+    handle.classList.add("is-dragging");
+    event.preventDefault(); // ヘッダー文字の選択を防ぐ（最小限）
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!aiSubtaskDragState.dragging || event.pointerId !== aiSubtaskDragState.pointerId) {
+      return;
+    }
+    const dx = event.clientX - aiSubtaskDragState.startX;
+    const dy = event.clientY - aiSubtaskDragState.startY;
+    applyAiSubtaskModalPosition(aiSubtaskDragState.baseX + dx, aiSubtaskDragState.baseY + dy);
+  });
+  const endDrag = (event) => {
+    if (event.pointerId !== aiSubtaskDragState.pointerId) {
+      return;
+    }
+    aiSubtaskDragState.dragging = false;
+    aiSubtaskDragState.pointerId = null;
+    handle.classList.remove("is-dragging");
+    if (typeof handle.releasePointerCapture === "function" && handle.hasPointerCapture?.(event.pointerId)) {
+      handle.releasePointerCapture(event.pointerId);
+    }
+  };
+  handle.addEventListener("pointerup", endDrag);
+  handle.addEventListener("pointercancel", endDrag);
+
+  // ウィンドウサイズ変更時、モーダル表示中なら現在位置を再 clamp（完全に画面外へ残らないように）。
+  window.addEventListener("resize", () => {
+    if (aiSubtaskModalElements.overlay && !aiSubtaskModalElements.overlay.hidden) {
+      applyAiSubtaskModalPosition(aiSubtaskDragState.x, aiSubtaskDragState.y);
+    }
+  });
+}
+
 // 「AIで分割」ボタンの taskId から、最新の親タスク1件を再取得して固定しモーダルを開く。
 // 一覧取得時の古いデータは使わず、Firestore から tasks/{taskId} を1件再読込し、最新値で候補判定する。
 // 候補外 / 未存在 / 取得失敗のときは開かず、古いデータへフォールバックしない（読み取りのみ・書き込みなし）。
@@ -1208,6 +1337,8 @@ async function openAiSubtaskImportModal(taskId) {
   // 親が固定できているので「次へ」を活性化。
   nextButton.disabled = false;
 
+  // 開くときは中央（ドラッグ位置をリセット）。
+  resetAiSubtaskModalPosition();
   aiSubtaskModalElements.overlay.hidden = false;
   nextButton.focus();
 }
@@ -1368,6 +1499,8 @@ function resetAiSubtaskStep2Fields() {
   if (els.jsonInput) els.jsonInput.value = "";
   clearAiSubtaskValidationResult();
   updateAiSubtaskJsonMeta();
+  // 登録フラグを戻したので閉じるボタンの disabled も解除する（次に開いたときは有効な状態にする）。
+  refreshAiSubtaskCloseControls();
 }
 
 // priority の select（既存の許可値＋現在値が許可外でも失わないよう temp option を足す・§既存owner編集と同方針）。
@@ -1770,9 +1903,10 @@ async function handleAiSubtaskRegister() {
   if (!canAiSubtaskRegister() || !aiSubtaskPreviewModule || !aiSubtaskParentTask || !result) {
     return;
   }
-  // 二重クリック防止（登録中はボタンを無効化・文言変更）。
+  // 二重クリック防止（登録中は登録・閉じるボタンを無効化・文言変更）。
   aiSubtaskRegistering = true;
   refreshAiSubtaskPreviewMeta();
+  refreshAiSubtaskCloseControls();
   setLoadState("AI分割タスクを登録しています...", false);
 
   // 登録用スナップショット（included・表示順・UIメタ除去＋編集後の継承4項目）と固定親の docId。
@@ -1795,12 +1929,15 @@ async function handleAiSubtaskRegister() {
     setLoadState(`AI分割タスクの登録に失敗しました: ${error?.message ?? "不明なエラー"}`, true);
     aiSubtaskRegistering = false;
     refreshAiSubtaskPreviewMeta();
+    refreshAiSubtaskCloseControls();
     return;
   }
 
   // --- ここへ来た時点で Firestore 登録は commit 済み --- 以降の失敗を「未変更」と表示しない・再登録させない。
   aiSubtaskRegistrationCommitted = true;
   aiSubtaskRegistering = false;
+  // 登録は終端したので閉じる操作を再び許可する（commit済で一覧再取得に失敗しても利用者が閉じられる）。
+  refreshAiSubtaskCloseControls();
 
   // --- 2) commit 後の再取得・再描画 --- ここでの失敗は「登録済みだが一覧更新失敗」扱い。
   try {
@@ -1880,10 +2017,24 @@ function renderAiSubtaskParentSummary(task) {
   return `<p class="ai-subtask-summary-title">分割元の親タスク</p><ul class="task-modal-list">${scalarItems}${arrayItems}</ul>`;
 }
 
+// 登録中（aiSubtaskRegistering=true）は閉じる操作を無効化するため、閉じるボタンの disabled を同期する。
+// 最終防御は closeAiSubtaskImportModal 側のガードとし、この disabled はUI上の補助に留める。
+// aiSubtaskRegistrationCommitted は閉じる可否に関与させない（commit済で一覧再取得失敗でも閉じられる）。
+function refreshAiSubtaskCloseControls() {
+  if (aiSubtaskModalElements.cancelButton) {
+    aiSubtaskModalElements.cancelButton.disabled = aiSubtaskRegistering === true;
+  }
+}
+
 // モーダルを閉じる。閉じたら状態は破棄する（固定親オブジェクト・プロンプト・JSON入力・
 // 検証結果・コピー通知・ステップ）。再度開いたときは openAiSubtaskImportModal が最新親を再取得する。
 // Firestore は変更しない。
+// 登録処理中（aiSubtaskRegistering=true）は、閉じるボタン・Escape・その他どの経路でも閉じない
+// （全 close 経路のガードをこの1関数へ集約する。最終防御）。
 function closeAiSubtaskImportModal() {
+  if (aiSubtaskRegistering === true) {
+    return;
+  }
   aiSubtaskParentTask = null;
   resetAiSubtaskStep2Fields();
   const { summary, warning, nextButton, overlay } = aiSubtaskModalElements;
@@ -1899,6 +2050,8 @@ function closeAiSubtaskImportModal() {
     nextButton.disabled = true;
   }
   showAiSubtaskStep(1);
+  // 位置を中央へ戻す（次に開いたときは初期位置）。
+  resetAiSubtaskModalPosition();
   if (overlay) {
     overlay.hidden = true;
   }
