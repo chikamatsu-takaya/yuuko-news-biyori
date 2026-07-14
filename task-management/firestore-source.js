@@ -38,6 +38,13 @@ import { firebaseConfig } from "./firebase-config.js";
 // AI分割タスク取込: 親候補判定（§3.10）。カード描画時に同期利用できるよう、変換時に判定して
 // 各タスクへ aiSubtaskEligible を持たせる（判定の正本は本モジュールに一本化する）。
 import { isEligibleAiSubtaskParent } from "./ai-subtask-import-parent.mjs";
+// AI分割タスク一括登録: 登録前最終検証・保存値組み立ての純粋関数（Firestore依存値は本層で付与）。
+import {
+  validateAiSubtaskRegistrationSnapshot,
+  validateAiSubtaskRegistrationParent,
+  buildAiSubtaskChildPayloads,
+  buildAiSubtaskParentUpdate,
+} from "./ai-subtask-import-registration.mjs";
 
 // Firebase アプリは多重初期化を避けるためモジュール内で1度だけ生成する。
 let appInstance = null;
@@ -957,4 +964,98 @@ export async function addTaskForPoc(input) {
   const created = await addDoc(collection(db, "tasks"), newTask);
   console.log("[Firestore POC] added task", { id: created.id, title, category, status });
   return created.id;
+}
+
+/**
+ * archived を含む全 tasks の最大 order を返す（無ければ 0）。
+ * AI分割の一括登録で baseOrder として使う（子は baseOrder + 10*(i+1)）。
+ * getNextOrder（最大+10）とは別責務: こちらは「素の最大値」を返す。
+ */
+async function getMaxTaskOrder(db) {
+  const snapshot = await getDocs(collection(db, "tasks"));
+  let maxOrder = 0;
+  snapshot.docs.forEach((doc) => {
+    const value = doc.data().order;
+    if (typeof value === "number" && Number.isFinite(value) && value > maxOrder) {
+      maxOrder = value;
+    }
+  });
+  return maxOrder;
+}
+
+/**
+ * AI分割タスクの一括登録（runTransaction・全件成功/全件失敗）。
+ * 画面で編集・再検証済みの登録用スナップショットを、親タスクの管理フィールド更新と同一トランザクションで登録する。
+ *
+ * 手順（§6 / §7）:
+ * 1. 書き込み層で登録用スナップショットを再検証する（UI で検証済みでも必ず再検証）。失敗なら書き込まない。
+ * 2. importBatchId（ai-${crypto.randomUUID()}）を「トランザクション開始前に1回だけ」生成する。
+ * 3. baseOrder（既存最大 order）をトランザクション外で1回取得する。
+ * 4. 登録対象数だけ子タスクの DocumentReference をトランザクション外で採番する（再試行でも docId 不変）。
+ * 5. runTransaction 内で親を再取得（transaction.get）→ 登録可否を再検証 → 親 update と全子 set を原子的に行う。
+ * 6. createdAt/updatedAt は書き込み層で serverTimestamp() を付与する。
+ *
+ * @param {{ parentTaskId: string, snapshot: object }} params
+ *   parentTaskId は画面で固定した親タスクの Firestore docId（JSON/編集からは受け取らない）。
+ * @returns {Promise<{ importBatchId: string, createdCount: number, childIds: string[] }>}
+ */
+export async function importAiSubtasksForPoc({ parentTaskId, snapshot }) {
+  if (!parentTaskId) {
+    throw new Error("親タスクIDが指定されていません。");
+  }
+  // 1. 登録前の最終検証（AI JSON部分＋継承値）。失敗なら runTransaction を始めない。
+  const check = validateAiSubtaskRegistrationSnapshot(snapshot);
+  if (!check.ok) {
+    throw new Error("登録用データの再検証に失敗しました。編集内容を再検証してから登録してください。");
+  }
+
+  const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+  const childCount = tasks.length;
+
+  // 2. importBatchId をトランザクション開始前に1回だけ生成（再試行でも同じ値を使う）。
+  if (typeof crypto === "undefined" || typeof crypto.randomUUID !== "function") {
+    // 独自代替は勝手に実装せず、報告のためエラーにする。
+    throw new Error("この環境では crypto.randomUUID が使えないため importBatchId を生成できません。");
+  }
+  const importBatchId = `ai-${crypto.randomUUID()}`;
+
+  const db = getFirestore(getApp());
+
+  // 3. baseOrder（既存最大 order）をトランザクション外で1回取得。
+  const baseOrder = await getMaxTaskOrder(db);
+
+  // 4. 子タスクの DocumentReference をトランザクション外で採番（再試行でも docId 不変）。
+  const childRefs = tasks.map(() => firestoreDoc(collection(db, "tasks")));
+
+  // 保存値を組み立て（純粋関数・Firestore依存値なし）。createdAt/updatedAt は下で付与する。
+  const childPayloads = buildAiSubtaskChildPayloads({ snapshot, parentTaskId, importBatchId, baseOrder });
+  const parentUpdate = buildAiSubtaskParentUpdate(childCount);
+  const parentRef = firestoreDoc(db, "tasks", parentTaskId);
+
+  // 5. 親再取得→再検証→親update＋全子set を同一トランザクションで（全件成功/全件失敗）。
+  await runTransaction(db, async (transaction) => {
+    const parentSnap = await transaction.get(parentRef);
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentCheck = validateAiSubtaskRegistrationParent(parentSnap.data() ?? {});
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // 親の管理フィールド更新（status/branchName/issuePr 等の既存値は触れない）。
+    transaction.update(parentRef, { ...parentUpdate, updatedAt: serverTimestamp() });
+    // 全子タスクを同一トランザクションで登録（createdAt/updatedAt を付与）。
+    childRefs.forEach((ref, index) => {
+      transaction.set(ref, {
+        ...childPayloads[index],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  });
+
+  // commit 成功後にのみ結果を返す（DocumentSnapshot/内部参照は返さない）。
+  const childIds = childRefs.map((ref) => ref.id);
+  console.log("[Firestore POC] imported ai-subtasks", { importBatchId, createdCount: childCount, parentTaskId });
+  return { importBatchId, createdCount: childCount, childIds };
 }

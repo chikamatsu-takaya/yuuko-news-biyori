@@ -947,6 +947,11 @@ let aiSubtaskPreviewState = null;
 // プレビューの検証状態: "validated"（初回検証済み）/ "edited"（編集後・未再検証）/
 // "revalidated-ok"（再検証成功）/ "revalidated-ng"（再検証失敗）。null=プレビューなし。
 let aiSubtaskPreviewStatus = null;
+// Firestore 一括登録の進行中フラグ（同一画面内の連続クリック防止）。
+let aiSubtaskRegistering = false;
+// 一括登録の commit が成功したフラグ。commit 後の再取得・再描画に失敗しても、登録済みの内容を
+// 再登録させないためのガード（true の間は登録ボタンを有効化しない）。
+let aiSubtaskRegistrationCommitted = false;
 // 固定親が「Doing かつ branchName 設定済み」で分割親警告が必要か。
 // 判定は ai-subtask-import-parent.mjs の shouldWarnSplitParentAutoUpdate をモーダルを開くときに1度だけ行い、
 // その結果をここへ保持して、ステップ1の注意と成功プレビューの警告で共有する（判定ロジックを重複させない）。
@@ -1130,7 +1135,7 @@ function setupAiSubtaskImportModal() {
       handleAiSubtaskInheritedFieldInput(inherited);
     }
   });
-  // 上下移動・再検証（click）。
+  // 上下移動・再検証・一括登録（click）。
   els.preview.addEventListener("click", (event) => {
     const move = event.target.closest(".ai-subtask-move");
     if (move) {
@@ -1139,6 +1144,10 @@ function setupAiSubtaskImportModal() {
     }
     if (event.target.closest("#aiSubtaskRevalidate")) {
       handleAiSubtaskRevalidate();
+      return;
+    }
+    if (event.target.closest("#aiSubtaskRegister")) {
+      void handleAiSubtaskRegister();
     }
   });
 }
@@ -1349,6 +1358,8 @@ function resetAiSubtaskStep2Fields() {
   const els = aiSubtaskModalElements;
   aiSubtaskPromptText = "";
   aiSubtaskValidating = false;
+  aiSubtaskRegistering = false;
+  aiSubtaskRegistrationCommitted = false;
   // 分割親警告フラグも初期化する（open 時に最新親で再判定して設定し直す）。
   aiSubtaskParentWarnSplit = false;
   if (els.promptText) els.promptText.textContent = "";
@@ -1487,6 +1498,12 @@ function refreshAiSubtaskPreviewMeta() {
   if (countsEl) {
     countsEl.textContent = aiSubtaskPreviewCountsText();
   }
+  // 登録ボタンの有効/文言も更新（編集・除外・並べ替え・継承値変更で無効へ戻す）。
+  const registerEl = preview.querySelector("#aiSubtaskRegister");
+  if (registerEl) {
+    registerEl.disabled = !canAiSubtaskRegister();
+    registerEl.textContent = aiSubtaskRegisterLabel();
+  }
 }
 
 // 編集・除外・並べ替えで内容が変わったら「編集後・未再検証」へ戻す。
@@ -1617,10 +1634,28 @@ function renderAiSubtaskPreview() {
     <ul class="ai-subtask-preview-list">${cards}</ul>
     <div class="ai-subtask-step-actions">
       <button id="aiSubtaskRevalidate" type="button" class="button primary compact">編集内容を再検証</button>
-      <button type="button" class="button compact" disabled title="Firestore登録は後続PRで実装します">Firestoreへ一括登録（後続PRで実装）</button>
+      <button id="aiSubtaskRegister" type="button" class="button primary compact" ${canAiSubtaskRegister() ? "" : "disabled"}>${escapeHtml(aiSubtaskRegisterLabel())}</button>
     </div>
-    <p class="ai-subtask-note">編集・除外・並べ替えは画面上のプレビュー状態のみを変更します（Firestore登録は後続PR）。</p>
+    <p class="ai-subtask-note">「編集内容を再検証」に成功すると一括登録できます（登録は全件成功または全件失敗）。</p>
   `;
+}
+
+// Firestore 一括登録ボタンを有効化してよいか。
+// preview あり・再検証成功・登録対象1件以上・登録中でない・Firestore表示・固定親あり のときだけ有効。
+function canAiSubtaskRegister() {
+  if (!state.isFirestore || !aiSubtaskParentTask || !aiSubtaskPreviewState || !aiSubtaskPreviewModule) {
+    return false;
+  }
+  // 登録中・commit 済み（再取得失敗を含む）は再登録させない。
+  if (aiSubtaskPreviewStatus !== "revalidated-ok" || aiSubtaskRegistering || aiSubtaskRegistrationCommitted) {
+    return false;
+  }
+  return aiSubtaskPreviewModule.countAiSubtaskIncluded(aiSubtaskPreviewState) >= 1;
+}
+
+// 登録ボタンの文言（登録中は「登録中…」）。
+function aiSubtaskRegisterLabel() {
+  return aiSubtaskRegistering ? "登録中…" : "Firestoreへ一括登録";
 }
 
 // 文字列/配列項目の編集（input）: 状態だけ更新しカードは再描画しない（フォーカス維持）。
@@ -1723,6 +1758,74 @@ function renderAiSubtaskPreviewRevalidationFailure(res) {
       <ul class="ai-subtask-result-errors">${items}</ul>`;
   }
   return html;
+}
+
+// 「Firestoreへ一括登録」: 再検証成功した編集内容を runTransaction で一括登録する（全件成功/全件失敗）。
+// 書き込み処理は firestore-source.js の importAiSubtasksForPoc に委譲（親再取得・再検証・原子的登録）。
+//
+// 重要: 「runTransaction 自体の失敗」と「commit 成功後の再取得・再描画の失敗」を分離する。
+// commit 済みの場合は Firestore は変更済みなので、未登録と誤認させず・再登録もさせない。
+async function handleAiSubtaskRegister() {
+  const { result } = aiSubtaskModalElements;
+  if (!canAiSubtaskRegister() || !aiSubtaskPreviewModule || !aiSubtaskParentTask || !result) {
+    return;
+  }
+  // 二重クリック防止（登録中はボタンを無効化・文言変更）。
+  aiSubtaskRegistering = true;
+  refreshAiSubtaskPreviewMeta();
+  setLoadState("AI分割タスクを登録しています...", false);
+
+  // 登録用スナップショット（included・表示順・UIメタ除去＋編集後の継承4項目）と固定親の docId。
+  const snapshot = aiSubtaskPreviewModule.toAiSubtaskRegistrationSnapshot(aiSubtaskPreviewState);
+  const parentTaskId = aiSubtaskParentTask.firestoreId;
+
+  // --- 1) Firestore 登録（runTransaction）--- ここでの失敗は「未登録」扱い。
+  let registered;
+  let firestoreModule;
+  try {
+    firestoreModule = await import("./firestore-source.js");
+    // 親IDは画面で固定した docId のみを渡す（JSON/編集からは受け取らない）。
+    registered = await firestoreModule.importAiSubtasksForPoc({ parentTaskId, snapshot });
+  } catch (error) {
+    // runTransaction 自体の失敗 → Firestore 全件無変更。プレビュー・JSON入力を維持し、再検証後に再試行可能。
+    // JSON全文・プロンプト全文・秘密情報は出さず、概要のみ console へ。
+    console.error("[AI分割] 一括登録（runTransaction）に失敗しました");
+    aiSubtaskPreviewStatus = "revalidated-ng";
+    result.innerHTML = `<p class="ai-subtask-result-ng">一括登録に失敗しました：${escapeHtml(String(error?.message ?? "不明なエラー"))}</p><p class="ai-subtask-note">Firestore は変更されていません。原因を確認し、必要なら再検証してから登録し直してください。</p>`;
+    setLoadState(`AI分割タスクの登録に失敗しました: ${error?.message ?? "不明なエラー"}`, true);
+    aiSubtaskRegistering = false;
+    refreshAiSubtaskPreviewMeta();
+    return;
+  }
+
+  // --- ここへ来た時点で Firestore 登録は commit 済み --- 以降の失敗を「未変更」と表示しない・再登録させない。
+  aiSubtaskRegistrationCommitted = true;
+  aiSubtaskRegistering = false;
+
+  // --- 2) commit 後の再取得・再描画 --- ここでの失敗は「登録済みだが一覧更新失敗」扱い。
+  try {
+    const docs = await firestoreModule.fetchFirestoreTasksForPoc();
+    state.data = firestoreModule.firestoreToBoardModel(docs);
+    state.isFirestore = true;
+    renderDashboard();
+    setLoadState(
+      `AI分割タスクを${registered.createdCount}件登録しました。 importBatchId: ${registered.importBatchId}`,
+      false,
+    );
+    // モーダル状態をリセットして閉じる（登録済み内容は破棄・committed フラグも reset で解除）。
+    closeAiSubtaskImportModal();
+  } catch {
+    // 登録は成功済み。再取得・再描画のみ失敗 → 「未変更」とは表示せず、再読み込みを案内する。
+    // 再登録は canAiSubtaskRegister() が committed=true で無効化するため防がれる。
+    console.error("[AI分割] 登録は成功しましたが一覧の再取得・再描画に失敗しました");
+    result.innerHTML = `<p class="ai-subtask-result-ok">AI分割タスク${registered.createdCount}件の登録は完了しました。</p><p class="ai-subtask-note">ただし一覧の再取得に失敗しました。ページを再読み込みして登録結果を確認してください。<br>importBatchId: ${escapeHtml(String(registered.importBatchId))}</p>`;
+    setLoadState(
+      `AI分割タスク${registered.createdCount}件の登録は完了しましたが、一覧の再取得に失敗しました。ページを再読み込みしてください。 importBatchId: ${registered.importBatchId}`,
+      true,
+    );
+    // 登録ボタンは無効のまま（committed=true）にして再登録を防ぐ。
+    refreshAiSubtaskPreviewMeta();
+  }
 }
 
 // 指定 previewId の item 内の要素へフォーカスする（再描画後のフォーカス復帰用）。
