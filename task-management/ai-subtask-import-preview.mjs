@@ -10,6 +10,16 @@
 //
 // 検証条件（文字数・型・件数等）は既存バリデータ（ai-subtask-import-validator.mjs）を正本とし、
 // このモジュールでは重複実装しない。許可キーの正本は ALLOWED_TASK_KEYS（テストで整合を保証）。
+// AI JSON 部分の検証は validateAiSubtaskImport を再利用する（継承4項目は別ルールで検証・§8.2）。
+
+import { validateAiSubtaskImport } from "./ai-subtask-import-validator.mjs";
+
+// 全子タスクへ継承される4項目（親タスク由来・AI JSON スキーマには含めない）。
+export const INHERITED_FIELDS = Object.freeze(["category", "subcategory", "priority", "owner"]);
+const INHERITED_FIELD_SET = new Set(INHERITED_FIELDS);
+
+// priority の許可値（既存データ・進捗ボードで使う値の和集合）。継承値検証で使う。
+export const ALLOWED_PRIORITIES = Object.freeze(["P0", "P1", "P1.5", "P2", "P3"]);
 
 // 許可11項目の編集UI区分（文字列項目 / 文字列配列項目）。
 // 両者の和集合が ALLOWED_TASK_KEYS と一致することはテストで保証する（正本は ALLOWED_TASK_KEYS）。
@@ -65,22 +75,80 @@ function mapItem(state, previewId, fn) {
 }
 
 /**
- * 検証済み value からプレビュー状態を作る（複製・全件 included=true）。
- * validatedValue（validation.value）は一切破壊しない。
- * @param {{schemaVersion?:number, splitSummary?:unknown, tasks?:Array<object>}} validatedValue
+ * 最新の固定親タスク（画面用モデル）から継承4項目を複製して取り出す（親を破壊せず・参照共有しない）。
+ * モデルのキー別名を吸収する（category=sectionTitle / subcategory=subsectionTitle）。
+ * @param {object} parentTask
+ * @returns {{category:string, subcategory:string, priority:string, owner:string}}
  */
-export function createAiSubtaskPreviewState(validatedValue) {
+export function buildInheritedValuesFromParent(parentTask) {
+  const p = parentTask ?? {};
+  return {
+    category: String(p.sectionTitle ?? p.category ?? ""),
+    subcategory: String(p.subsectionTitle ?? p.subcategory ?? ""),
+    priority: String(p.priority ?? ""),
+    owner: String(p.owner ?? ""),
+  };
+}
+
+/**
+ * 検証済み value と最新固定親からプレビュー状態を作る（複製・全件 included=true）。
+ * validatedValue（validation.value）・parentTask は一切破壊しない。
+ * 継承4項目は items[].task へ重複させず、トップレベル inheritedValues に保持する。
+ * @param {{schemaVersion?:number, splitSummary?:unknown, tasks?:Array<object>}} validatedValue
+ * @param {object} [parentTask] 最新の固定親タスク（継承値の初期値）
+ */
+export function createAiSubtaskPreviewState(validatedValue, parentTask) {
   const v = validatedValue ?? {};
   const tasks = Array.isArray(v.tasks) ? v.tasks : [];
   return {
     schemaVersion: v.schemaVersion,
     splitSummary: typeof v.splitSummary === "string" ? v.splitSummary : v.splitSummary != null ? String(v.splitSummary) : "",
+    inheritedValues: buildInheritedValuesFromParent(parentTask),
     items: tasks.map((task) => ({
       previewId: `preview-${(previewIdCounter += 1)}`,
       included: true,
       task: cloneTaskAllowed(task),
     })),
   };
+}
+
+/**
+ * 継承4項目の1件を更新した新しい state を返す（category/subcategory/priority/owner のみ）。
+ * 許可外フィールドは無視して非変更（unknown を安全に拒否）。items・元 state は破壊しない。
+ * @param {object} state
+ * @param {string} field
+ * @param {unknown} value
+ */
+export function setAiSubtaskPreviewInheritedField(state, field, value) {
+  if (!INHERITED_FIELD_SET.has(field)) {
+    return state; // 許可外は無視。
+  }
+  const current = state?.inheritedValues ?? { category: "", subcategory: "", priority: "", owner: "" };
+  return {
+    ...state,
+    inheritedValues: { ...current, [field]: String(value ?? "") },
+  };
+}
+
+/**
+ * 継承4項目を既存のタスク入力規則で検証する（AI JSON バリデータとは別ルール）。
+ * - category: 必須（trim後非空）
+ * - subcategory / owner: 任意（制約なし）
+ * - priority: 任意。指定時は ALLOWED_PRIORITIES のいずれか
+ * @param {{category?:string, subcategory?:string, priority?:string, owner?:string}} inheritedValues
+ * @returns {{ ok:boolean, errors:Array<{field:string, message:string}> }}
+ */
+export function validateAiSubtaskInheritedValues(inheritedValues) {
+  const iv = inheritedValues ?? {};
+  const errors = [];
+  if (String(iv.category ?? "").trim() === "") {
+    errors.push({ field: "category", message: "category は必須です（空にできません）。" });
+  }
+  const priority = String(iv.priority ?? "").trim();
+  if (priority !== "" && !ALLOWED_PRIORITIES.includes(priority)) {
+    errors.push({ field: "priority", message: `priority は ${ALLOWED_PRIORITIES.join(" / ")} のいずれかにしてください。` });
+  }
+  return { ok: errors.length === 0, errors };
 }
 
 /**
@@ -165,6 +233,42 @@ export function toAiSubtaskRevalidationInput(state) {
     splitSummary: state?.splitSummary,
     tasks,
   };
+}
+
+/**
+ * 後続PRの Firestore 一括登録が使う登録用スナップショットを作る（このPRでは書き込みしない）。
+ * AI JSON 部分（toAiSubtaskRevalidationInput）に加えて、画面で確定した継承4項目（複製）を含める。
+ * included=true の子タスクだけを現在の表示順で・UI専用メタ（previewId/included）を除いて含める。
+ */
+export function toAiSubtaskRegistrationSnapshot(state) {
+  const base = toAiSubtaskRevalidationInput(state);
+  const iv = state?.inheritedValues ?? {};
+  return {
+    schemaVersion: base.schemaVersion,
+    splitSummary: base.splitSummary,
+    inheritedValues: {
+      category: String(iv.category ?? ""),
+      subcategory: String(iv.subcategory ?? ""),
+      priority: String(iv.priority ?? ""),
+      owner: String(iv.owner ?? ""),
+    },
+    tasks: base.tasks,
+  };
+}
+
+/**
+ * プレビュー全体（AI JSON 部分＋継承4項目）を再検証する。
+ * - AI JSON 部分（included tasks・表示順・UI専用メタ除去）は既存の validateAiSubtaskImport で検証する
+ *   （継承4項目を混ぜて unknown key エラーにしない）。
+ * - 継承4項目は validateAiSubtaskInheritedValues（既存タスク入力規則）で別途検証する。
+ * - 両方成功したときだけ ok=true。
+ * @param {object} state
+ * @returns {{ ok:boolean, jsonResult:object, inheritedResult:{ok:boolean, errors:Array} }}
+ */
+export function validateAiSubtaskPreviewSnapshot(state) {
+  const jsonResult = validateAiSubtaskImport(JSON.stringify(toAiSubtaskRevalidationInput(state)));
+  const inheritedResult = validateAiSubtaskInheritedValues(state?.inheritedValues);
+  return { ok: jsonResult.ok && inheritedResult.ok, jsonResult, inheritedResult };
 }
 
 /**

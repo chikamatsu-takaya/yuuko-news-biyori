@@ -25,8 +25,29 @@ import {
   arrayToLines,
   PREVIEW_STRING_FIELDS,
   PREVIEW_ARRAY_FIELDS,
+  buildInheritedValuesFromParent,
+  setAiSubtaskPreviewInheritedField,
+  validateAiSubtaskInheritedValues,
+  validateAiSubtaskPreviewSnapshot,
+  toAiSubtaskRegistrationSnapshot,
+  INHERITED_FIELDS,
+  ALLOWED_PRIORITIES,
 } from "./ai-subtask-import-preview.mjs";
 import { ALLOWED_TASK_KEYS, validateAiSubtaskImport } from "./ai-subtask-import-validator.mjs";
+
+// 画面用モデル相当の固定親（継承値の初期値元）。category=sectionTitle / subcategory=subsectionTitle。
+function parentModel(overrides = {}) {
+  return {
+    firestoreId: "t1",
+    taskCode: "TASK-1",
+    text: "親タスク",
+    sectionTitle: "タスク管理機能",
+    subsectionTitle: "AI分割タスク取込",
+    priority: "P1",
+    owner: "近松",
+    ...overrides,
+  };
+}
 
 // 許可11項目すべてを持つ子タスク。
 function fullTask(overrides = {}) {
@@ -302,4 +323,134 @@ test("linesToArray: 改行分割・空行も要素として保持（黙って削
 test("arrayToLines: 1要素=1行で結合（linesToArray の逆）", () => {
   assert.equal(arrayToLines(["a", "", "b"]), "a\n\nb");
   assert.equal(arrayToLines([]), "");
+});
+
+// --- 継承4項目（category / subcategory / priority / owner） ---
+
+test("継承値: 最新親タスクの4項目からプレビュー state を作成できる", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  assert.deepEqual(state.inheritedValues, {
+    category: "タスク管理機能",
+    subcategory: "AI分割タスク取込",
+    priority: "P1",
+    owner: "近松",
+  });
+  assert.deepEqual([...INHERITED_FIELDS], ["category", "subcategory", "priority", "owner"]);
+});
+
+test("継承値: category / subcategory / priority / owner を編集できる", () => {
+  let state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  state = setAiSubtaskPreviewInheritedField(state, "category", "新カテゴリ");
+  state = setAiSubtaskPreviewInheritedField(state, "subcategory", "新サブ");
+  state = setAiSubtaskPreviewInheritedField(state, "priority", "P2");
+  state = setAiSubtaskPreviewInheritedField(state, "owner", "藤井");
+  assert.deepEqual(state.inheritedValues, {
+    category: "新カテゴリ",
+    subcategory: "新サブ",
+    priority: "P2",
+    owner: "藤井",
+  });
+});
+
+test("継承値: 1項目の編集で他の継承値や items を変更しない", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask(), fullTask({ title: "t2" })]), parentModel());
+  const next = setAiSubtaskPreviewInheritedField(state, "owner", "小柳");
+  assert.equal(next.inheritedValues.category, "タスク管理機能", "他の継承値は不変");
+  assert.equal(next.inheritedValues.priority, "P1");
+  assert.equal(next.items, state.items, "items 参照は共有（変更しない）");
+});
+
+test("継承値: 編集は元 state / validation.value / 親タスクを破壊しない", () => {
+  const value = validatedValue([fullTask()]);
+  const parent = parentModel();
+  const valueSnap = JSON.parse(JSON.stringify(value));
+  const parentSnap = JSON.parse(JSON.stringify(parent));
+  const state = createAiSubtaskPreviewState(value, parent);
+  const stateSnap = JSON.parse(JSON.stringify(state.inheritedValues));
+  setAiSubtaskPreviewInheritedField(state, "category", "変更");
+  assert.deepEqual(state.inheritedValues, stateSnap, "元 state は不変（イミュータブル）");
+  assert.deepEqual(value, valueSnap, "validation.value は不変");
+  assert.deepEqual(parent, parentSnap, "親タスクは不変");
+});
+
+test("継承値: unknown field は安全に拒否する（state 非変更）", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  const next = setAiSubtaskPreviewInheritedField(state, "taskCode", "X");
+  assert.equal(next, state, "許可外は同じ state を返す");
+  assert.ok(!("taskCode" in next.inheritedValues));
+});
+
+test("継承値検証: category 必須・priority 許可値", () => {
+  assert.equal(validateAiSubtaskInheritedValues({ category: "x", priority: "P1" }).ok, true);
+  assert.equal(validateAiSubtaskInheritedValues({ category: "", priority: "P1" }).ok, false, "category 空は不可");
+  assert.equal(validateAiSubtaskInheritedValues({ category: "x", priority: "P9" }).ok, false, "許可外 priority は不可");
+  assert.equal(validateAiSubtaskInheritedValues({ category: "x", priority: "" }).ok, true, "priority 空は任意");
+  assert.ok(ALLOWED_PRIORITIES.includes("P1.5"));
+});
+
+test("登録用スナップショット: 編集後の4項目・included のみ・表示順・UIメタ除去", () => {
+  let state = createAiSubtaskPreviewState(
+    validatedValue([fullTask({ title: "a" }), fullTask({ title: "b" }), fullTask({ title: "c" })]),
+    parentModel(),
+  );
+  state = setAiSubtaskPreviewInheritedField(state, "category", "編集カテゴリ");
+  state = setAiSubtaskPreviewIncluded(state, state.items[1].previewId, false); // b を除外
+  const snap = toAiSubtaskRegistrationSnapshot(state);
+  assert.equal(snap.inheritedValues.category, "編集カテゴリ", "編集後の継承値を含む");
+  assert.deepEqual(snap.inheritedValues, {
+    category: "編集カテゴリ",
+    subcategory: "AI分割タスク取込",
+    priority: "P1",
+    owner: "近松",
+  });
+  assert.deepEqual(snap.tasks.map((t) => t.title), ["a", "c"], "included のみ・表示順");
+  for (const t of snap.tasks) {
+    assert.ok(!("previewId" in t) && !("included" in t), "UI専用メタを含めない");
+  }
+});
+
+test("プレビュー再検証: 正常なら AI JSON も継承値も成功", () => {
+  const state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  const res = validateAiSubtaskPreviewSnapshot(state);
+  assert.equal(res.ok, true);
+  assert.equal(res.jsonResult.ok, true);
+  assert.equal(res.inheritedResult.ok, true);
+});
+
+test("プレビュー再検証: 不正 priority は継承値検証で失敗（AI JSON は成功でも全体 ok=false）", () => {
+  let state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  state = setAiSubtaskPreviewInheritedField(state, "priority", "P9");
+  const res = validateAiSubtaskPreviewSnapshot(state);
+  assert.equal(res.ok, false);
+  assert.equal(res.jsonResult.ok, true, "AI JSON 部分は成功");
+  assert.equal(res.inheritedResult.ok, false, "継承値検証で失敗");
+  assert.ok(res.inheritedResult.errors.some((e) => e.field === "priority"));
+});
+
+test("プレビュー再検証: category を空にすると継承値検証で失敗（必須）", () => {
+  let state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  state = setAiSubtaskPreviewInheritedField(state, "category", "");
+  const res = validateAiSubtaskPreviewSnapshot(state);
+  assert.equal(res.ok, false);
+  assert.ok(res.inheritedResult.errors.some((e) => e.field === "category"));
+});
+
+test("プレビュー再検証: 不正 title（AI JSON側）は jsonResult で失敗し、継承値へ混ぜない（unknown key にしない）", () => {
+  let state = createAiSubtaskPreviewState(validatedValue([fullTask()]), parentModel());
+  state = setAiSubtaskPreviewField(state, state.items[0].previewId, "title", "a".repeat(121));
+  const res = validateAiSubtaskPreviewSnapshot(state);
+  assert.equal(res.ok, false);
+  assert.equal(res.jsonResult.ok, false);
+  // AI JSON 検証に継承4項目は含めない → category 等の unknown key エラーは出ない。
+  const paths = res.jsonResult.errors.map((e) => e.path);
+  assert.ok(!paths.includes("category") && !paths.includes("inheritedValues"));
+});
+
+test("buildInheritedValuesFromParent: 親未設定でも例外にせず空値", () => {
+  assert.deepEqual(buildInheritedValuesFromParent(null), {
+    category: "",
+    subcategory: "",
+    priority: "",
+    owner: "",
+  });
 });

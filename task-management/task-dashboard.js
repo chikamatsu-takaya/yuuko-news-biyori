@@ -1105,18 +1105,29 @@ function setupAiSubtaskImportModal() {
   overlay.querySelector("#aiSubtaskBack").addEventListener("click", () => handleAiSubtaskBack());
 
   // 編集プレビューの操作はイベント委譲で受ける（カードは再描画で作り直されるため）。
-  // 文字列/配列項目の編集（input）: 状態だけ更新しカードは再描画しない（フォーカス維持のため）。
+  // 子タスクの文字列/配列項目の編集（input）と、継承4項目（category/subcategory/priority/owner）の編集。
+  // どちらも状態だけ更新しカードは再描画しない（入力フォーカス維持のため）。
   els.preview.addEventListener("input", (event) => {
     const field = event.target.closest(".ai-subtask-edit-field");
     if (field) {
       handleAiSubtaskPreviewFieldInput(field);
+      return;
+    }
+    const inherited = event.target.closest(".ai-subtask-inherited-field");
+    if (inherited) {
+      handleAiSubtaskInheritedFieldInput(inherited);
     }
   });
-  // 登録対象の含有/除外（change）。
+  // 登録対象の含有/除外（change）と、継承値の select 変更（change でも拾う）。
   els.preview.addEventListener("change", (event) => {
     const include = event.target.closest(".ai-subtask-include");
     if (include) {
       handleAiSubtaskPreviewIncludeToggle(include);
+      return;
+    }
+    const inherited = event.target.closest(".ai-subtask-inherited-field");
+    if (inherited) {
+      handleAiSubtaskInheritedFieldInput(inherited);
     }
   });
   // 上下移動・再検証（click）。
@@ -1266,8 +1277,9 @@ function handleAiSubtaskValidate() {
     // 既存の純粋バリデータをそのまま呼ぶ（独自検証を作らない）。同期関数。
     const validation = aiSubtaskValidatorModule.validateAiSubtaskImport(raw);
     if (validation.ok) {
-      // 検証成功: validation.value を破壊せず複製して編集可能なプレビュー状態を作る。
-      aiSubtaskPreviewState = aiSubtaskPreviewModule.createAiSubtaskPreviewState(validation.value);
+      // 検証成功: validation.value・親タスクを破壊せず複製して編集可能なプレビュー状態を作る。
+      // 継承4項目（category/subcategory/priority/owner）は最新の固定親から初期化する。
+      aiSubtaskPreviewState = aiSubtaskPreviewModule.createAiSubtaskPreviewState(validation.value, aiSubtaskParentTask);
       aiSubtaskPreviewStatus = "validated";
       const count = aiSubtaskPreviewState.items.length;
       result.innerHTML = `<p class="ai-subtask-result-ok">検証成功：子タスク ${count} 件。下のプレビューで編集・並べ替え・除外できます。</p>`;
@@ -1347,31 +1359,67 @@ function resetAiSubtaskStep2Fields() {
   updateAiSubtaskJsonMeta();
 }
 
-// 全子タスクへ継承される共通値（category/subcategory/priority/owner）の共通欄を作る。
-// 値は最新の固定親（parentTask=aiSubtaskParentTask）のみを正本に使う（AI生成JSONは使わない）。
-// 親未設定なら空文字を返して欄を出さない。全値 escapeHtml・URL自動リンクなし。
-function renderAiSubtaskInheritedBlock(parentTask) {
-  if (!parentTask) {
-    return "";
+// priority の select（既存の許可値＋現在値が許可外でも失わないよう temp option を足す・§既存owner編集と同方針）。
+function renderAiSubtaskPrioritySelectOptions(current) {
+  const allowed = aiSubtaskPreviewModule?.ALLOWED_PRIORITIES ?? [];
+  const cur = String(current ?? "");
+  const values = cur === "" || allowed.includes(cur) ? allowed : [...allowed, cur];
+  const options = [`<option value=""${cur === "" ? " selected" : ""}>（未設定）</option>`];
+  for (const v of values) {
+    options.push(`<option value="${escapeHtml(v)}"${v === cur ? " selected" : ""}>${escapeHtml(v)}</option>`);
   }
-  const rows = [
-    ["category", parentTask.sectionTitle],
-    ["subcategory", parentTask.subsectionTitle],
-    ["priority", parentTask.priority],
-    ["owner", parentTask.owner],
-  ];
-  const items = rows
-    .map(([label, value]) => {
-      const v = String(value ?? "").trim();
-      return `<li><strong>${escapeHtml(label)}:</strong> ${v ? escapeHtml(v) : "（未設定）"}</li>`;
-    })
-    .join("");
+  return options.join("");
+}
+
+// owner の select（既存候補 TASK_OWNER_OPTIONS ＋ 現在値が候補外でも消さない temp option・空も許容）。
+function renderAiSubtaskOwnerSelectOptions(current) {
+  const cur = String(current ?? "");
+  const values = cur === "" || TASK_OWNER_OPTIONS.includes(cur) ? TASK_OWNER_OPTIONS : [...TASK_OWNER_OPTIONS, cur];
+  const options = [`<option value=""${cur === "" ? " selected" : ""}>（未設定）</option>`];
+  for (const o of values) {
+    options.push(`<option value="${escapeHtml(o)}"${o === cur ? " selected" : ""}>${escapeHtml(o)}</option>`);
+  }
+  return options.join("");
+}
+
+// 全子タスクへ適用される継承4項目の「編集可能」ブロックを作る（§8.2）。
+// 値はプレビュー状態の inheritedValues を正本にする（初期値は最新固定親由来・複製済み）。
+// category/subcategory は text、priority/owner は既存ルールに合わせた select。
+// data-inherited-field で子タスク11項目のイベント処理と混線させない。全動的値 escapeHtml。
+function renderAiSubtaskInheritedEditor(inheritedValues) {
+  const iv = inheritedValues ?? { category: "", subcategory: "", priority: "", owner: "" };
+  const textField = (field) => `
+    <label class="ai-subtask-edit-row">
+      <span>${escapeHtml(field)}${field === "category" ? " *" : ""}</span>
+      <input type="text" class="ai-subtask-inherited-field" data-inherited-field="${field}"
+        value="${escapeHtml(String(iv[field] ?? ""))}" autocomplete="off" />
+    </label>`;
   return `
     <div class="ai-subtask-inherited">
-      <p class="ai-subtask-inherited-title">全子タスクに継承される値（固定した親タスク由来）</p>
-      <ul class="task-modal-list">${items}</ul>
+      <p class="ai-subtask-inherited-title">全子タスクに適用される値</p>
+      ${textField("category")}
+      ${textField("subcategory")}
+      <label class="ai-subtask-edit-row">
+        <span>priority</span>
+        <select class="ai-subtask-inherited-field ai-subtask-edit-field-select" data-inherited-field="priority">${renderAiSubtaskPrioritySelectOptions(iv.priority)}</select>
+      </label>
+      <label class="ai-subtask-edit-row">
+        <span>owner</span>
+        <select class="ai-subtask-inherited-field ai-subtask-edit-field-select" data-inherited-field="owner">${renderAiSubtaskOwnerSelectOptions(iv.owner)}</select>
+      </label>
     </div>
   `;
+}
+
+// 継承4項目の編集（input/change）: 状態だけ更新し、markAiSubtaskPreviewEdited で未再検証へ戻す。
+// カードは再描画しない（入力/選択のフォーカスを保つ）。親タスク本体は変更しない。
+function handleAiSubtaskInheritedFieldInput(el) {
+  if (!aiSubtaskPreviewState || !aiSubtaskPreviewModule) {
+    return;
+  }
+  const field = el.dataset.inheritedField;
+  aiSubtaskPreviewState = aiSubtaskPreviewModule.setAiSubtaskPreviewInheritedField(aiSubtaskPreviewState, field, el.value);
+  markAiSubtaskPreviewEdited();
 }
 
 // 検証失敗を path付きエラー一覧で描画する（JSON検証・再検証の両方で使う）。
@@ -1550,8 +1598,8 @@ function renderAiSubtaskPreview() {
   const items = aiSubtaskPreviewState.items ?? [];
   const total = items.length;
   const cards = items.map((item, index) => renderAiSubtaskPreviewCard(item, index, total)).join("");
-  // 継承値（最新の固定親由来）と分割親警告を維持表示する。
-  const inheritedBlock = renderAiSubtaskInheritedBlock(aiSubtaskParentTask);
+  // 継承4項目（編集可能・inheritedValues が正本）と分割親警告を維持表示する。
+  const inheritedBlock = renderAiSubtaskInheritedEditor(aiSubtaskPreviewState.inheritedValues);
   const splitParentWarning = aiSubtaskParentWarnSplit
     ? `<div class="ai-subtask-warning" role="note">${escapeHtml(AI_SUBTASK_SPLIT_PARENT_WARNING)}</div>`
     : "";
@@ -1634,24 +1682,23 @@ function handleAiSubtaskPreviewMove(el) {
   }
 }
 
-// 「編集内容を再検証」: included=true だけを表示順で取り出し、UI専用メタを除いて既存バリデータで再検証する。
+// 「編集内容を再検証」: AI JSON 部分（included・表示順・UIメタ除去）は既存 validateAiSubtaskImport で、
+// 継承4項目は既存タスク入力規則で別途検証する（unknown key エラーにしない）。両方成功で再検証成功。
 function handleAiSubtaskRevalidate() {
   const { result } = aiSubtaskModalElements;
-  if (!aiSubtaskPreviewState || !aiSubtaskPreviewModule || !aiSubtaskValidatorModule || !result) {
+  if (!aiSubtaskPreviewState || !aiSubtaskPreviewModule || !result) {
     return;
   }
   try {
-    // included のみ・表示順・UI専用メタ除去済みの { schemaVersion, splitSummary, tasks } を作る。
-    const input = aiSubtaskPreviewModule.toAiSubtaskRevalidationInput(aiSubtaskPreviewState);
-    // 既存の validateAiSubtaskImport をそのまま使う（独自検証を作らない）。全件除外は tasks 最小件数エラーになる。
-    const validation = aiSubtaskValidatorModule.validateAiSubtaskImport(JSON.stringify(input));
-    if (validation.ok) {
+    // AI JSON 検証（既存バリデータ）＋継承値検証（既存入力規則）を分離して行うラッパー。
+    const res = aiSubtaskPreviewModule.validateAiSubtaskPreviewSnapshot(aiSubtaskPreviewState);
+    if (res.ok) {
       aiSubtaskPreviewStatus = "revalidated-ok";
-      const count = Array.isArray(validation.value?.tasks) ? validation.value.tasks.length : 0;
+      const count = aiSubtaskPreviewModule.countAiSubtaskIncluded(aiSubtaskPreviewState);
       result.innerHTML = `<p class="ai-subtask-result-ok">再検証成功：登録対象 ${count} 件（Firestore登録は後続PRで実装します）。</p>`;
     } else {
       aiSubtaskPreviewStatus = "revalidated-ng";
-      result.innerHTML = renderAiSubtaskValidationFailure(validation);
+      result.innerHTML = renderAiSubtaskPreviewRevalidationFailure(res);
     }
   } catch {
     aiSubtaskPreviewStatus = "revalidated-ng";
@@ -1659,6 +1706,23 @@ function handleAiSubtaskRevalidate() {
     result.innerHTML = `<p class="ai-subtask-result-ng">再検証中に予期しないエラーが発生しました。</p>`;
   }
   refreshAiSubtaskPreviewMeta();
+}
+
+// 再検証失敗（AI JSON 部分 + 継承値）の複合エラー表示。全動的値 escapeHtml。
+function renderAiSubtaskPreviewRevalidationFailure(res) {
+  let html = "";
+  if (res.jsonResult && !res.jsonResult.ok) {
+    html += renderAiSubtaskValidationFailure(res.jsonResult);
+  }
+  if (res.inheritedResult && !res.inheritedResult.ok) {
+    const items = (res.inheritedResult.errors ?? [])
+      .map((e) => `<li><code>${escapeHtml(String(e.field ?? ""))}</code>: ${escapeHtml(String(e.message ?? "エラー"))}</li>`)
+      .join("");
+    html += `
+      <p class="ai-subtask-result-ng">継承値の検証失敗：${(res.inheritedResult.errors ?? []).length} 件のエラー</p>
+      <ul class="ai-subtask-result-errors">${items}</ul>`;
+  }
+  return html;
 }
 
 // 指定 previewId の item 内の要素へフォーカスする（再描画後のフォーカス復帰用）。

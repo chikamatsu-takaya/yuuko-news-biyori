@@ -1813,7 +1813,8 @@ p.markdown-sync-id {
   font-size: 0.76rem;
 }
 
-.ai-subtask-edit-field {
+.ai-subtask-edit-field,
+.ai-subtask-inherited-field {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
