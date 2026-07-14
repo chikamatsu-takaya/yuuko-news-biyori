@@ -1494,6 +1494,27 @@ p.markdown-sync-id {
   width: min(680px, 100%);
 }
 
+/* ヘッダー（h2）をドラッグハンドルにする。既存デザインは大きく変えず、カーソルと選択抑止のみ。 */
+.ai-subtask-drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none; /* ポインタ操作をブラウザのスクロール/ズームへ奪われないようにする */
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-drag-handle.is-dragging {
+  cursor: grabbing;
+}
+
+.ai-subtask-drag-hint {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .ai-subtask-sublist {
   margin: 4px 0 0;
   padding-left: 18px;
