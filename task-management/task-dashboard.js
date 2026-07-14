@@ -940,6 +940,14 @@ let aiSubtaskParentTask = null;
 let aiSubtaskPromptText = "";
 // JSON検証の二重実行防止フラグ。
 let aiSubtaskValidating = false;
+// 固定親が「Doing かつ branchName 設定済み」で分割親警告が必要か。
+// 判定は ai-subtask-import-parent.mjs の shouldWarnSplitParentAutoUpdate をモーダルを開くときに1度だけ行い、
+// その結果をここへ保持して、ステップ1の注意と成功プレビューの警告で共有する（判定ロジックを重複させない）。
+let aiSubtaskParentWarnSplit = false;
+
+// 分割親になる旨の警告文（ステップ1の注意・成功プレビューの警告で共通利用する静的文字列）。
+const AI_SUBTASK_SPLIT_PARENT_WARNING =
+  "このタスクを分割すると分割親となり、post-merge による Done / Review 自動更新の対象外になります（このPRでは実際の親更新やFirestore登録は行いません）。";
 
 // ステップ2で使うモジュール（プロンプト生成・JSON検証）を1度だけ動的 import してキャッシュする。
 let aiSubtaskPromptModule = null;
@@ -1130,10 +1138,10 @@ async function openAiSubtaskImportModal(taskId) {
   summary.hidden = false;
 
   // Doing かつ branchName 設定済みなら、分割で post-merge 自動更新対象外になる旨を案内する
-  // （このPRでは親フィールドの実設定は行わない）。判定・表示とも最新値を使う。
-  if (shouldWarnSplitParentAutoUpdate(freshTask)) {
-    warning.textContent =
-      "このタスクを分割すると分割親となり、post-merge による Done / Review 自動更新の対象外になります（このPRでは実際の設定は行いません）。";
+  // （このPRでは親フィールドの実設定は行わない）。判定は1度だけ行い、成功プレビューでも共有する。
+  aiSubtaskParentWarnSplit = shouldWarnSplitParentAutoUpdate(freshTask) === true;
+  if (aiSubtaskParentWarnSplit) {
+    warning.textContent = AI_SUBTASK_SPLIT_PARENT_WARNING;
     warning.hidden = false;
   } else {
     warning.hidden = true;
@@ -1272,6 +1280,8 @@ function resetAiSubtaskStep2Fields() {
   const els = aiSubtaskModalElements;
   aiSubtaskPromptText = "";
   aiSubtaskValidating = false;
+  // 分割親警告フラグも初期化する（open 時に最新親で再判定して設定し直す）。
+  aiSubtaskParentWarnSplit = false;
   if (els.promptText) els.promptText.textContent = "";
   if (els.promptCopyHint) els.promptCopyHint.textContent = "";
   if (els.step2Parent) els.step2Parent.textContent = "";
@@ -1362,8 +1372,15 @@ function renderAiSubtaskValidationResult(validation, parentTask) {
           </li>`;
       })
       .join("");
+    // 固定親が Doing かつ branchName 設定済みなら分割親警告を表示する。
+    // 判定は shouldWarnSplitParentAutoUpdate を open 時に済ませた結果（aiSubtaskParentWarnSplit）を再利用する
+    // （判定ロジックをここで重複実装しない）。警告文は静的文字列。
+    const splitParentWarning = aiSubtaskParentWarnSplit
+      ? `<div class="ai-subtask-warning" role="note">${escapeHtml(AI_SUBTASK_SPLIT_PARENT_WARNING)}</div>`
+      : "";
     return `
       <p class="ai-subtask-result-ok">検証成功：子タスク ${tasks.length} 件</p>
+      ${splitParentWarning}
       ${inheritedBlock}
       ${summaryLine}
       <ul class="ai-subtask-result-list">${taskItems}</ul>
