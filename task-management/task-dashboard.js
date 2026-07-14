@@ -911,9 +911,9 @@ async function executeManualPocTaskDelete(taskId) {
 // 責務（docs/00_project/ai-subtask-import-spec.md §3.10 / §3.11 / §8 / §8.3 / §11）:
 // - 親候補条件を満たす各タスクカードに「AIで分割」ボタンを出す。押したタスクを親として固定してモーダルを開く。
 // - ステップ1: 親タスク（最新1件を再取得）の概要確認。ステップ2: AI用プロンプト表示・コピー、AIが返した
-//   JSONを貼付して既存バリデータで検証・表示。
-// - このPRでは Firestore への子タスク登録・親フィールド設定（autoStatusUpdateDisabled / taskRole /
-//   splitChildCount）は行わない（後続PR）。
+//   JSONを貼付して既存バリデータで検証・表示、編集・除外・並べ替え・再検証。
+// - 再検証成功後、「Firestoreへ一括登録」で runTransaction により子タスク登録＋親の管理フィールド設定
+//   （autoStatusUpdateDisabled / taskRole / splitChildCount）を原子的に行う（firestore-source.js へ委譲）。
 // - 候補判定・ラベル・注意要否は ai-subtask-import-parent.mjs、プロンプト生成は ai-subtask-import-prompt.mjs、
 //   JSON検証は ai-subtask-import-validator.mjs に委譲する（独自実装しない）。
 // ---------------------------------------------------------------------------
@@ -1478,7 +1478,7 @@ function aiSubtaskPreviewCountsText() {
   const excluded = mod.countAiSubtaskExcluded(aiSubtaskPreviewState);
   let text = `登録対象 ${included} 件 / 除外 ${excluded} 件`;
   if (mod.isAiSubtaskAllExcluded(aiSubtaskPreviewState)) {
-    text += "（全件除外中：登録対象がありません。後続PRでも登録できません）";
+    text += "（全件除外中：登録対象がありません。登録できません）";
   }
   return text;
 }
@@ -1730,7 +1730,7 @@ function handleAiSubtaskRevalidate() {
     if (res.ok) {
       aiSubtaskPreviewStatus = "revalidated-ok";
       const count = aiSubtaskPreviewModule.countAiSubtaskIncluded(aiSubtaskPreviewState);
-      result.innerHTML = `<p class="ai-subtask-result-ok">再検証成功：登録対象 ${count} 件（Firestore登録は後続PRで実装します）。</p>`;
+      result.innerHTML = `<p class="ai-subtask-result-ok">再検証に成功しました：登録対象 ${count} 件。内容を確認し、「Firestoreへ一括登録」を押してください。</p>`;
     } else {
       aiSubtaskPreviewStatus = "revalidated-ng";
       result.innerHTML = renderAiSubtaskPreviewRevalidationFailure(res);
