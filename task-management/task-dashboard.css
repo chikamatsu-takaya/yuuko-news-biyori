@@ -1488,3 +1488,181 @@ p.markdown-sync-id {
 .ai-subtask-note-info {
   color: var(--amber);
 }
+
+/* 親固定モーダルはステップ2でプロンプト/JSONを扱うため、少し広めにする */
+.ai-subtask-modal {
+  width: min(680px, 100%);
+}
+
+.ai-subtask-sublist {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.ai-subtask-step-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* ステップ2: 固定親ラベル */
+.ai-subtask-step2-parent {
+  margin: 0 0 12px;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+/* ステップ2: プロンプト表示 */
+.ai-subtask-prompt-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-subtask-prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.ai-subtask-copy-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ai-subtask-prompt-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ステップ2: JSON入力 */
+.ai-subtask-json-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.86rem;
+}
+
+.ai-subtask-json-field > span {
+  color: var(--muted);
+}
+
+.ai-subtask-json-input {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: inherit;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-json-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ステップ2: 検証結果 */
+.ai-subtask-result:empty {
+  display: none;
+}
+
+.ai-subtask-result {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-size: 0.84rem;
+}
+
+.ai-subtask-result-ok {
+  margin: 0 0 8px;
+  color: var(--green, #7bd88f);
+  font-weight: 700;
+}
+
+/* 検証成功プレビュー上部の「全子タスクに継承される値」共通欄 */
+.ai-subtask-inherited {
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  padding: 8px 12px;
+}
+
+.ai-subtask-inherited-title {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.ai-subtask-result-ng {
+  margin: 0 0 8px;
+  color: var(--red);
+  font-weight: 700;
+}
+
+.ai-subtask-result-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.ai-subtask-result-task {
+  margin: 8px 0;
+}
+
+.ai-subtask-result-task-title {
+  margin: 0 0 4px;
+}
+
+.ai-subtask-result-meta {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-result-errors {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--red);
+}
+
+.ai-subtask-result-errors code {
+  font-family: var(--mono);
+}
+
+.ai-subtask-result-details {
+  margin-top: 6px;
+}
+
+.ai-subtask-result-pre {
+  margin: 6px 0 0;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
