@@ -906,28 +906,52 @@ async function executeManualPocTaskDelete(taskId) {
 }
 
 // ---------------------------------------------------------------------------
-// AIで分割タスクを追加（後続PR #3・親タスク固定の土台）
+// AIで分割タスクを追加（親固定 → AI用プロンプト生成・JSON貼付検証）
 //
-// 責務（docs/00_project/ai-subtask-import-spec.md §3.10 / §3.11 / §8 / §11-3）:
-// - 既存の通常「タスクを追加」は残したまま、親候補条件を満たす各タスクカードに「AIで分割」ボタンを出す。
-// - 押したタスクを親として固定してモーダルを開く（モーダル内で親を選び直さない＝select なし）。
-// - このPRでは「親の概要を表示する」ところまで。JSON貼付・検証・Firestore登録・親フィールド設定
-//   （autoStatusUpdateDisabled / taskRole / splitChildCount）は行わない（後続PRで実装）。
-// - 候補判定・ラベル・注意要否は純粋モジュール ai-subtask-import-parent.mjs に委譲する。
-//   カード表示可否は firestoreToBoardModel が付ける task.aiSubtaskEligible を使う（同期利用）。
+// 責務（docs/00_project/ai-subtask-import-spec.md §3.10 / §3.11 / §8 / §8.3 / §11）:
+// - 親候補条件を満たす各タスクカードに「AIで分割」ボタンを出す。押したタスクを親として固定してモーダルを開く。
+// - ステップ1: 親タスク（最新1件を再取得）の概要確認。ステップ2: AI用プロンプト表示・コピー、AIが返した
+//   JSONを貼付して既存バリデータで検証・表示。
+// - このPRでは Firestore への子タスク登録・親フィールド設定（autoStatusUpdateDisabled / taskRole /
+//   splitChildCount）は行わない（後続PR）。
+// - 候補判定・ラベル・注意要否は ai-subtask-import-parent.mjs、プロンプト生成は ai-subtask-import-prompt.mjs、
+//   JSON検証は ai-subtask-import-validator.mjs に委譲する（独自実装しない）。
 // ---------------------------------------------------------------------------
 
 // 取込モーダルの要素参照（1度だけ生成・index.html は変更しない）。
 const aiSubtaskModalElements = {
   overlay: null,
+  step1Panel: null,
+  step2Panel: null,
   summary: null,
   warning: null,
   nextButton: null,
-  nextNote: null,
+  step2Parent: null,
+  promptText: null,
+  promptCopyHint: null,
+  jsonInput: null,
+  jsonMeta: null,
+  validateButton: null,
+  result: null,
 };
 
-// モーダルで固定中の親タスクID（未オープンは null）。「次へ」の進行可否の正本にする。
-let aiSubtaskParentTaskId = null;
+// 再取得した最新の親タスクオブジェクト（「次へ」の進行可否の正本）と、生成したプロンプト。
+let aiSubtaskParentTask = null;
+let aiSubtaskPromptText = "";
+// JSON検証の二重実行防止フラグ。
+let aiSubtaskValidating = false;
+
+// ステップ2で使うモジュール（プロンプト生成・JSON検証）を1度だけ動的 import してキャッシュする。
+let aiSubtaskPromptModule = null;
+let aiSubtaskValidatorModule = null;
+async function ensureAiSubtaskStep2Modules() {
+  if (!aiSubtaskPromptModule) {
+    aiSubtaskPromptModule = await import("./ai-subtask-import-prompt.mjs");
+  }
+  if (!aiSubtaskValidatorModule) {
+    aiSubtaskValidatorModule = await import("./ai-subtask-import-validator.mjs");
+  }
+}
 
 // 取込モーダルを1度だけ動的生成する。
 function setupAiSubtaskImportUi() {
@@ -950,7 +974,7 @@ function renderAiSubtaskSplitButton(task) {
   `;
 }
 
-// 親固定の取込モーダルのDOMを1度だけ生成し、閉じる操作を配線する（初期は hidden・select なし）。
+// 親固定の取込モーダルのDOMを1度だけ生成し、各操作を配線する（初期は hidden・select なし）。
 function setupAiSubtaskImportModal() {
   if (aiSubtaskModalElements.overlay) {
     return;
@@ -960,33 +984,75 @@ function setupAiSubtaskImportModal() {
   overlay.className = "task-modal-overlay";
   overlay.hidden = true;
   overlay.innerHTML = `
-    <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="aiSubtaskModalTitle">
+    <div class="task-modal ai-subtask-modal" role="dialog" aria-modal="true" aria-labelledby="aiSubtaskModalTitle">
       <h2 id="aiSubtaskModalTitle">AIで分割タスクを追加</h2>
-      <p class="ai-subtask-step">ステップ 1 / 2：分割元の親タスク（このタスクで固定）</p>
-      <div class="ai-subtask-body">
-        <div id="aiSubtaskParentSummary" class="ai-subtask-summary" hidden></div>
-        <div id="aiSubtaskParentWarning" class="ai-subtask-warning" role="note" hidden></div>
-        <p class="ai-subtask-note">このステップでは Firestore への登録は行いません（親の確認のみ）。</p>
-        <p id="aiSubtaskNextNote" class="ai-subtask-note ai-subtask-note-info" hidden></p>
-      </div>
+
+      <section id="aiSubtaskStep1" class="ai-subtask-step-panel">
+        <p class="ai-subtask-step">ステップ 1 / 2：分割元の親タスク（このタスクで固定）</p>
+        <div class="ai-subtask-body">
+          <div id="aiSubtaskParentSummary" class="ai-subtask-summary" hidden></div>
+          <div id="aiSubtaskParentWarning" class="ai-subtask-warning" role="note" hidden></div>
+          <p class="ai-subtask-note">このステップでは Firestore への登録は行いません（親の確認のみ）。</p>
+        </div>
+        <div class="ai-subtask-step-actions">
+          <button id="aiSubtaskNext" type="button" class="button primary compact" disabled>次へ</button>
+        </div>
+      </section>
+
+      <section id="aiSubtaskStep2" class="ai-subtask-step-panel" hidden>
+        <p class="ai-subtask-step">ステップ 2 / 2：AI用プロンプトとJSON貼り付け・検証</p>
+        <p id="aiSubtaskStep2Parent" class="ai-subtask-step2-parent"></p>
+        <div class="ai-subtask-body">
+          <div class="ai-subtask-prompt-block">
+            <div class="ai-subtask-prompt-head">
+              <span>AIへ渡すプロンプト（このプロンプトをAIへ渡し、返ってきたJSONを下へ貼り付け）</span>
+              <button id="aiSubtaskPromptCopy" type="button" class="button compact">プロンプトをコピー</button>
+              <span id="aiSubtaskPromptCopyHint" class="ai-subtask-copy-hint" aria-live="polite"></span>
+            </div>
+            <pre id="aiSubtaskPromptText" class="ai-subtask-prompt-text"></pre>
+          </div>
+          <label class="ai-subtask-json-field" for="aiSubtaskJsonInput">
+            <span>AIが返したJSONを貼り付け</span>
+            <textarea id="aiSubtaskJsonInput" class="ai-subtask-json-input" rows="10" spellcheck="false"
+              autocomplete="off" placeholder='{"schemaVersion":1,"splitSummary":"...","tasks":[...]}'></textarea>
+          </label>
+          <p class="ai-subtask-note"><span id="aiSubtaskJsonMeta"></span> ／ APIキー等の秘密情報は入力しないでください。</p>
+          <div class="ai-subtask-json-actions">
+            <button id="aiSubtaskValidate" type="button" class="button primary compact" disabled>JSONを検証</button>
+            <button id="aiSubtaskClear" type="button" class="button compact">入力をクリア</button>
+            <button id="aiSubtaskBack" type="button" class="button compact">親タスク確認へ戻る</button>
+          </div>
+          <div id="aiSubtaskResult" class="ai-subtask-result" aria-live="polite"></div>
+          <div class="ai-subtask-step-actions">
+            <button type="button" class="button compact" disabled title="Firestore登録は後続PRで実装します">Firestoreへ一括登録（後続PRで実装）</button>
+          </div>
+        </div>
+      </section>
+
       <div class="task-modal-actions">
-        <button id="aiSubtaskCancel" type="button" class="button compact">キャンセル</button>
-        <button id="aiSubtaskNext" type="button" class="button primary compact" disabled>次へ</button>
+        <button id="aiSubtaskCancel" type="button" class="button compact">閉じる</button>
       </div>
     </div>
   `;
   document.body.appendChild(overlay);
 
-  aiSubtaskModalElements.overlay = overlay;
-  aiSubtaskModalElements.summary = overlay.querySelector("#aiSubtaskParentSummary");
-  aiSubtaskModalElements.warning = overlay.querySelector("#aiSubtaskParentWarning");
-  aiSubtaskModalElements.nextButton = overlay.querySelector("#aiSubtaskNext");
-  aiSubtaskModalElements.nextNote = overlay.querySelector("#aiSubtaskNextNote");
+  const els = aiSubtaskModalElements;
+  els.overlay = overlay;
+  els.step1Panel = overlay.querySelector("#aiSubtaskStep1");
+  els.step2Panel = overlay.querySelector("#aiSubtaskStep2");
+  els.summary = overlay.querySelector("#aiSubtaskParentSummary");
+  els.warning = overlay.querySelector("#aiSubtaskParentWarning");
+  els.nextButton = overlay.querySelector("#aiSubtaskNext");
+  els.step2Parent = overlay.querySelector("#aiSubtaskStep2Parent");
+  els.promptText = overlay.querySelector("#aiSubtaskPromptText");
+  els.promptCopyHint = overlay.querySelector("#aiSubtaskPromptCopyHint");
+  els.jsonInput = overlay.querySelector("#aiSubtaskJsonInput");
+  els.jsonMeta = overlay.querySelector("#aiSubtaskJsonMeta");
+  els.validateButton = overlay.querySelector("#aiSubtaskValidate");
+  els.result = overlay.querySelector("#aiSubtaskResult");
 
-  // キャンセル / 背景クリック / Escape で閉じる（Firestore は変更しない）。
-  overlay.querySelector("#aiSubtaskCancel").addEventListener("click", () => {
-    closeAiSubtaskImportModal();
-  });
+  // 閉じる / 背景クリック / Escape で閉じる（Firestore は変更しない）。
+  overlay.querySelector("#aiSubtaskCancel").addEventListener("click", () => closeAiSubtaskImportModal());
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) {
       closeAiSubtaskImportModal();
@@ -998,18 +1064,29 @@ function setupAiSubtaskImportModal() {
     }
   });
 
-  // 「次へ」は後続PR（JSON貼付）へ接続しない。押しても副作用を起こさず、未実装であることだけ知らせる。
-  // 進行可否の正本は「親タスクが固定済みか」（aiSubtaskParentTaskId）とし、未固定では進めない。
-  aiSubtaskModalElements.nextButton.addEventListener("click", () => {
-    if (aiSubtaskModalElements.nextButton.disabled || !aiSubtaskParentTaskId) {
-      return;
-    }
-    if (aiSubtaskModalElements.nextNote) {
-      aiSubtaskModalElements.nextNote.hidden = false;
-      aiSubtaskModalElements.nextNote.textContent =
-        "次のステップ（AI生成JSONの貼り付け）は後続PRで実装予定です。このPRでは登録は行いません。";
-    }
+  // 「次へ」→ プロンプト生成してステップ2へ。固定親が無ければ進めない。
+  els.nextButton.addEventListener("click", () => {
+    void handleAiSubtaskNext();
   });
+  // プロンプトをコピー（既存の writeTextToClipboard を再利用・プレーンテキスト）。
+  overlay.querySelector("#aiSubtaskPromptCopy").addEventListener("click", () => {
+    void handleAiSubtaskPromptCopy();
+  });
+  // JSON入力の文字数表示と「検証」ボタンの活性制御。
+  els.jsonInput.addEventListener("input", () => updateAiSubtaskJsonMeta());
+  // JSONを検証（既存バリデータを呼ぶ・独自検証は作らない）。
+  els.validateButton.addEventListener("click", () => handleAiSubtaskValidate());
+  // 入力をクリア（入力と検証結果を消す）。
+  overlay.querySelector("#aiSubtaskClear").addEventListener("click", () => handleAiSubtaskClear());
+  // 親タスク確認へ戻る（固定親・JSON入力は維持）。
+  overlay.querySelector("#aiSubtaskBack").addEventListener("click", () => handleAiSubtaskBack());
+}
+
+// ステップ表示を切り替える（1 or 2）。
+function showAiSubtaskStep(step) {
+  const { step1Panel, step2Panel } = aiSubtaskModalElements;
+  if (step1Panel) step1Panel.hidden = step !== 1;
+  if (step2Panel) step2Panel.hidden = step !== 2;
 }
 
 // 「AIで分割」ボタンの taskId から、最新の親タスク1件を再取得して固定しモーダルを開く。
@@ -1033,16 +1110,15 @@ async function openAiSubtaskImportModal(taskId) {
     }
     return;
   }
-  // 以降の概要・注意・固定はすべて再取得した最新タスク（freshTask）を使う。
+  // 以降の概要・注意・プロンプト生成はすべて再取得した最新タスク（freshTask）を使う。
   const freshTask = resolved.task;
 
-  const { summary, warning, nextButton, nextNote } = aiSubtaskModalElements;
-  // 親を固定する（最新の firestoreId）。
-  aiSubtaskParentTaskId = freshTask.firestoreId;
-  if (nextNote) {
-    nextNote.hidden = true;
-    nextNote.textContent = "";
-  }
+  const { summary, warning, nextButton } = aiSubtaskModalElements;
+  // 固定親を保持（古い一覧データではなく freshTask を保持する）。
+  aiSubtaskParentTask = freshTask;
+  // ステップ2の入力・結果・プロンプトは初期化してからステップ1で開く。
+  resetAiSubtaskStep2Fields();
+  showAiSubtaskStep(1);
 
   // 親の概要を表示（最新値・全値エスケープ・URL自動リンクなし）。
   summary.innerHTML = renderAiSubtaskParentSummary(freshTask);
@@ -1059,17 +1135,200 @@ async function openAiSubtaskImportModal(taskId) {
     warning.textContent = "";
   }
 
-  // 親が固定できているので「次へ」を活性化（押しても登録はせず、未実装案内のみ）。
+  // 親が固定できているので「次へ」を活性化。
   nextButton.disabled = false;
 
   aiSubtaskModalElements.overlay.hidden = false;
-  // フォーカスは「次へ」へ（親は固定済みで選び直さないため）。
   nextButton.focus();
+}
+
+// 「次へ」ハンドラ: 固定親からプロンプトを生成してステップ2を表示する（登録はしない）。
+async function handleAiSubtaskNext() {
+  if (aiSubtaskModalElements.nextButton.disabled || !aiSubtaskParentTask) {
+    return;
+  }
+  await ensureAiSubtaskStep2Modules();
+  // プロンプト生成は純粋関数へ委譲（DOM/Firestore非依存）。
+  aiSubtaskPromptText = aiSubtaskPromptModule.buildAiSubtaskImportPrompt(aiSubtaskParentTask);
+  // プロンプトはプレーンテキストとして表示（textContent で HTML 実行を防ぐ）。
+  aiSubtaskModalElements.promptText.textContent = aiSubtaskPromptText;
+
+  const code = String(aiSubtaskParentTask.taskCode ?? "").trim();
+  const title = String(aiSubtaskParentTask.text ?? "").trim();
+  aiSubtaskModalElements.step2Parent.textContent = `固定中の親タスク: ${code ? `${code}｜` : ""}${title}`;
+
+  updateAiSubtaskJsonMeta();
+  showAiSubtaskStep(2);
+  // JSON textarea へフォーカス。
+  aiSubtaskModalElements.jsonInput.focus();
+}
+
+// プロンプトをコピー（既存の writeTextToClipboard を再利用・生成した文字列をそのままコピー）。
+async function handleAiSubtaskPromptCopy() {
+  await writeTextToClipboard(aiSubtaskPromptText, aiSubtaskModalElements.promptCopyHint, () =>
+    selectPreText(aiSubtaskModalElements.promptText),
+  );
+}
+
+// JSON入力の文字数/バイト数表示と、「検証」ボタンの活性制御。
+function updateAiSubtaskJsonMeta() {
+  const { jsonInput, jsonMeta, validateButton } = aiSubtaskModalElements;
+  if (!jsonInput) {
+    return;
+  }
+  const raw = jsonInput.value;
+  const chars = raw.length;
+  const bytes = new TextEncoder().encode(raw).byteLength;
+  const max = aiSubtaskValidatorModule?.LIMITS?.MAX_JSON_BYTES ?? 0;
+  let text = `${chars} 文字 / ${bytes} バイト`;
+  if (max > 0) {
+    text += ` （上限 ${max} バイト）`;
+    if (bytes > max) {
+      text += " ※上限超過：検証で TOO_LARGE になります";
+    }
+  }
+  if (jsonMeta) {
+    jsonMeta.textContent = text;
+  }
+  // 空入力では検証ボタンを無効化（明確なエラー表示は検証時にも行う）。
+  if (validateButton) {
+    validateButton.disabled = raw.trim() === "" || aiSubtaskValidating;
+  }
+}
+
+// 「JSONを検証」ハンドラ: 既存バリデータ（validateAiSubtaskImport）を呼び、結果を描画する。
+function handleAiSubtaskValidate() {
+  const { jsonInput, result, validateButton } = aiSubtaskModalElements;
+  if (aiSubtaskValidating || !jsonInput || !result) {
+    return;
+  }
+  const raw = jsonInput.value;
+  if (raw.trim() === "") {
+    // 空入力は明確なエラーを表示（勝手に修正しない）。
+    result.innerHTML = `<p class="ai-subtask-result-ng">JSONが空です。AIが返したJSONを貼り付けてください。</p>`;
+    return;
+  }
+  aiSubtaskValidating = true;
+  if (validateButton) {
+    validateButton.disabled = true;
+  }
+  try {
+    // 既存の純粋バリデータをそのまま呼ぶ（独自検証を作らない）。同期関数。
+    const validation = aiSubtaskValidatorModule.validateAiSubtaskImport(raw);
+    result.innerHTML = renderAiSubtaskValidationResult(validation);
+  } catch {
+    // JSON全文はログに出さない（秘密情報混入・肥大化を避ける）。
+    console.error("[AI分割] JSON検証で予期しないエラーが発生しました");
+    result.innerHTML = `<p class="ai-subtask-result-ng">検証中に予期しないエラーが発生しました。</p>`;
+  } finally {
+    aiSubtaskValidating = false;
+    // 入力状態に応じて活性を戻す。
+    if (validateButton) {
+      validateButton.disabled = jsonInput.value.trim() === "";
+    }
+  }
+}
+
+// 「入力をクリア」ハンドラ: JSON入力と検証結果を消す（プロンプト・固定親は維持）。
+function handleAiSubtaskClear() {
+  const { jsonInput, result } = aiSubtaskModalElements;
+  if (jsonInput) {
+    jsonInput.value = "";
+  }
+  if (result) {
+    result.innerHTML = "";
+  }
+  updateAiSubtaskJsonMeta();
+  if (jsonInput) {
+    jsonInput.focus();
+  }
+}
+
+// 「親タスク確認へ戻る」ハンドラ: 固定親・JSON入力を維持したままステップ1へ戻る。
+function handleAiSubtaskBack() {
+  showAiSubtaskStep(1);
+  // 操作可能な要素（次へ）へフォーカスする。
+  if (aiSubtaskModalElements.nextButton) {
+    aiSubtaskModalElements.nextButton.focus();
+  }
+}
+
+// ステップ2の入力/結果/プロンプト/コピー通知を初期化する（開く時・閉じる時に使う）。
+function resetAiSubtaskStep2Fields() {
+  const els = aiSubtaskModalElements;
+  aiSubtaskPromptText = "";
+  aiSubtaskValidating = false;
+  if (els.promptText) els.promptText.textContent = "";
+  if (els.promptCopyHint) els.promptCopyHint.textContent = "";
+  if (els.step2Parent) els.step2Parent.textContent = "";
+  if (els.jsonInput) els.jsonInput.value = "";
+  if (els.result) els.result.innerHTML = "";
+  updateAiSubtaskJsonMeta();
+}
+
+// 検証結果を描画する（成功=読み取り専用の確認表示 / 失敗=path付きエラー一覧）。
+// 動的値はすべて escapeHtml してから埋め込む（HTML実行・注入を防ぐ）。
+function renderAiSubtaskValidationResult(validation) {
+  if (validation.ok) {
+    const value = validation.value ?? {};
+    const tasks = Array.isArray(value.tasks) ? value.tasks : [];
+    const summaryLine =
+      value.splitSummary != null
+        ? `<p class="ai-subtask-result-summary"><strong>splitSummary:</strong> ${escapeHtml(String(value.splitSummary))}</p>`
+        : "";
+    const taskItems = tasks
+      .map((t, index) => {
+        const title = escapeHtml(String(t.title ?? ""));
+        const purpose = t.purpose != null && String(t.purpose).trim() !== "" ? escapeHtml(String(t.purpose)) : "（未設定）";
+        const doneWhen = Array.isArray(t.doneWhen) ? t.doneWhen : [];
+        const reviewPoints = Array.isArray(t.reviewPoints) ? t.reviewPoints : [];
+        const listOf = (arr) =>
+          arr.length
+            ? `<ul class="ai-subtask-sublist">${arr.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+            : "";
+        const details = (label, text) =>
+          text != null && String(text).trim() !== ""
+            ? `<details class="ai-subtask-result-details"><summary>${escapeHtml(label)}</summary><pre class="ai-subtask-result-pre">${escapeHtml(String(text))}</pre></details>`
+            : "";
+        return `
+          <li class="ai-subtask-result-task">
+            <p class="ai-subtask-result-task-title"><strong>#${index + 1} ${title}</strong></p>
+            <p class="ai-subtask-result-meta">purpose: ${purpose}</p>
+            <p class="ai-subtask-result-meta">doneWhen（${doneWhen.length}件）:</p>${listOf(doneWhen)}
+            <p class="ai-subtask-result-meta">reviewPoints（${reviewPoints.length}件）:</p>${listOf(reviewPoints)}
+            ${details("implementationPrompt", t.implementationPrompt)}
+            ${details("reviewPrompt", t.reviewPrompt)}
+          </li>`;
+      })
+      .join("");
+    return `
+      <p class="ai-subtask-result-ok">検証成功：子タスク ${tasks.length} 件</p>
+      ${summaryLine}
+      <ul class="ai-subtask-result-list">${taskItems}</ul>
+      <p class="ai-subtask-note">読み取り専用の確認表示です（子タスクの編集・除外・並べ替え・登録は後続PR）。</p>
+    `;
+  }
+
+  // 失敗: path / 理由をエスケープして一覧表示（入力は保持・自動修正しない）。
+  const errors = Array.isArray(validation.errors) ? validation.errors : [];
+  const errorItems = errors
+    .map((e) => {
+      const path = String(e.path ?? "").trim();
+      const label = path !== "" ? `<code>${escapeHtml(path)}</code>` : "<code>(root)</code>";
+      const message = escapeHtml(String(e.message ?? e.code ?? "エラー"));
+      return `<li>${label}: ${message}</li>`;
+    })
+    .join("");
+  return `
+    <p class="ai-subtask-result-ng">検証失敗：${errors.length} 件のエラー</p>
+    <ul class="ai-subtask-result-errors">${errorItems}</ul>
+    <p class="ai-subtask-note">入力内容は保持しています。自動修正は行いません。</p>
+  `;
 }
 
 // 固定中の親タスクの概要を組み立てる（全値を escapeHtml し、innerHTML への直接埋め込みを避ける）。
 function renderAiSubtaskParentSummary(task) {
-  const rows = [
+  const scalarRows = [
     ["taskCode", task.taskCode],
     ["title", task.text],
     ["status", task.status],
@@ -1078,22 +1337,53 @@ function renderAiSubtaskParentSummary(task) {
     ["priority", task.priority],
     ["owner", task.owner],
     ["branchName", task.branch],
+    ["completionRule", task.completionRule],
   ];
-  const items = rows
+  const scalarItems = scalarRows
     .map(([label, value]) => {
       const v = String(value ?? "").trim();
       // URL 等が含まれても自動リンク化しない（プレーンにエスケープ表示するだけ）。
       return `<li><strong>${escapeHtml(label)}:</strong> ${v ? escapeHtml(v) : "（未設定）"}</li>`;
     })
     .join("");
-  return `<p class="ai-subtask-summary-title">分割元の親タスク</p><ul class="task-modal-list">${items}</ul>`;
+  const arrayRows = [
+    ["doneWhen", task.doneWhen],
+    ["notes", task.notes],
+    ["reviewPoints", task.reviewPoints],
+  ];
+  const arrayItems = arrayRows
+    .map(([label, arr]) => {
+      const items = Array.isArray(arr) ? arr.filter((x) => typeof x === "string" && x.trim() !== "") : [];
+      const inner = items.length
+        ? `<ul class="ai-subtask-sublist">${items.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`
+        : "（なし）";
+      return `<li><strong>${escapeHtml(label)}:</strong> ${inner}</li>`;
+    })
+    .join("");
+  return `<p class="ai-subtask-summary-title">分割元の親タスク</p><ul class="task-modal-list">${scalarItems}${arrayItems}</ul>`;
 }
 
-// モーダルを閉じる（固定した親は破棄する。Firestore は変更しない）。
+// モーダルを閉じる。閉じたら状態は破棄する（固定親オブジェクト・プロンプト・JSON入力・
+// 検証結果・コピー通知・ステップ）。再度開いたときは openAiSubtaskImportModal が最新親を再取得する。
+// Firestore は変更しない。
 function closeAiSubtaskImportModal() {
-  aiSubtaskParentTaskId = null;
-  if (aiSubtaskModalElements.overlay) {
-    aiSubtaskModalElements.overlay.hidden = true;
+  aiSubtaskParentTask = null;
+  resetAiSubtaskStep2Fields();
+  const { summary, warning, nextButton, overlay } = aiSubtaskModalElements;
+  if (summary) {
+    summary.innerHTML = "";
+    summary.hidden = true;
+  }
+  if (warning) {
+    warning.textContent = "";
+    warning.hidden = true;
+  }
+  if (nextButton) {
+    nextButton.disabled = true;
+  }
+  showAiSubtaskStep(1);
+  if (overlay) {
+    overlay.hidden = true;
   }
 }
 
