@@ -1336,10 +1336,12 @@ function renderAiSubtaskValidationResult(validation, parentTask) {
       return `<p class="ai-subtask-result-meta">${escapeHtml(label)}: ${v}</p>`;
     };
     // 長文（implementationPrompt / reviewPrompt）は details で折りたたみ＋スクロール。
-    const details = (label, text) =>
-      text != null && String(text).trim() !== ""
-        ? `<details class="ai-subtask-result-details"><summary>${escapeHtml(label)}</summary><pre class="ai-subtask-result-pre">${escapeHtml(String(text))}</pre></details>`
-        : "";
+    // 値が省略・空文字でも項目名（summary）は常に表示し、中身は「（未設定）」にする。
+    const details = (label, text) => {
+      const hasText = text != null && String(text).trim() !== "";
+      const body = hasText ? escapeHtml(String(text)) : "（未設定）";
+      return `<details class="ai-subtask-result-details"><summary>${escapeHtml(label)}</summary><pre class="ai-subtask-result-pre">${body}</pre></details>`;
+    };
 
     const taskItems = tasks
       .map((t, index) => {
