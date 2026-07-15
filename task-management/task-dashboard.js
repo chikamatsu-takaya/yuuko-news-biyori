@@ -55,6 +55,22 @@ const deleteTaskModalElements = {
 // 削除確認モーダルで「削除する」を押したときに削除する対象タスクID。
 let pendingDeleteTaskId = null;
 
+// AI分割子タスクの「個別削除 / 一括取り消し」確認モーダル（manual-poc削除とは別モーダル・別条件）。
+const aiSubtaskDeleteModalElements = {
+  overlay: null,
+  body: null,
+  executeButton: null,
+  cancelButton: null,
+};
+
+// 実行中フラグ（二重操作防止・処理中はモーダルを閉じない）。
+let aiSubtaskDeleteProcessing = false;
+// 削除commit成功後に一覧再取得・再描画が失敗したとき true。古いカード（削除済み）から再操作されるのを
+// 防ぐため、ページ再読み込み（=リロードで false に戻る）まで新規のAI分割削除操作を禁止する。
+let aiSubtaskDeleteRefreshRequired = false;
+// 確認モーダルで承認後に削除する対象。{ mode:"single"|"batch", taskId, importBatchId }。
+let pendingAiSubtaskDelete = null;
+
 document.addEventListener("DOMContentLoaded", () => {
   elements.reloadButton.addEventListener("click", () => {
     void loadDashboard();
@@ -95,6 +111,26 @@ document.addEventListener("DOMContentLoaded", () => {
       const task = taskId ? findFirestoreTaskById(taskId) : null;
       if (task) {
         openDeleteTaskModal(task);
+      }
+      return;
+    }
+    // AI分割子タスクの個別削除（source=ai-subtask-import 限定・確認モーダルを開く。実削除は承認後）。
+    const aiSubtaskDeleteButton = event.target.closest(".ai-subtask-delete-button");
+    if (aiSubtaskDeleteButton) {
+      const taskId = aiSubtaskDeleteButton.dataset.taskId;
+      const task = taskId ? findFirestoreTaskById(taskId) : null;
+      if (task) {
+        openAiSubtaskDeleteModal("single", task);
+      }
+      return;
+    }
+    // AI分割子タスクの一括取り消し（押したカードの importBatchId 単位・確認モーダルを開く）。
+    const aiSubtaskBatchCancelButton = event.target.closest(".ai-subtask-batch-cancel-button");
+    if (aiSubtaskBatchCancelButton) {
+      const taskId = aiSubtaskBatchCancelButton.dataset.taskId;
+      const task = taskId ? findFirestoreTaskById(taskId) : null;
+      if (task) {
+        openAiSubtaskDeleteModal("batch", task);
       }
       return;
     }
@@ -308,6 +344,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setupAddTaskForm();
   // 「DB追加タスク削除」確認モーダルも JS から1度だけ動的生成する。
   setupDeleteTaskModal();
+  // AI分割子タスクの削除・一括取り消し確認モーダルも1度だけ動的生成する（manual-poc削除とは別）。
+  setupAiSubtaskDeleteModal();
   // 「AIで分割タスクを追加」起動ボタン＋親タスク選択モーダルも JS から動的生成する（Firestore表示時のみ）。
   setupAiSubtaskImportUi();
   // Markdown同期プレビューのパネルも JS から動的生成する（Firestore表示時のみ表示）。
@@ -906,6 +944,254 @@ async function executeManualPocTaskDelete(taskId) {
 }
 
 // ---------------------------------------------------------------------------
+// AI分割子タスクの削除・一括取り消し（§3.7）。manual-poc削除とは別モーダル・別条件・別Firestore関数。
+// UIの表示条件・確認は操作性向上のための事前ガードで、最終防御は firestore-source 側のトランザクション内。
+// ---------------------------------------------------------------------------
+
+// AI分割削除操作を新規開始してよいか（処理中でなく・要リロード状態でもない）。
+// canStartAiSubtaskDeleteOperation（ai-subtask-delete.mjs）と同一ルール。classicスクリプトのため同値を
+// ここでインライン評価する（sync描画・sync イベント処理から参照するため動的importを待てない）。
+function aiSubtaskDeleteCanStart() {
+  return aiSubtaskDeleteProcessing !== true && aiSubtaskDeleteRefreshRequired !== true;
+}
+
+// 確認モーダルのDOMを1度だけ生成し、ボタンを配線する（初期は hidden）。
+function setupAiSubtaskDeleteModal() {
+  if (aiSubtaskDeleteModalElements.overlay) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "aiSubtaskDeleteModalOverlay";
+  overlay.className = "task-modal-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = `
+    <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="aiSubtaskDeleteModalTitle">
+      <h2 id="aiSubtaskDeleteModalTitle">AI分割タスクの削除</h2>
+      <div id="aiSubtaskDeleteModalBody" class="task-modal-body"></div>
+      <div class="task-modal-actions">
+        <button id="aiSubtaskDeleteModalCancel" type="button" class="button compact">キャンセル</button>
+        <button id="aiSubtaskDeleteModalExecute" type="button" class="button primary compact">削除する</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  aiSubtaskDeleteModalElements.overlay = overlay;
+  aiSubtaskDeleteModalElements.body = overlay.querySelector("#aiSubtaskDeleteModalBody");
+  aiSubtaskDeleteModalElements.executeButton = overlay.querySelector("#aiSubtaskDeleteModalExecute");
+  aiSubtaskDeleteModalElements.cancelButton = overlay.querySelector("#aiSubtaskDeleteModalCancel");
+
+  // キャンセル / 背景クリック / Escape は削除せず閉じる（処理中は closeAiSubtaskDeleteModal 側で閉じない）。
+  aiSubtaskDeleteModalElements.cancelButton.addEventListener("click", () => {
+    closeAiSubtaskDeleteModal();
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeAiSubtaskDeleteModal();
+    }
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeAiSubtaskDeleteModal();
+    }
+  });
+
+  aiSubtaskDeleteModalElements.executeButton.addEventListener("click", () => {
+    void executeAiSubtaskDelete();
+  });
+}
+
+// 実行ボタン・キャンセルボタンの活性/文言を処理状態に合わせて更新する（二重操作防止）。
+function refreshAiSubtaskDeleteControls() {
+  const { executeButton, cancelButton } = aiSubtaskDeleteModalElements;
+  const processing = aiSubtaskDeleteProcessing === true;
+  const isBatch = pendingAiSubtaskDelete?.mode === "batch";
+  if (executeButton) {
+    executeButton.disabled = processing;
+    executeButton.textContent = processing
+      ? isBatch
+        ? "取り消し中…"
+        : "削除中…"
+      : isBatch
+        ? "一括取り消しを実行"
+        : "削除する";
+  }
+  if (cancelButton) {
+    cancelButton.disabled = processing;
+  }
+}
+
+// 確認モーダルを開く。mode="single" は1件削除、mode="batch" は同一 importBatchId の一括取り消し。
+// 表示対象・件数は一覧から集めた「表示用」で、実際の削除対象は firestore-source 側で再取得・再検証する。
+function openAiSubtaskDeleteModal(mode, task) {
+  if (!aiSubtaskDeleteModalElements.overlay || !aiSubtaskDeleteModalElements.body) {
+    return;
+  }
+  // 最終UIガード: 処理中、または commit後の再取得失敗（要リロード）のときは新しい操作を開始しない。
+  // 判定ルールは純粋関数 canStartAiSubtaskDeleteOperation と同一（classicスクリプトのため同値をインライン化）。
+  if (!aiSubtaskDeleteCanStart()) {
+    return;
+  }
+  const isBatch = mode === "batch";
+
+  if (isBatch) {
+    const importBatchId = typeof task.importBatchId === "string" ? task.importBatchId.trim() : "";
+    if (importBatchId === "") {
+      return;
+    }
+    // 同じ importBatchId の子タスクを一覧から集めて件数・タイトルを表示（表示用・システムIDは escape）。
+    const members = (state.data?.tasks ?? []).filter(
+      (t) => typeof t.importBatchId === "string" && t.importBatchId.trim() === importBatchId,
+    );
+    pendingAiSubtaskDelete = { mode: "batch", taskId: task.firestoreId, importBatchId };
+    const titleItems = members.map((t) => `<li>${renderInline(t.text || "(無題)")}</li>`).join("");
+    aiSubtaskDeleteModalElements.body.innerHTML = `
+      <p>同じ取込（importBatchId）で登録されたAI分割子タスクを<strong>一括で物理削除</strong>します。</p>
+      <ul class="task-modal-list">
+        <li><strong>importBatchId:</strong> <span class="task-modal-id">${escapeHtml(importBatchId)}</span></li>
+        <li><strong>対象件数:</strong> ${members.length}件</li>
+      </ul>
+      <p>対象タスク:</p>
+      <ul class="task-modal-list">${titleItems}</ul>
+      <p class="task-modal-danger">
+        対象を全件削除します。1件でも削除できない状態（Doing / branchName設定済み / protected など）があれば全件中止します。<br>
+        最後の子まで削除される場合は、親タスクの分割状態（splitChildCount / autoStatusUpdateDisabled / taskRole）を解除します。<br>
+        親タスクの status / branchName / issuePr は変更しません。
+      </p>
+      <p class="ai-subtask-delete-error" role="alert" hidden></p>
+    `;
+  } else {
+    pendingAiSubtaskDelete = { mode: "single", taskId: task.firestoreId, importBatchId: "" };
+    aiSubtaskDeleteModalElements.body.innerHTML = `
+      <p>このAI分割子タスクをFirestore上から<strong>物理削除</strong>します（1件）。</p>
+      <ul class="task-modal-list">
+        <li><strong>タスク名:</strong> ${renderInline(task.text)}</li>
+        <li><strong>firestoreId:</strong> <span class="task-modal-id">${escapeHtml(task.firestoreId)}</span></li>
+      </ul>
+      <p class="task-modal-danger">
+        削除すると親タスクの子タスク数（splitChildCount）が1減ります。<br>
+        最後の子だった場合は、親タスクの分割状態（splitChildCount / autoStatusUpdateDisabled / taskRole）を解除します。<br>
+        親タスクの status / branchName / issuePr は変更しません。
+      </p>
+      <p class="ai-subtask-delete-error" role="alert" hidden></p>
+    `;
+  }
+
+  refreshAiSubtaskDeleteControls();
+  aiSubtaskDeleteModalElements.overlay.hidden = false;
+  aiSubtaskDeleteModalElements.executeButton.focus();
+}
+
+// キャンセル等で閉じる。処理中（Firestore実行中）は閉じない（二重操作・不整合表示を避ける）。
+function closeAiSubtaskDeleteModal() {
+  if (aiSubtaskDeleteProcessing === true) {
+    return;
+  }
+  if (aiSubtaskDeleteModalElements.overlay) {
+    aiSubtaskDeleteModalElements.overlay.hidden = true;
+  }
+  pendingAiSubtaskDelete = null;
+  refreshAiSubtaskDeleteControls();
+}
+
+// トランザクション失敗時、モーダル内に理由を出して再試行可能にする（Firestoreは無変更）。
+function showAiSubtaskDeleteError(reason) {
+  const el = aiSubtaskDeleteModalElements.body
+    ? aiSubtaskDeleteModalElements.body.querySelector(".ai-subtask-delete-error")
+    : null;
+  if (el) {
+    el.textContent = `削除できませんでした: ${reason}（Firestoreは変更されていません）`;
+    el.hidden = false;
+  }
+}
+
+// 処理を終了してモーダルを閉じ、状態をリセットしてメッセージを表示する（成功・再取得失敗の両方で使う）。
+function finishAiSubtaskDelete(message, isError) {
+  aiSubtaskDeleteProcessing = false;
+  pendingAiSubtaskDelete = null;
+  if (aiSubtaskDeleteModalElements.overlay) {
+    aiSubtaskDeleteModalElements.overlay.hidden = true;
+  }
+  refreshAiSubtaskDeleteControls();
+  setLoadState(message, isError);
+}
+
+// 確認モーダルで承認後に呼ばれる削除実行。登録処理と同様、①削除トランザクションと②commit後の再取得を分離する。
+async function executeAiSubtaskDelete() {
+  if (aiSubtaskDeleteProcessing === true) {
+    return; // 二重実行防止
+  }
+  const pending = pendingAiSubtaskDelete;
+  if (!pending || !state.isFirestore) {
+    return;
+  }
+  const isBatch = pending.mode === "batch";
+
+  aiSubtaskDeleteProcessing = true;
+  refreshAiSubtaskDeleteControls();
+
+  try {
+    const mod = await import("./firestore-source.js");
+
+    // ① Firestore 削除トランザクション（成功＝Firestore反映済み・全件成功/全件失敗）。
+    let outcome;
+    try {
+      outcome = isBatch
+        ? await mod.cancelAiSubtaskBatchForPoc(pending.importBatchId)
+        : await mod.deleteAiSubtaskForPoc(pending.taskId);
+    } catch (txnError) {
+      // トランザクション失敗: Firestore無変更。モーダルを閉じず、理由を表示して再試行可能にする。
+      // Console へは Error 全体を渡さない（理由文にタスク名が含まれうるため）。概要のみ出す。
+      console.error("[Firestore POC] ai-subtask delete transaction failed", { mode: isBatch ? "batch" : "single" });
+      // 利用者向けモーダルには textContent 経由で理由を表示する（showAiSubtaskDeleteError 内で escape 済み扱い）。
+      showAiSubtaskDeleteError(txnError?.message ?? "不明なエラー");
+      aiSubtaskDeleteProcessing = false;
+      refreshAiSubtaskDeleteControls();
+      return;
+    }
+
+    // ② commit 成功後の一覧再取得・再描画（失敗しても削除自体は成功として扱う）。
+    try {
+      const docs = await mod.fetchFirestoreTasksForPoc();
+      state.data = mod.firestoreToBoardModel(docs);
+      state.isFirestore = true;
+      renderDashboard();
+    } catch {
+      // Console へは Error 全体を渡さない（外部由来データ混入回避）。概要のみ出す。
+      console.error("[Firestore POC] refetch after ai-subtask delete failed", { mode: isBatch ? "batch" : "single" });
+      // 削除は成功済みだが古い state.data / カードが残る。ページ再読み込みまで新規削除操作を禁止する
+      // （削除済みの古いカードから再度Firestore削除を走らせないため）。リロードで自然に false へ戻る。
+      aiSubtaskDeleteRefreshRequired = true;
+      // 「無変更」とは言わず、削除成功済みとして再読み込みを案内する。
+      const msg = isBatch
+        ? `AI分割タスク${outcome.deletedCount}件の取り消しは完了しましたが、一覧の再取得に失敗しました。ページを再読み込みして結果を確認してください。importBatchId: ${outcome.importBatchId}`
+        : "AI分割タスクの削除は完了しましたが、一覧の再取得に失敗しました。ページを再読み込みして結果を確認してください。";
+      finishAiSubtaskDelete(msg, true);
+      return;
+    }
+
+    // 成功メッセージ（最後の子で親解除したか／残り件数を明示）。
+    let successMsg;
+    if (isBatch) {
+      successMsg = outcome.parentSplitCleared
+        ? `AI分割タスクを${outcome.deletedCount}件取り消しました。親タスクの分割状態を解除しました。importBatchId: ${outcome.importBatchId}`
+        : `AI分割タスクを${outcome.deletedCount}件取り消しました。親タスクの残り子タスク数: ${outcome.remainingChildCount}件（importBatchId: ${outcome.importBatchId}）`;
+    } else {
+      successMsg = outcome.parentSplitCleared
+        ? "AI分割タスクを削除しました。親タスクの分割状態を解除しました。"
+        : `AI分割タスクを削除しました。親タスクの残り子タスク数: ${outcome.remainingChildCount}件`;
+    }
+    finishAiSubtaskDelete(successMsg, false);
+  } catch (error) {
+    // 動的 import 失敗など。Firestore へは書き込んでいない。Console へは Error 全体を渡さない。
+    console.error("[Firestore POC] ai-subtask delete failed", { mode: isBatch ? "batch" : "single" });
+    showAiSubtaskDeleteError(error?.message ?? "不明なエラー");
+    aiSubtaskDeleteProcessing = false;
+    refreshAiSubtaskDeleteControls();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AIで分割タスクを追加（親固定 → AI用プロンプト生成・JSON貼付検証）
 //
 // 責務（docs/00_project/ai-subtask-import-spec.md §3.10 / §3.11 / §8 / §8.3 / §11）:
@@ -1420,9 +1706,21 @@ function handleAiSubtaskValidate() {
       // 検証成功: validation.value・親タスクを破壊せず複製して編集可能なプレビュー状態を作る。
       // 継承4項目（category/subcategory/priority/owner）は最新の固定親から初期化する。
       aiSubtaskPreviewState = aiSubtaskPreviewModule.createAiSubtaskPreviewState(validation.value, aiSubtaskParentTask);
-      aiSubtaskPreviewStatus = "validated";
       const count = aiSubtaskPreviewState.items.length;
-      result.innerHTML = `<p class="ai-subtask-result-ok">検証成功：子タスク ${count} 件。下のプレビューで編集・並べ替え・除外できます。</p>`;
+      // 初回検証でも登録用データ全体（AI JSON＋継承4項目）を検証する。全て成功なら、編集しない限り
+      // そのまま「Firestoreへ一括登録」を押せる（"validated"＝登録可能）。継承値（親由来）が不正な稀な
+      // ケースだけは登録不可にし、継承値を修正して「編集内容を再検証」するよう促す。
+      const snapshotCheck = aiSubtaskPreviewModule.validateAiSubtaskPreviewSnapshot(aiSubtaskPreviewState);
+      if (snapshotCheck.ok) {
+        aiSubtaskPreviewStatus = "validated";
+        result.innerHTML = `<p class="ai-subtask-result-ok">検証成功：子タスク ${count} 件。内容を確認し、そのまま「Firestoreへ一括登録」を押せます（編集した場合は「編集内容を再検証」を押してください）。</p>`;
+      } else {
+        // JSON は妥当だが継承値が不正。編集後扱いにして登録不可のままにし、修正→再検証を促す。
+        aiSubtaskPreviewStatus = "edited";
+        result.innerHTML =
+          renderAiSubtaskPreviewRevalidationFailure(snapshotCheck) +
+          `<p class="ai-subtask-note">継承値（category/priority など）を修正して「編集内容を再検証」を押してください。</p>`;
+      }
       renderAiSubtaskPreview();
     } else {
       // 検証失敗: プレビュー状態を破棄し、path付きエラー一覧を表示（入力は保持・自動修正しない）。
@@ -1774,13 +2072,18 @@ function renderAiSubtaskPreview() {
 }
 
 // Firestore 一括登録ボタンを有効化してよいか。
-// preview あり・再検証成功・登録対象1件以上・登録中でない・Firestore表示・固定親あり のときだけ有効。
+// preview あり・「登録用データ全体の検証に成功」・登録対象1件以上・登録中でない・Firestore表示・固定親あり
+// のときだけ有効。検証成功状態は次の2つ:
+// - "validated": 初回JSON検証時に登録用データ全体（AI JSON＋継承4項目）まで検証成功し、以後未編集。
+// - "revalidated-ok": 編集後に再検証で成功。
+// 編集すると "edited"（未再検証）へ移り、再検証するまで登録不可になる（意図しない未検証データの登録を防ぐ）。
 function canAiSubtaskRegister() {
   if (!state.isFirestore || !aiSubtaskParentTask || !aiSubtaskPreviewState || !aiSubtaskPreviewModule) {
     return false;
   }
+  const validatedNow = aiSubtaskPreviewStatus === "validated" || aiSubtaskPreviewStatus === "revalidated-ok";
   // 登録中・commit 済み（再取得失敗を含む）は再登録させない。
-  if (aiSubtaskPreviewStatus !== "revalidated-ok" || aiSubtaskRegistering || aiSubtaskRegistrationCommitted) {
+  if (!validatedNow || aiSubtaskRegistering || aiSubtaskRegistrationCommitted) {
     return false;
   }
   return aiSubtaskPreviewModule.countAiSubtaskIncluded(aiSubtaskPreviewState) >= 1;
@@ -2856,6 +3159,30 @@ function renderFirestoreFields(task) {
     ? `<button type="button" class="button compact task-delete-button" data-task-id="${taskId}">DB追加タスクを削除</button>`
     : "";
 
+  // AI分割子タスクの削除・一括取り消しボタン表示条件（§3.7・事前ガード。最終防御はトランザクション内）。
+  // source=ai-subtask-import の Todo・未完了・branchName未設定・非protected・親IDありのみ。
+  const branchUnset = typeof task.branch !== "string" || task.branch.trim() === "";
+  const parentIdSet = typeof task.parentTaskId === "string" && task.parentTaskId.trim() !== "";
+  // カード表示条件は「操作開始条件」とは分離する。processing 中はモーダルが前面・実行ボタンdisabled・
+  // openAiSubtaskDeleteModal 側の最終ガードで守られるため、カード描画で processing を条件にしない
+  // （成功後の再描画時 processing=true でボタンが消える不具合を防ぐ）。再取得失敗（要リロード）中のみ隠す。
+  const canAiSubtaskDelete =
+    task.source === "ai-subtask-import" &&
+    task.status === "Todo" &&
+    task.completed !== true &&
+    branchUnset &&
+    task.protected !== true &&
+    !!task.firestoreId &&
+    parentIdSet &&
+    aiSubtaskDeleteRefreshRequired !== true;
+  const batchIdSet = typeof task.importBatchId === "string" && task.importBatchId.trim() !== "";
+  const aiSubtaskDeleteButtons = canAiSubtaskDelete
+    ? `<button type="button" class="button compact ai-subtask-delete-button" data-task-id="${taskId}">AI分割タスクを削除</button>` +
+      (batchIdSet
+        ? `<button type="button" class="button compact ai-subtask-batch-cancel-button" data-task-id="${taskId}" data-batch-id="${escapeHtml(task.importBatchId.trim())}">この取込を一括取り消し</button>`
+        : "")
+    : "";
+
   // 表示部（担当 / 更新 / メモ）は Done でも共通。Done のときは編集ボタンを出さず注記を出す。
   const viewBlock = `
     <div class="fs-view">
@@ -2868,6 +3195,7 @@ function renderFirestoreFields(task) {
       : `<button type="button" class="button compact task-edit-button" data-task-id="${taskId}">編集</button>`
     }
         ${cardDeleteButton}
+        ${aiSubtaskDeleteButtons}
       </div>
     </div>
   `;

@@ -32,6 +32,7 @@ import {
   runTransaction,
   serverTimestamp,
   increment,
+  deleteField,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 import { firebaseConfig } from "./firebase-config.js";
@@ -45,6 +46,13 @@ import {
   buildAiSubtaskChildPayloads,
   buildAiSubtaskParentUpdate,
 } from "./ai-subtask-import-registration.mjs";
+// AI分割タスク削除・一括取り消し: 削除条件・親整合性・カウント計算の純粋関数（§3.7）。
+import {
+  validateAiSubtaskDeleteCandidate,
+  validateAiSubtaskDeleteParent,
+  calculateAiSubtaskParentAfterDeletion,
+  validateAiSubtaskBatchMembers,
+} from "./ai-subtask-delete.mjs";
 
 // Firebase アプリは多重初期化を避けるためモジュール内で1度だけ生成する。
 let appInstance = null;
@@ -278,6 +286,10 @@ function firestoreDocToTaskModel(doc, { line }) {
       typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
         ? doc.splitChildCount
         : 0,
+    // AI分割子タスクの削除・一括取り消し操作に必要な内部情報（§3.7）。表示は最小限。
+    // 文字列のみ trim して保持し、空・非文字列は空文字にする（HTML/属性へ入れる際は表示側で escape）。
+    parentTaskId: typeof doc.parentTaskId === "string" ? doc.parentTaskId.trim() : "",
+    importBatchId: typeof doc.importBatchId === "string" ? doc.importBatchId.trim() : "",
   };
   // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
   // 判定ロジックは ai-subtask-import-parent.mjs に集約（ここでは呼ぶだけ・重複実装しない）。
@@ -1058,4 +1070,230 @@ export async function importAiSubtasksForPoc({ parentTaskId, snapshot }) {
   const childIds = childRefs.map((ref) => ref.id);
   console.log("[Firestore POC] imported ai-subtasks", { importBatchId, createdCount: childCount, parentTaskId });
   return { importBatchId, createdCount: childCount, childIds };
+}
+
+/**
+ * 削除後の親ドキュメント更新内容を組み立てる（個別削除・一括取り消しで共通）。
+ * newCount>0 は splitChildCount を新値へ更新。newCount===0（最後の子）は
+ * splitChildCount / autoStatusUpdateDisabled / taskRole を deleteField() で「フィールドごと削除」し、
+ * 分割前の未設定状態へ完全に戻す（false / 0 / 空文字を残さない・§3.7）。
+ * status / branchName / issuePr 等の既存値は一切変更しない。
+ * @param {{ clearParentFields:boolean, nextCount:number, updatedBy:string }} params
+ */
+function buildAiSubtaskParentDeletionUpdate({ clearParentFields, nextCount, updatedBy }) {
+  const base = { updatedAt: serverTimestamp(), updatedBy };
+  if (clearParentFields) {
+    return {
+      ...base,
+      splitChildCount: deleteField(),
+      autoStatusUpdateDisabled: deleteField(),
+      taskRole: deleteField(),
+    };
+  }
+  return { ...base, splitChildCount: nextCount };
+}
+
+/**
+ * AI分割子タスクを1件だけ物理削除する（§3.7・runTransaction・全件成功/全件失敗）。
+ * 既存 deleteManualPocTaskForPoc とは別関数・別条件（manual-poc 判定に ai-subtask-import を混ぜない）。
+ *
+ * 手順:
+ * 1. トランザクション外で子タスクを1件読み、parentTaskId と親 Reference を確定する（正本にはしない）。
+ * 2. runTransaction 内で子・親を transaction.get で再取得（全read完了後にwrite）。
+ * 3. 子の削除条件・親子IDの一致・親整合性を再検証。newCount = splitChildCount - 1 を計算。
+ * 4. 子を delete し、newCount>0 は splitChildCount 更新、newCount===0 は親3フィールドを deleteField()。
+ * トランザクション内では UI 状態・外部変数を変更しない（再試行対策・§7）。
+ *
+ * @param {string} taskId 削除する子タスクの Firestore docId
+ * @returns {Promise<{ deletedTaskId:string, parentTaskId:string, deletedCount:number,
+ *   remainingChildCount:number, parentSplitCleared:boolean }>}
+ */
+export async function deleteAiSubtaskForPoc(taskId) {
+  if (!taskId) {
+    throw new Error("削除対象のタスクIDが指定されていません。");
+  }
+  const db = getFirestore(getApp());
+  const childRef = firestoreDoc(db, "tasks", taskId);
+
+  // 1. トランザクション外で親IDを確定する（親 Reference を作るために必要。判定の正本は下のtxn内再検証）。
+  const preSnap = await getDoc(childRef);
+  if (!preSnap.exists()) {
+    throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+  }
+  const preData = preSnap.data() ?? {};
+  const preParentId = typeof preData.parentTaskId === "string" ? preData.parentTaskId.trim() : "";
+  if (preParentId === "") {
+    throw new Error("対象タスクに parentTaskId が設定されていないため削除できません。");
+  }
+  const parentRef = firestoreDoc(db, "tasks", preParentId);
+
+  // 結果はコールバックから return し、runTransaction の戻り値として受け取る（外部変数を書き換えない・
+  // 再試行されても副作用なし）。返すのはUI表示用プリミティブのみ（DocumentSnapshot/Reference は返さない）。
+  const result = await runTransaction(db, async (transaction) => {
+    // 2. 全read（子→親）を先に完了させる。トランザクション外の値は信用しない。
+    const childSnap = await transaction.get(childRef);
+    if (!childSnap.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const childData = childSnap.data() ?? {};
+    const parentSnap = await transaction.get(parentRef);
+
+    // 3. 子の削除条件を再検証。
+    const candidate = validateAiSubtaskDeleteCandidate(childData);
+    if (!candidate.ok) {
+      throw new Error(candidate.reason);
+    }
+    // 子の parentTaskId が確定した親IDと一致するか（トランザクション外読取り後に付け替えられていないか）。
+    const childParentId = String(childData.parentTaskId).trim();
+    if (childParentId !== preParentId) {
+      throw new Error("子タスクの parentTaskId が想定した親と一致しません。中止します。");
+    }
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentData = parentSnap.data() ?? {};
+    const parentCheck = validateAiSubtaskDeleteParent(parentData);
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // newCount = splitChildCount - 1。
+    const calc = calculateAiSubtaskParentAfterDeletion(parentData.splitChildCount, 1);
+    if (!calc.ok) {
+      throw new Error(calc.reason);
+    }
+
+    // 4. 子削除 ＋ 親更新（同一トランザクション）。
+    transaction.delete(childRef);
+    transaction.update(
+      parentRef,
+      buildAiSubtaskParentDeletionUpdate({
+        clearParentFields: calc.clearParentFields,
+        nextCount: calc.nextCount,
+        updatedBy: "ai-subtask-delete",
+      }),
+    );
+    return {
+      deletedTaskId: taskId,
+      parentTaskId: preParentId,
+      deletedCount: 1,
+      remainingChildCount: calc.nextCount,
+      parentSplitCleared: calc.clearParentFields,
+    };
+  });
+
+  console.log("[Firestore POC] deleted ai-subtask", {
+    taskId,
+    parentTaskId: result?.parentTaskId,
+    remainingChildCount: result?.remainingChildCount,
+    parentSplitCleared: result?.parentSplitCleared,
+  });
+  return result;
+}
+
+/**
+ * 同一 importBatchId のAI分割子タスクを全件物理削除する（§3.7・runTransaction・全件成功/全件失敗）。
+ *
+ * 手順:
+ * 1. トランザクション外で where("importBatchId","==",id) の子タスク一覧と親IDを確定・整合性を確認する
+ *    （単一親・上限内・全件が削除条件を満たす。判定の最終正本は下のtxn内再検証）。
+ * 2. runTransaction 内で対象子タスク全件→親の順に transaction.get で再取得（全read完了後にwrite）。
+ * 3. 全子の削除条件・importBatchId一致・親子ID一致・親整合性を再検証。1件でも不可なら Error で全件中止。
+ * 4. newCount = splitChildCount - 削除件数。newCount<0 は整合性エラーで全件中止。
+ * 5. 全子を delete し、newCount>0 は splitChildCount 更新、newCount===0 は親3フィールドを deleteField()。
+ *
+ * @param {string} importBatchId 取り消し対象のバッチID
+ * @returns {Promise<{ importBatchId:string, parentTaskId:string, deletedCount:number,
+ *   remainingChildCount:number, parentSplitCleared:boolean, deletedTaskIds:string[] }>}
+ */
+export async function cancelAiSubtaskBatchForPoc(importBatchId) {
+  const batchId = typeof importBatchId === "string" ? importBatchId.trim() : "";
+  if (batchId === "") {
+    throw new Error("importBatchId が指定されていません。");
+  }
+  const db = getFirestore(getApp());
+
+  // 1. トランザクション外で対象子タスクを特定（表示・件数確定用）。判定の正本はtxn内で取り直す。
+  const batchQuery = query(collection(db, "tasks"), where("importBatchId", "==", batchId));
+  const querySnap = await getDocs(batchQuery);
+  const members = querySnap.docs.map((d) => ({ id: d.id, ...(d.data() ?? {}) }));
+  // 純粋関数で整合性を先に確認（0件・上限超過・複数親・条件不一致は早期中止でトランザクションを始めない）。
+  const batchCheck = validateAiSubtaskBatchMembers(members, batchId);
+  if (!batchCheck.ok) {
+    throw new Error(batchCheck.reason);
+  }
+  const parentTaskId = batchCheck.parentTaskId;
+  const childRefs = members.map((m) => firestoreDoc(db, "tasks", m.id));
+  const parentRef = firestoreDoc(db, "tasks", parentTaskId);
+
+  // 結果はコールバックから return し、runTransaction の戻り値として受け取る（外部変数を書き換えない）。
+  const result = await runTransaction(db, async (transaction) => {
+    // 2. 全read（対象子タスク全件→親）を先に完了させる。
+    const childSnaps = [];
+    for (const ref of childRefs) {
+      // 順次 get（全件読み終えてから write する）。
+      const snap = await transaction.get(ref);
+      childSnaps.push(snap);
+    }
+    const parentSnap = await transaction.get(parentRef);
+
+    // 3. 全子タスクを再検証（1件でも不可なら全件中止・部分削除しない）。
+    childSnaps.forEach((snap, index) => {
+      if (!snap.exists()) {
+        throw new Error("対象の子タスクが見つかりません（既に削除済みの可能性）。中止します。");
+      }
+      const data = snap.data() ?? {};
+      const candidate = validateAiSubtaskDeleteCandidate(data);
+      if (!candidate.ok) {
+        const title = typeof data.title === "string" && data.title.trim() !== "" ? data.title.trim() : childRefs[index].id;
+        throw new Error(`タスク「${title}」は${candidate.reason}中止します。`);
+      }
+      const dataBatch = typeof data.importBatchId === "string" ? data.importBatchId.trim() : "";
+      if (dataBatch !== batchId) {
+        throw new Error("importBatchId が一致しない子タスクが含まれています。中止します。");
+      }
+      if (String(data.parentTaskId).trim() !== parentTaskId) {
+        throw new Error("親IDが一致しない子タスクが含まれています。中止します。");
+      }
+    });
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentData = parentSnap.data() ?? {};
+    const parentCheck = validateAiSubtaskDeleteParent(parentData);
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // 4. newCount = splitChildCount - 削除件数（newCount<0 は整合性エラーで全件中止）。
+    const calc = calculateAiSubtaskParentAfterDeletion(parentData.splitChildCount, childRefs.length);
+    if (!calc.ok) {
+      throw new Error(calc.reason);
+    }
+
+    // 5. 全子削除 ＋ 親更新（同一トランザクション・全件成功/全件失敗）。
+    childRefs.forEach((ref) => transaction.delete(ref));
+    transaction.update(
+      parentRef,
+      buildAiSubtaskParentDeletionUpdate({
+        clearParentFields: calc.clearParentFields,
+        nextCount: calc.nextCount,
+        updatedBy: "ai-subtask-batch-cancel",
+      }),
+    );
+    return {
+      importBatchId: batchId,
+      parentTaskId,
+      deletedCount: childRefs.length,
+      remainingChildCount: calc.nextCount,
+      parentSplitCleared: calc.clearParentFields,
+      deletedTaskIds: childRefs.map((ref) => ref.id),
+    };
+  });
+
+  console.log("[Firestore POC] cancelled ai-subtask batch", {
+    importBatchId: batchId,
+    parentTaskId: result?.parentTaskId,
+    deletedCount: result?.deletedCount,
+    parentSplitCleared: result?.parentSplitCleared,
+  });
+  return result;
 }
