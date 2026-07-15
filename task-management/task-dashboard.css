@@ -580,10 +580,67 @@ details[open] > summary::after {
   color: var(--muted);
 }
 
+/* AI分割タスク（source=ai-subtask-import）。他バッジと区別できる専用色（固定クラス）。 */
+.source-badge.source-ai {
+  background: rgba(197, 163, 255, 0.16);
+  color: var(--violet);
+}
+
 .source-state-text {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 0.74rem;
+}
+
+/* source バッジ横の補足（AI分割の「Markdown未反映」等）。控えめな注意色。 */
+.source-supplementary {
+  color: var(--amber);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* AI分割の役割・親子関係表示（分割親 / 子→親）。カード幅を崩さないよう折り返し可能にする。 */
+.ai-subtask-relation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.ai-subtask-relation-role {
+  font-weight: 800;
+  color: var(--violet);
+}
+
+.ai-subtask-relation-line {
+  color: var(--text);
+  word-break: break-word;
+}
+
+.ai-subtask-relation-note {
+  font-size: 0.74rem;
+}
+
+/* 不整合（taskRole=split-parent だが autoStatusUpdateDisable!==true）を控えめに注意色で示す。 */
+.ai-subtask-relation-warning {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+/* parentTaskId（補助表示）。長いIDでも横スクロールしないよう折り返す。 */
+.ai-subtask-relation-sub {
+  width: 100%;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  word-break: break-all;
 }
 
 .task-meta {
@@ -738,6 +795,53 @@ details[open] > summary::after {
 }
 
 .work-prompt-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* AI分割の保存済みプロンプト（実装 / レビュー依頼）。work-prompt と同系の見た目を再利用しつつ別枠にする。 */
+.ai-subtask-prompts {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-subtask-prompt {
+  font-size: 0.86rem;
+}
+
+.ai-subtask-prompt > summary {
+  cursor: pointer;
+  color: var(--violet);
+  font-weight: 700;
+}
+
+.ai-subtask-prompt-text {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.ai-subtask-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ai-subtask-prompt-hint {
   color: var(--muted);
   font-size: 0.78rem;
 }

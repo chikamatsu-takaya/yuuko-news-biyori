@@ -225,6 +225,19 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // AI分割・保存済みプロンプト（実装/レビュー依頼）のコピー（read-only・DB更新/API呼び出しなし）。
+    // 押したボタンの最も近い .ai-subtask-prompt 内の <pre>/hint だけを対象にする（別プロンプトを掴まない）。
+    const aiSubtaskPromptCopy = event.target.closest(".ai-subtask-prompt-copy");
+    if (aiSubtaskPromptCopy) {
+      const wrap = aiSubtaskPromptCopy.closest(".ai-subtask-prompt");
+      const pre = wrap ? wrap.querySelector(".ai-subtask-prompt-text") : null;
+      const hint = wrap ? wrap.querySelector(".ai-subtask-prompt-hint") : null;
+      if (pre) {
+        void copyPreToClipboard(pre, hint);
+      }
+      return;
+    }
+
     // 作業開始（branchName を確認・編集 → status:Doing + branchName を保存）。
     const startButton = event.target.closest(".task-start-button");
     if (startButton) {
@@ -3047,6 +3060,7 @@ function renderTaskCard(task) {
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
       ${renderSourceBadge(task)}
+      ${renderAiSubtaskRelation(task)}
       <ul class="task-meta">
         <li><strong>Priority:</strong> ${renderInline(task.priority || "未定")}</li>
         <li><strong>Status:</strong> ${renderInline(task.status || "Todo")}</li>
@@ -3065,6 +3079,7 @@ function renderTaskCard(task) {
     state.isFirestore && task.firestoreId ? "" : renderLongList("Notes", task.notes)
     }
       ${renderReviewChecklistBlock(task)}
+      ${renderStoredAiSubtaskPrompts(task)}
       ${renderFirestoreFields(task)}
       ${renderStartControls(task)}
       ${renderDoingTransitionControls(task)}
@@ -3112,12 +3127,71 @@ function renderSourceBadge(task) {
     return "";
   }
   const badge = task.sourceBadge;
+  // supplementaryText（AI分割の「Markdown未反映」等）は存在時のみ表示。外部由来のため必ず escape。
+  const supplementary =
+    typeof badge.supplementaryText === "string" && badge.supplementaryText.trim() !== ""
+      ? `<span class="source-supplementary">${escapeHtml(badge.supplementaryText)}</span>`
+      : "";
   return `
     <div class="source-state">
       <span class="source-badge ${escapeHtml(badge.badgeClass)}">${escapeHtml(badge.label)}</span>
       <span class="source-state-text">${escapeHtml(badge.sourceText)}</span>
+      ${supplementary}
     </div>
   `;
+}
+
+// AI分割の「役割・関係」表示（表示専用・DB更新なし）。分割親と、子→親の関係を出す。
+// 判定・解決は firestore-source 側の純粋関数（ai-subtask-display.mjs）が付与した aiSubtaskSplitInfo /
+// aiSubtaskRelation を使う。Firestore表示時のみ・情報が無ければ何も出さない（Markdown通常表示は変更しない）。
+function renderAiSubtaskRelation(task) {
+  if (!state.isFirestore) {
+    return "";
+  }
+  let html = "";
+  // 分割親タスク（taskRole==="split-parent"）: 役割・子タスク数・自動status更新除外状態を明示。
+  // 子タスク数の不正（splitChildCount）と、自動status更新除外の不整合（autoStatusUpdateDisabled）は別々に表示する。
+  const splitInfo = task.aiSubtaskSplitInfo;
+  if (splitInfo && splitInfo.type === "parent") {
+    const countText = splitInfo.childCountKnown ? `${splitInfo.childCount}件` : "確認が必要";
+    // 除外状態の正本は autoStatusUpdateDisabled（純粋関数が付与した postMergeAutoStatusDisabled）。
+    // true のときだけ「対象外」と断定表示し、不整合（taskRole=split-parent だが未除外）は断定しない文言にする。
+    const autoStatusLine = splitInfo.postMergeAutoStatusDisabled
+      ? `<span class="ai-subtask-relation-note">post-merge自動status更新対象外</span>`
+      : `<span class="ai-subtask-relation-note ai-subtask-relation-warning">自動status更新設定: 確認が必要</span>`;
+    html += `
+      <div class="ai-subtask-relation ai-subtask-relation-parent">
+        <span class="ai-subtask-relation-role">分割親タスク</span>
+        <span class="ai-subtask-relation-line">子タスク数: ${escapeHtml(countText)}</span>
+        ${autoStatusLine}
+      </div>
+    `;
+  }
+  // AI分割子タスク: 親タスク（taskCode + タイトル）を表示。親未検出・関係不正は安全な文言にする。
+  const rel = task.aiSubtaskRelation;
+  if (rel && rel.type === "child") {
+    let parentLine;
+    if (rel.invalidRelation) {
+      parentLine = "親タスク: 関係不正（確認が必要）";
+    } else if (rel.parentFound) {
+      const code = rel.parentTaskCode ? `[${rel.parentTaskCode}] ` : "";
+      parentLine = `親タスク: ${code}${rel.parentTitle || "(無題)"}`;
+    } else {
+      parentLine = "親タスク: 一覧内で確認できません";
+    }
+    // parentTaskId（FirestoreドキュメントID）は補助表示のみ。人間向け主表示には使わない。
+    const idLine =
+      !rel.parentFound || rel.invalidRelation
+        ? `<span class="ai-subtask-relation-sub">parentTaskId: ${escapeHtml(rel.parentTaskId)}</span>`
+        : "";
+    html += `
+      <div class="ai-subtask-relation ai-subtask-relation-child">
+        <span class="ai-subtask-relation-line">${escapeHtml(parentLine)}</span>
+        ${idLine}
+      </div>
+    `;
+  }
+  return html;
 }
 
 // Firestore 表示時のみ、担当者名・更新日時・共有メモの表示と編集UIを描画する（編集POC）。
@@ -3685,6 +3759,60 @@ function renderLongList(label, items) {
 }
 
 // 「レビュー時の確認観点」の read-only 表示ブロック（開閉＋コピーボタン）。
+// AI分割子タスクの「保存済みプロンプト」を表示・コピーするブロック（表示専用・DB更新なし）。
+// 既存の動的生成プロンプト（buildWorkPrompt / buildReviewChecklist）とは別枠で、Firestore に保存された
+// implementationPrompt / reviewPrompt をそのまま出す（上書き・置換しない）。
+// 表示条件: Firestore表示・source==="ai-subtask-import"・各プロンプトが trim 後空でない文字列。
+function renderStoredAiSubtaskPrompts(task) {
+  if (!state.isFirestore || task.source !== "ai-subtask-import") {
+    return "";
+  }
+  const impl = typeof task.implementationPrompt === "string" ? task.implementationPrompt : "";
+  const review = typeof task.reviewPrompt === "string" ? task.reviewPrompt : "";
+  const blocks = [];
+  // 表示可否は trim 後空かで判定するが、表示・コピーする本文は保存値をそのまま使う（改行を失わせない）。
+  if (impl.trim() !== "") {
+    blocks.push(
+      renderStoredAiSubtaskPrompt({
+        kind: "implementation",
+        summary: "AI分割・実装プロンプト",
+        buttonLabel: "AI分割・実装プロンプトをコピー",
+        text: impl,
+      }),
+    );
+  }
+  if (review.trim() !== "") {
+    blocks.push(
+      renderStoredAiSubtaskPrompt({
+        kind: "review",
+        summary: "AI分割・レビュー依頼プロンプト",
+        buttonLabel: "AI分割・レビュー依頼プロンプトをコピー",
+        text: review,
+      }),
+    );
+  }
+  if (blocks.length === 0) {
+    return "";
+  }
+  return `<div class="ai-subtask-prompts">${blocks.join("")}</div>`;
+}
+
+// 保存済みプロンプト1件の折りたたみ表示。本文は必ず escapeHtml して <pre> へ（プレーンテキスト・改行保持・
+// URL自動リンク化やMarkdown/HTML解釈はしない）。コピーは <pre>.textContent を使うため data 属性へ全文を入れない。
+// kind は implementation / review の区別（コピー時に別プロンプトを掴まないための識別）。
+function renderStoredAiSubtaskPrompt({ kind, summary, buttonLabel, text }) {
+  return `
+    <details class="ai-subtask-prompt" data-prompt-kind="${escapeHtml(kind)}">
+      <summary>${escapeHtml(summary)}</summary>
+      <pre class="ai-subtask-prompt-text">${escapeHtml(text)}</pre>
+      <div class="ai-subtask-prompt-actions">
+        <button type="button" class="button compact ai-subtask-prompt-copy">${escapeHtml(buttonLabel)}</button>
+        <span class="ai-subtask-prompt-hint" aria-live="polite"></span>
+      </div>
+    </details>
+  `;
+}
+
 // 表示専用: DB更新・API呼び出しは行わない。本文は必ず escapeHtml して埋め込み、
 // コピーは <pre> の textContent 経由にする（HTMLインジェクション防止）。
 function renderReviewChecklistBlock(task) {

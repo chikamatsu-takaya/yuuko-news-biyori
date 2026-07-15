@@ -53,6 +53,15 @@ import {
   calculateAiSubtaskParentAfterDeletion,
   validateAiSubtaskBatchMembers,
 } from "./ai-subtask-delete.mjs";
+// AI分割タスクの表示系: source分類・親子関係解決・分割親情報（DOM/Firestore非依存の純粋関数）。
+// classifySourceBadge は本ファイルの既存 export を維持するため、ここで取り込み再エクスポートする。
+import {
+  classifySourceBadge,
+  buildTaskIndexById,
+  resolveAiSubtaskParentRelation,
+  resolveAiSubtaskSplitParentInfo,
+} from "./ai-subtask-display.mjs";
+export { classifySourceBadge } from "./ai-subtask-display.mjs";
 
 // Firebase アプリは多重初期化を避けるためモジュール内で1度だけ生成する。
 let appInstance = null;
@@ -179,47 +188,8 @@ function normalizeSource(source) {
   return trimmed === "" ? null : trimmed;
 }
 
-/**
- * task の生成元（source）を画面表示用バッジ情報へ分類する（段階1のsource可視化）。
- * 物理削除や書き込みは一切伴わない純粋な表示用ロジック。
- * - md-import   … Markdown管理下のタスク（通常色/青系）
- * - manual-poc  … 画面から追加したDB上だけのタスク（注意色/黄系・将来DB→md反映の対象）
- * - それ以外/未設定 … 由来不明（警告色/グレー系）
- *
- * 返却の label / sourceText はそのまま画面に出すが、外部由来 source 値を含むため
- * 表示側で必ず escapeHtml すること（このモジュール自身は文字列の組み立てまで）。
- * markdown-sync-ui.js の削除可否判定（evaluateDeleteCandidate）と source の意味付けを揃える。
- *
- * @param {unknown} source Firestore ドキュメントの source 値
- * @returns {{ key: string, label: string, badgeClass: string, sourceText: string }}
- */
-export function classifySourceBadge(source) {
-  const normalized = normalizeSource(source);
-
-  if (normalized === "md-import") {
-    return {
-      key: "md-import",
-      label: "Markdown管理",
-      badgeClass: "source-md",
-      sourceText: "source: md-import",
-    };
-  }
-  if (normalized === "manual-poc") {
-    return {
-      key: "manual-poc",
-      label: "DB追加 / md未反映",
-      badgeClass: "source-manual",
-      sourceText: "source: manual-poc",
-    };
-  }
-  // 未設定は「sourceなし」、未知の値は実値を添えて「由来不明」とする（手動確認の手掛かりにする）。
-  return {
-    key: "unknown",
-    label: "由来不明",
-    badgeClass: "source-unknown",
-    sourceText: normalized ? `source: ${normalized}` : "sourceなし",
-  };
-}
+// classifySourceBadge の実装は ai-subtask-display.mjs（DOM/Firestore非依存の純粋モジュール）へ移し、
+// ai-subtask-import を含む分類・supplementaryText 追加を集約した。本ファイルは上部で import + 再エクスポートする。
 
 /**
  * Firestore の tasks ドキュメント配列を、既存画面が期待する state.data 形へ変換する。
@@ -286,10 +256,19 @@ function firestoreDocToTaskModel(doc, { line }) {
       typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
         ? doc.splitChildCount
         : 0,
+    // post-merge の Done/Review 自動更新を除外する判定の「正本」。boolean の true のみ有効とし、
+    // 未設定・null・"true"・1・{} 等はすべて false 扱い（Boolean()/truthy 判定・自動補正はしない）。
+    // taskRole="split-parent" は表示・理由説明用で、除外状態の正本ではない（両者は別々に扱う）。
+    autoStatusUpdateDisabled: doc.autoStatusUpdateDisabled === true,
     // AI分割子タスクの削除・一括取り消し操作に必要な内部情報（§3.7）。表示は最小限。
     // 文字列のみ trim して保持し、空・非文字列は空文字にする（HTML/属性へ入れる際は表示側で escape）。
     parentTaskId: typeof doc.parentTaskId === "string" ? doc.parentTaskId.trim() : "",
     importBatchId: typeof doc.importBatchId === "string" ? doc.importBatchId.trim() : "",
+    // AI分割子タスクの保存済みプロンプト（カード表示・コピー用）。プリミティブ文字列のみ採用し、
+    // 非文字列・未設定は空文字。改行を保持するため trim しない（表示可否判定は表示側で trim して行う）。
+    // 本文はログ出力しない（外部由来・肥大化防止）。
+    implementationPrompt: typeof doc.implementationPrompt === "string" ? doc.implementationPrompt : "",
+    reviewPrompt: typeof doc.reviewPrompt === "string" ? doc.reviewPrompt : "",
   };
   // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
   // 判定ロジックは ai-subtask-import-parent.mjs に集約（ここでは呼ぶだけ・重複実装しない）。
@@ -350,6 +329,15 @@ export function firestoreToBoardModel(docs) {
     ...section.tasks,
     ...section.subsections.flatMap((subsection) => subsection.tasks),
   ]);
+
+  // AI分割の親子関係・分割親情報を、取得済み一覧から解決して各タスクへ付与する（Firestore追加取得なし）。
+  // sections/subsections と tasks は同一の task 参照を共有するため、ここで付与するとカード描画にも反映される。
+  // 判定は純粋関数（ai-subtask-display.mjs）へ委譲する。AI分割以外は null（表示側で出さない）。
+  const tasksById = buildTaskIndexById(tasks);
+  for (const task of tasks) {
+    task.aiSubtaskRelation = resolveAiSubtaskParentRelation(task, tasksById);
+    task.aiSubtaskSplitInfo = resolveAiSubtaskSplitParentInfo(task);
+  }
 
   return {
     // POCでは Firestore 側に meta ドキュメントを持たないため最小の既定値を返す。
