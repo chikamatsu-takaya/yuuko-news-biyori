@@ -49,10 +49,17 @@ export function validateAiSubtaskDeleteCandidate(childData) {
   if (d.completed === true) {
     return { ok: false, reason: "completed=trueのため削除できません。" };
   }
-  // branchName は null / undefined / trim後空 のみ「未設定」として許可する。
-  const branch = typeof d.branchName === "string" ? d.branchName.trim() : "";
-  if (branch !== "") {
-    return { ok: false, reason: "branchNameが設定されているため削除できません。" };
+  // branchName は「未設定」のみ許可する（フェイルクローズ）。null / undefined / フィールド未設定、
+  // または文字列で trim 後空 のときだけ許可。非文字列（true/false/数値/配列/オブジェクト/Stringオブジェクト等）は
+  // String() で文字列化して判定せず、型不正として拒否する（不正値を誤って削除可能にしないため）。
+  const rawBranchName = d.branchName;
+  if (rawBranchName !== null && rawBranchName !== undefined) {
+    if (typeof rawBranchName !== "string") {
+      return { ok: false, reason: "branchNameの型が不正なため削除できません。" };
+    }
+    if (rawBranchName.trim() !== "") {
+      return { ok: false, reason: "branchNameが設定されているため削除できません。" };
+    }
   }
   if (d.protected === true) {
     return { ok: false, reason: "protected=trueのため削除できません。" };

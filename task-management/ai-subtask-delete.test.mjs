@@ -87,6 +87,46 @@ test("9: branchName空文字を許可", () => {
   assert.equal(validateAiSubtaskDeleteCandidate(child({ branchName: "   " })).ok, true);
 });
 
+// --- branchName 境界値（フェイルクローズ：未設定のみ許可・非文字列は型不正で拒否） ---
+
+test("branchName: null は許可", () => {
+  assert.equal(validateAiSubtaskDeleteCandidate(child({ branchName: null })).ok, true);
+});
+
+test("branchName: undefined は許可", () => {
+  assert.equal(validateAiSubtaskDeleteCandidate(child({ branchName: undefined })).ok, true);
+});
+
+test("branchName: フィールド未設定は許可", () => {
+  const c = child();
+  delete c.branchName;
+  assert.equal(validateAiSubtaskDeleteCandidate(c).ok, true);
+});
+
+test('branchName: "" は許可', () => {
+  assert.equal(validateAiSubtaskDeleteCandidate(child({ branchName: "" })).ok, true);
+});
+
+test('branchName: "   " は許可', () => {
+  assert.equal(validateAiSubtaskDeleteCandidate(child({ branchName: "   " })).ok, true);
+});
+
+test('branchName: "feature/x" は拒否', () => {
+  const r = validateAiSubtaskDeleteCandidate(child({ branchName: "feature/x" }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /設定されている/);
+});
+
+test("branchNameがnull/undefined以外の非文字列なら型不正で拒否", () => {
+  // 代表的な非文字列値をテーブル駆動で確認する。String オブジェクトもプリミティブ文字列ではないため拒否。
+  const invalidValues = [true, false, 0, 1, NaN, {}, [], new String("")];
+  for (const branchName of invalidValues) {
+    const result = validateAiSubtaskDeleteCandidate(child({ branchName }));
+    assert.equal(result.ok, false, `branchName=${Object.prototype.toString.call(branchName)} は拒否する`);
+    assert.match(result.reason, /型が不正/);
+  }
+});
+
 test("10: protected=trueを拒否", () => {
   assert.equal(validateAiSubtaskDeleteCandidate(child({ protected: true })).ok, false);
 });
@@ -184,6 +224,12 @@ test("27: 1件でもDoingなら全件拒否", () => {
 test("28: 1件でもbranchName設定済みなら全件拒否", () => {
   const r = validateAiSubtaskBatchMembers([child({ id: "a" }), child({ id: "b", branchName: "feature/x" })], "ai-batch-1");
   assert.equal(r.ok, false);
+});
+
+test("28b: 1件でもbranchNameが非文字列なら全件拒否（部分成功を返さない）", () => {
+  const r = validateAiSubtaskBatchMembers([child({ id: "a" }), child({ id: "b", branchName: 0 })], "ai-batch-1");
+  assert.equal(r.ok, false);
+  assert.equal(r.parentTaskId, undefined); // 成功時のみ返す情報を持たない＝部分成功にならない
 });
 
 test("29: 1件でもprotectedなら全件拒否", () => {
