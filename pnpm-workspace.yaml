@@ -2,6 +2,13 @@
 # pnpm 11 では package.json の "pnpm" フィールドが読まれなくなったため、旧 pnpm.auditConfig をここへ移す。
 # あわせて、ビルドスクリプトを持つ依存の実行許可（旧 pnpm 9 の既定動作）を明示する。
 
+# 対象パッケージ。本リポジトリはルート package.json だけの単一パッケージ構成のため "." のみを指定する。
+# packages を空にすると actions/setup-node の pnpm キャッシュ初期化（pnpm store path）が
+# 「packages field missing or empty」で失敗するため、ルートを明示する。
+# node_modules や task-management など不要なサブディレクトリは workspace package に含めない。
+packages:
+  - "."
+
 # 依存監査の除外設定（旧 package.json pnpm.auditConfig から移行・値は変更しない）。
 auditConfig:
   ignoreGhsas:
