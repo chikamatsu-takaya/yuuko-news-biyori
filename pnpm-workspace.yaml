@@ -1,0 +1,18 @@
+# pnpm 11 用のプロジェクト設定ファイル。
+# pnpm 11 では package.json の "pnpm" フィールドが読まれなくなったため、旧 pnpm.auditConfig をここへ移す。
+# あわせて、ビルドスクリプトを持つ依存の実行許可（旧 pnpm 9 の既定動作）を明示する。
+
+# 依存監査の除外設定（旧 package.json pnpm.auditConfig から移行・値は変更しない）。
+auditConfig:
+  ignoreGhsas:
+    - GHSA-r5fr-rjxr-66jc
+
+# ビルドスクリプト（install / postinstall）の実行を許可するパッケージ。
+# pnpm 11 は strictDepBuilds により未許可のビルドスクリプトを無視して非ゼロ終了する（ERR_PNPM_IGNORED_BUILDS）。
+# 次の2つは native バイナリを配置するために install/postinstall が必要で、pnpm 9 では自動実行されていた。
+#  - sharp@0.34.5        : "install" スクリプト（node install/check.js || npm run build）で native モジュールを用意
+#  - unrs-resolver@1.12.2: "postinstall" スクリプト（node postinstall.js）で native リゾルバを配置
+# バージョンを固定して許可し、更新時は再レビューされるまで未許可（＝要確認）に戻る運用にする。
+allowBuilds:
+  sharp@0.34.5: true
+  unrs-resolver@1.12.2: true

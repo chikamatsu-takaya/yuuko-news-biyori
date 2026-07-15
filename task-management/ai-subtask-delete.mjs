@@ -49,6 +49,13 @@ export function validateAiSubtaskDeleteCandidate(childData) {
   if (d.completed === true) {
     return { ok: false, reason: "completed=trueのため削除できません。" };
   }
+  // archived は boolean の false のみ許可する（フェイルクローズ）。一覧は archived=false のみ表示し、
+  // AI分割登録時も子へ archived:false を必ず保存するため、削除可能なのは archived===false のときだけ。
+  // true はもちろん、未設定 / null / "false" / 0 / {} 等の不正値も、画面に出ない可能性があるため削除不可にする
+  // （Boolean() で変換したり不正値を false へ寄せたりしない）。
+  if (d.archived !== false) {
+    return { ok: false, reason: "archivedがfalseではないため削除できません。" };
+  }
   // branchName は「未設定」のみ許可する（フェイルクローズ）。null / undefined / フィールド未設定、
   // または文字列で trim 後空 のときだけ許可。非文字列（true/false/数値/配列/オブジェクト/Stringオブジェクト等）は
   // String() で文字列化して判定せず、型不正として拒否する（不正値を誤って削除可能にしないため）。

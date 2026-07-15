@@ -31,6 +31,7 @@ function child(overrides = {}) {
     source: "ai-subtask-import",
     status: "Todo",
     completed: false,
+    archived: false,
     branchName: null,
     protected: false,
     parentTaskId: "parent-1",
@@ -77,6 +78,32 @@ test("6: Doneを拒否", () => {
 
 test("7: completed=trueを拒否", () => {
   assert.equal(validateAiSubtaskDeleteCandidate(child({ completed: true })).ok, false);
+});
+
+// --- archived 境界値（boolean false のみ許可・フェイルクローズ） ---
+
+test("archived=false（boolean）のみ許可", () => {
+  assert.equal(validateAiSubtaskDeleteCandidate(child({ archived: false })).ok, true);
+});
+
+test("archived=trueは拒否", () => {
+  const r = validateAiSubtaskDeleteCandidate(child({ archived: true }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /archived/);
+});
+
+test("archivedがfalse以外（未設定/null/文字列/数値/オブジェクト/配列）は拒否", () => {
+  // false 以外はすべて削除不可（Boolean変換・false寄せをしない）。undefined はキー削除で表現する。
+  const noKey = child();
+  delete noKey.archived;
+  assert.equal(validateAiSubtaskDeleteCandidate(noKey).ok, false, "archived未設定は拒否");
+
+  const invalidValues = [true, null, "false", 0, {}, []];
+  for (const archived of invalidValues) {
+    const r = validateAiSubtaskDeleteCandidate(child({ archived }));
+    assert.equal(r.ok, false, `archived=${Object.prototype.toString.call(archived)} は拒否する`);
+    assert.match(r.reason, /archived/);
+  }
 });
 
 test("8: branchName設定済みを拒否", () => {
@@ -230,6 +257,20 @@ test("28b: 1件でもbranchNameが非文字列なら全件拒否（部分成功�
   const r = validateAiSubtaskBatchMembers([child({ id: "a" }), child({ id: "b", branchName: 0 })], "ai-batch-1");
   assert.equal(r.ok, false);
   assert.equal(r.parentTaskId, undefined); // 成功時のみ返す情報を持たない＝部分成功にならない
+});
+
+test("29b: 1件でもarchived=trueなら全件中止（部分成功を返さない）", () => {
+  const r = validateAiSubtaskBatchMembers([child({ id: "a", archived: false }), child({ id: "b", archived: true })], "ai-batch-1");
+  assert.equal(r.ok, false);
+  assert.equal(r.parentTaskId, undefined); // 成功時情報なし
+  assert.equal(r.count, undefined);
+});
+
+test("29c: 1件でもarchivedがfalse以外の不正値なら全件中止（部分成功を返さない）", () => {
+  const r = validateAiSubtaskBatchMembers([child({ id: "a", archived: false }), child({ id: "b", archived: "false" })], "ai-batch-1");
+  assert.equal(r.ok, false);
+  assert.equal(r.parentTaskId, undefined);
+  assert.equal(r.count, undefined);
 });
 
 test("29: 1件でもprotectedなら全件拒否", () => {
