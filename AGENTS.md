@@ -114,7 +114,7 @@ Claude Code は、各ルールの `paths` に一致するファイルを扱っ�
 | フロント | `components/**` `app/**` `hooks/**` `lib/**/*.ts` `tests/ui/**` | `.claude/rules/frontend.md` |
 | Rust / Tauri | `src-tauri/**/*.rs` | `.claude/rules/rust.md` |
 | 進捗管理 / Firestore docs | `task-management/**` ＋ `developタスクチェックリスト.md` など Firestore 進捗関連の個別ドキュメント | `.claude/rules/task-management.md` |
-| セキュリティ | `src-tauri/capabilities/**` `src-tauri/tauri.conf.json` `src-tauri/src/infra/**` | `.claude/rules/security.md` |
+| セキュリティ | `src-tauri/capabilities/**` `src-tauri/tauri.conf.json` `src-tauri/src/infra/**` およびAPIキー・外部通信・AI送信データを扱う個別サービス | `.claude/rules/security.md` |
 
 - タスク領域の入口: `docs/00_project/ai-context/README.md`。
 - 参考資料（常駐させず必要時に参照）: 要件定義書・MVPスコープ定義書（`docs/00_project/`）、各設計書（`docs/02_design/`）。
