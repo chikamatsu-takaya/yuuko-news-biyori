@@ -580,10 +580,67 @@ details[open] > summary::after {
   color: var(--muted);
 }
 
+/* AI分割タスク（source=ai-subtask-import）。他バッジと区別できる専用色（固定クラス）。 */
+.source-badge.source-ai {
+  background: rgba(197, 163, 255, 0.16);
+  color: var(--violet);
+}
+
 .source-state-text {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 0.74rem;
+}
+
+/* source バッジ横の補足（AI分割の「Markdown未反映」等）。控えめな注意色。 */
+.source-supplementary {
+  color: var(--amber);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* AI分割の役割・親子関係表示（分割親 / 子→親）。カード幅を崩さないよう折り返し可能にする。 */
+.ai-subtask-relation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.ai-subtask-relation-role {
+  font-weight: 800;
+  color: var(--violet);
+}
+
+.ai-subtask-relation-line {
+  color: var(--text);
+  word-break: break-word;
+}
+
+.ai-subtask-relation-note {
+  font-size: 0.74rem;
+}
+
+/* 不整合（taskRole=split-parent だが autoStatusUpdateDisable!==true）を控えめに注意色で示す。 */
+.ai-subtask-relation-warning {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+/* parentTaskId（補助表示）。長いIDでも横スクロールしないよう折り返す。 */
+.ai-subtask-relation-sub {
+  width: 100%;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  word-break: break-all;
 }
 
 .task-meta {
@@ -738,6 +795,53 @@ details[open] > summary::after {
 }
 
 .work-prompt-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* AI分割の保存済みプロンプト（実装 / レビュー依頼）。work-prompt と同系の見た目を再利用しつつ別枠にする。 */
+.ai-subtask-prompts {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-subtask-prompt {
+  font-size: 0.86rem;
+}
+
+.ai-subtask-prompt > summary {
+  cursor: pointer;
+  color: var(--violet);
+  font-weight: 700;
+}
+
+.ai-subtask-prompt-text {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.ai-subtask-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ai-subtask-prompt-hint {
   color: var(--muted);
   font-size: 0.78rem;
 }
@@ -1434,4 +1538,430 @@ p.markdown-sync-id {
   color: var(--amber);
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+/* AIで分割: タスクカード内の起動ボタン（親候補条件を満たすカードにのみ表示） */
+.ai-subtask-split {
+  margin-top: 10px;
+}
+
+/* 親固定の取込モーダル（.task-modal-* を再利用しつつ、本機能固有の要素を追加） */
+.ai-subtask-step {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.ai-subtask-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-subtask-summary {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+
+.ai-subtask-summary-title {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Doing + branchName 設定済み時の注意（危険ではなく警告色） */
+.ai-subtask-warning {
+  border: 1px solid rgba(240, 200, 120, 0.5);
+  border-radius: 12px;
+  background: rgba(240, 200, 120, 0.12);
+  color: var(--amber);
+  padding: 10px 12px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.ai-subtask-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-note-info {
+  color: var(--amber);
+}
+
+/* 親固定モーダルはステップ2でプロンプト/JSONを扱うため、少し広めにする */
+.ai-subtask-modal {
+  width: min(680px, 100%);
+}
+
+/* ヘッダー（h2）をドラッグハンドルにする。既存デザインは大きく変えず、カーソルと選択抑止のみ。 */
+.ai-subtask-drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none; /* ポインタ操作をブラウザのスクロール/ズームへ奪われないようにする */
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-drag-handle.is-dragging {
+  cursor: grabbing;
+}
+
+.ai-subtask-drag-hint {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ai-subtask-sublist {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.ai-subtask-step-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* ステップ2: 固定親ラベル */
+.ai-subtask-step2-parent {
+  margin: 0 0 12px;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+/* ステップ2: プロンプト表示 */
+.ai-subtask-prompt-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-subtask-prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.ai-subtask-copy-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ai-subtask-prompt-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ステップ2: JSON入力 */
+.ai-subtask-json-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.86rem;
+}
+
+.ai-subtask-json-field > span {
+  color: var(--muted);
+}
+
+.ai-subtask-json-input {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: inherit;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-json-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ステップ2: 検証結果 */
+.ai-subtask-result:empty {
+  display: none;
+}
+
+.ai-subtask-result {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-size: 0.84rem;
+}
+
+.ai-subtask-result-ok {
+  margin: 0 0 8px;
+  color: var(--green, #7bd88f);
+  font-weight: 700;
+}
+
+/* 検証成功プレビュー上部の「全子タスクに継承される値」共通欄 */
+.ai-subtask-inherited {
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  padding: 8px 12px;
+}
+
+.ai-subtask-inherited-title {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.ai-subtask-result-ng {
+  margin: 0 0 8px;
+  color: var(--red);
+  font-weight: 700;
+}
+
+.ai-subtask-result-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.ai-subtask-result-task {
+  margin: 8px 0;
+}
+
+.ai-subtask-result-task-title {
+  margin: 0 0 4px;
+}
+
+.ai-subtask-result-meta {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ai-subtask-result-errors {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--red);
+}
+
+.ai-subtask-result-errors code {
+  font-family: var(--mono);
+}
+
+.ai-subtask-result-details {
+  margin-top: 6px;
+}
+
+.ai-subtask-result-pre {
+  margin: 6px 0 0;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 未再検証などの注記（エラー赤ではない中立色） */
+.ai-subtask-result-note {
+  margin: 0;
+  color: var(--amber);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+/* ステップ2: 編集可能プレビュー */
+.ai-subtask-preview:empty {
+  display: none;
+}
+
+.ai-subtask-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ai-subtask-preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-preview-status {
+  margin: 0;
+  font-weight: 700;
+  font-size: 0.84rem;
+}
+
+.ai-subtask-preview-status.is-validated,
+.ai-subtask-preview-status.is-revalidated-ok {
+  color: var(--green, #7bd88f);
+}
+
+.ai-subtask-preview-status.is-edited {
+  color: var(--amber);
+}
+
+.ai-subtask-preview-status.is-revalidated-ng {
+  color: var(--red);
+}
+
+.ai-subtask-preview-counts {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.ai-subtask-preview-summary {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.ai-subtask-preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-subtask-preview-item.is-excluded {
+  opacity: 0.6;
+}
+
+.ai-subtask-preview-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 6px 10px;
+}
+
+.ai-subtask-preview-item.is-excluded .ai-subtask-preview-card {
+  border-style: dashed;
+}
+
+.ai-subtask-preview-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+
+.ai-subtask-preview-order {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.ai-subtask-preview-item-title {
+  flex: 1 1 auto;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-subtask-preview-state {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.ai-subtask-preview-item.is-excluded .ai-subtask-preview-state {
+  color: var(--red);
+}
+
+.ai-subtask-preview-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ai-subtask-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-subtask-include-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-row > span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+}
+
+.ai-subtask-edit-field,
+.ai-subtask-inherited-field {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  color: inherit;
+  padding: 6px 8px;
+  font-size: 0.82rem;
+}
+
+.ai-subtask-edit-array {
+  resize: vertical;
+  min-height: 56px;
+  font-family: var(--mono);
+  white-space: pre;
+}
+
+/* 長文プロンプト項目（implementationPrompt / reviewPrompt）は複数行を確認できる高さで縦リサイズ可 */
+.ai-subtask-edit-prompt {
+  resize: vertical;
+  min-height: 120px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--mono);
+  white-space: pre-wrap;
 }

@@ -27,13 +27,41 @@ import {
   orderBy,
   getDocs,
   doc as firestoreDoc,
+  getDoc,
   addDoc,
   runTransaction,
   serverTimestamp,
   increment,
+  deleteField,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 import { firebaseConfig } from "./firebase-config.js";
+// AI分割タスク取込: 親候補判定（§3.10）。カード描画時に同期利用できるよう、変換時に判定して
+// 各タスクへ aiSubtaskEligible を持たせる（判定の正本は本モジュールに一本化する）。
+import { isEligibleAiSubtaskParent } from "./ai-subtask-import-parent.mjs";
+// AI分割タスク一括登録: 登録前最終検証・保存値組み立ての純粋関数（Firestore依存値は本層で付与）。
+import {
+  validateAiSubtaskRegistrationSnapshot,
+  validateAiSubtaskRegistrationParent,
+  buildAiSubtaskChildPayloads,
+  buildAiSubtaskParentUpdate,
+} from "./ai-subtask-import-registration.mjs";
+// AI分割タスク削除・一括取り消し: 削除条件・親整合性・カウント計算の純粋関数（§3.7）。
+import {
+  validateAiSubtaskDeleteCandidate,
+  validateAiSubtaskDeleteParent,
+  calculateAiSubtaskParentAfterDeletion,
+  validateAiSubtaskBatchMembers,
+} from "./ai-subtask-delete.mjs";
+// AI分割タスクの表示系: source分類・親子関係解決・分割親情報（DOM/Firestore非依存の純粋関数）。
+// classifySourceBadge は本ファイルの既存 export を維持するため、ここで取り込み再エクスポートする。
+import {
+  classifySourceBadge,
+  buildTaskIndexById,
+  resolveAiSubtaskParentRelation,
+  resolveAiSubtaskSplitParentInfo,
+} from "./ai-subtask-display.mjs";
+export { classifySourceBadge } from "./ai-subtask-display.mjs";
 
 // Firebase アプリは多重初期化を避けるためモジュール内で1度だけ生成する。
 let appInstance = null;
@@ -160,47 +188,8 @@ function normalizeSource(source) {
   return trimmed === "" ? null : trimmed;
 }
 
-/**
- * task の生成元（source）を画面表示用バッジ情報へ分類する（段階1のsource可視化）。
- * 物理削除や書き込みは一切伴わない純粋な表示用ロジック。
- * - md-import   … Markdown管理下のタスク（通常色/青系）
- * - manual-poc  … 画面から追加したDB上だけのタスク（注意色/黄系・将来DB→md反映の対象）
- * - それ以外/未設定 … 由来不明（警告色/グレー系）
- *
- * 返却の label / sourceText はそのまま画面に出すが、外部由来 source 値を含むため
- * 表示側で必ず escapeHtml すること（このモジュール自身は文字列の組み立てまで）。
- * markdown-sync-ui.js の削除可否判定（evaluateDeleteCandidate）と source の意味付けを揃える。
- *
- * @param {unknown} source Firestore ドキュメントの source 値
- * @returns {{ key: string, label: string, badgeClass: string, sourceText: string }}
- */
-export function classifySourceBadge(source) {
-  const normalized = normalizeSource(source);
-
-  if (normalized === "md-import") {
-    return {
-      key: "md-import",
-      label: "Markdown管理",
-      badgeClass: "source-md",
-      sourceText: "source: md-import",
-    };
-  }
-  if (normalized === "manual-poc") {
-    return {
-      key: "manual-poc",
-      label: "DB追加 / md未反映",
-      badgeClass: "source-manual",
-      sourceText: "source: manual-poc",
-    };
-  }
-  // 未設定は「sourceなし」、未知の値は実値を添えて「由来不明」とする（手動確認の手掛かりにする）。
-  return {
-    key: "unknown",
-    label: "由来不明",
-    badgeClass: "source-unknown",
-    sourceText: normalized ? `source: ${normalized}` : "sourceなし",
-  };
-}
+// classifySourceBadge の実装は ai-subtask-display.mjs（DOM/Firestore非依存の純粋モジュール）へ移し、
+// ai-subtask-import を含む分類・supplementaryText 追加を集約した。本ファイルは上部で import + 再エクスポートする。
 
 /**
  * Firestore の tasks ドキュメント配列を、既存画面が期待する state.data 形へ変換する。
@@ -209,6 +198,84 @@ export function classifySourceBadge(source) {
  *
  * @param {Array<Record<string, unknown>>} docs fetchFirestoreTasksForPoc() の結果
  */
+/**
+ * Firestore ドキュメント（{ id, ...data }）1件を画面用タスクモデルへ変換する（キー別名の吸収を1箇所に集約）。
+ * firestoreToBoardModel と単一取得（fetchFirestoreTaskById）で同じ変換を使い、判定・表示のズレを防ぐ。
+ * line は呼び出し側の文脈（一覧の出現順 or 単一取得の order/sourceLine）で決めて渡す。
+ *
+ * @param {Record<string, unknown>} doc `{ id, ...data }` 形式のドキュメント
+ * @param {{ line: number }} ctx 表示順に使う line
+ */
+function firestoreDocToTaskModel(doc, { line }) {
+  const category = String(doc.category ?? "未分類");
+  const subcategory =
+    doc.subcategory === null || doc.subcategory === undefined ? "" : String(doc.subcategory);
+
+  const task = {
+    firestoreId: doc.id,
+    // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
+    taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
+    text: String(doc.title ?? ""),
+    completed: doc.completed === true,
+    // 論理削除フラグ。一覧は archived=false のみ取得するため通常 false だが、単一取得では
+    // archived=true の可能性があるため保持する（AI分割の候補判定 archived!==true に使う）。
+    archived: doc.archived === true,
+    line,
+    sectionTitle: category,
+    subsectionTitle: subcategory,
+    priority: doc.priority ? String(doc.priority) : "",
+    status: doc.status ? String(doc.status) : doc.completed === true ? "Done" : "Todo",
+    owner: doc.owner ? String(doc.owner) : "",
+    branch: doc.branchName ? String(doc.branchName) : "",
+    issuePr: doc.issuePr ? String(doc.issuePr) : "",
+    // 完了判定（自由文字列）。未設定・文字列以外は空表示にする（read-only）。
+    completionRule: typeof doc.completionRule === "string" ? doc.completionRule : "",
+    doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
+    // レビュー観点。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+    reviewPoints: Array.isArray(doc.reviewPoints)
+      ? doc.reviewPoints.filter((p) => typeof p === "string")
+      : [],
+    // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
+    notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
+    includedInProgress: !isExcludedSection(category),
+    // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
+    // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
+    updatedAtMillis: toMillisOrNull(doc.updatedAt),
+    // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
+    // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
+    // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
+    source: normalizeSource(doc.source),
+    sourceBadge: classifySourceBadge(doc.source),
+    // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
+    protected: doc.protected === true,
+    // AI分割タスク取込の親候補判定用（読み取りのみ・書き込みは今回しない）。
+    // taskRole="split-parent" / splitChildCount>0 は「分割済み親」で追加分割の対象外にする。
+    // 未設定・型不正は安全側（taskRole="" / splitChildCount=0）へ寄せる。
+    taskRole: typeof doc.taskRole === "string" ? doc.taskRole : "",
+    splitChildCount:
+      typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
+        ? doc.splitChildCount
+        : 0,
+    // post-merge の Done/Review 自動更新を除外する判定の「正本」。boolean の true のみ有効とし、
+    // 未設定・null・"true"・1・{} 等はすべて false 扱い（Boolean()/truthy 判定・自動補正はしない）。
+    // taskRole="split-parent" は表示・理由説明用で、除外状態の正本ではない（両者は別々に扱う）。
+    autoStatusUpdateDisabled: doc.autoStatusUpdateDisabled === true,
+    // AI分割子タスクの削除・一括取り消し操作に必要な内部情報（§3.7）。表示は最小限。
+    // 文字列のみ trim して保持し、空・非文字列は空文字にする（HTML/属性へ入れる際は表示側で escape）。
+    parentTaskId: typeof doc.parentTaskId === "string" ? doc.parentTaskId.trim() : "",
+    importBatchId: typeof doc.importBatchId === "string" ? doc.importBatchId.trim() : "",
+    // AI分割子タスクの保存済みプロンプト（カード表示・コピー用）。プリミティブ文字列のみ採用し、
+    // 非文字列・未設定は空文字。改行を保持するため trim しない（表示可否判定は表示側で trim して行う）。
+    // 本文はログ出力しない（外部由来・肥大化防止）。
+    implementationPrompt: typeof doc.implementationPrompt === "string" ? doc.implementationPrompt : "",
+    reviewPrompt: typeof doc.reviewPrompt === "string" ? doc.reviewPrompt : "",
+  };
+  // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
+  // 判定ロジックは ai-subtask-import-parent.mjs に集約（ここでは呼ぶだけ・重複実装しない）。
+  task.aiSubtaskEligible = isEligibleAiSubtaskParent(task);
+  return task;
+}
+
 export function firestoreToBoardModel(docs) {
   const sections = [];
   // category 単位・(category, subcategory) 単位の生成済みノードを引くための索引。
@@ -217,14 +284,12 @@ export function firestoreToBoardModel(docs) {
 
   // 取得順（order 昇順）で出現順にセクション/サブセクションを組み立てる。
   docs.forEach((doc, index) => {
-    const category = String(doc.category ?? "未分類");
-    const subcategory =
-      doc.subcategory === null || doc.subcategory === undefined
-        ? ""
-        : String(doc.subcategory);
     // task.line は order ?? sourceLine ?? 連番 の優先順で決める（§13.5）。
     // 外部由来値はHTML注入防止のため有限数値のみ採用し、それ以外は連番へフォールバック。
     const line = toFiniteNumber(doc.order) ?? toFiniteNumber(doc.sourceLine) ?? index + 1;
+    const task = firestoreDocToTaskModel(doc, { line });
+    const category = task.sectionTitle;
+    const subcategory = task.subsectionTitle;
 
     // セクションを必要に応じて生成（除外判定は category 名で行う）。
     let section = sectionByTitle.get(category);
@@ -240,44 +305,6 @@ export function firestoreToBoardModel(docs) {
       sectionByTitle.set(category, section);
       sections.push(section);
     }
-
-    // 既存 createTask と同じ形のタスクオブジェクトを作る（キー別名はここで吸収）。
-    // firestoreId は status 更新時に対象ドキュメントを指すために保持する（UI 表示には使わない）。
-    const task = {
-      firestoreId: doc.id,
-      // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
-      taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
-      text: String(doc.title ?? ""),
-      completed: doc.completed === true,
-      line,
-      sectionTitle: category,
-      subsectionTitle: subcategory,
-      priority: doc.priority ? String(doc.priority) : "",
-      status: doc.status ? String(doc.status) : doc.completed === true ? "Done" : "Todo",
-      owner: doc.owner ? String(doc.owner) : "",
-      branch: doc.branchName ? String(doc.branchName) : "",
-      issuePr: doc.issuePr ? String(doc.issuePr) : "",
-      // 完了判定（自由文字列）。未設定・文字列以外は空表示にする（read-only）。
-      completionRule: typeof doc.completionRule === "string" ? doc.completionRule : "",
-      doneWhen: Array.isArray(doc.doneWhen) ? doc.doneWhen.map(String) : [],
-      // レビュー観点。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
-      reviewPoints: Array.isArray(doc.reviewPoints)
-        ? doc.reviewPoints.filter((p) => typeof p === "string")
-        : [],
-      // 共有メモ。文字列以外の混入があっても表示が崩れないよう、文字列要素だけ採用する。
-      notes: Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === "string") : [],
-      includedInProgress: !section.excluded,
-      // 最終更新日時（updatedAt）。Firestore Timestamp / 数値 / 文字列いずれもミリ秒へ正規化する。
-      // 表示整形（JST）は UI 側で行う。未設定・不正値は null。
-      updatedAtMillis: toMillisOrNull(doc.updatedAt),
-      // 生成元（source）を保持し、表示用バッジ情報も付与する（§17.6 / 段階バッジ表示）。
-      // md-import / manual-poc / 不明 を画面で区別できるようにするための情報。
-      // source は外部由来文字列のため、ここでは正規化のみ行い、HTMLエスケープは表示側に任せる。
-      source: normalizeSource(doc.source),
-      sourceBadge: classifySourceBadge(doc.source),
-      // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
-      protected: doc.protected === true,
-    };
 
     // subcategory があればサブセクション配下、無ければセクション直下に置く。
     if (subcategory) {
@@ -303,6 +330,15 @@ export function firestoreToBoardModel(docs) {
     ...section.subsections.flatMap((subsection) => subsection.tasks),
   ]);
 
+  // AI分割の親子関係・分割親情報を、取得済み一覧から解決して各タスクへ付与する（Firestore追加取得なし）。
+  // sections/subsections と tasks は同一の task 参照を共有するため、ここで付与するとカード描画にも反映される。
+  // 判定は純粋関数（ai-subtask-display.mjs）へ委譲する。AI分割以外は null（表示側で出さない）。
+  const tasksById = buildTaskIndexById(tasks);
+  for (const task of tasks) {
+    task.aiSubtaskRelation = resolveAiSubtaskParentRelation(task, tasksById);
+    task.aiSubtaskSplitInfo = resolveAiSubtaskSplitParentInfo(task);
+  }
+
   return {
     // POCでは Firestore 側に meta ドキュメントを持たないため最小の既定値を返す。
     meta: { updatedAt: "Firestore", branch: "未記載" },
@@ -311,6 +347,32 @@ export function firestoreToBoardModel(docs) {
     qualityGate: sections.find((section) => normalizeTitle(section.title).includes("品質ゲート")),
     today: sections.find((section) => normalizeTitle(section.title).includes("今日見る場所")),
   };
+}
+
+/**
+ * tasks/{taskId} を1件だけ読み取り、画面用タスクモデルへ変換して返す（読み取り専用・書き込みなし）。
+ * AI分割の「AIで分割」ボタン押下時に、一覧取得時の古い state.data ではなく最新の1件で
+ * 候補判定・親概要を行うために使う（stale な候補外タスクの受理を防ぐ）。
+ * - ドキュメントが存在しない（削除済み等）場合は null を返す（呼び出し側はモーダルを開かない）。
+ * - 変換は firestoreToBoardModel と同じ firestoreDocToTaskModel を使う（判定・表示のズレ防止）。
+ *
+ * @param {string} taskId Firestore のドキュメントID
+ * @returns {Promise<object|null>} 画面用タスクモデル、存在しなければ null
+ */
+export async function fetchFirestoreTaskById(taskId) {
+  if (!taskId) {
+    throw new Error("taskId が指定されていません。");
+  }
+  const db = getFirestore(getApp());
+  const snapshot = await getDoc(firestoreDoc(db, "tasks", taskId));
+  if (!snapshot.exists()) {
+    return null;
+  }
+  const data = snapshot.data() ?? {};
+  const doc = { id: snapshot.id, ...data };
+  // 単一取得は一覧の出現順を持たないため、line は order ?? sourceLine ?? 0 で決める。
+  const line = toFiniteNumber(data.order) ?? toFiniteNumber(data.sourceLine) ?? 0;
+  return firestoreDocToTaskModel(doc, { line });
 }
 
 // status 更新で許可する値（UI 側のボタンと揃える）。想定外の値は書き込まない。
@@ -902,4 +964,324 @@ export async function addTaskForPoc(input) {
   const created = await addDoc(collection(db, "tasks"), newTask);
   console.log("[Firestore POC] added task", { id: created.id, title, category, status });
   return created.id;
+}
+
+/**
+ * archived を含む全 tasks の最大 order を返す（無ければ 0）。
+ * AI分割の一括登録で baseOrder として使う（子は baseOrder + 10*(i+1)）。
+ * getNextOrder（最大+10）とは別責務: こちらは「素の最大値」を返す。
+ */
+async function getMaxTaskOrder(db) {
+  const snapshot = await getDocs(collection(db, "tasks"));
+  let maxOrder = 0;
+  snapshot.docs.forEach((doc) => {
+    const value = doc.data().order;
+    if (typeof value === "number" && Number.isFinite(value) && value > maxOrder) {
+      maxOrder = value;
+    }
+  });
+  return maxOrder;
+}
+
+/**
+ * AI分割タスクの一括登録（runTransaction・全件成功/全件失敗）。
+ * 画面で編集・再検証済みの登録用スナップショットを、親タスクの管理フィールド更新と同一トランザクションで登録する。
+ *
+ * 手順（§6 / §7）:
+ * 1. 書き込み層で登録用スナップショットを再検証する（UI で検証済みでも必ず再検証）。失敗なら書き込まない。
+ * 2. importBatchId（ai-${crypto.randomUUID()}）を「トランザクション開始前に1回だけ」生成する。
+ * 3. baseOrder（既存最大 order）をトランザクション外で1回取得する。
+ * 4. 登録対象数だけ子タスクの DocumentReference をトランザクション外で採番する（再試行でも docId 不変）。
+ * 5. runTransaction 内で親を再取得（transaction.get）→ 登録可否を再検証 → 親 update と全子 set を原子的に行う。
+ * 6. createdAt/updatedAt は書き込み層で serverTimestamp() を付与する。
+ *
+ * @param {{ parentTaskId: string, snapshot: object }} params
+ *   parentTaskId は画面で固定した親タスクの Firestore docId（JSON/編集からは受け取らない）。
+ * @returns {Promise<{ importBatchId: string, createdCount: number, childIds: string[] }>}
+ */
+export async function importAiSubtasksForPoc({ parentTaskId, snapshot }) {
+  if (!parentTaskId) {
+    throw new Error("親タスクIDが指定されていません。");
+  }
+  // 1. 登録前の最終検証（AI JSON部分＋継承値）。失敗なら runTransaction を始めない。
+  const check = validateAiSubtaskRegistrationSnapshot(snapshot);
+  if (!check.ok) {
+    throw new Error("登録用データの再検証に失敗しました。編集内容を再検証してから登録してください。");
+  }
+
+  const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+  const childCount = tasks.length;
+
+  // 2. importBatchId をトランザクション開始前に1回だけ生成（再試行でも同じ値を使う）。
+  if (typeof crypto === "undefined" || typeof crypto.randomUUID !== "function") {
+    // 独自代替は勝手に実装せず、報告のためエラーにする。
+    throw new Error("この環境では crypto.randomUUID が使えないため importBatchId を生成できません。");
+  }
+  const importBatchId = `ai-${crypto.randomUUID()}`;
+
+  const db = getFirestore(getApp());
+
+  // 3. baseOrder（既存最大 order）をトランザクション外で1回取得。
+  const baseOrder = await getMaxTaskOrder(db);
+
+  // 4. 子タスクの DocumentReference をトランザクション外で採番（再試行でも docId 不変）。
+  const childRefs = tasks.map(() => firestoreDoc(collection(db, "tasks")));
+
+  // 保存値を組み立て（純粋関数・Firestore依存値なし）。createdAt/updatedAt は下で付与する。
+  const childPayloads = buildAiSubtaskChildPayloads({ snapshot, parentTaskId, importBatchId, baseOrder });
+  const parentUpdate = buildAiSubtaskParentUpdate(childCount);
+  const parentRef = firestoreDoc(db, "tasks", parentTaskId);
+
+  // 5. 親再取得→再検証→親update＋全子set を同一トランザクションで（全件成功/全件失敗）。
+  await runTransaction(db, async (transaction) => {
+    const parentSnap = await transaction.get(parentRef);
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentCheck = validateAiSubtaskRegistrationParent(parentSnap.data() ?? {});
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // 親の管理フィールド更新（status/branchName/issuePr 等の既存値は触れない）。
+    transaction.update(parentRef, { ...parentUpdate, updatedAt: serverTimestamp() });
+    // 全子タスクを同一トランザクションで登録（createdAt/updatedAt を付与）。
+    childRefs.forEach((ref, index) => {
+      transaction.set(ref, {
+        ...childPayloads[index],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  });
+
+  // commit 成功後にのみ結果を返す（DocumentSnapshot/内部参照は返さない）。
+  const childIds = childRefs.map((ref) => ref.id);
+  console.log("[Firestore POC] imported ai-subtasks", { importBatchId, createdCount: childCount, parentTaskId });
+  return { importBatchId, createdCount: childCount, childIds };
+}
+
+/**
+ * 削除後の親ドキュメント更新内容を組み立てる（個別削除・一括取り消しで共通）。
+ * newCount>0 は splitChildCount を新値へ更新。newCount===0（最後の子）は
+ * splitChildCount / autoStatusUpdateDisabled / taskRole を deleteField() で「フィールドごと削除」し、
+ * 分割前の未設定状態へ完全に戻す（false / 0 / 空文字を残さない・§3.7）。
+ * status / branchName / issuePr 等の既存値は一切変更しない。
+ * @param {{ clearParentFields:boolean, nextCount:number, updatedBy:string }} params
+ */
+function buildAiSubtaskParentDeletionUpdate({ clearParentFields, nextCount, updatedBy }) {
+  const base = { updatedAt: serverTimestamp(), updatedBy };
+  if (clearParentFields) {
+    return {
+      ...base,
+      splitChildCount: deleteField(),
+      autoStatusUpdateDisabled: deleteField(),
+      taskRole: deleteField(),
+    };
+  }
+  return { ...base, splitChildCount: nextCount };
+}
+
+/**
+ * AI分割子タスクを1件だけ物理削除する（§3.7・runTransaction・全件成功/全件失敗）。
+ * 既存 deleteManualPocTaskForPoc とは別関数・別条件（manual-poc 判定に ai-subtask-import を混ぜない）。
+ *
+ * 手順:
+ * 1. トランザクション外で子タスクを1件読み、parentTaskId と親 Reference を確定する（正本にはしない）。
+ * 2. runTransaction 内で子・親を transaction.get で再取得（全read完了後にwrite）。
+ * 3. 子の削除条件・親子IDの一致・親整合性を再検証。newCount = splitChildCount - 1 を計算。
+ * 4. 子を delete し、newCount>0 は splitChildCount 更新、newCount===0 は親3フィールドを deleteField()。
+ * トランザクション内では UI 状態・外部変数を変更しない（再試行対策・§7）。
+ *
+ * @param {string} taskId 削除する子タスクの Firestore docId
+ * @returns {Promise<{ deletedTaskId:string, parentTaskId:string, deletedCount:number,
+ *   remainingChildCount:number, parentSplitCleared:boolean }>}
+ */
+export async function deleteAiSubtaskForPoc(taskId) {
+  if (!taskId) {
+    throw new Error("削除対象のタスクIDが指定されていません。");
+  }
+  const db = getFirestore(getApp());
+  const childRef = firestoreDoc(db, "tasks", taskId);
+
+  // 1. トランザクション外で親IDを確定する（親 Reference を作るために必要。判定の正本は下のtxn内再検証）。
+  const preSnap = await getDoc(childRef);
+  if (!preSnap.exists()) {
+    throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+  }
+  const preData = preSnap.data() ?? {};
+  const preParentId = typeof preData.parentTaskId === "string" ? preData.parentTaskId.trim() : "";
+  if (preParentId === "") {
+    throw new Error("対象タスクに parentTaskId が設定されていないため削除できません。");
+  }
+  const parentRef = firestoreDoc(db, "tasks", preParentId);
+
+  // 結果はコールバックから return し、runTransaction の戻り値として受け取る（外部変数を書き換えない・
+  // 再試行されても副作用なし）。返すのはUI表示用プリミティブのみ（DocumentSnapshot/Reference は返さない）。
+  const result = await runTransaction(db, async (transaction) => {
+    // 2. 全read（子→親）を先に完了させる。トランザクション外の値は信用しない。
+    const childSnap = await transaction.get(childRef);
+    if (!childSnap.exists()) {
+      throw new Error("対象タスクがFirestoreに存在しません（既に削除済みの可能性）。");
+    }
+    const childData = childSnap.data() ?? {};
+    const parentSnap = await transaction.get(parentRef);
+
+    // 3. 子の削除条件を再検証。
+    const candidate = validateAiSubtaskDeleteCandidate(childData);
+    if (!candidate.ok) {
+      throw new Error(candidate.reason);
+    }
+    // 子の parentTaskId が確定した親IDと一致するか（トランザクション外読取り後に付け替えられていないか）。
+    const childParentId = String(childData.parentTaskId).trim();
+    if (childParentId !== preParentId) {
+      throw new Error("子タスクの parentTaskId が想定した親と一致しません。中止します。");
+    }
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentData = parentSnap.data() ?? {};
+    const parentCheck = validateAiSubtaskDeleteParent(parentData);
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // newCount = splitChildCount - 1。
+    const calc = calculateAiSubtaskParentAfterDeletion(parentData.splitChildCount, 1);
+    if (!calc.ok) {
+      throw new Error(calc.reason);
+    }
+
+    // 4. 子削除 ＋ 親更新（同一トランザクション）。
+    transaction.delete(childRef);
+    transaction.update(
+      parentRef,
+      buildAiSubtaskParentDeletionUpdate({
+        clearParentFields: calc.clearParentFields,
+        nextCount: calc.nextCount,
+        updatedBy: "ai-subtask-delete",
+      }),
+    );
+    return {
+      deletedTaskId: taskId,
+      parentTaskId: preParentId,
+      deletedCount: 1,
+      remainingChildCount: calc.nextCount,
+      parentSplitCleared: calc.clearParentFields,
+    };
+  });
+
+  console.log("[Firestore POC] deleted ai-subtask", {
+    taskId,
+    parentTaskId: result?.parentTaskId,
+    remainingChildCount: result?.remainingChildCount,
+    parentSplitCleared: result?.parentSplitCleared,
+  });
+  return result;
+}
+
+/**
+ * 同一 importBatchId のAI分割子タスクを全件物理削除する（§3.7・runTransaction・全件成功/全件失敗）。
+ *
+ * 手順:
+ * 1. トランザクション外で where("importBatchId","==",id) の子タスク一覧と親IDを確定・整合性を確認する
+ *    （単一親・上限内・全件が削除条件を満たす。判定の最終正本は下のtxn内再検証）。
+ * 2. runTransaction 内で対象子タスク全件→親の順に transaction.get で再取得（全read完了後にwrite）。
+ * 3. 全子の削除条件・importBatchId一致・親子ID一致・親整合性を再検証。1件でも不可なら Error で全件中止。
+ * 4. newCount = splitChildCount - 削除件数。newCount<0 は整合性エラーで全件中止。
+ * 5. 全子を delete し、newCount>0 は splitChildCount 更新、newCount===0 は親3フィールドを deleteField()。
+ *
+ * @param {string} importBatchId 取り消し対象のバッチID
+ * @returns {Promise<{ importBatchId:string, parentTaskId:string, deletedCount:number,
+ *   remainingChildCount:number, parentSplitCleared:boolean, deletedTaskIds:string[] }>}
+ */
+export async function cancelAiSubtaskBatchForPoc(importBatchId) {
+  const batchId = typeof importBatchId === "string" ? importBatchId.trim() : "";
+  if (batchId === "") {
+    throw new Error("importBatchId が指定されていません。");
+  }
+  const db = getFirestore(getApp());
+
+  // 1. トランザクション外で対象子タスクを特定（表示・件数確定用）。判定の正本はtxn内で取り直す。
+  const batchQuery = query(collection(db, "tasks"), where("importBatchId", "==", batchId));
+  const querySnap = await getDocs(batchQuery);
+  const members = querySnap.docs.map((d) => ({ id: d.id, ...(d.data() ?? {}) }));
+  // 純粋関数で整合性を先に確認（0件・上限超過・複数親・条件不一致は早期中止でトランザクションを始めない）。
+  const batchCheck = validateAiSubtaskBatchMembers(members, batchId);
+  if (!batchCheck.ok) {
+    throw new Error(batchCheck.reason);
+  }
+  const parentTaskId = batchCheck.parentTaskId;
+  const childRefs = members.map((m) => firestoreDoc(db, "tasks", m.id));
+  const parentRef = firestoreDoc(db, "tasks", parentTaskId);
+
+  // 結果はコールバックから return し、runTransaction の戻り値として受け取る（外部変数を書き換えない）。
+  const result = await runTransaction(db, async (transaction) => {
+    // 2. 全read（対象子タスク全件→親）を先に完了させる。
+    const childSnaps = [];
+    for (const ref of childRefs) {
+      // 順次 get（全件読み終えてから write する）。
+      const snap = await transaction.get(ref);
+      childSnaps.push(snap);
+    }
+    const parentSnap = await transaction.get(parentRef);
+
+    // 3. 全子タスクを再検証（1件でも不可なら全件中止・部分削除しない）。
+    childSnaps.forEach((snap, index) => {
+      if (!snap.exists()) {
+        throw new Error("対象の子タスクが見つかりません（既に削除済みの可能性）。中止します。");
+      }
+      const data = snap.data() ?? {};
+      const candidate = validateAiSubtaskDeleteCandidate(data);
+      if (!candidate.ok) {
+        const title = typeof data.title === "string" && data.title.trim() !== "" ? data.title.trim() : childRefs[index].id;
+        throw new Error(`タスク「${title}」は${candidate.reason}中止します。`);
+      }
+      const dataBatch = typeof data.importBatchId === "string" ? data.importBatchId.trim() : "";
+      if (dataBatch !== batchId) {
+        throw new Error("importBatchId が一致しない子タスクが含まれています。中止します。");
+      }
+      if (String(data.parentTaskId).trim() !== parentTaskId) {
+        throw new Error("親IDが一致しない子タスクが含まれています。中止します。");
+      }
+    });
+    if (!parentSnap.exists()) {
+      throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
+    }
+    const parentData = parentSnap.data() ?? {};
+    const parentCheck = validateAiSubtaskDeleteParent(parentData);
+    if (!parentCheck.ok) {
+      throw new Error(parentCheck.reason);
+    }
+    // 4. newCount = splitChildCount - 削除件数（newCount<0 は整合性エラーで全件中止）。
+    const calc = calculateAiSubtaskParentAfterDeletion(parentData.splitChildCount, childRefs.length);
+    if (!calc.ok) {
+      throw new Error(calc.reason);
+    }
+
+    // 5. 全子削除 ＋ 親更新（同一トランザクション・全件成功/全件失敗）。
+    childRefs.forEach((ref) => transaction.delete(ref));
+    transaction.update(
+      parentRef,
+      buildAiSubtaskParentDeletionUpdate({
+        clearParentFields: calc.clearParentFields,
+        nextCount: calc.nextCount,
+        updatedBy: "ai-subtask-batch-cancel",
+      }),
+    );
+    return {
+      importBatchId: batchId,
+      parentTaskId,
+      deletedCount: childRefs.length,
+      remainingChildCount: calc.nextCount,
+      parentSplitCleared: calc.clearParentFields,
+      deletedTaskIds: childRefs.map((ref) => ref.id),
+    };
+  });
+
+  console.log("[Firestore POC] cancelled ai-subtask batch", {
+    importBatchId: batchId,
+    parentTaskId: result?.parentTaskId,
+    deletedCount: result?.deletedCount,
+    parentSplitCleared: result?.parentSplitCleared,
+  });
+  return result;
 }

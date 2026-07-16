@@ -37,10 +37,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # pnpm audit は pnpm 11 で bulk advisory endpoint（/-/npm/v1/security/advisories/bulk）へ移行した。
+      # pnpm 9/10 が呼ぶ旧 security/audits(/quick) は npm レジストリで廃止済み（410）で監査が実行できないため、
+      # この監査ジョブだけ pnpm 11 を固定で使う。lockfileVersion 9.0 は pnpm 9/10/11 共通で frozen-lockfile が通る。
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 11.13.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -51,5 +54,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 使用中の pnpm バージョンをログへ残す（bulk endpoint 対応版で監査していることの確認用）。
+      - name: Show pnpm version
+        run: pnpm --version
+
+      # 高重大度以上の脆弱性を検出したら CI を失敗させる（監査の意味は維持）。
       - name: Run node dependency audit
         run: pnpm audit --audit-level=high

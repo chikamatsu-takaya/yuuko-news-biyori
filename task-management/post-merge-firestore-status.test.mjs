@@ -25,6 +25,8 @@ import {
   isPrDoneApplyChecked,
   evaluatePrDoneApplyConsent,
 } from "./post-merge-firestore-status.mjs";
+// live 再読込経路の整形（Firestore REST fields → data）を通して二段目ガードを検証するために import。
+import { mapTaskFieldsToApplyData } from "./firestore-admin-write.mjs";
 
 // PR本文 Done許可チェックボックスの固定文言（本番テンプレートと一致させる）。
 const CONSENT_CHECKED_LINE = "- [x] このPRのマージ後、紐づくFirestoreタスクをDoneにしてよい";
@@ -508,7 +510,7 @@ const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "post-merge-fi
 
 // CLI を offline（--firestore-json）で実行し、出力 artifact JSON を読み込むヘルパー。
 // 実 Firestore へは接続しない。一時ファイルは OS tmp に作り、必ず後片付けする。
-function runCliOffline({ prBody, taskStatus }) {
+function runCliOffline({ prBody, taskStatus, taskData = {} }) {
   const workDir = mkdtempSync(join(tmpdir(), "post-merge-cli-"));
   try {
     const prJsonPath = join(workDir, "pr.json");
@@ -541,6 +543,8 @@ function runCliOffline({ prBody, taskStatus }) {
             completed: false,
             archived: false,
             issuePr: "",
+            // 分割親の除外テスト等で autoStatusUpdateDisabled 等を上書きできるようにする。
+            ...taskData,
           },
         },
       ]),
@@ -617,4 +621,198 @@ test("CLI: --apply + offline + チェック済み + done_candidate + Doing → a
     ["status", "completed", "completedAt", "updatedAt", "updatedBy"],
     "Done 更新は5項目のみ",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 分割親タスクの post-merge 除外（autoStatusUpdateDisabled）回帰テスト
+//
+// 目的（docs/00_project/ai-subtask-import-spec.md §3.9 / §11-2）:
+// - autoStatusUpdateDisabled=true を正本として、done_candidate / review_candidate の自動更新から除外する。
+// - 初回判定（evaluate）と apply 直前の再読込ガード（planStatusApplyFromDoing）の二段で効くこと。
+// - taskRole は判定に使わない（表示用）。false / 未設定は従来どおり動くこと。
+// ---------------------------------------------------------------------------
+
+test("除外(初回判定): autoStatusUpdateDisabled=true + done_candidate相当 → no_change / G8（適用対象外）", () => {
+  // docsのみ変更は通常 done_candidate。フラグ true のタスクなら no_change(G8) に倒す。
+  const pr = makePr({ files: ["docs/a.md"] });
+  // flagged なタスクを明示的に使う（decisionFor は共通 TASKS を使うためここでは reportFor）。
+  const tasks = tasksWith({ autoStatusUpdateDisabled: true });
+  const d = reportFor(pr, tasks).decision;
+  assert.equal(d.result, "no_change", "done_candidate ではなく no_change にする");
+  assert.ok(d.reasonIds.includes("G8"), "reasonIds に G8 を含む");
+  assert.match(d.summary, /自動status更新無効のため適用しなかった/);
+  assertLabel(d, "G8");
+});
+
+test("除外(初回判定): autoStatusUpdateDisabled=true + review_candidate相当 → no_change / G8（適用対象外）", () => {
+  // UI変更は通常 review_candidate。フラグ true のタスクなら no_change(G8) に倒す。
+  const pr = makePr({ files: ["components/screens/MainScreen.tsx"] });
+  const tasks = tasksWith({ autoStatusUpdateDisabled: true });
+  const d = reportFor(pr, tasks).decision;
+  assert.equal(d.result, "no_change", "review_candidate ではなく no_change にする");
+  assert.ok(d.reasonIds.includes("G8"), "reasonIds に G8 を含む");
+  assertLabel(d, "G8");
+});
+
+test('除外の正本はフラグ: taskRole="split-parent" だけ（フラグ未設定）では除外しない', () => {
+  // taskRole は表示用。判定には使わないため、フラグ未設定なら通常どおり done_candidate。
+  const pr = makePr({ files: ["docs/a.md"] });
+  const tasks = tasksWith({ taskRole: "split-parent" });
+  const d = reportFor(pr, tasks).decision;
+  assert.equal(d.result, "done_candidate", "taskRole だけでは除外しない");
+  assert.ok(!d.reasonIds.includes("G8"), "G8 は付かない");
+});
+
+test("非除外: autoStatusUpdateDisabled=false は従来どおり done_candidate", () => {
+  const pr = makePr({ files: ["docs/a.md"] });
+  const tasks = tasksWith({ autoStatusUpdateDisabled: false });
+  const d = reportFor(pr, tasks).decision;
+
+  assert.equal(d.result, "done_candidate", "false は従来どおり");
+  assert.ok(!d.reasonIds.includes("G8"), "G8 は付かない");
+});
+
+test("非除外: autoStatusUpdateDisabled 未設定は従来どおり done_candidate", () => {
+  const pr = makePr({ files: ["docs/a.md"] });
+  const tasks = tasksWith(); // フラグなし
+  const d = reportFor(pr, tasks).decision;
+  assert.equal(d.result, "done_candidate", "未設定は従来どおり");
+});
+
+test("除外(初回判定): チェック済み + Doing でも autoStatusUpdateDisabled=true なら apply を試みない（部分更新なし）", async () => {
+  // 同意チェック済み・現状 Doing でも、フラグ true → evaluate が no_change にするため apply しない。
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(true) });
+  const tasks = tasksWith({ autoStatusUpdateDisabled: true });
+  const report = reportFor(pr, tasks);
+  assert.equal(report.decision.result, "no_change");
+
+  const apply = await computeApply(report, pr, tasks, OFFLINE_APPLY);
+  assert.equal(apply.attempted, false, "除外タスクでは apply を試みない");
+  assert.notEqual(apply.applied, true, "Firestore へ書き込まない");
+  assert.equal(apply.proposed, undefined, "書き込み payload を作らない（部分更新なし）");
+  assert.match(apply.reason ?? "", /書き込み対象外/);
+});
+
+test("除外(apply直前ガード): 再読込で autoStatusUpdateDisabled=true → Done 書き込まない", () => {
+  // evaluate 時は未設定でも、apply 直前の再読込でフラグ true なら書き込まない（最終防御）。
+  const plan = planStatusApplyFromDoing(
+    { exists: true, data: { status: "Doing", archived: false, completed: false, autoStatusUpdateDisabled: true } },
+    "Done",
+  );
+  assert.equal(plan.shouldWrite, false, "Done 書き込みを中止する");
+  assert.match(plan.reason, /autoStatusUpdateDisabled=true/);
+  assert.match(plan.reason, /自動status更新無効のため適用しなかった/);
+});
+
+test("除外(apply直前ガード): 再読込で autoStatusUpdateDisabled=true → Review 書き込まない", () => {
+  const plan = planStatusApplyFromDoing(
+    { exists: true, data: { status: "Doing", archived: false, completed: false, autoStatusUpdateDisabled: true } },
+    "Review",
+  );
+  assert.equal(plan.shouldWrite, false, "Review 書き込みを中止する");
+  assert.match(plan.reason, /Review/);
+  assert.match(plan.reason, /自動status更新無効のため適用しなかった/);
+});
+
+test("非除外(apply直前ガード): フラグ未設定/false なら現状 Doing で従来どおり書き込む", () => {
+  const unset = planStatusApplyFromDoing({ exists: true, data: { status: "Doing", archived: false, completed: false } }, "Done");
+  assert.equal(unset.shouldWrite, true, "未設定は従来どおり書き込む");
+  const off = planStatusApplyFromDoing(
+    { exists: true, data: { status: "Doing", archived: false, completed: false, autoStatusUpdateDisabled: false } },
+    "Review",
+  );
+  assert.equal(off.shouldWrite, true, "false は従来どおり書き込む");
+});
+
+test("結合(apply直前でtrue): evaluate未設定→再読込でtrue の stale done_candidate は apply されない（PATCHなし・issuePr skip）", async () => {
+  // computeApply は report と firestoreTasks を別々に受け取る。これを使い、
+  // 「evaluate 時はフラグ未設定（report は done_candidate）」だが「apply 直前の再読込では
+  //   フラグ true」という競合状況を、基盤変更なしで再現する。
+  const pr = makePr({ files: ["docs/a.md"], body: bodyWithConsent(true) }); // done_candidate / consent 済
+  // report は「フラグなし」タスクから作る → evaluate は done_candidate、matchedTaskId=t1。
+  const report = reportFor(pr, tasksWith());
+  assert.equal(report.decision.result, "done_candidate", "evaluate 時点では done_candidate（stale）");
+
+  // apply 直前の再読込データ（同一 id t1）はフラグ true。offline 経路はこの配列を fresh に使う。
+  const tasksAtApply = tasksWith({ autoStatusUpdateDisabled: true });
+  const apply = await computeApply(report, pr, tasksAtApply, OFFLINE_APPLY);
+
+  // applyPhase までは入るが、再読込ガードで書き込みしない（applied=false・payload なし＝PATCHなし・部分更新なし）。
+  assert.equal(apply.attempted, true, "consent 済 done_candidate なので applyPhase までは入る");
+  assert.notEqual(apply.applied, true, "再読込ガードで Firestore へ書き込まない");
+  assert.equal(apply.proposed, undefined, "書き込み payload を作らない（PATCHなし・部分更新なし）");
+  assert.match(apply.reason ?? "", /autoStatusUpdateDisabled=true/);
+  assert.match(apply.reason ?? "", /自動status更新無効のため適用しなかった/);
+
+  // issuePr 書き戻し: Done apply 未成立なので guard で skip（書き戻さない）。
+  const wb = computeIssuePrWriteback(report, pr, tasksAtApply, { apply: true });
+  const guarded = guardIssuePrWritebackAfterApply(wb, apply, { apply: true });
+  assert.equal(guarded.action, "skip", "Done apply 未成立なので issuePr は書き戻さない");
+  assert.notEqual(guarded.applied, true);
+  // 注: apply.reason は Summary の「### Firestore status apply」節へそのまま出力される除外理由。
+  //     この stale 経路の Summary 全体描画は buildSummaryMarkdown（未export）だが、
+  //     evaluate 時点でフラグが見える経路の Summary は別途 CLI 統合テストで検証済み。
+});
+
+test("結合(live再読込): fetchTaskForApply の整形結果(autoStatusUpdateDisabled=true)で二段目ガードが効く", () => {
+  // P1修正の要点: live 再読込は firestore-admin-write.mapTaskFieldsToApplyData で
+  // Firestore REST fields → data に整形される。ここに autoStatusUpdateDisabled が含まれるようになったため、
+  // 「evaluate 時は未設定でも、live 再読込で true」なら planStatusApplyFromDoing が書き込みを止める。
+  //
+  // Firestore の boolean true フィールドを模した fields（status は Doing・除外フラグ true）。
+  const fields = {
+    status: { stringValue: "Doing" },
+    completed: { booleanValue: false },
+    archived: { booleanValue: false },
+    autoStatusUpdateDisabled: { booleanValue: true },
+    branchName: { stringValue: "feature/x" },
+  };
+  // fetchTaskForApply が返す data 形（live 経路と同じ整形）。
+  const data = mapTaskFieldsToApplyData(fields);
+  assert.equal(data.autoStatusUpdateDisabled, true, "live 整形結果にフラグ true が含まれる");
+
+  // 二段目ガード（PATCH 直前）に fresh として渡す → 書き込みしない（Done / Review 双方）。
+  const done = planStatusApplyFromDoing({ exists: true, data }, "Done");
+  assert.equal(done.shouldWrite, false, "live 再読込で true なら Done 書き込まない（PATCHなし）");
+  assert.match(done.reason, /自動status更新無効のため適用しなかった/);
+
+  const review = planStatusApplyFromDoing({ exists: true, data }, "Review");
+  assert.equal(review.shouldWrite, false, "live 再読込で true なら Review 書き込まない（PATCHなし）");
+
+  // 対照: 文字列 "true"（誤保存）は true 扱いにならず、Doing なら従来どおり書き込み対象になる。
+  const strData = mapTaskFieldsToApplyData({ ...fields, autoStatusUpdateDisabled: { stringValue: "true" } });
+  assert.equal(strData.autoStatusUpdateDisabled, false, '文字列 "true" は除外フラグ扱いしない');
+  assert.equal(
+    planStatusApplyFromDoing({ exists: true, data: strData }, "Done").shouldWrite,
+    true,
+    "誤保存の文字列では従来どおり（Doing なら書き込み対象）",
+  );
+});
+
+test("CLI: --apply + offline + チェック済み + autoStatusUpdateDisabled=true + Doing → 除外(no_change/G8)・無変更・issuePr skip・理由表示", () => {
+  // 元PRマージ相当。分割親（フラグ true）は Done/Review 化せず、issuePr も書き戻さない。
+  const { res, report, summary } = runCliOffline({
+    prBody: bodyWithConsent(true),
+    taskStatus: "Doing",
+    taskData: { autoStatusUpdateDisabled: true, taskRole: "split-parent" },
+  });
+
+  assert.equal(res.status, 0, `CLI は正常終了する（stderr: ${res.stderr}）`);
+
+  // 初回判定で除外（no_change / G8）。
+  assert.equal(report.decision.result, "no_change", "除外タスクは no_change");
+  assert.ok(report.decision.reasonIds.includes("G8"), "reasonIds に G8");
+
+  // Firestore へ書き込まない（部分更新もない）。
+  assert.equal(report.apply.attempted, false, "apply を試みない");
+  assert.notEqual(report.apply.applied, true, "Firestore へ書き込まない");
+  assert.equal(report.apply.proposed, undefined, "書き込み payload なし（部分更新なし）");
+
+  // issuePr は書き戻さない。
+  assert.notEqual(report.issuePrWriteback.applied, true, "issuePr を書き戻さない");
+  assert.equal(report.issuePrWriteback.action, "skip", "issuePr は skip");
+
+  // Summary / report に除外理由（自動status更新無効）が出力される。
+  assert.match(summary, /自動status更新無効のため適用しなかった/);
+  assert.match(summary, /G8: 自動status更新が無効/);
 });
