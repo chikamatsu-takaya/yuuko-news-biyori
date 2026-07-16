@@ -742,6 +742,34 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
     - md同期PR作成確認用の一時タスク。確認完了後に削除または検証済みログへ移動する。
     - Firestore側はmd-import由来のテストタスク。
 
+### P1.5: AI開発コンテキスト導線
+- [ ] Claude Code / Codex向けAI作業コンテキスト導線の最小版を整備する
+  - Task code: 未設定
+  - Priority: P1.5
+  - Status: Doing
+  - Owner: 近松
+  - Branch: `chore/ai-context-entrypoint`
+  - Issue/PR: 未定
+  - Completion rule: 次のAI開発タスクを、リポジトリ全体の事前走査なしで開始できる
+  - Done when:
+    - ルートの `AGENTS.md` に共通の作業開始ルールが整理されている
+    - `CLAUDE.md` から共通ルールとai-context利用方法を確認できる
+    - `docs/00_project/ai-context/README.md` が作成されている
+    - settings領域のai-contextが作成されている
+    - 最初に読むファイル・関連設計書・重点確認項目・対象外領域が明記されている
+    - Claude CodeとCodexの両方で利用できる開始プロンプト例がある
+    - settingsタスクを例に、全体走査なしで調査を開始できる構成になっている
+  - Review points:
+    - `AGENTS.md` / `CLAUDE.md` が必要以上に肥大化していないか
+    - 既存の重要ルールが削除・弱体化されていないか
+    - Claude CodeとCodexのどちらか一方にしか使えない構成になっていないか
+    - ai-contextに設計書本文やソース内容を過剰に複製していないか
+    - 対象外領域と追加探索の条件が明確か
+    - アプリ本体やFirestore進捗管理ロジックに不要な変更がないか
+  - Notes:
+    - Claude Codeの初期探索で利用枠を大きく消費したため、今後の全タスクで不要な事前走査を減らす目的で追加
+    - 最小版ではsettings領域のみ作成し、他領域への展開・進捗管理画面連携・Skill化は後続とする
+
 ## 9. 作業テンプレート
 以下をコピーして追加する:
 
