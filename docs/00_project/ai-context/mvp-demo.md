@@ -60,6 +60,8 @@ MVPスコープ定義書 §4.1（基本デモシナリオ）の番号・内容�
 
 | 確認 | 期待結果 | 主な確認手段 | 失敗時の入口 |
 |---|---|---|---|
+| メイン画面のニュース一覧表示 | メイン画面にニュース一覧が表示される（0件など空表示も既存仕様どおり安全） | 手動＋Mock E2E | `yuuko-home.md` |
+| React / Rust の責務境界 | React 側に APIキー解決・保持・出力や直接ファイル I/O を置かず、秘密情報・外部通信・ファイル I/O は Rust 側へ委譲されている | 差分レビュー＋セキュリティ確認 | `AGENTS.md` §5＋`.claude/rules/security.md` |
 | MockProvider / Gemini 両対応 | APIキーなし（Mock）でも一連の流れが通り、Gemini でも同じ流れを見せられる | 手動＋実機 | 症状に応じた個別入口 |
 | APIキーなしで落ちない | APIキー未設定でもアプリ全体が落ちない | 手動＋実機 | `settings.md` / `term-dictionary.md` |
 | 設定変更・再読込保持 | 保存後の再読込・再起動で MVP 対象設定が保持される | 手動＋既存テスト | `settings.md` |
@@ -75,7 +77,10 @@ MVPスコープ定義書 §4.1（基本デモシナリオ）の番号・内容�
     - 画面からの手動更新だけ失敗する: `components/screens/MainScreen.tsx` → `lib/tauri/news.ts` の `refresh_news` → `src-tauri/src/commands/news_commands.rs` → `src-tauri/src/services/news_service.rs`
     - 取得元設定・allowlist は通常対象外。
 - AI要約・再説明・注目ポイント（§4.1 手順6）: `lib/tauri/articles.ts`（`generate_article_summary`）→ `components/screens/NewsReaderScreen.tsx` → `src-tauri/src/services/summary_service.rs`。Provider クライアント内部は必要時のみ。
-- 友情ポイント・ランク進捗（§4.1 手順11-12）: `lib/tauri/yuuko.ts`（`record_friendship_event` / `get_friendship_state`）→ `components/dialogs/RankUpDialog.tsx` → `src-tauri/src/services/friendship_service.rs`。
+- 友情ポイント・ランク進捗（§4.1 手順11-12）。加算・進捗表示・ランクアップ通知は担当が別なので混同しない。
+    - ポイントが増えない: `components/screens/NewsReaderScreen.tsx` の `recordFriendshipEvent` 発火条件（記事閲覧・用語解説・解説閲覧）→ `lib/tauri/yuuko.ts` の `record_friendship_event` → `src-tauri/src/commands/friendship_commands.rs` → `src-tauri/src/services/friendship_service.rs`
+    - ランク進捗を取得・表示できない: `lib/tauri/yuuko.ts` の `get_friendship_state` → `src-tauri/src/commands/friendship_commands.rs` / `src-tauri/src/services/friendship_service.rs` → 進捗表示は `components/screens/MainScreen.tsx` のランクカード
+    - ランクアップ通知だけ表示されない: `components/dialogs/RankUpDialog.tsx`（表示側。加算の発火元ではない）
 
 ## 問題発生地点からの振り分け
 
