@@ -97,7 +97,7 @@ use-notification-scheduler（定期実行・1tickにcommand1回）
 
 変更時に壊してはいけない点。**いずれも意図があって入っているため、緩める場合は理由を明記する。**
 
-- `isActiveNewsNotification`（`app/page.tsx`）— active 判定は Appearing / BalloonVisible / PreviewVisible ＋紹介対象の有無。Rust の `has_active_notification` と同基準を崩さない。報酬専用の `hasNotification` は使わない。
+- `isActiveNewsNotification`（`app/page.tsx`）— React 側の表示判定は Appearing / BalloonVisible / PreviewVisible に加え、紹介対象の記事が存在することも確認する。Rust の `has_active_notification` は状態だけを判定しており、React 側の追加ガード（表示時の安全確認）とは責務が異なる。React 側のこの追加条件を根拠なく Rust 側へ持ち込まない。報酬専用の `hasNotification` は使わない。
 - `fireTerminal` / `terminalFiredRef`（`YuukoInAppNotification.tsx`）— 終端操作の一回きり保証。連打・多重遷移防止の要。
 - `enqueueYuukoAction` / `yuukoActionChainRef`（`app/page.tsx`）— backend 操作の直列化。並行実行すると保存順序が乱れ active 通知が残る。
 - `yuukoActionTokenRef`（同上）— 古いクリック確定結果を UI へ採用しないためのトークン。
