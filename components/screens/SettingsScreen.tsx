@@ -694,6 +694,9 @@ export default function SettingsScreen({
   const storagePercentage =
     (settings.data.usedStorageGb / settings.data.maxStorageGb) * 100;
 
+  // テーマ現在値（読み取り専用表示）。未読込・空文字は安全な既定 "default" を表示する。
+  const currentThemeId = backendSettings?.selectedThemeId?.trim() || "default";
+
   return (
     <div className="h-dvh bg-background flex flex-col overflow-hidden">
       <AppTitleBar />
@@ -906,20 +909,39 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <SettingRow label="常駐時のゆうこを表示する">
+                  {/* テーマは selectedThemeId を読み取り専用で表示する。テーマ変更機能はMVP対象外（設計 §7:枠のみ）。 */}
+                  {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
+                  <SettingRow label="現在のテーマ">
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span
+                        className="text-sm text-foreground"
+                        data-testid="current-theme-id"
+                      >
+                        {currentThemeId}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        変更機能は準備中
+                      </span>
+                    </div>
+                  </SettingRow>
+                  {/* 以下4項目は保存DTOに対応フィールドが無く永続化されないため、誤操作防止に非活性＋「準備中」。 */}
+                  <SettingRow label="常駐時のゆうこを表示する（準備中）">
                     <Switch
                       checked={settings.yuuko.showResident}
+                      disabled
+                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateYuuko("showResident", checked)
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="吹き出しの自動表示">
+                  <SettingRow label="吹き出しの自動表示（準備中）">
                     <Select
                       value={settings.yuuko.balloonMode}
+                      disabled
                       onValueChange={(v) => updateYuuko("balloonMode", v)}
                     >
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="w-32" aria-disabled>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -931,12 +953,13 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="ゆうこの話しかけ頻度">
+                  <SettingRow label="ゆうこの話しかけ頻度（準備中）">
                     <Select
                       value={settings.yuuko.talkFrequency}
+                      disabled
                       onValueChange={(v) => updateYuuko("talkFrequency", v)}
                     >
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="w-32" aria-disabled>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -946,12 +969,13 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="ゆうこのアニメーション">
+                  <SettingRow label="ゆうこのアニメーション（準備中）">
                     <Select
                       value={settings.yuuko.animationMode}
+                      disabled
                       onValueChange={(v) => updateYuuko("animationMode", v)}
                     >
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="w-32" aria-disabled>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1000,9 +1024,13 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="ゲーム実行中は通知を抑制する">
+                  {/* suppressWhenGaming は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
+                      会議/マイク/フルスクリーンは DTO(suppressDuring*) へ保存されるため操作可能のまま。 */}
+                  <SettingRow label="ゲーム実行中は通知を抑制する（準備中）">
                     <Switch
                       checked={settings.suppression.suppressWhenGaming}
+                      disabled
+                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenGaming", checked)
                       }
@@ -1055,12 +1083,15 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="専門用語の解説レベル">
+                  {/* 以下3項目は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
+                      AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
+                  <SettingRow label="専門用語の解説レベル（準備中）">
                     <Select
                       value={settings.ai.termExplanationLevel}
+                      disabled
                       onValueChange={(v) => updateAi("termExplanationLevel", v)}
                     >
-                      <SelectTrigger className="w-36">
+                      <SelectTrigger className="w-36" aria-disabled>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1071,20 +1102,23 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  <SettingRow label="長文要点説明の自動候補">
+                  <SettingRow label="長文要点説明の自動候補（準備中）">
                     <Switch
                       checked={settings.ai.autoSuggestLongSummary}
+                      disabled
+                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateAi("autoSuggestLongSummary", checked)
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="AI処理の優先モード">
+                  <SettingRow label="AI処理の優先モード（準備中）">
                     <Select
                       value={settings.ai.priorityMode}
+                      disabled
                       onValueChange={(v) => updateAi("priorityMode", v)}
                     >
-                      <SelectTrigger className="w-36">
+                      <SelectTrigger className="w-36" aria-disabled>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
