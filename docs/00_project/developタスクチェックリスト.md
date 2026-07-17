@@ -411,12 +411,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: MVPスコープ定義書 §4.1 / §14、要件定義書 §16.1、基本設計書 §18.1、詳細設計書 §14.3。
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、辞書とランクが育つ」体験が途切れないことを確認する。
-- [ ] MVP設定項目の保存・読み込みを設定画面で確認する
+- [x] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
-  - Status: Review
+  - Status: Done
   - Owner: 近松
-  - Branch: `feature/mvp-settings-save-load-screen-check`
-  - Issue/PR: 未定
+  - Branch: `fix/mvp-settings-completion-gaps`
+  - Issue/PR: #191
   - Done when:
     - 関心カテゴリ、通知ON/OFF、通知時間帯、通知上限、解説レベル、AI Provider、テーマ枠が読み込み時に現在設定を反映する
     - 保存後に再読み込みしてもMVP対象設定が失われない
