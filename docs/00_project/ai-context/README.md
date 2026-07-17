@@ -74,6 +74,7 @@ Codex でも同じプロンプトをそのまま使える（共通ルールは `
 - [`yuuko-home.md`](./yuuko-home.md) — ゆうこ通知・吹き出し・軽量プレビュー・SCR-001 メイン画面（おすすめ記事表示・ゆうこ本体レイアウト）と通知操作のRust側接続。
 - [`term-dictionary.md`](./term-dictionary.md) — SCR-002 ニュース閲覧画面の文字列選択・用語解説ポップアップ・辞書保存とSCR-004 ゆうこ辞書画面での再利用。
 - [`settings.md`](./settings.md) — 設定画面・設定DTO・保存/読み込み（domain / service / repository）と設定テスト。
+- [`mvp-demo.md`](./mvp-demo.md) — MVP必須シナリオの通し確認・Windows実機確認・複数機能をまたぐ問題の切り分けと、個別ai-contextへの振り分けハブ。
 
 ## タスク内容から入口を選ぶ
 
@@ -82,7 +83,9 @@ Codex でも同じプロンプトをそのまま使える（共通ルールは `
 | 通知、ゆうこ、吹き出し、軽量プレビュー、ホーム画面、おすすめ記事 | `yuuko-home.md` |
 | 文字列選択、用語解説、辞書、ゆうこ辞書画面 | `term-dictionary.md` |
 | 設定保存、通知設定（ON/OFF・時間帯・上限）、解説レベル、AI Provider選択 | `settings.md` |
+| MVP通しデモ、実機確認、複数機能をまたぐ問題 | `mvp-demo.md` |
 
 - 通知の**設定値の保存**は `settings.md`、通知の**表示・操作**は `yuuko-home.md`。
 - 記事の**一覧表示**は `yuuko-home.md`、記事詳細での**用語解説**は `term-dictionary.md`。
+- 単一機能の修正は個別ai-contextを直接使う。`mvp-demo.md` は**複数機能をまたぐ横断確認のときだけ**使う。
 - 該当する入口がない領域（ニュース取得パイプライン・アーカイブ・ガチャ等）は、上記の追加判断基準に従う。
