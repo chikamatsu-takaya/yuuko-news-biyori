@@ -302,6 +302,229 @@ test("settings shows the default frequency 1日3回まで when there is no saved
   ).toBeVisible();
 });
 
+// 設定メニュー（左サイドバー）を切り替える。
+const openSettingsMenu = (page: Page, label: string) =>
+  page.getByRole("button", { name: label, exact: true }).click();
+
+// MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
+test("settings load reflects saved MVP settings and shows the theme read-only", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override（保存済み想定のDTOを返させる）
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      genres: ["IT"],
+      enableYuukoPopup: false,
+      workTimeRanges: [{ start: "10:00", end: "16:00" }],
+      notifyStartTime: "10:00",
+      notifyEndTime: "16:00",
+      notifyMaxPerDay: 5,
+      explanationLevel: "detailed",
+      aiProvider: "gemini",
+      selectedThemeId: "sakura",
+    };
+  });
+
+  await openSettings(page);
+
+  // 通知メニュー（既定表示）: enableYuukoPopup / workTimeRanges / notifyMaxPerDay が反映される。
+  await expect(page.getByRole("switch")).not.toBeChecked();
+  await expect(page.getByRole("textbox").first()).toHaveValue("10:00");
+  await expect(page.getByRole("textbox").nth(1)).toHaveValue("16:00");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
+  ).toBeVisible();
+
+  // 解説・AI設定メニュー: aiProvider / explanationLevel が反映される。
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "Gemini" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "詳しく" })
+  ).toBeVisible();
+
+  // ゆうこ表示メニュー: selectedThemeId が読み取り専用で表示される。
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+
+  // その他メニュー: genres が反映される。
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByRole("checkbox", { name: "IT" })).toBeChecked();
+});
+
+// MVP対象設定の編集 → 保存DTO確認、selectedThemeId が保存で失われないこと。
+test("settings save round-trips MVP settings and preserves selectedThemeId", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override（テーマは非既定・ジャンル初期値を用意）
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      genres: ["IT"],
+      selectedThemeId: "sakura",
+    };
+  });
+
+  await openSettings(page);
+
+  // 通知頻度 1日5回まで / 通知ON→OFF。
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await page.getByRole("switch").click();
+
+  // AI: provider=Gemini, 解説の詳しさ=詳しく。
+  await openSettingsMenu(page, "解説・AI設定");
+  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+  await page.getByRole("combobox").filter({ hasText: "ふつう" }).click();
+  await page.getByRole("option", { name: "詳しく" }).click();
+
+  // ジャンルに AI を追加。
+  await openSettingsMenu(page, "その他");
+  await page.getByRole("checkbox", { name: "AI" }).click();
+
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  const saved = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: {
+            notifyMaxPerDay?: number;
+            enableYuukoPopup?: boolean;
+            aiProvider?: string;
+            explanationLevel?: string;
+            genres?: string[];
+            selectedThemeId?: string;
+            workTimeRanges?: { start: string; end: string }[];
+          };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__
+  );
+
+  expect(saved?.notifyMaxPerDay).toBe(5);
+  expect(saved?.enableYuukoPopup).toBe(false);
+  expect(saved?.aiProvider).toBe("gemini");
+  expect(saved?.explanationLevel).toBe("detailed");
+  expect(saved?.genres).toEqual(expect.arrayContaining(["IT", "AI"]));
+  // selectedThemeId は編集不可でも、他設定の保存で失われない。
+  expect(saved?.selectedThemeId).toBe("sakura");
+  // 既定の通知時間帯（午前/午後2枠）も保持される。
+  expect(saved?.workTimeRanges).toEqual([
+    { start: "09:00", end: "12:00" },
+    { start: "13:00", end: "18:00" },
+  ]);
+
+  // --- 保存後の再読込: 保存DTOを次回 get_user_settings の戻り値にして開き直す ---
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      __E2E_SAVED_USER_SETTINGS__?: Record<string, unknown>;
+      __E2E_USER_SETTINGS_OVERRIDE__?: Record<string, unknown>;
+    };
+    target.__E2E_USER_SETTINGS_OVERRIDE__ = structuredClone(
+      target.__E2E_SAVED_USER_SETTINGS__
+    );
+  });
+
+  // SPA内遷移で SettingsScreen を再マウントし loadSettings を再実行する。
+  // openSettings は page.goto でoverrideを初期化してしまうため、ここでは使わない。
+  await page.getByRole("button", { name: "ホームへ戻る" }).click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+
+  // 再読込後、保存値が各UIへ復元される（保存→再読込→再反映の直接確認）。
+  // 通知メニュー（再マウント時の既定表示）。
+  await expect(page.getByRole("switch")).not.toBeChecked(); // enableYuukoPopup=false
+  // workTimeRanges の2区間・4時刻をすべて確認する（先頭のみだと終了/開始時刻の欠落を見逃す）。
+  const timeInputs = page.getByRole("textbox");
+  await expect(timeInputs).toHaveCount(4);
+  await expect(timeInputs.nth(0)).toHaveValue("09:00");
+  await expect(timeInputs.nth(1)).toHaveValue("12:00");
+  await expect(timeInputs.nth(2)).toHaveValue("13:00");
+  await expect(timeInputs.nth(3)).toHaveValue("18:00");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
+  ).toBeVisible(); // notifyMaxPerDay=5
+
+  // 解説・AI設定メニュー: aiProvider / explanationLevel。
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "Gemini" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "詳しく" })
+  ).toBeVisible();
+
+  // ゆうこ表示メニュー: selectedThemeId（読み取り専用表示）。
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  // 「変更機能は準備中」が表示され、テーマ値は編集不可のプレーン表示（span）であること。
+  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+  await expect(page.getByTestId("current-theme-id")).toHaveJSProperty(
+    "tagName",
+    "SPAN"
+  );
+
+  // その他メニュー: genres。
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByRole("checkbox", { name: "IT" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "AI" })).toBeChecked();
+});
+
+// 保存DTOに対応フィールドが無い後回し項目が非活性であること。
+test("settings postponed controls without a DTO field are disabled", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  // ゆうこ表示: 常駐スイッチ＋3ドロップダウンは DTO非接続のため非活性。
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByRole("switch")).toBeDisabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "控えめに" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "ふつう" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "通常" })
+  ).toBeDisabled();
+
+  // 抑制条件: ゲーム中のみ非活性。会議/マイク/フルスクリーンは DTO保存されるため操作可能。
+  await openSettingsMenu(page, "抑制条件");
+  const suppressionSwitches = page.getByRole("switch");
+  await expect(suppressionSwitches).toHaveCount(4);
+  await expect(suppressionSwitches.nth(0)).toBeEnabled();
+  await expect(suppressionSwitches.nth(3)).toBeDisabled();
+
+  // 解説・AI設定: 専門用語/長文自動/優先モードは非活性。Provider/解説の詳しさは操作可能。
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "ふつう" })
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "中学生レベル" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "バランス重視" })
+  ).toBeDisabled();
+  await expect(page.getByRole("switch")).toBeDisabled();
+});
+
+// APIキー入力欄を画面へ追加していないこと（秘密情報を画面で扱わない）。
+test("settings AI section does not expose an API key input", async ({ page }) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+});
+
 // 通知ありモック（request_yuuko_notification → notified:true）を有効化する。
 async function enableNotificationCandidate(page: Page) {
   await page.addInitScript(() => {
