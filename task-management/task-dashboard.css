@@ -519,6 +519,40 @@ details[open] > summary::after {
   white-space: nowrap;
 }
 
+/* MVP区分バッジ。色だけに依存せず文字（「MVP区分: …」）も表示する。
+   クラスは固定3種のみで、Firestore の生値を連結しない。 */
+.mvp-scope-line {
+  margin: 2px 0 4px;
+}
+
+.mvp-scope-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.mvp-scope-required {
+  background: rgba(123, 214, 166, 0.15);
+  color: var(--green);
+}
+
+.mvp-scope-additional {
+  background: rgba(126, 182, 255, 0.16);
+  color: var(--blue);
+}
+
+.mvp-scope-undecided {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--muted);
+}
+
 .badge.done {
   background: rgba(123, 214, 166, 0.15);
   color: var(--green);

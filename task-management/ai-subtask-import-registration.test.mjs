@@ -140,6 +140,36 @@ test("子タスク: 継承4項目を保持する", () => {
   assert.equal(p.owner, "近松");
 });
 
+test("子タスク: 親の MVP区分を継承する（正式値・別名・不正値・未設定）", () => {
+  // 親 Required → 子 Required。
+  const [req] = buildAiSubtaskChildPayloads({
+    snapshot: snapshot({ inheritedValues: { category: "c", priority: "P1", mvpScope: "Required" } }),
+    parentTaskId: "p",
+    importBatchId: "b",
+    baseOrder: 0,
+  });
+  assert.equal(req.mvpScope, "Required");
+  // 親 Additional（日本語別名）→ 子 Additional。
+  const [add] = buildAiSubtaskChildPayloads({
+    snapshot: snapshot({ inheritedValues: { category: "c", mvpScope: "追加機能" } }),
+    parentTaskId: "p",
+    importBatchId: "b",
+    baseOrder: 0,
+  });
+  assert.equal(add.mvpScope, "Additional");
+  // 親 不正値 → 子 Undecided（安全側）。
+  const [bad] = buildAiSubtaskChildPayloads({
+    snapshot: snapshot({ inheritedValues: { category: "c", mvpScope: "Support" } }),
+    parentTaskId: "p",
+    importBatchId: "b",
+    baseOrder: 0,
+  });
+  assert.equal(bad.mvpScope, "Undecided");
+  // 親 未設定（inheritedValues に mvpScope なし）→ 子 Undecided。
+  const [none] = buildAiSubtaskChildPayloads({ snapshot: snapshot(), parentTaskId: "p", importBatchId: "b", baseOrder: 0 });
+  assert.equal(none.mvpScope, "Undecided");
+});
+
 test("子タスク: implementationPrompt / reviewPrompt の改行を保持する", () => {
   const multi = "1行目\n2行目\n\n4行目";
   const [p] = buildAiSubtaskChildPayloads({

@@ -28,16 +28,18 @@
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 import { parseMarkdownTasks, collectSectionTasks, isExcludedSection } from "./markdown-task-parser.mjs";
+import { normalizeMvpScope, isExplicitMvpScope } from "./mvp-scope.mjs";
 
 // 比較対象フィールド（§17.7）。これ以外（createdAt/updatedAt/updatedBy/completedAt/
 // archived/source/completed）は差分判定に使わない。
-const COMPARE_FIELDS = [
+export const COMPARE_FIELDS = [
   "title",
   "taskCode",
+  "mvpScope",
   "category",
   "subcategory",
   "priority",
@@ -61,12 +63,13 @@ const NULLABLE_STRING_FIELDS = new Set([
   "issuePr",
   "completionRule",
   "taskCode",
+  "mvpScope",
 ]);
 
 // update（PATCH）で書き込む（＝updateMask に載せる）フィールド。
 // 比較対象12フィールド＋ completed（status 連動）＋ updatedAt / updatedBy のみ。
 // createdAt / completedAt / archived / source は mask に含めず一切触れない。
-const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
+export const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updatedBy"];
 
 // 条件付き同期フィールド: completionRule / reviewPoints / taskCode / branchName。
 // Markdown 側に明示の値が無い（行なし・空）状態を「未設定（=消す意図なし）」とみなし、
@@ -75,11 +78,12 @@ const UPDATE_WRITE_FIELDS = [...COMPARE_FIELDS, "completed", "updatedAt", "updat
 // Markdown 未記載のときに既存 taskCode を消さないため条件付きにする。
 // branchName は画面の「作業開始」で Firestore に保存されるため、Markdown 側に有効値が
 // 無いとき（未記載・空・"未作成"）に既存 branchName を消さないよう条件付きにする。
-const CONDITIONAL_SYNC_FIELDS = new Set([
+export const CONDITIONAL_SYNC_FIELDS = new Set([
   "completionRule",
   "reviewPoints",
   "taskCode",
   "branchName",
+  "mvpScope",
 ]);
 
 // reviewPoints を「trim 後に非空の文字列だけ」へ正規化する（空白のみ・非文字列要素は除外）。
@@ -95,7 +99,13 @@ function cleanReviewPoints(value) {
 // - completionRule: 非空文字列（convertTask は空を null にするため null は未設定）
 // - reviewPoints: trim 後に非空の文字列が1件以上ある配列（空白だけの箇条書きは未設定扱い）
 // 条件付きでないフィールドは常に同期対象（true）。
-function isSyncableField(field, desiredData) {
+export function isSyncableField(field, desiredData) {
+  if (field === "mvpScope") {
+    // 既知の正式値（Required/Additional/Undecided）のときだけ同期対象。
+    // 未設定（空→convertTask で null）・未知値（Support 等→convertTask で null）は同期対象外にし、
+    // 属性欠落・未知値の旧タスクで既存の有効な Firestore 値を消さない（安全側・二重の安全弁）。
+    return isExplicitMvpScope(desiredData?.mvpScope);
+  }
   if (field === "completionRule" || field === "taskCode") {
     // 単一行文字列: trim 後に非空のときだけ同期対象（空/null は未設定＝既存値保持）。
     const value = desiredData?.[field];
@@ -123,10 +133,16 @@ const DEFAULT_INPUT = "docs/00_project/developタスクチェックリスト.md"
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 
-main().catch((error) => {
-  console.error(`[markdown-sync] 想定外のエラー: ${error.message}`);
-  process.exitCode = 1;
-});
+// CLI として直接実行されたときだけ main() を走らせる（テスト等で純粋関数を import しても
+// 副作用〔ファイル読み込み・Firestore 接続〕を起こさないため。post-merge-firestore-status.mjs と同方針）。
+const isDirectRun =
+  Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(`[markdown-sync] 想定外のエラー: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -776,7 +792,7 @@ function buildFirestoreItems(parsed) {
 /**
  * 1タスクを Firestore 投入用オブジェクトへ変換する。
  */
-function convertTask(task, order, idToTitle) {
+export function convertTask(task, order, idToTitle) {
   const taskWarnings = [];
 
   const title = String(task.text ?? "").trim();
@@ -824,10 +840,25 @@ function convertTask(task, order, idToTitle) {
   const completionRule = task.completionRule ? String(task.completionRule).trim() : "";
   // taskCode（人間向け識別コード）。trim 後の非空文字列だけを値とし、空は null（未設定）。
   const taskCode = task.taskCode ? String(task.taskCode).trim() : "";
+  // mvpScope（MVP区分）。既知の正式値（別名含む）だけを同期対象にする。
+  // - 明示された正常値（Required/Additional/Undecided）→ 正規化して同期。
+  // - 未知値（Support 等）→ 同期しない（null＝既存 Firestore 値を保持）＋ warning。
+  // - 未記載（空）→ 未設定として null。
+  // parser が未知値を Undecided へ丸めず生値のまま保持するため、ここで両者を区別できる。
+  const mvpScopeRaw = task.mvpScope ? String(task.mvpScope).trim() : "";
+  const mvpScope = isExplicitMvpScope(mvpScopeRaw) ? normalizeMvpScope(mvpScopeRaw) : "";
+  if (mvpScopeRaw !== "" && !isExplicitMvpScope(mvpScopeRaw)) {
+    taskWarnings.push({
+      type: "mvp-scope-unknown",
+      title,
+      message: `未知の MVP区分「${mvpScopeRaw}」は同期しません（既存 Firestore 値を保持, line ${task.line}）`,
+    });
+  }
 
   const data = {
     title,
     taskCode: taskCode || null,
+    mvpScope: mvpScope || null,
     category,
     subcategory,
     priority,

@@ -10,6 +10,8 @@
 //   複製・調整して持つ。挙動を揃えて保守すること（除外キーワード・属性キー・推論規則）。
 // - 本ファイルは解析だけを行い、Firestore 変換・ID 生成・I/O は持たない（責務分離）。
 
+import { normalizeMvpScope, isExplicitMvpScope } from "./mvp-scope.mjs";
+
 // 集計除外セクション（task-dashboard.js の同名定義と揃える）。
 const EXCLUDED_SECTION_KEYWORDS = [
   "使い方",
@@ -174,6 +176,9 @@ function createTask({ text, completed, line, section, subsection }) {
     issuePr: inferIssuePr(text),
     // 人間向けの識別コード（例: TASK-023）。Markdown 未記載なら空のまま壊さない。
     taskCode: "",
+    // MVP区分（Required/Additional/Undecided）。Markdown 未記載なら空のまま保持し、
+    // 空=未設定として同期・表示側で安全に Undecided 扱いにする（属性欠落で既存値を消さないため）。
+    mvpScope: "",
     // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
     // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
     completionRule: "",
@@ -194,7 +199,7 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
+    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|MVP scope|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足|MVP区分):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -202,6 +207,7 @@ function parseTaskAttribute(text) {
 
   const keyMap = {
     "task code": "taskCode",
+    "mvp scope": "mvpScope",
     priority: "priority",
     status: "status",
     owner: "owner",
@@ -212,6 +218,7 @@ function parseTaskAttribute(text) {
     "review points": "reviewPoints",
     notes: "notes",
     タスクコード: "taskCode",
+    MVP区分: "mvpScope",
     担当: "owner",
     ブランチ: "branch",
     完了判定: "completionRule",
@@ -234,6 +241,15 @@ function applyTaskAttribute(task, key, value) {
     if (value) {
       task[key].push(value);
     }
+    return;
+  }
+  if (key === "mvpScope") {
+    // 属性行が存在する場合のみここに来る。Markdown 原文の妥当性を保持するため、
+    // 既知の別名（英大小・日本語）だけを正式値へ寄せ、未知値（例: Support）は生値のまま残す。
+    // これで「未設定（空）」「明示された正常値」「未知値」を後段（同期）で区別でき、
+    // 未知値を早期に Undecided へ丸めて原文の妥当性を失うことを避ける（欠落時は "" のまま）。
+    const raw = stripWrappingCode(value).trim();
+    task.mvpScope = isExplicitMvpScope(raw) ? normalizeMvpScope(raw) : raw;
     return;
   }
   task[key] = stripWrappingCode(value) || task[key];

@@ -445,6 +445,14 @@ function setupAddTaskForm() {
         </select>
       </label>
       <label class="add-task-field">
+        <span>MVP区分</span>
+        <select name="mvpScope">
+          <option value="Required">MVP必須</option>
+          <option value="Additional">追加機能</option>
+          <option value="Undecided" selected>要判断</option>
+        </select>
+      </label>
+      <label class="add-task-field">
         <span>status</span>
         <select name="status">${statusOptions}</select>
       </label>
@@ -481,6 +489,8 @@ async function handleAddTaskSubmit(form) {
     category: String(formData.get("category") ?? "").trim(),
     subcategory: String(formData.get("subcategory") ?? "").trim(),
     priority: String(formData.get("priority") ?? "").trim(),
+    // MVP区分。未選択・不正値は addTaskForPoc 側で Undecided へ正規化する（Required へ自動変換しない）。
+    mvpScope: String(formData.get("mvpScope") ?? "").trim(),
     status: String(formData.get("status") ?? "").trim(),
     owner: String(formData.get("owner") ?? "").trim(),
   };
@@ -2613,6 +2623,9 @@ function createTask({ text, completed, line, section, subsection }) {
     issuePr: inferIssuePr(text),
     // 人間向けの識別コード（例: TASK-023）。Markdown 未記載なら空のまま壊さない。
     taskCode: "",
+    // MVP区分（Required/Additional/Undecided）。Markdown 未記載なら空のまま保持し、
+    // 表示側で空＝Undecided 扱いにする（parser.mjs と揃える）。
+    mvpScope: "",
     // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）。
     // Done when / Notes とは別概念。未設定タスクは空のまま壊さない。
     completionRule: "",
@@ -2634,7 +2647,7 @@ function addTaskToCurrentNode(task, section, subsection) {
 
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
+    /^(Task code|Priority|Status|Owner|Branch|Issue\/PR|MVP scope|Completion rule|Done when|Review points|Notes|タスクコード|担当|ブランチ|完了判定|完了条件|レビュー観点|補足|MVP区分):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -2642,6 +2655,7 @@ function parseTaskAttribute(text) {
 
   const keyMap = {
     "task code": "taskCode",
+    "mvp scope": "mvpScope",
     priority: "priority",
     status: "status",
     owner: "owner",
@@ -2652,6 +2666,7 @@ function parseTaskAttribute(text) {
     "review points": "reviewPoints",
     notes: "notes",
     タスクコード: "taskCode",
+    MVP区分: "mvpScope",
     担当: "owner",
     ブランチ: "branch",
     完了判定: "completionRule",
@@ -2674,6 +2689,15 @@ function applyTaskAttribute(task, key, value) {
     if (value) {
       task[key].push(value);
     }
+    return;
+  }
+  if (key === "mvpScope") {
+    // parser.mjs と同じく、既知の別名だけ正式値へ寄せ、未知値は生値のまま保持する
+    // （表示は getMvpScopeDisplayName / getMvpScopeBadgeClass が安全側〔要判断〕へ寄せる）。
+    const raw = stripWrappingCode(value).trim();
+    task.mvpScope = window.MvpScope.isExplicitMvpScope(raw)
+      ? window.MvpScope.normalizeMvpScope(raw)
+      : raw;
     return;
   }
   task[key] = stripWrappingCode(value) || task[key];
@@ -3059,6 +3083,7 @@ function renderTaskCard(task) {
         <p class="task-title">${renderTaskCodeBadge(task)}${renderInline(task.text)}</p>
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
+      ${renderMvpScopeBadge(task)}
       ${renderSourceBadge(task)}
       ${renderAiSubtaskRelation(task)}
       <ul class="task-meta">
@@ -3103,6 +3128,18 @@ function renderTaskCodeBadge(task) {
     return "";
   }
   return `<span class="task-code-badge">${escapeHtml(code)}</span>`;
+}
+
+// MVP区分バッジ。Markdown表示・Firestore表示の両方で常に表示する（未設定は「要判断」）。
+// バッジクラス・表示名は必ず MvpScope の固定マップ経由で取得し、Firestore の生値を
+// CSSクラスや DOM へ直接連結しない。色だけに依存せず文字でも区分を示し、aria-label/title も付ける。
+function renderMvpScopeBadge(task) {
+  const badgeClass = window.MvpScope.getMvpScopeBadgeClass(task.mvpScope);
+  const display = window.MvpScope.getMvpScopeDisplayName(task.mvpScope);
+  const label = `MVP区分: ${display}`;
+  return `<div class="mvp-scope-line"><span class="mvp-scope-badge ${badgeClass}" title="${escapeHtml(
+    label,
+  )}" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</span></div>`;
 }
 
 // Branch 表示の <li>。有効な branchName のときだけ、値の横にコピーボタンを出す。
