@@ -25,10 +25,16 @@ import { firebaseConfig } from "./firebase-config.js";
 
 const FIRESTORE_BASE = "https://firestore.googleapis.com/v1";
 
-// 比較対象フィールド（Node側 sync スクリプトと揃える）。
+// 比較対象フィールド（Node側 sync-markdown-to-firestore.mjs の COMPARE_FIELDS と揃える）。
 // completionRule=完了判定（単一行）/ reviewPoints=レビュー観点（複数行）を追加。
-const COMPARE_FIELDS = [
+// taskCode（人間向け識別コード）/ mvpScope（MVP区分）も Node 側に合わせて追加する。
+// buildUpdateFromDiffs はこの集合で diff をフィルタするため、ここに無いと Node が出した
+// taskCode / mvpScope の更新 diff が画面に出ても updateMask / writeData へ入らず反映されない。
+// 値の推測・正規化はしない（Node の compare 結果を正として、diff の after をそのまま書き込む）。
+export const COMPARE_FIELDS = [
   "title",
+  "taskCode",
+  "mvpScope",
   "category",
   "subcategory",
   "priority",
@@ -321,7 +327,7 @@ function pickDeleteSource(item) {
 }
 
 // toCreate 1件分の作成データを組み立てる。{ id, data } 形・フラット形どちらにも対応。
-function buildCreateData(item) {
+export function buildCreateData(item) {
   const source =
     item && typeof item === "object" && item.data && typeof item.data === "object"
       ? item.data
@@ -329,6 +335,11 @@ function buildCreateData(item) {
   const status = String(source.status ?? "Todo");
   return {
     title: source.title ?? "",
+    // taskCode / mvpScope は Node の compare 結果（data）をそのまま保存する。
+    // 画面側で値を推測・正規化しない（未設定は null。未知値は Node 側で同期対象外にしているため
+    // ここには既知の正式値か null しか来ない）。
+    taskCode: source.taskCode ?? null,
+    mvpScope: source.mvpScope ?? null,
     category: source.category ?? "",
     subcategory: source.subcategory ?? null,
     priority: source.priority ?? "P2",
@@ -353,7 +364,7 @@ function buildCreateData(item) {
 
 // toUpdate の diffs（field/before/after）から、更新マスクと書き込み値を作る。
 // after は compare 側で正規化済みの desired 値（null可・配列可・数値可）。
-function buildUpdateFromDiffs(item) {
+export function buildUpdateFromDiffs(item) {
   const diffs = Array.isArray(item?.diffs) ? item.diffs : [];
   const mask = [];
   const writeData = {};
