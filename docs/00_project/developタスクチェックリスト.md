@@ -96,19 +96,32 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ## 3. 品質ゲート
 - [x] `pnpm run lint`
+  - MVP scope: Undecided
 - [x] `pnpm run typecheck`
+  - MVP scope: Undecided
 - [x] `pnpm run test`
+  - MVP scope: Undecided
 - [x] `pnpm run build`
+  - MVP scope: Undecided
 - [x] `cargo check --manifest-path src-tauri/Cargo.toml`
+  - MVP scope: Undecided
 - [x] `cargo test --manifest-path src-tauri/Cargo.toml`
+  - MVP scope: Undecided
 - [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`
+  - MVP scope: Undecided
 - [x] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
+  - MVP scope: Undecided
 - [x] `pnpm run test:ui`（Playwright UI E2E）
+  - MVP scope: Undecided
 - [x] `node --check task-management/task-dashboard.js`
+  - MVP scope: Additional
 - [x] `node --check task-management/serve-dashboard.mjs`
+  - MVP scope: Additional
 - [x] タスクダッシュボード表示確認（Nodeサーバー + Playwright smoke）
+  - MVP scope: Additional
 - [ ] `pnpm run test:ui` を `review:quick` / `review:strict` に組み込む
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -117,6 +130,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - Playwrightの実行時間と安定性を確認したうえで、review scriptへの組み込み可否が決まっている
 - [x] Playwright Chromium install をCI手順へ追加（`pnpm exec playwright install --with-deps chromium` / PR #73）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
@@ -125,6 +139,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - CI上でChromiumが確実に準備され、UI E2Eを任意チェックとして実行できる
 - [x] GitHub ActionsでUI E2Eを任意チェックとして追加（PR #73 / #74）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
@@ -139,18 +154,30 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ## 4. フロントエンド（完了済み + 残件）
 - [x] 主要画面の土台作成（Main / Reader / Dictionary / Settings / Customize / Gacha / History / Onboarding）
+  - MVP scope: Undecided
 - [x] オンボーディング追加（step4/5）
+  - MVP scope: Additional
 - [x] 開発画面左下の `N` アイコン非表示
+  - MVP scope: Additional
 - [x] Windowsコントラストテーマ影響の抑制（forced-colors対策）
+  - MVP scope: Additional
 - [x] 画面側のTauri呼び出しラッパー作成（型付き）
+  - MVP scope: Required
 - [x] 設定画面を `get_user_settings` / `save_user_settings` に接続
+  - MVP scope: Required
 - [x] 記事一覧・記事詳細・辞書・お気に入り・要約生成の段階接続
+  - MVP scope: Required
 - [x] ホーム画面にニュース手動更新UIを追加（PR #31 / `c57115f`）
+  - MVP scope: Required
 - [x] PlaywrightによるUI確認E2E基盤を追加（PR #32 / `3c0b7ac`）
+  - MVP scope: Additional
 - [x] MainScreenのニュース一覧スクロールを修正（PR #58）
+  - MVP scope: Required
 - [x] ゆうこ辞書のメモ編集・削除・★操作を実データへ接続（PR #67）
+  - MVP scope: Required
 - [ ] Mockデータ依存箇所を段階的に置換
   - Priority: P2
+  - MVP scope: Undecided
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -160,6 +187,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - Tauri未接続時のプレビュー用途と実データ用途が明確に分離されている
 - [ ] 失敗時UI（トースト / 再試行 / フォールバック）を統一
   - Priority: P2
+  - MVP scope: Additional
   - Status: Doing
   - Owner: メンバー
   - Branch: `feature/error-ui-unification`
@@ -177,6 +205,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - MainScreenの通知取得、GachaScreen / CustomizeScreenなど未配線画面は別タスクで判断する
 - [ ] 余白・横幅・はみ出し・スクロール領域・文字潰れの微修正
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -186,6 +215,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - PC幅での日常利用に支障がない
 - [x] `yuuko.png` のNext.js警告対応（LCP / 画像比率 / PR #50）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
@@ -196,38 +226,68 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ## 5. Tauri / Rust（完了済み）
 - [x] レイヤー構成作成（`commands/` `domain/` `repositories/` `services/` `state` `paths` `error`）
+  - MVP scope: Required
 - [x] ヘルスチェックコマンド（`ping`）
+  - MVP scope: Undecided
 - [x] 設定取得/保存コマンド（`get_user_settings` / `save_user_settings`）
+  - MVP scope: Required
 - [x] 設定保存の安全化（temp + backup + restore）
+  - MVP scope: Required
 - [x] 型安全強化（`AiProvider` / `ExplanationLevel` enum）
+  - MVP scope: Required
 - [x] `get_recommended_articles`
+  - MVP scope: Required
 - [x] `get_article_detail`
+  - MVP scope: Required
 - [x] `generate_article_summary`
+  - MVP scope: Required
 - [x] `explain_selected_term`
+  - MVP scope: Required
 - [x] `list_dictionary_entries`
+  - MVP scope: Required
 - [x] `save_dictionary_entry`
+  - MVP scope: Required
 - [x] `update_article_favorite`
+  - MVP scope: Required
 - [x] `get_yuuko_notification_state`
+  - MVP scope: Required
 - [x] `confirm_rank_up_reward`
+  - MVP scope: Required
 - [x] `refresh_news`
+  - MVP scope: Required
 - [x] `archive_old_articles`（月次ZIP増分1・非破壊 / PR #68）
+  - MVP scope: Additional
 - [x] Tauri npm/Rust crate のバージョン整合（PR #30 / `f16ba0d`）
+  - MVP scope: Required
 - [x] 辞書メモ更新・辞書削除コマンド（`update_dictionary_memo` / `delete_dictionary_entry`、PR #36）
+  - MVP scope: Required
 - [x] ゆうこ通知操作コマンド（`dismiss_yuuko_notification` / `handle_yuuko_clicked`、PR #37）
+  - MVP scope: Required
 - [x] 友情ランク状態・イベント記録コマンド（`get_friendship_state` / `record_friendship_event`、PR #52）
+  - MVP scope: Required
 
 ## 6. ニュース取得パイプライン（完了済み + 残件）
 - [x] URL/スキーム検証 + 許可リスト基盤（PR #22 / `286526d`, `baecc47`）
+  - MVP scope: Required
 - [x] RSS取得クライアント（PR #23 / `9c5df50`）
+  - MVP scope: Required
 - [x] HTML本文抽出フェッチャー（PR #24 / `15f9a6e`）
+  - MVP scope: Required
 - [x] Markdown保存 + ArticleRepository実データ化（PR #25 / `a73e352`）
+  - MVP scope: Required
 - [x] RecommendationService（PR #26 / `c3461e0`）
+  - MVP scope: Required
 - [x] NewsService + `refresh_news`（PR #27 / `f9828c3`）
+  - MVP scope: Required
 - [x] 起動時・日付変更時の低頻度ニュース取得スケジューラ（PR #28 / `5a53d6a`）
+  - MVP scope: Required
 - [x] FeedClientのRSS2.0/Atom両対応（PR #29 / `b2bb03b`, `484c4bb`）
+  - MVP scope: Required
 - [x] Publickey Atomフィードのローカル疎通確認（取得15件 / 保存15件 / errors 0）
+  - MVP scope: Required
 - [x] `news_sources.json` / `network_allowlist.json` の設定導線整備（PR #54）
   - Priority: P1
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
@@ -237,10 +297,14 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 製品デフォルトのdeny-by-defaultは維持される
     - 手作業手順とコマンド手順の関係がdocsに明記されている
 - [x] 設定JSONのUTF-8 BOM耐性追加（PR #33 / `8f87081`）
+  - MVP scope: Additional
 - [x] `settings.news.sources` と `config/news_sources.json` の責務整理（PR #34 / `2aa8016`）
+  - MVP scope: Required
 - [x] MVP用ニュースソース候補の採用方針確定（Publickey採用 / PR #35）
+  - MVP scope: Required
 - [x] 媒体ToSとAI要約の運用方針をMVP/公開版で分けて明文化
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @claude
   - Branch: `docs/media-tos-ai-policy`
@@ -253,16 +317,26 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ## 7. セキュリティ・ネットワーク境界
 - [x] deny-by-default の許可リスト方式
+  - MVP scope: Required
 - [x] `http` / `https` 以外のスキーム拒否
+  - MVP scope: Required
 - [x] username/password 付きURL拒否
+  - MVP scope: Required
 - [x] localhost / loopback / private IP / link-local / unspecified IP拒否
+  - MVP scope: Required
 - [x] DNS解決後の実IPもプライベートIP拒否
+  - MVP scope: Required
 - [x] リダイレクトは自動追従せず、各 `Location` を検証
+  - MVP scope: Required
 - [x] `fetch_any_url` 相当の公開Tauri commandを作らない方針を維持
+  - MVP scope: Required
 - [x] allowlist破損時は fail-close
+  - MVP scope: Required
 - [x] UTF-8 BOM付きJSONのみ許容し、それ以外の破損は fail-close 維持（PR #33）
+  - MVP scope: Required
 - [x] ソース追加・変更時の運用手順をドキュメント化（PR #54）
   - Priority: P1
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
@@ -276,6 +350,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 ### P1: ニュースソース設定導線 ✅ 完了（PR #54）
 - [x] 開発者向けに検証用ニュースソース設定を作成する導線を用意する
   - Priority: P1
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/dev-news-source-setup`
@@ -293,6 +368,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 ### P1: タスク進捗ダッシュボード ✅ 完了（PR #53 / `cb32965`）
 - [x] Markdown正本を読み込むHTMLダッシュボードを追加する
   - Priority: P1
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/task-dashboard`
@@ -307,37 +383,58 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ### P0: 設定JSONのUTF-8 BOM耐性追加 ✅ 完了（PR #33 / `8f87081`）
 - [x] `NetworkAllowlist::load` がUTF-8 BOM付きJSONを読めるようにする
+  - MVP scope: Additional
 - [x] `NewsSourcesConfig::load` がUTF-8 BOM付きJSONを読めるようにする
+  - MVP scope: Additional
 - [x] BOM以外の壊れたJSONは fail-close のままにする（セキュリティ境界の方針は維持）
+  - MVP scope: Required
 - [x] `settings.json` への横展開（共有ヘルパ `util::strip_utf8_bom`・BOMのみ許容・破損挙動は現状維持）
+  - MVP scope: Additional
 - [x] 単体テストを追加
+  - MVP scope: Undecided
 - [x] `cargo fmt` / `cargo test` / `cargo clippy -D warnings` を通す
+  - MVP scope: Undecided
 
 ### P1: ニュース取得設定の責務整理 ✅ 完了（PR #34 / `2aa8016`）
 - [x] `config/news_sources.json` を取得元の唯一の正とする（決定）
+  - MVP scope: Required
 - [x] `settings.news.sources` の扱いを整理 → **削除**（未使用・非露出。旧JSONは serde 無視で後方互換）
+  - MVP scope: Required
 - [x] 設計書と実装の責務を同期（データ設計書 §8.2 から `sources` 除去＋取得元の管理先を注記）
+  - MVP scope: Required
 
 ### P1: MVP用ニュースソース導入手順 ✅ 完了（PR #35）
 - [x] 採用候補を2〜4件に絞る（Publickey を採用。他はToS制約等で見送り）
+  - MVP scope: Required
 - [x] allowlist候補を確定（`www.publickey1.jp`）
+  - MVP scope: Required
 - [x] app-data配置手順をドキュメント化（`docs/01_setup/ニュースソース設定手順.md`）
+  - MVP scope: Required
 - [x] deny-by-defaultを維持したまま、検証用設定を扱いやすくする
+  - MVP scope: Required
 
 ### P1.5: MVP機能の波（実AI・継続要素）
 ニュース基盤の安定化（上記P0/P1）後に着手する。MVP価値の中核だが当初リスト漏れだったため追加。
 - [x] Gemini連携（実AIプロバイダ）（PR #38）— APIキーはRust側のみ・ログ非出力・送信データ最小化、未設定時はmockへフォールバック
+  - MVP scope: Required
 - [x] 友情ランク簡易完成（PR #52）— `get_friendship_state` / ポイント加算 / RankUpDialog 配線、並行更新対策、レビュー指摘対応まで完了
+  - MVP scope: Required
 - [x] 未配線コマンドの穴埋め（quick win）— `update_dictionary_memo` / `delete_dictionary_entry`（PR #36 merged）/ `dismiss_yuuko_notification` / `handle_yuuko_clicked` / `get_friendship_state`（読取専用・PR #37 merged）
+  - MVP scope: Required
 
 ### P1.5: Gemini堅牢化・運用（#38後フォロー）
 実AI（#38）を「安心して使える」状態にするための小さめフォロー群。
 - [x] Gemini通信失敗時のmockフォールバック（PR #41。CLAUDE.md §10「安全側へ倒す」準拠）
+  - MVP scope: Required
 - [x] GeminiモデルID更新/設定化（PR #41。既定 `gemini-2.5-flash` ＋ `GEMINI_MODEL` で上書き可）
+  - MVP scope: Required
 - [x] 実APIキーでの疎通確認（実APIで `gemini-2.5-flash` の200応答を確認。`#[ignore]` スモークテスト追加）
+  - MVP scope: Required
 - [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
+  - MVP scope: Required
 - [ ] AIプロバイダ接続テストの最小バックエンド基盤を追加する
   - Priority: P1.5
+  - MVP scope: Undecided
   - Status: Next
   - Owner: 未定
   - Branch: 未作成
@@ -350,8 +447,10 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: 画面詳細設計書 SCR-003 §7.5 / §7.10。UI配線はバックエンド基盤の後続PRへ分離可能
 - [x] （B-4後続・実装）要約のMarkdown永続化（PR #44）：summary_service が記事Markdownへ要約系フィールド＋ summarized/summary_generated_at/ai_provider を保存。再表示はキャッシュ・更新は明示再生成。種は元 excerpt から作り再生成膨張を防止
+  - MVP scope: Required
 - [x] （B-4後続・決定）アーカイブ退避の起点・粒度：データ設計書 §14 準拠で「1か月→月次ZIP（お気に入り除外）」を確定（「4〜7日」案は不採用）
   - Priority: P1.5
+  - MVP scope: Additional
   - Status: Done
   - Owner: @claude
   - Branch: `docs/archive-retention-policy`
@@ -363,6 +462,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 増分1の実ZIP圧縮はPR #68で完了。元Markdown削除・ZIP再閲覧・自動実行は増分2として後続
 - [x] アーカイブ退避候補の選定ロジックを追加（PR #66）
   - Priority: P1.5
+  - MVP scope: Additional
   - Status: Done
   - Owner: @claude
   - Branch: `feature/archive-candidates`
@@ -372,6 +472,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 境界値と除外条件の単体テストがある ✅
 - [x] 月次ZIPアーカイブ増分1を実装（PR #68）
   - Priority: P1.5
+  - MVP scope: Additional
   - Status: Done
   - Owner: @claude / @codex（レビュー修正）
   - Branch: `feature/archive-zip`
@@ -382,6 +483,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 複数月・途中失敗・同月再実行時の整合性をテストしている ✅
 - [x] 月次ZIPアーカイブ増分2（安全な復元・元Markdown削除・自動実行 / PR #84）
   - Priority: P1.5
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/archive-daily-scheduler`
@@ -398,6 +500,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 画面詳細設計書・MVPスコープ・データ設計書を現状実装と照合して追加（2026-06-26にMVP必須機能として再確認）。ニュース基盤/Gemini/友情ランクは完了済みのため、ここでは「実データ接続・操作配線・配布前に必要な決定」に絞る。
 - [ ] MVP必須シナリオを通しで確認し、デモ可能な状態にする
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -413,6 +516,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、辞書とランクが育つ」体験が途切れないことを確認する。
 - [x] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: 近松
   - Branch: `fix/mvp-settings-completion-gaps`
@@ -427,6 +531,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - PR #59で操作方針整理とリセットは完了。ここではMVP対象設定のDTO/永続化/画面表示の取りこぼし確認に絞る。
 - [x] ニュース履歴画面を実データへ接続する（PR #56）
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @codex
   - Branch: `codex/article-history-backend`
@@ -440,6 +545,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - PR #56 でマージ済み（status barの実データ件数表示・空/エラー時文言の整理を含む）
 - [x] ゆうこ辞書のメモ編集・削除・★操作をUIへ配線する（PR #67）
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: メンバー
   - Branch: `feature/dictionary-actions-ui`
@@ -453,6 +559,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: MVPスコープ §5.7 / 画面詳細設計書 SCR-004。RustコマンドはPR #36、フロント配線はPR #67で完了
 - [ ] ゆうこ通知・軽量プレビューの操作結果をフロントへ接続する
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Todo
   - Owner: バックエンド=@claude（#61完了）/ フロント=メンバー（#46）
   - Branch: `feature/yuuko-notification-state`（マージ済み）
@@ -468,6 +575,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: ゆうこ登場・通知挙動詳細設計書 §4-§6/§10/§12。**PR #61でバックエンド強化**: クールタイム(60分)/閉じる(120分)/無視(180分)、日次上限=settings.notification.maxPerDay、紹介済みFIFO、`request_yuuko_notification`（未紹介・未読・スコア順で選定＋ゲート）、報酬pending時は通知で上書きしない。残りの画面遷移・連打防止はフロント#46
 - [x] 設定画面の未実装操作を整理し、実装または明示的に無効化する
   - Priority: P1.5
+  - MVP scope: Undecided
   - Status: Done
   - Owner: @claude
   - Branch: `feature/settings-backend-actions`
@@ -481,6 +589,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 別タスク化推奨: 設定の多くがDTO未連携で未永続化（ゆうこ表示/解説詳しさ/用語レベル/長文自動候補/優先モード/通知頻度/ゲーム中抑制/ストレージ表示mock）。`UserSettings` DTO拡張はPR #59と分離
 - [x] 正式Tauri identifierとapp-data移行方針を決める（→ `jp.star-system.yuuko-news`）
   - Priority: P1.5
+  - MVP scope: Undecided
   - Status: Done
   - Owner: @claude
   - Branch: `chore/official-identifier`
@@ -496,6 +605,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 セキュリティ詳細設計書のMVPチェックリストと、常駐アプリとしての運用要件から追加。新機能ではなく、公開/社内配布前の仕上げ確認。
 - [x] Tauri capability / CSP / 権限設定を棚卸しする
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @claude
   - Branch: `chore/release-security-review`
@@ -508,6 +618,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: セキュリティ詳細設計書 §19.5 / §17.1。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [x] 制限的CSPをWindows/Tauri実機で検証する
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @codex（手順・記録）/ 実機操作=アプリを起動できる担当
   - Branch: `codex/resident-runtime-validation`
@@ -519,6 +630,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - PR #65でCSPを適用し、2026-06-15に`tauri build --debug`のWindows/WebView2で主要画面を目視確認。Vercel Analytics由来の構文エラーは依存ごと除去し、再確認で解消済み
 - [x] ログ・AI送信データ・秘密情報の最終点検を行う
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @claude
   - Branch: `chore/release-security-review`
@@ -531,6 +643,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: セキュリティ詳細設計書 §8 / §16 / §19.1〜19.4。点検結果は `docs/02_design/リリース前セキュリティ点検結果.md`
 - [x] 軽量常駐の性能確認観点を決め、最低限の測定を行う
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @codex
   - Branch: `codex/performance-baseline`
@@ -544,6 +657,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: 要件定義書 §8.2 / §14。固定の製品目標値は複数PC・release build測定後に決定する
 - [x] バックグラウンド常駐方式を決定し、待機状態を実装する（PR #87）
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Done
   - Owner: @codex
   - Branch: `codex/background-resident-lifecycle`
@@ -559,6 +673,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
     - 根拠: 要件定義書 §8.2 / §14、画面詳細設計書 §3.3
 - [ ] Windows実機で常駐動作・非表示性能・本番CSPを一括検証する
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Doing
   - Owner: @codex（手順・記録）/ 実機操作=アプリを起動できる担当
   - Branch: `codex/resident-runtime-validation`
@@ -578,6 +693,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 MVPでは簡易または後回しでよいが、設計書に明記されているため追跡対象にする。今すぐ着手しないものは `Status: Todo` のまま維持する。P3相当の将来拡張は、現在のダッシュボード集計との互換のため `Priority: P2` のまま「MVP後候補」と明記する。
 - [ ] お気に入り記事の一覧・再閲覧・解除導線を用意する
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -590,6 +706,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - 根拠: 要件定義書 §10.6。MVPではフラグ保存のみでも可だが、画面要件として追跡
 - [ ] 報酬カタログ・解放済み要素・カスタマイズ状態の最小データ化を決める
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -603,6 +720,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - MVP後候補。MVPではランクアップ体験と進捗表示が伝わればよく、本格的な報酬カタログ永続化は必須にしない
 - [ ] ガチャ画面のMVPでの扱いを決める
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -616,6 +734,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - MVP後候補。発表で見せる場合も簡易デモに留め、本格的な排出率・重複処理・履歴管理は今回の棚卸し対象外
 - [ ] データ移行（ローカルZIP / Google Drive）はMVP対象外としてバックログ化する
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -629,6 +748,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - MVP対象外。Google Drive連携・ローカルZIP移行の実装は、アプリ本体MVPのニュース理解補助体験が固まった後に扱う
 - [x] おすすめ判定の初期キーワード・重み調整方針を整理する
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @claude
   - Branch: `feature/recommendation-tuning`
@@ -643,6 +763,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 （補足：E2EのテストカバレッジはPR #45、任意CIはPR #73/#74で完了。残りは必須化の要否判断のみ。）
 - [x] CIで `pnpm exec playwright install --with-deps chromium` を実行（PR #73）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
@@ -651,6 +772,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - GitHub Actions上でPlaywrightブラウザが安定してインストールされる
 - [x] まず任意チェックとして追加（PR #73 / #74）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @codex
   - Branch: `codex/playwright-ui-e2e-ci`
@@ -659,6 +781,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - PR上でUI E2E結果を確認でき、失敗時の運用が明確になっている
 - [ ] 安定後に `review:strict` / 必須CIへの組み込み可否を判断
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -669,6 +792,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 ### P2: UI警告・見た目微修正
 - [x] `yuuko.png` のLCP警告対応（PR #50）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
@@ -677,6 +801,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - Next.jsのLCP警告が解消されている
 - [x] `yuuko.png` の画像比率警告対応（PR #50）
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: チーム
   - Branch: `feature/ui-image-warning-fix`
@@ -685,6 +810,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - 画像の縦横比が崩れず、Next.js警告が出ない
 - [ ] 主要画面の余白・スクロール・文字はみ出しをPlaywrightスクリーンショットで確認
   - Priority: P2
+  - MVP scope: Additional
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -696,6 +822,7 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
 MVP必須体験に直結するホーム表示・用語選択はP1.5として扱う。ニュース閲覧導線の自然さや細かなレイアウト改善はP2で追跡する。
 - [ ] **ホーム画面のレイアウト修正**：おすすめニュースが画面全体に縦羅列され、設計で必須の「ゆうこ本体（中央下寄り）」が見えない状態。
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -706,6 +833,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - 要すり合わせ：おすすめ表示件数（設計は「**10件前後**」／ユーザー想定は「ゆうこ厳選**3件程度**」）。件数方針を決めてからレイアウト調整。
 - [ ] **ニュース閲覧への遷移整理**：サイドバー「ニュースを見る」／ホーム「すべてを見る」押下で、いきなり記事詳細（ニュース閲覧画面）へ遷移している（`app/page.tsx` は news=NewsReaderScreen 直行・一覧を挟まない）。
   - Priority: P2
+  - MVP scope: Undecided
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -716,6 +844,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - 要決定：遷移先の一覧をどれにするか（メインのおすすめ一覧／ニュース履歴／新規ニュース一覧画面）。※設計の画面一覧(§4)に専用「ニュース一覧画面」は無く、メインのおすすめ一覧＋ニュース履歴で一覧を担う前提。
 - [ ] **用語解説を「範囲選択ベース」に作り直す**：現状は事前用意の候補語（`highlightedTerms` / `keyword_candidates` / fallback）をクリックする方式で、本文を範囲選択して解説する導線が無い。
   - Priority: P1.5
+  - MVP scope: Required
   - Status: Todo
   - Owner: 未定
   - Branch: 未作成
@@ -729,6 +858,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
 - [x] post-merge apply後にFirestore→Markdown同期PRが作成されることを確認する
   - Task code: OPS-MD-SYNC-CHECK-001
   - Priority: P2
+  - MVP scope: Additional
   - Status: Done
   - Owner: @auto-merge-test
   - Branch: ops/md-sync-apply-confirm
@@ -746,6 +876,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
 - [ ] Claude Code / Codex向けAI作業コンテキスト導線の最小版を整備する
   - Task code: 未設定
   - Priority: P1.5
+  - MVP scope: Additional
   - Status: Doing
   - Owner: 近松
   - Branch: `chore/ai-context-entrypoint`
