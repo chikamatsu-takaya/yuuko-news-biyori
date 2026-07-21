@@ -94,3 +94,69 @@ export function isExplicitMvpScope(value) {
   }
   return MVP_SCOPE_ALIASES.has(trimmed.toLowerCase());
 }
+
+// ---------------------------------------------------------------------------
+// MVP区分による絞り込み（表示専用の純粋関数）。
+// タスク配列・タスクオブジェクトを破壊せず、正規化は normalizeMvpScope を再利用する
+// （task-dashboard.js 側へ正規化ロジックを複製しない）。
+// ---------------------------------------------------------------------------
+
+/** 絞り込みの内部値。"all" は全件、それ以外は正式値と一致するもの。 */
+export const MVP_SCOPE_FILTER_ALL = "all";
+export const MVP_SCOPE_FILTER_VALUES = [MVP_SCOPE_FILTER_ALL, ...MVP_SCOPE_VALUES];
+
+/**
+ * 絞り込み選択値を安全な正規値へ解決する。
+ * "all" と正式値（Required/Additional/Undecided）だけを受理し、
+ * それ以外（未知値・空・非文字列）は安全側で "all"（全件）にする。
+ * ※ 選択値そのものは normalizeMvpScope に通さない（"all" が Undecided に化けるのを防ぐ）。
+ * @param {unknown} value
+ * @returns {"all"|"Required"|"Additional"|"Undecided"}
+ */
+export function resolveMvpScopeFilter(value) {
+  if (typeof value !== "string") {
+    return MVP_SCOPE_FILTER_ALL;
+  }
+  const trimmed = value.trim();
+  if (trimmed === MVP_SCOPE_FILTER_ALL) {
+    return MVP_SCOPE_FILTER_ALL;
+  }
+  return MVP_SCOPE_VALUES.includes(trimmed) ? trimmed : MVP_SCOPE_FILTER_ALL;
+}
+
+/**
+ * 1タスクが選択中のMVP区分フィルタに一致するか。
+ * "all" は常に true。タスクの mvpScope は normalizeMvpScope で正規化して比較するため、
+ * 未設定・空・未知値・非文字列は Undecided 扱いになる（画面表示仕様と同じ）。
+ * @param {unknown} task mvpScope を持ちうるタスク（null/undefined でも例外にしない）
+ * @param {unknown} selectedScope 絞り込み選択値
+ * @returns {boolean}
+ */
+export function matchesMvpScope(task, selectedScope) {
+  const scope = resolveMvpScopeFilter(selectedScope);
+  if (scope === MVP_SCOPE_FILTER_ALL) {
+    return true;
+  }
+  const value = task == null ? undefined : task.mvpScope;
+  return normalizeMvpScope(value) === scope;
+}
+
+/**
+ * タスク配列を選択中のMVP区分で絞り込む（新しい配列を返す・入力は破壊しない）。
+ * - 配列以外は [] を返す（例外にしない）。
+ * - "all" / 不正なフィルタ値は全件のコピーを返す。
+ * - タスクオブジェクト自体は書き換えない。
+ * @param {unknown} tasks
+ * @param {unknown} selectedScope
+ * @returns {Array}
+ */
+export function filterTasksByMvpScope(tasks, selectedScope) {
+  if (!Array.isArray(tasks)) {
+    return [];
+  }
+  const scope = resolveMvpScopeFilter(selectedScope);
+  if (scope === MVP_SCOPE_FILTER_ALL) {
+    return tasks.slice();
+  }
+  return tasks.filter((task) => matchesMvpScope(task, scope));
+}

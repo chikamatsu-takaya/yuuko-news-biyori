@@ -59,6 +59,9 @@ test("parity: window.MvpScope が読み込め、必要な関数を公開して�
     "getMvpScopeDisplayName",
     "getMvpScopeBadgeClass",
     "isExplicitMvpScope",
+    "resolveMvpScopeFilter",
+    "matchesMvpScope",
+    "filterTasksByMvpScope",
   ]) {
     assert.equal(typeof browser[fn], "function", `${fn} を公開`);
   }
@@ -90,3 +93,33 @@ for (const fn of FUNCTIONS) {
     }
   });
 }
+
+// 絞り込み関数の一致（選択値の解決・1タスク一致・配列絞り込み）。
+test("parity: resolveMvpScopeFilter は全入力で一致", () => {
+  for (const input of [...INPUTS, "all", "Required", "Additional", "Undecided", "  all  "]) {
+    assert.equal(browser.resolveMvpScopeFilter(input), esm.resolveMvpScopeFilter(input), `resolve(${JSON.stringify(input)})`);
+  }
+});
+
+test("parity: matchesMvpScope は全 mvpScope × 全フィルタで一致", () => {
+  const scopes = ["all", "Required", "Additional", "Undecided", "Support", ""];
+  for (const mv of INPUTS) {
+    for (const scope of scopes) {
+      const t = { mvpScope: mv };
+      assert.equal(
+        browser.matchesMvpScope(t, scope),
+        esm.matchesMvpScope(t, scope),
+        `matches(mvpScope=${JSON.stringify(mv)}, scope=${JSON.stringify(scope)})`,
+      );
+    }
+  }
+});
+
+test("parity: filterTasksByMvpScope は同一タスク配列で同じ結果", () => {
+  const tasks = INPUTS.map((mv, i) => ({ id: i, mvpScope: mv }));
+  for (const scope of ["all", "Required", "Additional", "Undecided", "Support"]) {
+    const a = esm.filterTasksByMvpScope(tasks, scope).map((t) => t.id);
+    const b = browser.filterTasksByMvpScope(tasks, scope).map((t) => t.id);
+    assert.deepEqual(b, a, `filter(scope=${JSON.stringify(scope)})`);
+  }
+});

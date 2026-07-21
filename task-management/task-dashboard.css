@@ -411,6 +411,52 @@ h3 {
   font-weight: 500;
 }
 
+/* MVP区分の絞り込みセグメント（操作群に動的追加）。狭い画面では折り返す。 */
+.mvp-scope-filter {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.mvp-scope-filter-label {
+  margin-right: 2px;
+}
+
+.mvp-scope-filter-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mvp-scope-filter-button:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+/* 選択中は色だけでなく、太字・枠・背景の見た目でも判別できるようにする（aria-pressed も併用）。 */
+.mvp-scope-filter-button.is-active {
+  background: rgba(126, 182, 255, 0.16);
+  border-color: var(--blue);
+  color: var(--blue);
+  font-weight: 850;
+}
+
+/* キーボード操作時のフォーカスを明確にする。 */
+.mvp-scope-filter-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .task-tree {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -489,6 +535,9 @@ details[open] > summary::after {
 .task-title {
   margin-bottom: 0;
   font-weight: 800;
+  /* 長いタスク名は折り返し、右の Status バッジを押し出さない（min-width:0 で縮小可能に）。 */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* 人間向けの識別コード（taskCode）バッジ。タスク名の前にインライン表示する。 */
@@ -519,12 +568,23 @@ details[open] > summary::after {
   white-space: nowrap;
 }
 
-/* MVP区分バッジ。色だけに依存せず文字（「MVP区分: …」）も表示する。
-   クラスは固定3種のみで、Firestore の生値を連結しない。 */
-.mvp-scope-line {
-  margin: 2px 0 4px;
+/* カード上部の情報行: MVP区分バッジと source バッジを1行にまとめ、狭い幅では折り返す。
+   Status（タイトル行右）とは別ブロックにして視覚的に区別する。 */
+.task-badge-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 6px 0 2px;
 }
 
+/* .task-badge-row 内に入る source ブロックは行内配置に合わせて上マージンを消す。 */
+.task-badge-row .source-state {
+  margin-top: 0;
+}
+
+/* MVP区分バッジ。色だけに依存せず文字（「MVP区分: …」）も表示する。
+   クラスは固定3種のみで、Firestore の生値を連結しない。 */
 .mvp-scope-badge {
   display: inline-flex;
   align-items: center;
