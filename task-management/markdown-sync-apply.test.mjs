@@ -1,4 +1,4 @@
-// ブラウザ版 Markdown 反映（markdown-sync-apply.js）の純粋関数テスト（node:test）。
+// ブラウザ版 Markdown 反映の純粋関数（markdown-sync-apply-core.js）テスト（node:test）。
 //
 // 範囲（Codex 指摘: mvpScope が更新 mask / 作成 payload に入っていなかった問題の回帰防止）:
 // - buildCreateData: 新規作成 payload に taskCode / mvpScope が入り、値を推測・正規化しないこと。
@@ -7,17 +7,20 @@
 // - COMPARE_FIELDS が Node 側 sync-markdown-to-firestore.mjs と mvpScope / taskCode を含めて一致すること。
 //
 // 実行: node --test task-management/markdown-sync-apply.test.mjs
-// 注: markdown-sync-apply.js は firebase-config.js（公開設定値のみ）を import するが、
-//     import 時に fetch などの副作用は無いためオフラインで安全にテストできる。
+// 注: 純粋関数は Firebase 非依存の core モジュールに分離済み。firebase-config.js（.gitignore 対象）へ
+//     依存しないため、クリーン checkout の CI でも import に失敗せずオフラインで安全にテストできる。
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
+// 純粋関数は Firebase 非依存の core モジュールから import する（P1修正）。
+// markdown-sync-apply.js を直接 import すると firebase-config.js（.gitignore 対象）へ依存し、
+// クリーン checkout の CI で ERR_MODULE_NOT_FOUND になるため、core だけを参照する。
 import {
   buildCreateData,
   buildUpdateFromDiffs,
   COMPARE_FIELDS,
-} from "./markdown-sync-apply.js";
+} from "./markdown-sync-apply-core.js";
 import { COMPARE_FIELDS as NODE_COMPARE_FIELDS } from "./sync-markdown-to-firestore.mjs";
 
 // diff からの更新結果を取り出すヘルパ。
