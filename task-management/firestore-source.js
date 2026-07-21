@@ -36,6 +36,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 import { firebaseConfig } from "./firebase-config.js";
+import { normalizeMvpScope } from "./mvp-scope.mjs";
 // AI分割タスク取込: 親候補判定（§3.10）。カード描画時に同期利用できるよう、変換時に判定して
 // 各タスクへ aiSubtaskEligible を持たせる（判定の正本は本モジュールに一本化する）。
 import { isEligibleAiSubtaskParent } from "./ai-subtask-import-parent.mjs";
@@ -215,6 +216,9 @@ function firestoreDocToTaskModel(doc, { line }) {
     firestoreId: doc.id,
     // 人間向けの識別コード（例: TASK-023 / TASK-023-R）。未設定・型不正は空文字（表示・検索で安全に扱う）。
     taskCode: typeof doc.taskCode === "string" ? doc.taskCode : "",
+    // MVP区分。非文字列・未設定・空・未知値は画面モデル上 Undecided に正規化する
+    // （不正な Firestore 生値を DOM/クラスへそのまま渡さない）。
+    mvpScope: normalizeMvpScope(doc.mvpScope),
     text: String(doc.title ?? ""),
     completed: doc.completed === true,
     // 論理削除フラグ。一覧は archived=false のみ取得するため通常 false だが、単一取得では
@@ -931,6 +935,8 @@ export async function addTaskForPoc(input) {
   const subcategoryRaw = String(input?.subcategory ?? "").trim();
   const subcategory = subcategoryRaw ? subcategoryRaw : null;
   const owner = String(input?.owner ?? "").trim();
+  // MVP区分。未選択・空・不正値は安全側で Undecided（Priority 等から推測しない・Required へ自動変換しない）。
+  const mvpScope = normalizeMvpScope(input?.mvpScope);
 
   const db = getFirestore(getApp());
   const isDone = status === "Done";
@@ -941,6 +947,7 @@ export async function addTaskForPoc(input) {
     category,
     subcategory,
     priority,
+    mvpScope,
     status,
     owner,
     completed: isDone,

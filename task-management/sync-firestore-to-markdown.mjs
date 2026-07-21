@@ -25,10 +25,11 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 import { parseMarkdownTasks } from "./markdown-task-parser.mjs";
+import { normalizeMvpScope, isExplicitMvpScope } from "./mvp-scope.mjs";
 
 // 既定の対象 Markdown（リポジトリルート基準）。
 const DEFAULT_INPUT = "docs/00_project/developタスクチェックリスト.md";
@@ -56,10 +57,16 @@ const EXCLUDED_SECTION_KEYWORDS = [
   "作業テンプレート",
 ];
 
-main().catch((error) => {
-  console.error(`[firestore-sync] 想定外のエラー: ${error.message}`);
-  process.exitCode = 1;
-});
+// CLI として直接実行されたときだけ main() を走らせる（テスト等で computeSync を import しても
+// 副作用〔Firestore 接続・ファイル書き込み〕を起こさないため。post-merge-firestore-status.mjs と同方針）。
+const isDirectRun =
+  Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(`[firestore-sync] 想定外のエラー: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -405,6 +412,10 @@ function reflectTaskIntoBlock(block, data, lines) {
   reflectSingleLineAttr(block, "branch", data.branchName, { format: formatBranchValue }, "Branch", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "issuePr", data.issuePr, null, "Issue/PR", lines, lineEdits, fields, warnings);
   reflectSingleLineAttr(block, "priority", data.priority, null, "Priority", lines, lineEdits, fields, warnings);
+  // MVP区分（mvpScope）は completionRule と同様「更新と挿入の両方」を扱う。
+  // 既存行あり→更新（不正・未知値は既存値を保護して warning）／既存行なし×有効値→
+  // Priority の後・Status の前へ挿入。未設定（欠損/null/空）は no-op（既存タスクを壊さない）。
+  reflectMvpScope(block, data, lines, lineEdits, splices, fields, warnings);
   // completionRule は例外的に reflectCompletionRule で「更新と挿入の両方」を扱う。
   // Markdown 側に Completion rule 行が無くても、Firestore 側に有効値があれば
   // 安全な位置（Issue/PR の後・Done when/Review points/Notes の前）へ挿入する。
@@ -536,6 +547,113 @@ function completionRuleInsertIndex(block) {
     .filter((n) => typeof n === "number");
   if (labelLines.length > 0) {
     return Math.min(...labelLines);
+  }
+  const attrLines = Object.values(block.attrs).map((a) => a.line);
+  if (attrLines.length > 0) {
+    return Math.max(...attrLines) + 1;
+  }
+  return block.checkboxLine + 1;
+}
+
+/**
+ * MVP区分（mvpScope）を反映する。completionRule と同様、既存行が無く有効値があれば
+ * 安全な位置（Priority の後・Status の前）へ「- MVP scope: …」行を挿入する。
+ * - 既存行あり × 有効値: 値を更新する。
+ * - 既存行あり × 不正・未知値: 既存の正常な Markdown 値を上書きせず warning（safeAutoMerge=false）。
+ * - 既存行あり/なし × 未設定（欠損/null/空）: no-op（属性欠落の旧タスクを壊さない・warning なし）。
+ * - 既存行なし × 有効値: 属性行を挿入する。
+ * - 既存行なし × 不正・未知値: 挿入せず warning。
+ */
+function reflectMvpScope(block, data, lines, lineEdits, splices, fields, warnings) {
+  const check = validateMvpScopeValue(data.mvpScope);
+  const attr = block.attrs.mvpScope;
+
+  if (attr) {
+    if (check.state === "valid") {
+      const currentValue = attr.rawValue.trim();
+      if (currentValue === check.value) {
+        return; // 変化なし。
+      }
+      const original = lines[attr.line];
+      // ラベル部分（"  - MVP scope: "）を保持して値部分だけ置き換える。
+      const replaced = original.replace(/^(\s*-\s+[^:]+:\s*).*$/, (_m, prefix) => `${prefix}${check.value}`);
+      lineEdits.push({ index: attr.line, text: replaced });
+      fields.push({ field: "mvpScope", before: currentValue, after: check.value });
+      return;
+    }
+    if (check.state === "invalid") {
+      // 不正・未知値は既存の正常値を保護し、safeAutoMerge を false にする。
+      warnings.push({
+        type: "unsafe-mvpScope",
+        id: block.id,
+        title: block.title,
+        message: `Firestore の mvpScope が不正（${check.reason}）のため、既存 Markdown の「MVP scope」を保護し変更しません。`,
+      });
+    }
+    // missing（欠損/null/空）→ no-op。
+    return;
+  }
+
+  // 既存行なし。
+  if (check.state === "valid") {
+    const insertAt = mvpScopeInsertIndex(block);
+    const indentWs = attrIndent(block, lines);
+    // order=-2: 同一 start に他属性の新規挿入が重なっても MVP scope が上（Status 側）へ来るようにする。
+    splices.push({
+      start: insertAt,
+      deleteCount: 0,
+      newLines: [`${indentWs}- MVP scope: ${check.value}`],
+      order: -2,
+    });
+    fields.push({ field: "mvpScope", before: null, after: check.value });
+    return;
+  }
+  if (check.state === "invalid") {
+    warnings.push({
+      type: "unsafe-mvpScope",
+      id: block.id,
+      title: block.title,
+      message: `Firestore の mvpScope が不正（${check.reason}）のため、MVP scope 行を挿入しません。`,
+    });
+  }
+  // missing → no-op。
+}
+
+/**
+ * Firestore の mvpScope 値を「反映してよいか」で3分類する。
+ * - missing: 欠損 / null / 空文字 / 空白のみ → 既存 Markdown へ触れない（no-op）。
+ * - valid: 明示された正常値（英大小・日本語別名含む） → 正式値へ正規化して反映する。
+ * - invalid: 非文字列 / 未知値 / 不正値 → 既存値を保護し warning（自動反映の安全判定へ影響）。
+ * @returns {{state:"missing"}|{state:"valid", value:string}|{state:"invalid", reason:string}}
+ */
+function validateMvpScopeValue(rawValue) {
+  if (rawValue === undefined || rawValue === null) {
+    return { state: "missing" };
+  }
+  if (typeof rawValue !== "string") {
+    return { state: "invalid", reason: "not-string" };
+  }
+  const trimmed = rawValue.trim();
+  if (trimmed === "") {
+    return { state: "missing" };
+  }
+  if (isExplicitMvpScope(trimmed)) {
+    return { state: "valid", value: normalizeMvpScope(trimmed) };
+  }
+  return { state: "invalid", reason: "unknown-value" };
+}
+
+/**
+ * MVP scope 行の挿入位置（元の lines のインデックス）を決める。
+ * 推奨位置に合わせ、Priority 行の直後 → Status 行の直前 → 最後の単一行属性の直後
+ * → チェックボックス行の直後、の優先で決める。
+ */
+function mvpScopeInsertIndex(block) {
+  if (block.attrs.priority) {
+    return block.attrs.priority.line + 1;
+  }
+  if (block.attrs.status) {
+    return block.attrs.status.line;
   }
   const attrLines = Object.values(block.attrs).map((a) => a.line);
   if (attrLines.length > 0) {
@@ -920,7 +1038,7 @@ function scanMarkdownBlocks(lines) {
  */
 function parseTaskAttribute(text) {
   const match = text.match(
-    /^(Priority|Status|Owner|Branch|Issue\/PR|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足):\s*(.*)$/i,
+    /^(Priority|Status|Owner|Branch|Issue\/PR|MVP scope|Completion rule|Done when|Review points|Notes|担当|ブランチ|完了判定|完了条件|レビュー観点|補足|MVP区分):\s*(.*)$/i,
   );
   if (!match) {
     return null;
@@ -931,10 +1049,12 @@ function parseTaskAttribute(text) {
     owner: "owner",
     branch: "branch",
     "issue/pr": "issuePr",
+    "mvp scope": "mvpScope",
     "completion rule": "completionRule",
     "done when": "doneWhen",
     "review points": "reviewPoints",
     notes: "notes",
+    MVP区分: "mvpScope",
     担当: "owner",
     ブランチ: "branch",
     完了判定: "completionRule",

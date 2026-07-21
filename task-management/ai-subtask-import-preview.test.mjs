@@ -334,6 +334,8 @@ test("継承値: 最新親タスクの4項目からプレビュー state を作�
     subcategory: "AI分割タスク取込",
     priority: "P1",
     owner: "近松",
+    // MVP区分は継承値として保持する（親未設定は Undecided）。編集対象4項目には含めない。
+    mvpScope: "Undecided",
   });
   assert.deepEqual([...INHERITED_FIELDS], ["category", "subcategory", "priority", "owner"]);
 });
@@ -349,6 +351,8 @@ test("継承値: category / subcategory / priority / owner を編集できる", 
     subcategory: "新サブ",
     priority: "P2",
     owner: "藤井",
+    // mvpScope は編集4項目外なので初期継承値（Undecided）のまま。
+    mvpScope: "Undecided",
   });
 });
 
@@ -402,6 +406,8 @@ test("登録用スナップショット: 編集後の4項目・included のみ�
     subcategory: "AI分割タスク取込",
     priority: "P1",
     owner: "近松",
+    // 登録スナップショットにも継承 mvpScope を含める（子タスクの初期値になる）。
+    mvpScope: "Undecided",
   });
   assert.deepEqual(snap.tasks.map((t) => t.title), ["a", "c"], "included のみ・表示順");
   for (const t of snap.tasks) {
@@ -452,5 +458,19 @@ test("buildInheritedValuesFromParent: 親未設定でも例外にせず空値", 
     subcategory: "",
     priority: "",
     owner: "",
+    // MVP区分は親未設定でも安全側の Undecided（他4項目のような空文字にはしない）。
+    mvpScope: "Undecided",
   });
+});
+
+test("継承値: 親の mvpScope を子タスク継承値へ引き継ぐ（正式値・別名・不正値）", () => {
+  // 親 Required → 継承 Required。
+  assert.equal(buildInheritedValuesFromParent(parentModel({ mvpScope: "Required" })).mvpScope, "Required");
+  // 親 Additional（別名・日本語）→ 継承 Additional。
+  assert.equal(buildInheritedValuesFromParent(parentModel({ mvpScope: "追加機能" })).mvpScope, "Additional");
+  // 親 Undecided → 継承 Undecided。
+  assert.equal(buildInheritedValuesFromParent(parentModel({ mvpScope: "Undecided" })).mvpScope, "Undecided");
+  // 親 不正値・非文字列 → 安全側で Undecided。
+  assert.equal(buildInheritedValuesFromParent(parentModel({ mvpScope: "Support" })).mvpScope, "Undecided");
+  assert.equal(buildInheritedValuesFromParent(parentModel({ mvpScope: 123 })).mvpScope, "Undecided");
 });

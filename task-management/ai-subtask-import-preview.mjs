@@ -13,8 +13,10 @@
 // AI JSON 部分の検証は validateAiSubtaskImport を再利用する（継承4項目は別ルールで検証・§8.2）。
 
 import { validateAiSubtaskImport } from "./ai-subtask-import-validator.mjs";
+import { normalizeMvpScope } from "./mvp-scope.mjs";
 
-// 全子タスクへ継承される4項目（親タスク由来・AI JSON スキーマには含めない）。
+// 全子タスクへ継承される編集可能な4項目（親タスク由来・AI JSON スキーマには含めない）。
+// mvpScope は「継承のみ（プレビュー編集は後続対応）」のため、この編集許可集合には含めない。
 export const INHERITED_FIELDS = Object.freeze(["category", "subcategory", "priority", "owner"]);
 const INHERITED_FIELD_SET = new Set(INHERITED_FIELDS);
 
@@ -87,6 +89,8 @@ export function buildInheritedValuesFromParent(parentTask) {
     subcategory: String(p.subsectionTitle ?? p.subcategory ?? ""),
     priority: String(p.priority ?? ""),
     owner: String(p.owner ?? ""),
+    // MVP区分は子タスクへ継承する（親 未設定・不正値は Undecided へ寄せる）。編集は今回対象外。
+    mvpScope: normalizeMvpScope(p.mvpScope),
   };
 }
 
@@ -251,6 +255,8 @@ export function toAiSubtaskRegistrationSnapshot(state) {
       subcategory: String(iv.subcategory ?? ""),
       priority: String(iv.priority ?? ""),
       owner: String(iv.owner ?? ""),
+      // MVP区分は継承値として保持（子タスクの初期値）。不正・未設定は Undecided。
+      mvpScope: normalizeMvpScope(iv.mvpScope),
     },
     tasks: base.tasks,
   };

@@ -15,6 +15,7 @@
 
 import { validateAiSubtaskImport } from "./ai-subtask-import-validator.mjs";
 import { validateAiSubtaskInheritedValues } from "./ai-subtask-import-preview.mjs";
+import { normalizeMvpScope } from "./mvp-scope.mjs";
 
 // 親タスクが登録可能な status（Todo / Doing / Blocked のみ）。Review / Done は不可。
 export const AI_SUBTASK_REGISTRATION_PARENT_STATUSES = Object.freeze(["Todo", "Doing", "Blocked"]);
@@ -112,6 +113,8 @@ export function buildAiSubtaskChildPayloads({ snapshot, parentTaskId, importBatc
   const subcategory = subcategoryRaw.trim() !== "" ? subcategoryRaw : null; // 空は未設定(null)扱い（既存追加と同方針）
   const priority = String(iv.priority ?? "");
   const owner = String(iv.owner ?? "");
+  // MVP区分は親から継承する（親 未設定・不正値は Undecided）。プレビューでの個別変更は今回対象外。
+  const mvpScope = normalizeMvpScope(iv.mvpScope);
   const base = Number.isFinite(baseOrder) ? baseOrder : 0;
 
   return tasks.map((task, index) => {
@@ -129,6 +132,8 @@ export function buildAiSubtaskChildPayloads({ snapshot, parentTaskId, importBatc
     payload.subcategory = subcategory;
     payload.priority = priority;
     payload.owner = owner;
+    // MVP区分（親から継承・正式値）。
+    payload.mvpScope = mvpScope;
     // システム固定値（§3.3 / §5.1）。
     payload.parentTaskId = parentTaskId;
     payload.status = "Todo";
