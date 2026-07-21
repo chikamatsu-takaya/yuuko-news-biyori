@@ -280,7 +280,7 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [x] NewsService + `refresh_news`（PR #27 / `f9828c3`）
   - MVP scope: Required
 - [x] 起動時・日付変更時の低頻度ニュース取得スケジューラ（PR #28 / `5a53d6a`）
-  - MVP scope: Required
+  - MVP scope: Undecided
 - [x] FeedClientのRSS2.0/Atom両対応（PR #29 / `b2bb03b`, `484c4bb`）
   - MVP scope: Required
 - [x] Publickey Atomフィードのローカル疎通確認（取得15件 / 保存15件 / errors 0）
