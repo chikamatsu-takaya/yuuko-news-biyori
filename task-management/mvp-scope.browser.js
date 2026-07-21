@@ -66,12 +66,57 @@
     return Object.prototype.hasOwnProperty.call(ALIASES, trimmed.toLowerCase());
   }
 
+  // --- MVP区分による絞り込み（mvp-scope.mjs と同一規則。変更時は両方を更新すること）。---
+  var MVP_SCOPE_FILTER_ALL = "all";
+  var MVP_SCOPE_FILTER_VALUES = [MVP_SCOPE_FILTER_ALL].concat(MVP_SCOPE_VALUES);
+
+  // 絞り込み選択値を安全な正規値へ解決する（"all" と正式値のみ受理・それ以外は "all"）。
+  function resolveMvpScopeFilter(value) {
+    if (typeof value !== "string") {
+      return MVP_SCOPE_FILTER_ALL;
+    }
+    var trimmed = value.trim();
+    if (trimmed === MVP_SCOPE_FILTER_ALL) {
+      return MVP_SCOPE_FILTER_ALL;
+    }
+    return MVP_SCOPE_VALUES.indexOf(trimmed) >= 0 ? trimmed : MVP_SCOPE_FILTER_ALL;
+  }
+
+  // 1タスクが選択中のMVP区分フィルタに一致するか（"all" は常に true）。
+  function matchesMvpScope(task, selectedScope) {
+    var scope = resolveMvpScopeFilter(selectedScope);
+    if (scope === MVP_SCOPE_FILTER_ALL) {
+      return true;
+    }
+    var value = task == null ? undefined : task.mvpScope;
+    return normalizeMvpScope(value) === scope;
+  }
+
+  // タスク配列を選択中のMVP区分で絞り込む（新しい配列を返す・入力とタスクを破壊しない）。
+  function filterTasksByMvpScope(tasks, selectedScope) {
+    if (!Array.isArray(tasks)) {
+      return [];
+    }
+    var scope = resolveMvpScopeFilter(selectedScope);
+    if (scope === MVP_SCOPE_FILTER_ALL) {
+      return tasks.slice();
+    }
+    return tasks.filter(function (task) {
+      return matchesMvpScope(task, scope);
+    });
+  }
+
   global.MvpScope = {
     MVP_SCOPE_VALUES: MVP_SCOPE_VALUES,
     DEFAULT_MVP_SCOPE: DEFAULT_MVP_SCOPE,
+    MVP_SCOPE_FILTER_ALL: MVP_SCOPE_FILTER_ALL,
+    MVP_SCOPE_FILTER_VALUES: MVP_SCOPE_FILTER_VALUES,
     normalizeMvpScope: normalizeMvpScope,
     getMvpScopeDisplayName: getMvpScopeDisplayName,
     getMvpScopeBadgeClass: getMvpScopeBadgeClass,
     isExplicitMvpScope: isExplicitMvpScope,
+    resolveMvpScopeFilter: resolveMvpScopeFilter,
+    matchesMvpScope: matchesMvpScope,
+    filterTasksByMvpScope: filterTasksByMvpScope,
   };
 })(typeof window !== "undefined" ? window : this);

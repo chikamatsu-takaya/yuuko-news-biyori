@@ -21,6 +21,9 @@ const state = {
   showCompleted: false,
   // taskCode 等のクライアント側検索文字列（DB再取得はしない・取得済みデータを絞り込む）。
   searchQuery: "",
+  // MVP区分の表示絞り込み（"all"/"Required"/"Additional"/"Undecided"）。表示専用で元データは変えない。
+  // 再描画では保持し（ページ再読み込みのみ "all" へ戻る）、DB書き込みは一切発生させない。
+  mvpScopeFilter: "all",
   // ?source=firestore で読み込んだときだけ true。status 更新UIの表示可否に使う。
   isFirestore: false,
 };
@@ -89,6 +92,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // taskCode 等の検索欄を動的生成し、操作群（すべて開く/閉じる・完了済み表示）の先頭に置く。
   // 検索は取得済みデータをクライアント側で絞り込むだけ（DBへは問い合わせない）。
   setupSearchInput();
+  // MVP区分の絞り込み（セグメントボタン）を動的生成する。表示専用でDB書き込みはしない。
+  setupMvpScopeFilter();
   // status 更新ボタン・担当/メモ編集ボタンはタスクツリー内に動的描画されるため、イベント委譲で受ける。
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
@@ -398,6 +403,67 @@ function setupSearchInput() {
   // 操作群の先頭（すべて開く/閉じる・完了済み表示の前）に置く。
   actions.insertBefore(wrap, actions.firstChild);
   elements.searchInput = input;
+}
+
+// MVP区分の絞り込みセグメントボタンを動的生成する（index.html は変更しない）。
+// 表示専用: 選択で state.mvpScopeFilter を更新し renderTaskTree() で再描画するだけ。
+// 元のタスク配列・Firestore は一切変更しない。選択中は固定クラス .is-active と aria-pressed で示す。
+function setupMvpScopeFilter() {
+  const actions = document.querySelector("#taskListSection .task-actions");
+  if (!actions || actions.querySelector(".mvp-scope-filter")) {
+    return;
+  }
+  // ラベル→内部値。内部値は MvpScope 側の正規値（"all" + 正式値）に対応。
+  const options = [
+    { value: "all", label: "すべて" },
+    { value: "Required", label: "MVP必須" },
+    { value: "Additional", label: "追加機能" },
+    { value: "Undecided", label: "要判断" },
+  ];
+
+  const group = document.createElement("div");
+  group.className = "mvp-scope-filter";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "MVP区分で絞り込み");
+
+  const labelText = document.createElement("span");
+  labelText.className = "mvp-scope-filter-label";
+  labelText.textContent = "MVP区分";
+  group.appendChild(labelText);
+
+  for (const option of options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mvp-scope-filter-button";
+    // 内部値は data 属性で保持（CSSクラスへ外部値を連結しない）。
+    button.dataset.scope = option.value;
+    button.textContent = option.label;
+    const isActive = option.value === state.mvpScopeFilter;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    button.addEventListener("click", () => {
+      selectMvpScopeFilter(option.value);
+    });
+    group.appendChild(button);
+  }
+
+  // 検索欄の後・操作群の先頭寄りに置く（操作ボタンと重ならないよう flex-wrap で折り返す）。
+  actions.insertBefore(group, actions.firstChild);
+  elements.mvpScopeFilter = group;
+}
+
+// 絞り込み選択を反映する。選択値は MvpScope.resolveMvpScopeFilter で安全側へ解決してから保持する。
+function selectMvpScopeFilter(rawScope) {
+  const scope = window.MvpScope.resolveMvpScopeFilter(rawScope);
+  state.mvpScopeFilter = scope;
+  if (elements.mvpScopeFilter) {
+    elements.mvpScopeFilter.querySelectorAll(".mvp-scope-filter-button").forEach((button) => {
+      const isActive = button.dataset.scope === scope;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+  renderTaskTree();
 }
 
 // index.html を変更せずにタスク追加フォームを差し込む（段階3の最小書き込みPOC）。
@@ -2966,8 +3032,21 @@ function renderTaskTree() {
   elements.taskTree.classList.toggle("hide-completed", !state.showCompleted);
   const sections = state.data.sections.filter(shouldRenderSection);
   elements.taskTree.innerHTML =
-    sections.map(renderSectionDetails).join("") ||
-    `<p class="empty-state">表示対象の未完了タスクはありません。</p>`;
+    sections.map(renderSectionDetails).join("") || renderEmptyTaskTreeMessage();
+}
+
+// タスクツリーが0件のときの案内。MVP区分で絞り込んで0件の場合は、
+// 「データ取得失敗」や「タスク自体が0件」とは区別した専用メッセージを出す。
+// state.data がある前提（データ取得失敗は loadState 側で別表示）で呼ばれる。
+function renderEmptyTaskTreeMessage() {
+  const scope = window.MvpScope.resolveMvpScopeFilter(state.mvpScopeFilter);
+  if (scope !== "all") {
+    const name = window.MvpScope.getMvpScopeDisplayName(scope);
+    return `<p class="empty-state">選択したMVP区分（${escapeHtml(
+      name,
+    )}）に該当するタスクはありません。</p>`;
+  }
+  return `<p class="empty-state">表示対象の未完了タスクはありません。</p>`;
 }
 
 function setAllTaskDetailsOpen(open) {
@@ -3052,8 +3131,13 @@ function shouldRenderSubsection(subsection) {
 }
 
 function shouldRenderTaskCard(task) {
-  // 完了済み表示チェックと検索条件を AND で組み合わせる。
-  return (state.showCompleted || !task.completed) && taskMatchesSearch(task);
+  // 完了済み表示チェック・検索条件・MVP区分絞り込みを AND で組み合わせる。
+  // MVP区分の正規化・一致判定は MvpScope 側の共通処理を使う（正規化ロジックを複製しない）。
+  return (
+    (state.showCompleted || !task.completed) &&
+    taskMatchesSearch(task) &&
+    window.MvpScope.matchesMvpScope(task, state.mvpScopeFilter)
+  );
 }
 
 // 取得済みタスクをクライアント側で絞り込む（DBへは問い合わせない）。
@@ -3083,8 +3167,10 @@ function renderTaskCard(task) {
         <p class="task-title">${renderTaskCodeBadge(task)}${renderInline(task.text)}</p>
         <span class="badge ${statusClass}">${escapeHtml(task.completed ? "Done" : task.status)}</span>
       </div>
-      ${renderMvpScopeBadge(task)}
-      ${renderSourceBadge(task)}
+      <div class="task-badge-row">
+        ${renderMvpScopeBadge(task)}
+        ${renderSourceBadge(task)}
+      </div>
       ${renderAiSubtaskRelation(task)}
       <ul class="task-meta">
         <li><strong>Priority:</strong> ${renderInline(task.priority || "未定")}</li>
@@ -3137,9 +3223,10 @@ function renderMvpScopeBadge(task) {
   const badgeClass = window.MvpScope.getMvpScopeBadgeClass(task.mvpScope);
   const display = window.MvpScope.getMvpScopeDisplayName(task.mvpScope);
   const label = `MVP区分: ${display}`;
-  return `<div class="mvp-scope-line"><span class="mvp-scope-badge ${badgeClass}" title="${escapeHtml(
+  // カード上部の情報行（.task-badge-row）に並べる。バッジクラスは固定3種のみ・生値は連結しない。
+  return `<span class="mvp-scope-badge ${badgeClass}" title="${escapeHtml(
     label,
-  )}" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</span></div>`;
+  )}" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
 }
 
 // Branch 表示の <li>。有効な branchName のときだけ、値の横にコピーボタンを出す。
