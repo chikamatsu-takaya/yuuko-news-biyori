@@ -5,10 +5,13 @@
 //! - キー未設定／他プロバイダ／Gemini呼び出し失敗時は MockProvider へフォールバックする（安全側）。
 //! - 送信内容は要約・再説明に必要な最小限（指示＋入力本文のみ）に絞る。
 
+use crate::domain::ai_connection::{
+    AiProviderConnectionErrorKind, AiProviderConnectionStatus, AiProviderConnectionTestResult,
+};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{AiRequest, AiResponse};
 use crate::error::AppError;
-use crate::infra::gemini_client::GeminiClient;
+use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
 use crate::paths::AppPaths;
 
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
@@ -72,6 +75,42 @@ impl AiProviderService {
         })
     }
 
+    /// AIプロバイダ接続テストの最小処理（接続確認専用）。通常の要約・用語解説処理には影響しない。
+    ///
+    /// - 引数は「確認対象Provider」のみ（任意URL・任意プロンプト・任意本文・任意APIキー・任意モデルは受け取らない）。
+    /// - Mock: 外部通信なしで常に Available（決定的）。
+    /// - Gemini: APIキー未設定→ApiKeyMissing。設定時は固定・無害な最小リクエストで到達確認する。
+    ///   **通常処理の自動Mockフォールバックはしない**（「Gemini接続成功」に見えないようにする）。
+    ///   Mockが使えることは `mock_available` で別途表す。
+    /// - OpenAI / Local: 未実装（NotImplemented / ProviderNotImplemented）。外部通信も仮実装も行わない。
+    pub fn test_connection(&self, provider: AiProvider) -> AiProviderConnectionTestResult {
+        match provider {
+            AiProvider::Mock => {
+                log::info!("test_ai_provider: mock provider is available");
+                mock_connection_result()
+            }
+            AiProvider::Gemini => {
+                let Some(api_key) = resolve_gemini_api_key() else {
+                    // キーはログに出さない。未設定の事実のみ記録し、panic せず固定エラーで返す。
+                    log::info!("test_ai_provider: GEMINI_API_KEY is not set");
+                    return gemini_api_key_missing_result();
+                };
+                log::info!("test_ai_provider: checking Gemini connectivity");
+                let result = gemini_outcome_result(self.gemini_client.check_connection(&api_key));
+                // 成否と固定エラー種別のみログへ（APIキー・本文・生エラー文は出さない）。
+                match result.error_kind {
+                    None => log::info!("test_ai_provider: gemini is available"),
+                    Some(kind) => log::warn!("test_ai_provider: gemini unavailable ({kind:?})"),
+                }
+                result
+            }
+            AiProvider::Openai | AiProvider::Local => {
+                log::info!("test_ai_provider: provider is not implemented");
+                not_implemented_result(provider)
+            }
+        }
+    }
+
     fn mock_response(
         &self,
         request: AiRequest,
@@ -109,6 +148,84 @@ fn resolve_gemini_api_key() -> Option<String> {
         .ok()
         .map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty())
+}
+
+// --- 接続テスト結果DTOの組み立て（純粋関数・テスト対象。外部通信・秘密情報を持たない）。---
+
+/// MockProviderは外部通信なしで常に利用可能。
+fn mock_connection_result() -> AiProviderConnectionTestResult {
+    AiProviderConnectionTestResult {
+        provider: Some(AiProvider::Mock),
+        checked_provider: Some(AiProvider::Mock),
+        status: AiProviderConnectionStatus::Available,
+        error_kind: None,
+        mock_available: true,
+    }
+}
+
+/// 未実装Provider（OpenAI / Local）。外部通信せず、アプリを止めない固定結果。
+fn not_implemented_result(provider: AiProvider) -> AiProviderConnectionTestResult {
+    AiProviderConnectionTestResult {
+        provider: Some(provider),
+        checked_provider: Some(provider),
+        status: AiProviderConnectionStatus::NotImplemented,
+        error_kind: Some(AiProviderConnectionErrorKind::ProviderNotImplemented),
+        mock_available: true,
+    }
+}
+
+/// Gemini結果の共通組み立て。checked_provider は Gemini（自動Mockフォールバックしないため）。
+/// mock_available は常に true とし、Gemini接続結果と Mock 利用可否を区別できるようにする。
+fn gemini_result(
+    status: AiProviderConnectionStatus,
+    error_kind: Option<AiProviderConnectionErrorKind>,
+) -> AiProviderConnectionTestResult {
+    AiProviderConnectionTestResult {
+        provider: Some(AiProvider::Gemini),
+        checked_provider: Some(AiProvider::Gemini),
+        status,
+        error_kind,
+        mock_available: true,
+    }
+}
+
+/// Gemini APIキー未設定の固定結果。
+fn gemini_api_key_missing_result() -> AiProviderConnectionTestResult {
+    gemini_result(
+        AiProviderConnectionStatus::Unavailable,
+        Some(AiProviderConnectionErrorKind::ApiKeyMissing),
+    )
+}
+
+/// Geminiの接続確認 Outcome を結果DTOへ変換する（固定分類のみ・生本文は含まない）。
+fn gemini_outcome_result(outcome: GeminiConnectionOutcome) -> AiProviderConnectionTestResult {
+    match outcome {
+        GeminiConnectionOutcome::Ok => gemini_result(AiProviderConnectionStatus::Available, None),
+        GeminiConnectionOutcome::Unauthorized => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::Unauthorized),
+        ),
+        GeminiConnectionOutcome::RateLimited => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::RateLimited),
+        ),
+        GeminiConnectionOutcome::Timeout => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::Timeout),
+        ),
+        GeminiConnectionOutcome::Network => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::Network),
+        ),
+        GeminiConnectionOutcome::InvalidResponse => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::InvalidResponse),
+        ),
+        GeminiConnectionOutcome::Internal => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::Internal),
+        ),
+    }
 }
 
 /// 要約・再説明に必要な最小限のプロンプトを組み立てる（送信データ最小化）。
@@ -162,5 +279,110 @@ mod tests {
         };
         assert!(build_prompt(&request, ExplanationLevel::Simple).contains("やさしく簡潔に"));
         assert!(build_prompt(&request, ExplanationLevel::Detailed).contains("詳しく"));
+    }
+
+    // --- 接続テスト（test_connection / 純粋な結果組み立て）---
+
+    fn service() -> AiProviderService {
+        AiProviderService::new(&AppPaths::new(std::env::temp_dir().join("yuuko_ai_test")))
+    }
+
+    #[test]
+    fn test_connection_mock_is_available_without_network() {
+        // Mockは外部通信なしで常に Available・APIキー不要・決定的。
+        let result = service().test_connection(AiProvider::Mock);
+        assert_eq!(result.provider, Some(AiProvider::Mock));
+        assert_eq!(result.checked_provider, Some(AiProvider::Mock));
+        assert_eq!(result.status, AiProviderConnectionStatus::Available);
+        assert!(result.error_kind.is_none());
+        assert!(result.mock_available);
+    }
+
+    #[test]
+    fn test_connection_openai_and_local_are_not_implemented() {
+        for provider in [AiProvider::Openai, AiProvider::Local] {
+            let result = service().test_connection(provider);
+            assert_eq!(result.provider, Some(provider));
+            assert_eq!(result.checked_provider, Some(provider));
+            assert_eq!(result.status, AiProviderConnectionStatus::NotImplemented);
+            assert_eq!(
+                result.error_kind,
+                Some(AiProviderConnectionErrorKind::ProviderNotImplemented)
+            );
+            // 未実装でもアプリを止めず、Mockは利用可能と示す。
+            assert!(result.mock_available);
+        }
+    }
+
+    #[test]
+    fn gemini_api_key_missing_returns_fixed_error_kind() {
+        // APIキー未設定は panic せず、固定の ApiKeyMissing を返す。
+        let result = gemini_api_key_missing_result();
+        assert_eq!(result.provider, Some(AiProvider::Gemini));
+        assert_eq!(result.status, AiProviderConnectionStatus::Unavailable);
+        assert_eq!(
+            result.error_kind,
+            Some(AiProviderConnectionErrorKind::ApiKeyMissing)
+        );
+        assert!(result.mock_available);
+    }
+
+    #[test]
+    fn gemini_outcome_ok_is_available() {
+        // 通信成功相当（Outcome::Ok）は Available・エラーなし。
+        let result = gemini_outcome_result(GeminiConnectionOutcome::Ok);
+        assert_eq!(result.status, AiProviderConnectionStatus::Available);
+        assert!(result.error_kind.is_none());
+        assert_eq!(result.checked_provider, Some(AiProvider::Gemini));
+    }
+
+    #[test]
+    fn gemini_outcomes_map_to_fixed_error_kinds() {
+        // 通信失敗・認証失敗・レート制限・タイムアウト・不正応答・内部エラーを固定種別へ変換する。
+        let cases = [
+            (
+                GeminiConnectionOutcome::Network,
+                AiProviderConnectionErrorKind::Network,
+            ),
+            (
+                GeminiConnectionOutcome::Unauthorized,
+                AiProviderConnectionErrorKind::Unauthorized,
+            ),
+            (
+                GeminiConnectionOutcome::RateLimited,
+                AiProviderConnectionErrorKind::RateLimited,
+            ),
+            (
+                GeminiConnectionOutcome::Timeout,
+                AiProviderConnectionErrorKind::Timeout,
+            ),
+            (
+                GeminiConnectionOutcome::InvalidResponse,
+                AiProviderConnectionErrorKind::InvalidResponse,
+            ),
+            (
+                GeminiConnectionOutcome::Internal,
+                AiProviderConnectionErrorKind::Internal,
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let result = gemini_outcome_result(outcome);
+            assert_eq!(result.status, AiProviderConnectionStatus::Unavailable);
+            assert_eq!(result.error_kind, Some(expected));
+        }
+    }
+
+    #[test]
+    fn gemini_result_keeps_mock_available_distinct_from_gemini_status() {
+        // Gemini接続失敗でも mock_available=true。UIは「Geminiは不可だがMockは使える」を区別できる。
+        let failed = gemini_outcome_result(GeminiConnectionOutcome::Network);
+        assert_eq!(failed.status, AiProviderConnectionStatus::Unavailable);
+        assert!(failed.mock_available);
+        // Mock自体の確認とは checked_provider で区別できる。
+        assert_eq!(failed.checked_provider, Some(AiProvider::Gemini));
+        assert_eq!(
+            mock_connection_result().checked_provider,
+            Some(AiProvider::Mock)
+        );
     }
 }

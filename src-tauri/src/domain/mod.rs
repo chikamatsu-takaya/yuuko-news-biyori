@@ -1,3 +1,4 @@
+pub mod ai_connection;
 pub mod article;
 pub mod dictionary;
 pub mod friendship;

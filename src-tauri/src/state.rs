@@ -1,3 +1,4 @@
+use crate::services::ai_provider_service::AiProviderService;
 use crate::services::article_service::ArticleService;
 use crate::services::dictionary_service::DictionaryService;
 use crate::services::friendship_service::FriendshipService;
@@ -8,6 +9,7 @@ use crate::services::yuuko_service::YuukoService;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub ai_provider_service: AiProviderService,
     pub article_service: ArticleService,
     pub dictionary_service: DictionaryService,
     pub friendship_service: FriendshipService,
