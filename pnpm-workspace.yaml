@@ -19,7 +19,7 @@ auditConfig:
 # next を 16.x 内で更新しても sharp<0.35.0 の脆弱性（libvips 継承）が解消しない。
 # sharp は next の画像最適化用 optional 依存であり、本プロジェクトは next.config.mjs で
 # images.unoptimized=true のため最適化に sharp を使わない。0.34→0.35 は minor 更新で
-# next の利用箇所と互換、Node は 20.9 以上が必要（CI/ローカルとも 20.20.2）。
+# next の利用箇所と互換。sharp 0.35.3 は Node 20.9 以上が必要で、CI は Node 22、ローカル確認環境は Node 20.20.2 で要件を満たす。
 # よって patched 版 0.35.3 へ上書きして Node Audit(High) を解消する。
 overrides:
   sharp: 0.35.3
