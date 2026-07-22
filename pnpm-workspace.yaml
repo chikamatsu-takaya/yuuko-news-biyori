@@ -14,12 +14,23 @@ auditConfig:
   ignoreGhsas:
     - GHSA-r5fr-rjxr-66jc
 
+# 推移依存の上書き。
+# next@16.2.x の optionalDependencies.sharp は "^0.34.5"（<0.35.0）で固定されており、
+# next を 16.x 内で更新しても sharp<0.35.0 の脆弱性（libvips 継承）が解消しない。
+# sharp は next の画像最適化用 optional 依存であり、本プロジェクトは next.config.mjs で
+# images.unoptimized=true のため最適化に sharp を使わない。0.34→0.35 は minor 更新で
+# next の利用箇所と互換。sharp 0.35.3 は Node 20.9 以上が必要で、CI は Node 22、ローカル確認環境は Node 20.20.2 で要件を満たす。
+# よって patched 版 0.35.3 へ上書きして Node Audit(High) を解消する。
+overrides:
+  sharp: 0.35.3
+
 # ビルドスクリプト（install / postinstall）の実行を許可するパッケージ。
 # pnpm 11 は strictDepBuilds により未許可のビルドスクリプトを無視して非ゼロ終了する（ERR_PNPM_IGNORED_BUILDS）。
 # 次の2つは native バイナリを配置するために install/postinstall が必要で、pnpm 9 では自動実行されていた。
-#  - sharp@0.34.5        : "install" スクリプト（node install/check.js || npm run build）で native モジュールを用意
+#  - sharp@0.35.3        : "install" スクリプト（node install/check.js || npm run build）で native モジュールを用意
 #  - unrs-resolver@1.12.2: "postinstall" スクリプト（node postinstall.js）で native リゾルバを配置
 # バージョンを固定して許可し、更新時は再レビューされるまで未許可（＝要確認）に戻る運用にする。
+# sharp は上記 overrides で 0.35.3 へ固定したため、許可バージョンも 0.35.3 に合わせる。
 allowBuilds:
-  sharp@0.34.5: true
+  sharp@0.35.3: true
   unrs-resolver@1.12.2: true
