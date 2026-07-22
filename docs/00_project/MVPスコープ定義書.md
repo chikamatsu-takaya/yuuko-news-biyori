@@ -470,7 +470,6 @@ MVPではデモ用の簡易体験に留める。
 - ガチャ画面
 - ガチャ結果モーダル
 - 報酬獲得通知モーダル
-- ランクアップ通知モーダル（追加機能・実装済み。詳細は §15.4）
 
 ### 9.3 MVPでは作らない画面
 - Google Drive移行画面
@@ -491,9 +490,17 @@ MVPで優先的に作るReactコンポーネント候補は以下。
 - `NewsCard.tsx`
 - `NewsPreviewPopup.tsx`
 - `TermExplanationPopup.tsx`
-- `RankUpDialog.tsx`
 - `FavoriteButton.tsx`
 - `EmptyStatePanel.tsx`
+
+### 9.5 追加機能・実装済みの画面／UI・コンポーネント
+MVP必須ではない追加機能（実装済み）の画面／UI・コンポーネント。詳細は §15.4、画面詳細設計書 §12。
+
+- ランクアップ通知モーダル（MOD-003 / `RankUpDialog.tsx`）
+  - MVP scope: Additional
+  - 実装状況: 実装済み（PR #52）
+  - 関連: §15.4、画面詳細設計書 §12
+- 追加機能・実装済みコンポーネント: `RankUpDialog.tsx`、友情ランク表示、ランク進捗表示
 
 ---
 
@@ -506,8 +513,6 @@ MVPで優先的に作るReactコンポーネント候補は以下。
 - 既読状態
 - お気に入りフラグ
 - ゆうこ辞書
-- 友情ポイント
-- 友情ランク
 - 最低限の設定情報
 - ゆうこ通知状態
 
@@ -525,8 +530,20 @@ MVPで優先するRust repository候補は以下。
 - `article_repository.rs`
 - `dictionary_repository.rs`
 - `settings_repository.rs`
-- `friendship_repository.rs`
 - `notification_repository.rs`
+
+### 10.4 追加機能で保存するデータ／repository
+MVP必須ではない追加機能（実装済みを含む）で保存するデータ。ニュース理解フローとは分離する。
+
+- 友情ポイント
+- 友情ランク
+- 次ランクまでの進捗
+- ランクアップ報酬状態
+- 友情イベント履歴
+- `friendship_repository.rs`（上記の保存・取得を担うRust repository）
+
+MVP scope: Additional
+実装状況: 実装済みのものを含む（友情ポイント加算・ランク進捗・報酬確認は PR #52）。データモデル・repository自体は削除しない。
 
 ---
 
@@ -605,9 +622,7 @@ MVPでは、以下のTauri commandを優先する。
 | `delete_dictionary_entry` | 辞書削除 | 中 |
 | `get_user_settings` | 設定取得 | 中 |
 | `save_user_settings` | 設定保存 | 中 |
-| `get_friendship_state` | ランク状態取得 | 中 |
 | `get_yuuko_notification_state` | ゆうこ通知状態取得 | 高 |
-| `confirm_rank_up_reward` | ランクアップ報酬確認済み処理 | 中 |
 | `handle_yuuko_clicked` | ゆうこクリック処理 | 高 |
 | `dismiss_yuuko_notification` | ゆうこ通知を閉じる | 中 |
 
@@ -620,6 +635,17 @@ MVPでは、以下のTauri commandを優先する。
 - `execute_command`
 - `get_env_value`
 - `open_any_path`
+
+### 13.3 追加機能・実装済みのcommand
+MVP必須ではない追加機能（実装済み）のTauri command。ニュース理解フローには含めない。
+
+| command | 用途 | MVP scope |
+|---|---|---|
+| `get_friendship_state` | ランク状態取得 | Additional |
+| `record_friendship_event` | 友情イベント記録・ポイント加算 | Additional |
+| `confirm_rank_up_reward` | ランクアップ報酬確認済み処理 | Additional |
+
+実装状況: 実装済み（PR #52）。関連: §15.4。commandは削除しない。
 
 ---
 
