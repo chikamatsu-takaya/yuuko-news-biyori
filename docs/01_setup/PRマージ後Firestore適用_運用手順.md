@@ -469,6 +469,22 @@ artifact の `post-merge-status-report.json` は、最上位キーが読みや�
 - `issuePr` に PR番号を手動で記録する。
 - 複数タスクPRの場合は、対象タスクを手動で Done / Review にする。
 
+### マージ済みPRの手動再処理（workflow_dispatch）
+PR本文のプレースホルダー等で `no_change` になった場合でも、**Firebase を直接編集せず**、GitHub Actions から **PR番号だけ** を指定して同じ判定・apply を再実行できる。
+
+手順:
+1. 必要ならPR本文を正す（例: `taskCode` のプレースホルダーを削除して空欄にする。`branchName` は実際の head branch にする）。
+2. Actions → **Post-merge Firestore Status (report-only)** → **Run workflow** → 入力 `pr_number` に対象PR番号を入れて実行する。
+   - 入力は **PR番号のみ**。任意の `taskId` / `branchName` / `taskCode` / 更新先 `status` は指定できない（安全のため受け付けない）。
+3. 手動実行でも GitHub API から **最新のPR本文** を取得して判定するため、手順1で直した本文が反映される（通常のマージ後実行と同じ PR コンテキスト形式・同じ判定/apply/安全ガードを共有）。
+4. 安全条件は自動実行と同一: `merged=true` / `base=develop` / `sync/*`・bot でない / `POST_MERGE_ENABLE_APPLY=true` / Done許可チェックが `[x]` / 対象タスクが1件に特定できる / `archived=false` / `completed=false` / `status=Doing` / apply直前の再読込・紐づけ再検証・楽観ロック成功。いずれかを満たさなければ `no_change` または apply スキップになる。
+5. 既に `Review` / `Done` へ更新済みなら、既存ガードにより安全に no-op（重複更新しない）。
+6. 手動実行でも report artifact と Step Summary が出る。
+
+注意:
+- 手動再処理でも `POST_MERGE_ENABLE_APPLY` が `true` でなければ report-only（書き込みなし）。
+- Rust変更を含むPRは判定が `review_candidate`（`Doing → Review`）になるのが正常。最終 `Review → Done` は進捗管理画面のレビュー完了操作で行う（既存方針を維持）。
+
 ---
 
 ## review_candidate になった場合の対応手順

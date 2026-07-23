@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   evaluate,
   buildReport,
+  normalizePrBodyLinkValue,
   planStatusApplyFromDoing,
   computeApply,
   computeIssuePrWriteback,
@@ -81,6 +82,137 @@ function assertLabel(decision, id) {
   assert.equal(typeof entry.label, "string");
   assert.ok(entry.label.length > 0, `${id} のラベルが非空であること`);
 }
+
+// PR本文の taskCode / branchName 行 + Done許可チェックを組み立てる（プレースホルダー回帰テスト用）。
+function bodyLink({ taskCode, branchName, checked = true } = {}) {
+  const lines = [];
+  if (taskCode !== undefined) lines.push(`- taskCode: ${taskCode}`);
+  if (branchName !== undefined) lines.push(`- branchName: ${branchName}`);
+  lines.push(checked ? CONSENT_CHECKED_LINE : CONSENT_UNCHECKED_LINE);
+  return lines.join("\n");
+}
+
+// --- PR本文プレースホルダーの正規化（fix/post-merge-placeholder-replay の回帰） ---
+
+test("normalizePrBodyLinkValue: 既知の未入力プレースホルダーは空にする", () => {
+  for (const placeholder of [
+    "",
+    "  ",
+    "未作成",
+    "【FirestoreのtaskCodeを記入】",
+    "【taskCodeを記入】",
+    "【branchNameを記入】",
+    "【このPR番号を記入】",
+    "【PR番号を記入】",
+    "PR作成後に記入",
+    "PR作成後に本PR番号を記入",
+    "`【taskCodeを記入】`", // バッククォート付きでも完全一致リスト内なら未入力扱い
+  ]) {
+    assert.equal(
+      normalizePrBodyLinkValue(placeholder),
+      "",
+      `${JSON.stringify(placeholder)} は未入力扱い`,
+    );
+  }
+});
+
+test("normalizePrBodyLinkValue: 実値・意図的な値は残す（勝手に無効化しない）", () => {
+  for (const value of [
+    "TASK-1",
+    "TASK-EXAMPLE-001",
+    "feature/x",
+    "対象外",
+    "複数タスク",
+    "自動更新対象外",
+    "手動確認",
+    "実際のtaskCode",
+    "実際のbranchName",
+    // 「【…】で囲まれている」だけでは未入力扱いにしない（完全一致リストにない実値は保持）。
+    "【TASK-REAL-123】",
+    "【feature/real-branch】",
+  ]) {
+    assert.equal(normalizePrBodyLinkValue(value), value, `${value} は保持`);
+  }
+});
+
+test("プレースホルダー taskCode + head branch一致 → G2にならず branchName で特定（PR #197想定）", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "【FirestoreのtaskCodeを記入】" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedTaskId, "t1");
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.notEqual(result.decision.result, "no_change");
+  assert.ok(!result.decision.reasonIds.includes("G2"));
+});
+
+test("プレースホルダー taskCode【taskCodeを記入】 + head branch一致 → branchName で特定", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "【taskCodeを記入】" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.ok(!result.decision.reasonIds.includes("G2"));
+});
+
+test("taskCode 空欄 + head branch一致 → branchName で特定", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.notEqual(result.decision.result, "no_change");
+});
+
+test("branchName プレースホルダー + 実 head branch一致 → head branch で特定", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ branchName: "【branchNameを記入】" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.ok(!result.decision.reasonIds.includes("G2"));
+});
+
+test("実在しない taskCode（0件一致）+ head branch一致 → 従来どおり G2 / no_change", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "TASK-WRONG" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.decision.result, "no_change");
+  assert.ok(result.decision.reasonIds.includes("G2"));
+});
+
+test("括弧付き不一致 taskCode【TASK-WRONG-999】は実値のまま、0件一致で G2（head branch にフォールバックしない）", () => {
+  const pr = makePr({
+    headRef: "feature/x", // head branch は t1 に一致するが、実値 taskCode 不一致を優先する
+    body: bodyLink({ taskCode: "【TASK-WRONG-999】" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.decision.result, "no_change");
+  assert.ok(result.decision.reasonIds.includes("G2"));
+});
+
+test("taskCode='対象外' はプレースホルダー扱いせず、0件一致で G2（安全側を維持）", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "対象外" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.decision.result, "no_change");
+  assert.ok(result.decision.reasonIds.includes("G2"));
+});
 
 test("docs/Markdown のみ変更 → done_candidate / D3 / ラベルあり", () => {
   const d = decisionFor(makePr({ files: ["docs/01_setup/memo.md"] }));
