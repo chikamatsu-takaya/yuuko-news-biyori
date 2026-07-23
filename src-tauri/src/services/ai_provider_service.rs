@@ -217,6 +217,10 @@ fn gemini_outcome_result(outcome: GeminiConnectionOutcome) -> AiProviderConnecti
             AiProviderConnectionStatus::Unavailable,
             Some(AiProviderConnectionErrorKind::Network),
         ),
+        GeminiConnectionOutcome::FailedPrecondition => gemini_result(
+            AiProviderConnectionStatus::Unavailable,
+            Some(AiProviderConnectionErrorKind::FailedPrecondition),
+        ),
         GeminiConnectionOutcome::InvalidResponse => gemini_result(
             AiProviderConnectionStatus::Unavailable,
             Some(AiProviderConnectionErrorKind::InvalidResponse),
@@ -355,6 +359,10 @@ mod tests {
             (
                 GeminiConnectionOutcome::Timeout,
                 AiProviderConnectionErrorKind::Timeout,
+            ),
+            (
+                GeminiConnectionOutcome::FailedPrecondition,
+                AiProviderConnectionErrorKind::FailedPrecondition,
             ),
             (
                 GeminiConnectionOutcome::InvalidResponse,

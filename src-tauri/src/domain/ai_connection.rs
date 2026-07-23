@@ -36,11 +36,15 @@ pub enum AiProviderConnectionErrorKind {
     Unauthorized,
     /// レート制限（429）。
     RateLimited,
+    /// 利用条件の前提不足（HTTP 400 かつ Google `error.status = FAILED_PRECONDITION`）。
+    /// 例: 無料枠を利用できない地域・課金設定が必要 など。**利用者が設定を変更すれば解決できる問題**で、
+    /// アプリ内部の不具合（`Internal`）とは区別する。UIは「利用条件（課金/地域）の確認」を案内できる。
+    FailedPrecondition,
     /// 応答が不正（2xx だが期待形式でない等）。
     InvalidResponse,
     /// 未実装Provider（OpenAI / Local）。
     ProviderNotImplemented,
-    /// 内部エラー（設定読込・クライアント生成失敗など）。
+    /// 内部エラー（設定読込・クライアント生成失敗、HTTP 400 の INVALID_ARGUMENT など、アプリ側の不整合）。
     Internal,
 }
 

@@ -46,9 +46,12 @@ pub enum GeminiConnectionOutcome {
     Timeout,
     /// 接続・ネットワーク失敗、またはその他の非2xx。
     Network,
+    /// 利用条件の前提不足（HTTP 400 かつ Google `error.status = FAILED_PRECONDITION`）。
+    /// 課金設定・利用可能地域などの前提不足で、利用者が設定を変更すれば解決できる。
+    FailedPrecondition,
     /// 2xx だが応答が期待形式でない。
     InvalidResponse,
-    /// 設定読込・URL検証・クライアント生成など内部準備の失敗。
+    /// 設定読込・URL検証・クライアント生成、HTTP 400 の INVALID_ARGUMENT などの内部不整合。
     Internal,
 }
 
@@ -144,7 +147,18 @@ impl GeminiClient {
 
         let status = response.status();
         if !status.is_success() {
-            return classify_gemini_error_status(status.as_u16());
+            let http_status = status.as_u16();
+            // HTTP 400 のみ、Google 構造化エラーの固定 `error.status`（例: FAILED_PRECONDITION /
+            // INVALID_ARGUMENT）を読んで分類に使う。message・本文・生エラー文は読まない/返さない。
+            let google_status = if http_status == 400 {
+                response
+                    .json::<Value>()
+                    .ok()
+                    .and_then(|body| extract_google_error_status(&body))
+            } else {
+                None
+            };
+            return classify_gemini_error_status(http_status, google_status.as_deref());
         }
         // 2xx: 応答本文を判定にのみ使う（生本文は返さない）。生成テキストがあれば到達＋生成OK。
         match response.json::<Value>() {
@@ -154,18 +168,40 @@ impl GeminiClient {
     }
 }
 
-/// 非2xxステータスを固定分類する（純粋関数・テスト対象）。生の本文・ヘッダは扱わない。
-/// 400 / 404 は通信障害ではなく、固定リクエスト・モデル設定・API仕様の不整合の可能性が高いため
-/// `Internal` に分類する（通常処理の生成エラー分類 `generate` は変更しない）。
-fn classify_gemini_error_status(status: u16) -> GeminiConnectionOutcome {
+/// 非2xxステータスを固定分類する（純粋関数・テスト対象）。生の本文・message・ヘッダは扱わない。
+/// HTTP 400 は Google 構造化エラーの固定 `error.status`（`google_status`）で細分する:
+/// - `FAILED_PRECONDITION`（課金設定・利用可能地域など前提不足＝利用者が設定変更で解決可能）→ `FailedPrecondition`
+/// - `INVALID_ARGUMENT`（リクエスト形式・モデルID・APIバージョンの不整合＝アプリ内部の不具合）→ `Internal`
+/// - それ以外/欠落 → `Internal`（内部不整合寄り・安全側）
+///
+/// 404 は NOT_FOUND（モデル未存在等）で内部設定不整合寄りのため `Internal`。
+/// 通常処理の生成エラー分類 `generate` は変更しない。
+fn classify_gemini_error_status(
+    status: u16,
+    google_status: Option<&str>,
+) -> GeminiConnectionOutcome {
     match status {
         401 | 403 => GeminiConnectionOutcome::Unauthorized,
         408 | 504 => GeminiConnectionOutcome::Timeout,
         429 => GeminiConnectionOutcome::RateLimited,
-        400 | 404 => GeminiConnectionOutcome::Internal,
+        400 => match google_status {
+            Some("FAILED_PRECONDITION") => GeminiConnectionOutcome::FailedPrecondition,
+            // INVALID_ARGUMENT・不明・欠落は内部不整合として扱う（利用者側では直せない前提）。
+            _ => GeminiConnectionOutcome::Internal,
+        },
+        404 => GeminiConnectionOutcome::Internal,
         // 500系・その他は通信/サーバ側障害としてネットワーク扱い。
         _ => GeminiConnectionOutcome::Network,
     }
+}
+
+/// Google 構造化エラーの固定 `error.status` 文字列のみを取り出す（純粋関数・テスト対象）。
+/// `error.message` や他フィールドは読まない（秘密情報・本文の混入を避ける）。分類にのみ使い、返却/ログはしない。
+fn extract_google_error_status(body: &Value) -> Option<String> {
+    body.get("error")
+        .and_then(|error| error.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// 2xx応答の本文を固定分類する（純粋関数・テスト対象）。
@@ -278,43 +314,80 @@ mod tests {
     #[test]
     fn classify_gemini_error_status_maps_known_codes() {
         assert_eq!(
-            classify_gemini_error_status(401),
+            classify_gemini_error_status(401, None),
             GeminiConnectionOutcome::Unauthorized
         );
         assert_eq!(
-            classify_gemini_error_status(403),
+            classify_gemini_error_status(403, None),
             GeminiConnectionOutcome::Unauthorized
         );
         assert_eq!(
-            classify_gemini_error_status(408),
+            classify_gemini_error_status(408, None),
             GeminiConnectionOutcome::Timeout
         );
         assert_eq!(
-            classify_gemini_error_status(504),
+            classify_gemini_error_status(504, None),
             GeminiConnectionOutcome::Timeout
         );
         assert_eq!(
-            classify_gemini_error_status(429),
+            classify_gemini_error_status(429, None),
             GeminiConnectionOutcome::RateLimited
         );
-        // 400 / 404 は通信障害でなく設定・仕様不整合の可能性が高いため Internal。
+        // 404 は NOT_FOUND（モデル未存在等）で内部設定不整合寄りのため Internal。
         assert_eq!(
-            classify_gemini_error_status(400),
-            GeminiConnectionOutcome::Internal
-        );
-        assert_eq!(
-            classify_gemini_error_status(404),
+            classify_gemini_error_status(404, None),
             GeminiConnectionOutcome::Internal
         );
         // 500系・その他は Network（生本文・詳細は取り込まない）。
         assert_eq!(
-            classify_gemini_error_status(500),
+            classify_gemini_error_status(500, None),
             GeminiConnectionOutcome::Network
         );
         assert_eq!(
-            classify_gemini_error_status(502),
+            classify_gemini_error_status(502, None),
             GeminiConnectionOutcome::Network
         );
+    }
+
+    #[test]
+    fn classify_gemini_400_splits_by_google_error_status() {
+        // FAILED_PRECONDITION（課金/地域など前提不足・利用者が設定変更で解決可能）→ FailedPrecondition。
+        assert_eq!(
+            classify_gemini_error_status(400, Some("FAILED_PRECONDITION")),
+            GeminiConnectionOutcome::FailedPrecondition
+        );
+        // INVALID_ARGUMENT（リクエスト/モデル/APIバージョン不整合＝アプリ内部の不具合）→ Internal。
+        assert_eq!(
+            classify_gemini_error_status(400, Some("INVALID_ARGUMENT")),
+            GeminiConnectionOutcome::Internal
+        );
+        // status 不明・欠落は安全側で Internal。
+        assert_eq!(
+            classify_gemini_error_status(400, Some("SOMETHING_ELSE")),
+            GeminiConnectionOutcome::Internal
+        );
+        assert_eq!(
+            classify_gemini_error_status(400, None),
+            GeminiConnectionOutcome::Internal
+        );
+    }
+
+    #[test]
+    fn extract_google_error_status_reads_only_status_field() {
+        let body = json!({
+            "error": {
+                "code": 400,
+                "message": "秘密や本文が混じりうるメッセージ",
+                "status": "FAILED_PRECONDITION"
+            }
+        });
+        assert_eq!(
+            extract_google_error_status(&body).as_deref(),
+            Some("FAILED_PRECONDITION")
+        );
+        // error/status が無ければ None（message は読まない）。
+        assert_eq!(extract_google_error_status(&json!({"error": {}})), None);
+        assert_eq!(extract_google_error_status(&json!({})), None);
     }
 
     #[test]
