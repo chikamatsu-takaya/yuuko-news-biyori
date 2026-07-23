@@ -69,8 +69,10 @@ pub fn run() {
             let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
             let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
             friendship_service.initialize_default_if_missing()?;
+            // 接続テストと通常の要約生成で同一設定の AiProviderService を共有する。
+            let ai_provider_service = AiProviderService::new(&paths);
             let summary_service = SummaryService::new(
-                AiProviderService::new(&paths),
+                ai_provider_service.clone(),
                 article_repository,
                 SettingsRepository::new(&paths),
             );
@@ -82,6 +84,7 @@ pub fn run() {
             );
             yuuko_service.initialize_default_if_missing()?;
             app.manage(AppState {
+                ai_provider_service,
                 article_service,
                 dictionary_service,
                 friendship_service,
@@ -129,6 +132,7 @@ pub fn run() {
             commands::settings_commands::get_user_settings,
             commands::settings_commands::save_user_settings,
             commands::settings_commands::reset_user_settings,
+            commands::settings_commands::test_ai_provider,
             commands::yuuko_commands::get_yuuko_notification_state,
             commands::yuuko_commands::confirm_rank_up_reward,
             commands::yuuko_commands::dismiss_yuuko_notification,
