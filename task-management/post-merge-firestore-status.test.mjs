@@ -99,6 +99,8 @@ test("normalizePrBodyLinkValue: 既知の未入力プレースホルダーは空
     "",
     "  ",
     "未作成",
+    "未設定",
+    "後で記入",
     "【FirestoreのtaskCodeを記入】",
     "【taskCodeを記入】",
     "【branchNameを記入】",
@@ -152,6 +154,28 @@ test("プレースホルダー taskCode【taskCodeを記入】 + head branch一�
   const pr = makePr({
     headRef: "feature/x",
     body: bodyLink({ taskCode: "【taskCodeを記入】" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.ok(!result.decision.reasonIds.includes("G2"));
+});
+
+test("プレースホルダー taskCode='未設定' + head branch一致 → branchName で特定", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "未設定" }),
+    files: ["docs/a.md"],
+  });
+  const result = evaluate(pr, TASKS);
+  assert.equal(result.match.matchedBy, "branchName");
+  assert.ok(!result.decision.reasonIds.includes("G2"));
+});
+
+test("プレースホルダー taskCode='後で記入' + head branch一致 → branchName で特定", () => {
+  const pr = makePr({
+    headRef: "feature/x",
+    body: bodyLink({ taskCode: "後で記入" }),
     files: ["docs/a.md"],
   });
   const result = evaluate(pr, TASKS);

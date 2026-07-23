@@ -685,6 +685,8 @@ function parseBodyFields(body) {
 // これらは実値ではないため未入力（""）扱いにし、head branch 等の実際の照合キーにフォールバックできるようにする。
 const PR_BODY_LINK_PLACEHOLDERS = new Set([
   "未作成", // branchName 未作成（既存挙動を維持）
+  "未設定", // テンプレート/運用資料が未入力例として挙げる表現
+  "後で記入", // 同上（実値でなく記入指示のため未入力扱い）
   "【FirestoreのtaskCodeを記入】",
   "【taskCodeを記入】",
   "【branchNameを記入】",
