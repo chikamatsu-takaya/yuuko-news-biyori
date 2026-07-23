@@ -3,6 +3,13 @@
 
 ## Firestoreタスク連携
 <!-- 詳細は docs/00_project/firestore-task-pr-linking-rule.md を参照 -->
+<!-- 記入ルール（AI・人間共通）:
+     - taskCode は判明している場合だけ実値を書く。不明なら「空欄」にする。
+       「未設定」「後で記入」「【FirestoreのtaskCodeを記入】」等のプレースホルダーは書かない
+       （プレースホルダーは post-merge 側で未入力扱いになるが、混乱を避けるため出力しない）。
+     - branchName は必ず実際のPR head branch を書く（例: `feature/example`）。
+     - issuePr はPR作成前なら空欄でよい。
+     人間の通常確認は「マージ後のFirestore更新」のDone許可チェックと判定理由のみ。 -->
 - taskCode:
 - branchName:
 - issuePr:

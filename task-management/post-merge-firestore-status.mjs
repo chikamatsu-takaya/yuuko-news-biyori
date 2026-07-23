@@ -672,14 +672,45 @@ function matchByIssuePr(tasks, prNumber) {
   return tasks.filter((t) => issuePrNumbers(t.data?.issuePr).includes(prNumber));
 }
 
-/** PR 本文から taskCode / branchName を取り出す（PRテンプレの「Firestoreタスク連携」節を想定）。 */
+/** PR 本文から taskCode / branchName を取り出す（PRテンプレの「Firestoreタスク連携」節を想定）。
+ * 既知の未入力プレースホルダーは未入力（""）として扱い、記載ミス判定（G2）の誤発火を避ける。 */
 function parseBodyFields(body) {
-  const branchName = stripBackticks(extractLabeledValue(body, "branchName"));
   return {
-    taskCode: stripBackticks(extractLabeledValue(body, "taskCode")),
-    // "未作成" はプレースホルダーのため未記載扱い（記載ミス判定の誤発火を避ける）。
-    branchName: branchName === "未作成" ? "" : branchName,
+    taskCode: normalizePrBodyLinkValue(extractLabeledValue(body, "taskCode")),
+    branchName: normalizePrBodyLinkValue(extractLabeledValue(body, "branchName")),
   };
+}
+
+// AI生成PR本文などに残りがちな「未入力プレースホルダー」の完全一致リスト（前後空白・バッククォート除去後で判定）。
+// これらは実値ではないため未入力（""）扱いにし、head branch 等の実際の照合キーにフォールバックできるようにする。
+const PR_BODY_LINK_PLACEHOLDERS = new Set([
+  "未作成", // branchName 未作成（既存挙動を維持）
+  "未設定", // テンプレート/運用資料が未入力例として挙げる表現
+  "後で記入", // 同上（実値でなく記入指示のため未入力扱い）
+  "【FirestoreのtaskCodeを記入】",
+  "【taskCodeを記入】",
+  "【branchNameを記入】",
+  "【このPR番号を記入】",
+  "【PR番号を記入】",
+  "PR作成後に記入",
+  "PR作成後に本PR番号を記入",
+]);
+
+/**
+ * PR本文のリンク用ラベル値（taskCode / branchName）を正規化する（純粋関数）。
+ * 未入力扱いにするのは、空文字と PR_BODY_LINK_PLACEHOLDERS の完全一致だけに限定する。
+ * 「【…】で囲まれている」という理由だけでは未入力扱いにしない
+ * （例:【TASK-REAL-123】【feature/real-branch】は実値として保持する）。
+ * 「対象外」「複数タスク」「自動更新対象外」「手動確認」等の意図的な値も残す（勝手に無効化しない）。
+ * → 実 taskCode（記載ミス含む）が Firestore で0件一致するケースは従来どおり非空を返し G2 を維持する。
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizePrBodyLinkValue(value) {
+  const trimmed = stripBackticks(String(value ?? "").trim());
+  if (trimmed === "") return "";
+  if (PR_BODY_LINK_PLACEHOLDERS.has(trimmed)) return "";
+  return trimmed;
 }
 
 function extractLabeledValue(body, label) {
@@ -1407,6 +1438,8 @@ function strOrEmpty(value) {
 export {
   ALLOWED_STATUSES,
   evaluate,
+  parseBodyFields,
+  normalizePrBodyLinkValue,
   decide,
   detectBodyReviewSignals,
   planStatusApplyFromDoing,
