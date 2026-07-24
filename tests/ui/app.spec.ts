@@ -531,6 +531,245 @@ test("today-news list marks the sidebar ニュースを見る item as active", a
   ).not.toHaveClass(/font-medium/);
 });
 
+// 記事詳細（NewsReaderScreen）をホームのニュースカードから開く。
+const openReaderFromHome = async (page: Page) => {
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  // 記事詳細固有の「戻る」ボタンで到達を確認。
+  await expect(
+    page.getByRole("button", { name: "戻る", exact: true }).first()
+  ).toBeVisible();
+};
+
+// 指定要素の内容を範囲選択し、mouseup を発火して「解説」ボタン判定を走らせる（実ブラウザSelection）。
+const selectContentsWithin = (page: Page, selector: string) =>
+  page.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    if (!element) {
+      return false;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return true;
+  }, selector);
+
+const collapseSelection = (page: Page) =>
+  page.evaluate(() => {
+    window.getSelection()?.removeAllRanges();
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+// 「解説」ボタン（aria-label で一意）。
+const explainButton = (page: Page) =>
+  page.getByRole("button", { name: "選択した用語を解説" });
+
+test("reader: selecting summary text shows the 解説 button within the viewport", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expect(explainButton(page)).toHaveCount(0);
+
+  const selected = await selectContentsWithin(
+    page,
+    '[data-explain-selectable="summary"]'
+  );
+  expect(selected).toBe(true);
+
+  await expect(explainButton(page)).toBeVisible();
+  // 画面端で見切れない（ビューポート内）。
+  const box = await explainButton(page).boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height);
+});
+
+test("reader: selecting the re-explanation text shows the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await expect(explainButton(page)).toBeVisible();
+});
+
+test("reader: selecting outside the selectable regions does not show the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  // 記事タイトル（h1・対象外領域）を選択しても表示されない。
+  await selectContentsWithin(page, "main h1");
+  await expect(explainButton(page)).toHaveCount(0);
+});
+
+test("reader: collapsing the selection hides the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  await collapseSelection(page);
+  await expect(explainButton(page)).toHaveCount(0);
+});
+
+test("reader: selecting a different region updates the 解説 button position", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+
+  // 1) ニュース要約を選択し、ボタン位置を取得。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  const firstBox = await explainButton(page).boundingBox();
+  expect(firstBox).not.toBeNull();
+
+  // 2) ゆうこの再説明（縦方向に離れた別領域）へ選択を変更。
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await expect(explainButton(page)).toBeVisible();
+  const secondBox = await explainButton(page).boundingBox();
+  expect(secondBox).not.toBeNull();
+
+  // 3) 位置が意味のある差で更新されている（x か y の一方が変化）。固定値には依存しない。
+  const moved =
+    Math.abs(secondBox!.x - firstBox!.x) > 4 ||
+    Math.abs(secondBox!.y - firstBox!.y) > 4;
+  expect(moved).toBe(true);
+
+  // 4) 更新後もビューポート内に収まっている。
+  const viewport = page.viewportSize();
+  expect(secondBox!.x).toBeGreaterThanOrEqual(0);
+  expect(secondBox!.y).toBeGreaterThanOrEqual(0);
+  expect(secondBox!.x + secondBox!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(secondBox!.y + secondBox!.height).toBeLessThanOrEqual(viewport!.height);
+});
+
+test("reader: a selection spanning two selectable regions hides the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+
+  // 先に有効な単一領域選択でボタンを出しておく（またぎ選択で消えることも確認する）。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // 実DOM上で「要約の先頭〜再説明の末尾」を1つの Range として選択し、mouseup を明示発火する。
+  const spanned = await page.evaluate(() => {
+    const startEl = document.querySelector('[data-explain-selectable="summary"]');
+    const endEl = document.querySelector(
+      '[data-explain-selectable="explanation"]'
+    );
+    const startNode = startEl?.firstChild;
+    const endNode = endEl?.firstChild;
+    if (!startNode || !endNode) {
+      return { ok: false, sameRegion: null };
+    }
+    const range = document.createRange();
+    range.setStart(startNode, 0);
+    range.setEnd(endNode, endNode.textContent?.length ?? 0);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    // 開始・終了が別の対象領域であることを確認用に返す。
+    const startRegion = startNode.parentElement?.closest(
+      "[data-explain-selectable]"
+    );
+    const endRegion = endNode.parentElement?.closest("[data-explain-selectable]");
+    return { ok: true, sameRegion: startRegion === endRegion };
+  });
+  expect(spanned.ok).toBe(true);
+  expect(spanned.sameRegion).toBe(false); // 別領域をまたいでいる
+
+  // 領域をまたぐ選択ではボタンは表示されない（過去の有効選択のボタンも消える）。
+  await expect(explainButton(page)).toHaveCount(0);
+});
+
+test("reader: resizing the viewport recalculates the 解説 button position", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // resize前のボタン位置と viewport を取得。
+  const beforeBox = await explainButton(page).boundingBox();
+  const beforeViewport = page.viewportSize();
+  expect(beforeBox).not.toBeNull();
+  expect(beforeViewport).not.toBeNull();
+
+  const beforeRight = beforeBox!.x + beforeBox!.width;
+  const beforeBottom = beforeBox!.y + beforeBox!.height;
+
+  // resize前のボタン下端より確実に小さい新viewportを動的に決める。
+  // 幅は維持する（左右サイドバー構成を壊して画面を操作不能にしないため）。
+  const cut = 40;
+  const newWidth = beforeViewport!.width;
+  const newHeight = Math.round(beforeBottom - cut);
+
+  // 事前条件: resize前の座標のままでは新viewportから確実にはみ出す。
+  // これが無いと「位置再計算を消してもビューポート内判定で偶然通る」テストになる。
+  expect(beforeBottom > newHeight || beforeRight > newWidth).toBe(true);
+  expect(beforeBottom).toBeGreaterThan(newHeight);
+
+  await page.setViewportSize({ width: newWidth, height: newHeight });
+  // resize は setViewportSize でも発火するが、再計算経路を確実に通すため明示発火する。
+  await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+
+  // resizeリスナー/位置再計算が無ければ、ボタンは旧位置（＝新viewport外）のままとなり、
+  // 「移動」かつ「収まり」の両立に到達できず、この poll は成立しない（＝テスト失敗）。
+  await expect(explainButton(page)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await explainButton(page).boundingBox();
+      if (!box) {
+        return false;
+      }
+      const moved =
+        Math.abs(box.x - beforeBox!.x) > 1 ||
+        Math.abs(box.y - beforeBox!.y) > 1;
+      const inside =
+        box.x >= 0 &&
+        box.y >= 0 &&
+        box.x + box.width <= newWidth &&
+        box.y + box.height <= newHeight;
+      return moved && inside;
+    })
+    .toBe(true);
+
+  // 最終 box で明示的に再確認（座標変化＋新viewport内への収まり）。
+  const afterBox = await explainButton(page).boundingBox();
+  expect(afterBox).not.toBeNull();
+  const moved =
+    Math.abs(afterBox!.x - beforeBox!.x) > 1 ||
+    Math.abs(afterBox!.y - beforeBox!.y) > 1;
+  expect(moved).toBe(true);
+  expect(afterBox!.x).toBeGreaterThanOrEqual(0);
+  expect(afterBox!.y).toBeGreaterThanOrEqual(0);
+  expect(afterBox!.x + afterBox!.width).toBeLessThanOrEqual(newWidth);
+  expect(afterBox!.y + afterBox!.height).toBeLessThanOrEqual(newHeight);
+});
+
+test("reader: existing 用語サポート candidate click still opens the term popup", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+
+  // 既存の候補語（ゆうこの解説内の候補語ボタン）をクリック。
+  await page.getByRole("button", { name: "Playwright", exact: true }).click();
+
+  // 既存の用語解説ポップアップが、クリックした候補語を見出しとして表示する。
+  // （範囲選択ボタンが既存クリック処理を妨げていないことの確認）
+  await expect(
+    page.getByRole("heading", { name: "Playwright" })
+  ).toBeVisible();
+});
+
 test("settings save keeps morning and afternoon work time ranges", async ({
   page,
 }) => {
