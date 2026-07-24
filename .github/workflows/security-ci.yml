@@ -14,8 +14,69 @@ permissions:
   contents: read
 
 jobs:
+  # 依存関係と無関係な PR が、後から公開された脆弱性で Security CI を失敗させないための変更判定。
+  # pull_request では base..head の差分から Node / Rust の依存関係ファイル変更有無を判定し、
+  # 監査ジョブに job-level の if を付けて必要な時だけ実行する（ワークフロー自体は常に起動する）。
+  # pull_request 以外（push / schedule / workflow_dispatch）では両方を必ず実行する。
+  # ※ ワークフロー全体を on.paths でスキップすると必須チェックが Pending のままになり得るため使わない。
+  dependency-changes:
+    name: Detect dependency changes
+    runs-on: ubuntu-latest
+    outputs:
+      node_changed: ${{ steps.detect.outputs.node_changed }}
+      rust_changed: ${{ steps.detect.outputs.rust_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # base..head の差分を取るため全履歴を取得する。
+          fetch-depth: 0
+
+      - name: Detect changed dependency files
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # pull_request 以外（push / schedule / workflow_dispatch）は従来どおり両監査を実行する。
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "node_changed=true" >> "$GITHUB_OUTPUT"
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          node_changed=false
+          rust_changed=false
+
+          # PR の base..head の変更ファイル名から依存関係変更を判定する（外部 Action は使わない）。
+          while IFS= read -r file; do
+            case "$file" in
+              # Node 依存関係ファイル
+              package.json|pnpm-lock.yaml|pnpm-workspace.yaml|.npmrc)
+                node_changed=true
+                ;;
+              # Rust 依存関係ファイル
+              src-tauri/Cargo.toml|src-tauri/Cargo.lock)
+                rust_changed=true
+                ;;
+              # Security CI 自身の変更時は、変更後の監査ジョブが実際に動くよう両方を実行する。
+              .github/workflows/security-ci.yml)
+                node_changed=true
+                rust_changed=true
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+
+          echo "node_changed=$node_changed" >> "$GITHUB_OUTPUT"
+          echo "rust_changed=$rust_changed" >> "$GITHUB_OUTPUT"
+
   rustsec-audit:
     name: RustSec Audit
+    needs: dependency-changes
+    # Rust 依存関係が変更された PR、および pull_request 以外（両方 true）で実行する。
+    if: ${{ needs.dependency-changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,6 +93,9 @@ jobs:
 
   node-audit:
     name: Node Audit (High)
+    needs: dependency-changes
+    # Node 依存関係が変更された PR、および pull_request 以外（両方 true）で実行する。
+    if: ${{ needs.dependency-changes.outputs.node_changed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
