@@ -23,6 +23,10 @@ auditConfig:
 # よって patched 版 0.35.3 へ上書きして Node Audit(High) を解消する。
 overrides:
   sharp: 0.35.3
+  # postcss<8.5.12 に High 脆弱性（GHSA）。直接依存(devDependency)は ^8.5.12 へ更新済みだが、
+  # next 経由の transitive postcss が 8.4.31（<8.5.12）で残り Node Audit(High) が解消しない。
+  # よって全 postcss を ^8.5.12 以上（実解決 8.5.22）へ統一する。8.5.x は minor 互換。
+  postcss: ^8.5.12
 
 # ビルドスクリプト（install / postinstall）の実行を許可するパッケージ。
 # pnpm 11 は strictDepBuilds により未許可のビルドスクリプトを無視して非ゼロ終了する（ERR_PNPM_IGNORED_BUILDS）。

@@ -23,14 +23,9 @@ type HitTargetFailure = {
   reason: string;
 };
 
+// 「ニュースを見る」は一覧（ホーム）への入口になったため、ここでは記事詳細を検証しない。
+// ニュース閲覧への遷移（一覧→記事詳細→戻る）は専用テストで確認する。
 const majorScreens = [
-  {
-    id: "news",
-    navName: "ニュースを見る",
-    expectedHeading: "E2Eテスト用ニュース", // NewsReaderScreen displays article title as heading
-    expectedText: "E2Eテスト用ニュース",
-    criticalButtons: ["ホームへ戻る", "要約を更新"],
-  },
   {
     id: "dictionary",
     navName: "ゆうこ辞書",
@@ -141,6 +136,400 @@ for (const screen of majorScreens) {
     await captureScreen(page, testInfo, screen.id);
   });
 }
+
+// ニュース閲覧への遷移整理（一覧を入口に、記事詳細は選択した記事IDで開き、戻るは遷移元へ）。
+
+const readRequestedArticleId = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, string | undefined>)
+        .__E2E_ARTICLE_DETAIL_REQUESTED_ID__ ?? null
+  );
+
+// 記事詳細（NewsReaderScreen）のサイドバー「戻る」ボタン。
+// 表示は遷移元によらず「戻る」で統一（戻り先は readerOrigin で制御）。
+// アプリ内で厳密一致「戻る」は記事詳細のこのボタンのみ（他画面は「ホームへ戻る」等）。
+const readerBackButton = (page: Page) =>
+  page.getByRole("button", { name: "戻る", exact: true });
+
+test("sidebar ニュースを見る opens the today-news list screen (not home, not the detail)", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュースを見る", exact: true })
+    .click();
+
+  // 当日ニュース一覧画面（独立画面）が表示される。ホームへは戻さない。
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toHaveCount(0);
+  // 「取得日時基準」であることの補足文が表示される（公開日との誤解を避ける）。
+  await expect(
+    page.getByText("今日、アプリが新しく取得したニュースを表示しています。")
+  ).toBeVisible();
+  // カードの日付には「公開日」ラベルが付く（表示値は publishedAtText のまま）。
+  await expect(page.locator("main").getByText(/公開日:/).first()).toBeVisible();
+  // 記事詳細へは直接遷移しない（詳細固有の「要約を更新」が出ていない）。
+  await expect(page.getByRole("button", { name: "要約を更新" })).toHaveCount(0);
+});
+
+test("sidebar ニュースを見る does not open an implicit default article", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュースを見る", exact: true })
+    .click();
+
+  // 当日ニュース一覧に留まる（記事詳細を表示しない）＝ get_article_detail は呼ばれない。
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+  await expect(page.getByText("記事詳細を表示しています")).toHaveCount(0);
+  expect(await readRequestedArticleId(page)).toBeNull();
+});
+
+test("today-news list opens the article detail by id and 戻る returns to the list", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュースを見る", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+
+  // 当日取得したニュースカードを選択する。
+  await page
+    .locator("main")
+    .getByText("E2Eテスト用ニュース")
+    .first()
+    .click();
+
+  // 記事詳細（一覧起点。戻るボタン表示は「戻る」）が開き、選択IDが渡っている。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRequestedArticleId(page)).toBe("e2e-article-1");
+
+  // 「戻る」で遷移元（当日ニュース一覧）へ戻る。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+});
+
+test("home news card opens the article detail with the selected id", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  // 実データのニュースカード（記事タイトル）を選択する。
+  await page
+    .locator("main")
+    .getByText("E2Eテスト用ニュース")
+    .first()
+    .click();
+
+  // 記事詳細（ホーム起点。戻るボタン表示は「戻る」）が開く。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  // 選択した記事IDが NewsReaderScreen 経由で get_article_detail に渡っている。
+  expect(await readRequestedArticleId(page)).toBe("e2e-article-1");
+});
+
+test("back from a home-opened article returns to the home news list", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .locator("main")
+    .getByText("E2Eテスト用ニュース")
+    .first()
+    .click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+
+  // 「戻る」で遷移元（ホームのニュース一覧）へ戻る。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+});
+
+test("news history opens an article by id and 戻る returns to history", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュース履歴", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+
+  // 履歴の記事を選び「もう一度見る」で開く（既存の再閲覧導線）。
+  await page
+    .locator("main")
+    .getByText("E2Eテスト用ニュース")
+    .first()
+    .click();
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+
+  // 記事詳細が開く（戻るボタン表示は「戻る」。戻り先は遷移元＝履歴で制御）。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  // 選択した記事IDが記事詳細へ渡っている。
+  expect(await readRequestedArticleId(page)).toBe("e2e-article-1");
+
+  // 「戻る」で遷移元（ニュース履歴）へ戻る。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+});
+
+test("home すべて見る opens the today-news list screen", async ({ page }) => {
+  await openHome(page);
+
+  await page.getByRole("button", { name: "すべて見る" }).click();
+
+  // 当日ニュース一覧画面へ遷移する（ホームの一覧内スクロールではない）。
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toHaveCount(0);
+});
+
+test("home limits by maxDailyRecommendations while the today-news list shows all acquired", async ({
+  page,
+}) => {
+  // 設定=3件、おすすめ候補=5件、当日取得=5件。
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      maxDailyRecommendations: 3,
+    };
+    (window as any).__E2E_RECOMMENDED_POOL__ = 5;
+    (window as any).__E2E_HISTORY_TODAY__ = 5;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+  await openHome(page);
+
+  const countCards = (locator: ReturnType<Page["locator"]>) =>
+    locator.getByRole("heading", { name: /^件数記事\d$/ });
+
+  // ホームは表示件数設定（3件）で制限される（候補5件のうち3件だけ）。
+  await expect(countCards(page.locator("main"))).toHaveCount(3);
+
+  // 「ニュースを見る」で当日ニュース一覧へ。件数設定は適用されず当日取得5件すべて表示される。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュースを見る", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+  await expect(countCards(page.locator("main"))).toHaveCount(5);
+});
+
+// サイドバー「ニュースを見る」で当日ニュース一覧を開く共通操作。
+const openTodayNewsList = async (page: Page) => {
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュースを見る", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+};
+
+test("today-news list filters by fetchedAt: today only (excludes prev-day, invalid, and publish-today/fetch-prev)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_MIXED_DATES__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  const main = page.locator("main");
+  // 本日取得の記事だけが表示される。
+  await expect(main.getByText("本日取得の記事")).toBeVisible();
+  // 前日取得・不正取得日時は表示されない。
+  await expect(main.getByText("前日取得の記事")).toHaveCount(0);
+  await expect(main.getByText("不正取得日時の記事")).toHaveCount(0);
+  // 公開日は本日でも fetchedAt が前日なら表示されない（抽出条件が fetchedAt であることを直接検証）。
+  await expect(main.getByText("公開本日だが取得前日の記事")).toHaveCount(0);
+  // カード（h3見出し）はちょうど1件。
+  await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
+});
+
+test("today-news list shows the empty state (no crash, no cards) when nothing was acquired today", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_EMPTY__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page); // 見出しが出る＝クラッシュしていない
+
+  // 空状態文言が表示される。
+  await expect(
+    page.getByText("今日取得したニュースはまだないみたい。")
+  ).toBeVisible();
+  // 件数バッジは0件、記事カード（h3）は0件。
+  await expect(page.getByText("0件", { exact: true })).toBeVisible();
+  await expect(
+    page.locator("main").getByRole("heading", { level: 3 })
+  ).toHaveCount(0);
+});
+
+test("today-news list shows a safe error and recovers after 再試行", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_RETRY_MODE__ = true;
+    (window as any).__E2E_HISTORY_FAIL__ = true; // 初回は失敗
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  // 安全なエラー文言が出る。
+  await expect(page.getByText(/読み込みに失敗/)).toBeVisible();
+  // 生エラー・内部パスはUIへ出ない。
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByText("E2E raw failure")).toHaveCount(0);
+  // 再試行ボタンがあり、記事カードはまだ無い。
+  const retry = page.getByRole("button", { name: "再試行" });
+  await expect(retry).toBeVisible();
+  await expect(
+    page.locator("main").getByText("再試行後に取得した本日の記事")
+  ).toHaveCount(0);
+
+  // 失敗フラグを解除して再試行 → 記事が表示され、失敗表示は消える。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_FAIL__ = false;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await retry.click();
+  await expect(
+    page.locator("main").getByText("再試行後に取得した本日の記事")
+  ).toBeVisible();
+  await expect(page.getByText(/読み込みに失敗/)).toHaveCount(0);
+});
+
+test("dictionary related article opens the detail by id and 戻る returns to the dictionary", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+  ).toBeVisible();
+
+  // 選択中辞書項目の「関連ニュース」を開く（既存の「開く」ボタン）。
+  await page.getByRole("button", { name: "開く", exact: true }).click();
+
+  // 記事詳細が開き、辞書項目の relatedArticleId が渡る。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  await expect
+    .poll(() => readRequestedArticleId(page))
+    .toBe("e2e-article-1");
+
+  // 戻るで遷移元（ゆうこ辞書）へ戻る。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+  ).toBeVisible();
+});
+
+test("opening a related article inside the reader keeps readerOrigin=news (戻る returns to the list)", async ({
+  page,
+}) => {
+  // 関連記事は get_recommended_articles 由来。プール2件で記事B（rec-1）を用意する。
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_RECOMMENDED_POOL__ = 2;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  // 記事A（当日一覧の記事）を開く。
+  await page
+    .locator("main")
+    .getByText("E2Eテスト用ニュース")
+    .first()
+    .click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+  await expect
+    .poll(() => readRequestedArticleId(page))
+    .toBe("e2e-article-1");
+
+  // 記事詳細内の関連記事B（件数記事1 = rec-1）を開く。
+  await page.getByRole("button", { name: /件数記事1/ }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("rec-1");
+  // 戻るボタンは引き続き「戻る」。
+  await expect(readerBackButton(page).first()).toBeVisible();
+
+  // 戻る → ホームや記事Aではなく当日ニュース一覧へ（readerOrigin=news 維持）。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "本日取得したニュース" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toHaveCount(0);
+});
+
+test("today-news list marks the sidebar ニュースを見る item as active", async ({
+  page,
+}) => {
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  const nav = page.getByRole("navigation").first();
+  // SidebarNavItem は aria-current/aria-selected を持たないため、選択状態は
+  // 見た目の色ではなく構造的なクラス（font-medium）で判定する。
+  await expect(
+    nav.getByRole("button", { name: "ニュースを見る", exact: true })
+  ).toHaveClass(/font-medium/);
+  // 非選択項目には付かない（選択状態が正しい項目にのみ適用されることを確認）。
+  await expect(
+    nav.getByRole("button", { name: "ゆうこ辞書", exact: true })
+  ).not.toHaveClass(/font-medium/);
+});
 
 test("settings save keeps morning and afternoon work time ranges", async ({
   page,
@@ -589,10 +978,10 @@ test("first click shows the light preview, then 詳しく見る opens the articl
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
 
-  // 「詳しく見る」でニュース閲覧画面へ遷移する（news固有の「ホームへ戻る」で判定）。
+  // 「詳しく見る」でニュース閲覧画面へ遷移する（記事詳細固有の「戻る」ボタンで判定）。
   await notification.getByRole("button", { name: "詳しく見る" }).click();
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "E2Eテスト用ニュース" })
@@ -625,9 +1014,9 @@ test("first click does not navigate and does not call dismiss", async ({
   await expect(
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
-  // ニュース閲覧画面（news固有の「ホームへ戻る」）は出ていない。
+  // ニュース閲覧画面（記事詳細固有の「戻る」ボタン）は出ていない。
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" })
+    page.getByRole("button", { name: "戻る", exact: true })
   ).toHaveCount(0);
   // 初回クリックは閉じる扱いではない（dismiss を呼ばない）。
   expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
@@ -663,7 +1052,7 @@ test("first click and 詳しく見る serialize handle_yuuko_clicked (no concurr
   // #1 完了前に「詳しく見る」を押す → navigate は進むが #2 は #1 完了まで実行されない。
   await notification.getByRole("button", { name: "詳しく見る" }).click();
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
   // #1 保留中、#2 の handle_yuuko_clicked はまだ走っていない（直列化）。
   expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(1);
@@ -1042,7 +1431,7 @@ test("詳しく見る keeps the notification hidden when a scheduler interval fi
   await notification.getByRole("button", { name: "詳しく見る" }).click();
   await page.clock.fastForward(400);
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
 
   // クリック確定中（#1 保留）に scheduler interval を進める → active を拾っても再表示されない。
@@ -1464,7 +1853,7 @@ test("resumes as the light preview (not the balloon) when the active notificatio
   // 「詳しく見る」でニュース閲覧画面へ遷移する（消えるだけで開けない、にならない）。
   await notification.getByRole("button", { name: "詳しく見る" }).click();
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
   // 成功導線なので dismiss は呼ばない。
   expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
@@ -1563,9 +1952,9 @@ test("handle_yuuko_clicked and navigation are not lost when the window hides rig
   expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
     0
   );
-  // 記事遷移処理も失われない（news 固有の「ホームへ戻る」）。
+  // 記事遷移処理も失われない（記事詳細固有の「戻る」ボタン）。
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
 
   // 再表示しても同じ active 通知は復活しない。
@@ -1622,12 +2011,12 @@ test("does not retain the Leaving state, so the processed news balloon is not re
   ).toBeVisible();
   await notification.getByRole("button", { name: "詳しく見る" }).click();
   await expect(
-    page.getByRole("button", { name: "ホームへ戻る" }).first()
+    page.getByRole("button", { name: "戻る", exact: true }).first()
   ).toBeVisible();
 
   // handle_yuuko_clicked は Leaving（balloonText/previewArticle が残る非active）を返す。
-  // ニュース閲覧画面からホームへ戻る。
-  await page.getByRole("button", { name: "ホームへ戻る" }).first().click();
+  // 記事詳細の「戻る」でホームへ戻る。
+  await page.getByRole("button", { name: "戻る", exact: true }).first().click();
   await expect(
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
@@ -1683,7 +2072,8 @@ async function installTauriMocks(page: Page) {
       title: "E2Eテスト用ニュース",
       sourceName: "E2E News",
       publishedAtText: "2026-06-05T00:00:00Z",
-      fetchedAt: "2026-06-05T00:10:00Z",
+      // 当日ニュース一覧が「その日に取得したニュース」を fetchedAt で判定するため、実行日を取得日時にする。
+      fetchedAt: new Date().toISOString(),
       genre: "AI・テクノロジー",
       summary: "UI確認用のモックニュースです。",
       isFavorite: false,
@@ -1748,11 +2138,110 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_WINDOW_CLOSE_CALLED__ = true;
             return null;
-          case "get_recommended_articles":
+          case "get_recommended_articles": {
+            // 件数制限テスト用: プール件数を設定すると limit を尊重して slice して返す。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const recommendedPool = (window as any).__E2E_RECOMMENDED_POOL__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (typeof recommendedPool === "number") {
+              const pool = Array.from({ length: recommendedPool }, (_, i) => ({
+                ...articleSummary,
+                articleId: `rec-${i + 1}`,
+                title: `件数記事${i + 1}`,
+              }));
+              const limit =
+                typeof params.limit === "number" ? params.limit : pool.length;
+              return pool.slice(0, limit);
+            }
             return [articleSummary];
-          case "list_article_history":
+          }
+          case "list_article_history": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const historyWin = window as any;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+
+            // 空状態テスト用: 空配列を返す。
+            if (historyWin.__E2E_HISTORY_EMPTY__) {
+              return [];
+            }
+
+            // 失敗→再試行テスト用: フラグが true の間は本番と同じ失敗形式（reject）。
+            // 再試行前にフラグを false にすると本日の記事を返す（StrictModeの二重実行に依存しない）。
+            if (historyWin.__E2E_HISTORY_RETRY_MODE__) {
+              if (historyWin.__E2E_HISTORY_FAIL__) {
+                // 生エラー文言・内部パスがUIへ出ないことを検証するための識別子を含める。
+                throw new Error("E2E raw failure /internal/secret/path");
+              }
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "retry-1",
+                  title: "再試行後に取得した本日の記事",
+                  fetchedAt: new Date().toISOString(),
+                },
+              ];
+            }
+
+            // 当日判定テスト用: 本日/前日/不正 fetchedAt を混在させる。
+            // 抽出条件が publishedAtText ではなく fetchedAt であることを直接検証するため、
+            // 「公開は本日だが取得は前日」の記事も含める（→ 非表示になるはず）。
+            if (historyWin.__E2E_HISTORY_MIXED_DATES__) {
+              const now = new Date();
+              const todayIso = now.toISOString();
+              const yesterdayIso = new Date(
+                now.getTime() - 24 * 60 * 60 * 1000
+              ).toISOString();
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "mix-today",
+                  title: "本日取得の記事",
+                  fetchedAt: todayIso,
+                  publishedAtText: yesterdayIso,
+                },
+                {
+                  ...articleHistoryItem,
+                  articleId: "mix-prev",
+                  title: "前日取得の記事",
+                  fetchedAt: yesterdayIso,
+                  publishedAtText: yesterdayIso,
+                },
+                {
+                  ...articleHistoryItem,
+                  articleId: "mix-invalid",
+                  title: "不正取得日時の記事",
+                  fetchedAt: "not-a-valid-date",
+                  publishedAtText: todayIso,
+                },
+                {
+                  ...articleHistoryItem,
+                  articleId: "mix-pubtoday",
+                  title: "公開本日だが取得前日の記事",
+                  fetchedAt: yesterdayIso,
+                  publishedAtText: todayIso,
+                },
+              ];
+            }
+
+            // 当日件数テスト用: 当日取得件数を設定すると fetchedAt=当日 の記事をその件数返す。
+            const todayCount = historyWin.__E2E_HISTORY_TODAY__;
+            if (typeof todayCount === "number") {
+              const todayIso = new Date().toISOString();
+              return Array.from({ length: todayCount }, (_, i) => ({
+                ...articleHistoryItem,
+                articleId: `today-${i + 1}`,
+                title: `件数記事${i + 1}`,
+                fetchedAt: todayIso,
+              }));
+            }
             return [articleHistoryItem];
+          }
           case "get_article_detail":
+            // 選択した記事IDが NewsReaderScreen 経由で渡っていることを検証するために記録する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).__E2E_ARTICLE_DETAIL_REQUESTED_ID__ =
+              params.articleId;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
               originalUrl: "https://example.com/e2e-article",

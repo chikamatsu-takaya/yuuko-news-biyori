@@ -2,6 +2,7 @@
 
 import React from "react";
 import MainScreen from "@/components/screens/MainScreen";
+import NewsListScreen from "@/components/screens/NewsListScreen";
 import NewsReaderScreen from "@/components/screens/NewsReaderScreen";
 import DictionaryScreen from "@/components/screens/DictionaryScreen";
 import NewsHistoryScreen from "@/components/screens/NewsHistoryScreen";
@@ -20,13 +21,21 @@ import {
 
 type ScreenType =
   | "home"
+  // "news" はサイドバー「ニュースを見る」／ホーム「すべて見る」の遷移先。
+  // 当日取得したニュースの一覧画面（NewsListScreen）を表示する独立画面。
   | "news"
+  // "reader" は記事詳細（NewsReaderScreen）。一覧から記事IDを選んだ時だけ入る。
+  | "reader"
   | "dictionary"
   | "history"
   | "settings"
   | "customize"
   | "gacha"
   | "onboarding";
+
+// 記事詳細を開いた遷移元。戻る先の画面をここで保持する（固定でホームへ戻さない）。
+// 「戻る」ボタンの表示文言は遷移元によらず「戻る」に統一し、戻り先のみこの値で制御する。
+type ReaderOrigin = "home" | "news" | "history" | "dictionary";
 
 // ニュース通知が「表示中（ユーザー操作待ち）」とみなせる active 状態。
 // reward 専用の hasNotification は使わず、Rust の has_active_notification と同基準で判定する。
@@ -52,6 +61,8 @@ export default function Page() {
   const [selectedArticleId, setSelectedArticleId] = React.useState<string | null>(
     null
   );
+  // 記事詳細を開いた遷移元。戻る先の一覧を決めるために保持する。
+  const [readerOrigin, setReaderOrigin] = React.useState<ReaderOrigin>("home");
 
   // 通知状態取得・候補生成は Page 側スケジューラに一本化する。最新値をここで保持し、
   // 表示が必要な画面（MainScreen 等）とアプリ内通知へ反映する。
@@ -152,9 +163,33 @@ export default function Page() {
     }
   };
 
-  const handleOpenArticle = (articleId: string) => {
+  // 一覧のカードから記事詳細を開く共通処理。選択した記事IDと遷移元を保持し、記事詳細（reader）へ入る。
+  // 遷移元を覚えることで、記事詳細の「戻る」を遷移元の一覧へ返せる。
+  const handleOpenArticle = React.useCallback(
+    (articleId: string, origin: ReaderOrigin = "home") => {
+      setSelectedArticleId(articleId);
+      setReaderOrigin(origin);
+      setCurrentScreen("reader");
+    },
+    []
+  );
+
+  // 各一覧に渡す onOpenArticle を、遷移元を固定して生成する（ホーム/履歴/辞書で戻り先を分ける）。
+  const openArticleFrom = React.useCallback(
+    (origin: ReaderOrigin) => (articleId: string) =>
+      handleOpenArticle(articleId, origin),
+    [handleOpenArticle]
+  );
+
+  // 記事詳細内の関連記事から別記事を開く。遷移元（readerOrigin）は維持し、戻る先を変えない。
+  const handleOpenRelatedArticle = (articleId: string) => {
     setSelectedArticleId(articleId);
-    setCurrentScreen("news");
+    setCurrentScreen("reader");
+  };
+
+  // 記事詳細の「戻る」。固定でホームへ戻さず、開いた遷移元の一覧へ戻す。
+  const handleReaderBack = () => {
+    setCurrentScreen(readerOrigin);
   };
 
   // ゆうこ通知の backend 操作（クリック確定 / 閉じる / 無視）を1本のキューで直列化する。
@@ -274,12 +309,35 @@ export default function Page() {
   };
 
   const renderCurrentScreen = () => {
-    if (currentScreen === "news") {
+    // 記事詳細は「一覧から記事IDを選んだ時」だけ表示する。
+    // 記事ID未指定のまま reader に入っても暗黙の既定記事を開かず、遷移元の一覧へ戻す。
+    if (currentScreen === "reader") {
+      if (!selectedArticleId) {
+        return (
+          <MainScreen
+            onNavigate={handleNavigate}
+            onOpenArticle={openArticleFrom("home")}
+            yuukoNotificationState={yuukoNotificationState}
+          />
+        );
+      }
       return (
         <NewsReaderScreen
-          articleId={selectedArticleId ?? undefined}
+          articleId={selectedArticleId}
           onNavigate={handleNavigate}
-          onOpenArticle={handleOpenArticle}
+          onOpenArticle={handleOpenRelatedArticle}
+          onBack={handleReaderBack}
+        />
+      );
+    }
+
+    // サイドバー「ニュースを見る」／ホーム「すべて見る」の遷移先。
+    // 当日取得したニュースの一覧画面を表示し、カード選択で記事詳細（origin=news）を開く。
+    if (currentScreen === "news") {
+      return (
+        <NewsListScreen
+          onNavigate={handleNavigate}
+          onOpenArticle={openArticleFrom("news")}
         />
       );
     }
@@ -288,7 +346,7 @@ export default function Page() {
       return (
         <DictionaryScreen
           onNavigate={handleNavigate}
-          onOpenArticle={handleOpenArticle}
+          onOpenArticle={openArticleFrom("dictionary")}
         />
       );
     }
@@ -297,7 +355,7 @@ export default function Page() {
       return (
         <NewsHistoryScreen
           onNavigate={handleNavigate}
-          onOpenArticle={handleOpenArticle}
+          onOpenArticle={openArticleFrom("history")}
         />
       );
     }
@@ -318,10 +376,12 @@ export default function Page() {
       return <OnboardingScreen onNavigate={handleNavigate} />;
     }
 
+    // 既定は "home"（ホーム画面）。おすすめニュースは MainScreen 側で
+    // 表示件数設定（maxDailyRecommendations）に従って制限して表示する。
     return (
       <MainScreen
         onNavigate={handleNavigate}
-        onOpenArticle={handleOpenArticle}
+        onOpenArticle={openArticleFrom("home")}
         yuukoNotificationState={yuukoNotificationState}
       />
     );

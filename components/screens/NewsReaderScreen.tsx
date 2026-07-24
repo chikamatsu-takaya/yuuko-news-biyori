@@ -670,10 +670,14 @@ export default function NewsReaderScreen({
   articleId,
   onNavigate,
   onOpenArticle,
+  onBack,
 }: {
   articleId?: string;
   onNavigate?: (screen: string) => void;
   onOpenArticle?: (articleId: string) => void;
+  // 記事詳細の「戻る」。固定でホームへ戻さず、遷移元（readerOrigin）に応じて Page 側で戻す。
+  // ボタン表示は遷移元によらず「戻る」に統一し、戻り先の制御は onBack が担う。
+  onBack?: () => void;
 }) {
   const [isAutoStart] = React.useState(true);
   const { toast } = useToast();
@@ -954,6 +958,15 @@ export default function NewsReaderScreen({
     onNavigate?.(screen);
   };
 
+  // 「戻る」。遷移元が渡されていればそこへ戻し、無ければ従来どおりホームへ戻す。
+  const handleBack = () => {
+    if (onBack) {
+      onBack();
+      return;
+    }
+    onNavigate?.("home");
+  };
+
   const handleOpenExternal = () => {
     if (!article.externalUrl) {
       return;
@@ -1106,10 +1119,10 @@ export default function NewsReaderScreen({
               variant="outline"
               size="sm"
               className="h-9 w-full justify-start gap-2 border-[var(--yuuko-green)] text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-              onClick={() => handleNavigate("home")}
+              onClick={handleBack}
             >
               <ArrowLeft className="h-4 w-4" />
-              ホームへ戻る
+              戻る
             </Button>
           </div>
 
