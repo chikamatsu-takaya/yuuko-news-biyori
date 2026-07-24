@@ -794,7 +794,8 @@ export default function MainScreen({
                     variant="ghost"
                     size="sm"
                     className="text-xs text-muted-foreground hover:text-foreground"
-                    onClick={() => console.log("View all news")}
+                    // 当日取得したニュースの一覧画面（NewsListScreen）へ遷移する。
+                    onClick={() => handleNavigate("news")}
                   >
                     すべて見る
                     <ChevronRight className="w-4 h-4 ml-1" />
