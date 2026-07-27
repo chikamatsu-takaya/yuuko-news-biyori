@@ -51,6 +51,12 @@ import {
 import { recordFriendshipEvent } from "@/lib/tauri/yuuko";
 import { RankUpDialog } from "@/components/dialogs/RankUpDialog";
 import { useToast } from "@/hooks/use-toast";
+// 範囲選択→「解説」ボタン表示の純粋ロジック（DOM非依存・node --test 済み）。
+import {
+  shouldShowExplainButton,
+  resolveAnchorRect,
+  clampExplainButtonPosition,
+} from "@/lib/explain-selection.mjs";
 
 type NavigationItem = {
   id: string;
@@ -666,6 +672,111 @@ const applyGeneratedSummary = (
   yuukoThoughts: generatedSummary.yuukoComment,
 });
 
+// 範囲選択の対象領域（ニュース要約・ゆうこの再説明）に付与するマーカー属性。
+// closest() でこの属性を持つ要素内に選択が収まっているかを判定する。
+const EXPLAIN_SELECTABLE_ATTR = "data-explain-selectable";
+// 「解説」ボタンのおおよその表示サイズ（画面端での位置補正に使う）。
+const EXPLAIN_BUTTON_SIZE = { width: 60, height: 30 } as const;
+
+type ExplainSelectionState = {
+  // trim 済みの選択文字列。後続タスクで explain_selected_term へ渡す（全文はログへ出さない）。
+  text: string;
+  // ボタンの表示座標（position: fixed / viewport 座標）。
+  left: number;
+  top: number;
+};
+
+// 選択ノードから対象領域要素（EXPLAIN_SELECTABLE_ATTR を持つ最近接要素）を辿る。
+const closestSelectableRegion = (node: Node | null): Element | null => {
+  if (!node) {
+    return null;
+  }
+  const element =
+    node.nodeType === Node.ELEMENT_NODE
+      ? (node as Element)
+      : node.parentElement;
+  return element?.closest(`[${EXPLAIN_SELECTABLE_ATTR}]`) ?? null;
+};
+
+// 現在の DOM 選択から「解説」ボタン表示情報を作る。無効な選択なら null。
+// 判定・座標補正は純粋関数（explain-selection.mjs）へ委譲し、ここは DOM 取得に限定する。
+// 選択文字列全文はログへ出さない。
+const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const selection = window.getSelection();
+  const rangeCount = selection?.rangeCount ?? 0;
+  // 単一Rangeのみ扱う。複数Range（rangeCount>=2）や range 無しは無効にして、
+  // getRangeAt(0) は rangeCount===1 を確認した後だけ呼ぶ。
+  // 複数Rangeの toString() は対象外文字列が混入し得るため state へ保持しない。
+  const isSingleRange = Boolean(selection) && rangeCount === 1;
+  const range = isSingleRange ? selection!.getRangeAt(0) : null;
+  const trimmedText = isSingleRange ? (selection?.toString() ?? "").trim() : "";
+
+  const startRegion = closestSelectableRegion(range?.startContainer ?? null);
+  const endRegion = closestSelectableRegion(range?.endContainer ?? null);
+  const sameSelectableRegion =
+    startRegion != null && startRegion === endRegion;
+
+  const valid = shouldShowExplainButton({
+    hasSelection: Boolean(selection),
+    rangeCount,
+    isCollapsed: selection?.isCollapsed ?? true,
+    trimmedTextLength: trimmedText.length,
+    sameSelectableRegion,
+  });
+  if (!valid || !range) {
+    return null;
+  }
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  const clientRects = Array.from(range.getClientRects()).map((rect) => ({
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  }));
+
+  const bounding = range.getBoundingClientRect();
+  const boundingRect = {
+    left: bounding.left,
+    top: bounding.top,
+    right: bounding.right,
+    bottom: bounding.bottom,
+    width: bounding.width,
+    height: bounding.height,
+  };
+
+  // 可視矩形の最後を採用。getClientRects が空のときだけ boundingRect をフォールバックにする。
+  // 非空かつ全件画面外なら null（boundingRect が交差しても再表示しない）。
+  // 選択が完全に viewport 外なら null → clamp で画面端へボタンだけを残さず非表示にする。
+  const anchor = resolveAnchorRect(
+    clientRects,
+    boundingRect,
+    viewportWidth,
+    viewportHeight
+  );
+  if (!anchor) {
+    return null;
+  }
+
+  const { left, top } = clampExplainButtonPosition({
+    anchorRight: anchor.right,
+    anchorBottom: anchor.bottom,
+    viewportWidth,
+    viewportHeight,
+    buttonWidth: EXPLAIN_BUTTON_SIZE.width,
+    buttonHeight: EXPLAIN_BUTTON_SIZE.height,
+  });
+
+  return { text: trimmedText, left, top };
+};
+
 export default function NewsReaderScreen({
   articleId,
   onNavigate,
@@ -726,6 +837,10 @@ export default function NewsReaderScreen({
   >("info");
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
+  // 範囲選択→「解説」ボタン。選択文字列（trim済み）とボタン座標を保持する。null で非表示。
+  // 後続タスクで explain_selected_term 呼び出し・ダイアログ表示へ接続する（本タスクでは表示のみ）。
+  const [explainSelection, setExplainSelection] =
+    React.useState<ExplainSelectionState | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
   const [rankUpState, setRankUpState] = React.useState<{
     open: boolean;
@@ -757,6 +872,38 @@ export default function NewsReaderScreen({
     return () => {
       isMountedRef.current = false;
     };
+  }, []);
+
+  // 現在の DOM 選択から「解説」ボタン状態を更新する。無効な選択なら非表示にする。
+  const updateExplainSelection = React.useCallback(() => {
+    setExplainSelection(readExplainSelectionFromDom());
+  }, []);
+
+  // 選択・スクロール・リサイズを監視して「解説」ボタンの表示/位置を更新する。
+  // グローバルリスナーは必ず解除する（解除漏れ防止）。scroll は capture で内側スクロールも拾う。
+  React.useEffect(() => {
+    document.addEventListener("mouseup", updateExplainSelection);
+    document.addEventListener("selectionchange", updateExplainSelection);
+    window.addEventListener("scroll", updateExplainSelection, true);
+    window.addEventListener("resize", updateExplainSelection);
+    return () => {
+      document.removeEventListener("mouseup", updateExplainSelection);
+      document.removeEventListener("selectionchange", updateExplainSelection);
+      window.removeEventListener("scroll", updateExplainSelection, true);
+      window.removeEventListener("resize", updateExplainSelection);
+    };
+  }, [updateExplainSelection]);
+
+  // 記事が切り替わったら古い選択状態を残さない（本文が差し替わるため）。
+  React.useEffect(() => {
+    setExplainSelection(null);
+  }, [resolvedArticleId]);
+
+  // 「解説」ボタン押下の集約ハンドラ。
+  // 本タスクでは後続処理（explain_selected_term 呼び出し・ダイアログ表示・選択解除・辞書保存）は行わない。
+  // 選択文字列は explainSelection.text として保持済み。後続タスクはここへ接続する。
+  const handleExplainButtonClick = React.useCallback(() => {
+    // 後続タスクで実装（現時点では副作用なし。選択文字列はログへ出さない）。
   }, []);
 
   const loadArticle = React.useCallback(async () => {
@@ -1275,7 +1422,11 @@ export default function NewsReaderScreen({
                     )}
                   </Button>
                 </div>
-                <p className="text-sm leading-relaxed text-foreground">
+                {/* 範囲選択の対象領域（ニュース要約）。この要素内の選択のみ「解説」ボタン対象。 */}
+                <p
+                  data-explain-selectable="summary"
+                  className="text-sm leading-relaxed text-foreground"
+                >
                   {article.summary}
                 </p>
                 {summaryNotice ? (
@@ -1292,7 +1443,11 @@ export default function NewsReaderScreen({
                     ゆうこの解説
                   </h2>
                 </div>
-                <p className="text-sm leading-relaxed text-foreground">
+                {/* 範囲選択の対象領域（ゆうこの再説明）。この要素内の選択のみ「解説」ボタン対象。 */}
+                <p
+                  data-explain-selectable="explanation"
+                  className="text-sm leading-relaxed text-foreground"
+                >
                   {article.yuukoExplanation}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -1497,6 +1652,23 @@ export default function NewsReaderScreen({
           </Card>
         </aside>
       </div>
+
+      {/* 範囲選択の右下付近に出す「解説」ボタン（position: fixed / viewport 座標）。
+          onMouseDown で preventDefault し、押下時に選択が解除されないようにする。
+          押下処理は後続タスクへ集約（本タスクでは副作用なし）。 */}
+      {explainSelection ? (
+        <button
+          type="button"
+          aria-label="選択した用語を解説"
+          data-explain-button="true"
+          className="fixed z-50 rounded-md border border-[var(--yuuko-green)] bg-white px-2 py-1 text-xs font-medium text-[var(--yuuko-green)] shadow-md hover:bg-[var(--yuuko-green-light)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+          style={{ left: explainSelection.left, top: explainSelection.top }}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={handleExplainButtonClick}
+        >
+          解説
+        </button>
+      ) : null}
 
       <footer className="flex h-9 shrink-0 items-center justify-between border-t border-border/50 bg-white px-4">
         <div className="flex items-center gap-3">
