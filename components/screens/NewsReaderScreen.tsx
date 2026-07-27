@@ -903,10 +903,32 @@ export default function NewsReaderScreen({
     };
   }, [updateExplainSelection]);
 
-  // 記事が切り替わったら古い選択状態を残さない（本文が差し替わるため）。
-  // 範囲選択・「解説」ボタン・連打ガードを持ち越さない（古い用語解説結果は loadTermExplanation 側で除外）。
+  // 記事が「実際に別の記事へ」切り替わった時点で、旧記事の用語解説処理を即時無効化する。
+  // 記事Bの getArticleDetail 完了を待たず、旧 TermPopup・旧解説・選択・取得中/通知を消す。
+  // loadTermRequestIdRef を最初にインクリメントし、進行中の旧 explain_selected_term の遅延応答
+  //（成功・失敗・友情ポイント）が新記事の画面へ反映されないよう stale 化する。
+  // 初回マウントは対象外（既存の初期表示・loadArticle の初期設定を壊さない）。
+  const previousResolvedArticleIdRef = React.useRef(resolvedArticleId);
   React.useEffect(() => {
+    if (previousResolvedArticleIdRef.current === resolvedArticleId) {
+      return;
+    }
+    previousResolvedArticleIdRef.current = resolvedArticleId;
+
+    // 旧用語解説 request を無効化（早い段階で更新し、旧応答を stale 化する）。
+    loadTermRequestIdRef.current += 1;
+
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
     setExplainSelection(null);
+    setShowTermPopup(false);
+    setSelectedTerm(null);
+    setSelectedDictionaryEntry(null);
+    setIsLoadingTermExplanation(false);
+    setIsSavingDictionaryEntry(false);
+    setTermNotice(null);
+    setTermNoticeKind("info");
     explainInFlightRef.current = false;
   }, [resolvedArticleId]);
 

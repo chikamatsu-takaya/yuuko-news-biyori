@@ -626,6 +626,29 @@ const dispatchExplainClick = (page: Page) =>
     return true;
   });
 
+// 個別保留モードを無効化する（保留していない新規呼び出しを通常どおり即時解決させる）。
+const disableManualExplainGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_MANUAL_GATE__ =
+      false;
+  });
+
+// get_article_detail を呼び出しごとに個別保留するモードを有効化する（記事切替競合の再現用）。
+const enableArticleDetailGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_MANUAL_GATE__ =
+      true;
+  });
+
+// 到着順 index の get_article_detail 呼び出しを解放する（記事Bの詳細取得を任意時点で完了させる）。
+const releaseArticleDetail = (page: Page, index: number) =>
+  page.evaluate((i) => {
+    const resolvers =
+      (window as unknown as Record<string, Array<() => void>>)
+        .__E2E_ARTICLE_DETAIL_RESOLVERS__ ?? [];
+    resolvers[i]?.();
+  }, index);
+
 // 記事詳細のモック本文（get_article_detail のモックに対応）。
 const READER_SUMMARY_TEXT = "UI確認用のモックニュースです。";
 const READER_EXPLANATION_TEXT = "E2E用の要約です。";
@@ -1177,6 +1200,81 @@ test("reader: a stale explanation request must not release the guard of an in-fl
   await expect(
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toBeVisible();
+});
+
+test("reader: switching articles mid-request invalidates the old explanation and never resurfaces it", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+  await enableManualExplainGate(page);
+
+  // A: 記事Aの要約を選択して解説を開始（保留）。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainResolverCount(page)).toBe(1); // A 到着（保留中）
+
+  // 記事切替時の解除対象として、ブラウザSelectionと「解説」ボタンを再度用意する。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  expect((await currentSelectionText(page)).trim()).not.toBe("");
+
+  // 記事Bの getArticleDetail を保留する（B の内容がまだ返らない状態を維持）。
+  await enableArticleDetailGate(page);
+
+  // 関連記事から記事B（article-001）へ切り替える。
+  await page.getByRole("button", { name: "次の記事" }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+
+  // 記事IDがBへ変わった直後（Bの詳細はまだ保留）: 旧記事Aの状態が即時に消えている。
+  await expect
+    .poll(async () => (await currentSelectionText(page)).trim())
+    .toBe(""); // ブラウザSelectionが空
+  await expect(explainButton(page)).toHaveCount(0); // 「解説」ボタンなし
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0); // 記事AのTermPopup・用語見出しなし
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0); // 辞書保存不可
+  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0); // 取得中表示なし
+  await expect(page.getByRole("button", { name: "再試行" })).toHaveCount(0); // 失敗通知・再試行なし
+
+  // 記事Bの詳細を保留したまま、旧記事Aの explain_selected_term だけを完了させる。
+  await releaseExplainCall(page, 0);
+  await page.waitForTimeout(300);
+  // 旧記事Aのポップアップ・解説・辞書保存ボタンが再表示されない。
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toHaveCount(0);
+  // 旧記事Aの失敗通知・生エラー・内部パスも表示されない。
+  await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 以降の用語解説は通常どおり即時解決させる（記事Bのフローを正常化）。
+  await disableManualExplainGate(page);
+
+  // 記事Bの getArticleDetail を完了 → 記事Bの内容と既存候補語ポップアップが正常表示される。
+  await releaseArticleDetail(page, 0);
+  await expect(
+    page.getByRole("heading", { name: "E2E用語" })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(2); // 記事Bの候補語解説
+
+  // 記事Bで新しく文字列を選択して解説を実行できる。
+  // 「次の記事」押下でスクロール位置が下がっているため、要約を可視位置へ戻してから選択する。
+  await scrollSelectableContainer(page, "top");
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(3);
+  const bArgs = await lastExplainTermArgs(page);
+  expect(bArgs.selectedText).toBe(READER_SUMMARY_TEXT);
 });
 
 test("settings save keeps morning and afternoon work time ranges", async ({
@@ -2884,11 +2982,20 @@ async function installTauriMocks(page: Page) {
             }
             return [articleHistoryItem];
           }
-          case "get_article_detail":
+          case "get_article_detail": {
             // 選択した記事IDが NewsReaderScreen 経由で渡っていることを検証するために記録する。
             /* eslint-disable @typescript-eslint/no-explicit-any */
-            (window as any).__E2E_ARTICLE_DETAIL_REQUESTED_ID__ =
-              params.articleId;
+            const detailWin = window as any;
+            detailWin.__E2E_ARTICLE_DETAIL_REQUESTED_ID__ = params.articleId;
+            // 個別保留モード: 有効時は呼び出しごとに専用 Promise を待ち、resolver を到着順に積む。
+            // 記事Bの詳細取得を保留したまま旧記事Aの状態消去を検証するために使う。
+            if (detailWin.__E2E_ARTICLE_DETAIL_MANUAL_GATE__) {
+              const resolvers = (detailWin.__E2E_ARTICLE_DETAIL_RESOLVERS__ =
+                detailWin.__E2E_ARTICLE_DETAIL_RESOLVERS__ || []);
+              await new Promise((resolve) => {
+                resolvers.push(resolve);
+              });
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
@@ -2898,6 +3005,7 @@ async function installTauriMocks(page: Page) {
               yuukoComment: "UI確認中だよ。",
               keywordCandidates: ["E2E用語", "Playwright"],
             };
+          }
           case "update_article_favorite":
             return params;
           case "generate_article_summary":
