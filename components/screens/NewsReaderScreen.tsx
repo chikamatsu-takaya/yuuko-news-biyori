@@ -471,6 +471,8 @@ function TermPopup({
           ) : null}
         </div>
         <button
+          type="button"
+          aria-label="閉じる"
           className="text-muted-foreground transition-colors hover:text-foreground"
           onClick={onClose}
         >
@@ -487,7 +489,9 @@ function TermPopup({
 
       {notice ? (
         <Alert role="presentation" className="mb-3 border-[var(--yuuko-green)]/30 bg-white p-2">
-          <div className="flex items-start gap-2">
+          {/* Alert は grid-cols-[0_1fr]（直下 svg が無いと col1 幅0）。ここは svg を直下に置かず
+              独自レイアウトのため、col-span-2 で全幅を確保しないと補助説明が幅0で不可視になる。 */}
+          <div className="col-span-2 flex items-start gap-2">
             <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <span
@@ -838,7 +842,7 @@ export default function NewsReaderScreen({
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
   // 範囲選択→「解説」ボタン。選択文字列（trim済み）とボタン座標を保持する。null で非表示。
-  // 後続タスクで explain_selected_term 呼び出し・ダイアログ表示へ接続する（本タスクでは表示のみ）。
+  // 押下時は handleExplainButtonClick が既存の用語解説経路（selectedTerm→TermPopup）へ接続する。
   const [explainSelection, setExplainSelection] =
     React.useState<ExplainSelectionState | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
@@ -853,6 +857,11 @@ export default function NewsReaderScreen({
   const loadArticleRequestIdRef = React.useRef(0);
   const loadRelatedRequestIdRef = React.useRef(0);
   const loadTermRequestIdRef = React.useRef(0);
+  // 「解説」ボタン連打による用語解説 command の重複呼び出しを防ぐ同期ガード。
+  // state 更新の反映を待たずに再入を弾くため useRef を使う。
+  const explainInFlightRef = React.useRef(false);
+  // 選択由来の用語へ内部用 id を振る連番。選択文字列全文を id へ埋め込まないための採番。
+  const explainSelectionSeqRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
@@ -895,16 +904,50 @@ export default function NewsReaderScreen({
   }, [updateExplainSelection]);
 
   // 記事が切り替わったら古い選択状態を残さない（本文が差し替わるため）。
+  // 範囲選択・「解説」ボタン・連打ガードを持ち越さない（古い用語解説結果は loadTermExplanation 側で除外）。
   React.useEffect(() => {
     setExplainSelection(null);
+    explainInFlightRef.current = false;
   }, [resolvedArticleId]);
 
   // 「解説」ボタン押下の集約ハンドラ。
-  // 本タスクでは後続処理（explain_selected_term 呼び出し・ダイアログ表示・選択解除・辞書保存）は行わない。
-  // 選択文字列は explainSelection.text として保持済み。後続タスクはここへ接続する。
+  // 選択文字列を既存の用語解説経路へ接続する。explainSelectedTerm は直接呼ばず、
+  // selectedTerm 更新 + showTermPopup=true → loadTermExplanation → explainSelectedTerm という
+  // 既存の state 駆動フロー（記事ID・selectedText 受け渡し・取得中/成功/失敗表示・辞書保存・
+  // リクエストIDによる古い応答除外・友情ポイント）をそのまま再利用する。
   const handleExplainButtonClick = React.useCallback(() => {
-    // 後続タスクで実装（現時点では副作用なし。選択文字列はログへ出さない）。
-  }, []);
+    // 連打の同期ガード。state 反映を待たずに再入を弾く（重複 command 呼び出し防止）。
+    if (explainInFlightRef.current) {
+      return;
+    }
+    // 先に選択文字列（trim 済み）をローカル変数へ退避する。これ以降に選択を解除しても失われない。
+    const selectedText = explainSelection?.text.trim() ?? "";
+    if (!selectedText) {
+      return;
+    }
+    explainInFlightRef.current = true;
+
+    // 選択文字列を既存 selectedTerm 形式へ変換する。
+    // id は内部用の連番のみ（選択文字列全文は id にも data 属性にも入れない）。
+    // explanation には既存の簡易 fallback 説明を持たせ、取得失敗時の補助説明に使えるようにする。
+    explainSelectionSeqRef.current += 1;
+    const selectionTerm: SupportTerm = {
+      id: `selection-${explainSelectionSeqRef.current}`,
+      term: selectedText,
+      explanation: defaultTermExplanation(selectedText),
+    };
+
+    // 文字列は退避済みなので、ここでブラウザ選択を解除し「解説」ボタンを隠しても失われない。
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
+    setExplainSelection(null);
+
+    // 既存経路へ接続: selectedTerm 更新 + showTermPopup=true で loadTermExplanation が走り、
+    // その中で explainSelectedTerm({ articleId: article.id, selectedText: selectedTerm.term }) が呼ばれる。
+    setSelectedTerm(selectionTerm);
+    setShowTermPopup(true);
+  }, [explainSelection]);
 
   const loadArticle = React.useCallback(async () => {
     loadArticleRequestIdRef.current += 1;
@@ -1033,6 +1076,8 @@ export default function NewsReaderScreen({
       setIsSavingDictionaryEntry(false);
       setTermNotice(null);
       setTermNoticeKind("info");
+      // ポップアップを閉じた等でここへ来た場合も連打ガードを解除しておく（次の解説を妨げない）。
+      explainInFlightRef.current = false;
       return;
     }
 
@@ -1088,11 +1133,15 @@ export default function NewsReaderScreen({
       setTermNoticeKind("error");
       console.warn("Failed to explain selected term:", error);
     } finally {
+      // 最新requestのみローディング状態と連打ガードを解除する。
+      // 古いrequest（例: 閉じて古くなったAの遅延完了）が、実行中の新しいB/Cのガードを
+      // 誤って解除しないようにする（成功・失敗どちらの完了でも同条件）。
       if (
         isMountedRef.current &&
         requestId === loadTermRequestIdRef.current
       ) {
         setIsLoadingTermExplanation(false);
+        explainInFlightRef.current = false;
       }
     }
   }, [article.id, article.title, selectedTerm, showTermPopup]);
@@ -1655,7 +1704,7 @@ export default function NewsReaderScreen({
 
       {/* 範囲選択の右下付近に出す「解説」ボタン（position: fixed / viewport 座標）。
           onMouseDown で preventDefault し、押下時に選択が解除されないようにする。
-          押下処理は後続タスクへ集約（本タスクでは副作用なし）。 */}
+          onClick で選択文字列を確定し、既存の用語解説（TermPopup）へ接続する。 */}
       {explainSelection ? (
         <button
           type="button"
