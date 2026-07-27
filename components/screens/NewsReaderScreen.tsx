@@ -54,7 +54,7 @@ import { useToast } from "@/hooks/use-toast";
 // 範囲選択→「解説」ボタン表示の純粋ロジック（DOM非依存・node --test 済み）。
 import {
   shouldShowExplainButton,
-  pickAnchorRect,
+  resolveAnchorRect,
   clampExplainButtonPosition,
 } from "@/lib/explain-selection.mjs";
 
@@ -730,25 +730,46 @@ const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
     return null;
   }
 
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
   const clientRects = Array.from(range.getClientRects()).map((rect) => ({
+    left: rect.left,
+    top: rect.top,
     right: rect.right,
     bottom: rect.bottom,
     width: rect.width,
     height: rect.height,
   }));
+
   const bounding = range.getBoundingClientRect();
-  const anchor = pickAnchorRect(clientRects, {
+  const boundingRect = {
+    left: bounding.left,
+    top: bounding.top,
     right: bounding.right,
     bottom: bounding.bottom,
     width: bounding.width,
     height: bounding.height,
-  });
+  };
+
+  // 可視矩形の最後を採用。getClientRects が空のときだけ boundingRect をフォールバックにする。
+  // 非空かつ全件画面外なら null（boundingRect が交差しても再表示しない）。
+  // 選択が完全に viewport 外なら null → clamp で画面端へボタンだけを残さず非表示にする。
+  const anchor = resolveAnchorRect(
+    clientRects,
+    boundingRect,
+    viewportWidth,
+    viewportHeight
+  );
+  if (!anchor) {
+    return null;
+  }
 
   const { left, top } = clampExplainButtonPosition({
     anchorRight: anchor.right,
     anchorBottom: anchor.bottom,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
+    viewportWidth,
+    viewportHeight,
     buttonWidth: EXPLAIN_BUTTON_SIZE.width,
     buttonHeight: EXPLAIN_BUTTON_SIZE.height,
   });

@@ -755,6 +755,47 @@ test("reader: resizing the viewport recalculates the 解説 button position", as
   expect(afterBox!.y + afterBox!.height).toBeLessThanOrEqual(newHeight);
 });
 
+// 選択領域を含むスクロール可能な親要素を上下端へスクロールする（scroll は capture リスナーが拾う）。
+const scrollSelectableContainer = (page: Page, to: "top" | "bottom") =>
+  page.evaluate((position) => {
+    const target = document.querySelector('[data-explain-selectable="summary"]');
+    let element = target?.parentElement ?? null;
+    while (element) {
+      const style = getComputedStyle(element);
+      if (
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        element.scrollHeight > element.clientHeight
+      ) {
+        break;
+      }
+      element = element.parentElement;
+    }
+    if (!element) {
+      return false;
+    }
+    element.scrollTop = position === "bottom" ? element.scrollHeight : 0;
+    return true;
+  }, to);
+
+test("reader: scrolling the selection out of the viewport hides the 解説 button (and back shows it)", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // 選択範囲（要約は上部）を含むスクロール領域を最下部までスクロール → 選択が完全に画面外（上）へ出る。
+  const scrolledDown = await scrollSelectableContainer(page, "bottom");
+  expect(scrolledDown).toBe(true);
+
+  // 画面外へ出たら「解説」ボタンは非表示（clamp で画面端へ残さない）。
+  await expect(explainButton(page)).toHaveCount(0);
+
+  // 元の位置へ戻す → Selection が維持されていれば再表示される（Chromium は scroll で選択を保持）。
+  await scrollSelectableContainer(page, "top");
+  await expect(explainButton(page)).toBeVisible();
+});
+
 test("reader: existing 用語サポート candidate click still opens the term popup", async ({
   page,
 }) => {
