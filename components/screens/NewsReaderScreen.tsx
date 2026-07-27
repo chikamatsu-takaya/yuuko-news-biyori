@@ -57,6 +57,8 @@ import {
   resolveAnchorRect,
   clampExplainButtonPosition,
 } from "@/lib/explain-selection.mjs";
+// 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
+import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
 
 type NavigationItem = {
   id: string;
@@ -452,18 +454,198 @@ function TermPopup({
   onClose: () => void;
   onRetry?: () => void;
 }) {
+  // 中央配置からのドラッグオフセット（px）。位置は永続化しない。
+  // 閉じる/記事切替は再マウントで初期化、別用語への切替は term 変更の effect で初期化する。
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const [offset, setOffset] = React.useState({ x: 0, y: 0 });
+  const offsetRef = React.useRef(offset);
+  // ドラッグ状態（pointerId・開始座標・開始オフセット）。差分積み上げではなく開始基準で毎回算出する。
+  const dragStateRef = React.useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startOffsetX: number;
+    startOffsetY: number;
+  } | null>(null);
+
+  const applyOffset = React.useCallback((next: { x: number; y: number }) => {
+    offsetRef.current = next;
+    setOffset(next);
+  }, []);
+
+  // 希望オフセットを main 表示領域内（8px 余白）へ補正する。main と popup の実サイズを基準にする。
+  const clampToMain = React.useCallback(
+    (rawX: number, rawY: number): { x: number; y: number } => {
+      const rootEl = rootRef.current;
+      const mainEl = rootEl?.closest("main") ?? null;
+      if (!rootEl || !mainEl) {
+        return { x: rawX, y: rawY };
+      }
+      const mainRect = mainEl.getBoundingClientRect();
+      const popupRect = rootEl.getBoundingClientRect();
+      const { dx, dy } = clampTermPopupOffset({
+        offsetX: rawX,
+        offsetY: rawY,
+        mainWidth: mainRect.width,
+        mainHeight: mainRect.height,
+        popupWidth: popupRect.width,
+        popupHeight: popupRect.height,
+        margin: 8,
+      });
+      return { x: dx, y: dy };
+    },
+    []
+  );
+
+  // 位置は永続化しない。中央初期位置への復帰は、呼び出し側の key（記事ID＋用語）で
+  // 再マウントさせて実現する（閉じて再開・別用語・記事切替のいずれでも新規マウント＝中央）。
+
+  // resize と高さ変化（取得中→成功など）で表示領域内へ再補正する。リスナー/Observerは必ず解除する。
+  React.useEffect(() => {
+    const reclamp = () => {
+      applyOffset(clampToMain(offsetRef.current.x, offsetRef.current.y));
+    };
+    window.addEventListener("resize", reclamp);
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined" && rootRef.current) {
+      observer = new ResizeObserver(() => reclamp());
+      observer.observe(rootRef.current);
+    }
+    return () => {
+      window.removeEventListener("resize", reclamp);
+      observer?.disconnect();
+    };
+  }, [applyOffset, clampToMain]);
+
+  // アンマウント時にドラッグ状態と pointer capture を確実に解除する。
+  React.useEffect(() => {
+    const rootEl = rootRef.current;
+    return () => {
+      const drag = dragStateRef.current;
+      if (drag && rootEl) {
+        try {
+          rootEl.releasePointerCapture(drag.pointerId);
+        } catch {
+          // capture 済みでなければ無視。
+        }
+      }
+      dragStateRef.current = null;
+    };
+  }, []);
+
+  // ドラッグ禁止領域（文字・ボタン・リンク・入力・スクロールバー）を子要素含めて判定する。
+  const NO_DRAG_SELECTOR =
+    'button, a, input, textarea, select, option, [contenteditable="true"], [role="button"], [role="link"], [data-term-popup-no-drag="true"]';
+
+  // スクロール可能要素のスクロールバー上での押下ではドラッグを開始しない。
+  const isOnScrollbar = (
+    target: EventTarget | null,
+    clientX: number,
+    clientY: number
+  ): boolean => {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    const hasVertical = target.scrollHeight > target.clientHeight;
+    const hasHorizontal = target.scrollWidth > target.clientWidth;
+    if (!hasVertical && !hasHorizontal) {
+      return false;
+    }
+    const rect = target.getBoundingClientRect();
+    const onVertical = hasVertical && clientX >= rect.left + target.clientWidth;
+    const onHorizontal =
+      hasHorizontal && clientY >= rect.top + target.clientHeight;
+    return onVertical || onHorizontal;
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // 主ポインターの左ボタンのみ。既に別ポインターでドラッグ中なら無視。
+    if (!event.isPrimary) {
+      return;
+    }
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+    if (dragStateRef.current) {
+      return;
+    }
+    const target = event.target as Element | null;
+    // 文字・操作要素・スクロールバーからはドラッグ開始しない（文字選択/クリック/フォーカスを維持）。
+    if (target && target.closest(NO_DRAG_SELECTOR)) {
+      return;
+    }
+    if (isOnScrollbar(target, event.clientX, event.clientY)) {
+      return;
+    }
+
+    // 有効なドラッグ開始時だけ preventDefault する。
+    event.preventDefault();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startOffsetX: offsetRef.current.x,
+      startOffsetY: offsetRef.current.y,
+    };
+    try {
+      // ダイアログ外へ出ても move/終了イベントを受け取れるよう capture する。
+      rootRef.current?.setPointerCapture(event.pointerId);
+    } catch {
+      // capture 不可でも通常のイベント経路で継続する。
+    }
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    // 開始座標＋開始オフセットから毎回算出する（差分積み上げはイベント欠落でずれるため避ける）。
+    const rawX = drag.startOffsetX + (event.clientX - drag.startX);
+    const rawY = drag.startOffsetY + (event.clientY - drag.startY);
+    applyOffset(clampToMain(rawX, rawY));
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    dragStateRef.current = null;
+    try {
+      rootRef.current?.releasePointerCapture(drag.pointerId);
+    } catch {
+      // 既に解除済みなら無視。
+    }
+  };
+
   return (
-    <div className="absolute left-1/2 top-1/2 z-50 w-80 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
+    <div
+      ref={rootRef}
+      data-term-popup="true"
+      data-term-popup-drag-surface="true"
+      className="absolute left-1/2 top-1/2 z-50 w-80 rounded-xl border border-border/50 bg-white p-4 shadow-lg"
+      style={{
+        transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
+      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
+    >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-foreground">{term}</h4>
+        <div data-term-popup-no-drag="true">
+          <h4 className="cursor-text text-sm font-semibold text-foreground">
+            {term}
+          </h4>
           {dictionaryEntry ? (
             <div className="mt-1 flex items-center gap-2">
               <Badge variant="outline" className="text-[10px]">
                 {dictionaryTypeLabel(dictionaryEntry.type)}
               </Badge>
               {dictionaryEntry.relatedArticleTitle ? (
-                <span className="text-[10px] text-muted-foreground">
+                <span className="cursor-text text-[10px] text-muted-foreground">
                   {dictionaryEntry.relatedArticleTitle}
                 </span>
               ) : null}
@@ -481,7 +663,10 @@ function TermPopup({
       </div>
 
       {isLoading ? (
-        <div className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <div
+          data-term-popup-no-drag="true"
+          className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
           <Spinner className="size-4" />
           <span>用語解説を取得しています…</span>
         </div>
@@ -491,7 +676,7 @@ function TermPopup({
         <Alert role="presentation" className="mb-3 border-[var(--yuuko-green)]/30 bg-white p-2">
           {/* Alert は grid-cols-[0_1fr]（直下 svg が無いと col1 幅0）。ここは svg を直下に置かず
               独自レイアウトのため、col-span-2 で全幅を確保しないと補助説明が幅0で不可視になる。 */}
-          <div className="col-span-2 flex items-start gap-2">
+          <div className="col-span-2 flex items-start gap-2" data-term-popup-no-drag="true">
             <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <span
@@ -518,10 +703,16 @@ function TermPopup({
 
       {dictionaryEntry ? (
         <div className="space-y-2">
-          <p className="text-xs font-medium leading-relaxed text-foreground">
+          <p
+            data-term-popup-no-drag="true"
+            className="cursor-text text-xs font-medium leading-relaxed text-foreground"
+          >
             {dictionaryEntry.shortExplanation}
           </p>
-          <p className="text-xs leading-relaxed text-muted-foreground">
+          <p
+            data-term-popup-no-drag="true"
+            className="cursor-text text-xs leading-relaxed text-muted-foreground"
+          >
             {dictionaryEntry.detailExplanation}
           </p>
           <div className="pt-1">
@@ -548,7 +739,10 @@ function TermPopup({
           </div>
         </div>
       ) : (
-        <p className="text-xs leading-relaxed text-muted-foreground">
+        <p
+          data-term-popup-no-drag="true"
+          className="cursor-text text-xs leading-relaxed text-muted-foreground"
+        >
           用語解説を表示できませんでした。
         </p>
       )}
@@ -887,9 +1081,15 @@ export default function NewsReaderScreen({
   }, []);
 
   // 現在の DOM 選択から「解説」ボタン状態を更新する。無効な選択なら非表示にする。
+  // TermPopup 表示中は背面選択を解説候補にしない（背面 selectionchange で解説ボタンを出さない）。
+  // ポップアップ内の文字選択自体はここでは解除しない（Selection を触らない）。
   const updateExplainSelection = React.useCallback(() => {
+    if (showTermPopup) {
+      setExplainSelection(null);
+      return;
+    }
     setExplainSelection(readExplainSelectionFromDom());
-  }, []);
+  }, [showTermPopup]);
 
   // 選択・スクロール・リサイズを監視して「解説」ボタンの表示/位置を更新する。
   // グローバルリスナーは必ず解除する（解除漏れ防止）。scroll は capture で内側スクロールも拾う。
@@ -905,6 +1105,18 @@ export default function NewsReaderScreen({
       window.removeEventListener("resize", updateExplainSelection);
     };
   }, [updateExplainSelection]);
+
+  // TermPopup を開いた瞬間だけ、背面に残る Selection を解除し旧「解説」ボタンを消す。
+  // 開いた後にユーザーがポップアップ内の解説文を選択しても解除しない（依存は showTermPopup のみ）。
+  React.useEffect(() => {
+    if (!showTermPopup) {
+      return;
+    }
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
+    setExplainSelection(null);
+  }, [showTermPopup]);
 
   // 記事が「実際に別の記事へ」切り替わった時点で、旧記事の用語解説処理を即時無効化する。
   // 記事Bの getArticleDetail 完了を待たず、旧 TermPopup・旧解説・選択・取得中/通知を消す。
@@ -1426,7 +1638,13 @@ export default function NewsReaderScreen({
         </aside>
 
         <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-6">
+          {/* TermPopup 表示中は背面の記事本文を選択不可にする（背面選択→「解説」ボタン誤表示を防ぐ）。
+              TermPopup は main 直下・このスクロール領域の外にあるため巻き込まれない。 */}
+          <div
+            className={`flex-1 overflow-y-auto p-6${
+              showTermPopup ? " select-none" : ""
+            }`}
+          >
             <Breadcrumb onNavigate={onNavigate} />
 
             <Card className="mb-4 border-0 py-4 shadow-sm">
@@ -1688,6 +1906,9 @@ export default function NewsReaderScreen({
 
           {showTermPopup && selectedTerm ? (
             <TermPopup
+              // 記事ID＋用語の一意ID で key を変える。表示文字列が同じでも別ID用語へ切り替われば
+              // 再マウントし、ドラッグ位置・pointerId・capture 等の一時状態を中央初期化する。
+              key={`${resolvedArticleId}::${selectedTerm.id}`}
               term={selectedTerm.term}
               dictionaryEntry={selectedDictionaryEntry}
               isLoading={isLoadingTermExplanation}
