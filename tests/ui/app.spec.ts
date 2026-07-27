@@ -567,6 +567,164 @@ const collapseSelection = (page: Page) =>
 const explainButton = (page: Page) =>
   page.getByRole("button", { name: "選択した用語を解説" });
 
+// 用語解説 command（explain_selected_term）の累計呼び出し回数（連打の重複検証用）。
+const explainTermCallCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, number>)
+        .__E2E_EXPLAIN_TERM_CALL_COUNT__ ?? 0
+  );
+
+// explain_selected_term に最後に渡った引数（記事ID・selectedText の受け渡し検証用）。
+const lastExplainTermArgs = (page: Page) =>
+  page.evaluate(() => {
+    const w = window as unknown as Record<string, string | undefined>;
+    return {
+      articleId: w.__E2E_EXPLAIN_TERM_LAST_ARTICLE_ID__ ?? null,
+      selectedText: w.__E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__ ?? null,
+    };
+  });
+
+// 現在のブラウザ選択文字列（押下後に解除されているかの検証用）。
+const currentSelectionText = (page: Page) =>
+  page.evaluate(() => window.getSelection()?.toString() ?? "");
+
+// explain_selected_term を呼び出しごとに個別保留するモードを有効化する（非同期競合の再現用）。
+const enableManualExplainGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_MANUAL_GATE__ =
+      true;
+  });
+
+// 個別保留モードで到着した呼び出し数（＝保留中 resolver の数）。
+const explainResolverCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        (window as unknown as Record<string, Array<() => void>>)
+          .__E2E_EXPLAIN_TERM_RESOLVERS__ ?? []
+      ).length
+  );
+
+// 到着順 index の呼び出しを個別に解放する（A・B を独立に完了させるため）。
+const releaseExplainCall = (page: Page, index: number) =>
+  page.evaluate((i) => {
+    const resolvers =
+      (window as unknown as Record<string, Array<() => void>>)
+        .__E2E_EXPLAIN_TERM_RESOLVERS__ ?? [];
+    resolvers[i]?.();
+  }, index);
+
+// 「解説」ボタンのクリックを同期発火する（ポップアップ表示中の重なりに影響されずハンドラを呼ぶ）。
+const dispatchExplainClick = (page: Page) =>
+  page.evaluate(() => {
+    const btn = document.querySelector('[data-explain-button="true"]');
+    if (!btn) {
+      return false;
+    }
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    return true;
+  });
+
+// 個別保留モードを無効化する（保留していない新規呼び出しを通常どおり即時解決させる）。
+const disableManualExplainGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_MANUAL_GATE__ =
+      false;
+  });
+
+// get_article_detail を呼び出しごとに個別保留するモードを有効化する（記事切替競合の再現用）。
+const enableArticleDetailGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_MANUAL_GATE__ =
+      true;
+  });
+
+// 到着順 index の get_article_detail 呼び出しを解放する（記事Bの詳細取得を任意時点で完了させる）。
+const releaseArticleDetail = (page: Page, index: number) =>
+  page.evaluate((i) => {
+    const resolvers =
+      (window as unknown as Record<string, Array<() => void>>)
+        .__E2E_ARTICLE_DETAIL_RESOLVERS__ ?? [];
+    resolvers[i]?.();
+  }, index);
+
+// save_dictionary_entry を呼び出しごとに個別保留するモードを有効化する（辞書保存競合の再現用）。
+const enableSaveDictionaryGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_SAVE_DICTIONARY_MANUAL_GATE__ =
+      true;
+  });
+
+// save_dictionary_entry の累計呼び出し回数（重複送信検証用）。
+const saveDictionaryCallCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, number>)
+        .__E2E_SAVE_DICTIONARY_CALL_COUNT__ ?? 0
+  );
+
+// 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
+const saveDictionaryControllerCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        (window as unknown as Record<string, unknown[]>)
+          .__E2E_SAVE_DICTIONARY_CONTROLLERS__ ?? []
+      ).length
+  );
+
+type SaveController = { resolve: () => void; reject: () => void };
+
+// 到着順 index の保存呼び出しを成功/失敗で個別に解放する。
+const releaseSaveDictionary = (
+  page: Page,
+  index: number,
+  outcome: "success" | "failure"
+) =>
+  page.evaluate(
+    ({ i, kind }) => {
+      const controllers =
+        (window as unknown as Record<string, SaveController[]>)
+          .__E2E_SAVE_DICTIONARY_CONTROLLERS__ ?? [];
+      const controller = controllers[i];
+      if (!controller) {
+        return;
+      }
+      if (kind === "success") {
+        controller.resolve();
+      } else {
+        controller.reject();
+      }
+    },
+    { i: index, kind: outcome }
+  );
+
+// 記事詳細のモック本文（get_article_detail のモックに対応）。
+const READER_SUMMARY_TEXT = "UI確認用のモックニュースです。";
+const READER_EXPLANATION_TEXT = "E2E用の要約です。";
+// 用語解説成功時にポップアップへ出るモック解説（explain_selected_term のモックに対応）。
+const READER_TERM_DETAIL_TEXT =
+  "E2Eテストで辞書画面を安定表示するためのモックです。";
+
+// 初期の用語解説ポップアップ（既定の候補語）が安定表示されるまで待ち、呼び出し回数を0へ揃える。
+// 初期ロードでも explain_selected_term が1回呼ばれるため、以降の検証前にリセットする。
+const settleInitialPopupAndResetCount = async (page: Page) => {
+  await expect(
+    page.getByRole("heading", { name: "E2E用語" })
+  ).toBeVisible();
+  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
+  await page.evaluate(() => {
+    (window as unknown as Record<string, number>).__E2E_EXPLAIN_TERM_CALL_COUNT__ = 0;
+  });
+};
+
+// 記事詳細をホームのニュースカードから開き、初期ポップアップを整える。
+const openReaderAndSettleInitialPopup = async (page: Page) => {
+  await openReaderFromHome(page);
+  await settleInitialPopupAndResetCount(page);
+};
+
 test("reader: selecting summary text shows the 解説 button within the viewport", async ({
   page,
 }) => {
@@ -808,6 +966,441 @@ test("reader: existing 用語サポート candidate click still opens the term p
   // （範囲選択ボタンが既存クリック処理を妨げていないことの確認）
   await expect(
     page.getByRole("heading", { name: "Playwright" })
+  ).toBeVisible();
+});
+
+test("reader: pressing 解説 on a summary selection opens the term popup for the selection", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  // ニュース要約を選択 → 「解説」ボタンが出る。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // 「解説」を押す。
+  await explainButton(page).click();
+
+  // 選択文字列が用語名（見出し）として表示される。
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  // ボタン押下後は「解説」ボタンが消え、ブラウザ選択も解除される。
+  await expect(explainButton(page)).toHaveCount(0);
+  expect((await currentSelectionText(page)).trim()).toBe("");
+
+  // 既存経路で article.id と selectedText（選択文字列）が渡っている。
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  const args = await lastExplainTermArgs(page);
+  expect(args.articleId).toBe("e2e-article-1");
+  expect(args.selectedText).toBe(READER_SUMMARY_TEXT);
+});
+
+test("reader: pressing 解説 on the re-explanation selection also opens the popup", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  // ゆうこの再説明を選択 → 「解説」ボタン → ポップアップが選択文字列で開く。
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+
+  await expect(
+    page.getByRole("heading", { name: READER_EXPLANATION_TEXT })
+  ).toBeVisible();
+  const args = await lastExplainTermArgs(page);
+  expect(args.selectedText).toBe(READER_EXPLANATION_TEXT);
+});
+
+test("reader: 解説 shows the loading state then the explanation on success", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  // explain_selected_term を保留させるゲートを仕込む（取得中表示を安定して観測するため）。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_EXPLAIN_TERM_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_EXPLAIN_TERM__ = resolve;
+    });
+  });
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  // 取得中の表示が出る。
+  await expect(page.getByText("用語解説を取得しています…")).toBeVisible();
+
+  // ゲートを解放 → 成功時の解説が表示され、取得中表示は消える。
+  await page.evaluate(() =>
+    (window as unknown as Record<string, () => void>).__E2E_RELEASE_EXPLAIN_TERM__()
+  );
+  await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
+  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
+});
+
+test("reader: 解説 command failure shows a safe helper text and 再試行, and reading continues", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  // 用語解説 command を失敗させる。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = true;
+  });
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  // 安全な補助説明（失敗の通知）が表示される。
+  await expect(
+    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
+  ).toBeVisible();
+  // 生エラー文言・内部パスはUIへ出ない。
+  await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 再試行ボタンが出る。
+  const retry = page.getByRole("button", { name: "再試行" });
+  await expect(retry).toBeVisible();
+  // 失敗してもニュース閲覧は継続できる（記事本文が表示され続ける）。
+  await expect(page.getByText(READER_SUMMARY_TEXT).first()).toBeVisible();
+
+  // 失敗フラグを解除して再試行 → 解説が表示され、失敗表示が消える。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = false;
+  });
+  await retry.click();
+  await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
+  await expect(
+    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
+  ).toHaveCount(0);
+});
+
+test("reader: spamming the 解説 button calls explain_selected_term only once", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // 同一 tick 内で複数回クリックを同期的に発火させる（state 反映前の連打を再現）。
+  const dispatched = await page.evaluate(() => {
+    const btn = document.querySelector('[data-explain-button="true"]');
+    if (!btn) {
+      return false;
+    }
+    for (let i = 0; i < 5; i += 1) {
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+    return true;
+  });
+  expect(dispatched).toBe(true);
+
+  // ポップアップは開くが、command 呼び出しは1回だけ。
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  // 少し待っても増えない（遅延した重複呼び出しがない）。
+  await page.waitForTimeout(200);
+  expect(await explainTermCallCount(page)).toBe(1);
+});
+
+test("reader: closing the popup then selecting another text opens it again", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  // 1つ目の選択で解説を開く。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+
+  // ポップアップを閉じる（アクセシブルな「閉じる」ボタン）。閉じてもニュース閲覧は継続できる。
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0);
+  await expect(page.getByText(READER_SUMMARY_TEXT).first()).toBeVisible();
+
+  // 別の文字列（再説明）を選択して再度「解説」を押すと、新しい選択でポップアップが開く。
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_EXPLANATION_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(2);
+});
+
+test("reader: the dictionary save button is usable from a selection explanation", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+
+  // 既存の「辞書に保存」を実行できる → 保存済み表示になる。
+  const save = page.getByRole("button", { name: "辞書に保存" });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
+});
+
+test("reader: switching articles clears the previous selection and its explanation", async ({
+  page,
+}) => {
+  // 記事詳細内の関連記事（rec-1）へ切り替えるためプールを2件用意する。
+  // プール2件だとホーム一覧のカード名が「件数記事N」になるため、当日ニュース一覧から記事Aを開く。
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_RECOMMENDED_POOL__ = 2;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("e2e-article-1");
+  await settleInitialPopupAndResetCount(page);
+
+  // 記事Aで要約を選択して解説を開く。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+
+  // 関連記事（件数記事1 = rec-1）へ切り替える。
+  await page.getByRole("button", { name: /件数記事1/ }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("rec-1");
+
+  // 前記事の選択由来の見出し・「解説」ボタンは残らない。
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0);
+  await expect(explainButton(page)).toHaveCount(0);
+  // 新しい記事のニュース閲覧は継続できる（既定の候補語ポップアップに戻る）。
+  await expect(
+    page.getByRole("heading", { name: "E2E用語" })
+  ).toBeVisible();
+});
+
+test("reader: a stale explanation request must not release the guard of an in-flight newer one", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+  // 以降の explain_selected_term を到着順に個別保留する。
+  await enableManualExplainGate(page);
+
+  // A: 要約を選択して解説を開始（保留）。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainResolverCount(page)).toBe(1); // A 到着
+  expect(await explainTermCallCount(page)).toBe(1);
+
+  // A のポップアップを閉じ、A を古い request にする（早期returnでガード解除される）。
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0);
+
+  // B: 別の文字列（再説明）を選択して解説を開始（保留）。B が最新 request になる。
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_EXPLANATION_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainResolverCount(page)).toBe(2); // B 到着
+  expect(await explainTermCallCount(page)).toBe(2);
+
+  // 古い A だけを完了させる（B は実行中のまま）。
+  await releaseExplainCall(page, 0);
+  // A の遅延完了が B の連打ガードを解除していないことを、実効的に確認する:
+  // C を選択して「解説」を押しても、B 実行中なので command 呼び出しは開始されない。
+  // （B のポップアップ表示中の重なりを避けるため、クリックは同期発火する）
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await dispatchExplainClick(page);
+  await page.waitForTimeout(200);
+  expect(await explainTermCallCount(page)).toBe(2); // 増えない
+  expect(await explainResolverCount(page)).toBe(2); // 新規保留も増えない
+
+  // B を完了させる → 最新 request なのでガードが正しく解除される。
+  await releaseExplainCall(page, 1);
+  await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
+
+  // B 完了後は別の文字列を解説できる（ガードが解除されている）。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await dispatchExplainClick(page);
+  await expect.poll(() => explainTermCallCount(page)).toBe(3);
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+});
+
+test("reader: switching articles mid-request invalidates the old explanation and never resurfaces it", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+  await enableManualExplainGate(page);
+
+  // A: 記事Aの要約を選択して解説を開始（保留）。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainResolverCount(page)).toBe(1); // A 到着（保留中）
+
+  // 記事切替時の解除対象として、ブラウザSelectionと「解説」ボタンを再度用意する。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  expect((await currentSelectionText(page)).trim()).not.toBe("");
+
+  // 記事Bの getArticleDetail を保留する（B の内容がまだ返らない状態を維持）。
+  await enableArticleDetailGate(page);
+
+  // 関連記事から記事B（article-001）へ切り替える。
+  await page.getByRole("button", { name: "次の記事" }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+
+  // 記事IDがBへ変わった直後（Bの詳細はまだ保留）: 旧記事Aの状態が即時に消えている。
+  await expect
+    .poll(async () => (await currentSelectionText(page)).trim())
+    .toBe(""); // ブラウザSelectionが空
+  await expect(explainButton(page)).toHaveCount(0); // 「解説」ボタンなし
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0); // 記事AのTermPopup・用語見出しなし
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0); // 辞書保存不可
+  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0); // 取得中表示なし
+  await expect(page.getByRole("button", { name: "再試行" })).toHaveCount(0); // 失敗通知・再試行なし
+
+  // 記事Bの詳細を保留したまま、旧記事Aの explain_selected_term だけを完了させる。
+  await releaseExplainCall(page, 0);
+  await page.waitForTimeout(300);
+  // 旧記事Aのポップアップ・解説・辞書保存ボタンが再表示されない。
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toHaveCount(0);
+  // 旧記事Aの失敗通知・生エラー・内部パスも表示されない。
+  await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 以降の用語解説は通常どおり即時解決させる（記事Bのフローを正常化）。
+  await disableManualExplainGate(page);
+
+  // 記事Bの getArticleDetail を完了 → 記事Bの内容と既存候補語ポップアップが正常表示される。
+  await releaseArticleDetail(page, 0);
+  await expect(
+    page.getByRole("heading", { name: "E2E用語" })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(2); // 記事Bの候補語解説
+
+  // 記事Bで新しく文字列を選択して解説を実行できる。
+  // 「次の記事」押下でスクロール位置が下がっているため、要約を可視位置へ戻してから選択する。
+  await scrollSelectableContainer(page, "top");
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(3);
+  const bArgs = await lastExplainTermArgs(page);
+  expect(bArgs.selectedText).toBe(READER_SUMMARY_TEXT);
+});
+
+// 記事Aの辞書保存を保留し、記事Bへ切り替えてBの保存も開始・保留する共通セットアップ。
+// 戻り時点で「保存A=controller[0] 保留」「保存B=controller[1] 保留」「Bボタン=保存中...」。
+const setupCrossArticleSaveConflict = async (page: Page) => {
+  await openReaderAndSettleInitialPopup(page);
+  await enableSaveDictionaryGate(page);
+
+  // 記事Aの候補語ポップアップで「辞書に保存」→ 保存A を保留。
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await page.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(1);
+  expect(await saveDictionaryCallCount(page)).toBe(1);
+
+  // 記事B（article-001）へ切り替える。切替で旧A保存は stale 化される。
+  await page.getByRole("button", { name: "次の記事" }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
+
+  // 記事Bで「辞書に保存」→ 保存B を保留（B が最新 request）。
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await page.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(2);
+  expect(await saveDictionaryCallCount(page)).toBe(2);
+};
+
+test("reader: a stale dictionary save success must not overwrite the new article's save state", async ({
+  page,
+}) => {
+  await setupCrossArticleSaveConflict(page);
+
+  // 古い記事Aの保存だけを成功させる。
+  await releaseSaveDictionary(page, 0, "success");
+  await page.waitForTimeout(300);
+
+  // 記事AのsavedEntryが記事Bへ反映されない: ボタンは「保存中...」のまま。
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toHaveCount(0);
+  // 旧Aの finally が記事Bの保存中状態を解除していない／重複送信もない。
+  expect(await saveDictionaryCallCount(page)).toBe(2);
+
+  // 記事Bの保存を成功させる → 記事Bの内容で「辞書保存済み」になる。
+  await releaseSaveDictionary(page, 1, "success");
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
+});
+
+test("reader: a stale dictionary save failure must not surface on the new article", async ({
+  page,
+}) => {
+  await setupCrossArticleSaveConflict(page);
+
+  // 古い記事Aの保存だけを失敗させる。
+  await releaseSaveDictionary(page, 0, "failure");
+  await page.waitForTimeout(300);
+
+  // 記事Bに記事Aの保存失敗通知・toast・生エラー・内部パスが表示されない。
+  await expect(
+    page.getByText("辞書保存に失敗しました。時間をおいてもう一度お試しください。")
+  ).toHaveCount(0);
+  await expect(page.getByText("保存に失敗しちゃった")).toHaveCount(0);
+  await expect(page.getByText("E2E save failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 記事Bのボタンは「保存中...」のまま。
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+
+  // 記事Bの保存を成功させる → 記事Bの「辞書保存済み」が正常に表示される。
+  await releaseSaveDictionary(page, 1, "success");
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
 });
 
@@ -2516,11 +3109,20 @@ async function installTauriMocks(page: Page) {
             }
             return [articleHistoryItem];
           }
-          case "get_article_detail":
+          case "get_article_detail": {
             // 選択した記事IDが NewsReaderScreen 経由で渡っていることを検証するために記録する。
             /* eslint-disable @typescript-eslint/no-explicit-any */
-            (window as any).__E2E_ARTICLE_DETAIL_REQUESTED_ID__ =
-              params.articleId;
+            const detailWin = window as any;
+            detailWin.__E2E_ARTICLE_DETAIL_REQUESTED_ID__ = params.articleId;
+            // 個別保留モード: 有効時は呼び出しごとに専用 Promise を待ち、resolver を到着順に積む。
+            // 記事Bの詳細取得を保留したまま旧記事Aの状態消去を検証するために使う。
+            if (detailWin.__E2E_ARTICLE_DETAIL_MANUAL_GATE__) {
+              const resolvers = (detailWin.__E2E_ARTICLE_DETAIL_RESOLVERS__ =
+                detailWin.__E2E_ARTICLE_DETAIL_RESOLVERS__ || []);
+              await new Promise((resolve) => {
+                resolvers.push(resolve);
+              });
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
@@ -2530,6 +3132,7 @@ async function installTauriMocks(page: Page) {
               yuukoComment: "UI確認中だよ。",
               keywordCandidates: ["E2E用語", "Playwright"],
             };
+          }
           case "update_article_favorite":
             return params;
           case "generate_article_summary":
@@ -2581,10 +3184,63 @@ async function installTauriMocks(page: Page) {
             return { ok: true };
           case "list_dictionary_entries":
             return [dictionaryEntry];
-          case "explain_selected_term":
+          case "explain_selected_term": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const explainWin = window as any;
+            // 連打による重複呼び出し検証用の回数カウント。
+            explainWin.__E2E_EXPLAIN_TERM_CALL_COUNT__ =
+              (explainWin.__E2E_EXPLAIN_TERM_CALL_COUNT__ || 0) + 1;
+            // 記事ID・selectedText が既存経路で渡ることを検証するために記録する（テスト用のみ）。
+            explainWin.__E2E_EXPLAIN_TERM_LAST_ARTICLE_ID__ = params.articleId;
+            explainWin.__E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__ =
+              params.selectedText;
+            // 個別保留モード: 有効時は呼び出しごとに専用 Promise を待ち、resolver を到着順に積む。
+            // これで古いA・新しいB を個別に解放でき、非同期競合を再現できる。
+            if (explainWin.__E2E_EXPLAIN_TERM_MANUAL_GATE__) {
+              const resolvers = (explainWin.__E2E_EXPLAIN_TERM_RESOLVERS__ =
+                explainWin.__E2E_EXPLAIN_TERM_RESOLVERS__ || []);
+              await new Promise((resolve) => {
+                resolvers.push(resolve);
+              });
+            } else {
+              // 単一ゲート（取得中表示・連打直列化テスト用。設定時のみ一度だけ待つ）。
+              const explainGate = explainWin.__E2E_EXPLAIN_TERM_GATE__;
+              if (explainGate) {
+                explainWin.__E2E_EXPLAIN_TERM_GATE__ = null;
+                await explainGate;
+              }
+            }
+            // 失敗テスト用: 生エラー文言・内部パスがUIへ出ないことも確認できる識別子を含める。
+            if (explainWin.__E2E_EXPLAIN_TERM_FAIL__) {
+              throw new Error("E2E explain term failure /internal/secret/path");
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return dictionaryEntry;
-          case "save_dictionary_entry":
+          }
+          case "save_dictionary_entry": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const saveWin = window as any;
+            saveWin.__E2E_SAVE_DICTIONARY_CALL_COUNT__ =
+              (saveWin.__E2E_SAVE_DICTIONARY_CALL_COUNT__ || 0) + 1;
+            saveWin.__E2E_SAVE_DICTIONARY_LAST_ENTRY__ = params.entry;
+            // 個別保留モード: 呼び出しごとに {resolve, reject} を到着順に積み、成功/失敗を個別制御する。
+            if (saveWin.__E2E_SAVE_DICTIONARY_MANUAL_GATE__) {
+              const controllers = (saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ =
+                saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ || []);
+              return await new Promise((resolve, reject) => {
+                controllers.push({
+                  resolve: () => resolve(params.entry),
+                  // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める。
+                  reject: () =>
+                    reject(
+                      new Error("E2E save failure /internal/secret/path")
+                    ),
+                });
+              });
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return params.entry;
+          }
           case "confirm_rank_up_reward":
             return {
               ok: true,
