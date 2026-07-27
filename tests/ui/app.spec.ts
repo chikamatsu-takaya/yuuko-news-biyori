@@ -1669,27 +1669,55 @@ test("term popup: cannot be dragged completely outside the main area", async ({
   );
 });
 
-test("term popup: shrinking the window keeps the close button reachable", async ({
+test("term popup: shrinking to a Tauri-like width keeps the close button reachable and clickable", async ({
   page,
 }) => {
   await openReaderFromHome(page);
-  await dragPopupFromBackground(page, 6000, 6000); // 右下端へ
+  await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
-  await page.setViewportSize({ width: 900, height: 480 });
+  // Tauri 初期幅相当の 800px へ縮小。左右固定領域を除くと main は約304px（<固定幅320px）。
+  await page.setViewportSize({ width: 800, height: 600 });
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
 
+  // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
+  await expect
+    .poll(async () => (await page.locator("main").boundingBox())?.width ?? 0)
+    .toBeLessThan(320);
+
+  const closeButton = page.getByRole("button", { name: "閉じる", exact: true });
+
+  // 再補正後、閉じるボタン全体が main の実座標範囲内に収まるまで待つ。
+  await expect
+    .poll(async () => {
+      const mb = await page.locator("main").boundingBox();
+      const cb = await closeButton.boundingBox();
+      if (!mb || !cb) {
+        return false;
+      }
+      return (
+        cb.x >= mb.x &&
+        cb.y >= mb.y &&
+        cb.x + cb.width <= mb.x + mb.width &&
+        cb.y + cb.height <= mb.y + mb.height
+      );
+    })
+    .toBe(true);
+
+  // 実座標でも厳密に確認する。
   const mainBox = (await page.locator("main").boundingBox())!;
-  const closeBox = (await page
-    .getByRole("button", { name: "閉じる", exact: true })
-    .boundingBox())!;
-  expect(closeBox.x).toBeGreaterThanOrEqual(mainBox.x - 1);
-  expect(closeBox.y).toBeGreaterThanOrEqual(mainBox.y - 1);
+  const closeBox = (await closeButton.boundingBox())!;
+  expect(closeBox.x).toBeGreaterThanOrEqual(mainBox.x);
   expect(closeBox.x + closeBox.width).toBeLessThanOrEqual(
-    mainBox.x + mainBox.width + 1
+    mainBox.x + mainBox.width
   );
+  expect(closeBox.y).toBeGreaterThanOrEqual(mainBox.y);
   expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(
-    mainBox.y + mainBox.height + 1
+    mainBox.y + mainBox.height
   );
+
+  // 画面上にあるだけでなく、実際にクリックできて TermPopup が閉じる。
+  await closeButton.click();
+  await expect(termPopup(page)).toHaveCount(0);
 });
 
 test("term popup: closing then reopening returns to the center", async ({
