@@ -857,6 +857,9 @@ export default function NewsReaderScreen({
   const loadArticleRequestIdRef = React.useRef(0);
   const loadRelatedRequestIdRef = React.useRef(0);
   const loadTermRequestIdRef = React.useRef(0);
+  // 辞書保存の世代管理。記事切替・新しい保存で更新し、旧記事の保存応答が
+  // 新記事の state（selectedDictionaryEntry・通知・toast・保存中）へ反映されないようにする。
+  const saveDictionaryRequestIdRef = React.useRef(0);
   // 「解説」ボタン連打による用語解説 command の重複呼び出しを防ぐ同期ガード。
   // state 更新の反映を待たずに再入を弾くため useRef を使う。
   const explainInFlightRef = React.useRef(false);
@@ -915,8 +918,9 @@ export default function NewsReaderScreen({
     }
     previousResolvedArticleIdRef.current = resolvedArticleId;
 
-    // 旧用語解説 request を無効化（早い段階で更新し、旧応答を stale 化する）。
+    // 旧用語解説 request と旧辞書保存 request を無効化（早い段階で更新し、旧応答を stale 化する）。
     loadTermRequestIdRef.current += 1;
+    saveDictionaryRequestIdRef.current += 1;
 
     if (typeof window !== "undefined") {
       window.getSelection()?.removeAllRanges();
@@ -1238,6 +1242,12 @@ export default function NewsReaderScreen({
       return;
     }
 
+    // 保存処理の世代を確定する。記事切替や別の保存で ref が進むと、この request は stale になる。
+    saveDictionaryRequestIdRef.current += 1;
+    const requestId = saveDictionaryRequestIdRef.current;
+    // 保存対象も開始時点で確定し、await 中の selectedDictionaryEntry 変更に影響されないようにする。
+    const entryToSave = selectedDictionaryEntry;
+
     setIsSavingDictionaryEntry(true);
     setTermNotice(null);
     setTermNoticeKind("info");
@@ -1245,21 +1255,39 @@ export default function NewsReaderScreen({
     try {
       const savedEntry = await saveDictionaryEntry({
         entry: {
-          ...selectedDictionaryEntry,
+          ...entryToSave,
           isStarred: true,
         },
       });
-      setSelectedDictionaryEntry(savedEntry);
+      // 最新 request（＝現在の記事の保存）だけが結果を反映する。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setSelectedDictionaryEntry(savedEntry);
+      }
     } catch (error) {
-      setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
-      toast({
-        variant: "destructive",
-        title: "保存に失敗しちゃった",
-        description: "辞書の保存ができなかったよ。もう一度試してみてね。",
-      });
+      // 旧記事・旧保存の失敗通知・toast・生エラーは新記事の画面へ出さない。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
+        toast({
+          variant: "destructive",
+          title: "保存に失敗しちゃった",
+          description: "辞書の保存ができなかったよ。もう一度試してみてね。",
+        });
+      }
       console.warn("Failed to save dictionary entry:", error);
     } finally {
-      setIsSavingDictionaryEntry(false);
+      // 最新 request だけが保存中表示を解除する（旧保存の finally が新保存の保存中を消さない）。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setIsSavingDictionaryEntry(false);
+      }
     }
   }, [selectedDictionaryEntry, toast]);
 

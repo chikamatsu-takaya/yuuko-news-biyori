@@ -649,6 +649,57 @@ const releaseArticleDetail = (page: Page, index: number) =>
     resolvers[i]?.();
   }, index);
 
+// save_dictionary_entry を呼び出しごとに個別保留するモードを有効化する（辞書保存競合の再現用）。
+const enableSaveDictionaryGate = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_SAVE_DICTIONARY_MANUAL_GATE__ =
+      true;
+  });
+
+// save_dictionary_entry の累計呼び出し回数（重複送信検証用）。
+const saveDictionaryCallCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, number>)
+        .__E2E_SAVE_DICTIONARY_CALL_COUNT__ ?? 0
+  );
+
+// 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
+const saveDictionaryControllerCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        (window as unknown as Record<string, unknown[]>)
+          .__E2E_SAVE_DICTIONARY_CONTROLLERS__ ?? []
+      ).length
+  );
+
+type SaveController = { resolve: () => void; reject: () => void };
+
+// 到着順 index の保存呼び出しを成功/失敗で個別に解放する。
+const releaseSaveDictionary = (
+  page: Page,
+  index: number,
+  outcome: "success" | "failure"
+) =>
+  page.evaluate(
+    ({ i, kind }) => {
+      const controllers =
+        (window as unknown as Record<string, SaveController[]>)
+          .__E2E_SAVE_DICTIONARY_CONTROLLERS__ ?? [];
+      const controller = controllers[i];
+      if (!controller) {
+        return;
+      }
+      if (kind === "success") {
+        controller.resolve();
+      } else {
+        controller.reject();
+      }
+    },
+    { i: index, kind: outcome }
+  );
+
 // 記事詳細のモック本文（get_article_detail のモックに対応）。
 const READER_SUMMARY_TEXT = "UI確認用のモックニュースです。";
 const READER_EXPLANATION_TEXT = "E2E用の要約です。";
@@ -1275,6 +1326,82 @@ test("reader: switching articles mid-request invalidates the old explanation and
   await expect.poll(() => explainTermCallCount(page)).toBe(3);
   const bArgs = await lastExplainTermArgs(page);
   expect(bArgs.selectedText).toBe(READER_SUMMARY_TEXT);
+});
+
+// 記事Aの辞書保存を保留し、記事Bへ切り替えてBの保存も開始・保留する共通セットアップ。
+// 戻り時点で「保存A=controller[0] 保留」「保存B=controller[1] 保留」「Bボタン=保存中...」。
+const setupCrossArticleSaveConflict = async (page: Page) => {
+  await openReaderAndSettleInitialPopup(page);
+  await enableSaveDictionaryGate(page);
+
+  // 記事Aの候補語ポップアップで「辞書に保存」→ 保存A を保留。
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await page.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(1);
+  expect(await saveDictionaryCallCount(page)).toBe(1);
+
+  // 記事B（article-001）へ切り替える。切替で旧A保存は stale 化される。
+  await page.getByRole("button", { name: "次の記事" }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
+
+  // 記事Bで「辞書に保存」→ 保存B を保留（B が最新 request）。
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await page.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(2);
+  expect(await saveDictionaryCallCount(page)).toBe(2);
+};
+
+test("reader: a stale dictionary save success must not overwrite the new article's save state", async ({
+  page,
+}) => {
+  await setupCrossArticleSaveConflict(page);
+
+  // 古い記事Aの保存だけを成功させる。
+  await releaseSaveDictionary(page, 0, "success");
+  await page.waitForTimeout(300);
+
+  // 記事AのsavedEntryが記事Bへ反映されない: ボタンは「保存中...」のまま。
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toHaveCount(0);
+  // 旧Aの finally が記事Bの保存中状態を解除していない／重複送信もない。
+  expect(await saveDictionaryCallCount(page)).toBe(2);
+
+  // 記事Bの保存を成功させる → 記事Bの内容で「辞書保存済み」になる。
+  await releaseSaveDictionary(page, 1, "success");
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
+});
+
+test("reader: a stale dictionary save failure must not surface on the new article", async ({
+  page,
+}) => {
+  await setupCrossArticleSaveConflict(page);
+
+  // 古い記事Aの保存だけを失敗させる。
+  await releaseSaveDictionary(page, 0, "failure");
+  await page.waitForTimeout(300);
+
+  // 記事Bに記事Aの保存失敗通知・toast・生エラー・内部パスが表示されない。
+  await expect(
+    page.getByText("辞書保存に失敗しました。時間をおいてもう一度お試しください。")
+  ).toHaveCount(0);
+  await expect(page.getByText("保存に失敗しちゃった")).toHaveCount(0);
+  await expect(page.getByText("E2E save failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 記事Bのボタンは「保存中...」のまま。
+  await expect(page.getByRole("button", { name: "保存中..." })).toBeVisible();
+
+  // 記事Bの保存を成功させる → 記事Bの「辞書保存済み」が正常に表示される。
+  await releaseSaveDictionary(page, 1, "success");
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
 });
 
 test("settings save keeps morning and afternoon work time ranges", async ({
@@ -3090,8 +3217,30 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return dictionaryEntry;
           }
-          case "save_dictionary_entry":
+          case "save_dictionary_entry": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const saveWin = window as any;
+            saveWin.__E2E_SAVE_DICTIONARY_CALL_COUNT__ =
+              (saveWin.__E2E_SAVE_DICTIONARY_CALL_COUNT__ || 0) + 1;
+            saveWin.__E2E_SAVE_DICTIONARY_LAST_ENTRY__ = params.entry;
+            // 個別保留モード: 呼び出しごとに {resolve, reject} を到着順に積み、成功/失敗を個別制御する。
+            if (saveWin.__E2E_SAVE_DICTIONARY_MANUAL_GATE__) {
+              const controllers = (saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ =
+                saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ || []);
+              return await new Promise((resolve, reject) => {
+                controllers.push({
+                  resolve: () => resolve(params.entry),
+                  // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める。
+                  reject: () =>
+                    reject(
+                      new Error("E2E save failure /internal/secret/path")
+                    ),
+                });
+              });
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return params.entry;
+          }
           case "confirm_rank_up_reward":
             return {
               ok: true,
