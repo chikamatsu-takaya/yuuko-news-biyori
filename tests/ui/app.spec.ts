@@ -615,17 +615,6 @@ const releaseExplainCall = (page: Page, index: number) =>
     resolvers[i]?.();
   }, index);
 
-// 「解説」ボタンのクリックを同期発火する（ポップアップ表示中の重なりに影響されずハンドラを呼ぶ）。
-const dispatchExplainClick = (page: Page) =>
-  page.evaluate(() => {
-    const btn = document.querySelector('[data-explain-button="true"]');
-    if (!btn) {
-      return false;
-    }
-    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    return true;
-  });
-
 // 個別保留モードを無効化する（保留していない新規呼び出しを通常どおり即時解決させる）。
 const disableManualExplainGate = (page: Page) =>
   page.evaluate(() => {
@@ -700,6 +689,87 @@ const releaseSaveDictionary = (
     { i: index, kind: outcome }
   );
 
+// 用語解説ダイアログ本体（ドラッグ検証用）。
+const termPopup = (page: Page) => page.locator('[data-term-popup="true"]');
+
+// ポップアップの boundingBox を取得する（null なら失敗）。
+const popupBox = async (page: Page) => {
+  const box = await termPopup(page).boundingBox();
+  if (!box) {
+    throw new Error("term popup boundingBox not found");
+  }
+  return box;
+};
+
+// ポップアップ中心座標（別要素からのドラッグ開始点計算に使う）。
+const popupCenter = (box: { x: number; y: number; width: number; height: number }) => ({
+  x: box.x + box.width / 2,
+  y: box.y + box.height / 2,
+});
+
+// main 中央にポップアップ中心があるか（初期位置＝中央）を許容誤差 tol で判定する。
+const expectPopupCentered = async (page: Page, tol = 6) => {
+  const mainBox = await page.locator("main").boundingBox();
+  const box = await popupBox(page);
+  if (!mainBox) {
+    throw new Error("main boundingBox not found");
+  }
+  const mainCenterX = mainBox.x + mainBox.width / 2;
+  const mainCenterY = mainBox.y + mainBox.height / 2;
+  const center = popupCenter(box);
+  expect(Math.abs(center.x - mainCenterX)).toBeLessThanOrEqual(tol);
+  expect(Math.abs(center.y - mainCenterY)).toBeLessThanOrEqual(tol);
+};
+
+// 記事を開くと候補語の TermPopup が中央に自動表示される。
+// TermPopup 表示中は背面選択がブロックされるため、背面選択を使うテストでは先に閉じる。
+const closeInitialTermPopup = async (page: Page) => {
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
+};
+
+// 背面の対象領域を、中央ポップアップに重ならない左側でマウスドラッグ選択しようとする。
+const dragToSelectBackground = async (page: Page, selector: string) => {
+  const box = (await page.locator(selector).boundingBox())!;
+  const y = box.y + Math.min(8, box.height / 2);
+  const startX = box.x + 4;
+  const endX = box.x + Math.min(140, box.width - 4);
+  await page.mouse.move(startX, y);
+  await page.mouse.down();
+  await page.mouse.move(endX, y, { steps: 8 });
+  await page.mouse.up();
+};
+
+// 背景（上部パディング＝ドラッグ可能な余白）からポインタでドラッグする。
+const dragPopupFromBackground = async (page: Page, dx: number, dy: number) => {
+  const box = await popupBox(page);
+  const startX = box.x + box.width / 2;
+  const startY = box.y + 6; // p-4 の上部余白（文字・ボタンではない背景）
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + dx, startY + dy, { steps: 10 });
+  await page.mouse.up();
+};
+
+// 指定要素の中心からドラッグを試みる（禁止領域の検証用）。
+const dragFromLocator = async (
+  page: Page,
+  locator: ReturnType<Page["locator"]>,
+  dx: number,
+  dy: number
+) => {
+  const box = await locator.boundingBox();
+  if (!box) {
+    throw new Error("drag source boundingBox not found");
+  }
+  const startX = box.x + box.width / 2;
+  const startY = box.y + box.height / 2;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + dx, startY + dy, { steps: 10 });
+  await page.mouse.up();
+};
+
 // 記事詳細のモック本文（get_article_detail のモックに対応）。
 const READER_SUMMARY_TEXT = "UI確認用のモックニュースです。";
 const READER_EXPLANATION_TEXT = "E2E用の要約です。";
@@ -719,16 +789,19 @@ const settleInitialPopupAndResetCount = async (page: Page) => {
   });
 };
 
-// 記事詳細をホームのニュースカードから開き、初期ポップアップを整える。
+// 記事詳細をホームのニュースカードから開き、初期ポップアップを整えてから閉じる。
+// 背面選択→「解説」ボタン経由でポップアップを開くテスト用（表示中は背面選択がブロックされるため）。
 const openReaderAndSettleInitialPopup = async (page: Page) => {
   await openReaderFromHome(page);
   await settleInitialPopupAndResetCount(page);
+  await closeInitialTermPopup(page);
 };
 
 test("reader: selecting summary text shows the 解説 button within the viewport", async ({
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page); // 背面選択を使うため既定ポップアップを閉じる
   await expect(explainButton(page)).toHaveCount(0);
 
   const selected = await selectContentsWithin(
@@ -752,6 +825,7 @@ test("reader: selecting the re-explanation text shows the 解説 button", async 
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
   await expect(explainButton(page)).toBeVisible();
 });
@@ -769,6 +843,7 @@ test("reader: collapsing the selection hides the 解説 button", async ({
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -780,6 +855,7 @@ test("reader: selecting a different region updates the 解説 button position", 
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
 
   // 1) ニュース要約を選択し、ボタン位置を取得。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -811,6 +887,7 @@ test("reader: a selection spanning two selectable regions hides the 解説 butto
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
 
   // 先に有効な単一領域選択でボタンを出しておく（またぎ選択で消えることも確認する）。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -852,6 +929,7 @@ test("reader: resizing the viewport recalculates the 解説 button position", as
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -939,6 +1017,7 @@ test("reader: scrolling the selection out of the viewport hides the 解説 butto
   page,
 }) => {
   await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -1173,6 +1252,7 @@ test("reader: switching articles clears the previous selection and its explanati
   await expect(readerBackButton(page).first()).toBeVisible();
   await expect.poll(() => readRequestedArticleId(page)).toBe("e2e-article-1");
   await settleInitialPopupAndResetCount(page);
+  await closeInitialTermPopup(page); // 背面選択のため既定ポップアップを閉じる
 
   // 記事Aで要約を選択して解説を開く。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1228,25 +1308,26 @@ test("reader: a stale explanation request must not release the guard of an in-fl
   expect(await explainTermCallCount(page)).toBe(2);
 
   // 古い A だけを完了させる（B は実行中のまま）。
+  // 背面選択は TermPopup 表示中はブロックされるため、古い A の遅延完了が B の state を
+  // 汚さないこと（呼び出し回数・保留数が増えず、B のポップアップが表示中のまま）を確認する。
   await releaseExplainCall(page, 0);
-  // A の遅延完了が B の連打ガードを解除していないことを、実効的に確認する:
-  // C を選択して「解説」を押しても、B 実行中なので command 呼び出しは開始されない。
-  // （B のポップアップ表示中の重なりを避けるため、クリックは同期発火する）
-  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
-  await expect(explainButton(page)).toBeVisible();
-  await dispatchExplainClick(page);
   await page.waitForTimeout(200);
   expect(await explainTermCallCount(page)).toBe(2); // 増えない
   expect(await explainResolverCount(page)).toBe(2); // 新規保留も増えない
+  await expect(
+    page.getByRole("heading", { name: READER_EXPLANATION_TEXT })
+  ).toBeVisible();
 
-  // B を完了させる → 最新 request なのでガードが正しく解除される。
+  // B を完了させる → 最新 request として正常に反映され、ガードも解除される。
   await releaseExplainCall(page, 1);
   await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
 
-  // B 完了後は別の文字列を解説できる（ガードが解除されている）。
+  // B のポップアップを閉じると背面選択が復帰し、別の文字列を解説できる。
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
-  await dispatchExplainClick(page);
+  await explainButton(page).click();
   await expect.poll(() => explainTermCallCount(page)).toBe(3);
   await expect(
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
@@ -1266,11 +1347,6 @@ test("reader: switching articles mid-request invalidates the old explanation and
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toBeVisible();
   await expect.poll(() => explainResolverCount(page)).toBe(1); // A 到着（保留中）
-
-  // 記事切替時の解除対象として、ブラウザSelectionと「解説」ボタンを再度用意する。
-  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
-  await expect(explainButton(page)).toBeVisible();
-  expect((await currentSelectionText(page)).trim()).not.toBe("");
 
   // 記事Bの getArticleDetail を保留する（B の内容がまだ返らない状態を維持）。
   await enableArticleDetailGate(page);
@@ -1315,7 +1391,9 @@ test("reader: switching articles mid-request invalidates the old explanation and
   await expect.poll(() => explainTermCallCount(page)).toBe(2); // 記事Bの候補語解説
 
   // 記事Bで新しく文字列を選択して解説を実行できる。
-  // 「次の記事」押下でスクロール位置が下がっているため、要約を可視位置へ戻してから選択する。
+  // 表示中は背面選択がブロックされるため候補語ポップアップを閉じ、要約を可視位置へ戻してから選択する。
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
   await scrollSelectableContainer(page, "top");
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
@@ -1333,6 +1411,10 @@ test("reader: switching articles mid-request invalidates the old explanation and
 const setupCrossArticleSaveConflict = async (page: Page) => {
   await openReaderAndSettleInitialPopup(page);
   await enableSaveDictionaryGate(page);
+
+  // 記事Aの候補語ポップアップを開き直す（openReaderAndSettleInitialPopup で閉じているため）。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
 
   // 記事Aの候補語ポップアップで「辞書に保存」→ 保存A を保留。
   await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
@@ -1402,6 +1484,447 @@ test("reader: a stale dictionary save failure must not surface on the new articl
   await expect(
     page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
+});
+
+// --- 用語解説ダイアログのドラッグ移動 ---
+
+test("term popup: dragging the background moves the dialog", async ({ page }) => {
+  await openReaderFromHome(page);
+  await expect(termPopup(page)).toBeVisible();
+  await expectPopupCentered(page); // 初期は中央
+
+  const before = await popupBox(page);
+  await dragPopupFromBackground(page, 140, 90);
+  const after = await popupBox(page);
+
+  expect(Math.abs(popupCenter(after).x - popupCenter(before).x)).toBeGreaterThan(50);
+  expect(Math.abs(popupCenter(after).y - popupCenter(before).y)).toBeGreaterThan(30);
+});
+
+test("term popup: dragging from the term heading does not move the dialog", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+  await dragFromLocator(
+    page,
+    page.getByRole("heading", { name: "E2E用語" }),
+    140,
+    90
+  );
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: dragging from the short/detail explanation does not move the dialog", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+
+  const before = await popupBox(page);
+  await dragFromLocator(
+    page,
+    page.getByText("UI確認用の辞書項目です。"),
+    120,
+    80
+  );
+  const afterShort = await popupBox(page);
+  expect(Math.abs(afterShort.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(afterShort.y - before.y)).toBeLessThan(3);
+
+  await dragFromLocator(page, page.getByText(READER_TERM_DETAIL_TEXT), 120, 80);
+  const afterDetail = await popupBox(page);
+  expect(Math.abs(afterDetail.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(afterDetail.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: explanation text stays range-selectable", async ({ page }) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+
+  // 詳細解説をダブルクリックで語選択（ドラッグは開始されない）。
+  await page.getByText(READER_TERM_DETAIL_TEXT).dblclick();
+  const selected = await page.evaluate(
+    () => window.getSelection()?.toString() ?? ""
+  );
+  expect(selected.length).toBeGreaterThan(0);
+
+  // 文字選択でダイアログは移動しない。
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: clicking 辞書に保存 does not drag and saves once", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+
+  await page.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
+
+  // 保存は1回だけ・ダイアログは動かない。
+  expect(await saveDictionaryCallCount(page)).toBe(1);
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: clicking 再試行 does not drag and retries once", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = true;
+  });
+  await openReaderFromHome(page);
+  // 失敗表示（再試行ボタン）が出る。
+  const retry = page.getByRole("button", { name: "再試行" });
+  await expect(retry).toBeVisible();
+
+  const before = await popupBox(page);
+  const baseline = await explainTermCallCount(page);
+  await retry.click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(baseline + 1);
+
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: clicking 閉じる closes and does not start a drag", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expect(termPopup(page)).toBeVisible();
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
+});
+
+test("term popup: right button does not start a drag", async ({ page }) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+  const startX = before.x + before.width / 2;
+  const startY = before.y + 6;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(startX + 150, startY + 100, { steps: 6 });
+  await page.mouse.up({ button: "right" });
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: pointercancel stops the drag", async ({ page }) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+  const startX = before.x + before.width / 2;
+  const startY = before.y + 6;
+
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + 60, startY + 40, { steps: 5 });
+  const moved = await popupBox(page);
+  expect(Math.abs(moved.x - before.x)).toBeGreaterThan(10);
+
+  // pointercancel でドラッグ終了 → 以降の move では動かない。
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-term-popup="true"]');
+    el?.dispatchEvent(
+      new PointerEvent("pointercancel", { pointerId: 1, bubbles: true })
+    );
+  });
+  const atCancel = await popupBox(page);
+  await page.mouse.move(startX + 200, startY + 160, { steps: 5 });
+  const afterCancel = await popupBox(page);
+  await page.mouse.up();
+
+  expect(Math.abs(afterCancel.x - atCancel.x)).toBeLessThan(3);
+  expect(Math.abs(afterCancel.y - atCancel.y)).toBeLessThan(3);
+});
+
+test("term popup: cannot be dragged completely outside the main area", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const mainBox = (await page.locator("main").boundingBox())!;
+
+  // 左上へ大きくドラッグ → 左上端が main + 余白の内側に残る。
+  await dragPopupFromBackground(page, -6000, -6000);
+  const topLeft = await popupBox(page);
+  expect(topLeft.x).toBeGreaterThanOrEqual(mainBox.x + 8 - 1);
+  expect(topLeft.y).toBeGreaterThanOrEqual(mainBox.y + 8 - 1);
+
+  // 右下へ大きくドラッグ → 右下端が main - 余白の内側に残る。
+  await dragPopupFromBackground(page, 6000, 6000);
+  const bottomRight = await popupBox(page);
+  expect(bottomRight.x + bottomRight.width).toBeLessThanOrEqual(
+    mainBox.x + mainBox.width - 8 + 1
+  );
+  expect(bottomRight.y + bottomRight.height).toBeLessThanOrEqual(
+    mainBox.y + mainBox.height - 8 + 1
+  );
+});
+
+test("term popup: shrinking to a Tauri-like width keeps the close button reachable and clickable", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
+
+  // Tauri 初期幅相当の 800px へ縮小。左右固定領域を除くと main は約304px（<固定幅320px）。
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+
+  // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
+  await expect
+    .poll(async () => (await page.locator("main").boundingBox())?.width ?? 0)
+    .toBeLessThan(320);
+
+  const closeButton = page.getByRole("button", { name: "閉じる", exact: true });
+
+  // 再補正後、閉じるボタン全体が main の実座標範囲内に収まるまで待つ。
+  await expect
+    .poll(async () => {
+      const mb = await page.locator("main").boundingBox();
+      const cb = await closeButton.boundingBox();
+      if (!mb || !cb) {
+        return false;
+      }
+      return (
+        cb.x >= mb.x &&
+        cb.y >= mb.y &&
+        cb.x + cb.width <= mb.x + mb.width &&
+        cb.y + cb.height <= mb.y + mb.height
+      );
+    })
+    .toBe(true);
+
+  // 実座標でも厳密に確認する。
+  const mainBox = (await page.locator("main").boundingBox())!;
+  const closeBox = (await closeButton.boundingBox())!;
+  expect(closeBox.x).toBeGreaterThanOrEqual(mainBox.x);
+  expect(closeBox.x + closeBox.width).toBeLessThanOrEqual(
+    mainBox.x + mainBox.width
+  );
+  expect(closeBox.y).toBeGreaterThanOrEqual(mainBox.y);
+  expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(
+    mainBox.y + mainBox.height
+  );
+
+  // 画面上にあるだけでなく、実際にクリックできて TermPopup が閉じる。
+  await closeButton.click();
+  await expect(termPopup(page)).toHaveCount(0);
+});
+
+test("term popup: closing then reopening returns to the center", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await dragPopupFromBackground(page, 150, 100);
+  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
+
+  // 候補語から再度開く → 中央に戻る。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(termPopup(page)).toBeVisible();
+  await expectPopupCentered(page);
+});
+
+test("term popup: switching to another term resets to the center", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await dragPopupFromBackground(page, 150, 100);
+
+  // 別用語（Playwright）を開くと中央へ戻る。
+  await page.getByRole("button", { name: "Playwright", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Playwright" })).toBeVisible();
+  await expectPopupCentered(page);
+});
+
+test("term popup: switching articles leaves no stale drag position", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await dragPopupFromBackground(page, -150, -100); // 上部へ寄せて「次の記事」を隠さない
+
+  await page.getByRole("button", { name: "次の記事" }).click();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
+  await expectPopupCentered(page);
+});
+
+test("term popup: a popup opened from a range selection can be dragged", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+
+  const before = await popupBox(page);
+  await dragPopupFromBackground(page, 120, 80);
+  const after = await popupBox(page);
+  expect(Math.abs(popupCenter(after).x - popupCenter(before).x)).toBeGreaterThan(40);
+});
+
+test("term popup: a popup opened from a candidate click can be dragged", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await page.getByRole("button", { name: "Playwright", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Playwright" })).toBeVisible();
+
+  const before = await popupBox(page);
+  await dragPopupFromBackground(page, 100, 70);
+  const after = await popupBox(page);
+  expect(Math.abs(popupCenter(after).x - popupCenter(before).x)).toBeGreaterThan(40);
+});
+
+// --- P2: 同名・別ID用語の位置初期化 / 背面文字選択の防止 ---
+
+test("term popup: switching to a same-text but different-id term resets to the center", async ({
+  page,
+}) => {
+  // 表示文字列は同じだが ID が異なる2候補を用意する。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_SAME_NAME_TERMS__ = true;
+  });
+  await openReaderFromHome(page);
+
+  // 既定ポップアップは同名用語A（term-0）。中央から移動する。
+  await expect(page.getByRole("heading", { name: "同じ用語" })).toBeVisible();
+  await dragPopupFromBackground(page, 160, 110);
+  const mainBox = (await page.locator("main").boundingBox())!;
+  const movedCenter = popupCenter(await popupBox(page));
+  expect(
+    Math.abs(movedCenter.x - (mainBox.x + mainBox.width / 2))
+  ).toBeGreaterThan(40);
+
+  // 同名用語B（term-1・表示は同じだが別ID）を開く（候補ボタンの2つ目）。
+  await page.getByRole("button", { name: "同じ用語", exact: true }).nth(1).click();
+  await expect(page.getByRole("heading", { name: "同じ用語" })).toBeVisible();
+
+  // 表示文字列が同じでも別IDなので中央へ戻り、古いドラッグ位置が残らない。
+  await expectPopupCentered(page);
+});
+
+test("term popup: while open, the background article cannot be text-selected", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expect(termPopup(page)).toBeVisible();
+
+  // 背面のニュース要約を実マウスでドラッグしても選択されず、「解説」ボタンも出ない。
+  await dragToSelectBackground(page, '[data-explain-selectable="summary"]');
+  expect(
+    (await page.evaluate(() => window.getSelection()?.toString() ?? "")).trim()
+  ).toBe("");
+  await expect(explainButton(page)).toHaveCount(0);
+
+  // 「ゆうこの解説」でも同様。
+  await dragToSelectBackground(page, '[data-explain-selectable="explanation"]');
+  expect(
+    (await page.evaluate(() => window.getSelection()?.toString() ?? "")).trim()
+  ).toBe("");
+  await expect(explainButton(page)).toHaveCount(0);
+});
+
+test("term popup: while open, a programmatic background selection does not show the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expect(termPopup(page)).toBeVisible();
+
+  // CSS の user-select:none を無視して背面へ Range を作成し selectionchange を発火。
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-explain-selectable="summary"]');
+    if (!el) {
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+
+  // Selection 文字列は存在し得るが、「解説」ボタンは表示されないことを確認する。
+  await expect(explainButton(page)).toHaveCount(0);
+});
+
+test("term popup: text inside the popup stays selectable without showing the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const before = await popupBox(page);
+
+  // ポップアップ内の詳細解説はダブルクリックで語選択できる。
+  await page.getByText(READER_TERM_DETAIL_TEXT).dblclick();
+  const selected = await page.evaluate(
+    () => window.getSelection()?.toString() ?? ""
+  );
+  expect(selected.length).toBeGreaterThan(0);
+
+  // 「解説」ボタンは出ず、ポップアップも移動しない。
+  await expect(explainButton(page)).toHaveCount(0);
+  const after = await popupBox(page);
+  expect(Math.abs(after.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(after.y - before.y)).toBeLessThan(3);
+});
+
+test("term popup: closing it restores background selection and the 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
+
+  // 閉じた後は背面の要約を範囲選択でき、選択文字列を取得できる。
+  const selected = await selectContentsWithin(
+    page,
+    '[data-explain-selectable="summary"]'
+  );
+  expect(selected).toBe(true);
+  expect(
+    (await page.evaluate(() => window.getSelection()?.toString() ?? "")).trim()
+      .length
+  ).toBeGreaterThan(0);
+  await expect(explainButton(page)).toBeVisible();
+
+  // そのボタンから TermPopup を開ける。
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+});
+
+test("term popup: opening it clears a pre-existing background selection and 解説 button", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await closeInitialTermPopup(page);
+
+  // 閉じた状態で背面を選択 →「解説」ボタン表示。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+
+  // 別経路（候補語クリック）で TermPopup を開く。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(termPopup(page)).toBeVisible();
+
+  // 開いた瞬間に古い Selection が解除され、古い「解説」ボタンも消える。
+  await expect
+    .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ""))
+    .toBe("");
+  await expect(explainButton(page)).toHaveCount(0);
 });
 
 test("settings save keeps morning and afternoon work time ranges", async ({
@@ -3130,7 +3653,10 @@ async function installTauriMocks(page: Page) {
               yuukoExplanation: "E2E用の要約です。",
               focusPoints: ["クリックできること", "表示が崩れないこと"],
               yuukoComment: "UI確認中だよ。",
-              keywordCandidates: ["E2E用語", "Playwright"],
+              // 同名・別IDの用語切替テスト用: フラグ時は表示文字列が同じ2候補（ID は別になる）。
+              keywordCandidates: detailWin.__E2E_SAME_NAME_TERMS__
+                ? ["同じ用語", "同じ用語"]
+                : ["E2E用語", "Playwright"],
             };
           }
           case "update_article_favorite":
