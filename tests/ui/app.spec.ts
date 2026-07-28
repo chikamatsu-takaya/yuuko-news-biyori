@@ -653,6 +653,14 @@ const saveDictionaryCallCount = (page: Page) =>
         .__E2E_SAVE_DICTIONARY_CALL_COUNT__ ?? 0
   );
 
+// save_dictionary_entry に最後に渡ったエントリ（選択文字列との接続検証用）。
+const lastSavedDictionaryEntry = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, { keyText?: string } | undefined>)
+        .__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
+  );
+
 // 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
 const saveDictionaryControllerCount = (page: Page) =>
   page.evaluate(
@@ -1123,6 +1131,7 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   page,
 }) => {
   await openReaderAndSettleInitialPopup(page);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
 
   // 用語解説 command を失敗させる。
   await page.evaluate(() => {
@@ -1139,6 +1148,7 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   // 生エラー文言・内部パスはUIへ出ない。
   await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
   // 再試行ボタンが出る。
   const retry = page.getByRole("button", { name: "再試行" });
   await expect(retry).toBeVisible();
@@ -1222,15 +1232,66 @@ test("reader: the dictionary save button is usable from a selection explanation"
   await openReaderAndSettleInitialPopup(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
   await explainButton(page).click();
+  const args = await lastExplainTermArgs(page);
+  expect(args.selectedText).toBe(READER_SUMMARY_TEXT);
+  await expect.poll(() => currentSelectionText(page)).toBe("");
+  await expect(explainButton(page)).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toBeVisible();
 
-  // 既存の「辞書に保存」を実行できる → 保存済み表示になる。
+  // ダイアログを開いただけでは保存せず、明示操作後に選択文字列を含むエントリを1回だけ保存する。
+  expect(await saveDictionaryCallCount(page)).toBe(0);
   const save = page.getByRole("button", { name: "辞書に保存" });
   await expect(save).toBeEnabled();
   await save.click();
+  await expect.poll(() => saveDictionaryCallCount(page)).toBe(1);
+  const savedEntry = await lastSavedDictionaryEntry(page);
+  expect(savedEntry?.keyText).toBe(READER_SUMMARY_TEXT);
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toBeVisible();
+});
+
+test("reader: current dictionary save failure is safe and can be retried", async ({
+  page,
+}) => {
+  await openReaderAndSettleInitialPopup(page);
+  await enableSaveDictionaryGate(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+
+  const save = page.getByRole("button", { name: "辞書に保存" });
+  await save.click();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(1);
+  await expect.poll(() => saveDictionaryCallCount(page)).toBe(1);
+  await releaseSaveDictionary(page, 0, "failure");
+
+  await expect(
+    page.getByText("辞書保存に失敗しました。時間をおいてもう一度お試しください。")
+  ).toBeVisible();
+  await expect(page.getByText("E2E save failure")).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "辞書保存済み" })
+  ).toHaveCount(0);
+  await expect(page.getByText(READER_SUMMARY_TEXT).first()).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect(save).toBeEnabled();
+
+  await save.click();
+  await expect.poll(() => saveDictionaryControllerCount(page)).toBe(2);
+  await expect.poll(() => saveDictionaryCallCount(page)).toBe(2);
+  await releaseSaveDictionary(page, 1, "success");
   await expect(
     page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
@@ -3741,7 +3802,10 @@ async function installTauriMocks(page: Page) {
               throw new Error("E2E explain term failure /internal/secret/path");
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
-            return dictionaryEntry;
+            return {
+              ...dictionaryEntry,
+              keyText: params.selectedText,
+            };
           }
           case "save_dictionary_entry": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
