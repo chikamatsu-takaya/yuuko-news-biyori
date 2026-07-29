@@ -31,8 +31,10 @@ impl DictionaryRepository {
     /// 検索失敗は `Err(AppError)`（未命中と区別）。固定サンプル解説・汎用文の生成は担当しない。
     ///
     /// 同じ正規化語を持つエントリが複数あるときの選択規則:
-    ///   1. `source_article_ids` に現在の `article_id` を含むエントリを最優先。
-    ///   2. 現在の記事に紐づく候補が無ければ、記事横断候補から決定的に1件を選ぶ。
+    ///
+    /// 1. `source_article_ids` に現在の `article_id` を含むエントリを最優先。
+    /// 2. 現在の記事に紐づく候補が無ければ、記事横断候補から決定的に1件を選ぶ。
+    ///
     /// どちらの母集団でも、`entry_timestamp_key`（更新/作成日時）降順→`dictionary_id` 昇順の
     /// 全順序で1件に決めるため、ファイル内の格納順や逆順構築に依存しない。
     pub fn find_saved_entry(
@@ -165,10 +167,7 @@ impl DictionaryRepository {
         // ログにも辞書の保存先パス・本文を出さない（エラー種別・行/列の位置情報だけ残す）。
         let raw = std::fs::read_to_string(&self.dictionary_path).map_err(|error| {
             log::error!("Failed to read dictionary store (kind: {:?})", error.kind());
-            AppError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "dictionary store could not be read",
-            ))
+            AppError::Io(io::Error::other("dictionary store could not be read"))
         })?;
         let mut store =
             serde_json::from_str::<PersistedDictionaryStore>(&raw).map_err(|error| {

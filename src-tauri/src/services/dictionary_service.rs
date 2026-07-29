@@ -25,9 +25,10 @@ impl DictionaryService {
         }
     }
 
-    /// 選択語の解説を返す。処理順は「入力検証 → 記事確認 → 辞書検索 → 判定 → DTO化」。
-    /// 記事確認は ArticleRepository の既存取得経路を使い、固定サンプル以外の実ニュース記事IDでも
-    /// 解決できるようにする（未存在は NotFound）。
+    /// 選択語の解説を返す。処理順は「入力検証 → 記事タイトル解決 → 辞書検索 → 判定 → DTO化」。
+    /// 記事タイトルは通常 ArticleRepository で解決する。固定サンプルID(article-001〜003)は、
+    /// アーカイブ保守で active Markdown が退避され NotFound になっても、組み込みタイトルへ
+    /// フォールバックして固定サンプル解説へ到達できるようにする（他の未知IDは NotFound のまま）。
     ///
     /// 辞書検索は Repository が `Some`（命中）/`None`（未命中）/`Err`（検索失敗）で返し、
     /// Service が命中・未命中を判定する。未命中（`None`）分岐は、後続PRで AI Provider 呼び出しへ
@@ -37,11 +38,11 @@ impl DictionaryService {
         params: ExplainSelectedTermParams,
     ) -> Result<DictionaryEntryDto, AppError> {
         let (article_id, selected_text) = params.validated_inputs()?;
-        // 記事の存在確認（実記事の解決）。汎用文フォールバック用に実タイトルも得る。
-        let article = self.article_repository.get_article_detail(&article_id)?;
+        // 記事タイトルの解決（汎用文フォールバック用）。NotFound かつ固定サンプルIDのみ組み込み値へ。
+        let article_title = self.resolve_article_title(&article_id)?;
 
         let normalized_text = normalize_text(&selected_text);
-        // 保存済み辞書の完全一致（記事優先→記事横断の決定的選択）。命中なら即返す。
+        // 保存済み辞書の完全一致（記事優先→記事横断の決定的選択）。固定サンプル解説より優先。命中なら即返す。
         if let Some(saved_entry) = self
             .repository
             .find_saved_entry(&article_id, &normalized_text)?
@@ -53,9 +54,24 @@ impl DictionaryService {
         // 現状は固定サンプル解説 or 汎用文（AI 不使用・副作用なし）。
         Ok(build_dictionary_miss_entry(
             &article_id,
-            &article.title,
+            &article_title,
             &selected_text,
         ))
+    }
+
+    /// 記事タイトルを解決する。通常は ArticleRepository。ArticleRepository が NotFound を返した
+    /// 場合だけ、既知の固定サンプルID(article-001〜003)なら組み込みタイトルへフォールバックする。
+    /// 固定サンプル以外の未知IDは NotFound のまま。NotFound 以外（I/O・JSON 等）は伝播する。
+    /// 記事存在確認は Service の責務に留め、DictionaryRepository へは戻さない。
+    fn resolve_article_title(&self, article_id: &str) -> Result<String, AppError> {
+        match self.article_repository.get_article_detail(article_id) {
+            Ok(article) => Ok(article.title),
+            Err(AppError::NotFound(message)) => match sample_article_title(article_id) {
+                Some(title) => Ok(title.to_string()),
+                None => Err(AppError::NotFound(message)),
+            },
+            Err(other) => Err(other),
+        }
     }
 
     pub fn list_dictionary_entries(
@@ -104,6 +120,16 @@ impl DictionaryService {
 // --- 辞書未命中時のフォールバック（固定サンプル解説・汎用文）: 副作用なしの純粋 helper ---
 // AI Provider を呼ばず、辞書ストアにも触れない。後続PRでは explain_selected_term の未命中分岐を
 // AI 呼び出しへ置き換えるため、生成ロジックを Repository ではなく Service 側に集約する。
+
+/// 既知の固定サンプル記事ID(article-001〜003)に対する組み込みタイトルを返す（純粋関数・副作用なし）。
+/// 未知IDは None。active Markdown がアーカイブ退避で無くても固定サンプル解説へ到達するための
+/// フォールバックにだけ使う。タイトルの二重定義を避けるため、サンプル定義から引く。
+fn sample_article_title(article_id: &str) -> Option<&'static str> {
+    sample_dictionary_entries()
+        .into_iter()
+        .find(|entry| entry.article_id == article_id)
+        .map(|entry| entry.article_title)
+}
 
 /// 固定サンプル記事の解説に一致すればそれを、無ければ汎用文を返す（純粋関数）。
 fn build_dictionary_miss_entry(
@@ -412,6 +438,85 @@ mod tests {
             !dictionary_path.exists(),
             "解説表示だけで辞書ストアを作成・更新してはならない"
         );
+    }
+
+    // build_service は固定サンプル記事(article-001 等)の Markdown を seed しないため、
+    // ArticleRepository.get_article_detail("article-001") は NotFound になる。
+    // ＝アーカイブ退避などで active Markdown が無い状態を再現している。
+
+    #[test]
+    fn explain_falls_back_to_fixed_sample_when_sample_markdown_missing() {
+        let context = build_service();
+
+        // 固定サンプルID。ArticleRepository は NotFound だが、組み込みタイトルへフォールバックして
+        // 固定サンプル解説へ到達できる。
+        let entry = explain(&context, "article-001", "生成AI");
+        assert_eq!(entry.key_text, "生成AI");
+        assert_eq!(entry.related_article_id.as_deref(), Some("article-001"));
+        assert!(entry.short_explanation.contains("自動生成"));
+
+        // 固定サンプルフォールバックでも辞書は保存・更新しない。
+        assert!(
+            !context
+                .root_dir
+                .join("dictionary")
+                .join("entries.json")
+                .exists(),
+            "固定サンプルフォールバックで辞書ストアを作成してはならない"
+        );
+    }
+
+    #[test]
+    fn explain_prefers_saved_dictionary_over_fixed_sample_when_markdown_missing() {
+        let context = build_service();
+        // 保存済み辞書（"生成AI"）を用意。source は REAL_ARTICLE_ID（記事横断で命中させる）。
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: saved_entry(),
+            })
+            .unwrap();
+
+        // article-001 の Markdown は無いが、保存済み辞書を固定サンプル解説より優先して返す。
+        let entry = explain(&context, "article-001", "生成AI");
+        assert_eq!(entry.short_explanation, "保存済みの短い説明");
+        assert!(entry.is_starred);
+    }
+
+    #[test]
+    fn explain_returns_not_found_for_unknown_non_sample_article() {
+        let context = build_service();
+        // 固定サンプル以外の未知IDは、フォールバックせず NotFound のまま。
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: "unknown-article-xyz".to_string(),
+                selected_text: "生成AI".to_string(),
+            })
+            .unwrap_err();
+
+        let command_error = CommandError::from(error);
+        assert_eq!(command_error.code, "NOT_FOUND_ERROR");
+    }
+
+    #[test]
+    fn explain_does_not_fall_back_to_sample_on_non_not_found_error() {
+        let context = build_service();
+        // ArticleRepository が NotFound 以外（I/O エラー）を返す状態を作る:
+        // お気に入りストアの位置をディレクトリにして read_to_string を失敗させる。
+        std::fs::create_dir_all(context.root_dir.join("article_favorites.json")).unwrap();
+
+        // 固定サンプルID でも、NotFound 以外のエラーはフォールバックせずそのまま伝播する。
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: "article-001".to_string(),
+                selected_text: "生成AI".to_string(),
+            })
+            .unwrap_err();
+
+        let command_error = CommandError::from(error);
+        assert_eq!(command_error.code, "IO_ERROR");
     }
 
     // --- 辞書未命中フォールバック（純粋 helper build_dictionary_miss_entry）の直接テスト ---
