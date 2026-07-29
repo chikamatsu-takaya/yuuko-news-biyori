@@ -45,6 +45,21 @@ pub struct AiResponse {
     pub provider: String,
 }
 
+/// 用語解説をAIへ依頼するときの prompt_id（v1）。AiProviderService と DictionaryService で共有する。
+/// 単一文字列出力の既存契約に、用語解説だけの構造化出力（JSON: short/detail）契約を1つ追加する。
+pub const TERM_EXPLANATION_PROMPT_ID: &str = "term_explanation_v1";
+
+/// 用語解説AI出力（`TERM_EXPLANATION_PROMPT_ID`）の構造化契約（v1）。
+/// AI の単一文字列出力を、この JSON として **厳格に** 解析して short/detail を得る。
+/// フィールドは `DictionaryEntryDto` の shortExplanation / detailExplanation に対応する。
+/// `deny_unknown_fields` により short/detail 以外の未知フィールドを含む JSON は解析失敗にする。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiTermExplanation {
+    pub short: String,
+    pub detail: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::GenerateArticleSummaryParams;

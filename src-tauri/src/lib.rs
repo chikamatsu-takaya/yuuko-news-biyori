@@ -66,14 +66,16 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 article_service.clone(),
             );
+            // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
+            let ai_provider_service = AiProviderService::new(&paths);
             let dictionary_service = DictionaryService::new(
                 DictionaryRepository::new(&paths),
                 article_repository.clone(),
+                SettingsRepository::new(&paths),
+                std::sync::Arc::new(ai_provider_service.clone()),
             );
             let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
             friendship_service.initialize_default_if_missing()?;
-            // 接続テストと通常の要約生成で同一設定の AiProviderService を共有する。
-            let ai_provider_service = AiProviderService::new(&paths);
             let summary_service = SummaryService::new(
                 ai_provider_service.clone(),
                 article_repository,
