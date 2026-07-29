@@ -45,7 +45,7 @@ impl ArticleRepository {
     }
 
     #[cfg(test)]
-    fn with_paths(
+    pub(crate) fn with_paths(
         article_news_dir: PathBuf,
         article_favorites_path: PathBuf,
         archive_dir: PathBuf,
