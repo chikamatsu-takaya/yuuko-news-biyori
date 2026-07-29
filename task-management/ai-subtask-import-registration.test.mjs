@@ -17,7 +17,13 @@ import {
   validateAiSubtaskRegistrationParent,
   buildAiSubtaskChildPayloads,
   buildAiSubtaskParentUpdate,
+  planAiSubtaskParentSplitCount,
 } from "./ai-subtask-import-registration.mjs";
+
+// 整合した分割済み親の親 data()（Todo・3フィールド揃い）。
+function consistentSplitParent(overrides = {}) {
+  return { status: "Doing", taskRole: "split-parent", autoStatusUpdateDisabled: true, splitChildCount: 3, ...overrides };
+}
 
 // 許可11項目を持つ子タスク（登録用スナップショットの tasks 要素）。
 function childTask(overrides = {}) {
@@ -278,14 +284,56 @@ test("親可否: completed=true を拒否", () => {
   assert.equal(validateAiSubtaskRegistrationParent({ status: "Doing", completed: true }).ok, false);
 });
 
-test('親可否: taskRole="split-parent" を拒否', () => {
-  const r = validateAiSubtaskRegistrationParent({ status: "Doing", taskRole: "split-parent" });
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /分割済み/);
+test("親可否: 整合した分割済み親（3フィールド揃い）は許可（追加登録・既存子は保持）", () => {
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent()).ok, true);
 });
 
-test("親可否: splitChildCount > 0 を拒否", () => {
-  assert.equal(validateAiSubtaskRegistrationParent({ status: "Doing", splitChildCount: 2 }).ok, false);
+test("親可否: 分割済みでも Review / Done / archived / completed は拒否（既存条件は維持）", () => {
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ status: "Review" })).ok, false);
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ status: "Done" })).ok, false);
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ archived: true })).ok, false);
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ completed: true })).ok, false);
+});
+
+test("親可否: parentTaskId を持つ子タスクは拒否（孫タスク化防止・P1-1）", () => {
+  const r = validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: "p1" });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /孫タスク|子タスク/);
+  // 空白のみは trim 後に空＝親なし扱いで許可（未分割）。
+  assert.equal(validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: "   " }).ok, true);
+  // 分割管理フィールドがあっても parentTaskId があれば拒否。
+  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ parentTaskId: "p1" })).ok, false);
+});
+
+test("親可否: 非文字列 parentTaskId（型不整合）は登録直前検証でも拒否（P2-1・空文字補正しない）", () => {
+  for (const bad of [123, true, [], {}, ["parent-id"]]) {
+    const r = validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: bad });
+    assert.equal(r.ok, false, `parentTaskId=${JSON.stringify(bad)} は拒否`);
+    // inconsistent 扱いの固定エラー文（内部情報を含めない）。
+    assert.equal(r.reason, "親タスクの分割管理情報が不整合です。データを確認してください。");
+  }
+});
+
+test("親可否: 不整合な分割管理は拒否（固定エラー文・内部情報を含めない・P1-2）", () => {
+  const inconsistent = [
+    { status: "Doing", taskRole: "split-parent" },
+    { status: "Doing", autoStatusUpdateDisabled: true },
+    { status: "Doing", splitChildCount: 3 },
+    { status: "Doing", taskRole: "split-parent", autoStatusUpdateDisabled: true }, // count 欠落
+    consistentSplitParent({ splitChildCount: 0 }),
+    consistentSplitParent({ splitChildCount: -1 }),
+    consistentSplitParent({ splitChildCount: 1.5 }),
+    consistentSplitParent({ splitChildCount: "3" }),
+    consistentSplitParent({ splitChildCount: NaN }),
+    consistentSplitParent({ splitChildCount: Infinity }),
+    consistentSplitParent({ taskRole: "foo" }),
+    consistentSplitParent({ autoStatusUpdateDisabled: false }),
+  ];
+  for (const data of inconsistent) {
+    const r = validateAiSubtaskRegistrationParent(data);
+    assert.equal(r.ok, false, `${JSON.stringify(data)} は拒否`);
+    assert.equal(r.reason, "親タスクの分割管理情報が不整合です。データを確認してください。");
+  }
 });
 
 test("親可否: 未存在（null）を拒否", () => {
@@ -294,7 +342,7 @@ test("親可否: 未存在（null）を拒否", () => {
   assert.match(r.reason, /見つかりません/);
 });
 
-test("親可否: splitChildCount 未設定 / 0 は許可", () => {
+test("親可否: 完全な未分割（splitChildCount 未設定 / 0・管理フィールドなし）は許可", () => {
   assert.equal(validateAiSubtaskRegistrationParent({ status: "Doing" }).ok, true);
   assert.equal(validateAiSubtaskRegistrationParent({ status: "Doing", splitChildCount: 0 }).ok, true);
 });
@@ -312,4 +360,99 @@ test("親更新値: 正しい管理フィールド（status/branchName/issuePr �
   }
   // createdAt/updatedAt は書き込み層で付与するため含めない。
   assert.ok(!("updatedAt" in upd));
+});
+
+test("親更新値: splitChildCount は引数（登録後の総数）をそのまま反映する", () => {
+  // 初回分割: 既存0＋新規2＝2。
+  assert.equal(buildAiSubtaskParentUpdate(2).splitChildCount, 2);
+  // 追加登録: 既存3＋新規2＝5（既存子を保った総数）。呼び出し側で総数を計算して渡す契約。
+  assert.equal(buildAiSubtaskParentUpdate(5).splitChildCount, 5);
+});
+
+// --- planAiSubtaskParentSplitCount（トランザクション内の状態分類＋既存子数＋登録後総数の計算・P1-2 / P2） ---
+
+test("plan: 初回分割は既存0＋新規2＝2", () => {
+  const r = planAiSubtaskParentSplitCount({ status: "Doing" }, 2);
+  assert.deepEqual(r, { ok: true, existingChildCount: 0, totalChildCount: 2 });
+});
+
+test("plan: 追加登録は既存3＋新規2＝5（再取得した splitChildCount を正本にする）", () => {
+  const r = planAiSubtaskParentSplitCount(consistentSplitParent({ splitChildCount: 3 }), 2);
+  assert.deepEqual(r, { ok: true, existingChildCount: 3, totalChildCount: 5 });
+});
+
+test("plan: splitChildCount=0 の未分割は初回分割（0＋新規）として計算する", () => {
+  const r = planAiSubtaskParentSplitCount({ status: "Todo", splitChildCount: 0 }, 4);
+  assert.deepEqual(r, { ok: true, existingChildCount: 0, totalChildCount: 4 });
+});
+
+test("plan: child（parentTaskId あり）は親更新計画を作らない", () => {
+  const r = planAiSubtaskParentSplitCount({ status: "Todo", parentTaskId: "p1" }, 2);
+  assert.equal(r.ok, false);
+  assert.equal(r.existingChildCount, undefined);
+  assert.equal(r.totalChildCount, undefined);
+});
+
+test("plan: 非文字列 parentTaskId（型不整合）は親更新計画を作らない（P2-1）", () => {
+  for (const bad of [123, true, [], {}, ["parent-id"]]) {
+    const r = planAiSubtaskParentSplitCount({ status: "Todo", parentTaskId: bad }, 2);
+    assert.equal(r.ok, false, `parentTaskId=${JSON.stringify(bad)} は拒否`);
+    assert.equal(r.totalChildCount, undefined);
+  }
+});
+
+test("plan: 不整合状態はすべて拒否し、親更新計画を作らない（0補正しない）", () => {
+  const inconsistent = [
+    { status: "Doing", taskRole: "split-parent" },
+    { status: "Doing", autoStatusUpdateDisabled: true },
+    { status: "Doing", splitChildCount: 3 },
+    consistentSplitParent({ splitChildCount: 0 }),
+    consistentSplitParent({ splitChildCount: -1 }),
+    consistentSplitParent({ splitChildCount: 1.5 }),
+    consistentSplitParent({ splitChildCount: "3" }),
+    consistentSplitParent({ splitChildCount: NaN }),
+    consistentSplitParent({ splitChildCount: Infinity }),
+    consistentSplitParent({ taskRole: "foo" }),
+    consistentSplitParent({ autoStatusUpdateDisabled: false }),
+  ];
+  for (const data of inconsistent) {
+    const r = planAiSubtaskParentSplitCount(data, 2);
+    assert.equal(r.ok, false, `${JSON.stringify(data)} は拒否`);
+    assert.equal(r.totalChildCount, undefined);
+  }
+});
+
+test("plan: 新規件数が正の安全整数でなければ拒否", () => {
+  for (const bad of [0, -1, 1.5, NaN, Infinity, "2", null, undefined]) {
+    assert.equal(planAiSubtaskParentSplitCount({ status: "Doing" }, bad).ok, false, `newChildCount=${bad}`);
+  }
+});
+
+test("plan: 上限近辺の安全整数判定（既存が MAX_SAFE_INTEGER で加算が桁あふれなら拒否）", () => {
+  // 既存が安全整数上限そのものは split-parent として分類され existingChildCount に反映される…
+  const boundary = consistentSplitParent({ splitChildCount: Number.MAX_SAFE_INTEGER });
+  // …が、+2 すると安全整数を超えるため登録は拒否（0補正・切り捨てをしない）。
+  const r = planAiSubtaskParentSplitCount(boundary, 2);
+  assert.equal(r.ok, false);
+  assert.equal(r.totalChildCount, undefined);
+  // 既存 = MAX-3、新規 3 → ちょうど MAX で許可。
+  const ok = planAiSubtaskParentSplitCount(
+    consistentSplitParent({ splitChildCount: Number.MAX_SAFE_INTEGER - 3 }),
+    3,
+  );
+  assert.deepEqual(ok, {
+    ok: true,
+    existingChildCount: Number.MAX_SAFE_INTEGER - 3,
+    totalChildCount: Number.MAX_SAFE_INTEGER,
+  });
+});
+
+test("plan: 正常時に返す総数は buildAiSubtaskParentUpdate へ渡す値と一致する（配線契約）", () => {
+  // importAiSubtasksForPoc は plan.totalChildCount を buildAiSubtaskParentUpdate に渡す。
+  const plan = planAiSubtaskParentSplitCount(consistentSplitParent({ splitChildCount: 3 }), 2);
+  assert.equal(plan.ok, true);
+  const upd = buildAiSubtaskParentUpdate(plan.totalChildCount);
+  assert.equal(upd.splitChildCount, 5);
+  assert.equal(upd.taskRole, "split-parent");
+  assert.equal(upd.autoStatusUpdateDisabled, true);
 });

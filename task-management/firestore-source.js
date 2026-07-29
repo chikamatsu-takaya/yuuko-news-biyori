@@ -39,13 +39,13 @@ import { firebaseConfig } from "./firebase-config.js";
 import { normalizeMvpScope } from "./mvp-scope.mjs";
 // AI分割タスク取込: 親候補判定（§3.10）。カード描画時に同期利用できるよう、変換時に判定して
 // 各タスクへ aiSubtaskEligible を持たせる（判定の正本は本モジュールに一本化する）。
-import { isEligibleAiSubtaskParent } from "./ai-subtask-import-parent.mjs";
+import { computeAiSubtaskUiFlags } from "./ai-subtask-import-parent.mjs";
 // AI分割タスク一括登録: 登録前最終検証・保存値組み立ての純粋関数（Firestore依存値は本層で付与）。
 import {
   validateAiSubtaskRegistrationSnapshot,
-  validateAiSubtaskRegistrationParent,
   buildAiSubtaskChildPayloads,
   buildAiSubtaskParentUpdate,
+  planAiSubtaskParentSplitCount,
 } from "./ai-subtask-import-registration.mjs";
 // AI分割タスク削除・一括取り消し: 削除条件・親整合性・カウント計算の純粋関数（§3.7）。
 import {
@@ -252,9 +252,9 @@ function firestoreDocToTaskModel(doc, { line }) {
     sourceBadge: classifySourceBadge(doc.source),
     // 保護フラグ。タスクカード削除ボタンの表示可否（manual-poc かつ非protected）判定に使う。
     protected: doc.protected === true,
-    // AI分割タスク取込の親候補判定用（読み取りのみ・書き込みは今回しない）。
-    // taskRole="split-parent" / splitChildCount>0 は「分割済み親」で追加分割の対象外にする。
-    // 未設定・型不正は安全側（taskRole="" / splitChildCount=0）へ寄せる。
+    // AI分割タスク取込の親候補判定・追加登録用。taskRole="split-parent" / splitChildCount>0 は
+    // 「分割済み親」だが、既存子を保ったまま子タスクを追加登録できる（候補外にはしない）。
+    // splitChildCount は現在の子タスク数（追加で加算・削除で減算）。未設定・型不正は安全側へ寄せる。
     taskRole: typeof doc.taskRole === "string" ? doc.taskRole : "",
     splitChildCount:
       typeof doc.splitChildCount === "number" && Number.isFinite(doc.splitChildCount)
@@ -274,9 +274,15 @@ function firestoreDocToTaskModel(doc, { line }) {
     implementationPrompt: typeof doc.implementationPrompt === "string" ? doc.implementationPrompt : "",
     reviewPrompt: typeof doc.reviewPrompt === "string" ? doc.reviewPrompt : "",
   };
-  // 「AIで分割」ボタンの表示可否（親候補条件）を同期利用できるよう、変換時に判定して持たせる。
-  // 判定ロジックは ai-subtask-import-parent.mjs に集約（ここでは呼ぶだけ・重複実装しない）。
-  task.aiSubtaskEligible = isEligibleAiSubtaskParent(task);
+  // 「AIで分割」ボタンの表示可否・文言は、表示用に正規化した task ではなく**正規化前の生データ doc**から
+  // 計算する（P2-2）。task 側は非文字列 parentTaskId/taskRole を空文字・非有限 splitChildCount を 0 へ
+  // 正規化しており、型不整合が unsplit へ潰れて候補に出てしまうため。判定ロジックは
+  // ai-subtask-import-parent.mjs に集約（同じ分類をここで再実装しない）。生データは候補判定・文言判定に
+  // だけ使い、DOM/表示へは task（正規化済み・エスケープ前提）を使う。
+  const uiFlags = computeAiSubtaskUiFlags(doc);
+  task.aiSubtaskEligible = uiFlags.eligible;
+  // 分割済み親か（ボタン文言を「AIで分割」／「子タスクを追加」で切り替える表示用。候補可否には影響しない）。
+  task.aiSubtaskAlreadySplit = uiFlags.alreadySplit;
   return task;
 }
 
@@ -1034,9 +1040,9 @@ export async function importAiSubtasksForPoc({ parentTaskId, snapshot }) {
   // 4. 子タスクの DocumentReference をトランザクション外で採番（再試行でも docId 不変）。
   const childRefs = tasks.map(() => firestoreDoc(collection(db, "tasks")));
 
-  // 保存値を組み立て（純粋関数・Firestore依存値なし）。createdAt/updatedAt は下で付与する。
+  // 子タスクの保存値を組み立て（純粋関数・Firestore依存値なし）。createdAt/updatedAt は下で付与する。
+  // 親の splitChildCount は「既存＋新規」の総数にするため、トランザクション内で既存値を読んでから確定する。
   const childPayloads = buildAiSubtaskChildPayloads({ snapshot, parentTaskId, importBatchId, baseOrder });
-  const parentUpdate = buildAiSubtaskParentUpdate(childCount);
   const parentRef = firestoreDoc(db, "tasks", parentTaskId);
 
   // 5. 親再取得→再検証→親update＋全子set を同一トランザクションで（全件成功/全件失敗）。
@@ -1045,11 +1051,17 @@ export async function importAiSubtasksForPoc({ parentTaskId, snapshot }) {
     if (!parentSnap.exists()) {
       throw new Error("親タスクが見つかりません（削除またはアーカイブされた可能性があります）。");
     }
-    const parentCheck = validateAiSubtaskRegistrationParent(parentSnap.data() ?? {});
-    if (!parentCheck.ok) {
-      throw new Error(parentCheck.reason);
+    const parentData = parentSnap.data() ?? {};
+    // 親状態の分類・登録可否・登録後総数を「再取得した最新 parentData」から毎回計算する（再試行のたびに再計算）。
+    // child（孫タスク化）/ inconsistent（不整合）/ 桁あふれは拒否し、Firestore へ何も書き込ませない。
+    // 不正な splitChildCount を 0 補正せず、既存子数は整合した split-parent の splitChildCount のみを使う。
+    const plan = planAiSubtaskParentSplitCount(parentData, childCount);
+    if (!plan.ok) {
+      throw new Error(plan.reason);
     }
-    // 親の管理フィールド更新（status/branchName/issuePr 等の既存値は触れない）。
+    // 追加登録後の総数（既存＋新規）を splitChildCount に反映する。初回分割なら既存=0＝新規数。
+    const parentUpdate = buildAiSubtaskParentUpdate(plan.totalChildCount);
+    // 親の管理フィールド更新（status/branchName/issuePr 等の既存値は触れない・既存子タスクにも触れない）。
     transaction.update(parentRef, { ...parentUpdate, updatedAt: serverTimestamp() });
     // 全子タスクを同一トランザクションで登録（createdAt/updatedAt を付与）。
     childRefs.forEach((ref, index) => {
