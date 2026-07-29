@@ -66,7 +66,10 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 article_service.clone(),
             );
-            let dictionary_service = DictionaryService::new(DictionaryRepository::new(&paths));
+            let dictionary_service = DictionaryService::new(
+                DictionaryRepository::new(&paths),
+                article_repository.clone(),
+            );
             let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
             friendship_service.initialize_default_if_missing()?;
             // 接続テストと通常の要約生成で同一設定の AiProviderService を共有する。
