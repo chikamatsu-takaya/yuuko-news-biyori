@@ -45,10 +45,12 @@ export function hasNonEmptyParentTaskId(task) {
  * 親タスクの分割状態を分類する（UI候補判定・登録前検証・件数計算で共通利用する正本）。
  *
  * 分類（§3.9 / §3.10）:
- * - "child": 非空の文字列 parentTaskId を持つ。子タスクを親にすると孫タスク化になるため分割対象外。
- * - "inconsistent": null 以外の非文字列 parentTaskId（型不整合）、または分割管理フィールドの混在・不正値
- *   （片方だけ設定・0/負/小数/文字列/NaN/Infinity・管理フィールドと parentTaskId の併存 など）。
- *   追加登録は拒否する。不正値を 0 や空文字へ補正したり、実件数を検索して自動修復したりはしない。
+ * - "child": 非空の文字列 parentTaskId を持ち、かつ分割管理フィールド（taskRole / autoStatusUpdateDisabled /
+ *   splitChildCount）がすべて未設定側（通常の子タスク）。子タスクを親にすると孫タスク化になるため分割対象外。
+ * - "inconsistent": null 以外の非文字列 parentTaskId（型不整合）、分割管理フィールドの混在・不正値
+ *   （片方だけ設定・0/負/小数/文字列/NaN/Infinity）、または **非空 parentTaskId と分割親管理フィールドの併存**
+ *   （子タスクなのに split-parent 情報を持つ＝要修復）など。追加登録は拒否する。不正値を 0 や空文字へ
+ *   補正したり、実件数を検索して自動修復したりはしない。
  * - "unsplit": 完全な未分割。parentTaskId なし かつ taskRole≠"split-parent" かつ
  *   autoStatusUpdateDisabled≠true かつ splitChildCount が未設定/null/0。existingChildCount=0。
  * - "split-parent": 整合した分割済み親。parentTaskId なし かつ taskRole==="split-parent" かつ
@@ -61,26 +63,33 @@ export function classifyAiSubtaskParentState(task) {
   const t = task ?? {};
   // 親子関係の正本 parentTaskId を最初に判定する（型不整合を空文字へ潰さない・P2-1）。
   const parentIdKind = classifyParentTaskIdField(t.parentTaskId);
-  if (parentIdKind === "child") {
-    // 非空文字列＝子タスク（孫タスク化になるため分割対象外）。他フィールドに関わらず child。
-    return { state: "child", existingChildCount: 0 };
-  }
   if (parentIdKind === "invalid") {
     // null 以外の非文字列（数値/boolean/配列/オブジェクト 等）は不整合として拒否する。
     return { state: "inconsistent", existingChildCount: 0 };
   }
-  // parentIdKind === "absent"（親なし）のときだけ、分割管理フィールドで分類する。
-  // 各フィールドを「分割側 / 未設定側 / 型不整合」の3値に分ける（型情報を残したまま判定する）。
+
+  // 分割管理フィールドを「分割側 / 未設定側 / 型不整合」の3値に分ける（型情報を残したまま判定する）。
   const roleKind = classifySplitRoleField(t.taskRole);
   const flagKind = classifyDisableFlagField(t.autoStatusUpdateDisabled);
   const countKind = classifySplitCountField(t.splitChildCount);
+  // 3つがすべて「未設定側」で揃っているか（＝分割管理フィールドが実質未設定）。
+  const allSplitFieldsAbsent = roleKind === "absent" && flagKind === "absent" && countKind === "absent";
 
+  if (parentIdKind === "child") {
+    // 非空文字列 parentTaskId＝子タスク。分割管理フィールドがすべて未設定側なら通常の子タスク（child）。
+    // 分割済み側や型不整合の管理フィールドが併存する場合は、修復が必要な不整合として inconsistent（§3.9・P3）。
+    return allSplitFieldsAbsent
+      ? { state: "child", existingChildCount: 0 }
+      : { state: "inconsistent", existingChildCount: 0 };
+  }
+
+  // parentIdKind === "absent"（親なし）のときだけ、分割管理フィールドで unsplit/split-parent を判定する。
   // どれか1つでも型不整合（invalid）なら不整合（例: taskRole が非文字列・splitChildCount が "3"/Infinity）。
   if (roleKind === "invalid" || flagKind === "invalid" || countKind === "invalid") {
     return { state: "inconsistent", existingChildCount: 0 };
   }
   // 完全な未分割: 3つの分割管理フィールドがすべて「未設定側」で揃っている。
-  if (roleKind === "absent" && flagKind === "absent" && countKind === "absent") {
+  if (allSplitFieldsAbsent) {
     return { state: "unsplit", existingChildCount: 0 };
   }
   // 整合した分割済み親: 3つがすべて「分割済み側」で揃っている。

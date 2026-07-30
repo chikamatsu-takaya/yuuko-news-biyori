@@ -295,14 +295,32 @@ test("親可否: 分割済みでも Review / Done / archived / completed は拒�
   assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ completed: true })).ok, false);
 });
 
-test("親可否: parentTaskId を持つ子タスクは拒否（孫タスク化防止・P1-1）", () => {
+test("親可否: 通常の子タスク（parentTaskId のみ）は孫タスク禁止の理由で拒否（P1-1）", () => {
   const r = validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: "p1" });
   assert.equal(r.ok, false);
   assert.match(r.reason, /孫タスク|子タスク/);
+  // 未分割側のデフォルト値だけの子タスクも同じく孫タスク禁止の理由で拒否（child のまま）。
+  const r2 = validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: "p1", taskRole: "", autoStatusUpdateDisabled: false, splitChildCount: 0 });
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /孫タスク|子タスク/);
   // 空白のみは trim 後に空＝親なし扱いで許可（未分割）。
   assert.equal(validateAiSubtaskRegistrationParent({ status: "Todo", parentTaskId: "   " }).ok, true);
-  // 分割管理フィールドがあっても parentTaskId があれば拒否。
-  assert.equal(validateAiSubtaskRegistrationParent(consistentSplitParent({ parentTaskId: "p1" })).ok, false);
+});
+
+test("親可否: parentTaskId と分割親管理フィールドの併存は固定の不整合エラーで拒否（P3）", () => {
+  // child ではなく inconsistent。エラー理由は「孫タスク禁止」ではなく「分割管理情報が不整合」。
+  const coexist = [
+    consistentSplitParent({ parentTaskId: "p1" }),
+    { status: "Todo", parentTaskId: "p1", taskRole: "split-parent" },
+    { status: "Todo", parentTaskId: "p1", autoStatusUpdateDisabled: true },
+    { status: "Todo", parentTaskId: "p1", splitChildCount: 2 },
+    { status: "Todo", parentTaskId: "p1", splitChildCount: "2" },
+  ];
+  for (const data of coexist) {
+    const r = validateAiSubtaskRegistrationParent(data);
+    assert.equal(r.ok, false, `${JSON.stringify(data)} は拒否`);
+    assert.equal(r.reason, "親タスクの分割管理情報が不整合です。データを確認してください。");
+  }
 });
 
 test("親可否: 非文字列 parentTaskId（型不整合）は登録直前検証でも拒否（P2-1・空文字補正しない）", () => {
@@ -397,6 +415,20 @@ test("plan: 非文字列 parentTaskId（型不整合）は親更新計画を作�
   for (const bad of [123, true, [], {}, ["parent-id"]]) {
     const r = planAiSubtaskParentSplitCount({ status: "Todo", parentTaskId: bad }, 2);
     assert.equal(r.ok, false, `parentTaskId=${JSON.stringify(bad)} は拒否`);
+    assert.equal(r.totalChildCount, undefined);
+  }
+});
+
+test("plan: parentTaskId と分割親管理フィールドの併存（inconsistent）は親更新計画を作らない（P3）", () => {
+  const coexist = [
+    consistentSplitParent({ parentTaskId: "p1" }),
+    { status: "Todo", parentTaskId: "p1", taskRole: "split-parent" },
+    { status: "Todo", parentTaskId: "p1", splitChildCount: 2 },
+    { status: "Todo", parentTaskId: "p1", splitChildCount: "2" },
+  ];
+  for (const data of coexist) {
+    const r = planAiSubtaskParentSplitCount(data, 2);
+    assert.equal(r.ok, false, `${JSON.stringify(data)} は拒否`);
     assert.equal(r.totalChildCount, undefined);
   }
 });

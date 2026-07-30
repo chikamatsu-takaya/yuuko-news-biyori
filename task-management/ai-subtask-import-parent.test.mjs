@@ -136,7 +136,7 @@ test("parentTaskId を持つ子タスクは候補にならない（Todo/Doing/Bl
   assert.equal(isEligibleAiSubtaskParent(parentTask({ status: "Blocked", parentTaskId: "p1" })), false);
   // 空白のみは trim 後に空＝親なし扱いで候補になる。
   assert.equal(isEligibleAiSubtaskParent(parentTask({ parentTaskId: "   " })), true);
-  // 分割済み親であっても parentTaskId を持てば子タスク扱いで候補外。
+  // parentTaskId と分割親管理フィールドの併存は inconsistent（P3）。いずれにせよ候補外。
   assert.equal(isEligibleAiSubtaskParent(splitParent({ parentTaskId: "p1" })), false);
 });
 
@@ -184,13 +184,35 @@ test("classifyParentTaskIdField: invalid（null以外の非文字列）", () => 
 
 // --- classifyAiSubtaskParentState（分類の正本） ---
 
-test("classifyAiSubtaskParentState: child（parentTaskId あり）", () => {
+test("classifyAiSubtaskParentState: child（parentTaskId あり・分割管理フィールドは未設定側のみ）", () => {
+  // parentTaskId だけの通常の子タスク。
   assert.deepEqual(classifyAiSubtaskParentState({ parentTaskId: "p1" }), {
     state: "child",
     existingChildCount: 0,
   });
-  // 管理フィールドがあっても parentTaskId があれば child。
-  assert.equal(classifyAiSubtaskParentState(splitParent({ parentTaskId: "p1" })).state, "child");
+  // 未分割側のデフォルト値（空文字 / false / 0）だけなら child。
+  assert.deepEqual(
+    classifyAiSubtaskParentState({ parentTaskId: "p1", taskRole: "", autoStatusUpdateDisabled: false, splitChildCount: 0 }),
+    { state: "child", existingChildCount: 0 },
+  );
+});
+
+test("classifyAiSubtaskParentState: parentTaskId と分割親管理フィールドの併存は inconsistent（child にしない・P3）", () => {
+  const coexist = [
+    // 整合した split-parent 情報を併せ持つ（要修復）。
+    splitParent({ parentTaskId: "p1" }),
+    { parentTaskId: "p1", taskRole: "split-parent" },
+    { parentTaskId: "p1", autoStatusUpdateDisabled: true },
+    { parentTaskId: "p1", splitChildCount: 2 },
+    // 型不整合の分割管理フィールドを併せ持つ。
+    { parentTaskId: "p1", splitChildCount: "2" },
+    { parentTaskId: "p1", taskRole: 123 },
+  ];
+  for (const data of coexist) {
+    const r = classifyAiSubtaskParentState(data);
+    assert.equal(r.state, "inconsistent", `${JSON.stringify(data)} は inconsistent`);
+    assert.equal(r.existingChildCount, 0);
+  }
 });
 
 test("classifyAiSubtaskParentState: unsplit（既存子数0）", () => {
