@@ -98,8 +98,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // 削除候補の選択・反映はMarkdown同期プレビュー側（markdown-sync-ui.js）で扱う。
   elements.taskTree.addEventListener("click", (event) => {
     // 「AIで分割」ボタン（Firestore版・親候補条件を満たすタスクのみ表示）。
-    // 押したタスクIDから最新1件を再取得し、最新状態で候補判定してからモーダルを開く
-    // （一覧の古いデータで候補外タスクを開かないため。このPRでは登録・親更新はしない）。
+    // この段階では最新の親タスク1件を再取得し、最新状態で候補判定してからモーダルを開くだけ
+    // （一覧の古いデータで候補外タスクを開かないため）。Firestore登録・親更新は、
+    // JSON検証・確認後の「一括登録」処理（importAiSubtasksForPoc・§7）で行う。
     const aiSubtaskSplitButton = event.target.closest(".ai-subtask-split-button");
     if (aiSubtaskSplitButton) {
       const taskId = aiSubtaskSplitButton.dataset.taskId;
@@ -1367,15 +1368,17 @@ function setupAiSubtaskImportUi() {
 // 「AIで分割」ボタンのタスクカード用HTMLを返す。
 // Firestore 表示時かつ親候補条件（task.aiSubtaskEligible）を満たすタスクにだけ出す。
 // autoStatusUpdateDisabled は候補条件に含めない（判定は ai-subtask-import-parent.mjs 側）。
+// 分割済み親は「子タスクを追加」、未分割は「AIで分割」と文言を切り替える（動作は同じ・既存子は保持）。
 function renderAiSubtaskSplitButton(task) {
   if (!state.isFirestore || !task.firestoreId || task.aiSubtaskEligible !== true) {
     return "";
   }
+  const label = task.aiSubtaskAlreadySplit === true ? "子タスクを追加" : "AIで分割";
   return `
     <div class="ai-subtask-split">
       <button type="button" class="button compact ai-subtask-split-button" data-task-id="${escapeHtml(
     task.firestoreId,
-  )}">AIで分割</button>
+  )}">${label}</button>
     </div>
   `;
 }
@@ -1699,7 +1702,7 @@ async function openAiSubtaskImportModal(taskId) {
   summary.hidden = false;
 
   // Doing かつ branchName 設定済みなら、分割で post-merge 自動更新対象外になる旨を案内する
-  // （このPRでは親フィールドの実設定は行わない）。判定は1度だけ行い、成功プレビューでも共有する。
+  // （実際の親フィールド設定は「一括登録」時に行う。ここは案内表示のみ）。判定は1度だけ行い、成功プレビューでも共有する。
   aiSubtaskParentWarnSplit = shouldWarnSplitParentAutoUpdate(freshTask) === true;
   if (aiSubtaskParentWarnSplit) {
     warning.textContent = AI_SUBTASK_SPLIT_PARENT_WARNING;
