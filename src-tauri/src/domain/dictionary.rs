@@ -87,6 +87,10 @@ impl DictionaryEntryType {
     }
 }
 
+/// 選択語(selectedText)の Unicode 文字数上限（trim 後・chars 単位）。AIへ渡す入力の可変部分を
+/// 明示的に有界化する。バイト長ではなく文字数で判定し、日本語・絵文字でも文字境界を壊さない。
+const TERM_EXPLANATION_SELECTED_TEXT_MAX_CHARS: usize = 200;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainSelectedTermParams {
@@ -108,6 +112,14 @@ impl ExplainSelectedTermParams {
             return Err(AppError::Validation(
                 "selectedText must not be empty".to_string(),
             ));
+        }
+
+        // trim 後の文字数上限。超過時は入力本文をエラー・ログへ含めず固定文言で拒否する
+        // （この後段の記事取得・辞書検索・AI呼び出し・辞書保存には一切進まない）。
+        if selected_text.chars().count() > TERM_EXPLANATION_SELECTED_TEXT_MAX_CHARS {
+            return Err(AppError::Validation(format!(
+                "selectedText must be {TERM_EXPLANATION_SELECTED_TEXT_MAX_CHARS} characters or fewer"
+            )));
         }
 
         Ok((article_id.to_string(), selected_text.to_string()))
@@ -394,6 +406,58 @@ mod tests {
         };
 
         assert!(params.validated_inputs().is_err());
+    }
+
+    // selectedText の文字数上限（200文字・trim 後・chars 単位）。
+    fn explain_params(selected_text: &str) -> ExplainSelectedTermParams {
+        ExplainSelectedTermParams {
+            article_id: "article-001".to_string(),
+            selected_text: selected_text.to_string(),
+        }
+    }
+
+    #[test]
+    fn validated_inputs_accepts_up_to_200_chars() {
+        // 199文字・200文字ちょうどは許可。
+        assert!(explain_params(&"a".repeat(199)).validated_inputs().is_ok());
+        let ok = explain_params(&"a".repeat(200)).validated_inputs().unwrap();
+        assert_eq!(ok.1.chars().count(), 200);
+    }
+
+    #[test]
+    fn validated_inputs_rejects_201_chars_without_leaking_body() {
+        let body = "a".repeat(201);
+        let err = explain_params(&body).validated_inputs().unwrap_err();
+        // 入力本文（201文字分）はエラー文へ含めない。文字数上限(200)の固定文言のみ。
+        let message = err.to_string();
+        assert!(!message.contains(&body));
+        assert!(!message.contains("aaaa"));
+        assert!(message.contains("200"));
+    }
+
+    #[test]
+    fn validated_inputs_counts_multibyte_by_chars_not_bytes() {
+        // 日本語200文字（600バイト）は許可、201文字は拒否（chars 判定）。
+        assert!(explain_params(&"あ".repeat(200)).validated_inputs().is_ok());
+        assert!(explain_params(&"あ".repeat(201))
+            .validated_inputs()
+            .is_err());
+        // 絵文字（サロゲートペア相当・4バイト）でも文字数で判定する。
+        assert!(explain_params(&"😀".repeat(200)).validated_inputs().is_ok());
+        assert!(explain_params(&"😀".repeat(201))
+            .validated_inputs()
+            .is_err());
+    }
+
+    #[test]
+    fn validated_inputs_counts_after_trim() {
+        // 前後空白を trim した後の文字数で判定する。200文字＋前後空白 → 許可。
+        let padded = format!("  {}  ", "あ".repeat(200));
+        let ok = explain_params(&padded).validated_inputs().unwrap();
+        assert_eq!(ok.1.chars().count(), 200);
+        // trim 後に 201 文字なら拒否。
+        let padded_over = format!("  {}  ", "あ".repeat(201));
+        assert!(explain_params(&padded_over).validated_inputs().is_err());
     }
 
     #[test]

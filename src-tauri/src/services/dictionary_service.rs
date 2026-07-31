@@ -221,10 +221,20 @@ enum ResolvedArticle {
 /// 分離した、AI送信専用の上限。送信最小化のため保存時よりさらに短くする。値だけで調整できる。
 const TERM_EXPLANATION_CONTEXT_MAX_CHARS: usize = 500;
 
+/// AI へ渡す記事タイトルの文字数上限（AI context 専用・chars 単位）。AIへ渡す入力の可変部分を有界化する。
+/// DTO の related_article_title・ArticleRepository/保存済みタイトル・画面表示タイトルには影響させない。
+const TERM_EXPLANATION_TITLE_MAX_CHARS: usize = 300;
+
 /// AI へ渡す参考文脈（外部データ）を組み立てる（副作用なし）。タイトルと抜粋のみで、記事本文全文は渡さない。
-/// 抜粋は AI送信専用上限(TERM_EXPLANATION_CONTEXT_MAX_CHARS)で UTF-8 安全（chars 単位）に切り詰める
-/// （バイト境界スライスをしない）。保存側の excerpt 上限(2000文字)は変更しない。
+/// タイトルは AI送信専用上限(TERM_EXPLANATION_TITLE_MAX_CHARS)、抜粋は AI送信専用上限
+/// (TERM_EXPLANATION_CONTEXT_MAX_CHARS)で、それぞれ UTF-8 安全（chars 単位）に切り詰める
+/// （バイト境界スライスをしない）。切り詰めは AI context だけで、DTO・保存・表示のタイトルや
+/// 保存側 excerpt 上限(2000文字)には影響しない。
 fn build_ai_context(article_title: &str, excerpt: Option<&str>) -> String {
+    let capped_title = article_title
+        .chars()
+        .take(TERM_EXPLANATION_TITLE_MAX_CHARS)
+        .collect::<String>();
     let capped_excerpt = excerpt
         .map(|text| {
             text.chars()
@@ -233,8 +243,8 @@ fn build_ai_context(article_title: &str, excerpt: Option<&str>) -> String {
         })
         .filter(|text| !text.trim().is_empty());
     match capped_excerpt {
-        Some(excerpt) => format!("タイトル: {article_title}\n抜粋: {excerpt}"),
-        None => format!("タイトル: {article_title}"),
+        Some(excerpt) => format!("タイトル: {capped_title}\n抜粋: {excerpt}"),
+        None => format!("タイトル: {capped_title}"),
     }
 }
 
@@ -776,6 +786,94 @@ mod tests {
         // 元の長い抜粋（上限超え）をそのまま渡していない。
         assert!(excerpt_char_count < long_excerpt_char_count);
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn explain_caps_article_title_in_ai_context_only() {
+        let root_dir = temp_root("title-cap");
+        let ai = Arc::new(FakeAi::new());
+        // 上限(300)を超える301文字の日本語タイトル（'ア'で構成し、既定抜粋 "本文抜粋" と区別する）。
+        let long_title = "ア".repeat(301);
+        let service = service_with_articles(
+            &root_dir,
+            ai.clone(),
+            vec![real_news_article("rss-long-title", &long_title)],
+        );
+
+        let entry = service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: "rss-long-title".to_string(),
+                selected_text: "用語".to_string(),
+            })
+            .unwrap();
+
+        let request = ai.last_request().expect("AI へ渡ったリクエスト");
+        let context_text = request.context.expect("context");
+        // AI context のタイトルは最大300文字へ UTF-8 安全に切り詰める（'ア' の数 == 300）。
+        let title_char_count = context_text.chars().filter(|c| *c == 'ア').count();
+        assert_eq!(title_char_count, 300);
+        // 元の301文字タイトルをそのまま渡していない。
+        assert!(title_char_count < long_title.chars().count());
+        // 抜粋（既定 "本文抜粋"）は AI context に残る（excerpt の既存500文字上限は別・維持）。
+        assert!(context_text.contains(REAL_ARTICLE_EXCERPT));
+        // DTO の related_article_title は元の301文字を維持（切り詰めは AI context だけ）。
+        assert_eq!(
+            entry.related_article_title.as_deref(),
+            Some(long_title.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn explain_keeps_titles_at_or_below_limit_unchanged_in_context() {
+        // 299文字・300文字ちょうどはそのまま AI context に含める（切り詰めない）。
+        for n in [299usize, 300] {
+            let root_dir = temp_root(&format!("title-keep-{n}"));
+            let ai = Arc::new(FakeAi::new());
+            let title = "ア".repeat(n);
+            let service = service_with_articles(
+                &root_dir,
+                ai.clone(),
+                vec![real_news_article("rss-title", &title)],
+            );
+            service
+                .explain_selected_term(ExplainSelectedTermParams {
+                    article_id: "rss-title".to_string(),
+                    selected_text: "用語".to_string(),
+                })
+                .unwrap();
+            let request = ai.last_request().expect("AI へ渡ったリクエスト");
+            let context_text = request.context.expect("context");
+            assert_eq!(context_text.chars().filter(|c| *c == 'ア').count(), n);
+            let _ = std::fs::remove_dir_all(&root_dir);
+        }
+    }
+
+    #[test]
+    fn explain_rejects_oversized_selected_text_without_ai_or_save() {
+        let context = build_service();
+        let dictionary_path = context.root_dir.join("dictionary").join("entries.json");
+
+        // 上限(200)を超える201文字の選択語。
+        let oversized = "あ".repeat(201);
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: oversized.clone(),
+            })
+            .unwrap_err();
+
+        // 固定の Validation エラー。入力本文はエラーへ含めない。
+        let command_error = CommandError::from(error);
+        assert_eq!(command_error.code, "VALIDATION_ERROR");
+        assert!(!command_error.message.contains(&oversized));
+        // 超過時は AI を呼ばず、辞書ストアも作成・更新しない（不要な副作用なし）。
+        assert_eq!(context.ai.call_count(), 0);
+        assert!(
+            !dictionary_path.exists(),
+            "入力上限超過の拒否で辞書ストアを作成・更新してはならない"
+        );
     }
 
     #[test]
