@@ -440,12 +440,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - MVP scope: Required
 - [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
   - MVP scope: Required
-- [ ] AIプロバイダ接続テストの最小バックエンド基盤を追加する
+- [x] AIプロバイダ接続テストの最小バックエンド基盤を追加する
   - Priority: P1.5
   - MVP scope: Undecided
-  - Status: Next
+  - Status: Done
   - Owner: 未定
-  - Branch: 未作成
+  - Branch: `feature/ai-mdfa7b1f`
   - Issue/PR: 未定
   - Done when:
     - 接続確認専用の固定処理として、GeminiまたはMockProviderの利用可否を確認できる
@@ -539,11 +539,11 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: MVPスコープ定義書 §4.1 / §14、要件定義書 §16.1、基本設計書 §18.1、詳細設計書 §14.3。
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、用語が辞書へ蓄積される」体験が途切れないことを確認する。
-    - MVP必須機能を含む画面: ホーム画面 / 当日ニュース一覧画面（SCR-009・見出し「本日取得したニュース」） / ニュース履歴画面 / ゆうこ辞書画面 / 設定画面
+    - MVP必須機能を含む画面: ホーム画面 / ニュース履歴画面 / ゆうこ辞書画面 / 設定画面
     - 追加機能として扱う画面: ガチャ画面 / カスタマイズ画面
-    - ニュース閲覧・記事詳細（SCR-002）は、ホーム / 当日ニュース一覧（SCR-009） / ニュース履歴 / ゆうこ辞書の関連ニュース から開くMVP必須UI
-    - サイドバー「ニュースを見る」とホーム「すべて見る」は、当日ニュース一覧画面（SCR-009）へ遷移する
+    - ニュース閲覧・記事詳細は、ホームまたは履歴から開くMVP必須UI
     - ニューステーマは設定画面の機能
+    - 独立した新規ニュース一覧画面は作成しない
     - 友情ポイント、ランク進捗、ランクアップ表示は追加機能として扱い、MVP必須シナリオの完了条件には含めない
 - [x] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
@@ -897,7 +897,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - Priority: P1.5
   - MVP scope: Required
   - Status: Todo
-  - Owner: 未定
+  - Owner: 近松
   - Branch: 未作成
   - Issue/PR: #46
   - Done when:
@@ -924,9 +924,9 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
 - [ ] 実ニュース記事の選択語を辞書再利用またはAIで解説する
   - Priority: P1.5
   - MVP scope: Required
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: 近松
+  - Branch: `feature/ai-explanation`
   - Issue/PR: 未定
   - Done when:
     - 固定サンプル以外の実ニュース記事IDでも用語解説を実行できる
