@@ -1369,4 +1369,73 @@ mod tests {
         // 設定読込失敗は AI 呼び出し前に起きるため、AI は一度も呼ばれない。
         assert_eq!(context.ai.call_count(), 0);
     }
+
+    #[test]
+    fn explain_dictionary_store_read_failure_is_safe_error_and_does_not_call_ai() {
+        // 辞書ストアの読み込み失敗（JSON破損）は「未命中」に変換してはならない。
+        // 実ニュース記事（固定サンプルではない）に対して発生させ、AI生成へ進まないことを確認する。
+        let context = build_service();
+        let dictionary_path = context.root_dir.join("dictionary").join("entries.json");
+        std::fs::create_dir_all(dictionary_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &dictionary_path,
+            "{ this is not valid json :: 生成AIの本文 }",
+        )
+        .unwrap();
+
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: "生成AI".to_string(),
+            })
+            .unwrap_err();
+
+        let command_error = CommandError::from(error);
+        // 辞書未命中(AI生成)ではなく、辞書検索失敗として安全な内部エラーになる。
+        assert_eq!(command_error.code, "PARSE_ERROR");
+        // 生のファイル内容・パスを公開エラーへ含めない。
+        assert!(!command_error.message.contains("生成AIの本文"));
+        assert!(!command_error.message.contains(".json"));
+        // 辞書読み込み失敗はAI呼び出しより前に起きるため、AIは一度も呼ばれない
+        // （＝読み込み失敗を「未命中」へ誤変換してAI生成へ進んでいないことの直接確認）。
+        assert_eq!(context.ai.call_count(), 0);
+    }
+
+    #[test]
+    fn explain_result_can_be_saved_via_save_dictionary_entry_and_is_then_reused() {
+        // explain_selected_term が返す既存 DictionaryEntryDto を、変換なしで save_dictionary_entry へ
+        // 渡せる契約になっていることを確認する（explain→save の command 間契約）。
+        let context = build_service();
+        let dictionary_path = context.root_dir.join("dictionary").join("entries.json");
+
+        let explained = explain(&context, REAL_ARTICLE_ID, "新しい概念");
+        assert!(
+            !dictionary_path.exists(),
+            "明示的な保存前に辞書ストアを作成してはならない"
+        );
+
+        let saved = context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: explained.clone(),
+            })
+            .unwrap();
+
+        // 保存後の項目内容が explain の結果と一致する（DTOフィールドの受け渡しに欠落がない）。
+        assert_eq!(saved.entry_id, explained.entry_id);
+        assert_eq!(saved.key_text, explained.key_text);
+        assert_eq!(saved.short_explanation, explained.short_explanation);
+        assert_eq!(saved.detail_explanation, explained.detail_explanation);
+        assert_eq!(saved.related_article_id, explained.related_article_id);
+        assert_eq!(saved.related_article_title, explained.related_article_title);
+        assert!(dictionary_path.exists(), "明示保存で辞書ストアが作成される");
+
+        // 明示保存の直後は AI 呼び出しは explain 時の1回のまま。
+        assert_eq!(context.ai.call_count(), 1);
+        // 保存後に同じ選択語を再解説すると、保存済み辞書が再利用され AI は追加で呼ばれない。
+        let reused = explain(&context, REAL_ARTICLE_ID, "新しい概念");
+        assert_eq!(reused.short_explanation, explained.short_explanation);
+        assert_eq!(context.ai.call_count(), 1);
+    }
 }
