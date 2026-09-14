@@ -10,6 +10,7 @@ import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   listArticleHistory,
+  updateArticleFavorite,
   type ArticleHistoryFilter,
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
@@ -444,6 +445,7 @@ export default function NewsHistoryScreen({
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [favoriteUpdatingArticleId, setFavoriteUpdatingArticleId] = React.useState<string | null>(null);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
     "info" | "error" | "empty"
@@ -551,6 +553,35 @@ export default function NewsHistoryScreen({
     }
 
     onNavigate?.("news");
+  };
+
+  const handleRemoveFavorite = async () => {
+    if (!selectedItem?.isFavorite || favoriteUpdatingArticleId) {
+      return;
+    }
+
+    setFavoriteUpdatingArticleId(selectedItem.id);
+    try {
+      const result = await updateArticleFavorite({
+        articleId: selectedItem.id,
+        isFavorite: false,
+      });
+      setHistoryItems((items) =>
+        activeFilter === "favorite"
+          ? items.filter((item) => item.id !== result.articleId)
+          : items.map((item) =>
+              item.id === result.articleId
+                ? { ...item, isFavorite: result.isFavorite }
+                : item
+            )
+      );
+    } catch (error) {
+      setLoadNotice("お気に入りの解除に失敗しました。もう一度お試しください。");
+      setLoadNoticeKind("error");
+      console.warn("Failed to remove article favorite:", error);
+    } finally {
+      setFavoriteUpdatingArticleId(null);
+    }
   };
 
   const getCategoryColor = (category: NewsCategory) => {
@@ -832,10 +863,11 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     className="w-full gap-2"
-                    onClick={() => console.log("お気に入り解除:", selectedItem.id)}
+                    onClick={() => void handleRemoveFavorite()}
+                    disabled={!selectedItem.isFavorite || favoriteUpdatingArticleId === selectedItem.id}
                   >
                     <Star className="w-4 h-4" aria-hidden="true" />
-                    お気に入り解除
+                    {favoriteUpdatingArticleId === selectedItem.id ? "解除中..." : "お気に入り解除"}
                   </Button>
                   <Button
                     variant="outline"
