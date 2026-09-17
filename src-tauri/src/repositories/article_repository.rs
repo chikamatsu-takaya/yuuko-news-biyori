@@ -703,13 +703,20 @@ impl ArticleRepository {
     ) -> Result<FavoriteUpdateResult, AppError> {
         let _write_guard = self.lock_writes()?;
         let mut article = self.find_article_record(article_id)?;
+        // JSONの読込失敗では記事を変更せず、両方の保存完了後だけ成功を返す。
+        let mut favorite_store = self.load_favorite_store_or_default()?;
+        let previous_favorite = article.favorite;
         article.favorite = is_favorite;
         self.save_article_record(&article)?;
 
-        let mut favorite_store = self.load_favorite_store_or_default()?;
         favorite_store.set(article_id, is_favorite);
         if let Err(error) = self.save_favorite_store(&favorite_store) {
-            log::warn!("Failed to persist favorite override JSON: {error}");
+            // JSONが更新できなければ先行したMarkdownも戻す。復元失敗時も成功にはしない。
+            article.favorite = previous_favorite;
+            if let Err(rollback_error) = self.save_article_record(&article) {
+                log::error!("Failed to roll back article favorite: {rollback_error}");
+            }
+            return Err(error);
         }
 
         Ok(FavoriteUpdateResult {
