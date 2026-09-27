@@ -10,6 +10,7 @@ import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import {
   listArticleHistory,
+  updateArticleFavorite,
   type ArticleHistoryFilter,
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
@@ -342,22 +343,25 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
 function FilterChipButton({
   chip,
   isActive,
+  disabled,
   onClick,
 }: {
   chip: FilterChip;
   isActive: boolean;
+  disabled: boolean;
   onClick: () => void;
 }) {
   const Icon = chip.icon;
   return (
     <button
-      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border ${
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border disabled:cursor-not-allowed disabled:opacity-50 ${
         isActive
           ? "bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)]"
           : "bg-white text-muted-foreground border-border hover:border-[var(--yuuko-green)]/50"
       }`}
       onClick={onClick}
       aria-pressed={isActive}
+      disabled={disabled}
     >
       {Icon && <Icon className="w-4 h-4" aria-hidden="true" />}
       <span>{chip.label}</span>
@@ -444,6 +448,10 @@ export default function NewsHistoryScreen({
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [favoriteUpdatingArticleId, setFavoriteUpdatingArticleId] = React.useState<string | null>(null);
+  // state反映前の連打も止め、古い一覧応答が解除結果を上書きしないようにする。
+  const favoriteUpdateInFlightRef = React.useRef(false);
+  const historyRequestRef = React.useRef(0);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
     "info" | "error" | "empty"
@@ -468,6 +476,8 @@ export default function NewsHistoryScreen({
     null;
 
   const loadHistoryItems = React.useCallback(async () => {
+    if (favoriteUpdateInFlightRef.current) return;
+    const requestId = ++historyRequestRef.current;
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
@@ -477,6 +487,7 @@ export default function NewsHistoryScreen({
         filter: activeFilter,
         limit: 200,
       });
+      if (requestId !== historyRequestRef.current) return;
 
       if (!articles) {
         const fallbackItems = getFallbackHistoryItems(activeFilter);
@@ -507,6 +518,7 @@ export default function NewsHistoryScreen({
           : mappedItems[0]?.id ?? null
       );
     } catch (error) {
+      if (requestId !== historyRequestRef.current) return;
       setHistoryItems([]);
       setSelectedItemId(null);
       setLoadNotice(
@@ -515,12 +527,13 @@ export default function NewsHistoryScreen({
       setLoadNoticeKind("error");
       console.warn("Failed to load article history:", error);
     } finally {
-      setIsLoading(false);
+      if (requestId === historyRequestRef.current) setIsLoading(false);
     }
   }, [activeFilter]);
 
   React.useEffect(() => {
     void loadHistoryItems();
+    return () => { historyRequestRef.current += 1; };
   }, [loadHistoryItems]);
 
   React.useEffect(() => {
@@ -551,6 +564,40 @@ export default function NewsHistoryScreen({
     }
 
     onNavigate?.("news");
+  };
+
+  const handleRemoveFavorite = async () => {
+    if (!selectedItem?.isFavorite || isLoading || favoriteUpdateInFlightRef.current) {
+      return;
+    }
+
+    favoriteUpdateInFlightRef.current = true;
+    historyRequestRef.current += 1;
+    setFavoriteUpdatingArticleId(selectedItem.id);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
+    try {
+      const result = await updateArticleFavorite({
+        articleId: selectedItem.id,
+        isFavorite: false,
+      });
+      setHistoryItems((items) =>
+        activeFilter === "favorite"
+          ? items.filter((item) => item.id !== result.articleId)
+          : items.map((item) =>
+              item.id === result.articleId
+                ? { ...item, isFavorite: result.isFavorite }
+                : item
+            )
+      );
+    } catch (error) {
+      setLoadNotice("お気に入りの解除に失敗しました。もう一度お試しください。");
+      setLoadNoticeKind("error");
+      console.warn("Failed to remove article favorite:", error);
+    } finally {
+      favoriteUpdateInFlightRef.current = false;
+      setFavoriteUpdatingArticleId(null);
+    }
   };
 
   const getCategoryColor = (category: NewsCategory) => {
@@ -674,8 +721,11 @@ export default function NewsHistoryScreen({
                 key={chip.id}
                 chip={chip}
                 isActive={activeFilter === chip.id}
+                disabled={favoriteUpdatingArticleId !== null}
                 onClick={() => {
-                  if (isHistoryFilter(chip.id)) {
+                  if (!favoriteUpdateInFlightRef.current && chip.id !== activeFilter && isHistoryFilter(chip.id)) {
+                    historyRequestRef.current += 1;
+                    setIsLoading(true);
                     setActiveFilter(chip.id);
                   }
                 }}
@@ -832,10 +882,11 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     className="w-full gap-2"
-                    onClick={() => console.log("お気に入り解除:", selectedItem.id)}
+                    onClick={() => void handleRemoveFavorite()}
+                    disabled={!selectedItem.isFavorite || isLoading || favoriteUpdatingArticleId !== null}
                   >
                     <Star className="w-4 h-4" aria-hidden="true" />
-                    お気に入り解除
+                    {favoriteUpdatingArticleId !== null ? "解除中..." : "お気に入り解除"}
                   </Button>
                   <Button
                     variant="outline"
