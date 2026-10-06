@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "yuuko-window",
+  "description": "常駐ゆうこ用ウィンドウ専用。Rust から届く通知イベントの購読・解除だけを許可し、ウィンドウ操作・ファイル・URL・シェル系の権限は与えない。",
+  "windows": [
+    "yuuko"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

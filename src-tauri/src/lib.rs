@@ -8,6 +8,7 @@ mod repositories;
 mod services;
 mod state;
 mod util;
+mod yuuko_window;
 
 use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
