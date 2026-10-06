@@ -15,6 +15,7 @@ import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 import {
   dismissYuukoNotification,
   handleYuukoClicked,
+  listenYuukoOpenArticle,
   markYuukoIgnored,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
@@ -173,6 +174,34 @@ export default function Page() {
     },
     []
   );
+
+  // デスクトップ右下のゆうこ（アプリ非表示中の通知）で「詳しく見る」が確定したとき、
+  // Rust がメインを前面表示してこのイベントを送る。アプリ内通知の「詳しく見る」と同じ経路で記事詳細を開く。
+  // 通知状態の確定（handle_yuuko_clicked）は Rust 側で済んでいるため、ここでは画面遷移だけ行う。
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    listenYuukoOpenArticle((articleId) => {
+      // 非表示前に保持していた同じ通知は Rust 側で確定済み（非active）。前面表示の直後に
+      // 古い吹き出しを記事詳細へ重ねないよう、scheduler の拾い直しを待たずに破棄する。
+      setYuukoNotificationState(null);
+      handleOpenArticle(articleId);
+    })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to listen yuuko open-article event:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleOpenArticle]);
 
   // 各一覧に渡す onOpenArticle を、遷移元を固定して生成する（ホーム/履歴/辞書で戻り先を分ける）。
   const openArticleFrom = React.useCallback(

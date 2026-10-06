@@ -14,11 +14,43 @@ use tauri::{
 
 /// capabilities/yuuko-window.json の windows と一致させる。
 pub const YUUKO_WINDOW_LABEL: &str = "yuuko";
-/// Next.js の静的エクスポートで out/yuuko-window.html として出力されるプレースホルダページ。
+/// Next.js の静的エクスポートで out/yuuko-window.html として出力されるページ（app/yuuko-window）。
 const YUUKO_WINDOW_PAGE: &str = "yuuko-window";
-/// ゆうこ本体と吹き出しが収まる大きさ（論理px）。実寸は UI 実装タスクで調整する。
-const YUUKO_WINDOW_LOGICAL_WIDTH: f64 = 320.0;
-const YUUKO_WINDOW_LOGICAL_HEIGHT: f64 = 360.0;
+/// ウィンドウ幅（論理px）。ページの通知（幅280px＋左右16pxの余白。影の描画にも使う）に合わせる。
+const YUUKO_WINDOW_LOGICAL_WIDTH: f64 = 312.0;
+/// 吹き出し段階の高さ（論理px）。吹き出し3行（ページ側で行数を抑える）＋ゆうこ本体＋下余白と影の分。
+/// tests/ui/yuuko-window.spec.ts で、長文でも中身がこの寸法に収まることを確認している。
+const YUUKO_WINDOW_BALLOON_LOGICAL_HEIGHT: f64 = 196.0;
+/// 軽量プレビュー段階の高さ（論理px）。タイトル3行＋出典＋一言＋「詳しく見る」＋ゆうこ本体が収まる最小限。
+const YUUKO_WINDOW_PREVIEW_LOGICAL_HEIGHT: f64 = 272.0;
+
+/// ゆうこ用ウィンドウの表示段階。段階ごとに中身に合わせた大きさへ切り替える。
+///
+/// Windows（WebView2）の透明ウィンドウは透明部分でもマウス入力を受け、背後のアプリのクリックを奪う。
+/// 透過部分のクリックを素通りさせる `set_ignore_cursor_events` はウィンドウ全体に効くため、
+/// 吹き出しやボタンまで押せなくなる。そこでウィンドウ自体を表示中の中身ぎりぎりの大きさにし、
+/// 奪う範囲を最小にする。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum YuukoWindowStage {
+    Balloon,
+    Preview,
+}
+
+impl YuukoWindowStage {
+    fn logical_size(self) -> (f64, f64) {
+        match self {
+            Self::Balloon => (
+                YUUKO_WINDOW_LOGICAL_WIDTH,
+                YUUKO_WINDOW_BALLOON_LOGICAL_HEIGHT,
+            ),
+            Self::Preview => (
+                YUUKO_WINDOW_LOGICAL_WIDTH,
+                YUUKO_WINDOW_PREVIEW_LOGICAL_HEIGHT,
+            ),
+        }
+    }
+}
+
 /// 作業領域の端にぴったり付けると通知領域やタスクバーの境界と重なって見えるため、少し内側へ寄せる。
 const SCREEN_EDGE_LOGICAL_MARGIN: f64 = 16.0;
 
@@ -38,7 +70,10 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
         WebviewUrl::App(YUUKO_WINDOW_PAGE.into()),
     )
     .title("ゆうこ")
-    .inner_size(YUUKO_WINDOW_LOGICAL_WIDTH, YUUKO_WINDOW_LOGICAL_HEIGHT)
+    .inner_size(
+        YUUKO_WINDOW_LOGICAL_WIDTH,
+        YUUKO_WINDOW_BALLOON_LOGICAL_HEIGHT,
+    )
     .visible(false)
     .decorations(false)
     // 枠なし透明ウィンドウに Windows の影が付くと、透明部分の輪郭が見えてしまうため無効化する。
@@ -67,15 +102,31 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
     }
 }
 
-/// ゆうこ用ウィンドウをプライマリモニタ作業領域の右下へ配置してから表示する。
+/// ゆうこ用ウィンドウを段階に合った大きさでプライマリモニタ作業領域の右下へ配置してから表示する。
 ///
 /// 配置先を決められない場合は、意図しない位置に出すより表示しない方が安全なため、表示せずにエラーを返す。
-pub fn show_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+pub fn show_yuuko_window<R: Runtime>(
+    app: &AppHandle<R>,
+    stage: YuukoWindowStage,
+) -> tauri::Result<()> {
     let window = ensure_yuuko_window(app)?;
-    place_at_primary_work_area_bottom_right(app, &window)?;
+    place_at_primary_work_area_bottom_right(app, &window, stage)?;
     window.show()?;
     log::info!("ゆうこ用ウィンドウを表示しました");
     Ok(())
+}
+
+/// 表示中のゆうこ用ウィンドウを、右下を基準に段階に合った大きさへ変える（初回クリックで軽量プレビューへ進んだとき）。
+///
+/// command から呼ばれるため、ここではウィンドウを生成しない（Windows の生成デッドロック回避）。
+pub fn resize_yuuko_window<R: Runtime>(
+    app: &AppHandle<R>,
+    stage: YuukoWindowStage,
+) -> tauri::Result<()> {
+    match app.get_webview_window(YUUKO_WINDOW_LABEL) {
+        Some(window) => place_at_primary_work_area_bottom_right(app, &window, stage),
+        None => Ok(()),
+    }
 }
 
 /// ゆうこ用ウィンドウを隠す。次回表示で再利用するため破棄はしない。
@@ -102,6 +153,7 @@ pub fn close_yuuko_window<R: Runtime>(app: &AppHandle<R>) {
 fn place_at_primary_work_area_bottom_right<R: Runtime>(
     app: &AppHandle<R>,
     window: &WebviewWindow<R>,
+    stage: YuukoWindowStage,
 ) -> tauri::Result<()> {
     let monitor = app.primary_monitor()?.ok_or_else(|| {
         log::warn!("プライマリモニタを取得できないため、ゆうこ用ウィンドウを表示しません");
@@ -113,9 +165,10 @@ fn place_at_primary_work_area_bottom_right<R: Runtime>(
 
     // 作業領域は物理pxで返るため、ウィンドウ寸法と余白もプライマリモニタの倍率で物理pxへ揃える。
     let scale_factor = monitor.scale_factor();
+    let (logical_width, logical_height) = stage.logical_size();
     let window_size = PhysicalSize::new(
-        to_physical(YUUKO_WINDOW_LOGICAL_WIDTH, scale_factor),
-        to_physical(YUUKO_WINDOW_LOGICAL_HEIGHT, scale_factor),
+        to_physical(logical_width, scale_factor),
+        to_physical(logical_height, scale_factor),
     );
     let margin = to_physical(SCREEN_EDGE_LOGICAL_MARGIN, scale_factor);
     let work_area = monitor.work_area();

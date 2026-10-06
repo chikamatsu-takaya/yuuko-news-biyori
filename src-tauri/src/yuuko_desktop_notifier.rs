@@ -19,7 +19,7 @@ use crate::domain::yuuko::{
     RequestYuukoNotificationResult, YuukoNotificationState, YuukoResidentState,
 };
 use crate::services::yuuko_service::YuukoService;
-use crate::yuuko_window::{self, YUUKO_WINDOW_LABEL};
+use crate::yuuko_window::{self, YuukoWindowStage, YUUKO_WINDOW_LABEL};
 
 /// 判定間隔。アプリ内通知のスケジューラ（5分）と揃え、表示中/非表示中で通知の出やすさを変えない。
 /// クールタイムが最短60分のため、これより細かく見ても通知機会はほぼ増えない。
@@ -27,14 +27,17 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// デスクトップ通知（非表示中の判定とゆうこ用ウィンドウ表示）を有効にするか。
 ///
-/// ゆうこ用ウィンドウはまだ中身のない透明なプレースホルダで、Windows（WebView2）の透明ウィンドウは
-/// 透明部分でもマウス入力を受けるため、表示すると右下の見えない領域が他アプリのクリックを奪い、
-/// 閉じる手段もない。さらに見えない表示のために通知枠・紹介済みを消費してしまう。
-/// そのため UI 実装タスク（0eC3Fhgo）で描画と閉じる導線が揃うまで false にしておき、そこで true にする。
-const DESKTOP_NOTIFICATION_ENABLED: bool = false;
+/// ゆうこ用ウィンドウの画面（吹き出し・2段階クリック・閉じる・自動退場）と、通知終了時に Rust 側で
+/// ウィンドウを隠す導線が揃ったため有効にしている。透明部分のクリック奪取は、ウィンドウを
+/// 表示段階ごとに中身ぎりぎりの大きさにすることで最小化している（yuuko_window::YuukoWindowStage）。
+/// 実機で問題が出た場合に、判定（通知枠の消費）ごと止められる切り替え口として残す。
+const DESKTOP_NOTIFICATION_ENABLED: bool = true;
 
 /// ゆうこ用ウィンドウへ通知データを渡すイベント名。lib/tauri/yuuko.ts と一致させる。
 pub const YUUKO_DESKTOP_NOTIFICATION_EVENT: &str = "yuuko-desktop-notification";
+/// ゆうこ用ウィンドウで「詳しく見る」が確定したとき、メインウィンドウへ記事を開かせるイベント名。
+/// lib/tauri/yuuko.ts の YUUKO_OPEN_ARTICLE_EVENT と一致させる。
+pub const YUUKO_OPEN_ARTICLE_EVENT: &str = "yuuko-open-article";
 
 /// ゆうこ用ウィンドウへ渡す最小限の表示用データ。
 ///
@@ -47,6 +50,25 @@ pub struct YuukoDesktopNotification {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balloon_text: Option<String>,
+    /// 既に軽量プレビュー段階か。ページの表示段階とウィンドウの大きさを Rust の状態に合わせるために使う。
+    pub preview_visible: bool,
+}
+
+impl YuukoDesktopNotification {
+    fn stage(&self) -> YuukoWindowStage {
+        if self.preview_visible {
+            YuukoWindowStage::Preview
+        } else {
+            YuukoWindowStage::Balloon
+        }
+    }
+}
+
+/// メインウィンドウへ渡す「記事を開く」要求。記事IDは永続状態の紹介中記事から決める。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YuukoOpenArticleRequest {
+    article_id: String,
 }
 
 /// 1回の判定周期で行うこと。
@@ -116,6 +138,7 @@ fn desktop_notification_from_state(
             .unwrap_or_else(|| article.article_id.clone()),
         title: article.title.clone(),
         balloon_text: state.balloon_text.clone(),
+        preview_visible: state.state == YuukoResidentState::PreviewVisible,
     })
 }
 
@@ -185,7 +208,123 @@ fn present<R: Runtime>(
         YUUKO_DESKTOP_NOTIFICATION_EVENT,
         notification,
     )?;
-    yuuko_window::show_yuuko_window(app)
+    yuuko_window::show_yuuko_window(app, notification.stage())
+}
+
+/// ゆうこ通知を操作する既存 command（クリック確定 / 閉じる / 無視）の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YuukoAction {
+    Click,
+    Dismiss,
+    Ignore,
+}
+
+/// command 処理後に、ゆうこ用ウィンドウとメインウィンドウへ行う後処理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FollowUp {
+    None,
+    /// 吹き出し→軽量プレビューへ進んだので、ウィンドウを中身に合わせて広げる。
+    ResizeToPreview,
+    /// 通知が終わった（閉じる / 無視 / 失敗）ので、ゆうこ用ウィンドウを隠す。
+    Hide,
+    /// 「詳しく見る」が確定したので、隠したうえでメインを前面表示して記事を開かせる。
+    OpenInMain {
+        article_id: String,
+    },
+}
+
+/// command の呼び出し元・種類・結果から後処理を決める。
+///
+/// - ゆうこ用ウィンドウにはウィンドウ操作の権限が無いため、隠す・大きさ変更・メイン表示は
+///   Rust で行う。新しい command や権限を増やさないよう、既存 command の後処理にしている。
+/// - 結果が active なニュース通知でなくなったら、呼び出し元に関係なく隠す
+///   （メイン表示中はもともと隠れているため無害で、取り残された透明ウィンドウを残さない）。
+/// - ゆうこ用ウィンドウからの command が失敗した場合も、状態が不明なまま透明ウィンドウが
+///   クリックを奪い続けないよう隠す（通知状態は永続化済みのため、メイン表示時にアプリ内で拾い直せる）。
+fn decide_follow_up(
+    from_yuuko_window: bool,
+    action: YuukoAction,
+    result: Option<&YuukoNotificationState>,
+) -> FollowUp {
+    let Some(state) = result else {
+        return if from_yuuko_window {
+            FollowUp::Hide
+        } else {
+            FollowUp::None
+        };
+    };
+    match (from_yuuko_window, action, state.state) {
+        // 2回目のクリック（PreviewVisible → Leaving）は「詳しく見る」の確定。
+        (true, YuukoAction::Click, YuukoResidentState::Leaving) => {
+            let article_id = state.current_article_id.clone().or_else(|| {
+                state
+                    .preview_article
+                    .as_ref()
+                    .map(|article| article.article_id.clone())
+            });
+            match article_id {
+                Some(article_id) => FollowUp::OpenInMain { article_id },
+                None => FollowUp::Hide,
+            }
+        }
+        (true, YuukoAction::Click, YuukoResidentState::PreviewVisible) => FollowUp::ResizeToPreview,
+        (_, _, resident) if is_active_news(resident) => FollowUp::None,
+        _ => FollowUp::Hide,
+    }
+}
+
+fn is_active_news(state: YuukoResidentState) -> bool {
+    matches!(
+        state,
+        YuukoResidentState::Appearing
+            | YuukoResidentState::BalloonVisible
+            | YuukoResidentState::PreviewVisible
+    )
+}
+
+/// ゆうこ通知 command の処理後に呼び、ゆうこ用ウィンドウの表示とメインの前面表示を状態に合わせる。
+///
+/// 後処理の失敗で command の結果（保存済みの状態）を変えないよう、失敗はログだけにする。
+/// command（async・非メインスレッド）から呼ぶため、ウィンドウの生成は行わない。
+pub fn after_yuuko_action<R: Runtime, E>(
+    app: &AppHandle<R>,
+    caller_label: &str,
+    action: YuukoAction,
+    result: &Result<YuukoNotificationState, E>,
+) {
+    let follow_up = decide_follow_up(
+        caller_label == YUUKO_WINDOW_LABEL,
+        action,
+        result.as_ref().ok(),
+    );
+    match follow_up {
+        FollowUp::None => {}
+        FollowUp::ResizeToPreview => {
+            if let Err(error) = yuuko_window::resize_yuuko_window(app, YuukoWindowStage::Preview) {
+                log::warn!("ゆうこ用ウィンドウを軽量プレビューの大きさにできませんでした: {error}");
+            }
+        }
+        FollowUp::Hide => hide_after_action(app),
+        FollowUp::OpenInMain { article_id } => {
+            hide_after_action(app);
+            // 先に記事を開かせてから前面表示し、直前の画面が一瞬見えるのを避ける。
+            // メインは非表示でも WebView とイベント購読は生きている。
+            if let Err(error) = app.emit_to(
+                MAIN_WINDOW_LABEL,
+                YUUKO_OPEN_ARTICLE_EVENT,
+                YuukoOpenArticleRequest { article_id },
+            ) {
+                log::warn!("メインウィンドウへ記事を開く要求を送れませんでした: {error}");
+            }
+            crate::app_lifecycle::show_main_window(app);
+        }
+    }
+}
+
+fn hide_after_action<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = yuuko_window::hide_yuuko_window(app) {
+        log::warn!("通知終了に合わせてゆうこ用ウィンドウを隠せませんでした: {error}");
+    }
 }
 
 fn main_window_visibility<R: Runtime>(app: &AppHandle<R>) -> Option<(bool, bool)> {
@@ -262,6 +401,19 @@ mod tests {
     }
 
     #[test]
+    fn desktop_notification_is_enabled() {
+        // UI 実装（0eC3Fhgo）で描画・閉じる導線・終了時の非表示が揃ったため有効にしている。
+        // 非表示中は判定まで進む（ゲートで止まらない）ことで確認する。
+        assert_eq!(
+            gate_tick(
+                DESKTOP_NOTIFICATION_ENABLED,
+                decide_tick(Some((false, false)))
+            ),
+            TickAction::RunJudgement
+        );
+    }
+
+    #[test]
     fn disabled_gate_never_judges_or_shows_desktop() {
         for main_window in [
             Some((false, false)),
@@ -299,6 +451,7 @@ mod tests {
                 article_id: "article-001".to_string(),
                 title: "タイトル".to_string(),
                 balloon_text: Some("気になるニュースがあるよ".to_string()),
+                preview_visible: false,
             })
         );
     }
@@ -310,10 +463,11 @@ mod tests {
             "already_active",
             state(YuukoResidentState::PreviewVisible, true),
         ));
-        assert_eq!(
-            payload.map(|p| p.article_id),
-            Some("article-001".to_string())
-        );
+        let payload = payload.expect("active notification should be shown");
+        assert_eq!(payload.article_id, "article-001");
+        // 軽量プレビュー段階から再開し、ウィンドウもプレビューの大きさで出す。
+        assert!(payload.preview_visible);
+        assert_eq!(payload.stage(), YuukoWindowStage::Preview);
     }
 
     #[test]
@@ -362,8 +516,94 @@ mod tests {
             article_id: "a".to_string(),
             title: "t".to_string(),
             balloon_text: None,
+            preview_visible: false,
         })
         .unwrap();
-        assert_eq!(json, serde_json::json!({ "articleId": "a", "title": "t" }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "articleId": "a", "title": "t", "previewVisible": false })
+        );
+    }
+
+    #[test]
+    fn first_click_from_yuuko_window_resizes_to_preview() {
+        let state = state(YuukoResidentState::PreviewVisible, true);
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Click, Some(&state)),
+            FollowUp::ResizeToPreview
+        );
+        // メインのアプリ内通知のクリックでは、ゆうこ用ウィンドウに触れない。
+        assert_eq!(
+            decide_follow_up(false, YuukoAction::Click, Some(&state)),
+            FollowUp::None
+        );
+    }
+
+    #[test]
+    fn confirm_click_from_yuuko_window_opens_article_in_main() {
+        let state = state(YuukoResidentState::Leaving, true);
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Click, Some(&state)),
+            FollowUp::OpenInMain {
+                article_id: "article-001".to_string()
+            }
+        );
+        // メイン側の「詳しく見る」はメイン自身が遷移するため、ゆうこ用ウィンドウを隠すだけ。
+        assert_eq!(
+            decide_follow_up(false, YuukoAction::Click, Some(&state)),
+            FollowUp::Hide
+        );
+        // 紹介記事が分からない確定は、メインを開かず隠すだけにする。
+        let without_article = YuukoNotificationState {
+            preview_article: None,
+            current_article_id: None,
+            ..state
+        };
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Click, Some(&without_article)),
+            FollowUp::Hide
+        );
+    }
+
+    #[test]
+    fn dismiss_and_ignore_hide_yuuko_window() {
+        let waiting = state(YuukoResidentState::Waiting, false);
+        for action in [YuukoAction::Dismiss, YuukoAction::Ignore] {
+            for from_yuuko_window in [true, false] {
+                assert_eq!(
+                    decide_follow_up(from_yuuko_window, action, Some(&waiting)),
+                    FollowUp::Hide,
+                    "action={action:?} from_yuuko={from_yuuko_window}"
+                );
+            }
+        }
+        // 報酬通知が優先された（非active）場合も隠す。
+        let reward = state(YuukoResidentState::RewardNotifying, true);
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Dismiss, Some(&reward)),
+            FollowUp::Hide
+        );
+    }
+
+    #[test]
+    fn failed_command_from_yuuko_window_hides_it() {
+        for action in [
+            YuukoAction::Click,
+            YuukoAction::Dismiss,
+            YuukoAction::Ignore,
+        ] {
+            assert_eq!(decide_follow_up(true, action, None), FollowUp::Hide);
+            // メイン側の失敗はアプリ内通知の責務のため、ここでは何もしない。
+            assert_eq!(decide_follow_up(false, action, None), FollowUp::None);
+        }
+    }
+
+    #[test]
+    fn still_active_balloon_keeps_window() {
+        let balloon = state(YuukoResidentState::BalloonVisible, true);
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Dismiss, Some(&balloon)),
+            FollowUp::None
+        );
     }
 }

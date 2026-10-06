@@ -51,6 +51,11 @@ type YuukoInAppNotificationProps = {
   onClose: () => void;
   /** 自動退場（無操作タイムアウト＝無視扱い）。退場後に呼ばれる。 */
   onIgnore: () => void;
+  /**
+   * 吹き出し文言と記事タイトルを3行までに収めるか（既定 false＝従来どおり全文）。
+   * 中身に合わせた固定サイズのデスクトップ用ウィンドウで、長いタイトルが上にはみ出さないようにする。
+   */
+  clampText?: boolean;
 };
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
@@ -73,6 +78,7 @@ export default function YuukoInAppNotification({
   onOpen,
   onClose,
   onIgnore,
+  clampText = false,
 }: YuukoInAppNotificationProps) {
   // 表示段階：吹き出し → 初回クリックで軽量プレビュー（§10.2）。
   // backend が既に PreviewVisible なら最初から preview で再開する。
@@ -169,7 +175,11 @@ export default function YuukoInAppNotification({
               onClick={handleFirstClick}
               className="block w-full text-left"
             >
-              <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
+              <p
+                className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
+                  clampText ? "line-clamp-3" : ""
+                }`}
+              >
                 {balloonText ?? "気になるニュースを見つけたよ。"}
               </p>
             </button>
@@ -183,7 +193,11 @@ export default function YuukoInAppNotification({
                 className="block w-full text-left"
               >
                 {articleTitle ? (
-                  <p className="text-sm font-semibold leading-snug text-foreground">
+                  <p
+                    className={`text-sm font-semibold leading-snug text-foreground ${
+                      clampText ? "line-clamp-3" : ""
+                    }`}
+                  >
                     {articleTitle}
                   </p>
                 ) : null}

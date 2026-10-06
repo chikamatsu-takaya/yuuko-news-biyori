@@ -2531,6 +2531,44 @@ test("first click shows the light preview, then 詳しく見る opens the articl
   await expect(notification).toHaveCount(0);
 });
 
+test("yuuko desktop window open-article event opens the article in the main window", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  // ゆうこ用ウィンドウで「詳しく見る」が確定すると、Rust がメインを前面表示してこのイベントを送る。
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+          }
+        ).__E2E_EMIT_EVENT__("yuuko-open-article", { articleId: "e2e-article-1" })
+      )
+    )
+    .toBeGreaterThan(0);
+
+  await expect(
+    page.getByRole("button", { name: "戻る", exact: true }).first()
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>)
+          .__E2E_ARTICLE_DETAIL_REQUESTED_ID__
+    )
+  ).toBe("e2e-article-1");
+  // 確定は Rust 側で済んでいるため、メインから通知 command を重ねて呼ばない。
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(0);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+});
+
 test("first click does not navigate and does not call dismiss", async ({
   page,
 }) => {
@@ -3666,6 +3704,18 @@ async function installTauriMocks(page: Page) {
         /* eslint-enable @typescript-eslint/no-explicit-any */
 
         switch (cmd) {
+          // Rust からのイベント購読（ゆうこ用ウィンドウの「詳しく見る」で記事を開く要求など）。
+          // handler は transformCallback で登録した ID。テストからは __E2E_EMIT_EVENT__ で発火させる。
+          case "plugin:event|listen": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const eventArgs = args as unknown as { event: string; handler: number };
+            const listeners = ((window as any).__E2E_EVENT_LISTENERS__ ||= {});
+            (listeners[eventArgs.event] ||= []).push(eventArgs.handler);
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return eventArgs.handler;
+          }
+          case "plugin:event|unlisten":
+            return null;
           case "plugin:window|close":
             (
               window as typeof window & {
@@ -4125,7 +4175,15 @@ async function installTauriMocks(page: Page) {
             throw new Error(`Unhandled Tauri command in Playwright mock: ${cmd}`);
         }
       },
-      transformCallback: () => 0,
+      transformCallback: (callback: (payload: unknown) => void) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const callbacks = ((window as any).__E2E_CALLBACKS__ ||= {});
+        const id = ((window as any).__E2E_CALLBACK_SEQ__ =
+          ((window as any).__E2E_CALLBACK_SEQ__ || 0) + 1);
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+        callbacks[id] = callback;
+        return id;
+      },
       unregisterCallback: () => undefined,
       runCallback: () => undefined,
       callbacks: {},
@@ -4141,6 +4199,19 @@ async function installTauriMocks(page: Page) {
         __TAURI_INTERNALS__?: typeof internals;
       }
     ).__TAURI_INTERNALS__ = internals;
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
+    };
+    // Rust の emit_to 相当。購読中のハンドラへ { event, payload } を渡す。
+    (window as any).__E2E_EMIT_EVENT__ = (event: string, payload: unknown) => {
+      const ids: number[] = (window as any).__E2E_EVENT_LISTENERS__?.[event] || [];
+      for (const id of ids) {
+        (window as any).__E2E_CALLBACKS__?.[id]?.({ event, id, payload });
+      }
+      return ids.length;
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 }
 
