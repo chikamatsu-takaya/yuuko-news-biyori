@@ -76,7 +76,7 @@ impl ArticleRepository {
 
     pub fn list_recommended(&self, limit: usize) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let mut articles = self.load_article_records()?;
+        let mut articles = self.load_readable_article_records()?.records;
         articles.sort_by(compare_article_records);
 
         Ok(articles
@@ -94,7 +94,7 @@ impl ArticleRepository {
         limit: usize,
     ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let active_records = self.load_article_records()?;
+        let active_records = self.load_readable_article_records()?.records;
         let mut seen_ids = active_records
             .iter()
             .map(|article| article.article_id.clone())
@@ -747,12 +747,19 @@ impl ArticleRepository {
     }
 
     /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
+    /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
+    /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
-        let mut article_ids = self
-            .load_article_records()?
+        let loaded = self.load_readable_article_records()?;
+        let mut article_ids = loaded
+            .records
             .into_iter()
             .map(|article| article.article_id)
             .collect::<HashSet<_>>();
+        article_ids.extend(loaded.skipped_paths.iter().filter_map(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        }));
         article_ids.extend(
             self.load_archive_index_or_default()?
                 .archives
@@ -844,11 +851,24 @@ impl ArticleRepository {
             .map_err(|_| AppError::Archive("article write lock is poisoned".to_string()))
     }
 
+    /// 詳細表示・単一記事更新用の検索。他記事の破損で対象記事まで読めなくならないよう寛容ローダーを使う。
+    /// 更新時の保存先が破損ファイルと一致する場合は、上書きで破損ファイルを失わないよう中止する。
     fn find_article_record(&self, article_id: &str) -> Result<PersistedArticleRecord, AppError> {
-        self.find_article_record_optional(article_id)?
-            .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))
+        let loaded = self.load_readable_article_records()?;
+        let article = loaded
+            .records
+            .into_iter()
+            .find(|article| article.article_id == article_id)
+            .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))?;
+        if loaded.skipped_paths.contains(&self.article_path(&article)) {
+            return Err(AppError::Parse(format!(
+                "article markdown path is occupied by a corrupt file: {article_id}"
+            )));
+        }
+        Ok(article)
     }
 
+    /// アーカイブ復元用の検索。復元は保存先へ書き込むため、破損ファイルがあれば厳格ローダーで中止する。
     fn find_article_record_optional(
         &self,
         article_id: &str,
@@ -859,6 +879,8 @@ impl ArticleRepository {
             .find(|article| article.article_id == article_id))
     }
 
+    /// 書き込み・削除・圧縮を伴う処理用の厳格ローダー。
+    /// 破損ファイルを見落としたままZIP化・退避・復元すると記事を失いうるため、1件でも読めなければ中止する。
     fn load_article_records(&self) -> Result<Vec<PersistedArticleRecord>, AppError> {
         let mut markdown_paths = Vec::new();
         collect_markdown_files(&self.article_news_dir, &mut markdown_paths)?;
@@ -868,6 +890,36 @@ impl ArticleRepository {
             .into_iter()
             .map(|path| self.load_article_record(&path))
             .collect()
+    }
+
+    /// 一覧・詳細表示用の寛容ローダー（画面詳細設計書 §9.8）。
+    /// Front Matter破損・非UTF-8の記事は1件で全体を止めないよう警告ログを残してスキップする。
+    /// スキップしたパスは、書き込み側が破損ファイルを上書きしないための判定に使えるよう返す。
+    /// ディレクトリ走査失敗など破損以外のI/Oエラーは「一覧全体が読めない」としてそのまま返す。
+    fn load_readable_article_records(&self) -> Result<ReadableArticleRecords, AppError> {
+        let mut markdown_paths = Vec::new();
+        collect_markdown_files(&self.article_news_dir, &mut markdown_paths)?;
+        markdown_paths.sort();
+
+        let mut loaded = ReadableArticleRecords::default();
+        for path in markdown_paths {
+            match self.load_article_record(&path) {
+                Ok(record) => loaded.records.push(record),
+                Err(error) => {
+                    let Some(reason) = corrupt_article_reason(&error) else {
+                        return Err(error);
+                    };
+                    // エラー本文はYAMLの値（記事内容）を含みうるため、パスと分類だけを残す。
+                    log::warn!(
+                        "Skipping corrupt article markdown ({reason}): {}",
+                        path.display()
+                    );
+                    loaded.skipped_paths.push(path);
+                }
+            }
+        }
+
+        Ok(loaded)
     }
 
     fn load_article_record(&self, path: &Path) -> Result<PersistedArticleRecord, AppError> {
@@ -1321,6 +1373,25 @@ fn news_dir_contains_markdown_files(dir: &Path) -> Result<bool, AppError> {
     }
 
     Ok(false)
+}
+
+/// 寛容ローダーの結果。読めた記事と、破損としてスキップした記事Markdownのパスを持つ。
+#[derive(Debug, Default)]
+struct ReadableArticleRecords {
+    records: Vec<PersistedArticleRecord>,
+    skipped_paths: Vec<PathBuf>,
+}
+
+/// 記事ファイル自体の破損（Front Matter不正・必須項目欠落・非UTF-8）ならログ用の分類を返す。
+/// 権限不足などの一時的なI/Oエラーは破損と断定できないため対象外（呼び出し側でエラーを返す）。
+fn corrupt_article_reason(error: &AppError) -> Option<&'static str> {
+    match error {
+        AppError::Parse(_) => Some("invalid front matter"),
+        AppError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData => {
+            Some("not valid UTF-8")
+        }
+        _ => None,
+    }
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
@@ -3485,6 +3556,167 @@ mod tests {
             error.to_string(),
             "not found: article not found: article-999"
         );
+    }
+
+    /// Front Matter破損・非UTF-8の記事Markdownを置き、置いた中身（バイト列）を返す。
+    fn write_corrupt_markdown_files(
+        news_dir: &std::path::Path,
+        bucket: &str,
+    ) -> Vec<(PathBuf, Vec<u8>)> {
+        let dir = news_dir.join(bucket);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = vec![
+            (
+                dir.join("broken-yaml.md"),
+                b"---\narticleId: [unterminated\n---\n\nbody\n".to_vec(),
+            ),
+            (
+                dir.join("broken-utf8.md"),
+                vec![b'-', b'-', b'-', b'\n', 0xff, 0xfe, 0xfd, b'\n'],
+            ),
+        ];
+        for (path, bytes) in &files {
+            std::fs::write(path, bytes).unwrap();
+        }
+        files
+    }
+
+    fn assert_files_unchanged(files: &[(PathBuf, Vec<u8>)]) {
+        for (path, bytes) in files {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn read_apis_skip_corrupt_markdown_and_return_remaining_articles() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
+
+        let recommended = context.repository.list_recommended(10).unwrap();
+        assert_eq!(recommended.len(), 3);
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+        assert_eq!(history.len(), 3);
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert_eq!(detail.article_id, "article-002");
+
+        // 単一記事の更新も他記事の破損で止まらず、破損ファイルには触れない。
+        context
+            .repository
+            .update_article_favorite("article-002", true)
+            .unwrap();
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn archive_candidates_aborts_without_changes_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "old-plain".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        assert!(context.repository.archive_candidates(now).is_err());
+
+        // 圧縮・archived印付けを行わず、破損ファイルも保持する（安全側で中止）。
+        assert!(!context
+            .root_dir
+            .join("archive")
+            .join("archive_index.json")
+            .exists());
+        let saved = context
+            .repository
+            .load_article_record(&context.news_dir.join("202605").join("old-plain.md"))
+            .unwrap();
+        assert!(!saved.is_archived);
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn retire_archived_markdown_aborts_without_deleting_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let article = PersistedArticleRecord {
+            article_id: "retire-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&article).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
+
+        assert!(context.repository.retire_archived_markdown().is_err());
+
+        assert!(context.news_dir.join("202605").join("retire-a.md").exists());
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn refresh_does_not_overwrite_corrupt_markdown() {
+        use crate::domain::article::FetchedArticle;
+
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
+
+        let existing = context.repository.existing_article_ids().unwrap();
+        assert!(existing.contains("article-001"));
+        // 破損ファイル名のIDは既存扱いにし、同じIDの取得記事で上書きさせない。
+        assert!(existing.contains("broken-yaml"));
+        assert!(existing.contains("broken-utf8"));
+
+        let fetched = |article_id: &str| FetchedArticle {
+            article_id: article_id.to_string(),
+            title: "新着記事".to_string(),
+            source_name: "テストソース".to_string(),
+            original_url: "https://example.com/news".to_string(),
+            fetched_at: "2026-06-20T00:00:00Z".to_string(),
+            published_at_text: "2026-06-20T00:00:00Z".to_string(),
+            genre: "テクノロジー".to_string(),
+            tags: Vec::new(),
+            excerpt: None,
+            recommendation_score: 0.5,
+            read_state: ArticleReadState::Unread,
+        };
+        let saved = context
+            .repository
+            .save_fetched_articles(vec![
+                fetched("broken-yaml"),
+                fetched("broken-utf8"),
+                fetched("fresh-article"),
+            ])
+            .unwrap();
+
+        assert_eq!(saved, 1);
+        assert!(context
+            .news_dir
+            .join("202606")
+            .join("fresh-article.md")
+            .exists());
+        assert_files_unchanged(&corrupt);
     }
 
     #[test]
