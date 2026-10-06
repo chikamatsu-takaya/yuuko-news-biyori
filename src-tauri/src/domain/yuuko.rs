@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
@@ -266,6 +266,7 @@ impl PersistedYuukoState {
     /// 通知を出してよいか判定する（設計書 §4.3/§5.2 のMVP抑制条件）。
     /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
     /// 時間帯判定（start_time, end_time）が指定されている場合は、ローカル時刻で判定する。
+    /// 日次上限もローカル日付で区切る（ローカル深夜0時にリセット）。
     /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
     pub fn can_notify<'a>(
         &self,
@@ -273,7 +274,19 @@ impl PersistedYuukoState {
         max_per_day: u32,
         time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> NotificationGate {
-        let local_time = now.with_timezone(&chrono::Local);
+        self.can_notify_in(&chrono::Local, now, max_per_day, time_ranges)
+    }
+
+    /// `can_notify` の本体。タイムゾーンを引数で受け取り、テストでは固定オフセットを注入して
+    /// 実行端末のタイムゾーンに依存せず日付境界を検証できるようにする（本番は chrono::Local）。
+    fn can_notify_in<'a, Tz: TimeZone>(
+        &self,
+        tz: &Tz,
+        now: DateTime<Utc>,
+        max_per_day: u32,
+        time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> NotificationGate {
+        let local_time = now.with_timezone(tz);
         use chrono::Timelike;
         let current_minutes = local_time.hour() * 60 + local_time.minute();
 
@@ -281,13 +294,8 @@ impl PersistedYuukoState {
             return NotificationGate::OutsideTimeRange;
         }
 
-        let today = now.format(DATE_FORMAT).to_string();
-        let used_today = if self.daily_notification.date == today {
-            self.daily_notification.count
-        } else {
-            0
-        };
-        if used_today >= max_per_day {
+        let today = local_date_key(now, tz);
+        if self.notifications_used_on(&today, tz) >= max_per_day {
             return NotificationGate::DailyLimitReached;
         }
 
@@ -304,6 +312,28 @@ impl PersistedYuukoState {
         }
 
         NotificationGate::Allowed
+    }
+
+    /// ローカル日付 `today` に既に出した通知回数を返す（日付が違えば 0）。
+    ///
+    /// カウントの所属日は「前回通知時刻 last_notified_at のローカル日付」を正とする。
+    /// mark_notified は count と last_notified_at を必ず同時に更新するため両者は常に対応する。
+    /// 旧バージョンは daily_notification.date を UTC 日付で保存しており、JST 00:00〜09:00 の間は
+    /// ローカル日付と1日ずれる。date 文字列だけで比較すると、移行直後に同じローカル日内で
+    /// カウントが 0 に戻り上限を超えて通知してしまうため、時刻から日付を導出し直す。
+    /// 旧データの count は UTC 1日分の累計で「最後の通知のローカル日」の実回数以上になるため、
+    /// 判定は過剰許可にならない側（安全側）へ倒れ、翌ローカル日には必ずリセットされる。
+    /// last_notified_at が無い/壊れている場合のみ、保存済み date との一致で判定する。
+    fn notifications_used_on<Tz: TimeZone>(&self, today: &str, tz: &Tz) -> u32 {
+        let counted_date = match self.last_notified_at.as_deref().and_then(parse_timestamp) {
+            Some(last) => local_date_key(last, tz),
+            None => self.daily_notification.date.clone(),
+        };
+        if counted_date == today {
+            self.daily_notification.count
+        } else {
+            0
+        }
     }
 
     /// おすすめ候補（スコア順）から紹介する1件を選ぶ。未紹介・非お気に入りを対象に未読を優先する
@@ -323,14 +353,24 @@ impl PersistedYuukoState {
     }
 
     /// 選んだ記事を「ゆうこが紹介中」の状態にし、通知回数・クールタイム基点・紹介済みを記録する。
-    /// 日付が変わっていれば日次カウントをリセットしてから加算する。
+    /// ローカル日付が変わっていれば日次カウントをリセットしてから加算する。
     pub fn mark_notified(&mut self, now: DateTime<Utc>, article: ArticleSummaryDto) {
-        let today = now.format(DATE_FORMAT).to_string();
-        if self.daily_notification.date != today {
-            self.daily_notification.date = today;
-            self.daily_notification.count = 0;
-        }
-        self.daily_notification.count = self.daily_notification.count.saturating_add(1);
+        self.mark_notified_in(&chrono::Local, now, article);
+    }
+
+    /// `mark_notified` の本体（タイムゾーン注入版。理由は `can_notify_in` と同じ）。
+    fn mark_notified_in<Tz: TimeZone>(
+        &mut self,
+        tz: &Tz,
+        now: DateTime<Utc>,
+        article: ArticleSummaryDto,
+    ) {
+        let today = local_date_key(now, tz);
+        // last_notified_at を上書きする前に、既存カウントが今日の分かを判定する。
+        let used_today = self.notifications_used_on(&today, tz);
+        // 旧形式（UTC日付）の date もここでローカル日付へ正規化される。
+        self.daily_notification.date = today;
+        self.daily_notification.count = used_today.saturating_add(1);
         self.last_notified_at = Some(format_timestamp(now));
 
         if !self.is_introduced(&article.article_id) {
@@ -395,6 +435,16 @@ pub struct RequestYuukoNotificationResult {
 /// 保存用タイムスタンプ文字列を生成する（UTC・他サービスと同形式）。
 fn format_timestamp(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
+}
+
+/// 日次上限の日付キー（YYYY-MM-DD）を `tz` のローカル日付で返す。
+/// news_scheduler の local_today() と同じくローカル日付で日を区切り、
+/// UTC 日付で区切ると JST 09:00 に上限がリセットされてしまう問題を避ける。
+fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> String {
+    now.with_timezone(tz)
+        .date_naive()
+        .format(DATE_FORMAT)
+        .to_string()
 }
 
 /// 保存済みRFC3339文字列を UTC DateTime へ復元する。
@@ -462,7 +512,7 @@ fn is_within_any_notification_time_range<'a>(
 mod tests {
     use super::*;
     use crate::domain::settings::PersistedSettings;
-    use chrono::{Local, TimeZone};
+    use chrono::{FixedOffset, Local};
 
     fn article(
         id: &str,
@@ -546,9 +596,24 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::Leaving);
     }
 
+    /// テスト用の固定タイムゾーン（JST, +09:00）。実行端末のタイムゾーンに依存させない。
+    fn jst() -> FixedOffset {
+        FixedOffset::east_opt(9 * 3600).unwrap()
+    }
+
+    /// JST の壁時計時刻を UTC に変換する。
+    fn jst_at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        jst()
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    const ALL_DAY: [(&str, &str); 1] = [("00:00", "23:59")];
+
     #[test]
     fn can_notify_blocks_when_daily_limit_reached_and_resets_next_day() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = jst_at(2026, 6, 9, 12, 0);
         let state = PersistedYuukoState {
             daily_notification: DailyNotificationCount {
                 date: "2026-06-09".to_string(),
@@ -557,15 +622,144 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "23:59")]),
+            state.can_notify_in(&jst(), now, 3, ALL_DAY),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
-        let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
+        let tomorrow = jst_at(2026, 6, 10, 9, 0);
         assert_eq!(
-            state.can_notify(tomorrow, 3, [("00:00", "23:59")]),
+            state.can_notify_in(&jst(), tomorrow, 3, ALL_DAY),
             NotificationGate::Allowed
         );
+    }
+
+    #[test]
+    fn daily_limit_resets_at_local_midnight_not_utc_midnight() {
+        let mut state = PersistedYuukoState::default();
+        // JST 6/9 に上限（3回）まで通知する。最後は 22:00。
+        for (i, hour) in [10, 16, 22].into_iter().enumerate() {
+            state.mark_notified_in(
+                &jst(),
+                jst_at(2026, 6, 9, hour, 0),
+                article(&format!("a{i}"), ArticleReadState::Unread, false, 0.9),
+            );
+            state.clear_active_notification();
+        }
+        assert_eq!(state.daily_notification.date, "2026-06-09");
+        assert_eq!(state.daily_notification.count, 3);
+
+        // ローカル深夜0時の直前は上限到達のまま。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 9, 23, 59), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+        // ローカル深夜0時を越えたらリセット（UTC ではまだ 6/9 15:00 で日付は変わっていない）。
+        let after_midnight = jst_at(2026, 6, 10, 0, 0);
+        assert_eq!(after_midnight.format(DATE_FORMAT).to_string(), "2026-06-09");
+        assert_eq!(
+            state.can_notify_in(&jst(), after_midnight, 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+
+        // 深夜0時以降の通知は新しいローカル日の1回目として数える。
+        state.mark_notified_in(
+            &jst(),
+            after_midnight,
+            article("b0", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 1);
+    }
+
+    #[test]
+    fn daily_limit_does_not_reset_at_jst_nine_oclock() {
+        // JST 6/10 00:30〜02:30 に3回通知（UTC 日付はすべて 6/9）。
+        let mut state = PersistedYuukoState::default();
+        for (i, hour) in [0, 1, 2].into_iter().enumerate() {
+            state.mark_notified_in(
+                &jst(),
+                jst_at(2026, 6, 10, hour, 30),
+                article(&format!("a{i}"), ArticleReadState::Unread, false, 0.9),
+            );
+            state.clear_active_notification();
+        }
+        // UTC 日付が 6/10 に変わる JST 09:00 を過ぎても、同じローカル日なら上限のまま。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 10, 9, 30), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+    }
+
+    #[test]
+    fn legacy_utc_date_does_not_over_allow_within_same_local_day() {
+        // 旧バージョンが JST 6/10 07:30（= UTC 6/9 22:30）に3回目を記録した状態。
+        // date は UTC 日付 "2026-06-09" で保存されている。
+        let state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 3,
+            },
+            last_notified_at: Some("2026-06-09T22:30:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // 同じローカル日（JST 6/10）のうちは date 文字列が違っても上限を維持する。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 10, 10, 0), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+        // 翌ローカル日には必ずリセットされ、永久停止にならない。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 11, 0, 0), 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+    }
+
+    #[test]
+    fn legacy_utc_date_from_previous_local_day_is_reset() {
+        // 旧バージョンが JST 6/9 12:00（= UTC 6/9 03:00）に3回目を記録した状態。
+        let mut state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 3,
+            },
+            last_notified_at: Some("2026-06-09T03:00:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // JST 6/10 07:00 は UTC ではまだ 6/9 だが、ローカルでは翌日なので通知できる。
+        let now = jst_at(2026, 6, 10, 7, 0);
+        assert_eq!(
+            state.can_notify_in(&jst(), now, 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+        // 通知時にローカル日付へ正規化され、1回目として数える。
+        state.mark_notified_in(
+            &jst(),
+            now,
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 1);
+    }
+
+    #[test]
+    fn legacy_count_is_kept_when_marking_within_same_local_day() {
+        // 旧バージョンが JST 6/10 06:00（= UTC 6/9 21:00）に1回目を記録した状態。
+        let mut state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 1,
+            },
+            last_notified_at: Some("2026-06-09T21:00:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // 同じローカル日の2回目は 1 に戻さず 2 として数える（上限超過を防ぐ）。
+        state.mark_notified_in(
+            &jst(),
+            jst_at(2026, 6, 10, 8, 0),
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 2);
     }
 
     #[test]
@@ -588,9 +782,13 @@ mod tests {
 
     #[test]
     fn mark_notified_records_count_cooltime_and_introduced() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = jst_at(2026, 6, 9, 12, 0);
         let mut state = PersistedYuukoState::default();
-        state.mark_notified(now, article("a1", ArticleReadState::Unread, false, 0.9));
+        state.mark_notified_in(
+            &jst(),
+            now,
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
 
         assert_eq!(state.daily_notification.count, 1);
         assert_eq!(state.daily_notification.date, "2026-06-09");

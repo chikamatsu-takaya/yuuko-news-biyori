@@ -183,7 +183,7 @@ mod tests {
     use crate::domain::settings::{PersistedSettings, WorkTimeRange};
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
-    use chrono::{Duration, Local, Timelike, Utc};
+    use chrono::{Duration, Local, Timelike};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(saved.daily_notification.count, 1);
         assert_eq!(
             saved.daily_notification.date,
-            Utc::now().format("%Y-%m-%d").to_string()
+            Local::now().format("%Y-%m-%d").to_string()
         );
         assert_eq!(saved.introduced_article_ids.len(), 1);
         assert!(saved.last_notified_at.is_some());
