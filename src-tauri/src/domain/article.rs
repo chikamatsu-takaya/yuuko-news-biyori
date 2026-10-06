@@ -40,6 +40,23 @@ pub enum ArticleReadState {
     DetailViewed,
 }
 
+impl ArticleReadState {
+    /// 閲覧の進み具合（Unread < Previewed < DetailViewed）。詳細設計書 §11.2 の一方向遷移を表す。
+    fn progress_rank(&self) -> u8 {
+        match self {
+            Self::Unread => 0,
+            Self::Previewed => 1,
+            Self::DetailViewed => 2,
+        }
+    }
+
+    /// `target` が現在より進んだ状態のときだけ true。
+    /// 詳細閲覧後に軽量プレビューを開いても DetailViewed→Previewed へ後退させないために使う。
+    pub fn can_advance_to(&self, target: &ArticleReadState) -> bool {
+        target.progress_rank() > self.progress_rank()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleSummaryDto {
@@ -293,6 +310,20 @@ mod tests {
         UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn read_state_advances_only_forward() {
+        use super::ArticleReadState::{DetailViewed, Previewed, Unread};
+
+        assert!(Unread.can_advance_to(&Previewed));
+        assert!(Unread.can_advance_to(&DetailViewed));
+        assert!(Previewed.can_advance_to(&DetailViewed));
+        // 同じ状態・後退方向は更新しない。
+        assert!(!Previewed.can_advance_to(&Previewed));
+        assert!(!DetailViewed.can_advance_to(&Previewed));
+        assert!(!DetailViewed.can_advance_to(&Unread));
+        assert!(!Previewed.can_advance_to(&Unread));
+    }
 
     #[test]
     fn normalized_limit_defaults_to_twenty() {

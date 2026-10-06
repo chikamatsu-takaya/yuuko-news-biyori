@@ -148,6 +148,20 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
         if state.handle_click() {
             self.yuuko_state_repository.save(&state)?;
+            // 初回クリック（PreviewVisible 遷移）で軽量プレビューを見せた記事を Previewed にする
+            // （詳細設計書 §11.2）。ドメインの遷移は副作用を持たないため、既読保存はサービス側で行う。
+            // 既読保存の失敗はログのみで、クリック遷移の結果は返す。
+            if state.state == YuukoResidentState::PreviewVisible {
+                let article_id = state.current_article_id.clone().or_else(|| {
+                    state
+                        .preview_article
+                        .as_ref()
+                        .map(|article| article.article_id.clone())
+                });
+                if let Some(article_id) = article_id {
+                    self.article_service.mark_article_previewed(&article_id);
+                }
+            }
         }
         Ok(state.to_notification_state())
     }
@@ -180,6 +194,7 @@ mod tests {
     //! （通知ON/OFF・notifyMaxPerDay・workTimeRanges）を通知判定へ正しく渡していることを保証する。
     //! 各リポジトリは一時ディレクトリ（実ファイル）で構成し、本番コードへテスト用分岐は追加しない。
     use super::*;
+    use crate::domain::article::{ArticleHistoryFilter, ArticleReadState, GetArticleDetailParams};
     use crate::domain::settings::{PersistedSettings, WorkTimeRange};
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
@@ -411,5 +426,117 @@ mod tests {
         let saved = load_state(&ctx);
         assert_eq!(saved.daily_notification.count, 0);
         assert!(saved.introduced_article_ids.is_empty());
+    }
+
+    fn read_state_of(ctx: &ServiceContext, article_id: &str) -> ArticleReadState {
+        ctx.article_repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap()
+            .into_iter()
+            .find(|article| article.article_id == article_id)
+            .unwrap()
+            .read_state
+    }
+
+    /// 7. 初回クリック（PreviewVisible 遷移）で紹介記事が Unread→Previewed になり、未読フィルタから外れる。
+    #[test]
+    fn first_click_marks_introduced_article_previewed() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        let notified = ctx.service.request_yuuko_notification().unwrap();
+        let article_id = notified.state.current_article_id.clone().unwrap();
+        assert_eq!(read_state_of(&ctx, &article_id), ArticleReadState::Unread);
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
+        assert_eq!(
+            read_state_of(&ctx, &article_id),
+            ArticleReadState::Previewed
+        );
+        assert!(!ctx
+            .article_repository
+            .list_history(ArticleHistoryFilter::Unread, 10)
+            .unwrap()
+            .iter()
+            .any(|article| article.article_id == article_id));
+
+        // 再クリック（Leaving 確定）では既読状態を変えない。
+        let left = ctx.service.handle_yuuko_clicked().unwrap();
+        assert_eq!(left.state, YuukoResidentState::Leaving);
+        assert_eq!(
+            read_state_of(&ctx, &article_id),
+            ArticleReadState::Previewed
+        );
+    }
+
+    /// 8. 詳細閲覧済み（DetailViewed）の記事は、プレビュー表示で Previewed へ後退しない。
+    #[test]
+    fn first_click_does_not_regress_detail_viewed_article() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        ctx.article_repository
+            .advance_article_read_state("article-001", ArticleReadState::DetailViewed)
+            .unwrap();
+        let active_state = PersistedYuukoState {
+            state: YuukoResidentState::BalloonVisible,
+            current_article_id: Some("article-001".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        ctx.yuuko_state_repository.save(&active_state).unwrap();
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
+        assert_eq!(
+            read_state_of(&ctx, "article-001"),
+            ArticleReadState::DetailViewed
+        );
+    }
+
+    /// 9. 記事詳細で保存された DetailViewed は、おすすめ候補の未読優先選定に反映される。
+    #[test]
+    fn request_skips_detail_viewed_article_in_favor_of_unread() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        // 最高スコアの article-001 を記事詳細で閲覧済みにする。
+        ctx.service
+            .article_service
+            .get_article_detail(GetArticleDetailParams {
+                article_id: "article-001".to_string(),
+            })
+            .unwrap();
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(
+            result.state.current_article_id.as_deref(),
+            Some("article-002")
+        );
+    }
+
+    /// 10. 紹介記事が見つからず既読保存に失敗しても、クリック遷移自体は成功する。
+    #[test]
+    fn first_click_succeeds_even_when_article_is_missing() {
+        let ctx = make_context();
+        let active_state = PersistedYuukoState {
+            state: YuukoResidentState::BalloonVisible,
+            current_article_id: Some("missing-article".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        ctx.yuuko_state_repository.save(&active_state).unwrap();
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
     }
 }
