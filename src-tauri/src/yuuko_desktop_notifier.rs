@@ -41,8 +41,10 @@ pub const YUUKO_OPEN_ARTICLE_EVENT: &str = "yuuko-open-article";
 
 /// ゆうこ用ウィンドウへ渡す最小限の表示用データ。
 ///
-/// 本文・要約・URL は渡さない（小型ウィンドウでは不要で、外部由来文字列の露出を最小にするため）。
-/// title / balloon_text は外部由来を含み得るため、UI 側は必ずテキストとして描画する。
+/// 本文・URL は渡さない（小型ウィンドウでは不要で、外部由来文字列の露出を最小にするため）。
+/// 要約は保存済みの AI 要約を短く切り詰めたもの（YuukoNotificationState::preview_short_summary。
+/// サービス層が詰める）だけを渡す（設計書 §10.3 初回クリックの短い追加要約）。
+/// title / balloon_text / source_name / summary は外部由来を含み得るため、UI 側は必ずテキストとして描画する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct YuukoDesktopNotification {
@@ -50,6 +52,11 @@ pub struct YuukoDesktopNotification {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balloon_text: Option<String>,
+    /// 出典名（軽量プレビューで表示）。
+    pub source_name: String,
+    /// 短い要約。要約が未生成・空の記事では None（UI は固定の一言を出す）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// 既に軽量プレビュー段階か。ページの表示段階とウィンドウの大きさを Rust の状態に合わせるために使う。
     pub preview_visible: bool,
 }
@@ -138,6 +145,9 @@ fn desktop_notification_from_state(
             .unwrap_or_else(|| article.article_id.clone()),
         title: article.title.clone(),
         balloon_text: state.balloon_text.clone(),
+        source_name: article.source_name.clone(),
+        // preview_article.summary は要約が無いと本文抜粋で補われるため使わない。
+        summary: state.preview_short_summary.clone(),
         preview_visible: state.state == YuukoResidentState::PreviewVisible,
     })
 }
@@ -167,16 +177,16 @@ fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
 }
 
 fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
-    let result = match yuuko_service.request_yuuko_notification() {
+    let mut result = match yuuko_service.request_yuuko_notification() {
         Ok(result) => result,
         Err(error) => {
             log::warn!("非表示中のゆうこ通知判定に失敗しました。次回に再試行します: {error}");
             return;
         }
     };
-    let Some(notification) = desktop_notification_from(&result) else {
+    if desktop_notification_from(&result).is_none() {
         return;
-    };
+    }
 
     // 判定中にメインが再表示された場合は、アプリ内の再表示（保存済み active の拾い直し）に任せる。
     if decide_tick(main_window_visibility(app)) != TickAction::RunJudgement {
@@ -187,6 +197,12 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
         return;
     }
 
+    // 短い要約は記事の読み込みを伴うため、実際に表示すると決まってから詰める
+    // （active な通知を周期ごとに出し直さない場合に、毎回読み込まないようにする）。
+    yuuko_service.attach_preview_short_summary(&mut result.state);
+    let Some(notification) = desktop_notification_from(&result) else {
+        return;
+    };
     if let Err(error) = present(app, &notification) {
         // 通知状態は永続化済みのため、メイン再表示時にアプリ内で拾い直せる（取りこぼさない）。
         log::warn!("ゆうこ用ウィンドウに通知を表示できませんでした: {error}");
@@ -357,7 +373,7 @@ mod tests {
             source_name: "source".to_string(),
             published_at_text: "today".to_string(),
             genre: "tech".to_string(),
-            summary: Some("要約は渡さない".to_string()),
+            summary: Some("本文抜粋で補われ得る要約欄".to_string()),
             is_favorite: false,
             read_state: ArticleReadState::Unread,
             recommendation_score: 0.9,
@@ -373,6 +389,7 @@ mod tests {
             has_notification: false,
             current_article_id: with_article.then(|| "article-001".to_string()),
             reward_notification: None,
+            preview_short_summary: with_article.then(|| "保存済みの要約".to_string()),
         }
     }
 
@@ -451,9 +468,26 @@ mod tests {
                 article_id: "article-001".to_string(),
                 title: "タイトル".to_string(),
                 balloon_text: Some("気になるニュースがあるよ".to_string()),
+                source_name: "source".to_string(),
+                summary: Some("保存済みの要約".to_string()),
                 preview_visible: false,
             })
         );
+    }
+
+    #[test]
+    fn summary_comes_only_from_preview_short_summary() {
+        // preview_article.summary（要約が無いと本文抜粋で補われる）に値があっても、
+        // 補う前の要約（preview_short_summary）が無ければ要約を送らない。
+        let mut without_summary = state(YuukoResidentState::BalloonVisible, true);
+        without_summary.preview_short_summary = None;
+        assert!(without_summary
+            .preview_article
+            .as_ref()
+            .is_some_and(|article| article.summary.is_some()));
+        let payload = desktop_notification_from_state(&without_summary).unwrap();
+        assert_eq!(payload.summary, None);
+        assert_eq!(payload.source_name, "source");
     }
 
     #[test]
@@ -516,12 +550,20 @@ mod tests {
             article_id: "a".to_string(),
             title: "t".to_string(),
             balloon_text: None,
+            source_name: "s".to_string(),
+            summary: None,
             preview_visible: false,
         })
         .unwrap();
+        // 本文・URL などの欄は持たない。要約が無いときは summary 自体を送らない。
         assert_eq!(
             json,
-            serde_json::json!({ "articleId": "a", "title": "t", "previewVisible": false })
+            serde_json::json!({
+                "articleId": "a",
+                "title": "t",
+                "sourceName": "s",
+                "previewVisible": false
+            })
         );
     }
 

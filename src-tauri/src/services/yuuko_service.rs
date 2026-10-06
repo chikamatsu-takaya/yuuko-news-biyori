@@ -2,8 +2,9 @@ use chrono::Utc;
 
 use crate::domain::article::GetRecommendedArticlesParams;
 use crate::domain::yuuko::{
-    ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate, PersistedYuukoState,
-    RequestYuukoNotificationResult, YuukoNotificationState, YuukoResidentState,
+    short_preview_summary, ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate,
+    PersistedYuukoState, RequestYuukoNotificationResult, YuukoNotificationState,
+    YuukoResidentState,
 };
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
@@ -53,7 +54,45 @@ impl YuukoService {
             response.balloon_text = yuuko_state.balloon_text.clone();
         }
 
+        // ゆうこ用ウィンドウはマウント時にこの結果で初期表示するため、イベント経路と同じ短い要約を詰める。
+        self.attach_preview_short_summary(&mut response);
         Ok(response)
+    }
+
+    /// active なニュース通知のとき、紹介中記事の保存済み AI 要約を短く切り詰めて状態へ詰める。
+    ///
+    /// preview_article.summary は要約が無いと本文抜粋で補われる（メイン画面の表示用でその意味は変えない）ため、
+    /// デスクトップ通知が本文を送らないよう補う前の要約を記事から読み直す。preview_article は通知時点の
+    /// 写しなので、後から生成された要約も反映できる。読めない場合は要約なし（固定の一言）に倒す。
+    ///
+    /// 記事の読み込みを伴うため、実際に表示へ使う場面（初期表示の状態取得と、デスクトップ通知の表示直前）
+    /// だけで呼ぶ。メイン画面も5分ごとに呼ぶ request_yuuko_notification では呼ばない（常駐時の負荷を抑える）。
+    pub fn attach_preview_short_summary(&self, state: &mut YuukoNotificationState) {
+        let is_active_news = matches!(
+            state.state,
+            YuukoResidentState::Appearing
+                | YuukoResidentState::BalloonVisible
+                | YuukoResidentState::PreviewVisible
+        );
+        if !is_active_news {
+            return;
+        }
+        let Some(article) = state.preview_article.as_ref() else {
+            return;
+        };
+        let article_id = state
+            .current_article_id
+            .clone()
+            .unwrap_or_else(|| article.article_id.clone());
+        match self.article_service.get_saved_summary(&article_id) {
+            Ok(summary) => {
+                state.preview_short_summary = summary.as_deref().and_then(short_preview_summary);
+            }
+            Err(error) => {
+                // 本文・要約はログに出さない。
+                log::warn!("ゆうこ通知の短い要約を読み込めませんでした ({article_id}): {error}");
+            }
+        }
     }
 
     pub fn confirm_rank_up_reward(
@@ -538,5 +577,90 @@ mod tests {
         let clicked = ctx.service.handle_yuuko_clicked().unwrap();
 
         assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
+    }
+
+    /// AI 要約前（excerpt のみ）の記事を1件だけ保存する。
+    fn save_excerpt_only_article(ctx: &ServiceContext, excerpt: &str) {
+        ctx.article_repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: "excerpt-only".to_string(),
+                title: "要約前の記事".to_string(),
+                source_name: "テストソース".to_string(),
+                original_url: "https://example.com/news".to_string(),
+                fetched_at: "2026-06-20T00:00:00Z".to_string(),
+                published_at_text: "2026-06-20T00:00:00Z".to_string(),
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some(excerpt.to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            }])
+            .unwrap();
+    }
+
+    /// 要約前の記事では、preview_article.summary が本文抜粋で補われても短い要約は付けない
+    /// （デスクトップ通知に本文を送らず、固定の一言を出させる）。初期表示経路も同じ。
+    #[test]
+    fn excerpt_only_article_has_no_preview_short_summary() {
+        let ctx = make_context();
+        save_excerpt_only_article(&ctx, "本文抜粋の先頭です。");
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+
+        let mut result = ctx.service.request_yuuko_notification().unwrap();
+        assert!(result.notified);
+        assert_eq!(
+            result
+                .state
+                .preview_article
+                .as_ref()
+                .and_then(|article| article.summary.as_deref()),
+            Some("本文抜粋の先頭です。"),
+            "preview_article の意味（excerpt で補う）は変えない"
+        );
+        // デスクトップ通知の表示直前と同じく詰めても、要約前の記事では付かない。
+        ctx.service.attach_preview_short_summary(&mut result.state);
+        assert_eq!(result.state.preview_short_summary, None);
+
+        let current = ctx.service.get_yuuko_notification_state().unwrap();
+        assert_eq!(current.preview_short_summary, None);
+    }
+
+    /// 保存済み AI 要約がある記事では、初期表示経路とデスクトップ通知の表示直前で同じ短い要約を付ける。
+    /// request_yuuko_notification（メイン画面も5分ごとに呼ぶ）自体は記事を読まず、要約を詰めない。
+    #[test]
+    fn saved_summary_is_attached_only_where_displayed() {
+        let ctx = make_context();
+        save_excerpt_only_article(&ctx, "本文抜粋の先頭です。");
+        let long_summary = "保存済みの要約です。".repeat(10);
+        ctx.article_repository
+            .update_article_summary(
+                "excerpt-only",
+                crate::domain::article::ArticleSummaryUpdate {
+                    summary: long_summary.clone(),
+                    yuuko_explanation: "説明".to_string(),
+                    focus_points: Vec::new(),
+                    yuuko_comment: "ひとこと".to_string(),
+                    ai_provider: "mock".to_string(),
+                    generated_at: "2026-06-20T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+
+        let expected = short_preview_summary(&long_summary);
+        assert!(expected.as_deref().is_some_and(|s| s.ends_with('…')));
+        let mut result = ctx.service.request_yuuko_notification().unwrap();
+        assert!(result.notified);
+        // 要約が保存済みでも、request の戻り値には詰めない（記事を読まない）。
+        assert_eq!(result.state.preview_short_summary, None);
+        let already_active = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(already_active.reason, "already_active");
+        assert_eq!(already_active.state.preview_short_summary, None);
+
+        // デスクトップ通知の表示直前（yuuko_desktop_notifier::run_judgement）と初期表示で同じ値になる。
+        ctx.service.attach_preview_short_summary(&mut result.state);
+        assert_eq!(result.state.preview_short_summary, expected);
+        let current = ctx.service.get_yuuko_notification_state().unwrap();
+        assert_eq!(current.preview_short_summary, expected);
     }
 }

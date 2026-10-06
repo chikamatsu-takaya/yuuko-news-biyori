@@ -173,6 +173,10 @@ export default function YuukoWindowPage() {
             // 外部由来を含み得るため、文字列のまま渡してテキストとして描画させる。
             balloonText={notification.balloonText}
             articleTitle={notification.title}
+            // 出典・短い要約（Rust で切り詰め済み）も外部由来のためテキストとして描画させる。
+            // 要約が無い記事では YuukoInAppNotification が固定の一言を出す。
+            sourceName={notification.sourceName}
+            summary={notification.summary}
             positionMode="RightBottom"
             // ウィンドウは段階ごとの固定サイズ（Rust 側）なので、長文で上へはみ出さないよう行数を抑える。
             clampText
