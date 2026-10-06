@@ -440,7 +440,8 @@ fn format_timestamp(value: DateTime<Utc>) -> String {
 /// 日次上限の日付キー（YYYY-MM-DD）を `tz` のローカル日付で返す。
 /// news_scheduler の local_today() と同じくローカル日付で日を区切り、
 /// UTC 日付で区切ると JST 09:00 に上限がリセットされてしまう問題を避ける。
-fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> String {
+/// 友情ポイントの日次上限（friendship_service）も同じ日付境界にそろえるため crate 内で共有する。
+pub(crate) fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> String {
     now.with_timezone(tz)
         .date_naive()
         .format(DATE_FORMAT)
