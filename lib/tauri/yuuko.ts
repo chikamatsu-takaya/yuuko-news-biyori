@@ -128,6 +128,48 @@ export const requestYuukoNotification =
     return invoke<RequestYuukoNotificationResult>("request_yuuko_notification");
   };
 
+// --- 常駐ゆうこ用ウィンドウ（デスクトップ通知） ---
+
+/**
+ * メインウィンドウ非表示・最小化中に、Rust の判定スレッドがゆうこ用ウィンドウへ送るイベント名。
+ * Rust 側 yuuko_desktop_notifier::YUUKO_DESKTOP_NOTIFICATION_EVENT と一致させる。
+ */
+export const YUUKO_DESKTOP_NOTIFICATION_EVENT = "yuuko-desktop-notification";
+
+/**
+ * ゆうこ用ウィンドウへ渡す最小限の表示用データ（Rust YuukoDesktopNotification と一致）。
+ * title / balloonText は外部由来を含み得るため、必ずテキストとして描画する。
+ */
+export type YuukoDesktopNotification = {
+  articleId: string;
+  title: string;
+  balloonText?: string;
+};
+
+/**
+ * 通知状態から、ゆうこ用ウィンドウの表示用データを取り出す（Rust desktop_notification_from_state と同基準）。
+ *
+ * ウィンドウ初回生成時はページの購読開始より先にイベントが送られ得るため、
+ * ゆうこ用ウィンドウはマウント時に getYuukoNotificationState の結果をこれで変換して初期表示に使う。
+ * active なニュース通知でない、またはタイトルが無い場合は null（表示しない）。
+ */
+export const toYuukoDesktopNotification = (
+  state: YuukoNotificationState | null
+): YuukoDesktopNotification | null => {
+  if (
+    !state ||
+    !["Appearing", "BalloonVisible", "PreviewVisible"].includes(state.state) ||
+    !state.previewArticle
+  ) {
+    return null;
+  }
+  return {
+    articleId: state.currentArticleId ?? state.previewArticle.articleId,
+    title: state.previewArticle.title,
+    ...(state.balloonText ? { balloonText: state.balloonText } : {}),
+  };
+};
+
 /** 無操作タイムアウト（無視）を記録する。自動退場タイマー側から呼ぶ。非Tauriは null。 */
 export const markYuukoIgnored =
   async (): Promise<YuukoNotificationState | null> => {

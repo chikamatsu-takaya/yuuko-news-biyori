@@ -26,8 +26,7 @@ const SCREEN_EDGE_LOGICAL_MARGIN: f64 = 16.0;
 ///
 /// Windows では同期 Tauri command（メインスレッド）内でのウィンドウ生成がデッドロックするため、
 /// 呼び出し側はスケジューラスレッドや async command から呼ぶこと。
-// 表示タイミングを判定する別タスクから呼ぶまでは未使用になるため、dead_code を許可する。
-#[allow(dead_code)]
+/// 現在の生成経路は `yuuko_desktop_notifier` の判定スレッドだけに限定している。
 pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     if let Some(window) = app.get_webview_window(YUUKO_WINDOW_LABEL) {
         return Ok(window);
@@ -57,13 +56,20 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
     #[cfg(not(target_os = "macos"))]
     let builder = builder.transparent(true);
 
-    builder.build()
+    // 「取得→生成」の間に別経路が同じラベルで生成していた場合、build はラベル重複で失敗する。
+    // その場合は既に作られたウィンドウを使えば目的を満たすため、失敗扱いにせず取得し直す。
+    match builder.build() {
+        Ok(window) => Ok(window),
+        Err(error) => match app.get_webview_window(YUUKO_WINDOW_LABEL) {
+            Some(window) => Ok(window),
+            None => Err(error),
+        },
+    }
 }
 
 /// ゆうこ用ウィンドウをプライマリモニタ作業領域の右下へ配置してから表示する。
 ///
 /// 配置先を決められない場合は、意図しない位置に出すより表示しない方が安全なため、表示せずにエラーを返す。
-#[allow(dead_code)]
 pub fn show_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let window = ensure_yuuko_window(app)?;
     place_at_primary_work_area_bottom_right(app, &window)?;
@@ -73,7 +79,6 @@ pub fn show_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 /// ゆうこ用ウィンドウを隠す。次回表示で再利用するため破棄はしない。
-#[allow(dead_code)]
 pub fn hide_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     match app.get_webview_window(YUUKO_WINDOW_LABEL) {
         Some(window) => window.hide(),
