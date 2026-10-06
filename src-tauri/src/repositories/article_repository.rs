@@ -746,6 +746,24 @@ impl ArticleRepository {
         Ok(())
     }
 
+    /// 記事の既読状態を前進方向にだけ更新して保存する（詳細設計書 §11.2）。
+    /// 後退（DetailViewed→Previewed 等）・同値は保存せず false を返す。
+    /// 単一記事更新と同じ `find_article_record` を使い、保存先が破損ファイルなら上書きせず中止する。
+    pub fn advance_article_read_state(
+        &self,
+        article_id: &str,
+        target: ArticleReadState,
+    ) -> Result<bool, AppError> {
+        let _write_guard = self.lock_writes()?;
+        let mut article = self.find_article_record(article_id)?;
+        if !article.read_state.can_advance_to(&target) {
+            return Ok(false);
+        }
+        article.read_state = target;
+        self.save_article_record(&article)?;
+        Ok(true)
+    }
+
     /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
     /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
     /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない。
@@ -3718,6 +3736,11 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(summary_error, crate::error::AppError::Parse(_)));
+        let read_state_error = context
+            .repository
+            .advance_article_read_state("misplaced-a", ArticleReadState::DetailViewed)
+            .unwrap_err();
+        assert!(matches!(read_state_error, crate::error::AppError::Parse(_)));
         assert_files_unchanged(&corrupt);
     }
 
@@ -3792,6 +3815,49 @@ mod tests {
             .join("fresh-article.md")
             .exists());
         assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn advance_article_read_state_persists_forward_and_never_regresses() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let read_state_of = |article_id: &str| {
+            context
+                .repository
+                .list_history(ArticleHistoryFilter::All, 10)
+                .unwrap()
+                .into_iter()
+                .find(|article| article.article_id == article_id)
+                .unwrap()
+                .read_state
+        };
+
+        // Unread → Previewed → DetailViewed は保存される。
+        assert!(context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::Previewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::Previewed);
+        assert!(context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::DetailViewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::DetailViewed);
+
+        // DetailViewed → Previewed へは後退させない（保存も行わない）。
+        assert!(!context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::Previewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::DetailViewed);
+
+        // 存在しない記事は NotFound（新規ファイルを作らない）。
+        assert!(matches!(
+            context
+                .repository
+                .advance_article_read_state("article-999", ArticleReadState::Previewed),
+            Err(crate::error::AppError::NotFound(_))
+        ));
     }
 
     #[test]
