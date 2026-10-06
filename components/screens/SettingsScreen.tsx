@@ -1149,7 +1149,11 @@ export default function SettingsScreen({
                   <SettingRow label="AIプロバイダー">
                     <Select
                       value={settings.ai.provider}
-                      onValueChange={(v) => updateAi("provider", v)}
+                      onValueChange={(v) => {
+                        // 前回の接続テスト結果を新しいプロバイダーの結果と誤解させないため、切替時に消す。
+                        setAiTestView(null);
+                        updateAi("provider", v);
+                      }}
                     >
                       <SelectTrigger className="w-48">
                         <SelectValue />
