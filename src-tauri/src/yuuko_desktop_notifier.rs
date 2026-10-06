@@ -39,10 +39,19 @@ pub const YUUKO_DESKTOP_NOTIFICATION_EVENT: &str = "yuuko-desktop-notification";
 /// lib/tauri/yuuko.ts の YUUKO_OPEN_ARTICLE_EVENT と一致させる。
 pub const YUUKO_OPEN_ARTICLE_EVENT: &str = "yuuko-open-article";
 
+/// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
+///
+/// プレビューの要約欄は幅約240px・12px・3行のため、全角だと1行約20字×3行＝約60字で埋まる。
+/// それ以上送っても画面では切れて見えないうえ、外部由来文字列の露出が増えるだけなので、
+/// Rust 側で切り詰めてから渡す。lib/tauri/yuuko.ts の YUUKO_PREVIEW_SUMMARY_MAX_CHARS と一致させる。
+const PREVIEW_SUMMARY_MAX_CHARS: usize = 60;
+const ELLIPSIS: char = '…';
+
 /// ゆうこ用ウィンドウへ渡す最小限の表示用データ。
 ///
-/// 本文・要約・URL は渡さない（小型ウィンドウでは不要で、外部由来文字列の露出を最小にするため）。
-/// title / balloon_text は外部由来を含み得るため、UI 側は必ずテキストとして描画する。
+/// 本文・URL は渡さない（小型ウィンドウでは不要で、外部由来文字列の露出を最小にするため）。
+/// 要約は保存済みの記事要約を短く切り詰めたものだけを渡す（設計書 §10.3 初回クリックの短い追加要約）。
+/// title / balloon_text / source_name / summary は外部由来を含み得るため、UI 側は必ずテキストとして描画する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct YuukoDesktopNotification {
@@ -50,6 +59,11 @@ pub struct YuukoDesktopNotification {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balloon_text: Option<String>,
+    /// 出典名（軽量プレビューで表示）。
+    pub source_name: String,
+    /// 短い要約。要約が未生成・空の記事では None（UI は固定の一言を出す）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// 既に軽量プレビュー段階か。ページの表示段階とウィンドウの大きさを Rust の状態に合わせるために使う。
     pub preview_visible: bool,
 }
@@ -138,8 +152,31 @@ fn desktop_notification_from_state(
             .unwrap_or_else(|| article.article_id.clone()),
         title: article.title.clone(),
         balloon_text: state.balloon_text.clone(),
+        source_name: article.source_name.clone(),
+        summary: article.summary.as_deref().and_then(short_preview_summary),
         preview_visible: state.state == YuukoResidentState::PreviewVisible,
     })
+}
+
+/// 保存済みの要約を、軽量プレビュー用に前後空白を除いて最大文字数へ切り詰める。
+/// 空なら None（UI 側の固定の一言へフォールバックさせる）。
+/// 文字数はバイトではなく char（コードポイント）で数え、マルチバイト文字の途中で切らない。
+fn short_preview_summary(summary: &str) -> Option<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= PREVIEW_SUMMARY_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let mut short: String = trimmed
+        .chars()
+        .take(PREVIEW_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    // 切り詰め位置の直前が空白だと「… 」の見た目が崩れるため落としてから省略記号を付ける。
+    short.truncate(short.trim_end().len());
+    short.push(ELLIPSIS);
+    Some(short)
 }
 
 /// 判定スレッドを開始する。起動直後はメインが表示中のため、最初の判定は1周期待ってから行う。
@@ -357,7 +394,7 @@ mod tests {
             source_name: "source".to_string(),
             published_at_text: "today".to_string(),
             genre: "tech".to_string(),
-            summary: Some("要約は渡さない".to_string()),
+            summary: Some("保存済みの要約".to_string()),
             is_favorite: false,
             read_state: ArticleReadState::Unread,
             recommendation_score: 0.9,
@@ -451,9 +488,51 @@ mod tests {
                 article_id: "article-001".to_string(),
                 title: "タイトル".to_string(),
                 balloon_text: Some("気になるニュースがあるよ".to_string()),
+                source_name: "source".to_string(),
+                summary: Some("保存済みの要約".to_string()),
                 preview_visible: false,
             })
         );
+    }
+
+    #[test]
+    fn long_summary_is_truncated_by_chars_with_ellipsis() {
+        let long = "あ".repeat(PREVIEW_SUMMARY_MAX_CHARS + 20);
+        let short = short_preview_summary(&long).unwrap();
+        assert_eq!(short.chars().count(), PREVIEW_SUMMARY_MAX_CHARS);
+        assert!(short.ends_with('…'));
+        assert!(short.starts_with(&"あ".repeat(PREVIEW_SUMMARY_MAX_CHARS - 1)));
+
+        // ちょうど上限なら切らない。前後の空白は落とす。
+        let exact = "い".repeat(PREVIEW_SUMMARY_MAX_CHARS);
+        assert_eq!(
+            short_preview_summary(&format!("  {exact}\n")),
+            Some(exact.clone())
+        );
+        // 切り詰め位置の直前の空白は省略記号の前に残さない。
+        let spaced = format!(
+            "{} {}",
+            "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2),
+            "え".repeat(10)
+        );
+        assert_eq!(
+            short_preview_summary(&spaced),
+            Some(format!("{}…", "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2)))
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_summary_is_omitted() {
+        assert_eq!(short_preview_summary(""), None);
+        assert_eq!(short_preview_summary(" \n\t "), None);
+
+        let mut without_summary = state(YuukoResidentState::BalloonVisible, true);
+        if let Some(article) = without_summary.preview_article.as_mut() {
+            article.summary = None;
+        }
+        let payload = desktop_notification_from_state(&without_summary).unwrap();
+        assert_eq!(payload.summary, None);
+        assert_eq!(payload.source_name, "source");
     }
 
     #[test]
@@ -516,12 +595,20 @@ mod tests {
             article_id: "a".to_string(),
             title: "t".to_string(),
             balloon_text: None,
+            source_name: "s".to_string(),
+            summary: None,
             preview_visible: false,
         })
         .unwrap();
+        // 本文・URL などの欄は持たない。要約が無いときは summary 自体を送らない。
         assert_eq!(
             json,
-            serde_json::json!({ "articleId": "a", "title": "t", "previewVisible": false })
+            serde_json::json!({
+                "articleId": "a",
+                "title": "t",
+                "sourceName": "s",
+                "previewVisible": false
+            })
         );
     }
 

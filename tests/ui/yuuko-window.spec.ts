@@ -11,7 +11,7 @@ import { expect, test, type Page } from "@playwright/test";
 // Rust 側 yuuko_window.rs のウィンドウ寸法（論理px）と揃える。中身がはみ出さないことの確認に使う。
 const WINDOW_WIDTH = 312;
 const BALLOON_HEIGHT = 196;
-const PREVIEW_HEIGHT = 272;
+const PREVIEW_HEIGHT = 298;
 
 const REGION = "ゆうこからのお知らせ";
 
@@ -30,7 +30,7 @@ const activeState = (overrides: Record<string, unknown> = {}) => ({
     sourceName: "E2E News",
     publishedAtText: "2026-10-06T00:00:00Z",
     genre: "AI・テクノロジー",
-    summary: "要約はデスクトップでは渡さない",
+    summary: "デスクトップでも短い要約を表示する",
     isFavorite: false,
     readState: "unread",
     recommendationScore: 0.9,
@@ -148,10 +148,15 @@ async function openYuukoWindow(page: Page, height = BALLOON_HEIGHT) {
 
 /** 通知の中身がウィンドウ（ビューポート）内に収まっているか。透明部分を最小にした寸法の検証。 */
 async function expectFitsInWindow(page: Page, height: number) {
-  const box = await page
+  const content = page
     .getByRole("region", { name: REGION })
-    .locator(":scope > div")
-    .boundingBox();
+    .locator(":scope > div");
+  // 登場演出の途中（translateY / scale の行き過ぎ）で測ると静止時の寸法と食い違い不安定になるため、
+  // 演出の終了を待ってから測る。
+  await content.evaluate((element) =>
+    Promise.all(element.getAnimations().map((animation) => animation.finished))
+  );
+  const box = await content.boundingBox();
   expect(box).not.toBeNull();
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.x).toBeGreaterThanOrEqual(0);
@@ -336,6 +341,97 @@ test("long title and balloon text are clamped and rendered as plain text", async
   await region.getByRole("button", { name: "ニュースをプレビュー" }).click();
   await page.setViewportSize({ width: WINDOW_WIDTH, height: PREVIEW_HEIGHT });
   await expect(region.getByRole("button", { name: "詳しく見る" })).toBeVisible();
+  await expectFitsInWindow(page, PREVIEW_HEIGHT);
+
+  // HTML として解釈しない（img 要素が作られず、スクリプトも動かない）。
+  await expect(region.locator("img[src='x']")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as unknown as { __XSS__?: number }).__XSS__)
+  ).toBeUndefined();
+});
+
+test("first click preview shows the source and short summary", async ({
+  page,
+}) => {
+  await installMocks(page, { state: activeState() });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+
+  await region.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(region.getByText("E2E News", { exact: true })).toBeVisible();
+  await expect(
+    region.getByText("デスクトップでも短い要約を表示する", { exact: true })
+  ).toBeVisible();
+  // 要約がある記事では固定の一言は出さない。
+  await expect(region.getByText("いっしょに読もう")).toHaveCount(0);
+});
+
+test("event payload summary is shown, and the fixed teaser is used without it", async ({
+  page,
+}) => {
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page, PREVIEW_HEIGHT);
+  const region = page.getByRole("region", { name: REGION });
+
+  await emit(page, {
+    articleId: "desk-article-4",
+    title: "要約つきのニュース",
+    sourceName: "イベント出典",
+    summary: "イベントで届いた短い要約",
+    previewVisible: true,
+  });
+  await expect(region.getByText("イベント出典", { exact: true })).toBeVisible();
+  await expect(
+    region.getByText("イベントで届いた短い要約", { exact: true })
+  ).toBeVisible();
+
+  // 要約がまだない記事では、従来の固定の一言を出す。
+  await emit(page, {
+    articleId: "desk-article-5",
+    title: "要約なしのニュース",
+    sourceName: "イベント出典",
+    previewVisible: true,
+  });
+  await expect(region.getByText("要約なしのニュース")).toBeVisible();
+  await expect(
+    region.getByText("気になったら「詳しく見る」でいっしょに読もう？")
+  ).toBeVisible();
+});
+
+test("long summary and source fit the preview window and render as plain text", async ({
+  page,
+}) => {
+  const xss = `<img src=x onerror="window.__XSS__=1">`;
+  const longTitle = `${xss}${"とても長いニュースのタイトル".repeat(8)}`;
+  const longSource = `${xss}${"とても長い出典名".repeat(10)}`;
+  const longSummary = `${xss}${"保存済みのとても長い要約です。".repeat(20)}`;
+  await installMocks(page, {
+    state: activeState({
+      state: "PreviewVisible",
+      previewArticle: {
+        ...activeState().previewArticle,
+        title: longTitle,
+        sourceName: longSource,
+        summary: longSummary,
+      },
+    }),
+  });
+  await openYuukoWindow(page, PREVIEW_HEIGHT);
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByRole("button", { name: "詳しく見る" })).toBeVisible();
+
+  // 初期表示（状態取得）経路でも、Rust のイベントと同じく 60 字以内へ切り詰めて表示する。
+  const summaryText = region.getByText("保存済みのとても長い要約です。", {
+    exact: false,
+  });
+  await expect(summaryText).toBeVisible();
+  const shown = (await summaryText.textContent()) ?? "";
+  expect(Array.from(shown).length).toBeLessThanOrEqual(60);
+  expect(shown.endsWith("…")).toBe(true);
+  // 要約・出典の HTML 風文字列は文字のまま見える。
+  expect(shown.startsWith(xss)).toBe(true);
+  await expect(region.getByText(longSource, { exact: true })).toBeVisible();
+
   await expectFitsInWindow(page, PREVIEW_HEIGHT);
 
   // HTML として解釈しない（img 要素が作られず、スクリプトも動かない）。

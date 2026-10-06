@@ -139,17 +139,50 @@ export const YUUKO_DESKTOP_NOTIFICATION_EVENT = "yuuko-desktop-notification";
 
 /**
  * ゆうこ用ウィンドウへ渡す最小限の表示用データ（Rust YuukoDesktopNotification と一致）。
- * title / balloonText は外部由来を含み得るため、必ずテキストとして描画する。
+ * 本文・URL は持たない。title / balloonText / sourceName / summary は外部由来を含み得るため、
+ * 必ずテキストとして描画する。
  */
 export type YuukoDesktopNotification = {
   articleId: string;
   title: string;
   balloonText?: string;
+  /** 出典名（軽量プレビューで表示）。 */
+  sourceName: string;
+  /** 保存済み要約を YUUKO_PREVIEW_SUMMARY_MAX_CHARS 以内に切り詰めたもの。無ければ省略。 */
+  summary?: string;
   /**
    * 既に軽量プレビュー段階（PreviewVisible）か。吹き出しからやり直すと、
    * 次のクリックが Rust 側で「確定（記事を開く）」扱いになりずれるため、段階を合わせる。
    */
   previewVisible: boolean;
+};
+
+/**
+ * 軽量プレビューの短い要約の最大文字数（省略記号を含む）。
+ * Rust yuuko_desktop_notifier::PREVIEW_SUMMARY_MAX_CHARS と一致させる（理由は Rust 側のコメント）。
+ */
+export const YUUKO_PREVIEW_SUMMARY_MAX_CHARS = 60;
+
+/**
+ * 保存済み要約を軽量プレビュー用に切り詰める（Rust short_preview_summary と同じ規則）。
+ * マウント時の初期表示（get_yuuko_notification_state は要約全文を返す）でも、
+ * イベント経由と同じ短い要約にそろえるために使う。文字数はコードポイントで数える。
+ */
+export const toShortPreviewSummary = (
+  summary: string | null | undefined
+): string | undefined => {
+  const trimmed = summary?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  const chars = Array.from(trimmed);
+  if (chars.length <= YUUKO_PREVIEW_SUMMARY_MAX_CHARS) {
+    return trimmed;
+  }
+  return `${chars
+    .slice(0, YUUKO_PREVIEW_SUMMARY_MAX_CHARS - 1)
+    .join("")
+    .trimEnd()}…`;
 };
 
 /**
@@ -169,10 +202,13 @@ export const toYuukoDesktopNotification = (
   ) {
     return null;
   }
+  const summary = toShortPreviewSummary(state.previewArticle.summary);
   return {
     articleId: state.currentArticleId ?? state.previewArticle.articleId,
     title: state.previewArticle.title,
     ...(state.balloonText ? { balloonText: state.balloonText } : {}),
+    sourceName: state.previewArticle.sourceName,
+    ...(summary ? { summary } : {}),
     previewVisible: state.state === "PreviewVisible",
   };
 };
