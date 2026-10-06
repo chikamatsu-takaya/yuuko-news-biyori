@@ -29,7 +29,10 @@ impl FriendshipRepository {
         }
 
         let raw = std::fs::read_to_string(&self.state_path)?;
-        let state = serde_json::from_str::<FriendshipState>(&raw)?;
+        let mut state = serde_json::from_str::<FriendshipState>(&raw)?;
+        // 旧仕様（ランク0開始・flat 100pt）で保存されたデータも、累計ポイントから
+        // 段階制のランクへ計算し直して読み込む（保存形式は変えず、読み込みのたびに導出する）。
+        state.normalize_rank_from_total();
         Ok(state)
     }
 
@@ -136,6 +139,29 @@ mod tests {
         assert_eq!(reloaded.total_points, 5);
         assert_eq!(reloaded.daily_points.points, 5);
         assert_eq!(reloaded.daily_points.date, "2026-06-08");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_flat_rank_file_loads_with_recomputed_rank() {
+        let (repo, root) = temp_repo();
+        std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
+        // 旧仕様で保存された friendship.json（rank1・累計120）。
+        std::fs::write(
+            &repo.state_path,
+            r#"{"version":1,"currentRank":1,"currentPoints":20,"totalPoints":120,
+            "dailyPoints":{"date":"2026-06-08","points":5,"limit":25},"rankMax":20}"#,
+        )
+        .unwrap();
+
+        let state = repo.load_or_default().unwrap();
+        // 累計120 → Rank6（到達累計100）・進捗20/35。累計・日次は保持。
+        assert_eq!(state.current_rank, 6);
+        assert_eq!(state.current_points, 20);
+        assert_eq!(state.total_points, 120);
+        assert_eq!(state.daily_points.points, 5);
+        assert!(state.pending_reward_ids.is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

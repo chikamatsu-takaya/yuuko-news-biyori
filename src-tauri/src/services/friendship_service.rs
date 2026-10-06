@@ -138,7 +138,9 @@ mod tests {
         }
 
         let state = service.get_friendship_state().unwrap();
-        assert_eq!(state.current_point, 20);
+        // 累計20pt（取りこぼしなし）→ Rank2（到達10pt）・進捗10。
+        assert_eq!(state.current_rank, 2);
+        assert_eq!(state.current_point, 10);
         assert_eq!(state.daily_earned_point, 20);
 
         let _ = std::fs::remove_dir_all(root);
