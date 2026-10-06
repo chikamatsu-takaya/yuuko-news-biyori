@@ -18,6 +18,9 @@ use crate::domain::article::ArticleReadState;
 /// 鮮度加点の減衰窓（時間）。この時間を超えると鮮度加点は 0 になる。
 const FRESHNESS_WINDOW_HOURS: f64 = 72.0;
 
+/// 取得時採点（`score_at_fetch`）で使う経過時間。`rescore_stored` の割り戻しと共有する。
+const FETCH_TIME_AGE_HOURS: f64 = 0.0;
+
 /// 驚き表現の語彙（ヒューリスティック）。タイトルに含まれると加点する。
 const SURPRISE_TERMS: [&str; 10] = [
     "最大",
@@ -132,6 +135,54 @@ impl RecommendationService {
         }
 
         score *= read_state_multiplier(input.read_state);
+        score.clamp(0.0, 1.0)
+    }
+
+    /// 取得時に保存するスコアを算出する（経過 `FETCH_TIME_AGE_HOURS` 時間・未読として採点）。
+    ///
+    /// `rescore_stored` はこの前提で保存スコアから鮮度分を割り戻すため、取得時の採点条件は
+    /// 必ずこの関数に集約する（呼び出し側で条件を変えると基礎点がずれる）。
+    pub fn score_at_fetch(
+        &self,
+        title: &str,
+        genre: &str,
+        tags: &[String],
+        context: &RecommendationContext,
+    ) -> f32 {
+        self.calculate_score(
+            &RecommendationInput {
+                title,
+                genre,
+                tags,
+                read_state: &ArticleReadState::Unread,
+                age_hours: Some(FETCH_TIME_AGE_HOURS),
+            },
+            context,
+        )
+    }
+
+    /// 取得時に保存したスコアを基礎点として、現在の鮮度係数と既読係数で補正し直す（0.0〜1.0）。
+    ///
+    /// 保存スコアは `score_at_fetch`（経過0時間＝鮮度係数 1.0・`Unread`＝係数 1.0）で算出したもの。
+    /// 加点要素の最大合計は 1.0 のためクランプも効かず、
+    /// 「保存スコア − 取得時の鮮度加点」がそのまま鮮度を除いた加点合計（基礎点）になる。
+    /// これにより記事本文やタイトルを再評価せず、一覧取得時に時刻と既読だけを反映できる。
+    /// 想定外の保存値（手入力・旧データで鮮度重み未満など）は基礎点 0 に倒し、上位を占めないようにする。
+    /// `age_hours` が `None`（取得日時が解釈不能）の場合は鮮度を加点しない。
+    pub fn rescore_stored(
+        &self,
+        stored_score: f32,
+        read_state: &ArticleReadState,
+        age_hours: Option<f64>,
+    ) -> f32 {
+        // NaN は f32::max で 0.0 に倒れる。
+        let fetch_time_freshness = self.weights.freshness * freshness_factor(FETCH_TIME_AGE_HOURS);
+        let mut score = (stored_score - fetch_time_freshness).max(0.0);
+        if let Some(age_hours) = age_hours {
+            score += self.weights.freshness * freshness_factor(age_hours);
+        }
+
+        score *= read_state_multiplier(read_state);
         score.clamp(0.0, 1.0)
     }
 
@@ -361,6 +412,78 @@ mod tests {
         let sorted = service.sort_by_recommendation(items, |item| item.1);
         let labels: Vec<&str> = sorted.into_iter().map(|item| item.0).collect();
         assert_eq!(labels, vec!["high", "mid", "low"]);
+    }
+
+    /// 取得時と同じ条件（鮮度0時間・未読）で算出した保存スコアを、そのまま返せること。
+    #[test]
+    fn rescore_stored_reproduces_fetch_time_score() {
+        let service = RecommendationService::new();
+        let tag_values = tags(&[]);
+        let ctx = context(&["AI・テクノロジー"], &[]);
+        // クロージャだと参照の寿命が初回呼び出しに固定されるため、関数として定義する。
+        fn make<'a>(
+            tags: &'a [String],
+            read_state: &'a ArticleReadState,
+            age_hours: Option<f64>,
+        ) -> RecommendationInput<'a> {
+            RecommendationInput {
+                title: "国内初の取り組み",
+                genre: "AI・テクノロジー",
+                tags,
+                read_state,
+                age_hours,
+            }
+        }
+        let stored =
+            service.score_at_fetch("国内初の取り組み", "AI・テクノロジー", &tag_values, &ctx);
+        assert!(
+            (stored
+                - service.calculate_score(
+                    &make(&tag_values, &ArticleReadState::Unread, Some(0.0)),
+                    &ctx
+                ))
+            .abs()
+                < f32::EPSILON
+        );
+
+        // 再計算結果が、同じ記事を現在条件で calculate_score した値と一致する。
+        for (read_state, age_hours) in [
+            (ArticleReadState::Unread, Some(0.0)),
+            (ArticleReadState::Unread, Some(36.0)),
+            (ArticleReadState::Previewed, Some(10.0)),
+            (ArticleReadState::DetailViewed, Some(200.0)),
+            (ArticleReadState::Unread, None),
+        ] {
+            let expected =
+                service.calculate_score(&make(&tag_values, &read_state, age_hours), &ctx);
+            let rescored = service.rescore_stored(stored, &read_state, age_hours);
+            assert!(
+                (expected - rescored).abs() < 1e-6,
+                "expected {expected}, got {rescored}"
+            );
+        }
+    }
+
+    /// 鮮度窓（72時間）を大きく超えた記事は、取得直後の同点記事より下がる。
+    #[test]
+    fn rescore_stored_drops_articles_far_beyond_freshness_window() {
+        let service = RecommendationService::new();
+        let fresh = service.rescore_stored(0.5, &ArticleReadState::Unread, Some(1.0));
+        let stale = service.rescore_stored(0.5, &ArticleReadState::Unread, Some(24.0 * 30.0));
+        assert!(fresh > stale);
+        assert!((stale - 0.35).abs() < 1e-6, "stale score was {stale}");
+    }
+
+    /// 想定外の保存値でも 0.0〜1.0 に収まる（鮮度重み未満・NaN・範囲外）。
+    #[test]
+    fn rescore_stored_is_safe_for_unexpected_stored_values() {
+        let service = RecommendationService::new();
+        for stored in [0.05_f32, -1.0, 5.0, f32::NAN] {
+            let score = service.rescore_stored(stored, &ArticleReadState::Unread, Some(0.0));
+            assert!((0.0..=1.0).contains(&score), "score was {score}");
+        }
+        let stale_low = service.rescore_stored(0.05, &ArticleReadState::Unread, None);
+        assert!(stale_low.abs() < f32::EPSILON);
     }
 
     #[test]

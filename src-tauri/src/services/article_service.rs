@@ -6,6 +6,8 @@ use crate::domain::article::{
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
+use crate::services::recommendation_service::RecommendationService;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct ArticleService {
@@ -17,12 +19,56 @@ impl ArticleService {
         Self { repository }
     }
 
+    /// おすすめ一覧を返す。基準時刻は現在UTC（要件定義書 §7.4A.6 / §7.4A.8）。
     pub fn get_recommended_articles(
         &self,
         params: GetRecommendedArticlesParams,
     ) -> Result<Vec<ArticleSummaryDto>, AppError> {
+        self.get_recommended_articles_at(params, Utc::now())
+    }
+
+    /// `get_recommended_articles` の本体（基準時刻注入版。テストで時刻を固定するため分離）。
+    ///
+    /// 保存スコアは取得時点の鮮度・未読前提で固定されているため、そのまま並べると
+    /// 古い記事が上位に残り続け、既読記事も下がらない。取得のたびに現在時刻の鮮度係数と
+    /// 現在の readState 係数で再計算し、そのスコア順で返す（既読記事は除外せず順位を下げるだけ）。
+    /// 返却する `recommendation_score` も並び順と一致させるため再計算後の値にする。
+    fn get_recommended_articles_at(
+        &self,
+        params: GetRecommendedArticlesParams,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let limit = params.normalized_limit()?;
-        self.repository.list_recommended(limit)
+        let recommendation_service = RecommendationService::new();
+        let mut ranked = self
+            .repository
+            .list_recommendation_candidates()?
+            .into_iter()
+            .map(|candidate| {
+                let mut summary = candidate.summary;
+                summary.recommendation_score = recommendation_service.rescore_stored(
+                    summary.recommendation_score,
+                    &summary.read_state,
+                    age_hours_since(&candidate.fetched_at, now),
+                );
+                (summary, candidate.fetched_at)
+            })
+            .collect::<Vec<_>>();
+        // 同点時は従来どおり取得日時の新しい順 → 記事ID順で並びを安定させる。
+        ranked.sort_by(|(left, left_fetched_at), (right, right_fetched_at)| {
+            right
+                .recommendation_score
+                .partial_cmp(&left.recommendation_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right_fetched_at.cmp(left_fetched_at))
+                .then_with(|| left.article_id.cmp(&right.article_id))
+        });
+
+        Ok(ranked
+            .into_iter()
+            .map(|(summary, _)| summary)
+            .take(limit)
+            .collect())
     }
 
     pub fn list_article_history(
@@ -99,6 +145,15 @@ impl ArticleService {
     }
 }
 
+/// 取得日時（RFC3339）から基準時刻までの経過時間（時間単位）を求める。
+/// 鮮度はおすすめ判定ポリシー §2 のとおり「取得から」の経過で測る（公開日時は表示用文字列のため使わない）。
+/// 解釈できない取得日時は `None` とし、鮮度加点なし（安全側）で扱う。
+fn age_hours_since(fetched_at: &str, now: DateTime<Utc>) -> Option<f64> {
+    let fetched_at = DateTime::parse_from_rfc3339(fetched_at.trim()).ok()?;
+    let elapsed = now.signed_duration_since(fetched_at.with_timezone(&Utc));
+    Some(elapsed.num_seconds() as f64 / 3600.0)
+}
+
 #[cfg(test)]
 mod tests {
     //! サービス層テスト: get_article_detail が保存した既読状態を、履歴の未読フィルタと
@@ -141,6 +196,105 @@ mod tests {
             news_dir: paths.article_news_dir.clone(),
             root,
         }
+    }
+
+    /// おすすめ再計算テストの基準時刻（シード記事 2026-06-04 取得からは鮮度窓を大きく超える）。
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// 取得時と同じく未読で保存スコアを持つ記事を、基準時刻の `hours_ago` 時間前に取得したものとして保存する。
+    fn save_fetched(ctx: &ServiceContext, article_id: &str, stored_score: f32, hours_ago: i64) {
+        let fetched_at = (fixed_now() - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        let saved = ctx
+            .service
+            .repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: article_id.to_string(),
+                title: format!("テスト記事 {article_id}"),
+                source_name: "テストソース".to_string(),
+                original_url: format!("https://example.com/{article_id}"),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at,
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some("抜粋".to_string()),
+                recommendation_score: stored_score,
+                read_state: ArticleReadState::Unread,
+            }])
+            .unwrap();
+        assert_eq!(saved, 1);
+    }
+
+    fn recommended_at(ctx: &ServiceContext, limit: Option<u32>) -> Vec<ArticleSummaryDto> {
+        ctx.service
+            .get_recommended_articles_at(GetRecommendedArticlesParams { limit }, fixed_now())
+            .unwrap()
+    }
+
+    fn ids(articles: &[ArticleSummaryDto]) -> Vec<&str> {
+        articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recommended_articles_drop_articles_far_beyond_freshness_window() {
+        let ctx = make_context();
+        // 保存スコアだけなら stale 系が上位だが、30日・10日前の取得で鮮度加点を失う。
+        save_fetched(&ctx, "stale-30d", 0.97, 24 * 30);
+        save_fetched(&ctx, "stale-10d", 0.96, 24 * 10);
+        save_fetched(&ctx, "fresh-1h", 0.93, 1);
+        save_fetched(&ctx, "fresh-2h", 0.92, 2);
+
+        let articles = recommended_at(&ctx, None);
+        assert_eq!(
+            &ids(&articles)[..4],
+            &["fresh-1h", "fresh-2h", "stale-30d", "stale-10d"]
+        );
+        // 返却スコアは再計算後の値で、並び順と一致する（降順）。
+        assert!(articles
+            .windows(2)
+            .all(|pair| pair[0].recommendation_score >= pair[1].recommendation_score));
+        // 件数制限は再計算後の順位に対して適用される。
+        assert_eq!(
+            ids(&recommended_at(&ctx, Some(2))),
+            ["fresh-1h", "fresh-2h"]
+        );
+    }
+
+    #[test]
+    fn detail_viewed_article_is_ranked_lower_but_not_excluded() {
+        let ctx = make_context();
+        save_fetched(&ctx, "read-target", 0.95, 1);
+        save_fetched(&ctx, "unread-mid", 0.90, 1);
+        let before = recommended_at(&ctx, None);
+        assert_eq!(&ids(&before)[..2], &["read-target", "unread-mid"]);
+
+        ctx.service
+            .get_article_detail(detail_params("read-target"))
+            .unwrap();
+
+        let after = recommended_at(&ctx, None);
+        let position = |id: &str| after.iter().position(|a| a.article_id == id).unwrap();
+        // 一覧から除外されず、未読の同等記事より下位になる。
+        assert_eq!(after.len(), before.len());
+        assert!(position("read-target") > position("unread-mid"));
+        assert_eq!(
+            after[position("read-target")].read_state,
+            ArticleReadState::DetailViewed
+        );
+    }
+
+    #[test]
+    fn age_hours_since_handles_offsets_and_invalid_values() {
+        let now = fixed_now();
+        let age = age_hours_since("2026-10-06T18:00:00+09:00", now).unwrap();
+        assert!((age - 3.0).abs() < 1e-9);
+        assert!(age_hours_since("not-a-date", now).is_none());
     }
 
     fn detail_params(article_id: &str) -> GetArticleDetailParams {

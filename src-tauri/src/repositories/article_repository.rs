@@ -23,6 +23,14 @@ const MAX_ARCHIVE_TOTAL_ENTRY_SIZE: u64 = 128 * 1024 * 1024;
 const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
 const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
 
+/// おすすめ再計算用の候補。`summary.recommendation_score` は保存スコア（取得時の基礎点）のまま。
+#[derive(Debug, Clone)]
+pub struct RecommendationCandidate {
+    pub summary: ArticleSummaryDto,
+    /// 鮮度係数の基点となる取得日時（RFC3339）。
+    pub fetched_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArticleRepository {
     article_favorites_path: PathBuf,
@@ -74,17 +82,19 @@ impl ArticleRepository {
         Ok(())
     }
 
-    pub fn list_recommended(&self, limit: usize) -> Result<Vec<ArticleSummaryDto>, AppError> {
+    /// おすすめ一覧の候補を、保存スコア（基礎点）と取得日時付きで返す（並び替えはしない）。
+    /// 鮮度・既読の補正は取得のたびに現在時刻で再計算する必要があるため、
+    /// 並び順と件数の決定は ArticleService（RecommendationService）側に任せる。
+    pub fn list_recommendation_candidates(&self) -> Result<Vec<RecommendationCandidate>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let mut articles = self.load_readable_article_records()?.records;
-        articles.sort_by(compare_article_records);
+        let articles = self.load_readable_article_records()?.records;
 
         Ok(articles
             .into_iter()
-            .map(|article| {
-                article.to_summary_dto(is_effectively_favorite(&article, &favorite_store))
+            .map(|article| RecommendationCandidate {
+                summary: article.to_summary_dto(is_effectively_favorite(&article, &favorite_store)),
+                fetched_at: article.fetched_at,
             })
-            .take(limit)
             .collect())
     }
 
@@ -1690,18 +1700,6 @@ fn push_list_section(buffer: &mut Vec<String>, section: ArticleBodySection, valu
     buffer.push(format!("## {}\n{}", section.heading(), items));
 }
 
-fn compare_article_records(
-    left: &PersistedArticleRecord,
-    right: &PersistedArticleRecord,
-) -> Ordering {
-    right
-        .recommendation_score
-        .partial_cmp(&left.recommendation_score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-        .then_with(|| left.article_id.cmp(&right.article_id))
-}
-
 fn compare_history_items(left: &ArticleHistoryItemDto, right: &ArticleHistoryItemDto) -> Ordering {
     right
         .fetched_at
@@ -2290,23 +2288,20 @@ mod tests {
         assert_eq!(files, 3);
     }
 
+    /// 件数制限と並び順は ArticleService 側の責務（article_service のテストで確認）。
     #[test]
-    fn list_recommended_respects_limit() {
+    fn list_recommendation_candidates_returns_stored_score_and_fetched_at() {
         let context = TestRepositoryContext::new();
         context.repository.initialize_default_if_missing().unwrap();
 
-        let articles = context.repository.list_recommended(2).unwrap();
-        assert_eq!(articles.len(), 2);
-    }
-
-    #[test]
-    fn list_recommended_keeps_recommendation_order() {
-        let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
-
-        let articles = context.repository.list_recommended(3).unwrap();
-        assert!(articles[0].recommendation_score >= articles[1].recommendation_score);
-        assert!(articles[1].recommendation_score >= articles[2].recommendation_score);
+        let candidates = context.repository.list_recommendation_candidates().unwrap();
+        assert_eq!(candidates.len(), 3);
+        let first = candidates
+            .iter()
+            .find(|candidate| candidate.summary.article_id == "article-001")
+            .unwrap();
+        assert!((first.summary.recommendation_score - 0.92).abs() < f32::EPSILON);
+        assert!(!first.fetched_at.is_empty());
     }
 
     #[test]
@@ -3611,7 +3606,7 @@ mod tests {
         context.repository.initialize_default_if_missing().unwrap();
         let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
 
-        let recommended = context.repository.list_recommended(10).unwrap();
+        let recommended = context.repository.list_recommendation_candidates().unwrap();
         assert_eq!(recommended.len(), 3);
         let history = context
             .repository
@@ -3871,12 +3866,13 @@ mod tests {
             .unwrap();
         assert!(result.is_favorite);
 
-        let articles = context.repository.list_recommended(3).unwrap();
+        let articles = context.repository.list_recommendation_candidates().unwrap();
         assert!(
             articles
                 .iter()
-                .find(|article| article.article_id == "article-001")
+                .find(|article| article.summary.article_id == "article-001")
                 .unwrap()
+                .summary
                 .is_favorite
         );
 
