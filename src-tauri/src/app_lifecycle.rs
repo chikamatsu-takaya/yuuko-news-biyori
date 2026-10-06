@@ -88,7 +88,9 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
     }
 }
 
-fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+/// メインウィンドウを最小化解除・表示・前面化する。トレイの「画面を開く」と、
+/// ゆうこ用ウィンドウの「詳しく見る」（yuuko_desktop_notifier）で同じ手順を使う。
+pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         log::error!("再表示対象のメインウィンドウが見つかりません");
         return;

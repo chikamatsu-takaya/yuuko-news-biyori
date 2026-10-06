@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "@/lib/tauri/settings";
 
 export type YuukoResidentState =
@@ -144,6 +145,11 @@ export type YuukoDesktopNotification = {
   articleId: string;
   title: string;
   balloonText?: string;
+  /**
+   * 既に軽量プレビュー段階（PreviewVisible）か。吹き出しからやり直すと、
+   * 次のクリックが Rust 側で「確定（記事を開く）」扱いになりずれるため、段階を合わせる。
+   */
+  previewVisible: boolean;
 };
 
 /**
@@ -167,7 +173,53 @@ export const toYuukoDesktopNotification = (
     articleId: state.currentArticleId ?? state.previewArticle.articleId,
     title: state.previewArticle.title,
     ...(state.balloonText ? { balloonText: state.balloonText } : {}),
+    previewVisible: state.state === "PreviewVisible",
   };
+};
+
+/**
+ * ゆうこ用ウィンドウで、Rust から届くデスクトップ通知イベントを購読する。
+ * 非Tauri（ブラウザプレビュー）では何もしない解除関数を返す。
+ */
+export const listenYuukoDesktopNotification = async (
+  handler: (notification: YuukoDesktopNotification) => void
+): Promise<() => void> => {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  return listen<YuukoDesktopNotification>(
+    YUUKO_DESKTOP_NOTIFICATION_EVENT,
+    (event) => handler(event.payload)
+  );
+};
+
+/**
+ * ゆうこ用ウィンドウの「詳しく見る」確定時に、Rust がメインウィンドウへ送るイベント名。
+ * Rust 側 yuuko_desktop_notifier::YUUKO_OPEN_ARTICLE_EVENT と一致させる。
+ */
+export const YUUKO_OPEN_ARTICLE_EVENT = "yuuko-open-article";
+
+/** メインウィンドウで開く記事（Rust が永続状態の紹介中記事から決める）。 */
+export type YuukoOpenArticleRequest = {
+  articleId: string;
+};
+
+/**
+ * メインウィンドウで「ゆうこ用ウィンドウから記事を開く」要求を購読する。
+ * 記事IDは Rust の状態由来だが、念のため空でない文字列だけを渡す。非Tauriでは何もしない。
+ */
+export const listenYuukoOpenArticle = async (
+  handler: (articleId: string) => void
+): Promise<() => void> => {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  return listen<YuukoOpenArticleRequest>(YUUKO_OPEN_ARTICLE_EVENT, (event) => {
+    const articleId = event.payload?.articleId;
+    if (typeof articleId === "string" && articleId.length > 0) {
+      handler(articleId);
+    }
+  });
 };
 
 /** 無操作タイムアウト（無視）を記録する。自動退場タイマー側から呼ぶ。非Tauriは null。 */
