@@ -25,6 +25,14 @@ use crate::yuuko_window::{self, YUUKO_WINDOW_LABEL};
 /// クールタイムが最短60分のため、これより細かく見ても通知機会はほぼ増えない。
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// デスクトップ通知（非表示中の判定とゆうこ用ウィンドウ表示）を有効にするか。
+///
+/// ゆうこ用ウィンドウはまだ中身のない透明なプレースホルダで、Windows（WebView2）の透明ウィンドウは
+/// 透明部分でもマウス入力を受けるため、表示すると右下の見えない領域が他アプリのクリックを奪い、
+/// 閉じる手段もない。さらに見えない表示のために通知枠・紹介済みを消費してしまう。
+/// そのため UI 実装タスク（0eC3Fhgo）で描画と閉じる導線が揃うまで false にしておき、そこで true にする。
+const DESKTOP_NOTIFICATION_ENABLED: bool = false;
+
 /// ゆうこ用ウィンドウへ通知データを渡すイベント名。lib/tauri/yuuko.ts と一致させる。
 pub const YUUKO_DESKTOP_NOTIFICATION_EVENT: &str = "yuuko-desktop-notification";
 
@@ -50,6 +58,15 @@ enum TickAction {
     RunJudgement,
     /// メインの状態が分からない（破棄済み・取得失敗）: 二重通知や終了妨害を避けるため何もしない。
     Skip,
+}
+
+/// デスクトップ通知が無効な間は、判定（通知枠の消費）もウィンドウ生成・表示も行わない。
+/// メイン表示中の hide は既存ウィンドウを隠すだけ（無ければ何もしない）で無害なため残す。
+fn gate_tick(enabled: bool, action: TickAction) -> TickAction {
+    match action {
+        TickAction::RunJudgement if !enabled => TickAction::Skip,
+        other => other,
+    }
 }
 
 /// メインウィンドウの (表示中か, 最小化中か) から、この周期の動作を決める。
@@ -111,7 +128,10 @@ pub fn start<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
 }
 
 fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
-    match decide_tick(main_window_visibility(app)) {
+    match gate_tick(
+        DESKTOP_NOTIFICATION_ENABLED,
+        decide_tick(main_window_visibility(app)),
+    ) {
         TickAction::Skip => {}
         TickAction::HideDesktop => {
             // ウィンドウイベントでの非表示に失敗した場合の取りこぼし対策も兼ねる。
@@ -239,6 +259,26 @@ mod tests {
         assert_eq!(decide_tick(Some((false, false))), TickAction::RunJudgement);
         assert_eq!(decide_tick(Some((true, true))), TickAction::RunJudgement);
         assert_eq!(decide_tick(Some((false, true))), TickAction::RunJudgement);
+    }
+
+    #[test]
+    fn disabled_gate_never_judges_or_shows_desktop() {
+        for main_window in [
+            Some((false, false)),
+            Some((true, true)),
+            Some((false, true)),
+            Some((true, false)),
+            None,
+        ] {
+            let action = gate_tick(false, decide_tick(main_window));
+            // 判定（通知枠の消費）とウィンドウ生成・表示につながる RunJudgement にはならない。
+            assert_ne!(action, TickAction::RunJudgement, "main={main_window:?}");
+        }
+        // 有効時は従来どおり判定する。
+        assert_eq!(
+            gate_tick(true, decide_tick(Some((false, false)))),
+            TickAction::RunJudgement
+        );
     }
 
     #[test]
