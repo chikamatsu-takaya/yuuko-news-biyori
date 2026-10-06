@@ -25,6 +25,11 @@ use crate::yuuko_window::{self, YuukoWindowStage, YUUKO_WINDOW_LABEL};
 /// クールタイムが最短60分のため、これより細かく見ても通知機会はほぼ増えない。
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// 全画面・プレゼン中に抑制した後の再確認間隔。5分間隔のままだと解除の検知が最大5分遅れ、
+/// 設計書 §5.4 の「解除後 30〜180 秒の猶予」より大幅に遅れるため、抑制中に限って短くする。
+/// 1回の判定は小さな JSON の読み込みと OS への問い合わせ1回だけで、抑制が終われば通常間隔へ戻る。
+const FULLSCREEN_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 /// デスクトップ通知（非表示中の判定とゆうこ用ウィンドウ表示）を有効にするか。
 ///
 /// ゆうこ用ウィンドウの画面（吹き出し・2段階クリック・閉じる・自動退場）と、通知終了時に Rust 側で
@@ -144,37 +149,64 @@ fn desktop_notification_from_state(
 
 /// 判定スレッドを開始する。起動直後はメインが表示中のため、最初の判定は1周期待ってから行う。
 pub fn start<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(CHECK_INTERVAL);
-        tick(&app, &yuuko_service);
+    std::thread::spawn(move || {
+        let mut delay = CHECK_INTERVAL;
+        loop {
+            std::thread::sleep(delay);
+            delay = tick(&app, &yuuko_service);
+        }
     });
 }
 
-fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
+/// 1周期分を実行し、次の判定までの待ち時間を返す。
+fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duration {
     match gate_tick(
         DESKTOP_NOTIFICATION_ENABLED,
         decide_tick(main_window_visibility(app)),
     ) {
-        TickAction::Skip => {}
+        TickAction::Skip => CHECK_INTERVAL,
         TickAction::HideDesktop => {
             // ウィンドウイベントでの非表示に失敗した場合の取りこぼし対策も兼ねる。
             if let Err(error) = yuuko_window::hide_yuuko_window(app) {
                 log::warn!("メイン表示中にゆうこ用ウィンドウを隠せませんでした: {error}");
             }
+            CHECK_INTERVAL
         }
         TickAction::RunJudgement => run_judgement(app, yuuko_service),
     }
 }
 
-fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
+/// 判定結果の理由から次の判定までの待ち時間を決める。
+///
+/// - 全画面・プレゼン中: 解除をすぐ検知できるよう短い間隔で再確認する。
+/// - 解除後の猶予中: 猶予が明けた直後に判定する（境界での取りこぼしを避けるため 1 秒足す）。
+/// - それ以外: 通常間隔。
+fn next_check_delay(reason: &str, grace_remaining: Option<Duration>) -> Duration {
+    match reason {
+        "fullscreen" => FULLSCREEN_RECHECK_INTERVAL,
+        "fullscreen_grace" => grace_remaining
+            .map(|remaining| (remaining + Duration::from_secs(1)).min(CHECK_INTERVAL))
+            .unwrap_or(FULLSCREEN_RECHECK_INTERVAL),
+        _ => CHECK_INTERVAL,
+    }
+}
+
+fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duration {
     let result = match yuuko_service.request_yuuko_notification() {
         Ok(result) => result,
         Err(error) => {
             log::warn!("非表示中のゆうこ通知判定に失敗しました。次回に再試行します: {error}");
-            return;
+            return CHECK_INTERVAL;
         }
     };
-    let Some(notification) = desktop_notification_from(&result) else {
+    let next_delay = next_check_delay(&result.reason, yuuko_service.fullscreen_grace_remaining());
+    present_if_needed(app, &result);
+    next_delay
+}
+
+/// 判定結果に表示すべき通知があれば、ゆうこ用ウィンドウに出す。
+fn present_if_needed<R: Runtime>(app: &AppHandle<R>, result: &RequestYuukoNotificationResult) {
+    let Some(notification) = desktop_notification_from(result) else {
         return;
     };
 
@@ -385,6 +417,35 @@ mod tests {
             notified,
             reason: reason.to_string(),
             state,
+        }
+    }
+
+    #[test]
+    fn fullscreen_suppression_rechecks_sooner_than_normal_interval() {
+        assert_eq!(
+            next_check_delay("fullscreen", None),
+            FULLSCREEN_RECHECK_INTERVAL
+        );
+        assert!(FULLSCREEN_RECHECK_INTERVAL < CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn grace_period_rechecks_right_after_grace_ends() {
+        assert_eq!(
+            next_check_delay("fullscreen_grace", Some(Duration::from_secs(95))),
+            Duration::from_secs(96)
+        );
+        // 猶予の残りが取れない場合も通常間隔まで待たない。
+        assert_eq!(
+            next_check_delay("fullscreen_grace", None),
+            FULLSCREEN_RECHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn other_reasons_use_normal_interval() {
+        for reason in ["notified", "cooling_down", "daily_limit", "no_candidate"] {
+            assert_eq!(next_check_delay(reason, None), CHECK_INTERVAL);
         }
     }
 

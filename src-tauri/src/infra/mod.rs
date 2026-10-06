@@ -6,6 +6,8 @@
 
 pub mod allowlist;
 pub mod archive_storage;
+/// OS 連携（全画面・プレゼン判定）。外部通信は行わない。
+pub mod fullscreen_detector;
 pub mod gemini_client;
 pub mod html_fetcher;
 pub mod rss_client;

@@ -1,20 +1,32 @@
-use chrono::Utc;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use chrono::{DateTime, Utc};
 
 use crate::domain::article::GetRecommendedArticlesParams;
+use crate::domain::fullscreen_suppression::{
+    grace_from_seed, time_seed, FullscreenGate, FullscreenSuppressionTracker,
+};
 use crate::domain::yuuko::{
     ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate, PersistedYuukoState,
     RequestYuukoNotificationResult, YuukoNotificationState, YuukoResidentState,
 };
 use crate::error::AppError;
+use crate::infra::fullscreen_detector::{
+    FullscreenDetector, FullscreenStatus, SystemFullscreenDetector,
+};
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::repositories::yuuko_state_repository::YuukoStateRepository;
 use crate::services::article_service::ArticleService;
 
+/// Clone しても全画面抑制の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
+/// 同じ猶予を見る。
 #[derive(Debug, Clone)]
 pub struct YuukoService {
     settings_repository: SettingsRepository,
     yuuko_state_repository: YuukoStateRepository,
     article_service: ArticleService,
+    fullscreen_detector: Arc<dyn FullscreenDetector>,
+    fullscreen_tracker: Arc<Mutex<FullscreenSuppressionTracker>>,
 }
 
 impl YuukoService {
@@ -27,7 +39,49 @@ impl YuukoService {
             settings_repository,
             yuuko_state_repository,
             article_service,
+            fullscreen_detector: Arc::new(SystemFullscreenDetector),
+            fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
         }
+    }
+
+    /// テストで OS に依存しない全画面判定を差し込む。
+    #[cfg(test)]
+    fn with_fullscreen_detector(mut self, detector: Arc<dyn FullscreenDetector>) -> Self {
+        self.fullscreen_detector = detector;
+        self
+    }
+
+    /// 全画面抑制の解除後の猶予中なら残り時間を返す（デスクトップ通知スレッドの次回判定用）。
+    pub fn fullscreen_grace_remaining(&self) -> Option<std::time::Duration> {
+        self.lock_fullscreen_tracker()
+            .grace_remaining(Utc::now())
+            .and_then(|remaining| remaining.to_std().ok())
+    }
+
+    /// 全画面・プレゼン中の抑制判定（設計書 §5.2〜§5.4）。設定 OFF なら保留中の抑制も捨てて通知可。
+    /// OS 判定に失敗した場合は抑制しない（fail-open）。詳細は出さず警告だけ残す。
+    fn check_fullscreen(&self, now: DateTime<Utc>, suppress_in_fullscreen: bool) -> FullscreenGate {
+        let mut tracker = self.lock_fullscreen_tracker();
+        if !suppress_in_fullscreen {
+            tracker.reset();
+            return FullscreenGate::Allowed;
+        }
+        let busy = match self.fullscreen_detector.detect() {
+            FullscreenStatus::Busy => true,
+            FullscreenStatus::Free => false,
+            FullscreenStatus::Unknown => {
+                log::warn!("全画面状態を取得できなかったため、全画面による通知抑制を行いません");
+                false
+            }
+        };
+        tracker.observe(now, busy, grace_from_seed(time_seed()))
+    }
+
+    /// 記録はメモリ上の小さな状態だけなので、他スレッドの panic で毒化していても続行する。
+    fn lock_fullscreen_tracker(&self) -> MutexGuard<'_, FullscreenSuppressionTracker> {
+        self.fullscreen_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn get_yuuko_notification_state(&self) -> Result<YuukoNotificationState, AppError> {
@@ -83,7 +137,8 @@ impl YuukoService {
         Ok(state.to_notification_state())
     }
 
-    /// ゆうこにニュース通知を出させる。MVP抑制条件（enabled / 日次上限 / クールタイム / cooldown）と
+    /// ゆうこにニュース通知を出させる。MVP抑制条件（enabled / 日次上限 / クールタイム / cooldown /
+    /// 全画面・プレゼン中と解除後の猶予）と
     /// 候補選定（未紹介・未読・スコア順／お気に入り除外）を満たす場合のみ、おすすめから1件を
     /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。報酬 pending 時は誤消し防止のため何もしない。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
@@ -128,6 +183,18 @@ impl YuukoService {
                 return Ok(notification_result(false, "outside_time_range", &state));
             }
             NotificationGate::Allowed => {}
+        }
+
+        // 全画面・プレゼン中と解除後の猶予中は出さない。候補選定（紹介済み記録・通知枠の消費）の前に
+        // 止めるため、候補は捨てられず解除後の判定で再び選ばれる（§5.3 次回判定まで保留）。
+        match self.check_fullscreen(now, settings.notification.suppress_in_fullscreen) {
+            FullscreenGate::Suppressed => {
+                return Ok(notification_result(false, "fullscreen", &state));
+            }
+            FullscreenGate::GracePeriod { .. } => {
+                return Ok(notification_result(false, "fullscreen_grace", &state));
+            }
+            FullscreenGate::Allowed => {}
         }
 
         // おすすめ候補（スコア順）から未紹介・未読を優先して1件選ぶ。選定はRust側責務（§2.3）。
@@ -204,12 +271,29 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    /// テスト用の全画面判定。実行端末の画面状態に依存させない（既定は通知可）。
+    #[derive(Debug)]
+    struct FakeFullscreenDetector(Mutex<FullscreenStatus>);
+
+    impl FakeFullscreenDetector {
+        fn set(&self, status: FullscreenStatus) {
+            *self.0.lock().unwrap() = status;
+        }
+    }
+
+    impl FullscreenDetector for FakeFullscreenDetector {
+        fn detect(&self) -> FullscreenStatus {
+            *self.0.lock().unwrap()
+        }
+    }
+
     /// 一時ディレクトリに各リポジトリを構成し、Drop で後始末する。
     struct ServiceContext {
         service: YuukoService,
         settings_repository: SettingsRepository,
         yuuko_state_repository: YuukoStateRepository,
         article_repository: ArticleRepository,
+        fullscreen: Arc<FakeFullscreenDetector>,
         root: PathBuf,
     }
 
@@ -230,17 +314,20 @@ mod tests {
         let yuuko_state_repository = YuukoStateRepository::new(&paths);
         let article_repository = ArticleRepository::new(&paths);
         let article_service = ArticleService::new(article_repository.clone());
+        let fullscreen = Arc::new(FakeFullscreenDetector(Mutex::new(FullscreenStatus::Free)));
         let service = YuukoService::new(
             settings_repository.clone(),
             yuuko_state_repository.clone(),
             article_service,
-        );
+        )
+        .with_fullscreen_detector(fullscreen.clone());
 
         ServiceContext {
             service,
             settings_repository,
             yuuko_state_repository,
             article_repository,
+            fullscreen,
             root,
         }
     }
@@ -538,5 +625,107 @@ mod tests {
         let clicked = ctx.service.handle_yuuko_clicked().unwrap();
 
         assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
+    }
+
+    /// 通知枠・紹介済みを消費していないこと（候補が保留されていること）を確認する。
+    fn assert_nothing_consumed(ctx: &ServiceContext) {
+        let state = load_state(ctx);
+        assert!(!state.has_active_notification());
+        assert_eq!(state.daily_notification.count, 0);
+        assert!(state.introduced_article_ids.is_empty());
+    }
+
+    /// 11. 全画面中は fullscreen で抑制し、解除後は猶予（30〜180秒）を置いてから同じ候補を出す。
+    #[test]
+    fn request_holds_candidate_while_fullscreen_and_notifies_after_grace() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+
+        let suppressed = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!suppressed.notified);
+        assert_eq!(suppressed.reason, "fullscreen");
+        assert_nothing_consumed(&ctx);
+        assert!(ctx.service.fullscreen_grace_remaining().is_none());
+
+        // 解除直後は猶予中で、まだ出さない。
+        ctx.fullscreen.set(FullscreenStatus::Free);
+        let grace = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!grace.notified);
+        assert_eq!(grace.reason, "fullscreen_grace");
+        assert_nothing_consumed(&ctx);
+        let remaining = ctx
+            .service
+            .fullscreen_grace_remaining()
+            .expect("grace should be pending");
+        assert!(remaining <= std::time::Duration::from_secs(180));
+        assert!(remaining > std::time::Duration::from_secs(25));
+
+        // 猶予が明けた時点を観測させる（実時間を待たない）。
+        ctx.service.lock_fullscreen_tracker().observe(
+            Utc::now() + Duration::seconds(181),
+            false,
+            Duration::seconds(30),
+        );
+        let notified = ctx.service.request_yuuko_notification().unwrap();
+        assert!(notified.notified);
+        assert_eq!(notified.reason, "notified");
+        // 保留していた最上位候補がそのまま選ばれる。
+        assert_eq!(
+            notified.state.current_article_id.as_deref(),
+            Some("article-001")
+        );
+    }
+
+    /// 12. 設定「全画面中は抑制」が OFF なら、全画面中でも通知する。
+    #[test]
+    fn request_ignores_fullscreen_when_setting_is_off() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        let mut settings = PersistedSettings::default();
+        settings.notification.work_time_ranges = all_day_ranges();
+        settings.notification.suppress_in_fullscreen = false;
+        ctx.settings_repository.save(&settings).unwrap();
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(result.reason, "notified");
+    }
+
+    /// 13. 全画面状態を取得できない場合は抑制しない（fail-open）。
+    #[test]
+    fn request_notifies_when_fullscreen_state_is_unknown() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        ctx.fullscreen.set(FullscreenStatus::Unknown);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+    }
+
+    /// 14. 日次上限などの既存理由は全画面判定より優先され、全画面を観測しない。
+    #[test]
+    fn existing_gates_take_precedence_over_fullscreen() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 0, all_day_ranges());
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert_eq!(result.reason, "daily_limit");
     }
 }
