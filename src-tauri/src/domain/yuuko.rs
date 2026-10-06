@@ -118,6 +118,42 @@ pub struct YuukoNotificationState {
     pub has_notification: bool,
     pub current_article_id: Option<String>,
     pub reward_notification: Option<RewardNotificationState>,
+    /// 紹介中記事の保存済み AI 要約を、軽量プレビュー用に短く切り詰めたもの（デスクトップ通知用）。
+    ///
+    /// preview_article.summary は要約が無いとき本文抜粋（excerpt）で補われるため、
+    /// デスクトップ通知では本文を送らないよう、補う前の要約だけをここに別に持たせる。
+    /// 永続化はせず、サービス層が active なニュース通知のときだけ記事から読み直して詰める。
+    /// 要約が無い記事・非 active では None（送らない）。既存フィールドの意味は変えない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_short_summary: Option<String>,
+}
+
+/// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
+///
+/// プレビューの要約欄は幅約240px・12px・3行のため、全角だと1行約20字×3行＝約60字で埋まる。
+/// それ以上送っても画面では切れて見えないうえ、外部由来文字列の露出が増えるだけなので、
+/// Rust 側で切り詰めてから渡す。lib/tauri/yuuko.ts の YUUKO_PREVIEW_SUMMARY_MAX_CHARS と一致させる。
+pub const PREVIEW_SUMMARY_MAX_CHARS: usize = 60;
+
+/// 保存済みの要約を、軽量プレビュー用に前後空白を除いて最大文字数へ切り詰める。
+/// 空なら None（UI 側の固定の一言へフォールバックさせる）。
+/// 文字数はバイトではなく char（コードポイント）で数え、マルチバイト文字の途中で切らない。
+pub fn short_preview_summary(summary: &str) -> Option<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= PREVIEW_SUMMARY_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let mut short: String = trimmed
+        .chars()
+        .take(PREVIEW_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    // 切り詰め位置の直前が空白だと「… 」の見た目が崩れるため落としてから省略記号を付ける。
+    short.truncate(short.trim_end().len());
+    short.push('…');
+    Some(short)
 }
 
 impl PersistedYuukoState {
@@ -141,6 +177,7 @@ impl PersistedYuukoState {
             has_notification: has_reward_notification,
             current_article_id: self.current_article_id.clone(),
             reward_notification: self.reward_notification.clone(),
+            preview_short_summary: None,
         }
     }
 
@@ -1043,6 +1080,49 @@ mod tests {
         assert_eq!(
             state.can_notify(now, 3, ranges),
             NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn long_summary_is_truncated_by_chars_with_ellipsis() {
+        let long = "あ".repeat(PREVIEW_SUMMARY_MAX_CHARS + 20);
+        let short = short_preview_summary(&long).unwrap();
+        assert_eq!(short.chars().count(), PREVIEW_SUMMARY_MAX_CHARS);
+        assert!(short.ends_with('…'));
+        assert!(short.starts_with(&"あ".repeat(PREVIEW_SUMMARY_MAX_CHARS - 1)));
+
+        // ちょうど上限なら切らない。前後の空白は落とす。
+        let exact = "い".repeat(PREVIEW_SUMMARY_MAX_CHARS);
+        assert_eq!(
+            short_preview_summary(&format!("  {exact}\n")),
+            Some(exact.clone())
+        );
+        // 切り詰め位置の直前の空白は省略記号の前に残さない。
+        let spaced = format!(
+            "{} {}",
+            "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2),
+            "え".repeat(10)
+        );
+        assert_eq!(
+            short_preview_summary(&spaced),
+            Some(format!("{}…", "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2)))
+        );
+    }
+
+    #[test]
+    fn blank_summary_is_omitted() {
+        assert_eq!(short_preview_summary(""), None);
+        assert_eq!(short_preview_summary(" \n\t "), None);
+    }
+
+    #[test]
+    fn notification_state_never_carries_short_summary_from_persisted_state() {
+        // 短い要約は永続化せず、サービス層が記事から読み直して詰める。
+        assert_eq!(
+            PersistedYuukoState::default()
+                .to_notification_state()
+                .preview_short_summary,
+            None
         );
     }
 }

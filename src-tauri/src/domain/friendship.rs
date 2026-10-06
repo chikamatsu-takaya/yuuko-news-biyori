@@ -4,8 +4,11 @@
 //! - 永続化用 `FriendshipState`（`user/friendship.json`・データ設計書 §10.5 準拠）。
 //! - ポイント加算イベント `FriendshipEventType`（§10.4）と、加算・ランクアップ判定の純ロジック。
 //!
-//! 簡易仕様（友情ランク簡易完成）:
-//! - ランクアップは flat `POINTS_PER_RANK`(100) pt/ランク・`RANK_MAX`(20) まで。
+//! 仕様:
+//! - ランクは 1 から始まり `RANK_MAX`(20) で止まる段階制（要件定義書 §7.6.1 / §7.6.7）。
+//!   Rank r → r+1 の必要ポイントは `required_points_for_next_rank`（10pt から 5pt 刻みで 100pt）。
+//! - ランクと「現ランク内の進捗ポイント」は**累計ポイント `total_points` から毎回導出**する。
+//!   旧データ（ランク0開始・flat 100pt/ランク）も累計から計算し直せば、保存形式を変えずに新しい表へ移行できる。
 //! - デイリー上限はポイントで頭打ち（既定 `DEFAULT_DAILY_LIMIT` = 25）。**上限はRust側で強制**する。
 //! - 報酬カタログ未整備のため、ランクアップは演出のみ。`pending_reward_ids` は将来用に予約（今回は空運用）。
 //!
@@ -13,8 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 1ランクアップに必要なポイント（簡易・flat）。
-pub const POINTS_PER_RANK: u32 = 100;
+/// 開始ランク（要件定義書 §7.6.7 の表が Rank 1 から始まるため）。
+pub const RANK_MIN: u32 = 1;
 /// 最大ランク。
 pub const RANK_MAX: u32 = 20;
 /// デイリー加算上限の既定値（pt）。
@@ -93,7 +96,7 @@ impl Default for FriendshipState {
     fn default() -> Self {
         Self {
             version: 1,
-            current_rank: 0,
+            current_rank: RANK_MIN,
             current_points: 0,
             total_points: 0,
             daily_points: DailyPoints::default(),
@@ -103,6 +106,34 @@ impl Default for FriendshipState {
             confirmed_reward_ids: Vec::new(),
         }
     }
+}
+
+/// Rank `rank` → `rank + 1` に必要なポイント（要件定義書 §7.6.7）。
+/// 前半は軽く後半はやや重く、Rank 1→2 の 10pt から 5pt 刻みで Rank 19→20 の 100pt まで。
+/// 最大ランク以上（および範囲外）では 0（＝これ以上上がらない）。
+pub fn required_points_for_next_rank(rank: u32) -> u32 {
+    if (RANK_MIN..RANK_MAX).contains(&rank) {
+        5 + 5 * rank
+    } else {
+        0
+    }
+}
+
+/// 累計ポイントから (ランク, 現ランク内の進捗ポイント) を求める。
+/// 最大ランク到達後は累計がいくら増えても `RANK_MAX` で止め、進捗は 0 とする
+/// （次ランクが存在せず「次まで x/y」を表示できないため。従来の上限到達時と同じ扱い）。
+pub fn rank_progress_from_total(total_points: u32) -> (u32, u32) {
+    let mut rank = RANK_MIN;
+    let mut remaining = total_points;
+    while rank < RANK_MAX {
+        let required = required_points_for_next_rank(rank);
+        if remaining < required {
+            return (rank, remaining);
+        }
+        remaining -= required;
+        rank += 1;
+    }
+    (RANK_MAX, 0)
 }
 
 /// ポイント加算結果。
@@ -115,6 +146,20 @@ pub struct EarnOutcome {
 }
 
 impl FriendshipState {
+    /// 累計ポイントからランク・進捗を計算し直す（読み込み時に必ず通す）。
+    ///
+    /// 保存済みの `current_rank` / `current_points` は旧仕様（ランク0開始・flat 100pt）の値の
+    /// 可能性があるため信用せず、正である `total_points` から導出する。保存形式は変えない。
+    /// 旧仕様より各ランクの閾値が低いので、移行でランクが下がることはない。
+    /// 移行によるランク上昇は「加算によるランクアップ」ではないため、ランクアップ演出・
+    /// `last_rank_up_at`・報酬状態（`pending_reward_ids`）には触れない（黙って反映する）。
+    pub fn normalize_rank_from_total(&mut self) {
+        let (rank, progress) = rank_progress_from_total(self.total_points);
+        self.current_rank = rank;
+        self.current_points = progress;
+        self.rank_max = RANK_MAX;
+    }
+
     /// イベントによるポイント加算（デイリー上限で頭打ち・ランクアップ判定込み）。
     /// `today` は当日の日付（"YYYY-MM-DD"）、`now_rfc3339` はランクアップ時刻記録用。
     pub fn earn(
@@ -142,22 +187,18 @@ impl FriendshipState {
             };
         }
 
+        // 加算前のランクも累計から求める。保存値（旧仕様のランク）と比べると、
+        // 移行によるランク差をこの加算のランクアップと誤判定してしまうため。
+        let (rank_before, _) = rank_progress_from_total(self.total_points);
+
         self.daily_points.points += add;
-        self.total_points += add;
-        self.current_points += add;
+        // 累計は最大ランク到達後も加算し続ける（ランクは RANK_MAX で止まる）。
+        self.total_points = self.total_points.saturating_add(add);
+        self.normalize_rank_from_total();
 
-        // ランクアップ判定（flat POINTS_PER_RANK・RANK_MAX まで）。
-        let mut ranked_up = false;
-        while self.current_rank < self.rank_max && self.current_points >= POINTS_PER_RANK {
-            self.current_points -= POINTS_PER_RANK;
-            self.current_rank += 1;
+        let ranked_up = self.current_rank > rank_before;
+        if ranked_up {
             self.last_rank_up_at = Some(now_rfc3339.to_string());
-            ranked_up = true;
-        }
-
-        // 上限ランク到達後は端数を持ち越さない（簡易仕様）。
-        if self.current_rank >= self.rank_max {
-            self.current_points = 0;
         }
 
         EarnOutcome {
@@ -166,13 +207,10 @@ impl FriendshipState {
         }
     }
 
-    /// 次ランクまでに必要なポイント（DTO表示用）。上限ランクでは 0。
+    /// 現ランクから次ランクへ上がるのに必要なポイント（DTO表示用・ランクごとに異なる）。
+    /// `current_point` と組で「次のランクまで current_point / next_required_point」を表す。上限ランクでは 0。
     pub fn next_required_point(&self) -> u32 {
-        if self.current_rank >= self.rank_max {
-            0
-        } else {
-            POINTS_PER_RANK
-        }
+        required_points_for_next_rank(self.current_rank)
     }
 
     /// 読み取り用DTOへ変換する。
@@ -196,8 +234,11 @@ impl FriendshipState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FriendshipStateDto {
+    /// 現在のランク（1〜20）。
     pub current_rank: u32,
+    /// 現ランク内の進捗ポイント（ランクアップごとに 0 から数え直す）。
     pub current_point: u32,
+    /// 現ランクから次ランクへの必要ポイント（ランクごとに異なる・最大ランクでは 0）。
     pub next_required_point: u32,
     pub daily_earned_point: u32,
     pub daily_point_limit: u32,
@@ -205,7 +246,7 @@ pub struct FriendshipStateDto {
 }
 
 impl Default for FriendshipStateDto {
-    /// 未保存時の既定値（rank0・point0・しきい値100・デイリー上限は既定）。
+    /// 未保存時の既定値（rank1・point0・しきい値10・デイリー上限は既定）。
     fn default() -> Self {
         FriendshipState::default().to_dto()
     }
@@ -236,11 +277,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_friendship_state_is_zero_progress() {
+    fn default_friendship_state_starts_at_rank_one() {
         let state = FriendshipStateDto::default();
-        assert_eq!(state.current_rank, 0);
+        assert_eq!(state.current_rank, 1);
         assert_eq!(state.current_point, 0);
-        assert_eq!(state.next_required_point, POINTS_PER_RANK);
+        assert_eq!(state.next_required_point, 10);
         assert_eq!(state.daily_point_limit, DEFAULT_DAILY_LIMIT);
         assert!(state.last_point_date.is_none());
     }
@@ -315,52 +356,158 @@ mod tests {
         assert_eq!(state.total_points, 10);
     }
 
-    #[test]
-    fn rank_up_when_crossing_threshold() {
-        // デイリー上限を一時的に大きくして100pt到達を試験。
+    /// 各ランク到達に必要な累計ポイント（§7.6.7 の表の累積和）。
+    fn cumulative_threshold(rank: u32) -> u32 {
+        (RANK_MIN..rank).map(required_points_for_next_rank).sum()
+    }
+
+    /// デイリー上限を一時的に大きくし、累計 `total` の状態を作る（ランクは累計から導出）。
+    fn state_with_total(total: u32) -> FriendshipState {
         let mut state = FriendshipState {
+            total_points: total,
             daily_points: DailyPoints {
-                date: String::new(),
+                date: "2026-06-08".to_string(),
                 points: 0,
-                limit: 1000,
+                limit: 10_000,
             },
             ..FriendshipState::default()
         };
-        let mut ranked = false;
-        for _ in 0..20 {
-            // yuuko_to_main(5) × 20 = 100 で 1ランクアップ。
-            let out = state.earn(
-                FriendshipEventType::YuukoToMain,
-                "2026-06-08",
-                "2026-06-08T00:00:00Z",
+        state.normalize_rank_from_total();
+        state
+    }
+
+    #[test]
+    fn required_points_follow_requirement_table() {
+        // Rank1→2: 10pt から 5pt 刻みで Rank19→20: 100pt。
+        let table: Vec<u32> = (RANK_MIN..RANK_MAX)
+            .map(required_points_for_next_rank)
+            .collect();
+        let expected: Vec<u32> = (0..19).map(|i| 10 + 5 * i).collect();
+        assert_eq!(table, expected);
+        assert_eq!(required_points_for_next_rank(1), 10);
+        assert_eq!(required_points_for_next_rank(19), 100);
+        // 最大ランク・範囲外では 0。
+        assert_eq!(required_points_for_next_rank(RANK_MAX), 0);
+        assert_eq!(required_points_for_next_rank(0), 0);
+        assert_eq!(required_points_for_next_rank(21), 0);
+        // Rank20 到達に必要な累計は 1045pt。
+        assert_eq!(cumulative_threshold(RANK_MAX), 1045);
+    }
+
+    #[test]
+    fn rank_progress_at_every_threshold_boundary() {
+        assert_eq!(rank_progress_from_total(0), (1, 0));
+        for rank in (RANK_MIN + 1)..=RANK_MAX {
+            let threshold = cumulative_threshold(rank);
+            // 閾値ちょうどで到達（進捗0）し、1pt 手前では前ランクの最終ポイント。
+            assert_eq!(rank_progress_from_total(threshold), (rank, 0));
+            assert_eq!(
+                rank_progress_from_total(threshold - 1),
+                (rank - 1, required_points_for_next_rank(rank - 1) - 1)
             );
-            ranked = ranked || out.ranked_up;
         }
+        // 最大ランク到達後は累計が増えてもランク20・進捗0で止まる。
+        assert_eq!(rank_progress_from_total(1046), (RANK_MAX, 0));
+        assert_eq!(rank_progress_from_total(u32::MAX), (RANK_MAX, 0));
+    }
+
+    #[test]
+    fn rank_up_exactly_at_threshold() {
+        // 累計 9pt（Rank1・あと1pt）から 1pt でちょうど 10pt → Rank2。
+        let mut state = state_with_total(9);
         assert_eq!(state.current_rank, 1);
+        assert_eq!(state.current_points, 9);
+        assert_eq!(state.next_required_point(), 10);
+
+        let out = state.earn(
+            FriendshipEventType::TermExplained,
+            "2026-06-08",
+            "2026-06-08T00:00:00Z",
+        );
+        assert!(out.ranked_up);
+        assert_eq!(state.current_rank, 2);
         assert_eq!(state.current_points, 0);
-        assert!(ranked);
+        assert_eq!(state.total_points, 10);
+        assert_eq!(state.next_required_point(), 15);
         assert_eq!(
             state.last_rank_up_at.as_deref(),
             Some("2026-06-08T00:00:00Z")
         );
+
+        // 次の閾値（累計25）の手前ではランクアップしない。
+        let mut state = state_with_total(20);
+        let out = state.earn(FriendshipEventType::ExplanationViewed, "2026-06-08", "t");
+        assert!(!out.ranked_up);
+        assert_eq!((state.current_rank, state.current_points), (2, 14));
     }
 
     #[test]
-    fn rank_does_not_exceed_rank_max() {
-        let mut state = FriendshipState {
-            current_rank: RANK_MAX,
-            daily_points: DailyPoints {
-                date: String::new(),
-                points: 0,
-                limit: 1000,
-            },
-            ..FriendshipState::default()
-        };
+    fn reaching_rank_max_and_beyond() {
+        // 累計 1040（Rank19・95/100）から 5pt でちょうど Rank20。
+        let mut state = state_with_total(1040);
+        assert_eq!((state.current_rank, state.current_points), (19, 95));
         let out = state.earn(FriendshipEventType::YuukoToMain, "2026-06-08", "t");
-        // 上限ランクではランクアップせず、端数も持ち越さない。
-        assert!(!out.ranked_up);
+        assert!(out.ranked_up);
         assert_eq!(state.current_rank, RANK_MAX);
         assert_eq!(state.current_points, 0);
         assert_eq!(state.next_required_point(), 0);
+
+        // 最大ランク後も累計は加算されるが、ランクは上がらず進捗も持ち越さない。
+        let out = state.earn(FriendshipEventType::YuukoToMain, "2026-06-08", "t2");
+        assert_eq!(out.earned_points, 5);
+        assert!(!out.ranked_up);
+        assert_eq!(state.current_rank, RANK_MAX);
+        assert_eq!(state.current_points, 0);
+        assert_eq!(state.total_points, 1050);
+        assert_eq!(state.last_rank_up_at.as_deref(), Some("t"));
+        assert_eq!(state.to_dto().next_required_point, 0);
+    }
+
+    #[test]
+    fn legacy_flat_state_is_recomputed_from_total_points() {
+        // 旧仕様（ランク0開始・flat 100pt）で保存された状態: rank3・50pt・累計350。
+        let json = r#"{
+            "version": 1,
+            "currentRank": 3,
+            "currentPoints": 50,
+            "totalPoints": 350,
+            "dailyPoints": {"date": "2026-06-08", "points": 10, "limit": 25},
+            "rankMax": 20,
+            "lastRankUpAt": "2026-06-01T00:00:00Z",
+            "pendingRewardIds": [],
+            "confirmedRewardIds": ["deco_001"]
+        }"#;
+        let mut state: FriendshipState = serde_json::from_str(json).unwrap();
+        state.normalize_rank_from_total();
+        // 累計350 → Rank11（到達累計325）・進捗25/60。
+        assert_eq!(state.current_rank, 11);
+        assert_eq!(state.current_points, 25);
+        assert_eq!(state.next_required_point(), 60);
+        // 累計・日次・報酬・最終ランクアップ時刻は変えない（データを壊さない・演出を出さない）。
+        assert_eq!(state.total_points, 350);
+        assert_eq!(state.daily_points.points, 10);
+        assert_eq!(state.confirmed_reward_ids, vec!["deco_001".to_string()]);
+        assert!(state.pending_reward_ids.is_empty());
+        assert_eq!(
+            state.last_rank_up_at.as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn legacy_jump_is_not_reported_as_rank_up_on_next_earn() {
+        // 未正規化の旧状態（rank0・累計350）に直接加算しても、移行分のランク差は
+        // この加算のランクアップとして扱わない（ダイアログを出さない）。
+        let mut state = FriendshipState {
+            current_rank: 0,
+            current_points: 50,
+            total_points: 350,
+            ..FriendshipState::default()
+        };
+        let out = state.earn(FriendshipEventType::TermExplained, "2026-06-08", "t");
+        assert!(!out.ranked_up);
+        assert_eq!(state.current_rank, 11);
+        assert_eq!(state.current_points, 26);
+        assert!(state.last_rank_up_at.is_none());
     }
 }
