@@ -30,13 +30,16 @@ const activeState = (overrides: Record<string, unknown> = {}) => ({
     sourceName: "E2E News",
     publishedAtText: "2026-10-06T00:00:00Z",
     genre: "AI・テクノロジー",
-    summary: "デスクトップでも短い要約を表示する",
+    // 要約前の記事では本文抜粋で補われる欄。デスクトップ通知では使わない。
+    summary: "本文抜粋の先頭（デスクトップには出さない）",
     isFavorite: false,
     readState: "unread",
     recommendationScore: 0.9,
   },
   hasNotification: false,
   currentArticleId: "desk-article-1",
+  // Rust が保存済み AI 要約から切り詰めて付ける短い要約。
+  previewShortSummary: "デスクトップでも短い要約を表示する",
   ...overrides,
 });
 
@@ -366,6 +369,33 @@ test("first click preview shows the source and short summary", async ({
   await expect(region.getByText("いっしょに読もう")).toHaveCount(0);
 });
 
+test("initial display ignores the excerpt-backed preview summary without a short summary", async ({
+  page,
+}) => {
+  for (const previewShortSummary of [undefined, "", "   "]) {
+    const state = activeState({ state: "PreviewVisible" }) as Record<
+      string,
+      unknown
+    >;
+    if (previewShortSummary === undefined) {
+      delete state.previewShortSummary;
+    } else {
+      state.previewShortSummary = previewShortSummary;
+    }
+    await installMocks(page, { state });
+    await openYuukoWindow(page, PREVIEW_HEIGHT);
+    const region = page.getByRole("region", { name: REGION });
+    await expect(region.getByRole("button", { name: "詳しく見る" })).toBeVisible();
+
+    // AI 要約がまだ無い記事では本文抜粋を出さず、固定の一言にする。
+    await expect(
+      region.getByText("気になったら「詳しく見る」でいっしょに読もう？")
+    ).toBeVisible();
+    await expect(region.getByText("本文抜粋の先頭")).toHaveCount(0);
+    await expect(region.getByText("E2E News", { exact: true })).toBeVisible();
+  }
+});
+
 test("event payload summary is shown, and the fixed teaser is used without it", async ({
   page,
 }) => {
@@ -412,8 +442,8 @@ test("long summary and source fit the preview window and render as plain text", 
         ...activeState().previewArticle,
         title: longTitle,
         sourceName: longSource,
-        summary: longSummary,
       },
+      previewShortSummary: longSummary,
     }),
   });
   await openYuukoWindow(page, PREVIEW_HEIGHT);

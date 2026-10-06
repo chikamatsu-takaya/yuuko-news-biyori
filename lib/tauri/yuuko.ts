@@ -48,6 +48,11 @@ export type YuukoNotificationState = {
   hasNotification: boolean;
   currentArticleId?: string;
   rewardNotification?: RewardNotificationState;
+  /**
+   * 紹介中記事の保存済み AI 要約を短く切り詰めたもの（デスクトップ通知用・Rust 側で付与）。
+   * previewArticle.summary は要約が無いと本文抜粋で補われるため、デスクトップ通知ではこちらだけを使う。
+   */
+  previewShortSummary?: string;
 };
 
 export type ConfirmRankUpRewardParams = {
@@ -159,14 +164,14 @@ export type YuukoDesktopNotification = {
 
 /**
  * 軽量プレビューの短い要約の最大文字数（省略記号を含む）。
- * Rust yuuko_desktop_notifier::PREVIEW_SUMMARY_MAX_CHARS と一致させる（理由は Rust 側のコメント）。
+ * Rust domain::yuuko::PREVIEW_SUMMARY_MAX_CHARS と一致させる（理由は Rust 側のコメント）。
  */
 export const YUUKO_PREVIEW_SUMMARY_MAX_CHARS = 60;
 
 /**
- * 保存済み要約を軽量プレビュー用に切り詰める（Rust short_preview_summary と同じ規則）。
- * マウント時の初期表示（get_yuuko_notification_state は要約全文を返す）でも、
- * イベント経由と同じ短い要約にそろえるために使う。文字数はコードポイントで数える。
+ * 要約を軽量プレビュー用に切り詰める（Rust short_preview_summary と同じ規則）。
+ * previewShortSummary は Rust で切り詰め済みだが、上限を超える値が来ても枠を超えないよう念のため適用する
+ * （切り詰め済みの値には何もしない）。文字数はコードポイントで数える。
  */
 export const toShortPreviewSummary = (
   summary: string | null | undefined
@@ -202,7 +207,8 @@ export const toYuukoDesktopNotification = (
   ) {
     return null;
   }
-  const summary = toShortPreviewSummary(state.previewArticle.summary);
+  // previewArticle.summary は本文抜粋で補われ得るため使わない（無ければ固定の一言になる）。
+  const summary = toShortPreviewSummary(state.previewShortSummary);
   return {
     articleId: state.currentArticleId ?? state.previewArticle.articleId,
     title: state.previewArticle.title,

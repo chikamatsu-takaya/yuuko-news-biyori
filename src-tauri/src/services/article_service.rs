@@ -92,6 +92,12 @@ impl ArticleService {
         Ok(detail)
     }
 
+    /// 保存済みの AI 要約だけを返す（本文抜粋で補わない）。ゆうこのデスクトップ通知用。
+    /// get_article_detail と違い、既読状態は進めない（通知を出しただけで既読にしない）。
+    pub fn get_saved_summary(&self, article_id: &str) -> Result<Option<String>, AppError> {
+        self.repository.get_saved_summary(article_id)
+    }
+
     /// ゆうこ軽量プレビュー表示（初回クリック）時に、紹介記事を Previewed へ進める（詳細設計書 §11.2）。
     /// プレビュー表示を止めないよう、失敗はログのみとする。
     pub fn mark_article_previewed(&self, article_id: &str) {

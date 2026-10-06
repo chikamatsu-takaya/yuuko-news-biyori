@@ -185,6 +185,14 @@ impl ArticleRepository {
         Ok(article.to_detail_dto(is_effectively_favorite(&article, &favorite_store)))
     }
 
+    /// 保存済みの AI 要約だけを返す（無ければ None）。
+    ///
+    /// 一覧・詳細 DTO の summary は要約が無いと本文抜粋（excerpt）で補われるため、
+    /// 本文を渡したくないゆうこのデスクトップ通知用に、補う前の値を取り出す。
+    pub fn get_saved_summary(&self, article_id: &str) -> Result<Option<String>, AppError> {
+        Ok(self.find_article_record(article_id)?.summary)
+    }
+
     /// 退避候補を月次ZIPへ圧縮し、`archive_index.json` を更新して archived 印を付ける（増分1・非破壊）。
     /// 元の記事Markdownは削除せず保持する（容量解放＝元.md削除は後続）。候補が無ければ何もしない。
     /// ZIP整合性検証に成功した月だけ archived 印を付ける（破損時は印を付けない＝安全側）。
