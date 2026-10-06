@@ -3675,6 +3675,81 @@ mod tests {
     }
 
     #[test]
+    fn single_article_update_aborts_when_save_path_is_corrupt_file() {
+        let context = TestRepositoryContext::new();
+        // 読める記事Aを本来とは別の月バケット（202606）に置き、本来の保存先（202605/A.md）を破損ファイルにする。
+        let article = PersistedArticleRecord {
+            article_id: "misplaced-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let readable_dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&readable_dir).unwrap();
+        std::fs::write(
+            readable_dir.join("misplaced-a.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+        let corrupt_dir = context.news_dir.join("202605");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        let corrupt_path = corrupt_dir.join("misplaced-a.md");
+        let corrupt_bytes = b"---\narticleId: [unterminated\n---\n".to_vec();
+        std::fs::write(&corrupt_path, &corrupt_bytes).unwrap();
+        let corrupt = vec![(corrupt_path, corrupt_bytes)];
+
+        let favorite_error = context
+            .repository
+            .update_article_favorite("misplaced-a", true)
+            .unwrap_err();
+        assert!(matches!(favorite_error, crate::error::AppError::Parse(_)));
+        let summary_error = context
+            .repository
+            .update_article_summary(
+                "misplaced-a",
+                ArticleSummaryUpdate {
+                    summary: "要約".to_string(),
+                    yuuko_explanation: "説明".to_string(),
+                    focus_points: vec!["注目".to_string()],
+                    yuuko_comment: "コメント".to_string(),
+                    generated_at: "2026-07-15T00:00:00Z".to_string(),
+                    ai_provider: "mock".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(summary_error, crate::error::AppError::Parse(_)));
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn restore_archived_article_aborts_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let article = PersistedArticleRecord {
+            article_id: "restore-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&article).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        // archive後に対象記事のMarkdownを破損内容へ差し替える。
+        let markdown_path = context.news_dir.join("202605").join("restore-a.md");
+        let corrupt_bytes = b"---\narticleId: [unterminated\n---\n".to_vec();
+        std::fs::write(&markdown_path, &corrupt_bytes).unwrap();
+
+        assert!(context
+            .repository
+            .restore_archived_article("restore-a")
+            .is_err());
+        assert_files_unchanged(&[(markdown_path, corrupt_bytes)]);
+    }
+
+    #[test]
     fn refresh_does_not_overwrite_corrupt_markdown() {
         use crate::domain::article::FetchedArticle;
 
