@@ -64,7 +64,10 @@ impl YuukoService {
     /// preview_article.summary は要約が無いと本文抜粋で補われる（メイン画面の表示用でその意味は変えない）ため、
     /// デスクトップ通知が本文を送らないよう補う前の要約を記事から読み直す。preview_article は通知時点の
     /// 写しなので、後から生成された要約も反映できる。読めない場合は要約なし（固定の一言）に倒す。
-    fn attach_preview_short_summary(&self, state: &mut YuukoNotificationState) {
+    ///
+    /// 記事の読み込みを伴うため、実際に表示へ使う場面（初期表示の状態取得と、デスクトップ通知の表示直前）
+    /// だけで呼ぶ。メイン画面も5分ごとに呼ぶ request_yuuko_notification では呼ばない（常駐時の負荷を抑える）。
+    pub fn attach_preview_short_summary(&self, state: &mut YuukoNotificationState) {
         let is_active_news = matches!(
             state.state,
             YuukoResidentState::Appearing
@@ -123,13 +126,6 @@ impl YuukoService {
     /// 候補選定（未紹介・未読・スコア順／お気に入り除外）を満たす場合のみ、おすすめから1件を
     /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。報酬 pending 時は誤消し防止のため何もしない。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
-        let mut result = self.decide_yuuko_notification()?;
-        // デスクトップ通知のイベント経路（yuuko_desktop_notifier）と初期表示経路で同じ短い要約にそろえる。
-        self.attach_preview_short_summary(&mut result.state);
-        Ok(result)
-    }
-
-    fn decide_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
         let settings = self.settings_repository.load_or_default()?;
         let mut state = self.yuuko_state_repository.load_or_default()?;
 
@@ -610,7 +606,7 @@ mod tests {
         save_excerpt_only_article(&ctx, "本文抜粋の先頭です。");
         save_notification_settings(&ctx, true, 3, all_day_ranges());
 
-        let result = ctx.service.request_yuuko_notification().unwrap();
+        let mut result = ctx.service.request_yuuko_notification().unwrap();
         assert!(result.notified);
         assert_eq!(
             result
@@ -621,15 +617,18 @@ mod tests {
             Some("本文抜粋の先頭です。"),
             "preview_article の意味（excerpt で補う）は変えない"
         );
+        // デスクトップ通知の表示直前と同じく詰めても、要約前の記事では付かない。
+        ctx.service.attach_preview_short_summary(&mut result.state);
         assert_eq!(result.state.preview_short_summary, None);
 
         let current = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(current.preview_short_summary, None);
     }
 
-    /// 保存済み AI 要約がある記事では、両経路とも同じ短い要約を付ける。
+    /// 保存済み AI 要約がある記事では、初期表示経路とデスクトップ通知の表示直前で同じ短い要約を付ける。
+    /// request_yuuko_notification（メイン画面も5分ごとに呼ぶ）自体は記事を読まず、要約を詰めない。
     #[test]
-    fn saved_summary_is_attached_as_short_summary_on_both_paths() {
+    fn saved_summary_is_attached_only_where_displayed() {
         let ctx = make_context();
         save_excerpt_only_article(&ctx, "本文抜粋の先頭です。");
         let long_summary = "保存済みの要約です。".repeat(10);
@@ -650,8 +649,16 @@ mod tests {
 
         let expected = short_preview_summary(&long_summary);
         assert!(expected.as_deref().is_some_and(|s| s.ends_with('…')));
-        let result = ctx.service.request_yuuko_notification().unwrap();
+        let mut result = ctx.service.request_yuuko_notification().unwrap();
         assert!(result.notified);
+        // 要約が保存済みでも、request の戻り値には詰めない（記事を読まない）。
+        assert_eq!(result.state.preview_short_summary, None);
+        let already_active = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(already_active.reason, "already_active");
+        assert_eq!(already_active.state.preview_short_summary, None);
+
+        // デスクトップ通知の表示直前（yuuko_desktop_notifier::run_judgement）と初期表示で同じ値になる。
+        ctx.service.attach_preview_short_summary(&mut result.state);
         assert_eq!(result.state.preview_short_summary, expected);
         let current = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(current.preview_short_summary, expected);

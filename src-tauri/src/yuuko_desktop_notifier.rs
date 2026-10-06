@@ -177,16 +177,16 @@ fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
 }
 
 fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
-    let result = match yuuko_service.request_yuuko_notification() {
+    let mut result = match yuuko_service.request_yuuko_notification() {
         Ok(result) => result,
         Err(error) => {
             log::warn!("非表示中のゆうこ通知判定に失敗しました。次回に再試行します: {error}");
             return;
         }
     };
-    let Some(notification) = desktop_notification_from(&result) else {
+    if desktop_notification_from(&result).is_none() {
         return;
-    };
+    }
 
     // 判定中にメインが再表示された場合は、アプリ内の再表示（保存済み active の拾い直し）に任せる。
     if decide_tick(main_window_visibility(app)) != TickAction::RunJudgement {
@@ -197,6 +197,12 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
         return;
     }
 
+    // 短い要約は記事の読み込みを伴うため、実際に表示すると決まってから詰める
+    // （active な通知を周期ごとに出し直さない場合に、毎回読み込まないようにする）。
+    yuuko_service.attach_preview_short_summary(&mut result.state);
+    let Some(notification) = desktop_notification_from(&result) else {
+        return;
+    };
     if let Err(error) = present(app, &notification) {
         // 通知状態は永続化済みのため、メイン再表示時にアプリ内で拾い直せる（取りこぼさない）。
         log::warn!("ゆうこ用ウィンドウに通知を表示できませんでした: {error}");
