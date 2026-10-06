@@ -58,6 +58,20 @@ impl YuukoService {
             .and_then(|remaining| remaining.to_std().ok())
     }
 
+    /// 保存済みの active 通知を出し直してよいかの全画面判定（デスクトップ通知スレッド用）。
+    ///
+    /// request_yuuko_notification は already_active を全画面判定より先に返す（既存の理由の優先順位を
+    /// 保つため）。その結果を使ってゆうこ用ウィンドウ（最前面）に出し直す経路でも、全画面中・猶予中は
+    /// 出さないようにするために使う。設定を読めない場合は既定（抑制 ON）で判定する（安全側）。
+    pub fn fullscreen_gate_for_redisplay(&self) -> FullscreenGate {
+        let suppress_in_fullscreen = self
+            .settings_repository
+            .load_or_default()
+            .map(|settings| settings.notification.suppress_in_fullscreen)
+            .unwrap_or(true);
+        self.check_fullscreen(Utc::now(), suppress_in_fullscreen)
+    }
+
     /// 全画面・プレゼン中の抑制判定（設計書 §5.2〜§5.4）。設定 OFF なら保留中の抑制も捨てて通知可。
     /// OS 判定に失敗した場合は抑制しない（fail-open）。詳細は出さず警告だけ残す。
     fn check_fullscreen(&self, now: DateTime<Utc>, suppress_in_fullscreen: bool) -> FullscreenGate {
@@ -677,6 +691,47 @@ mod tests {
         assert_eq!(
             notified.state.current_article_id.as_deref(),
             Some("article-001")
+        );
+    }
+
+    /// 11b. active 通知が残ったまま全画面になった場合、already_active の優先順位は変えずに、
+    /// 出し直し用の判定では抑制する（最前面のゆうこ用ウィンドウを全画面アプリの上に出さない）。
+    #[test]
+    fn redisplay_of_active_notification_is_blocked_while_fullscreen() {
+        let ctx = make_context();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        let active_state = PersistedYuukoState {
+            state: YuukoResidentState::BalloonVisible,
+            current_article_id: Some("existing-article".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        ctx.yuuko_state_repository.save(&active_state).unwrap();
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(result.reason, "already_active");
+        assert_eq!(
+            ctx.service.fullscreen_gate_for_redisplay(),
+            FullscreenGate::Suppressed
+        );
+
+        // 解除直後は猶予中のため、まだ出し直さない。
+        ctx.fullscreen.set(FullscreenStatus::Free);
+        assert!(matches!(
+            ctx.service.fullscreen_gate_for_redisplay(),
+            FullscreenGate::GracePeriod { .. }
+        ));
+    }
+
+    /// 11c. 全画面でなければ出し直してよい。
+    #[test]
+    fn redisplay_of_active_notification_is_allowed_when_not_fullscreen() {
+        let ctx = make_context();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+
+        assert_eq!(
+            ctx.service.fullscreen_gate_for_redisplay(),
+            FullscreenGate::Allowed
         );
     }
 

@@ -15,6 +15,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::app_lifecycle::MAIN_WINDOW_LABEL;
+use crate::domain::fullscreen_suppression::FullscreenGate;
 use crate::domain::yuuko::{
     RequestYuukoNotificationResult, YuukoNotificationState, YuukoResidentState,
 };
@@ -199,9 +200,30 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -
             return CHECK_INTERVAL;
         }
     };
-    let next_delay = next_check_delay(&result.reason, yuuko_service.fullscreen_grace_remaining());
-    present_if_needed(app, &result);
+    // already_active は全画面判定より先に返る理由なので、出し直す前にここで全画面判定を通す。
+    // 出すものが無いときは判定しない（猶予の記録を余計に動かさない）。
+    let redisplay_block = if !result.notified && desktop_notification_from(&result).is_some() {
+        redisplay_block_reason(yuuko_service.fullscreen_gate_for_redisplay())
+    } else {
+        None
+    };
+    let next_delay = next_check_delay(
+        redisplay_block.unwrap_or(result.reason.as_str()),
+        yuuko_service.fullscreen_grace_remaining(),
+    );
+    if redisplay_block.is_none() {
+        present_if_needed(app, &result);
+    }
     next_delay
+}
+
+/// 出し直しを止める場合、その理由を request の理由と同じ名前で返す（次回判定の間隔にも使う）。
+fn redisplay_block_reason(gate: FullscreenGate) -> Option<&'static str> {
+    match gate {
+        FullscreenGate::Allowed => None,
+        FullscreenGate::Suppressed => Some("fullscreen"),
+        FullscreenGate::GracePeriod { .. } => Some("fullscreen_grace"),
+    }
 }
 
 /// 判定結果に表示すべき通知があれば、ゆうこ用ウィンドウに出す。
@@ -439,6 +461,20 @@ mod tests {
         assert_eq!(
             next_check_delay("fullscreen_grace", None),
             FULLSCREEN_RECHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn redisplay_is_blocked_during_fullscreen_and_grace() {
+        assert_eq!(redisplay_block_reason(FullscreenGate::Allowed), None);
+        assert_eq!(
+            redisplay_block_reason(FullscreenGate::Suppressed),
+            Some("fullscreen")
+        );
+        let until = chrono::Utc::now();
+        assert_eq!(
+            redisplay_block_reason(FullscreenGate::GracePeriod { until }),
+            Some("fullscreen_grace")
         );
     }
 
