@@ -26,9 +26,7 @@ use crate::infra::url_guard::{validate_url, UrlPurpose};
 use crate::paths::AppPaths;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::services::recommendation_service::{
-    RecommendationContext, RecommendationInput, RecommendationService,
-};
+use crate::services::recommendation_service::{RecommendationContext, RecommendationService};
 
 // 結果の errors に載せる固定カテゴリ（UI返却用・低レベル詳細を含めない）。
 const ERROR_FEED_URL_REJECTED: &str = "feed_url_rejected";
@@ -233,14 +231,12 @@ impl NewsService {
                 let fetched_at = utc_now_rfc3339();
                 let published_at_text =
                     normalize_published_at(item.published_at.as_deref(), &fetched_at);
-                let score = self.recommendation_service.calculate_score(
-                    &RecommendationInput {
-                        title: &item.title,
-                        genre: &source.genre,
-                        tags: &[],
-                        read_state: &ArticleReadState::Unread,
-                        age_hours: Some(0.0),
-                    },
+                // 取得時の採点条件は score_at_fetch に集約する（一覧取得時の rescore_stored が
+                // この前提で鮮度分を割り戻すため、ここで条件を変えない）。
+                let score = self.recommendation_service.score_at_fetch(
+                    &item.title,
+                    &source.genre,
+                    &[],
                     &context,
                 );
 
