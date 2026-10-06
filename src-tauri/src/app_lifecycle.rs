@@ -54,6 +54,12 @@ pub fn setup(app: &App) -> tauri::Result<()> {
 
 /// メインウィンドウの閉じる操作を、プロセス終了ではなく非表示待機へ変換する。
 pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    if should_close_yuuko_window(window.label(), matches!(event, WindowEvent::Destroyed)) {
+        // メインが本当に破棄されたら、非表示のゆうこ用ウィンドウが残ってプロセスが終わらないのを防ぐ。
+        crate::yuuko_window::close_yuuko_window(window.app_handle());
+        return;
+    }
+
     if !should_hide_on_close(
         window.label(),
         matches!(event, WindowEvent::CloseRequested { .. }),
@@ -117,6 +123,10 @@ fn should_hide_on_close(
         && !exit_requested
 }
 
+fn should_close_yuuko_window(window_label: &str, is_destroyed: bool) -> bool {
+    window_label == MAIN_WINDOW_LABEL && is_destroyed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +151,27 @@ mod tests {
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, false, true, false));
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, true, false, false));
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, true, true, true));
+    }
+
+    #[test]
+    fn yuuko_window_close_does_not_trigger_main_close_to_hide() {
+        // ゆうこ用ウィンドウ追加後も、close-to-hide はメインウィンドウだけに効く。
+        assert!(!should_hide_on_close(
+            crate::yuuko_window::YUUKO_WINDOW_LABEL,
+            true,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn yuuko_window_is_closed_only_when_main_window_is_destroyed() {
+        assert!(should_close_yuuko_window(MAIN_WINDOW_LABEL, true));
+        // close-to-hide でメインを隠しただけでは破棄されないため、ゆうこ用ウィンドウは残す。
+        assert!(!should_close_yuuko_window(MAIN_WINDOW_LABEL, false));
+        assert!(!should_close_yuuko_window(
+            crate::yuuko_window::YUUKO_WINDOW_LABEL,
+            true
+        ));
     }
 }
