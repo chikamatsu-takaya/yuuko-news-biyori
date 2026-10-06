@@ -45,6 +45,8 @@ import {
   getUserSettings,
   saveUserSettings,
   resetUserSettings,
+  testAiProvider,
+  type AiProviderConnectionTestResult,
   type WorkTimeRangeDto,
   type UserSettingsDto,
   type ExplanationLevel,
@@ -387,6 +389,54 @@ const buildDtoForSave = (
   };
 };
 
+// AI接続テストの画面表示（固定文言のみ）。
+type AiConnectionTestView = {
+  tone: "success" | "warning";
+  message: string;
+  // Gemini で APIキー未設定のときだけ MockProvider を案内する（画面詳細設計書 SCR-003 §7.6/§7.7）。
+  recommendMock: boolean;
+};
+
+// 接続テスト結果 → 表示。Rust から受け取る status / errorKind を固定文言へ写像し、
+// APIキー・生エラー文は画面へ出さない（セキュリティ詳細設計書 §8.6）。
+// 特定 Provider 専用の分岐は持たず、未知の値・Provider未確定は安全側の「接続失敗」に倒す。
+const mapAiConnectionTestResult = (
+  result: AiProviderConnectionTestResult
+): AiConnectionTestView => {
+  if (result.status === "available") {
+    return { tone: "success", message: "利用可能です", recommendMock: false };
+  }
+  if (result.errorKind === "api_key_missing") {
+    return {
+      tone: "warning",
+      message: "APIキーが未設定です",
+      recommendMock: result.provider === "gemini",
+    };
+  }
+  if (
+    result.status === "not_implemented" ||
+    result.errorKind === "provider_not_implemented"
+  ) {
+    return {
+      tone: "warning",
+      message: "未対応のAIプロバイダーです",
+      recommendMock: false,
+    };
+  }
+  return {
+    tone: "warning",
+    message: "接続に失敗しました",
+    recommendMock: false,
+  };
+};
+
+// command 自体が reject した場合（通常は起きない）も、生エラーを出さず接続失敗として表示する。
+const aiConnectionTestFailedView: AiConnectionTestView = {
+  tone: "warning",
+  message: "接続に失敗しました",
+  recommendMock: false,
+};
+
 // Sub Components
 function SettingRow({
   label,
@@ -466,6 +516,13 @@ export default function SettingsScreen({
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  const [isTestingAi, setIsTestingAi] = React.useState(false);
+  const [aiTestView, setAiTestView] =
+    React.useState<AiConnectionTestView | null>(null);
+  const [aiTestUnavailableInPreview, setAiTestUnavailableInPreview] =
+    React.useState(false);
+  // state 更新前の連打でも二重実行しないよう、同期的に参照できる ref でも実行中を保持する。
+  const isTestingAiRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
 
   const { toast } = useToast();
@@ -688,6 +745,45 @@ export default function SettingsScreen({
       });
     } finally {
       setResetDialogOpen(false);
+    }
+  };
+
+  // AI接続テスト（画面詳細設計書 SCR-003 §7.5 / §7.8）。Rust 側は保存済み設定の Provider を確認するため、
+  // 画面上の未保存の選択は反映されない（UI にその旨を明記する）。失敗してもアプリは止めず警告表示のみ。
+  const handleTestAiProvider = async () => {
+    if (isTestingAiRef.current) {
+      return;
+    }
+    isTestingAiRef.current = true;
+    setIsTestingAi(true);
+    setAiTestView(null);
+    setAiTestUnavailableInPreview(false);
+
+    try {
+      const result = await testAiProvider();
+      if (!isMountedRef.current) {
+        return;
+      }
+      if (!result) {
+        setAiTestUnavailableInPreview(true);
+        return;
+      }
+      setAiTestView(mapAiConnectionTestResult(result));
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 調査用に種別だけ残す（生エラー文は画面へ出さない）。
+      console.error(
+        "Failed to test AI provider via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAiTestView(aiConnectionTestFailedView);
+    } finally {
+      isTestingAiRef.current = false;
+      if (isMountedRef.current) {
+        setIsTestingAi(false);
+      }
     }
   };
 
@@ -1068,6 +1164,49 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
+                  <div className="py-3 border-b border-border/50">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm text-foreground">AI接続テスト</span>
+                        <span className="text-xs text-muted-foreground">
+                          保存済みの設定でテストします（未保存の変更は反映されません）
+                        </span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleTestAiProvider()}
+                        disabled={isTestingAi}
+                        aria-busy={isTestingAi}
+                      >
+                        {isTestingAi ? "テスト中…" : "接続テスト"}
+                      </Button>
+                    </div>
+                    {/* 結果は固定文言のみ表示（APIキー・生エラー文は出さない）。 */}
+                    <div role="status" aria-live="polite" data-testid="ai-connection-test-result">
+                      {aiTestView && (
+                        <div
+                          className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
+                            aiTestView.tone === "success"
+                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green)]"
+                              : "border-amber-300 bg-amber-50 text-amber-800"
+                          }`}
+                        >
+                          <p>{aiTestView.message}</p>
+                          {aiTestView.recommendMock && (
+                            <p className="mt-1">
+                              Gemini を使うにはAPIキーの設定が必要です。キーを設定するまでは <strong>MockProvider</strong> の利用をおすすめします。
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      {aiTestUnavailableInPreview && (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          接続テストはアプリ内でのみ実行できます。
+                        </p>
+                      )}
+                    </div>
+                  </div>
                   <SettingRow label="解説の詳しさ">
                     <Select
                       value={settings.ai.explanationDetail}

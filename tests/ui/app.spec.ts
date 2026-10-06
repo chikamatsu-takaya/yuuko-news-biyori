@@ -2371,6 +2371,84 @@ test("settings AI section does not expose an API key input", async ({ page }) =>
   await expect(page.getByRole("textbox")).toHaveCount(0);
 });
 
+// AI接続テスト結果を差し替える（test_ai_provider のモック戻り値）。
+const setAiTestResult = (page: Page, result: Record<string, unknown>) =>
+  page.addInitScript((value) => {
+    (window as unknown as Record<string, unknown>).__E2E_AI_TEST_RESULT__ =
+      value;
+  }, result);
+
+const aiTestResultRegion = (page: Page) =>
+  page.getByTestId("ai-connection-test-result");
+
+test("settings AI connection test shows 利用可能 and blocks double clicks while running", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AI_TEST_DELAY_MS__ =
+      500;
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByText("保存済みの設定でテストします")).toBeVisible();
+
+  const button = page.getByRole("button", { name: "接続テスト" });
+  await button.click();
+  // 実行中は無効化され、再押下しても command は1回しか呼ばれない。
+  const running = page.getByRole("button", { name: "テスト中…" });
+  await expect(running).toBeDisabled();
+  await running.click({ force: true });
+
+  await expect(aiTestResultRegion(page)).toContainText("利用可能です");
+  await expect(button).toBeEnabled();
+  expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
+  await expect(aiTestResultRegion(page)).not.toContainText("MockProvider");
+});
+
+test("settings AI connection test shows APIキー未設定 with a MockProvider recommendation for Gemini", async ({
+  page,
+}) => {
+  await setAiTestResult(page, {
+    provider: "gemini",
+    checkedProvider: "gemini",
+    status: "unavailable",
+    errorKind: "api_key_missing",
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  await page.getByRole("button", { name: "接続テスト" }).click();
+
+  const region = aiTestResultRegion(page);
+  await expect(region).toContainText("APIキーが未設定です");
+  await expect(region).toContainText("MockProvider");
+  // 秘密情報・生エラーを扱う欄は出さない。
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+});
+
+test("settings AI connection test shows 接続失敗 without raw error text", async ({
+  page,
+}) => {
+  await setAiTestResult(page, {
+    provider: "gemini",
+    checkedProvider: "gemini",
+    status: "unavailable",
+    errorKind: "unauthorized",
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  await page.getByRole("button", { name: "接続テスト" }).click();
+
+  const region = aiTestResultRegion(page);
+  await expect(region).toContainText("接続に失敗しました");
+  // 固定文言のみ。エラー種別名やキー未設定の案内は出さない。
+  await expect(region).not.toContainText("unauthorized");
+  await expect(region).not.toContainText("APIキー");
+});
+
 // 通知ありモック（request_yuuko_notification → notified:true）を有効化する。
 async function enableNotificationCandidate(page: Page) {
   await page.addInitScript(() => {
@@ -3769,6 +3847,27 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
+          case "test_ai_provider": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const aiTestWin = window as any;
+            // 二重押下の検証用に呼び出し回数を数え、任意で応答を遅延させる。
+            aiTestWin.__E2E_AI_TEST_CALL_COUNT__ =
+              (aiTestWin.__E2E_AI_TEST_CALL_COUNT__ || 0) + 1;
+            const delayMs = aiTestWin.__E2E_AI_TEST_DELAY_MS__;
+            if (typeof delayMs === "number") {
+              await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
+            return (
+              aiTestWin.__E2E_AI_TEST_RESULT__ ?? {
+                provider: "mock",
+                checkedProvider: "mock",
+                status: "available",
+                errorKind: null,
+                mockAvailable: true,
+              }
+            );
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "list_dictionary_entries":
             return [dictionaryEntry];
           case "explain_selected_term": {
