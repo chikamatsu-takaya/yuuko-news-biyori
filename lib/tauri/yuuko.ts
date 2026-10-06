@@ -93,7 +93,10 @@ export type NotificationReason =
   | "daily_limit"
   | "cooling_down"
   | "no_candidate"
-  | "outside_time_range";
+  | "outside_time_range"
+  // 全画面・プレゼン中（設計書 §5.2）/ 解除後 30〜180 秒の猶予中（§5.4）。
+  | "fullscreen"
+  | "fullscreen_grace";
 
 export type RequestYuukoNotificationResult = {
   notified: boolean;
