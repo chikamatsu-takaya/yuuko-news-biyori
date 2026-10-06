@@ -63,6 +63,44 @@ export const saveUserSettings = async (
   return invoke<CommandOk>("save_user_settings", { params: { settings } });
 };
 
+// AI接続テスト結果（Rust: domain/ai_connection.rs の AiProviderConnectionTestResult と一致させる）。
+// 状態・エラー種別は固定値のみで、APIキー・生エラー文・URL等は含まれない（セキュリティ詳細設計書 §8.6）。
+export type AiProviderConnectionStatus =
+  | "available"
+  | "unavailable"
+  | "not_implemented";
+
+export type AiProviderConnectionErrorKind =
+  | "api_key_missing"
+  | "network"
+  | "timeout"
+  | "unauthorized"
+  | "rate_limited"
+  | "failed_precondition"
+  | "invalid_response"
+  | "provider_not_implemented"
+  | "internal";
+
+export type AiProviderConnectionTestResult = {
+  // 設定読込失敗などで Provider を決定できない場合は null。
+  provider: AiProvider | null;
+  checkedProvider: AiProvider | null;
+  status: AiProviderConnectionStatus;
+  errorKind: AiProviderConnectionErrorKind | null;
+  mockAvailable: boolean;
+};
+
+// 保存済みの AI Provider 設定で接続確認する（引数なし: 画面上の未保存値は送らない）。
+// Rust 側は失敗も固定の結果DTOで返す設計。非Tauri（ブラウザプレビュー）では null を返す。
+export const testAiProvider =
+  async (): Promise<AiProviderConnectionTestResult | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<AiProviderConnectionTestResult>("test_ai_provider");
+  };
+
 // 設定を既定値へ初期化する。破壊的操作のため呼び出し側で確認を挟む（画面詳細設計書 SCR-003 §7.6）。
 // 非Tauri（ブラウザプレビュー）では null を返し、画面側はローカル表示のみ初期化する。
 export const resetUserSettings = async (): Promise<UserSettingsDto | null> => {
