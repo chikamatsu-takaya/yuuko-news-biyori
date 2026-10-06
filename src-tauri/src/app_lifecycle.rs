@@ -11,7 +11,7 @@ use tauri::{
     App, AppHandle, Manager, Runtime, Window, WindowEvent,
 };
 
-const MAIN_WINDOW_LABEL: &str = "main";
+pub const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "resident-tray";
 const SHOW_MENU_ID: &str = "resident-show-main-window";
 const QUIT_MENU_ID: &str = "resident-quit-application";
@@ -60,6 +60,15 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
         return;
     }
 
+    if should_hide_yuuko_window_on_focus(
+        window.label(),
+        matches!(event, WindowEvent::Focused(true)),
+    ) {
+        // メインが前面に戻ったらアプリ内通知へ一本化し、デスクトップ側と二重に見せない。
+        // active 通知は永続状態に残るため、アプリ内のスケジューラが拾い直して表示する。
+        hide_yuuko_window_for_main(window.app_handle());
+    }
+
     if !should_hide_on_close(
         window.label(),
         matches!(event, WindowEvent::CloseRequested { .. }),
@@ -92,8 +101,16 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         log::error!("メインウィンドウの再表示に失敗しました: {error}");
         return;
     }
+    // フォーカス取得に失敗しても Focused イベント頼みにせず、再表示時点で確実に隠す。
+    hide_yuuko_window_for_main(app);
     if let Err(error) = window.set_focus() {
         log::warn!("再表示したメインウィンドウへフォーカスできませんでした: {error}");
+    }
+}
+
+fn hide_yuuko_window_for_main<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = crate::yuuko_window::hide_yuuko_window(app) {
+        log::warn!("メイン表示に合わせてゆうこ用ウィンドウを隠せませんでした: {error}");
     }
 }
 
@@ -125,6 +142,10 @@ fn should_hide_on_close(
 
 fn should_close_yuuko_window(window_label: &str, is_destroyed: bool) -> bool {
     window_label == MAIN_WINDOW_LABEL && is_destroyed
+}
+
+fn should_hide_yuuko_window_on_focus(window_label: &str, is_focus_gained: bool) -> bool {
+    window_label == MAIN_WINDOW_LABEL && is_focus_gained
 }
 
 #[cfg(test)]
@@ -170,6 +191,17 @@ mod tests {
         // close-to-hide でメインを隠しただけでは破棄されないため、ゆうこ用ウィンドウは残す。
         assert!(!should_close_yuuko_window(MAIN_WINDOW_LABEL, false));
         assert!(!should_close_yuuko_window(
+            crate::yuuko_window::YUUKO_WINDOW_LABEL,
+            true
+        ));
+    }
+
+    #[test]
+    fn yuuko_window_is_hidden_when_main_window_gains_focus() {
+        assert!(should_hide_yuuko_window_on_focus(MAIN_WINDOW_LABEL, true));
+        assert!(!should_hide_yuuko_window_on_focus(MAIN_WINDOW_LABEL, false));
+        // ゆうこ用ウィンドウ自身のフォーカスでは隠さない（focusable=false だが念のため）。
+        assert!(!should_hide_yuuko_window_on_focus(
             crate::yuuko_window::YUUKO_WINDOW_LABEL,
             true
         ));

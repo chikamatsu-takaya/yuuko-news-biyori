@@ -8,6 +8,7 @@ mod repositories;
 mod services;
 mod state;
 mod util;
+mod yuuko_desktop_notifier;
 mod yuuko_window;
 
 use infra::allowlist::NetworkAllowlist;
@@ -89,6 +90,7 @@ pub fn run() {
                 article_service.clone(),
             );
             yuuko_service.initialize_default_if_missing()?;
+            let desktop_notifier_yuuko_service = yuuko_service.clone();
             app.manage(AppState {
                 ai_provider_service,
                 article_service,
@@ -102,6 +104,9 @@ pub fn run() {
 
             // 同じ低頻度スレッドでニュース取得と日次アーカイブ保守を確認する。
             news_scheduler.start();
+            // メイン非表示・最小化中だけゆうこ通知を判定する低頻度スレッド。ニュース取得の
+            // 待ち時間に通知判定が引きずられないよう、ニュース用スレッドとは分ける。
+            yuuko_desktop_notifier::start(app.handle().clone(), desktop_notifier_yuuko_service);
 
             log::info!(
                 "Backend initialized. storage_root={}",
