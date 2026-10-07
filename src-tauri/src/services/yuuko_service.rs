@@ -18,6 +18,7 @@ use crate::infra::fullscreen_detector::{
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::repositories::yuuko_state_repository::YuukoStateRepository;
 use crate::services::article_service::ArticleService;
+use crate::services::reward_service::RewardService;
 
 /// Clone しても全画面抑制の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
 /// 同じ猶予を見る。
@@ -26,6 +27,7 @@ pub struct YuukoService {
     settings_repository: SettingsRepository,
     yuuko_state_repository: YuukoStateRepository,
     article_service: ArticleService,
+    reward_service: RewardService,
     fullscreen_detector: Arc<dyn FullscreenDetector>,
     fullscreen_tracker: Arc<Mutex<FullscreenSuppressionTracker>>,
 }
@@ -35,11 +37,13 @@ impl YuukoService {
         settings_repository: SettingsRepository,
         yuuko_state_repository: YuukoStateRepository,
         article_service: ArticleService,
+        reward_service: RewardService,
     ) -> Self {
         Self {
             settings_repository,
             yuuko_state_repository,
             article_service,
+            reward_service,
             fullscreen_detector: Arc::new(SystemFullscreenDetector),
             fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
         }
@@ -163,14 +167,59 @@ impl YuukoService {
         }
     }
 
+    /// ランク報酬を確認済みにする（確認 command は confirm_rank_up_reward に一本化・D35）。
+    ///
+    /// 正は rewards.json の未確認一覧。ゆうこ通知状態の reward_notification（旧経路）に同じ ID が
+    /// 残っていれば併せて消し、"reward_pending" でニュース通知が止まり続けないようにする。
+    /// どちらにも未確認として無い ID しか無ければ、従来どおり Validation エラーを返す。
     pub fn confirm_rank_up_reward(
         &self,
         params: ConfirmRankUpRewardParams,
     ) -> Result<ConfirmRankUpRewardResult, AppError> {
+        if params.reward_ids.is_empty() {
+            return Err(AppError::Validation(
+                "rewardIds must contain at least one item".to_string(),
+            ));
+        }
+        if params.reward_ids.iter().any(|id| id.trim().is_empty()) {
+            return Err(AppError::Validation(
+                "rewardIds must not contain empty values".to_string(),
+            ));
+        }
+
+        let outcome = self.reward_service.confirm_rewards(&params.reward_ids)?;
+        let mut confirmed_reward_ids = outcome.confirmed_reward_ids;
+        let mut remaining_pending_reward_ids = outcome.remaining_pending_reward_ids;
+
         let mut state = self.yuuko_state_repository.load_or_default()?;
-        let result = state.confirm_rank_up_reward(&params.reward_ids)?;
-        self.yuuko_state_repository.save(&state)?;
-        Ok(result)
+        if state.reward_notification.is_some() {
+            // 旧経路で一致が無い場合のエラーは無視する（rewards.json 側で確認できていればよい）。
+            if let Ok(legacy) = state.confirm_rank_up_reward(&params.reward_ids) {
+                self.yuuko_state_repository.save(&state)?;
+                for id in legacy.confirmed_reward_ids {
+                    if !confirmed_reward_ids.contains(&id) {
+                        confirmed_reward_ids.push(id);
+                    }
+                }
+                for id in legacy.remaining_pending_reward_ids {
+                    if !remaining_pending_reward_ids.contains(&id) {
+                        remaining_pending_reward_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        if confirmed_reward_ids.is_empty() {
+            return Err(AppError::Validation(
+                "none of rewardIds matched pending rewards".to_string(),
+            ));
+        }
+
+        Ok(ConfirmRankUpRewardResult {
+            ok: true,
+            confirmed_reward_ids,
+            remaining_pending_reward_ids,
+        })
     }
 
     /// ゆうこの通知を閉じる。pending 報酬は保持し、再通知抑制（クールタイム）を設定する。
@@ -318,6 +367,8 @@ mod tests {
     use crate::domain::settings::{PersistedSettings, WorkTimeRange};
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
+    use crate::repositories::friendship_repository::FriendshipRepository;
+    use crate::repositories::reward_repository::RewardRepository;
     use chrono::{Duration, Local, Timelike};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -368,10 +419,16 @@ mod tests {
         let article_repository = ArticleRepository::new(&paths);
         let article_service = ArticleService::new(article_repository.clone());
         let fullscreen = Arc::new(FakeFullscreenDetector(Mutex::new(FullscreenStatus::Free)));
+        let reward_service = RewardService::new(
+            RewardRepository::new(&paths),
+            FriendshipRepository::new(&paths),
+            settings_repository.clone(),
+        );
         let service = YuukoService::new(
             settings_repository.clone(),
             yuuko_state_repository.clone(),
             article_service,
+            reward_service,
         )
         .with_fullscreen_detector(fullscreen.clone());
 
@@ -906,5 +963,84 @@ mod tests {
         assert_eq!(result.state.preview_short_summary, expected);
         let current = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(current.preview_short_summary, expected);
+    }
+
+    /// 累計 `total` の friendship.json を保存する（ランクは累計から導出）。
+    fn save_friendship_total(ctx: &ServiceContext, total: u32) {
+        let mut state = crate::domain::friendship::FriendshipState {
+            total_points: total,
+            ..Default::default()
+        };
+        state.normalize_rank_from_total();
+        FriendshipRepository::new(&AppPaths::new(ctx.root.clone()))
+            .save(&state)
+            .unwrap();
+    }
+
+    fn reward_ids(values: &[&str]) -> ConfirmRankUpRewardParams {
+        ConfirmRankUpRewardParams {
+            reward_ids: values.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn confirm_rank_up_reward_confirms_pending_rewards_in_rewards_json() {
+        let ctx = make_context();
+        // 未確認が無ければ従来どおりエラー。
+        assert!(ctx
+            .service
+            .confirm_rank_up_reward(reward_ids(&["theme_001"]))
+            .is_err());
+        assert!(ctx.service.confirm_rank_up_reward(reward_ids(&[])).is_err());
+        assert!(ctx
+            .service
+            .confirm_rank_up_reward(reward_ids(&[" "]))
+            .is_err());
+
+        // Rank7 相当（累計 160pt）→ テーマ①②が未確認で解放される。
+        save_friendship_total(&ctx, 160);
+        let result = ctx
+            .service
+            .confirm_rank_up_reward(reward_ids(&["theme_001"]))
+            .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.confirmed_reward_ids, vec!["theme_001".to_string()]);
+        assert_eq!(
+            result.remaining_pending_reward_ids,
+            vec!["theme_002".to_string()]
+        );
+
+        // 保存され、再読込しても確認済みのまま（未解放にも戻らない）。
+        let saved = RewardRepository::new(&AppPaths::new(ctx.root.clone()))
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.pending_reward_ids(), vec!["theme_002".to_string()]);
+        assert!(saved.is_unlocked("theme_001"));
+
+        // 未確認の報酬があってもゆうこ通知状態には積まない（"reward_pending" でニュース通知を止めない）。
+        let state = ctx.service.get_yuuko_notification_state().unwrap();
+        assert!(state.reward_notification.is_none());
+    }
+
+    #[test]
+    fn confirm_rank_up_reward_also_clears_legacy_yuuko_reward_notification() {
+        let ctx = make_context();
+        let mut state = ctx.yuuko_state_repository.load_or_default().unwrap();
+        state.reward_notification = Some(crate::domain::yuuko::RewardNotificationState {
+            pending: true,
+            rank: 3,
+            reward_ids: vec!["legacy-1".to_string()],
+            message: "m".to_string(),
+        });
+        ctx.yuuko_state_repository.save(&state).unwrap();
+
+        let result = ctx
+            .service
+            .confirm_rank_up_reward(reward_ids(&["legacy-1"]))
+            .unwrap();
+        assert_eq!(result.confirmed_reward_ids, vec!["legacy-1".to_string()]);
+        let saved = ctx.yuuko_state_repository.load_or_default().unwrap();
+        assert!(saved.reward_notification.is_none());
     }
 }
