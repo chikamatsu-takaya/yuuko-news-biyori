@@ -64,6 +64,12 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useToast } from "@/hooks/use-toast";
+import { TimeInput } from "@/components/settings/TimeInput";
+import {
+  GENRE_OPTIONS,
+  NICKNAME_MAX_LENGTH,
+  normalizeWorkTimeRanges,
+} from "@/lib/settings-options";
 
 // Types
 type NotificationSettings = {
@@ -221,25 +227,6 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   aiProvider: "mock",
   maxDailyRecommendations: 10,
   autoSummaryEnabled: false,
-};
-
-const defaultWorkTimeRanges: WorkTimeRangeDto[] = [
-  { start: "09:00", end: "12:00" },
-  { start: "13:00", end: "18:00" },
-];
-
-const normalizeWorkTimeRanges = (
-  ranges?: WorkTimeRangeDto[]
-): WorkTimeRangeDto[] => {
-  if (!ranges || ranges.length === 0) {
-    return defaultWorkTimeRanges.map((range) => ({ ...range }));
-  }
-
-  if (ranges.length === 1) {
-    return [{ ...ranges[0] }];
-  }
-
-  return ranges.slice(0, 2).map((range) => ({ ...range }));
 };
 
 // 通知頻度ドロップダウンの表示文言と、永続値 notifyMaxPerDay（= notification.maxPerDay）の対応。
@@ -452,47 +439,6 @@ function SettingRow({
         )}
       </div>
       <div>{children}</div>
-    </div>
-  );
-}
-
-function TimeInput({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 bg-white border border-border rounded-lg px-3 py-1.5">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-12 text-sm text-center bg-transparent outline-none"
-      />
-      <div className="flex flex-col">
-        <button
-          className="text-muted-foreground hover:text-foreground text-[10px] leading-none"
-          onClick={() => {
-            const [h, m] = value.split(":").map(Number);
-            const newH = (h + 1) % 24;
-            onChange(`${String(newH).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-          }}
-        >
-          ▲
-        </button>
-        <button
-          className="text-muted-foreground hover:text-foreground text-[10px] leading-none"
-          onClick={() => {
-            const [h, m] = value.split(":").map(Number);
-            const newH = (h - 1 + 24) % 24;
-            onChange(`${String(newH).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-          }}
-        >
-          ▼
-        </button>
-      </div>
     </div>
   );
 }
@@ -1431,10 +1377,10 @@ export default function SettingsScreen({
                         onChange={(e) => updateUser("nickname", e.target.value)}
                         placeholder="ゆうこに呼んでほしい名前"
                         className="w-48"
-                        maxLength={32}
+                        maxLength={NICKNAME_MAX_LENGTH}
                       />
                       <span className="text-[10px] text-muted-foreground">
-                        32文字以内
+                        {NICKNAME_MAX_LENGTH}文字以内
                       </span>
                     </div>
                   </SettingRow>
@@ -1462,15 +1408,7 @@ export default function SettingsScreen({
                       <span className="text-sm text-foreground">関心のあるジャンル</span>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                      {[
-                        "IT",
-                        "AI",
-                        "開発",
-                        "セキュリティ",
-                        "クラウド",
-                        "ビジネス",
-                        "ガジェット",
-                      ].map((genre) => (
+                      {GENRE_OPTIONS.map((genre) => (
                         <div key={genre} className="flex items-center space-x-2">
                           <Checkbox
                             id={`genre-${genre}`}

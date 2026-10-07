@@ -4330,6 +4330,216 @@ test("does not retain the Leaving state, so the processed news balloon is not re
   );
 });
 
+// 初回起動時の案内（オンボーディング、SCR-010 / 判断台帳 D59）。
+// Rust 側で新規作成した設定だけが onboardingCompleted=false になる前提で、その時だけ重ねて表示する。
+const onboardingDialog = (page: Page) =>
+  page.getByRole("dialog", { name: "はじめまして、ゆうこだよ！" });
+
+const readSavedSettingsRecord = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown>).__E2E_SAVED_USER_SETTINGS__ as
+        | Record<string, unknown>
+        | undefined
+  );
+
+const setOnboardingPending = (page: Page) =>
+  page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      onboardingCompleted: false,
+      genres: ["AI", "IT"],
+      nickname: "",
+    };
+  });
+
+test("onboarding overlay saves the chosen settings with はじめる", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  // 設定画面と同じ選択肢・範囲（ジャンル7種、通知時間帯2レンジ、ニックネーム32文字）。
+  await dialog.getByLabel("IT", { exact: true }).click();
+  await dialog.getByLabel("セキュリティ", { exact: true }).click();
+  await expect(dialog.getByRole("checkbox")).toHaveCount(7);
+  await expect(dialog.getByLabel("ニックネーム")).toHaveAttribute("maxlength", "32");
+  await dialog.getByRole("textbox").nth(1).fill("10:00");
+  await dialog.getByLabel("ニックネーム").fill("ゆうちゃん");
+
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  const saved = await readSavedSettingsRecord(page);
+  expect(saved).toMatchObject({
+    onboardingCompleted: true,
+    genres: ["AI", "セキュリティ"],
+    nickname: "ゆうちゃん",
+    workTimeRanges: [
+      { start: "09:00", end: "10:00" },
+      { start: "13:00", end: "18:00" },
+    ],
+    notifyStartTime: "09:00",
+    notifyEndTime: "18:00",
+  });
+  // 自動起動を選んでいなければ OS 登録は変えない。
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
+test("onboarding overlay skip saves only completion and keeps defaults", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  // スキップ前に変えた値は保存しない（既定値のまま開始する）。
+  await dialog.getByLabel("ニックネーム").fill("保存しない名前");
+  await dialog.getByRole("button", { name: "スキップ" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  const saved = await readSavedSettingsRecord(page);
+  expect(saved).toMatchObject({
+    onboardingCompleted: true,
+    genres: ["AI", "IT"],
+    nickname: "",
+    workTimeRanges: [
+      { start: "09:00", end: "12:00" },
+      { start: "13:00", end: "18:00" },
+    ],
+  });
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+});
+
+test("onboarding overlay stays open with a toast when saving fails", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SAVE_USER_SETTINGS_FAIL__ =
+      true;
+  });
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(page.getByText("保存できなかったよ", { exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "スキップ" })).toBeEnabled();
+
+  // Esc では閉じない（完了かスキップのどちらかを記録する）。
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+});
+
+test("onboarding overlay pauses notification candidates until it is closed", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  // 案内の表示中は request_yuuko_notification を呼ばない（背面で通知枠を消費しない）。
+  const countWhileOpen = await readCount(
+    page,
+    "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"
+  );
+  await page.waitForTimeout(1000);
+  expect(
+    await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")
+  ).toBe(countWhileOpen);
+
+  // 閉じると候補生成が再開する。
+  await dialog.getByRole("button", { name: "スキップ" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThan(countWhileOpen);
+});
+
+test("onboarding overlay rejects malformed times before saving", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("textbox").first().fill("9時");
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(page.getByText("時刻の形を確認してね", { exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect(await readSavedSettingsRecord(page)).toBeUndefined();
+});
+
+test("onboarding overlay is not shown for completed or legacy settings", async ({
+  page,
+}) => {
+  // 既定のモック設定は onboardingCompleted を持たない（旧形式の設定ファイル相当）。
+  await openHome(page);
+  // 設定の読み込み（非同期）を待ってから、案内が出ていないことを確認する。
+  await page.waitForTimeout(500);
+  await expect(onboardingDialog(page)).toHaveCount(0);
+
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      onboardingCompleted: true,
+    };
+  });
+  await openHome(page);
+  await page.waitForTimeout(500);
+  await expect(onboardingDialog(page)).toHaveCount(0);
+  expect(await readSavedSettingsRecord(page)).toBeUndefined();
+});
+
+test("onboarding overlay autostart opt-in calls set_autostart_enabled", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("switch", { name: "PC起動時の自動起動" }).click();
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await expect.poll(() => readAutostartSetCalls(page)).toEqual([true]);
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+  });
+});
+
+test("onboarding overlay completes even when autostart fails", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_WRITE_FAIL__ =
+      true;
+  });
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("switch", { name: "PC起動時の自動起動" }).click();
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByText("自動起動をオンにできなかったよ", { exact: true })
+  ).toBeVisible();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+  });
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -4671,6 +4881,13 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "save_user_settings":
+            // 保存失敗テスト用（初回起動の案内で、失敗時に閉じずに残ることを確認する）。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_SAVE_USER_SETTINGS_FAIL__
+            ) {
+              throw new Error("E2E settings save failure");
+            }
             (
               window as typeof window & {
                 __E2E_SAVED_USER_SETTINGS__?: unknown;

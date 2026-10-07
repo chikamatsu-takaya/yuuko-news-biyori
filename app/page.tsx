@@ -11,6 +11,7 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
+import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 import { useNewsListRevision } from "@/hooks/use-news-list-revision";
 import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
@@ -164,12 +165,16 @@ export default function Page() {
   // 既に表示中の通知は閲覧画面へ移っても消さず、無視扱いにもしない（ユーザー操作か自動退場に任せる）。
   // onStateChange は handleSchedulerStateChange 経由で、終端操作中の再表示を抑止する。
   const isReadingArticle = currentScreen === "reader" && Boolean(selectedArticleId);
+  // 初回起動の案内を表示中は、通知を操作できず枠だけ消費するため候補生成と表示を止める。
+  const [isOnboardingOpen, setIsOnboardingOpen] = React.useState(false);
   useNotificationScheduler({
     generateCandidates: true,
-    canGenerateCandidates: canGenerateNotificationCandidates({
-      isWindowVisible,
-      isReadingArticle,
-    }),
+    canGenerateCandidates:
+      !isOnboardingOpen &&
+      canGenerateNotificationCandidates({
+        isWindowVisible,
+        isReadingArticle,
+      }),
     onStateChange: handleSchedulerStateChange,
   });
 
@@ -478,7 +483,7 @@ export default function Page() {
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
           （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
           scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}
-      {isWindowVisible && displayedNotification && (
+      {isWindowVisible && !isOnboardingOpen && displayedNotification && (
         <YuukoInAppNotification
           // 記事が変わったら段階(view)をリセットするため key で作り直す。
           key={activeNotificationArticleId ?? "yuuko-notification"}
@@ -500,6 +505,8 @@ export default function Page() {
           onExited={handleNotificationExited}
         />
       )}
+      {/* 初回起動時だけ案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
+      <OnboardingOverlay onOpenChange={setIsOnboardingOpen} />
     </>
   );
 }
