@@ -606,7 +606,7 @@ export default function SettingsScreen({
       setIsSettingsCorrupt(corrupt);
       setLoadNotice(
         corrupt
-          ? "設定ファイルが壊れていて、読み込めなかったよ。「設定を初期化する」で初期状態に戻せるよ（今の設定ファイルは上書きされるよ）。"
+          ? "設定ファイルが壊れていて、読み込めなかったよ。「設定を初期化する」で初期状態に戻せるよ（壊れたファイルは別名でコピーを1つだけ残すよ）。"
           : "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
       setLoadNoticeKind("error");
@@ -1686,7 +1686,10 @@ export default function SettingsScreen({
           <AlertDialogHeader>
             <AlertDialogTitle>設定を初期状態に戻しますか？</AlertDialogTitle>
             <AlertDialogDescription>
-              通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。
+              {/* 破損時は Rust 側が壊れたファイルを別名で1つだけ残してから初期化する（判断台帳 D57）。パスは出さない。 */}
+              {isSettingsCorrupt
+                ? "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。壊れた設定ファイルは、初期化の前に別名でコピーを1つだけ残します。"
+                : "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。"}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
