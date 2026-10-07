@@ -38,7 +38,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -98,11 +97,6 @@ type AiSettings = {
   providerStatus: string;
 };
 
-type DataManagementState = {
-  usedStorageGb: number;
-  maxStorageGb: number;
-};
-
 type UserProfileSettingsState = {
   nickname: string;
 };
@@ -121,7 +115,6 @@ type SettingsState = {
   yuuko: YuukoDisplaySettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
-  data: DataManagementState;
   user: UserProfileSettingsState;
   news: NewsSettingsState;
   integration: IntegrationSettings;
@@ -181,10 +174,6 @@ const mockSettings: SettingsState = {
     priorityMode: "バランス重視",
     provider: "mock",
     providerStatus: "MockProviderで動作中",
-  },
-  data: {
-    usedStorageGb: 1.24,
-    maxStorageGb: 5.0,
   },
   user: {
     nickname: "",
@@ -871,9 +860,6 @@ export default function SettingsScreen({
     }
   };
 
-  const storagePercentage =
-    (settings.data.usedStorageGb / settings.data.maxStorageGb) * 100;
-
   // テーマ現在値（読み取り専用表示）。未読込・空文字は安全な既定 "default" を表示する。
   const currentThemeId = backendSettings?.selectedThemeId?.trim() || "default";
 
@@ -1476,7 +1462,7 @@ export default function SettingsScreen({
                     データ管理は準備中だよ
                   </h3>
                   <p className="text-xs text-muted-foreground max-w-[280px]">
-                    データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
+                    データ管理機能は今後のアップデートで追加される予定です。ストレージの使用状況の表示も準備中だよ。
                   </p>
                 </CardContent>
               </Card>
@@ -1577,21 +1563,10 @@ export default function SettingsScreen({
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                保存データの使用状況を確認できます。
+              {/* 実容量の取得は新しい command が要るため別途判断。固定の仮値は実値と誤認されるので出さない（SCR-003）。 */}
+              <p className="text-xs text-muted-foreground" data-testid="storage-status-placeholder">
+                保存データの使用状況の表示は準備中です。
               </p>
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    使用中のストレージ
-                  </span>
-                </div>
-                <div className="text-lg font-bold text-foreground mb-1">
-                  {settings.data.usedStorageGb.toFixed(2)} GB /{" "}
-                  {settings.data.maxStorageGb.toFixed(2)} GB
-                </div>
-                <Progress value={storagePercentage} className="h-2" />
-              </div>
               <div className="space-y-2">
                 {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
                 <Button
