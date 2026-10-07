@@ -84,31 +84,12 @@ impl SettingsRepository {
         }
     }
 
-    /// 破損した設定ファイルの退避先（`settings.json` → 同じフォルダの `settings.corrupt.json`）。
-    /// 名前を固定にして常に1世代だけ残す（判断台帳 D57 / セキュリティ詳細設計書 §11.4）。
-    fn corrupt_backup_path(&self) -> PathBuf {
-        self.settings_path.with_extension("corrupt.json")
-    }
-
-    /// 破損した設定ファイルを、初期化で上書きする前に別名でそのまま複製する。
-    /// 元ファイルは動かさない（初期化が失敗しても元のまま残すため）。
-    /// 一時ファイルへ複製してから差し替えるので、途中で失敗しても前回の退避ファイルは壊れない。
-    /// 失敗時は Err を返し、呼び出し側は初期化を中止する。
+    /// 破損した設定ファイルを、初期化で上書きする前に `settings.corrupt.json` へ1世代だけ複製する
+    /// （判断台帳 D57 / セキュリティ詳細設計書 §11.4）。
+    /// 元ファイルは動かさず、一時ファイル経由で差し替える。失敗時は Err を返し、呼び出し側は初期化を中止する。
+    /// 通知状態・友情ランク・報酬の保存ファイルと同じ共通処理を使う。
     pub fn backup_corrupt_file(&self) -> Result<(), AppError> {
-        let backup_path = self.corrupt_backup_path();
-        let temp_path = self.settings_path.with_extension("corrupt.json.tmp");
-
-        let result = std::fs::copy(&self.settings_path, &temp_path)
-            .and_then(|_| std::fs::rename(&temp_path, &backup_path));
-        if let Err(error) = result {
-            // 中身やフルパスはログへ出さない。
-            log::error!("Failed to back up corrupt settings file: {}", error.kind());
-            if temp_path.exists() {
-                let _ = std::fs::remove_file(&temp_path);
-            }
-            return Err(error.into());
-        }
-        Ok(())
+        super::corrupt_json::backup_corrupt_file(&self.settings_path, "settings")
     }
 
     fn restore_backup_if_primary_missing(&self) {

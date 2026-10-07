@@ -1069,10 +1069,10 @@ mod tests {
     #[test]
     fn detail_confirmation_succeeds_even_when_friendship_save_fails() {
         let ctx = make_context();
-        // 読めない friendship.json を置き、加算を必ず失敗させる。
+        // friendship.json の位置にディレクトリを置き、読み込み（IO エラー）で加算を必ず失敗させる。
+        // 壊れた JSON は退避・初期化で回復するため、ここでは回復しない IO エラーを使う。
         let friendship_path = AppPaths::new(ctx.root.clone()).friendship_path;
-        std::fs::create_dir_all(friendship_path.parent().unwrap()).unwrap();
-        std::fs::write(&friendship_path, "not json").unwrap();
+        std::fs::create_dir_all(&friendship_path).unwrap();
 
         save_balloon_notification(&ctx, "article-a");
         ctx.service.handle_yuuko_clicked().unwrap();
@@ -1080,10 +1080,7 @@ mod tests {
 
         assert_eq!(left.state, YuukoResidentState::Leaving);
         assert_eq!(load_state(&ctx).state, YuukoResidentState::Leaving);
-        assert_eq!(
-            std::fs::read_to_string(&friendship_path).unwrap(),
-            "not json"
-        );
+        assert!(friendship_path.is_dir());
     }
 
     /// 累計 `total` の friendship.json を保存する（ランクは累計から導出）。

@@ -28,8 +28,15 @@ impl FriendshipRepository {
             return Ok(FriendshipState::default());
         }
 
-        let raw = std::fs::read_to_string(&self.state_path)?;
-        let mut state = serde_json::from_str::<FriendshipState>(&raw)?;
+        // JSON として読めない場合は `friendship.corrupt.json` へ退避して既定値（ランク・ポイント初期値）で
+        // 作り直す（セキュリティ詳細設計書 §11.4）。退避した元データは手動復旧用に残る。
+        // 退避に失敗したら上書きせずエラーを返す（ポイントを失う前に止める）。
+        let mut state =
+            super::corrupt_json::read_json_or_reset(&self.state_path, "friendship", || {
+                let state = FriendshipState::default();
+                self.save(&state)?;
+                Ok(state)
+            })?;
         // 旧仕様（ランク0開始・flat 100pt）で保存されたデータも、累計ポイントから
         // 段階制のランクへ計算し直して読み込む（保存形式は変えず、読み込みのたびに導出する）。
         state.normalize_rank_from_total();
@@ -162,6 +169,58 @@ mod tests {
         assert_eq!(state.total_points, 120);
         assert_eq!(state.daily_points.points, 5);
         assert!(state.pending_reward_ids.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_file_is_backed_up_and_reset_to_initial_rank() {
+        let (repo, root) = temp_repo();
+        std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
+        std::fs::write(&repo.state_path, r#"{"version":1,"totalPoints":"#).unwrap();
+
+        // 読めない friendship.json は退避してから初期値で作り直す（§11.4）。
+        let state = repo.load_or_default().unwrap();
+        let default = FriendshipState::default();
+        assert_eq!(state.current_rank, default.current_rank);
+        assert_eq!(state.total_points, 0);
+        let backup = root.join("user").join("friendship.corrupt.json");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            r#"{"version":1,"totalPoints":"#
+        );
+        // 作り直したファイルは次回そのまま読める。
+        assert_eq!(repo.load_or_default().unwrap().total_points, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_file_is_kept_when_backup_fails() {
+        let (repo, root) = temp_repo();
+        std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
+        std::fs::write(&repo.state_path, "{not json").unwrap();
+        std::fs::create_dir_all(root.join("user").join("friendship.corrupt.json")).unwrap();
+
+        // 退避できない間はポイントを消さない（上書きせずエラー）。
+        assert!(repo.load_or_default().is_err());
+        assert_eq!(std::fs::read(&repo.state_path).unwrap(), b"{not json");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn utf8_bom_is_tolerated_without_reset() {
+        // 手編集で付く BOM だけで初期化されないこと（ポイントを保持する）。
+        let (repo, root) = temp_repo();
+        std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
+        let json = r#"{"version":1,"currentRank":1,"currentPoints":0,"totalPoints":120,
+            "dailyPoints":{"date":"2026-06-08","points":5,"limit":25},"rankMax":20}"#;
+        std::fs::write(&repo.state_path, format!("\u{feff}{json}")).unwrap();
+
+        let state = repo.load_or_default().unwrap();
+        assert_eq!(state.total_points, 120);
+        assert!(!root.join("user").join("friendship.corrupt.json").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
