@@ -10,7 +10,11 @@
 //! - 失敗した記事は他の記事の後ろへ回して再試行し、合計 `MAX_ATTEMPTS` 回失敗したら
 //!   再起動まで `Failed` のままにする（他の記事の処理は止めない）。
 //! - 外部AIの利用枠を使い切らないよう、設定 `ai.autoSummaryEnabled` が有効なときだけ動く（既定は無効）。
-//!   MockProvider でも有効時は動かす（手動の要約生成と同じく Mock 結果を保存する既存の流れに合わせる）。
+//! - 設定の AI プロバイダが Mock のときは動かない（判断台帳 D56）。固定応答で記事を「要約済み」に
+//!   してしまうと、後で実AIを使えるようになっても自動では作り直されないため。
+//! - 実AIの失敗・利用枠超過・検証落ちで Mock の代替出力になった場合は保存せず失敗として扱い、
+//!   再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56）。
+//! - 1回の投入はおすすめ順の上位 `maxDailyRecommendations` 件まで（常駐負荷を抑えるため、D56）。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
 //!   一時ファイルへ書き切ってから tmp→bak→本体 の順に差し替える方式（article_repository の
 //!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
@@ -25,6 +29,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::domain::article::{ArticleDetailDto, ArticleSummaryDto, SummaryState};
+use crate::domain::settings::{AiProvider, PersistedSettings};
 use crate::domain::summary::GenerateArticleSummaryParams;
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
@@ -236,12 +241,16 @@ impl AutoSummaryQueue {
     /// 未要約の記事をおすすめ順で待機列へ並べ直す。ニュース取得の完了後・起動時・設定保存後に呼ぶ。
     /// 無効時は待機列を空にする（処理中の1件はそのまま終わらせる）。
     pub fn enqueue_unsummarized(&self) {
-        if !self.is_enabled() {
+        let Some(settings) = self.load_settings() else {
+            self.core.clear_pending();
+            return;
+        };
+        if !is_auto_summary_allowed(&settings) {
             self.core.clear_pending();
             return;
         }
         match self.article_service.list_unsummarized_article_ids() {
-            Ok(ids) => self.core.replace_pending(ids),
+            Ok(ids) => self.core.replace_pending(cap_for_enqueue(ids, &settings)),
             Err(error) => log::warn!("failed to list unsummarized articles: {error}"),
         }
     }
@@ -264,7 +273,7 @@ impl AutoSummaryQueue {
                 |article_id| self.is_summarized(article_id),
                 |article_id| {
                     self.summary_service
-                        .generate_article_summary(GenerateArticleSummaryParams {
+                        .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
                             article_id: article_id.to_string(),
                         })
                         .map(|_| ())
@@ -320,14 +329,32 @@ impl AutoSummaryQueue {
 
     /// 設定が読めないときは自動要約しない（外部AIの利用枠を守る安全側）。
     fn is_enabled(&self) -> bool {
+        self.load_settings()
+            .is_some_and(|settings| is_auto_summary_allowed(&settings))
+    }
+
+    fn load_settings(&self) -> Option<PersistedSettings> {
         match self.settings_repository.load_or_default() {
-            Ok(settings) => settings.ai.auto_summary_enabled,
+            Ok(settings) => Some(settings),
             Err(error) => {
                 log::warn!("failed to load settings for auto summary: {error}");
-                false
+                None
             }
         }
     }
+}
+
+/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが Mock 以外のときだけ true。
+/// 画面へ渡す値と同じ解釈（未知の値は Mock）にするため DTO 変換を通す。
+fn is_auto_summary_allowed(settings: &PersistedSettings) -> bool {
+    settings.ai.auto_summary_enabled && settings.to_dto().ai_provider != AiProvider::Mock
+}
+
+/// 1回の投入件数を、おすすめ順の上位 `maxDailyRecommendations` 件に絞る（常駐負荷を抑えるため）。
+/// 件数と処理間隔は、ローカルLLM導入時に見直す。
+fn cap_for_enqueue(ordered_ids: Vec<String>, settings: &PersistedSettings) -> Vec<String> {
+    let limit = settings.news.max_daily_recommendations as usize;
+    ordered_ids.into_iter().take(limit).collect()
 }
 
 /// 記事ファイルの状態（Done/None）とキューの状態を合わせる。保存済みなら常に Done。
@@ -401,6 +428,40 @@ mod tests {
         assert_eq!(outcome, StepOutcome::Skipped("done-elsewhere".to_string()));
         assert_eq!(core.state_of("done-elsewhere"), SummaryState::None);
         assert_eq!(drain(&core, |_| Ok(())), ids(&["next"]));
+    }
+
+    fn settings_with(enabled: bool, provider: &str, max: u32) -> PersistedSettings {
+        let mut settings = PersistedSettings::default();
+        settings.ai.auto_summary_enabled = enabled;
+        settings.ai.provider = provider.to_string();
+        settings.news.max_daily_recommendations = max;
+        settings
+    }
+
+    #[test]
+    fn auto_summary_runs_only_when_enabled_with_a_real_ai_provider() {
+        assert!(is_auto_summary_allowed(&settings_with(true, "gemini", 10)));
+        assert!(!is_auto_summary_allowed(&settings_with(
+            false, "gemini", 10
+        )));
+        // Mock（未知の値も Mock 扱い）では有効でも動かない。
+        assert!(!is_auto_summary_allowed(&settings_with(true, "mock", 10)));
+        assert!(!is_auto_summary_allowed(&settings_with(
+            true, "unknown", 10
+        )));
+    }
+
+    #[test]
+    fn enqueue_is_capped_to_max_daily_recommendations_in_order() {
+        let ordered = ids(&["a", "b", "c", "d"]);
+        assert_eq!(
+            cap_for_enqueue(ordered.clone(), &settings_with(true, "gemini", 2)),
+            ids(&["a", "b"])
+        );
+        assert_eq!(
+            cap_for_enqueue(ordered.clone(), &settings_with(true, "gemini", 10)),
+            ordered
+        );
     }
 
     #[test]
