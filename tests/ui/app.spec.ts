@@ -3549,6 +3549,66 @@ test("news-refreshed event while the window is hidden does not generate candidat
   );
 });
 
+test("news list reloads on the next re-show after a scheduled news refresh", async ({
+  page,
+}) => {
+  // 表示中で起動し、マウント時の一覧読み込みを済ませる。
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const initialLoads = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // 取得完了イベントが届いても、表示中の一覧はその場では読み直さない（操作の邪魔をしない）。
+  await expect.poll(() => emitNewsRefreshed(page)).toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    initialLoads
+  );
+
+  // 次に非表示→表示へ戻ったとき、一覧を読み直す（マウント時と同じ読み込みが走る）。
+  await setVisible(false);
+  await setVisible(true);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(initialLoads);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await page.waitForTimeout(200);
+  const afterFirstReload = await readCount(
+    page,
+    "__E2E_RECOMMENDED_CALL_COUNT__"
+  );
+
+  // 取得完了がなければ、表示切替だけでは読み直さない。
+  await setVisible(false);
+  await setVisible(true);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    afterFirstReload
+  );
+
+  // 非表示中に届いた取得完了も、再表示の時点で反映する。
+  await setVisible(false);
+  await emitNewsRefreshed(page);
+  await setVisible(true);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(afterFirstReload);
+});
+
 test("does not generate candidates while reading an article and resumes after leaving the reader", async ({
   page,
 }) => {
@@ -4111,6 +4171,10 @@ async function installTauriMocks(page: Page) {
             ).__E2E_WINDOW_CLOSE_CALLED__ = true;
             return null;
           case "get_recommended_articles": {
+            // 一覧の読み直し回数の検証用に呼び出し回数を数える。
+            const recommendedCallWindow = window as unknown as Record<string, number>;
+            recommendedCallWindow.__E2E_RECOMMENDED_CALL_COUNT__ =
+              (recommendedCallWindow.__E2E_RECOMMENDED_CALL_COUNT__ || 0) + 1;
             // 件数制限テスト用: プール件数を設定すると limit を尊重して slice して返す。
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const recommendedPool = (window as any).__E2E_RECOMMENDED_POOL__;

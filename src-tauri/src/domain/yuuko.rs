@@ -538,7 +538,9 @@ fn is_within_notification_time_range(
     }
 }
 
-fn is_within_any_notification_time_range<'a>(
+/// 現在時刻（0時からの分）が通知の時間帯のいずれかに入っているか。
+/// ニュースの定期取得（news_scheduler）も「通知の時間帯内だけ取得する」判定に同じ規則を使う。
+pub(crate) fn is_within_any_notification_time_range<'a>(
     current_minutes: u32,
     time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> bool {
