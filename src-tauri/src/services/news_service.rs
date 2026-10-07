@@ -4,6 +4,7 @@
 //! フロー: 取得元読込 → feed_url 検証 → RSS取得 → 各記事URL検証 → 本文抽出 →
 //!         おすすめ採点 → 保存。重複排除（同一URL／同一出典・同一タイトル）は
 //!         本文取得より前に行い、既知記事への外部通信を発生させない。
+//!         1フィード・1回の取得で処理する新着は MAX_NEW_ITEMS_PER_FEED 件まで（重複排除後に数える）。
 //!
 //! セキュリティ方針:
 //! - news_sources.json は deny-by-default（空配列）。破損時は fail-close（Err）。
@@ -38,6 +39,40 @@ const ERROR_FEED_URL_REJECTED: &str = "feed_url_rejected";
 const ERROR_FEED_FETCH_FAILED: &str = "feed_fetch_failed";
 const ERROR_ARTICLE_URL_REJECTED: &str = "article_url_rejected";
 const ERROR_ARTICLE_FETCH_FAILED: &str = "article_fetch_failed";
+
+/// 1フィード・1回の取得で処理する新着記事（重複排除後）の上限。セキュリティ詳細設計書 §9.1。
+/// 記事ごとに HTML 取得（外部通信）と解析が走るため、巨大フィードでも1回の取得負荷を抑える
+/// （常駐負荷・AGENTS.md §2）。上限を超えた新着は保存せず、次回以降の取得で順に処理する。
+const MAX_NEW_ITEMS_PER_FEED: usize = 30;
+
+/// 1フィード内で処理する新着件数の上限管理。既知記事（重複）は数えず、フィードの並び順のまま
+/// 先頭から上限件数までを通す。上限を超えた件数は後でログに残すため数えておく。
+struct NewItemCap {
+    limit: usize,
+    admitted: usize,
+    deferred: usize,
+}
+
+impl NewItemCap {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            admitted: 0,
+            deferred: 0,
+        }
+    }
+
+    /// 新着1件を処理してよいか。重複排除を通過した item にだけ呼ぶ。
+    fn admit(&mut self) -> bool {
+        if self.admitted < self.limit {
+            self.admitted += 1;
+            true
+        } else {
+            self.deferred += 1;
+            false
+        }
+    }
+}
 
 /// 取得元1件（許可URLとジャンル）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,12 +282,18 @@ impl NewsService {
                 }
             };
 
+            let mut new_item_cap = NewItemCap::new(MAX_NEW_ITEMS_PER_FEED);
             for item in items {
                 fetched += 1;
                 let article_id = article_id_from_url(&item.article_url);
                 // 要件定義書 §7.2.4。URL検証・HTML本文取得（外部通信）より前に判定する。
                 // 定期取得では大半が既知記事になるため、スキップはログに残さない。
                 if dedupe_keys.is_duplicate(&article_id, &item.source_name, &item.title) {
+                    continue;
+                }
+                // 重複排除の後で数えるため、既知記事は上限を消費しない。超過分は保存も
+                // 重複キー登録もしないので、次回以降の取得で新着として処理される。
+                if !new_item_cap.admit() {
                     continue;
                 }
 
@@ -308,6 +349,13 @@ impl NewsService {
                     recommendation_score: score,
                     read_state: ArticleReadState::Unread,
                 });
+            }
+            if new_item_cap.deferred > 0 {
+                // URL は載せない（データ設計書 §16.4）。件数のみ記録する。
+                log::info!(
+                    "feed new-item limit ({MAX_NEW_ITEMS_PER_FEED}) reached; deferred {} items to a later refresh",
+                    new_item_cap.deferred
+                );
             }
         }
 
@@ -485,6 +533,72 @@ mod tests {
             kept,
             vec!["https://news.example.com/a", "https://other.example.com/c"]
         );
+    }
+
+    #[test]
+    fn new_item_cap_counts_only_new_items_and_keeps_feed_order() {
+        use crate::domain::article::ArticleDedupeKeys;
+
+        // refresh 内の判定順（is_duplicate → 上限判定 → 保存予定なら insert）を再現する。
+        // 既知記事が先頭に並んでいても上限を消費せず、新着だけがフィード順に上限件数まで通る。
+        let mut keys = ArticleDedupeKeys::default();
+        keys.insert(
+            article_id_from_url("https://news.example.com/known-0"),
+            "出典A",
+            "既知0",
+        );
+        keys.insert(
+            article_id_from_url("https://news.example.com/known-1"),
+            "出典A",
+            "既知1",
+        );
+
+        let mut items = vec![
+            (
+                "https://news.example.com/known-0".to_string(),
+                "既知0".to_string(),
+            ),
+            (
+                "https://news.example.com/known-1".to_string(),
+                "既知1".to_string(),
+            ),
+        ];
+        for index in 0..(MAX_NEW_ITEMS_PER_FEED + 5) {
+            items.push((
+                format!("https://news.example.com/new-{index}"),
+                format!("新着{index}"),
+            ));
+        }
+
+        let mut cap = NewItemCap::new(MAX_NEW_ITEMS_PER_FEED);
+        let mut kept = Vec::new();
+        for (url, title) in &items {
+            let article_id = article_id_from_url(url);
+            if keys.is_duplicate(&article_id, "出典A", title) {
+                continue;
+            }
+            if !cap.admit() {
+                continue;
+            }
+            keys.insert(article_id, "出典A", title);
+            kept.push(url.clone());
+        }
+
+        assert_eq!(kept.len(), MAX_NEW_ITEMS_PER_FEED);
+        assert_eq!(kept[0], "https://news.example.com/new-0");
+        assert_eq!(
+            kept[MAX_NEW_ITEMS_PER_FEED - 1],
+            format!(
+                "https://news.example.com/new-{}",
+                MAX_NEW_ITEMS_PER_FEED - 1
+            )
+        );
+        assert_eq!(cap.deferred, 5);
+    }
+
+    #[test]
+    fn new_item_cap_is_thirty() {
+        assert_eq!(MAX_NEW_ITEMS_PER_FEED, 30);
     }
 
     #[test]
