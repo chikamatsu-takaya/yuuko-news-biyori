@@ -37,9 +37,8 @@ pub struct RewardDefinition {
 
 /// 報酬マスタ（アプリ同梱）。
 ///
-/// §11.3 は同梱 JSON（resources/reward_master.json）を想定しているが、リソース同梱設定
-/// （tauri.conf.json）を変えずに済み、外部から書き換えられない値を正にできるため、バイナリに埋め込む。
-/// ID は §11.3 の命名（theme_001…）に合わせる。表示名は仮の名前で、実際の配色はテーマ設計タスクで決める。
+/// リソース同梱設定（tauri.conf.json）を変えずに済み、外部から書き換えられない値を正にできるため、
+/// 同梱 JSON ではなくバイナリに埋め込む（データ設計書 §11.3）。表示名は仮の名前で、実際の配色はテーマ設計タスクで決める。
 /// 呼び名は解放条件なし（2026-10-05 決定）のため報酬に含めない。
 /// ランク 10 の報酬枠は空けておく（中身は後で決める）。他のランクは当面ランクだけ上がる。
 pub const REWARD_MASTER: &[RewardDefinition] = &[
@@ -74,7 +73,7 @@ pub struct PendingReward {
 
 /// 永続化する報酬状態（`rewards/rewards.json`・§11.2）。
 ///
-/// §11.2 の `active`（適用中のテーマ等）は書かない。適用中テーマは既存の設定 `ui.themeId` が
+/// 適用中のテーマは持たない（§11.2・判断台帳 D51）。適用中テーマは既存の設定 `ui.themeId` が
 /// 保存・変更（save_user_settings）の正であり、ここにも持つと食い違いが起こり得るため。
 /// 未知のフィールドは読み込み時に無視する（将来 `active` 等が書かれていても読み込める）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
