@@ -25,8 +25,9 @@ impl FriendshipService {
     pub fn new(friendship_repository: FriendshipRepository, reward_service: RewardService) -> Self {
         Self {
             friendship_repository,
+            // 報酬側も friendship.json を読むため、同じロックを共有する（順序は friendship → reward）。
+            store_lock: reward_service.friendship_store_lock(),
             reward_service,
-            store_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -325,6 +326,33 @@ mod tests {
             .expect("rewards.json is written on rank up");
         assert_eq!(saved.unlocked_reward_ids, vec!["theme_001".to_string()]);
         assert_eq!(saved.pending_reward_ids(), vec!["theme_001".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reward_service_reads_friendship_under_the_same_lock() {
+        let (service, root) = temp_service();
+        assert!(Arc::ptr_eq(
+            &service.store_lock,
+            &service.reward_service.friendship_store_lock()
+        ));
+
+        // 友情側のロック保持中は、報酬側の friendship.json 読み込みが待たされる。
+        let guard = service.lock_store().unwrap();
+        let reward_service = service.reward_service.clone();
+        let handle = std::thread::spawn(move || reward_service.get_reward_state());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!handle.is_finished());
+        drop(guard);
+        assert!(handle.join().unwrap().is_ok());
+
+        // ランクアップ（friendship → reward の順でロック）でもデッドロックしない。
+        save_legacy_daily(&service, "2026-06-01", 24);
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")
+            .unwrap();
+        assert!(result.ranked_up);
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -27,6 +27,11 @@ pub struct RewardService {
     friendship_repository: FriendshipRepository,
     settings_repository: SettingsRepository,
     store_lock: Arc<Mutex<()>>,
+    /// friendship.json 用のロック。FriendshipService と同じものを共有する。
+    /// load_or_default の bak 復旧（存在確認→rename）が加算の保存と競合すると、新しい
+    /// friendship.json を古い bak で上書きしてポイントが巻き戻り得るため、読むときも必ず取る。
+    /// 取る順序は常に friendship → reward（デッドロック防止）。
+    friendship_lock: Arc<Mutex<()>>,
 }
 
 /// 確認処理の結果（確認済みにした ID と、まだ未確認の ID）。
@@ -47,13 +52,20 @@ impl RewardService {
             friendship_repository,
             settings_repository,
             store_lock: Arc::new(Mutex::new(())),
+            friendship_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// friendship.json 用の共有ロック。FriendshipService はこれを自分の store_lock として使う。
+    pub fn friendship_store_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.friendship_lock)
     }
 
     /// 報酬状態を返す（読み取り）。現ランクまでの未解放があればここで解放して保存する
     /// （既に高ランクの既存利用者への移行もこの経路で冪等に行う）。
     /// 保存に失敗しても表示は止めない（次回の取得・ランクアップで再度追いつく）。
     pub fn get_reward_state(&self) -> Result<RewardStateDto, AppError> {
+        let _friendship_guard = self.lock_friendship()?;
         let _guard = self.lock_store()?;
         let friendship = self.friendship_repository.load_or_default()?;
         let (state, _, changed) = self.load_synced(&friendship, &now_timestamp())?;
@@ -67,6 +79,8 @@ impl RewardService {
 
     /// 友情ランクに合わせて報酬を解放し、変更があれば保存する。新たに解放した ID を返す。
     /// ポイント加算でのランクアップ時と起動時に呼ぶ。
+    /// 呼び出し側が friendship ロックを保持している前提（ここでは reward ロックだけを取る。
+    /// std の Mutex は再入できないため、ここで friendship ロックを取り直すと自己デッドロックになる）。
     pub fn sync_with_friendship(
         &self,
         friendship: &FriendshipState,
@@ -81,10 +95,10 @@ impl RewardService {
 
     /// 起動時に現在のランクへ追いつかせる。失敗してもアプリ起動は止めない（取得時に再試行される）。
     pub fn sync_on_startup(&self) {
-        let result = self
-            .friendship_repository
-            .load_or_default()
-            .and_then(|friendship| self.sync_with_friendship(&friendship));
+        let result = self.lock_friendship().and_then(|_friendship_guard| {
+            let friendship = self.friendship_repository.load_or_default()?;
+            self.sync_with_friendship(&friendship)
+        });
         if let Err(error) = result {
             log::warn!("起動時の報酬状態の更新に失敗しました: {error}");
         }
@@ -96,6 +110,7 @@ impl RewardService {
         &self,
         reward_ids: &[String],
     ) -> Result<ConfirmRewardsOutcome, AppError> {
+        let _friendship_guard = self.lock_friendship()?;
         let _guard = self.lock_store()?;
         let friendship = self.friendship_repository.load_or_default()?;
         let (mut state, _, changed) = self.load_synced(&friendship, &now_timestamp())?;
@@ -151,6 +166,12 @@ impl RewardService {
                 DEFAULT_THEME_ID.to_string()
             }
         }
+    }
+
+    fn lock_friendship(&self) -> Result<MutexGuard<'_, ()>, AppError> {
+        self.friendship_lock
+            .lock()
+            .map_err(|_| AppError::Io(std::io::Error::other("friendship store lock was poisoned")))
     }
 
     fn lock_store(&self) -> Result<MutexGuard<'_, ()>, AppError> {
