@@ -35,6 +35,18 @@ atom_syndication = "0.12"
 # 月次アーカイブのZIP圧縮（データ設計書 §14）。std/既存に ZIP 作成機能が無いため追加。
 # C依存を避けるため default-features は無効化し、純Rustの deflate のみ有効化（常駐負荷・ビルド軽量化）。
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# PC起動時の自動起動（要件定義書 §7.1.6、判断台帳 D31・2026-10-05 承認）。OS ごとの登録先
+# （Windows: HKCU Run キー / macOS: LaunchAgent / Linux: autostart .desktop）を自前実装しないため。
+# MIT / Apache-2.0。常駐負荷なし（ON/OFF・状態確認の command 呼び出し時だけ OS へアクセス）。
+# React へは capability を付与せず Rust の command からだけ使う。2.6 以降は MSRV 1.90 で
+# CI の Rust 1.88 と合わないため 2.5 系に固定する。
+tauri-plugin-autostart = "~2.5.1"
+# 二重起動の防止（判断台帳 D50・2026-10-07 承認）。自動起動中に手動でもう一度起動したとき、
+# 2つ目のプロセスは終了し、既存のメイン画面を前面へ出す。OS ごとの排他（Windows: 名前付き
+# ミューテックス＋メッセージ通知）を自前実装しないため。公式プラグイン・MIT / Apache-2.0。
+# 常駐負荷は起動時の排他取得と、2つ目の起動時の通知受信のみ（ポーリングなし）。capability 不要。
+# 2.5 以降は MSRV 1.90 で CI の Rust 1.88 と合わないため 2.4 系に固定する。
+tauri-plugin-single-instance = "~2.4.1"
 
 # 全画面アプリ・プレゼン中のゆうこ通知抑制（ゆうこ登場・通知挙動 詳細設計書 §5.2、2026-10-05 承認）。
 # SHQueryUserNotificationState を呼ぶためだけに Windows 限定で使う。tauri 経由で同じ 0.61 が

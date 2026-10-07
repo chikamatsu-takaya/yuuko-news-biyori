@@ -110,3 +110,24 @@ export const resetUserSettings = async (): Promise<UserSettingsDto | null> => {
 
   return invoke<UserSettingsDto>("reset_user_settings");
 };
+
+// PC起動時の自動起動（要件定義書 §7.1.6）。OS の登録状態を正とし、Rust 側 command からだけ操作する
+// （React には自動起動プラグインの権限を渡さない）。非Tauri（ブラウザプレビュー）では null を返す。
+export const getAutostartEnabled = async (): Promise<boolean | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<boolean>("get_autostart_enabled");
+};
+
+// 自動起動を登録・解除し、反映後の OS 状態を返す。設定画面の保存ボタンを待たずに即時反映する。
+export const setAutostartEnabled = async (
+  enabled: boolean
+): Promise<boolean | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<boolean>("set_autostart_enabled", { params: { enabled } });
+};
