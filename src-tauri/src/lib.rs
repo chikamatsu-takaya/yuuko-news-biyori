@@ -34,6 +34,11 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 二重起動の防止。公式の案内どおり最初に登録し、2つ目のプロセスが他の初期化
+        // （保存領域・スケジューラ・トレイ）を始める前に終了させる。
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            app_lifecycle::handle_second_instance(app, args);
+        }))
         .on_window_event(|window, event| {
             app_lifecycle::handle_window_event(window, event);
         })

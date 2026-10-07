@@ -41,6 +41,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # React へは capability を付与せず Rust の command からだけ使う。2.6 以降は MSRV 1.90 で
 # CI の Rust 1.88 と合わないため 2.5 系に固定する。
 tauri-plugin-autostart = "~2.5.1"
+# 二重起動の防止（判断台帳 D50・2026-10-07 承認）。自動起動中に手動でもう一度起動したとき、
+# 2つ目のプロセスは終了し、既存のメイン画面を前面へ出す。OS ごとの排他（Windows: 名前付き
+# ミューテックス＋メッセージ通知）を自前実装しないため。公式プラグイン・MIT / Apache-2.0。
+# 常駐負荷は起動時の排他取得と、2つ目の起動時の通知受信のみ（ポーリングなし）。capability 不要。
+# 2.5 以降は MSRV 1.90 で CI の Rust 1.88 と合わないため 2.4 系に固定する。
+tauri-plugin-single-instance = "~2.4.1"
 
 # 全画面アプリ・プレゼン中のゆうこ通知抑制（ゆうこ登場・通知挙動 詳細設計書 §5.2、2026-10-05 承認）。
 # SHQueryUserNotificationState を呼ぶためだけに Windows 限定で使う。tauri 経由で同じ 0.61 が

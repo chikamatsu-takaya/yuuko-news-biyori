@@ -128,6 +128,17 @@ fn should_start_hidden(resident_ready: bool, launched_by_autostart: bool) -> boo
     resident_ready && launched_by_autostart
 }
 
+/// 2つ目の起動を受けたときの処理。利用者が手動で起動した場合は既存のメイン画面を前面へ出す。
+/// OS の自動起動が既に起動中のアプリへ重なった場合（--autostart 付き）は、待機中の画面を
+/// 勝手に開かないよう何もしない。
+pub(crate) fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, args: Vec<String>) {
+    if is_autostart_launch(args.into_iter().map(OsString::from)) {
+        log::info!("自動起動による2つ目の起動を受けたため、画面は表示しません");
+        return;
+    }
+    show_main_window(app);
+}
+
 /// メインウィンドウを最小化解除・表示・前面化する。トレイの「画面を開く」と、
 /// ゆうこ用ウィンドウの「詳しく見る」（yuuko_desktop_notifier）で同じ手順を使う。
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
