@@ -768,6 +768,10 @@ export default function SettingsScreen({
   };
 
   const handleSave = async () => {
+    // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
+    if (isUpdatingAutostartRef.current) {
+      return;
+    }
     try {
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
@@ -796,6 +800,10 @@ export default function SettingsScreen({
   // リセットは破壊的操作のため確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
+    // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
+    if (isUpdatingAutostartRef.current) {
+      return;
+    }
     try {
       const dto = await resetUserSettings();
       if (dto) {
@@ -1641,6 +1649,7 @@ export default function SettingsScreen({
           <Button
             className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
             onClick={handleSave}
+            disabled={isUpdatingAutostart}
           >
             <Check className="w-4 h-4" />
             保存する
