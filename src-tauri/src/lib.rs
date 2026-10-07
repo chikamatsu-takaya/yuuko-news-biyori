@@ -220,5 +220,7 @@ fn register_log_plugin(app: &tauri::App) {
         .plugin(infra::app_logging::build_log_plugin(&policy, &app_data_dir))
     {
         eprintln!("ログプラグインを初期化できないため、ログなしで起動します: {error}");
+        return;
     }
+    infra::app_logging::install_panic_location_hook();
 }

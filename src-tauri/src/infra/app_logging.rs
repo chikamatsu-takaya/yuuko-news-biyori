@@ -24,6 +24,19 @@ pub const RELEASE_LOG_MAX_FILE_BYTES: u128 = 1024 * 1024;
 /// プラグインの `KeepSome(n)` は「書き込み中を除く退避ファイル数」を n に保つ仕様。
 pub const RELEASE_LOG_KEEP_ROTATED_FILES: usize = 4;
 
+/// 自クレートのログ target の根（`module_path!()` のクレート直下と同じ。lib 名 `app_lib`）。
+/// 配布ビルドのファイルには、この target 配下のログだけを書く。
+pub const APP_LOG_TARGET_ROOT: &str = env!("CARGO_CRATE_NAME");
+
+/// 自クレートが出したログかを target で判定する。
+/// 依存（tauri / wry / reqwest など）の警告は URL やパスなど制御できない文字列を含みうるため、
+/// 配布ビルドのファイルには残さない。
+pub fn is_app_log_target(target: &str) -> bool {
+    target
+        .strip_prefix(APP_LOG_TARGET_ROOT)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
 /// ビルド種別ごとのログ方針。テストで配布/開発の差を確認できるよう値として切り出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogPolicy {
@@ -72,16 +85,35 @@ pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> 
         } => tauri_plugin_log::Builder::default()
             // 配布版はコンソールを持たないため、ファイルだけへ出す。
             .clear_targets()
-            .target(Target::new(TargetKind::Folder {
-                path: app_data_dir.join(relative_dir),
-                file_name: Some((*file_stem).to_string()),
-            }))
+            .target(
+                Target::new(TargetKind::Folder {
+                    path: app_data_dir.join(relative_dir),
+                    file_name: Some((*file_stem).to_string()),
+                })
+                .filter(|metadata| is_app_log_target(metadata.target())),
+            )
             .level(*level)
             .max_file_size(*max_file_bytes)
             // KeepSome(0) はプラグイン内部で桁あふれするため、最低1を保証する。
             .rotation_strategy(RotationStrategy::KeepSome((*keep_rotated_files).max(1)))
             .build(),
     }
+}
+
+/// パニック発生箇所（ファイル:行）だけをエラーログへ残すフックを入れる。
+/// ペイロードは外部由来の文字列を含みうるため記録しない。既存のフック（開発時の標準エラー出力など）は
+/// そのまま呼び、従来の動きを保つ。ロガー登録後に1回だけ呼ぶ前提。
+pub fn install_panic_location_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        // 配布ビルドのファイルは自クレートの target だけを通すため、target を明示する。
+        log::error!(target: APP_LOG_TARGET_ROOT, "panic occurred at {location}");
+        previous(info);
+    }));
 }
 
 #[cfg(test)]
@@ -120,5 +152,18 @@ mod tests {
         assert!(keep_rotated_files >= 1);
         // 書き込み中のファイルを含めて最大5世代。
         assert_eq!(keep_rotated_files + 1, 5);
+    }
+
+    #[test]
+    fn app_log_target_accepts_only_this_crate() {
+        assert_eq!(APP_LOG_TARGET_ROOT, "app_lib");
+        assert_eq!(module_path!(), "app_lib::infra::app_logging::tests");
+        assert!(is_app_log_target("app_lib"));
+        assert!(is_app_log_target("app_lib::services::news_service"));
+        assert!(is_app_log_target(module_path!()));
+        assert!(!is_app_log_target("app_library::x"));
+        assert!(!is_app_log_target("tauri::manager"));
+        assert!(!is_app_log_target("reqwest::connect"));
+        assert!(!is_app_log_target(""));
     }
 }
