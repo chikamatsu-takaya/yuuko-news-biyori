@@ -27,6 +27,29 @@ pub fn is_archive_candidate(
     }
 }
 
+/// 同一出典・同一タイトルの重複判定で比べる既存記事の期間（日数）。D58（2026-10-07）。
+/// 毎日同じタイトルで配信される記事（定例コラム等）を取りこぼさないよう、タイトル側の判定は
+/// 直近この日数以内に取得（取得日時がなければ公開日時）された既存記事とだけ比べる。
+/// URL（article_id）側の判定には期間を設けない。
+pub const TITLE_DEDUPE_WINDOW_DAYS: i64 = 7;
+
+/// 既存記事を「同一出典・同一タイトル」の比較対象に含めるか（純粋関数・I/Oなし）。
+///
+/// 基準時刻は `fetched_at`、解釈できなければ `published_at` を使う。どちらもRFC3339として
+/// 解釈できない場合は比較対象に含めない（D58 の目的は同一タイトル記事の取りこぼし防止であり、
+/// 時期不明の記事で新しい記事を落とさないため。同一URLの判定は別途期間なしで行われる）。
+/// 基準時刻が `now` より未来（時計ずれ等）の場合は直近とみなして含める。
+pub fn is_within_title_dedupe_window(
+    fetched_at: &str,
+    published_at: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    match parse_rfc3339_utc(fetched_at).or_else(|| parse_rfc3339_utc(published_at)) {
+        Some(at) => at >= now - Duration::days(TITLE_DEDUPE_WINDOW_DAYS),
+        None => false,
+    }
+}
+
 /// 取得時の重複判定に使う既存記事のキー集合（要件定義書 §7.2.4・純粋データ・I/Oなし）。
 ///
 /// - 同一 article_id（正規化URL由来）は重複。
@@ -34,6 +57,7 @@ pub fn is_archive_candidate(
 ///
 /// 1回の取得（refresh）につき1度だけ構築し、保存予定に加えた記事も `insert` で追記して、
 /// 同じ取得内の重複も弾く。タイトル類似度による判定は扱わない。
+/// 既存記事のタイトル側キーは `TITLE_DEDUPE_WINDOW_DAYS` 以内の記事だけを入れる（呼び出し側で絞る）。
 #[derive(Debug, Clone, Default)]
 pub struct ArticleDedupeKeys {
     article_ids: HashSet<String>,
@@ -388,9 +412,10 @@ impl RestoreArchivedArticleParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_archive_candidate, normalize_title_for_dedupe, ArticleDedupeKeys, ArticleHistoryFilter,
-        GetArticleDetailParams, GetRecommendedArticlesParams, ListArticleHistoryParams,
-        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
+        is_archive_candidate, is_within_title_dedupe_window, normalize_title_for_dedupe,
+        ArticleDedupeKeys, ArticleHistoryFilter, GetArticleDetailParams,
+        GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
+        UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
 
@@ -431,6 +456,52 @@ mod tests {
         let mut keys = ArticleDedupeKeys::default();
         keys.insert("news_a".to_string(), "出典A", " \u{3000} ");
         assert!(!keys.is_duplicate("news_b", "出典A", ""));
+    }
+
+    #[test]
+    fn title_dedupe_window_includes_only_last_seven_days() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        // 境界（ちょうど7日前）は含める。
+        assert!(is_within_title_dedupe_window(
+            "2026-09-30T12:00:00Z",
+            "",
+            now
+        ));
+        assert!(is_within_title_dedupe_window(
+            "2026-10-06T21:00:00+09:00",
+            "",
+            now
+        ));
+        // 7日を1秒でも過ぎたら比較対象外。
+        assert!(!is_within_title_dedupe_window(
+            "2026-09-30T11:59:59Z",
+            "2026-10-07T00:00:00Z",
+            now
+        ));
+        // 未来時刻（時計ずれ）は直近とみなす。
+        assert!(is_within_title_dedupe_window(
+            "2026-10-08T00:00:00Z",
+            "",
+            now
+        ));
+    }
+
+    #[test]
+    fn title_dedupe_window_falls_back_to_published_at_and_excludes_unknown_time() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        // 取得日時が解釈できなければ公開日時で判定する。
+        assert!(is_within_title_dedupe_window(
+            "",
+            "2026-10-05T00:00:00Z",
+            now
+        ));
+        assert!(!is_within_title_dedupe_window(
+            "不明",
+            "2026-09-01T00:00:00Z",
+            now
+        ));
+        // どちらも解釈できなければ比較対象に含めない。
+        assert!(!is_within_title_dedupe_window("", "1時間前", now));
     }
 
     #[test]
