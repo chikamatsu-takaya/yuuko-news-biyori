@@ -24,6 +24,7 @@ use reqwest::redirect::Policy;
 use serde_json::{json, Value};
 
 use super::allowlist::NetworkAllowlist;
+use super::http_body::declared_length_exceeds;
 use super::url_guard::{validate_url, UrlPurpose};
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -232,13 +233,6 @@ fn extract_google_error_status(body: &Value) -> Option<String> {
 /// AiProviderService::request_text の既存エラー経路で Mock フォールバックへ倒れる。
 fn body_limit_error() -> AppError {
     AppError::Parse("Gemini response body exceeded the receive size limit".to_string())
-}
-
-/// 宣言された Content-Length による早期拒否判定（純粋関数・テスト対象）。
-/// 宣言があり `max_bytes` を超える場合のみ true（本文を読み始める前に拒否してよい）。
-/// 宣言なし(None・chunked 等)は false を返し、実読み取り制限に委ねる。
-fn declared_length_exceeds(content_length: Option<u64>, max_bytes: usize) -> bool {
-    matches!(content_length, Some(len) if len > max_bytes as u64)
 }
 
 /// 任意の `Read` から本文を段階的に読み、`max_bytes` を超えたら本文を保持せず固定エラーにする。

@@ -6,6 +6,7 @@
 //! - resolved IPs must stay on public addresses before connecting
 //! - redirects are followed manually and every `Location` hop is re-validated
 //! - RSS payloads are converted into sanitized article candidates only
+//! - 受信本文は MAX_FEED_BODY_BYTES まで（超過は取得失敗）。タイトル・概要は文字数上限で切り詰める
 #![allow(dead_code)]
 
 use std::{
@@ -23,6 +24,7 @@ use url::{Host, Url};
 
 use super::{
     allowlist::NetworkAllowlist,
+    http_body::{read_async_response_body_capped, truncate_chars, BodyReadError},
     url_guard::{is_disallowed_ip_addr, validate_parsed_url, validate_url, UrlPurpose},
 };
 use crate::{error::AppError, paths::AppPaths};
@@ -30,6 +32,13 @@ use crate::{error::AppError, paths::AppPaths};
 const MAX_REDIRECTS: usize = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const RSS_USER_AGENT: &str = "yuuko-news-biyori/0.1";
+/// RSS / Atom 応答本文の受信バイト上限（4 MiB）。セキュリティ詳細設計書 §9.1。
+/// 一般的なフィードは数十〜数百 KiB のため十分な余裕を取りつつ、巨大応答の全量展開を防ぐ（常駐負荷・AGENTS.md §2）。
+pub(crate) const MAX_FEED_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// 保存するタイトルの最大文字数（Unicode 文字数）。セキュリティ詳細設計書 §15.2「長すぎる文字列を制限する」。
+pub(crate) const MAX_TITLE_CHARS: usize = 300;
+/// 保存する RSS 概要の最大文字数。記事抜粋の上限（html_fetcher の MAX_EXCERPT_CHARS = 2,000）に揃える。
+pub(crate) const MAX_SUMMARY_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RssItem {
@@ -73,7 +82,7 @@ impl RssClient {
         let mut visited = HashSet::from([current_url.to_string()]);
 
         for redirect_count in 0..=self.max_redirects {
-            let response = self.send_request(&current_url).await?;
+            let mut response = self.send_request(&current_url).await?;
             if response.status().is_redirection() {
                 if redirect_count == self.max_redirects {
                     return Err(AppError::Network(format!(
@@ -101,10 +110,11 @@ impl RssClient {
                 )));
             }
 
-            let body = response.bytes().await.map_err(|error| {
-                AppError::Network(format!("failed to read RSS response body: {error}"))
-            })?;
-            return Ok((current_url, body.to_vec()));
+            // 本文は受信上限付きで読む。超過はこのフィードの取得失敗として扱う（URL は載せない）。
+            let body = read_async_response_body_capped(&mut response, MAX_FEED_BODY_BYTES)
+                .await
+                .map_err(feed_body_error)?;
+            return Ok((current_url, body));
         }
 
         Err(AppError::Network(
@@ -135,6 +145,16 @@ impl RssClient {
         builder
             .build()
             .map_err(|error| AppError::Network(format!("failed to build RSS HTTP client: {error}")))
+    }
+}
+
+/// 本文読み取り失敗を固定文言の AppError にする（本文・URL・生のエラー文を含めない）。
+fn feed_body_error(error: BodyReadError) -> AppError {
+    match error {
+        BodyReadError::TooLarge => {
+            AppError::Network("RSS response body exceeded the receive size limit".to_string())
+        }
+        BodyReadError::Read => AppError::Network("failed to read RSS response body".to_string()),
     }
 }
 
@@ -340,14 +360,14 @@ fn map_atom_entry(
         Err(error) => return Err(error),
     };
 
-    let title = sanitize_plain_text(&entry.title().value).unwrap_or_else(|| article_url.clone());
+    let title = sanitize_title(&entry.title().value, &article_url);
 
     let summary = entry
         .summary()
         .map(|text| text.value.clone())
         .or_else(|| entry.content().and_then(|content| content.value.clone()))
         .as_deref()
-        .and_then(sanitize_html_fragment);
+        .and_then(sanitize_summary);
 
     let published_at = entry.published().map(|datetime| {
         datetime
@@ -448,12 +468,11 @@ fn map_feed_item(
         Err(error) => return Err(error),
     };
 
-    let title = sanitize_plain_text(item.title().unwrap_or_default())
-        .unwrap_or_else(|| article_url.clone());
+    let title = sanitize_title(item.title().unwrap_or_default(), &article_url);
     let summary = item
         .content()
         .or_else(|| item.description())
-        .and_then(sanitize_html_fragment);
+        .and_then(sanitize_summary);
     let published_at = item.pub_date().and_then(sanitize_plain_text);
 
     Ok(Some(RssItem {
@@ -467,6 +486,18 @@ fn map_feed_item(
 
 fn guid_permalink(guid: Option<&Guid>) -> Option<&str> {
     guid.and_then(|guid| guid.is_permalink().then_some(guid.value()))
+}
+
+/// タイトルをサニタイズし、MAX_TITLE_CHARS 文字以内に切り詰める（空なら記事URLで代替）。
+/// 重複判定と保存は同じ切り詰め後の値で行われる。
+fn sanitize_title(raw: &str, article_url: &str) -> String {
+    let title = sanitize_plain_text(raw).unwrap_or_else(|| article_url.to_string());
+    truncate_chars(&title, MAX_TITLE_CHARS)
+}
+
+/// 概要（HTML断片）をタグ除去・サニタイズし、MAX_SUMMARY_CHARS 文字以内に切り詰める。
+fn sanitize_summary(raw: &str) -> Option<String> {
+    sanitize_html_fragment(raw).map(|summary| truncate_chars(&summary, MAX_SUMMARY_CHARS))
 }
 
 fn sanitize_html_fragment(value: &str) -> Option<String> {
@@ -666,6 +697,105 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].article_url, "https://news.example.com/articles/42");
+    }
+
+    // 組み直した応答は Content-Length を持つため、ここでは読む前の早期拒否経路を確認する。
+    // Content-Length のない受信中の上限判定は http_body の append_chunk_capped 単体テストで確認する。
+    #[test]
+    fn rejects_feed_body_over_limit_as_fetch_failure() {
+        // 上限 + 1 バイトの本文は TooLarge になり、固定文言の取得失敗（URL・本文なし）へ変換される。
+        let body = vec![b'a'; MAX_FEED_BODY_BYTES + 1];
+        let mut response = Response::from(tauri::http::Response::new(body));
+        let error = tauri::async_runtime::block_on(read_async_response_body_capped(
+            &mut response,
+            MAX_FEED_BODY_BYTES,
+        ))
+        .expect_err("over-limit feed must be rejected");
+        assert_eq!(error, BodyReadError::TooLarge);
+        let message = feed_body_error(error).to_string();
+        assert!(message.contains("exceeded the receive size limit"));
+        assert!(!message.contains("http"));
+    }
+
+    #[test]
+    fn accepts_feed_body_at_limit() {
+        let body = vec![b'a'; MAX_FEED_BODY_BYTES];
+        let mut response = Response::from(tauri::http::Response::new(body));
+        let bytes = tauri::async_runtime::block_on(read_async_response_body_capped(
+            &mut response,
+            MAX_FEED_BODY_BYTES,
+        ))
+        .expect("body exactly at the limit must be accepted");
+        assert_eq!(bytes.len(), MAX_FEED_BODY_BYTES);
+    }
+
+    #[test]
+    fn feed_limits_are_the_agreed_values() {
+        assert_eq!(MAX_FEED_BODY_BYTES, 4 * 1024 * 1024);
+        assert_eq!(MAX_TITLE_CHARS, 300);
+        assert_eq!(MAX_SUMMARY_CHARS, 2_000);
+    }
+
+    #[test]
+    fn truncates_long_title_and_summary_by_chars() {
+        let feed_url = Url::parse("https://rss.example.com/feed.xml").unwrap();
+        let long_title = "題".repeat(MAX_TITLE_CHARS + 50);
+        let long_summary = "要".repeat(MAX_SUMMARY_CHARS + 50);
+        let feed = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Feed</title>
+    <link>https://rss.example.com/</link>
+    <description>test feed</description>
+    <item>
+      <title>{long_title}</title>
+      <link>https://news.example.com/articles/long</link>
+      <description>{long_summary}</description>
+    </item>
+    <item>
+      <title>短いタイトル</title>
+      <link>https://news.example.com/articles/short</link>
+      <description>短い概要</description>
+    </item>
+  </channel>
+</rss>"#
+        );
+        let items =
+            parse_feed_items(feed.as_bytes(), &feed_url, &allowlist()).expect("feed should parse");
+
+        assert_eq!(items[0].title.chars().count(), MAX_TITLE_CHARS);
+        assert!(items[0].title.ends_with("..."));
+        let summary = items[0].summary.as_deref().unwrap();
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert!(summary.ends_with("..."));
+        // 上限以内はそのまま。
+        assert_eq!(items[1].title, "短いタイトル");
+        assert_eq!(items[1].summary.as_deref(), Some("短い概要"));
+    }
+
+    #[test]
+    fn truncates_long_atom_title() {
+        let feed_url = Url::parse("https://rss.example.com/atom.xml").unwrap();
+        let long_title = "題".repeat(MAX_TITLE_CHARS + 1);
+        let feed = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>Example Atom</title>
+  <updated>2026-06-03T16:00:00Z</updated>
+  <entry>
+    <id>urn:example:long</id>
+    <title>{long_title}</title>
+    <link rel="alternate" href="https://news.example.com/articles/atom-long"/>
+    <updated>2026-06-03T16:00:00Z</updated>
+  </entry>
+</feed>"#
+        );
+        let items = parse_feed_items(feed.as_bytes(), &feed_url, &allowlist())
+            .expect("atom feed should parse");
+
+        assert_eq!(items[0].title.chars().count(), MAX_TITLE_CHARS);
     }
 
     #[test]
