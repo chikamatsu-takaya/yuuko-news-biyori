@@ -26,9 +26,16 @@ impl SettingsService {
         Ok(())
     }
 
+    /// 起動時に設定ファイルが無ければ既定値で作成する。
+    /// ここで新規作成する場合だけが「初回起動」なので、案内（オンボーディング）を未完了で記録する。
+    /// 既存ファイル（旧形式でフィールドが無いものを含む）は触らず、完了扱いのまま案内を出さない。
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
         if !self.repository.exists() {
-            let persisted = self.repository.load_or_default()?;
+            let mut persisted = self.repository.load_or_default()?;
+            // load_or_default は .bak から復元できた場合は既存設定を返す（その場合は既存ユーザー）。
+            if !self.repository.exists() {
+                persisted.ui.onboarding_completed = false;
+            }
             self.repository.save(&persisted)?;
         }
         Ok(())
@@ -41,17 +48,22 @@ impl SettingsService {
     /// （ここで OFF にすると OS 状態と設定値がずれる）。
     /// 設定ファイルが破損（JSON_ERROR）している場合は、上書きする前に別名で1世代だけ退避する。
     /// 退避に失敗したら初期化を中止し、元ファイルを残したままエラーを返す（判断台帳 D57）。
+    /// 初回起動の案内の完了状態も引き継ぐ（リセットで案内を再表示しない）。読めない場合は完了扱い。
     pub fn reset_user_settings(&self) -> Result<UserSettingsDto, AppError> {
-        let current_auto_start = match self.repository.load_or_default() {
-            Ok(persisted) => persisted.ui.auto_start_on_pc_boot,
+        let (current_auto_start, onboarding_completed) = match self.repository.load_or_default() {
+            Ok(persisted) => (
+                persisted.ui.auto_start_on_pc_boot,
+                persisted.ui.onboarding_completed,
+            ),
             Err(AppError::Json(_)) => {
                 self.repository.backup_corrupt_file()?;
-                false
+                (false, true)
             }
-            Err(_) => false,
+            Err(_) => (false, true),
         };
         let mut defaults = PersistedSettings::default();
         defaults.ui.auto_start_on_pc_boot = current_auto_start;
+        defaults.ui.onboarding_completed = onboarding_completed;
         self.repository.save(&defaults)?;
         Ok(defaults.to_dto())
     }
@@ -201,6 +213,100 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&backup);
+    }
+
+    #[test]
+    fn new_install_starts_with_onboarding_pending() {
+        // 設定ファイルが無い初回起動だけ、案内を未完了で作成する。
+        let (service, path) = temp_service();
+        service.initialize_default_if_missing().unwrap();
+        assert_eq!(
+            service.get_user_settings().unwrap().onboarding_completed,
+            Some(false)
+        );
+
+        // 2回目以降の起動（ファイルあり）では作り直さず、未完了のまま変えない。
+        service.initialize_default_if_missing().unwrap();
+        assert_eq!(
+            service.get_user_settings().unwrap().onboarding_completed,
+            Some(false)
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn existing_legacy_settings_file_is_not_treated_as_first_launch() {
+        // 旧形式の settings.json（ui.onboardingCompleted なし）がある既存ユーザーには案内を出さない。
+        let (service, path) = temp_service();
+        std::fs::write(&path, br#"{ "version": 1, "user": { "nickname": "old" } }"#).unwrap();
+
+        service.initialize_default_if_missing().unwrap();
+        let dto = service.get_user_settings().unwrap();
+        assert_eq!(dto.onboarding_completed, Some(true));
+        assert_eq!(dto.nickname, "old");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn completing_onboarding_saves_choices_and_survives_reset() {
+        let (service, path) = temp_service();
+        service.initialize_default_if_missing().unwrap();
+
+        // 案内の「はじめる」: 選んだ内容と完了を同じ保存で記録する。
+        let dto = UserSettingsDto {
+            genres: vec!["セキュリティ".to_string()],
+            nickname: "ゆう".to_string(),
+            onboarding_completed: Some(true),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        let saved = service.get_user_settings().unwrap();
+        assert_eq!(saved.onboarding_completed, Some(true));
+        assert_eq!(saved.genres, vec!["セキュリティ".to_string()]);
+        assert_eq!(saved.nickname, "ゆう");
+
+        // 設定画面からの保存（onboardingCompleted なし）でも完了状態は保たれる。
+        service
+            .save_user_settings(UserSettingsDto::default())
+            .unwrap();
+        assert_eq!(
+            service.get_user_settings().unwrap().onboarding_completed,
+            Some(true)
+        );
+
+        // リセットでは完了状態を引き継ぎ、案内を再表示しない。
+        let reset = service.reset_user_settings().unwrap();
+        assert_eq!(reset.onboarding_completed, Some(true));
+        assert_eq!(reset.nickname, "");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn reset_keeps_pending_onboarding_and_corrupt_reset_counts_as_completed() {
+        let (service, path) = temp_service();
+        service.initialize_default_if_missing().unwrap();
+        // 未完了のままリセットしても未完了を引き継ぐ（次回起動で案内を出す）。
+        assert_eq!(
+            service.reset_user_settings().unwrap().onboarding_completed,
+            Some(false)
+        );
+
+        // 破損ファイルからの初期化は既存ユーザーとみなし、完了扱いにする。
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        assert_eq!(
+            service.reset_user_settings().unwrap().onboarding_completed,
+            Some(true)
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+        let _ = std::fs::remove_file(path.with_extension("corrupt.json"));
     }
 
     #[test]

@@ -28,6 +28,9 @@ export type UserSettingsDto = {
   maxDailyRecommendations: number;
   // ニュース取得後の自動要約（既定は無効）。旧データでは欠落し得るため任意扱い。
   autoSummaryEnabled?: boolean;
+  // 初回起動時の案内を完了／スキップ済みか。読み込み時は常に返る（旧データは true 扱い）。
+  // 保存時は true のときだけ完了として記録され、未指定なら既存値のまま（設定画面の保存では送らない）。
+  onboardingCompleted?: boolean;
 };
 
 type CommandOk = {

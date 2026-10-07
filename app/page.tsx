@@ -11,6 +11,7 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
+import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 import { useNewsListRevision } from "@/hooks/use-news-list-revision";
 import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
@@ -500,6 +501,8 @@ export default function Page() {
           onExited={handleNotificationExited}
         />
       )}
+      {/* 初回起動時だけ案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
+      <OnboardingOverlay />
     </>
   );
 }

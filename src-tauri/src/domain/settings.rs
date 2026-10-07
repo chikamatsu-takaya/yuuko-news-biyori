@@ -86,6 +86,11 @@ pub struct UserSettingsDto {
     /// 旧画面・旧データとの互換のため、欠落時は false とする。
     #[serde(default)]
     pub auto_summary_enabled: bool,
+    /// 初回起動時の案内（オンボーディング）を完了／スキップ済みか（要件定義書 §7.1.1、判断台帳 D27 / D59）。
+    /// 読み込み時は常に Some を返す。保存時は Some(true) のときだけ完了として記録し、
+    /// 未指定（設定画面など案内と無関係な保存）や false では既存値を変えない（案内を再表示させないため）。
+    #[serde(default)]
+    pub onboarding_completed: Option<bool>,
 }
 
 impl Default for UserSettingsDto {
@@ -109,6 +114,7 @@ impl Default for UserSettingsDto {
             ai_provider: AiProvider::Mock,
             max_daily_recommendations: 10,
             auto_summary_enabled: false,
+            onboarding_completed: None,
         }
     }
 }
@@ -229,6 +235,7 @@ impl PersistedSettings {
             ai_provider: AiProvider::from_storage(&self.ai.provider),
             max_daily_recommendations: self.news.max_daily_recommendations,
             auto_summary_enabled: self.ai.auto_summary_enabled,
+            onboarding_completed: Some(self.ui.onboarding_completed),
         }
     }
 
@@ -255,6 +262,10 @@ impl PersistedSettings {
         self.ui.theme_id = dto.selected_theme_id;
         self.ui.tone_id = dto.selected_tone_id;
         self.ui.personality_id = dto.selected_personality_id;
+        // 案内の完了は一方向（未完了→完了）だけ反映する。false や未指定で未完了へ戻さない。
+        if dto.onboarding_completed == Some(true) {
+            self.ui.onboarding_completed = true;
+        }
         // auto_start_on_pc_boot は OS 登録状態の写しのため、通常保存では上書きしない。
         // 自動起動の ON/OFF は autostart command（autostart_service）からだけ変更する。
     }
@@ -420,6 +431,11 @@ pub struct UiSettings {
     pub yuuko_position: String,
     pub enable_light_animation: bool,
     pub auto_start_on_pc_boot: bool,
+    /// 初回起動時の案内を完了／スキップ済みか。
+    /// 既定（= 旧 settings.json にフィールドが無い場合）は true（完了扱い）にして、
+    /// 既存ユーザーには案内を出さない。未完了（false）で始まるのは、設定ファイルが無く
+    /// 新規作成する初回起動時だけ（`SettingsService::initialize_default_if_missing`）。
+    pub onboarding_completed: bool,
 }
 
 impl Default for UiSettings {
@@ -431,6 +447,7 @@ impl Default for UiSettings {
             yuuko_position: "bottom_center".to_string(),
             enable_light_animation: true,
             auto_start_on_pc_boot: false,
+            onboarding_completed: true,
         }
     }
 }
@@ -494,6 +511,51 @@ mod tests {
             .remove("autoSummaryEnabled");
         let dto: UserSettingsDto = serde_json::from_value(dto_json).unwrap();
         assert!(!dto.auto_summary_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_without_onboarding_field_are_treated_as_completed() {
+        // 既存ユーザーの settings.json（ui.onboardingCompleted なし / ui 自体なし）は完了扱い。
+        let without_field: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "themeId": "default" } }"#).unwrap();
+        assert!(without_field.ui.onboarding_completed);
+        let without_ui: PersistedSettings = serde_json::from_str(r#"{ "version": 1 }"#).unwrap();
+        assert!(without_ui.ui.onboarding_completed);
+        assert_eq!(without_ui.to_dto().onboarding_completed, Some(true));
+
+        let pending: PersistedSettings =
+            serde_json::from_str(r#"{ "ui": { "onboardingCompleted": false } }"#).unwrap();
+        assert_eq!(pending.to_dto().onboarding_completed, Some(false));
+    }
+
+    #[test]
+    fn onboarding_completion_is_only_recorded_one_way() {
+        let mut settings = PersistedSettings::default();
+        settings.ui.onboarding_completed = false;
+
+        // 案内と無関係な保存（未指定）や false では未完了のまま変えない。
+        settings.apply_from_dto(UserSettingsDto::default());
+        assert!(!settings.ui.onboarding_completed);
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(false),
+            ..UserSettingsDto::default()
+        });
+        assert!(!settings.ui.onboarding_completed);
+
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(true),
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ui.onboarding_completed);
+        let stored = serde_json::to_value(&settings).unwrap();
+        assert_eq!(stored["ui"]["onboardingCompleted"], true);
+
+        // 完了後に false を送っても未完了へ戻さない（案内を再表示しない）。
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(false),
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ui.onboarding_completed);
     }
 
     #[test]
