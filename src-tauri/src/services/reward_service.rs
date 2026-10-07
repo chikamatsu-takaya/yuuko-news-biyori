@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::Utc;
 
 use crate::domain::friendship::FriendshipState;
-use crate::domain::reward::{RewardStateDto, RewardsState, DEFAULT_THEME_ID};
+use crate::domain::reward::{find_reward, RewardStateDto, RewardsState, DEFAULT_THEME_ID};
 use crate::error::AppError;
 use crate::repositories::friendship_repository::FriendshipRepository;
 use crate::repositories::reward_repository::RewardRepository;
@@ -121,7 +121,12 @@ impl RewardService {
         }
         Ok(ConfirmRewardsOutcome {
             confirmed_reward_ids,
-            remaining_pending_reward_ids: state.pending_reward_ids(),
+            // UI へ返すため、マスタに存在する報酬だけに絞る（保存ファイル由来の未知 ID を流さない）。
+            remaining_pending_reward_ids: state
+                .pending_reward_ids()
+                .into_iter()
+                .filter(|id| find_reward(id).is_some())
+                .collect(),
         })
     }
 
