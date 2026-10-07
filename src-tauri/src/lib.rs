@@ -133,6 +133,7 @@ pub fn run() {
                 yuuko_state_repository,
                 article_service.clone(),
                 reward_service.clone(),
+                friendship_service.clone(),
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
