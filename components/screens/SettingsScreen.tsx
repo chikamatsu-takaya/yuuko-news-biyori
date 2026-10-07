@@ -42,6 +42,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   getAutostartEnabled,
   getUserSettings,
+  isSettingsCorruptError,
   saveUserSettings,
   setAutostartEnabled,
   resetUserSettings,
@@ -511,6 +512,8 @@ export default function SettingsScreen({
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  // 読み込み失敗が設定ファイル破損によるものか。破損時だけ「設定を初期化する」導線を出す（判断台帳 D28）。
+  const [isSettingsCorrupt, setIsSettingsCorrupt] = React.useState(false);
   const [isTestingAi, setIsTestingAi] = React.useState(false);
   const [aiTestView, setAiTestView] =
     React.useState<AiConnectionTestView | null>(null);
@@ -576,6 +579,7 @@ export default function SettingsScreen({
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
+    setIsSettingsCorrupt(false);
 
     try {
       const dto = await getUserSettings();
@@ -596,8 +600,14 @@ export default function SettingsScreen({
         return;
       }
       console.error("Failed to load settings from tauri command:", error);
+      // 破損時も自動では上書きしない。原因だけを固定文言で伝え、初期化はユーザー操作（確認ダイアログ経由）に任せる。
+      // 生エラー文・ファイルパスは画面へ出さない。
+      const corrupt = isSettingsCorruptError(error);
+      setIsSettingsCorrupt(corrupt);
       setLoadNotice(
-        "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+        corrupt
+          ? "設定ファイルが壊れていて、読み込めなかったよ。「設定を初期化する」で初期状態に戻せるよ（今の設定ファイルは上書きされるよ）。"
+          : "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
       setLoadNoticeKind("error");
     } finally {
@@ -808,6 +818,10 @@ export default function SettingsScreen({
         // 非Tauri（プレビュー）時は表示のみ初期化する。
         setSettings(mockSettings);
       }
+      // 初期化で読める設定ファイルになったため、読み込み失敗の表示は解除する。
+      setLoadNotice(null);
+      setLoadNoticeKind("info");
+      setIsSettingsCorrupt(false);
       toast({
         title: "設定をリセットしたよ",
         description: "すべての設定が初期状態に戻ったよ。",
@@ -963,15 +977,29 @@ export default function SettingsScreen({
                   {loadNotice}
                 </span>
                 {loadNoticeKind === "error" && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
-                    onClick={() => void loadSettings()}
-                    disabled={isLoading}
-                  >
-                    再試行
-                  </Button>
+                  <div className="flex shrink-0 gap-2 self-start sm:self-auto">
+                    {/* 破損時の初期化導線。既存のリセット確認ダイアログを開くだけで、直接は上書きしない。 */}
+                    {isSettingsCorrupt && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        onClick={() => setResetDialogOpen(true)}
+                        disabled={isLoading}
+                      >
+                        設定を初期化する
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                      onClick={() => void loadSettings()}
+                      disabled={isLoading}
+                    >
+                      再試行
+                    </Button>
+                  </div>
                 )}
               </AlertDescription>
             </Alert>

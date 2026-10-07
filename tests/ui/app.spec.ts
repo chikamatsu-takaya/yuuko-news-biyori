@@ -2536,6 +2536,82 @@ test("settings autostart read failure disables the toggle with fixed wording", a
   await expect(page.getByText("secret/path")).toHaveCount(0);
 });
 
+// 設定ファイル破損（JSON_ERROR）: 原因と「設定を初期化する」導線を出し、確認ダイアログ経由でだけ初期化する（判断台帳 D28）。
+test("settings corrupt file shows the reset path and resets to defaults after confirmation", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ =
+      "JSON_ERROR";
+  });
+  await openSettings(page);
+
+  const notice = page.getByRole("alert").filter({ hasText: "設定ファイルが壊れていて" });
+  await expect(notice).toBeVisible();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  const resetButton = page.getByRole("button", { name: "設定を初期化する", exact: true });
+  await expect(resetButton).toBeVisible();
+
+  const resetCalls = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as Record<string, number | undefined>)
+          .__E2E_RESET_USER_SETTINGS_CALLS__ ?? 0
+    );
+
+  // 初期化前に画面上の値を変えておき、初期化で既定値へ戻ることを確認できるようにする。
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+
+  // ボタンは確認ダイアログを開くだけで、キャンセルすれば初期化しない（自動で上書きしない）。
+  await resetButton.click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await resetCalls()).toBe(0);
+  await expect(notice).toBeVisible();
+
+  // 確認して初期化すると、エラー表示が消えて既定値で表示される。
+  await resetButton.click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "初期状態に戻す" }).click();
+  expect(await resetCalls()).toBe(1);
+  await expect(notice).toHaveCount(0);
+  await expect(resetButton).toHaveCount(0);
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
+  ).toBeVisible();
+
+  // 初期化後は通常どおり保存でき、初期化結果（Rust の既定値DTO）を土台に保存される。
+  await page.getByRole("button", { name: "保存する" }).click();
+  const saved = (await readSavedSettings(page)) as
+    | (Record<string, unknown> & { notifyMaxPerDay?: number })
+    | undefined;
+  expect(saved?.notifyMaxPerDay).toBe(3);
+  expect(saved?.selectedToneId).toBe("gentle");
+});
+
+// 破損以外の読み込み失敗（IO 等）は従来の汎用文言のままで、初期化導線は出さない。
+test("settings non-corrupt load failure keeps the generic message without the reset path", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ =
+      "IO_ERROR";
+  });
+  await openSettings(page);
+
+  await expect(
+    page.getByRole("alert").filter({ hasText: "設定の読み込みに失敗しちゃった。" })
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "再試行", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "設定を初期化する", exact: true })
+  ).toHaveCount(0);
+  await expect(page.getByText("設定ファイルが壊れていて")).toHaveCount(0);
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+});
+
 // 抑制条件: 未実装の抑制は「準備中」で操作不可、フルスクリーン抑制は操作・保存でき、
 // 非活性項目の保存値は保存で上書きされないこと（判断台帳 D04 / D44）。
 test("settings suppression shows 準備中 for unimplemented switches and saves the fullscreen switch", async ({
@@ -4334,13 +4410,57 @@ async function installTauriMocks(page: Page) {
               hasNotification: false,
             };
           }
-          case "get_user_settings":
+          case "get_user_settings": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
+            const settingsWin = window as any;
+            // 読み込み失敗テスト用: 本番と同じ CommandError 形式（{ code, message }）で reject する。
+            // 生エラー文言・内部パスがUIへ出ないことを検証するための識別子を含める。
+            if (settingsWin.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__) {
+              throw {
+                code: settingsWin.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__,
+                message: "E2E raw settings failure /internal/secret/path",
+              };
+            }
             return {
               ...userSettings,
-              ...((window as any).__E2E_USER_SETTINGS_OVERRIDE__ || {}),
+              ...(settingsWin.__E2E_USER_SETTINGS_OVERRIDE__ || {}),
             };
             /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // 設定の初期化。Rust 側 UserSettingsDto::default 相当の既定値を返し、以降の読み込みは成功させる。
+          case "reset_user_settings": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const resetWin = window as any;
+            resetWin.__E2E_RESET_USER_SETTINGS_CALLS__ =
+              (resetWin.__E2E_RESET_USER_SETTINGS_CALLS__ || 0) + 1;
+            resetWin.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ = null;
+            const defaults = {
+              genres: ["AI", "IT"],
+              notifyStartTime: "09:00",
+              notifyEndTime: "18:00",
+              workTimeRanges: [
+                { start: "09:00", end: "12:00" },
+                { start: "13:00", end: "18:00" },
+              ],
+              notifyMaxPerDay: 3,
+              enableYuukoPopup: true,
+              suppressDuringMeeting: true,
+              suppressDuringMicUse: true,
+              suppressDuringFullscreen: true,
+              autoStartOnPcBoot: false,
+              explanationLevel: "normal",
+              selectedThemeId: "default",
+              selectedToneId: "gentle",
+              selectedPersonalityId: "standard",
+              nickname: "",
+              aiProvider: "mock",
+              maxDailyRecommendations: 10,
+              autoSummaryEnabled: false,
+            };
+            resetWin.__E2E_USER_SETTINGS_OVERRIDE__ = defaults;
+            return defaults;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "save_user_settings":
             (
               window as typeof window & {

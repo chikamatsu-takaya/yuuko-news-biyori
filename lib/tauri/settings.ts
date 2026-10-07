@@ -55,6 +55,14 @@ export const getUserSettings = async (): Promise<UserSettingsDto | null> => {
   return invoke<UserSettingsDto>("get_user_settings");
 };
 
+// get_user_settings の失敗が「設定ファイルの破損（JSONとして読めない）」かを判定する。
+// Rust 側 AppError::Json は CommandError.code = "JSON_ERROR" で返る（読み込み時はJSON解析でしか発生しない）。
+// 破損時も黙って既定値へ置き換えず、ユーザー操作で初期化させるための判定（判断台帳 D28）。
+export const isSettingsCorruptError = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  (error as { code?: unknown }).code === "JSON_ERROR";
+
 export const saveUserSettings = async (
   settings: UserSettingsDto
 ): Promise<CommandOk | null> => {

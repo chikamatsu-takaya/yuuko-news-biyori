@@ -115,6 +115,25 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_settings_file_reports_json_error_and_can_be_reset() {
+        // 画面側は code="JSON_ERROR" で「設定ファイル破損」を判別し初期化導線を出す（判断台帳 D28）。
+        // 読み込みでは既定値へ黙って置き換えず、明示的なリセットでだけ復旧できること。
+        let (service, path) = temp_service();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+
+        let error = service.get_user_settings().unwrap_err();
+        assert_eq!(crate::error::CommandError::from(error).code, "JSON_ERROR");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+
+        let reset = service.reset_user_settings().unwrap();
+        assert_eq!(reset.notify_max_per_day, 3);
+        assert!(service.get_user_settings().is_ok());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
     fn reset_user_settings_keeps_os_backed_auto_start_copy() {
         let (service, path) = temp_service();
         service.sync_auto_start_on_pc_boot(true).unwrap();
