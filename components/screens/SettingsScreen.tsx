@@ -16,7 +16,6 @@ import {
   RotateCcw,
   HelpCircle,
   Trash2,
-  Download,
   Archive,
   Check,
   Info,
@@ -1569,6 +1568,7 @@ export default function SettingsScreen({
               </p>
               <div className="space-y-2">
                 {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
+                {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
@@ -1577,15 +1577,6 @@ export default function SettingsScreen({
                 >
                   <Trash2 className="w-4 h-4" />
                   キャッシュを削除（準備中）
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
-                >
-                  <Download className="w-4 h-4" />
-                  辞書データをエクスポート（準備中）
                 </Button>
                 <Button
                   variant="outline"
