@@ -2152,6 +2152,19 @@ test("settings shows the default frequency 1日3回まで when there is no saved
 const openSettingsMenu = (page: Page, label: string) =>
   page.getByRole("button", { name: label, exact: true }).click();
 
+// ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
+test("settings storage panel shows 準備中 instead of dummy usage values", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  await expect(page.getByTestId("storage-status-placeholder")).toHaveText(
+    "保存データの使用状況の表示は準備中です。"
+  );
+  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+});
+
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
 test("settings load reflects saved MVP settings and shows the theme read-only", async ({
   page,
