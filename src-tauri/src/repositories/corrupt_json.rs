@@ -40,12 +40,34 @@ pub(crate) fn backup_corrupt_file(path: &Path, kind: &str) -> Result<(), AppErro
     Ok(())
 }
 
+/// 読み込み済みの壊れたバイト列を、別名（`<name>.corrupt.json`）へそのまま書き出す。
+/// ファイルを読み直さずに手元のバイト列を使うのは、並行した読み込みが先に既定値で作り直していた場合に、
+/// その既定値で本来の退避ファイルを上書きしないため（ロックの無い通知状態で起こり得る）。
+/// 一時ファイルへ書いてから差し替えるので、途中で失敗しても前回の退避ファイルは壊れない。
+/// 失敗時は Err を返し、呼び出し側は作り直しを中止する。`kind` はログ用の種類名（パスは出さない）。
+fn backup_bytes(path: &Path, raw: &[u8], kind: &str) -> Result<(), AppError> {
+    let backup_path = corrupt_backup_path(path);
+    let temp_path = path.with_extension("corrupt.json.tmp");
+
+    let result =
+        std::fs::write(&temp_path, raw).and_then(|_| std::fs::rename(&temp_path, &backup_path));
+    if let Err(error) = result {
+        // 中身やフルパスはログへ出さない。
+        log::error!("Failed to back up corrupt {kind} file: {}", error.kind());
+        if temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 /// 既存の JSON ファイルを読む。JSON として読めなければ退避してから `reset` で既定値を保存し、その値を返す。
 ///
 /// - バイト列で読み、先頭の UTF-8 BOM を除いてから解析する（手編集の BOM や不正な UTF-8 も
 ///   「JSON として読めない」側に含め、BOM だけで初期化されないようにする）。
 /// - 読み込み自体の IO エラーはそのまま返す（作り直さない）。
-/// - 退避に失敗したら上書きせずエラーを返す（元ファイルはそのまま）。
+/// - 退避は読み込んだバイト列そのものを書き出す（読み直さない）。失敗したら上書きせずエラーを返す（元ファイルはそのまま）。
 /// - `reset` は既定値を保存して返す処理。保存に失敗したらそのエラーを返す（次回の読み込みで再試行される）。
 pub(crate) fn read_json_or_reset<T, F>(path: &Path, kind: &str, reset: F) -> Result<T, AppError>
 where
@@ -61,7 +83,7 @@ where
                 "{kind} file is not valid JSON ({:?}); backing it up and resetting to defaults",
                 error.classify()
             );
-            backup_corrupt_file(path, kind)?;
+            backup_bytes(path, &raw, kind)?;
             reset()
         }
     }
@@ -82,6 +104,24 @@ mod tests {
             corrupt_backup_path(&path),
             Path::new("state").join("yuuko_notification_state.corrupt.json")
         );
+    }
+
+    #[test]
+    fn backup_bytes_writes_the_bytes_that_were_read_not_the_current_file() {
+        // 並行した読み込みが先に既定値で作り直していても、退避には読み込んだ壊れたバイト列を残す。
+        let path = std::env::temp_dir().join(format!(
+            "yuuko_corrupt_json_test_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"{\"reset\":true}").unwrap();
+
+        backup_bytes(&path, b"{ broken", "test").unwrap();
+
+        let backup = corrupt_backup_path(&path);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ broken");
+        assert!(!path.with_extension("corrupt.json.tmp").exists());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
     }
 
     #[test]
