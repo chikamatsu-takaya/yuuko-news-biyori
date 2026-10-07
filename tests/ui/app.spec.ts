@@ -3376,6 +3376,95 @@ test("does not generate candidates while the window is hidden and generates afte
   ).toBeVisible();
 });
 
+// Rust の news_scheduler が refresh 成功時に送る news-refreshed を模擬する。
+// 戻り値は届いたハンドラ数（購読済みかの確認に使う）。
+function emitNewsRefreshed(page: Page) {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+      }
+    ).__E2E_EMIT_EVENT__("news-refreshed", { savedCount: 2 })
+  );
+}
+
+test("news-refreshed event generates candidates once without waiting for the 5-minute poll", async ({
+  page,
+}) => {
+  // 候補なしで起動し、マウント時の初回 request（1回）を済ませる。
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+
+  // 次の request を保留させ、候補ありへ切り替える。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_REQUEST_NOTIFIED__ = true;
+    w.__E2E_REQUEST_GATE__ = new Promise((resolve) => {
+      w.__E2E_RELEASE_REQUEST__ = resolve;
+    });
+  });
+
+  // 取得完了イベントで即座に request が1回走る（定期 tick は待たない）。
+  await expect.poll(() => emitNewsRefreshed(page)).toBeGreaterThan(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(2);
+
+  // request 実行中に再度届いても inFlight ガードで新たな request は始めない。
+  await emitNewsRefreshed(page);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    2
+  );
+
+  // 完了した結果は通常どおりアプリ内通知として表示される（生成と表示が同一導線）。
+  await releaseGate(page, "__E2E_RELEASE_REQUEST__");
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toBeVisible();
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    2
+  );
+});
+
+test("news-refreshed event while the window is hidden does not generate candidates", async ({
+  page,
+}) => {
+  await installVisibilityControl(page, true);
+  await enableNotificationCandidate(page);
+  await openHome(page);
+
+  // 非表示中のイベントでは request しない（未表示消費の防止）。後で処理するためのキューにも積まない。
+  await expect.poll(() => emitNewsRefreshed(page)).toBeGreaterThan(0);
+  await emitNewsRefreshed(page);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+
+  // 再表示時は既存の再表示導線で1回だけ候補生成され、表示される（イベント分の追加 request はない）。
+  await page.evaluate(() =>
+    (
+      window as unknown as Record<string, (visible: boolean) => void>
+    ).__E2E_SET_WINDOW_VISIBLE__(true)
+  );
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    1
+  );
+});
+
 test("does not generate candidates while reading an article and resumes after leaving the reader", async ({
   page,
 }) => {

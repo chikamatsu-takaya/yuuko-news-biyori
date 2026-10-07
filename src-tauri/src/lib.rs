@@ -139,7 +139,8 @@ pub fn run() {
             });
 
             // 同じ低頻度スレッドでニュース取得と日次アーカイブ保守を確認する。
-            news_scheduler.start();
+            // refresh 成功時はメインウィンドウへ news-refreshed を送り、アプリ内通知の候補生成を促す。
+            news_scheduler.start(app.handle().clone());
             // メイン非表示・最小化中だけゆうこ通知を判定する低頻度スレッド。ニュース取得の
             // 待ち時間に通知判定が引きずられないよう、ニュース用スレッドとは分ける。
             yuuko_desktop_notifier::start(app.handle().clone(), desktop_notifier_yuuko_service);
