@@ -22,6 +22,10 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
 const BALLOON_AUTO_DISMISS_MS = 20000;
 const PREVIEW_AUTO_DISMISS_MS = 30000;
 
+// 退場演出（globals.css の .yuuko-notification-leave＝0.3s）が終わらなかったときの保険。
+// 演出が止まっている環境でも退場状態のまま残らないよう、少し長めに待ってから外す。
+const LEAVE_FALLBACK_MS = 450;
+
 // プレビューに要約が無いときの、ゆうこの一言（§10.6 要約なし→タイトル＋ゆうこの一言）。
 const DEFAULT_TEASER = "気になったら「詳しく見る」でいっしょに読もう？";
 
@@ -56,6 +60,13 @@ type YuukoInAppNotificationProps = {
    * 中身に合わせた固定サイズのデスクトップ用ウィンドウで、長いタイトルが上にはみ出さないようにする。
    */
   clampText?: boolean;
+  /**
+   * 退場中か（既定 false）。終端操作の確定は呼び出し時点で済んでおり、ここは見た目だけを扱う。
+   * true の間は退場アニメーションを出し、クリックを受け付けず、自動退場・Esc も動かさない。
+   */
+  exiting?: boolean;
+  /** 退場演出の終了（またはアンマウント）時に呼ばれる。親は表示を外す。 */
+  onExited?: () => void;
 };
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
@@ -79,6 +90,8 @@ export default function YuukoInAppNotification({
   onClose,
   onIgnore,
   clampText = false,
+  exiting = false,
+  onExited,
 }: YuukoInAppNotificationProps) {
   // 表示段階：吹き出し → 初回クリックで軽量プレビュー（§10.2）。
   // backend が既に PreviewVisible なら最初から preview で再開する。
@@ -113,20 +126,55 @@ export default function YuukoInAppNotification({
     action();
   }, []);
 
+  // 退場演出の終了通知。animationend を基本とし、演出が走らないときはタイマーで外す。
+  // アンマウント（ウィンドウ非表示など）や退場の取り消しでも親の退場状態を残さない。
+  const onExitedRef = useRef(onExited);
+  useEffect(() => {
+    onExitedRef.current = onExited;
+  }, [onExited]);
+  const exitedRef = useRef(false);
+  const notifyExited = useCallback(() => {
+    if (exitedRef.current) {
+      return;
+    }
+    exitedRef.current = true;
+    onExitedRef.current?.();
+  }, []);
+  useEffect(() => {
+    if (!exiting) {
+      return;
+    }
+    exitedRef.current = false;
+    const timer = setTimeout(notifyExited, LEAVE_FALLBACK_MS);
+    return () => {
+      clearTimeout(timer);
+      notifyExited();
+      // 退場が取り消されて同じ通知を表示し続ける場合に備え、終端操作を再び受け付ける。
+      terminalFiredRef.current = false;
+    };
+  }, [exiting, notifyExited]);
+
   // 自動退場（無操作）。段階に応じた時間で無視扱いにする（§9.4）。
   // タイマーはアンマウント時にクリアされる（ウィンドウ非表示中は進まない）。
   // 発火時は即座に onIgnore を呼ぶ（確定は Page 側キューが直列実行する）。
+  // 退場中は確定済みのため動かさない。
   useEffect(() => {
+    if (exiting) {
+      return;
+    }
     const timeoutMs =
       view === "preview" ? PREVIEW_AUTO_DISMISS_MS : BALLOON_AUTO_DISMISS_MS;
     const timer = setTimeout(() => {
       fireTerminal(() => onIgnoreRef.current());
     }, timeoutMs);
     return () => clearTimeout(timer);
-  }, [view, fireTerminal]);
+  }, [view, exiting, fireTerminal]);
 
-  // Esc は閉じると同等（§10.6）。
+  // Esc は閉じると同等（§10.6）。退場中は確定済みのため購読しない。
   useEffect(() => {
+    if (exiting) {
+      return;
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         fireTerminal(() => onCloseRef.current());
@@ -134,15 +182,18 @@ export default function YuukoInAppNotification({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [fireTerminal]);
+  }, [exiting, fireTerminal]);
 
   // 閉じる/詳しく見るは即座に Page へ確定を委譲する（遅延なし）。
   const handleClose = () => fireTerminal(() => onCloseRef.current());
   // 「詳しく見る」/プレビュー再クリック → 記事を開く（§10.4）。
   const handleOpen = () => fireTerminal(() => onOpenRef.current());
   // 初回クリック → 軽量プレビューへ（まだ遷移しない）。クリック確定系の状態も進める（§10.3）。
-  // これは終端操作ではない（表示を継続する）。
+  // これは終端操作ではない（表示を継続する）。終端確定後（退場中）は受け付けない。
   const handleFirstClick = () => {
+    if (terminalFiredRef.current) {
+      return;
+    }
     setView("preview");
     onFirstClick?.();
   };
@@ -151,10 +202,27 @@ export default function YuukoInAppNotification({
     <div
       role="region"
       aria-label="ゆうこからのお知らせ"
+      // 退場中は確定済みのため、支援技術・フォーカス移動の対象からも外す。
+      aria-hidden={exiting || undefined}
+      inert={exiting || undefined}
       className={`pointer-events-none fixed z-50 flex flex-col gap-2 ${POSITION_CLASS[positionMode]}`}
     >
+      {/* 退場中は右下へ戻る演出（§8.4）を出し、クリックを受け付けない。 */}
       <div
-        className="pointer-events-auto flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 yuuko-notification-enter"
+        className={`flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 ${
+          exiting
+            ? "pointer-events-none yuuko-notification-leave"
+            : "pointer-events-auto yuuko-notification-enter"
+        }`}
+        onAnimationEnd={(event) => {
+          if (
+            exiting &&
+            event.target === event.currentTarget &&
+            event.animationName === "yuuko-notification-pop-out"
+          ) {
+            notifyExited();
+          }
+        }}
       >
         {/* 吹き出し / 軽量プレビュー（ゆうこ本体の上・近くに表示） */}
         <div className="relative rounded-2xl border border-border/50 bg-white p-3 pr-7 shadow-lg">

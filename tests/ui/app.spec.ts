@@ -3107,6 +3107,113 @@ const readBackendActive = (page: Page) =>
       null
   );
 
+// 退場演出（.yuuko-notification-leave）が一度でも描画されたかを記録する。
+// 演出は 0.3 秒で終わるため、終了後でも「出たか/出なかったか」を判定できるようにする。
+async function watchLeaveAnimation(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, number>;
+    w.__E2E_LEAVE_ANIMATION_SEEN__ = 0;
+    new MutationObserver(() => {
+      if (document.querySelector(".yuuko-notification-leave")) {
+        w.__E2E_LEAVE_ANIMATION_SEEN__ = 1;
+      }
+    }).observe(document, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  });
+}
+
+test("closing plays the exit animation while dismiss is confirmed exactly once", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await watchLeaveAnimation(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  // 退場演出が出ている最中に Esc を押しても二重確定にならない。
+  // （退場中は aria-hidden のため role ではなくクラスで要素を確認する）
+  await expect(page.locator(".yuuko-notification-leave")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  // 確定（dismiss）は退場演出を待たずに走る。
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_LEAVE_ANIMATION_SEEN__")).toBe(1);
+  // 退場演出の後に外れる。
+  await expect(page.locator(".yuuko-notification-leave")).toHaveCount(0);
+  await expect(notification).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(1);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(0);
+  await expect(notification).toHaveCount(0);
+});
+
+test("詳しく見る plays the exit animation and confirms handle_yuuko_clicked once without dismiss", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await watchLeaveAnimation(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 初回クリック（handle_yuuko_clicked #1）で軽量プレビューへ。
+  await notification.getByRole("button", { name: "ニュースをプレビュー" }).click();
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+
+  // 「詳しく見る」: 確定（handle_yuuko_clicked #2）は即座に一度だけ。退場演出が出てから外れる。
+  await notification.getByRole("button", { name: "詳しく見る" }).click();
+  await expect
+    .poll(() => readCount(page, "__E2E_LEAVE_ANIMATION_SEEN__"))
+    .toBe(1);
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(2);
+  await expect(page.locator(".yuuko-notification-leave")).toHaveCount(0);
+  await expect(notification).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(2);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(0);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+});
+
+test("closing under reduced motion removes the notification without the exit animation", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await enableNotificationCandidate(page);
+  await watchLeaveAnimation(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  // 演出なしで外れる（退場クラスが一度も描画されないことを主に確認する）。
+  await expect(notification).toHaveCount(0, { timeout: 1000 });
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_LEAVE_ANIMATION_SEEN__")).toBe(0);
+});
+
 test("closing while the first-click handle_yuuko_clicked is pending does not re-show", async ({
   page,
 }) => {
