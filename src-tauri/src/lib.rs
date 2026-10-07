@@ -8,6 +8,7 @@ mod repositories;
 mod services;
 mod state;
 mod util;
+mod webview_guard;
 mod yuuko_desktop_notifier;
 mod yuuko_window;
 
@@ -42,6 +43,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             app_lifecycle::handle_second_instance(app, args);
         }))
+        // メイン・ゆうこ用ウィンドウとも、アプリ自身のページ以外への移動を Rust で拒否する。
+        .plugin(webview_guard::init())
         .on_window_event(|window, event| {
             app_lifecycle::handle_window_event(window, event);
         })

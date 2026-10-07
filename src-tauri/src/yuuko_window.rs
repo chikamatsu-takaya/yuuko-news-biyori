@@ -7,6 +7,7 @@
 //! 静的に作ると、未使用時も WebView を常駐させて負荷が増えるうえ、トレイ初期化に失敗して
 //! 通常終了へ戻ったときに「非表示のゆうこウィンドウだけが残りプロセスが終わらない」状態になるため。
 
+use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -87,7 +88,10 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
     .minimizable(false)
     // 通知のたびに作業中アプリからフォーカスを奪わないよう、生成時も表示時もアクティブにしない。
     .focused(false)
-    .focusable(false);
+    .focusable(false)
+    // 吹き出しからの window.open / target="_blank" で新しいウィンドウを作らない。
+    // ページ移動の判定は全 WebView 共通の webview_guard プラグインが行う。
+    .on_new_window(|_url, _features| NewWindowResponse::Deny);
 
     // macOS の透明化は macos-private-api 機能が必要で、MVP の対象（Windows）外のため付けない。
     #[cfg(not(target_os = "macos"))]
