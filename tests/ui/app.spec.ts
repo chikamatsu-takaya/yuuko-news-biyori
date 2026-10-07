@@ -2165,6 +2165,21 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
   await expect(page.getByRole("progressbar")).toHaveCount(0);
 });
 
+// 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
+// 他の「準備中」項目は残ることも確かめる。
+test("settings data panel has no dictionary export item", async ({ page }) => {
+  await openSettings(page);
+
+  await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
+  await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "キャッシュを削除（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "アーカイブを管理（準備中）" })
+  ).toBeDisabled();
+});
+
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
 test("settings load reflects saved MVP settings and shows the theme read-only", async ({
   page,
