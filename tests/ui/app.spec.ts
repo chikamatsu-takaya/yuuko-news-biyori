@@ -3107,6 +3107,74 @@ const readBackendActive = (page: Page) =>
       null
   );
 
+// 退場演出（.yuuko-notification-leave）が一度でも描画されたかを記録する。
+// 演出は 0.3 秒で終わるため、終了後でも「出たか/出なかったか」を判定できるようにする。
+async function watchLeaveAnimation(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, number>;
+    w.__E2E_LEAVE_ANIMATION_SEEN__ = 0;
+    new MutationObserver(() => {
+      if (document.querySelector(".yuuko-notification-leave")) {
+        w.__E2E_LEAVE_ANIMATION_SEEN__ = 1;
+      }
+    }).observe(document, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  });
+}
+
+test("closing plays the exit animation while dismiss is confirmed exactly once", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await watchLeaveAnimation(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  // 確定（dismiss）は退場演出を待たずに走る。
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  // 退場中の Esc は二重確定にならない。
+  await page.keyboard.press("Escape");
+  // 退場演出が出て、その後に外れる。
+  await expect
+    .poll(() => readCount(page, "__E2E_LEAVE_ANIMATION_SEEN__"))
+    .toBe(1);
+  await expect(notification).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(1);
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(0);
+  await expect(notification).toHaveCount(0);
+});
+
+test("closing under reduced motion removes the notification without the exit animation", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await enableNotificationCandidate(page);
+  await watchLeaveAnimation(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+  // 演出なしで即座に外れる（退場演出の 0.3 秒より短い待ちで消える）。
+  await expect(notification).toHaveCount(0, { timeout: 200 });
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_LEAVE_ANIMATION_SEEN__")).toBe(0);
+});
+
 test("closing while the first-click handle_yuuko_clicked is pending does not re-show", async ({
   page,
 }) => {

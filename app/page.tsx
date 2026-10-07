@@ -59,6 +59,12 @@ const isActiveNewsNotification = (
   ACTIVE_NEWS_NOTIFICATION_STATES.includes(state.state) &&
   (Boolean(state.previewArticle) || Boolean(state.currentArticleId));
 
+// 動きを抑える設定か。退場演出を出さずに即座に外すために使う。
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 export default function Page() {
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
   const [selectedArticleId, setSelectedArticleId] = React.useState<string | null>(
@@ -70,6 +76,10 @@ export default function Page() {
   // 通知状態取得・候補生成は Page 側スケジューラに一本化する。最新値をここで保持し、
   // 表示が必要な画面（MainScreen 等）とアプリ内通知へ反映する。
   const [yuukoNotificationState, setYuukoNotificationState] =
+    React.useState<YuukoNotificationState | null>(null);
+  // 終端操作（閉じる/Esc/自動退場/詳しく見る）直後に退場演出を見せている通知の表示用コピー。
+  // 見た目専用で、通知状態（yuukoNotificationState）や backend 確定には使わない。
+  const [exitingNotification, setExitingNotification] =
     React.useState<YuukoNotificationState | null>(null);
 
   // メインウィンドウが表示中か。close-to-hide 等で非表示の間は候補生成を止め、
@@ -110,7 +120,12 @@ export default function Page() {
   // 残って返っても、ホーム側で処理済みニュースを再表示しないよう保持しない。
   const applyYuukoNotificationState = React.useCallback(
     (next: YuukoNotificationState | null) => {
-      setYuukoNotificationState(isActiveNewsNotification(next) ? next : null);
+      const active = isActiveNewsNotification(next);
+      if (active) {
+        // 新しい active 通知を表示するときは、退場演出中の古い表示を残さない。
+        setExitingNotification(null);
+      }
+      setYuukoNotificationState(active ? next : null);
     },
     []
   );
@@ -276,11 +291,22 @@ export default function Page() {
 
   // 終端操作の開始: UI即時非表示＋終端中フラグ＋抑止対象IDを立てる。
   // 以降、backend 解消が完了するまで scheduler は同一 active 通知を採用しない。
+  // 通知状態は即座に外し、見た目だけ退場演出用のコピーで短時間残す（確定処理は待たせない）。
+  // 動きを抑える設定では演出を出さず即座に外す。
   const beginTerminalAction = (articleId: string | null) => {
     terminalActionInFlightRef.current = true;
     suppressActiveNotificationIdRef.current = articleId;
+    setExitingNotification(
+      !prefersReducedMotion() && isActiveNewsNotification(yuukoNotificationState)
+        ? yuukoNotificationState
+        : null
+    );
     setYuukoNotificationState(null);
   };
+
+  const handleNotificationExited = React.useCallback(() => {
+    setExitingNotification(null);
+  }, []);
 
   // 終端操作の解除: backend が非active へ進んだ後に呼ぶ。
   const endTerminalAction = () => {
@@ -437,9 +463,13 @@ export default function Page() {
   const activeNotification = isActiveNewsNotification(yuukoNotificationState)
     ? yuukoNotificationState
     : null;
+  // active が無い間だけ、退場演出中のコピーを同じ位置（同じ key）に描画する。
+  // 同じ要素を使い続けることで、初回クリック後の軽量プレビューのまま退場させる。
+  const displayedNotification = activeNotification ?? exitingNotification;
+  const isNotificationExiting = !activeNotification && !!exitingNotification;
   const activeNotificationArticleId =
-    activeNotification?.currentArticleId ??
-    activeNotification?.previewArticle?.articleId ??
+    displayedNotification?.currentArticleId ??
+    displayedNotification?.previewArticle?.articleId ??
     null;
 
   return (
@@ -448,24 +478,26 @@ export default function Page() {
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
           （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
           scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}
-      {isWindowVisible && activeNotification && (
+      {isWindowVisible && displayedNotification && (
         <YuukoInAppNotification
           // 記事が変わったら段階(view)をリセットするため key で作り直す。
           key={activeNotificationArticleId ?? "yuuko-notification"}
           articleId={activeNotificationArticleId ?? undefined}
           // backend が PreviewVisible のときは最初から軽量プレビューで再開する。
           initialView={
-            activeNotification.state === "PreviewVisible" ? "preview" : "balloon"
+            displayedNotification.state === "PreviewVisible" ? "preview" : "balloon"
           }
-          balloonText={activeNotification.balloonText}
-          articleTitle={activeNotification.previewArticle?.title}
-          sourceName={activeNotification.previewArticle?.sourceName}
-          summary={activeNotification.previewArticle?.summary}
-          positionMode={activeNotification.positionMode}
+          balloonText={displayedNotification.balloonText}
+          articleTitle={displayedNotification.previewArticle?.title}
+          sourceName={displayedNotification.previewArticle?.sourceName}
+          summary={displayedNotification.previewArticle?.summary}
+          positionMode={displayedNotification.positionMode}
           onFirstClick={handleNotificationFirstClick}
           onOpen={handleNotificationOpen}
           onClose={handleNotificationClose}
           onIgnore={handleNotificationIgnore}
+          exiting={isNotificationExiting}
+          onExited={handleNotificationExited}
         />
       )}
     </>
