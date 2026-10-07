@@ -569,6 +569,7 @@ mod tests {
             is_favorite,
             read_state,
             recommendation_score: score,
+            summary_state: Default::default(),
         }
     }
 

@@ -29,8 +29,12 @@ pub async fn save_user_settings(
     params: SaveUserSettingsParams,
 ) -> CommandResult<CommandOk> {
     let settings_service = state.settings_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        settings_service.save_user_settings(params.settings)
+        settings_service.save_user_settings(params.settings)?;
+        // 自動要約を有効にした直後から次回のニュース取得を待たずに動かし、無効にしたら待機列を空にする。
+        auto_summary_queue.enqueue_unsummarized();
+        Ok::<(), crate::error::AppError>(())
     })
     .await
     .map_err(|error| {

@@ -170,6 +170,12 @@ fn hide_yuuko_window_for_main<R: Runtime>(app: &AppHandle<R>) {
 fn request_exit<R: Runtime>(app: &AppHandle<R>) {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
     log::info!("トレイメニューからアプリ終了が要求されました");
+    // 自動要約は新しい記事を取り出さないようにする。処理中の1件は待たない
+    // （記事の保存は tmp→bak→本体 の差し替えのため書きかけの .md は残らない。ただし2回の rename の
+    // 間で強制終了されると .bak だけが残る短い隙間がある。既存の全保存処理に共通の制約）。
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state.auto_summary_queue.request_stop();
+    }
     app.exit(0);
 }
 

@@ -94,6 +94,7 @@ type AiSettings = {
   priorityMode: string;
   provider: string;
   providerStatus: string;
+  autoSummaryEnabled: boolean;
 };
 
 type UserProfileSettingsState = {
@@ -173,6 +174,7 @@ const mockSettings: SettingsState = {
     priorityMode: "バランス重視",
     provider: "mock",
     providerStatus: "MockProviderで動作中",
+    autoSummaryEnabled: false,
   },
   user: {
     nickname: "",
@@ -217,6 +219,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   nickname: "",
   aiProvider: "mock",
   maxDailyRecommendations: 10,
+  autoSummaryEnabled: false,
 };
 
 const defaultWorkTimeRanges: WorkTimeRangeDto[] = [
@@ -324,6 +327,7 @@ const mapSettingsFromDto = (
       providerStatus: dto.aiProvider,
       // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
       explanationDetail: explanationLevelToLabel(dto.explanationLevel),
+      autoSummaryEnabled: dto.autoSummaryEnabled ?? false,
     },
     user: {
       ...base.user,
@@ -376,6 +380,7 @@ const buildDtoForSave = (
     nickname: settingsState.user.nickname,
     aiProvider: normalizedProvider,
     maxDailyRecommendations: settingsState.news.maxRecommendations,
+    autoSummaryEnabled: settingsState.ai.autoSummaryEnabled,
   };
 };
 
@@ -1304,6 +1309,28 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
+                  {/* 取得後の自動要約。外部AIの利用枠を使い切らないよう既定は無効。保存ボタンで他のAI設定と一緒に保存する。 */}
+                  {/* 実際に動くかは Rust 側が判定する（実AI＝現在は Gemini のときだけ）。ここでは案内だけ出す。 */}
+                  <div className="py-3 border-b border-border/50">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm text-foreground">ニュース取得後に自動で要約する</span>
+                        <span
+                          className="text-xs text-muted-foreground"
+                          data-testid="auto-summary-help"
+                        >
+                          AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）
+                        </span>
+                      </div>
+                      <Switch
+                        aria-label="ニュース取得後に自動で要約する"
+                        checked={settings.ai.autoSummaryEnabled}
+                        onCheckedChange={(checked) =>
+                          updateAi("autoSummaryEnabled", checked)
+                        }
+                      />
+                    </div>
+                  </div>
                   {/* 以下3項目は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
                       AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
                   <SettingRow label="専門用語の解説レベル（準備中）">
@@ -1325,6 +1352,7 @@ export default function SettingsScreen({
                   </SettingRow>
                   <SettingRow label="長文要点説明の自動候補（準備中）">
                     <Switch
+                      aria-label="長文要点説明の自動候補（準備中）"
                       checked={settings.ai.autoSuggestLongSummary}
                       disabled
                       aria-disabled

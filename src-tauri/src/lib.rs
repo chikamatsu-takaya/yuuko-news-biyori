@@ -21,6 +21,7 @@ use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
+use services::auto_summary_queue::AutoSummaryQueue;
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
 use services::news_scheduler::NewsScheduler;
@@ -87,12 +88,6 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 RecommendationService::new(),
             );
-            let news_scheduler = NewsScheduler::new(
-                &paths,
-                news_service.clone(),
-                SettingsRepository::new(&paths),
-                article_service.clone(),
-            );
             // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
             let ai_provider_service = AiProviderService::new(&paths);
             let dictionary_service = DictionaryService::new(
@@ -117,6 +112,19 @@ pub fn run() {
                 article_repository,
                 SettingsRepository::new(&paths),
             );
+            // 自動要約キュー（設定で有効なときだけ動く）。ニュース取得後に NewsScheduler から投入する。
+            let auto_summary_queue = AutoSummaryQueue::new(
+                article_service.clone(),
+                summary_service.clone(),
+                SettingsRepository::new(&paths),
+            );
+            let news_scheduler = NewsScheduler::new(
+                &paths,
+                news_service.clone(),
+                SettingsRepository::new(&paths),
+                article_service.clone(),
+                auto_summary_queue.clone(),
+            );
             let yuuko_state_repository = YuukoStateRepository::new(&paths);
             let yuuko_service = YuukoService::new(
                 SettingsRepository::new(&paths),
@@ -129,6 +137,7 @@ pub fn run() {
             app.manage(AppState {
                 ai_provider_service,
                 article_service,
+                auto_summary_queue: auto_summary_queue.clone(),
                 dictionary_service,
                 friendship_service,
                 news_service,
@@ -141,6 +150,8 @@ pub fn run() {
             // 同じ低頻度スレッドでニュース取得と日次アーカイブ保守を確認する。
             // refresh 成功時はメインウィンドウへ news-refreshed を送り、アプリ内通知の候補生成を促す。
             news_scheduler.start(app.handle().clone());
+            // 未要約記事を1件ずつ要約する低頻度スレッド。起動時に残っている未要約記事も並べ直す。
+            auto_summary_queue.start();
             // メイン非表示・最小化中だけゆうこ通知を判定する低頻度スレッド。ニュース取得の
             // 待ち時間に通知判定が引きずられないよう、ニュース用スレッドとは分ける。
             yuuko_desktop_notifier::start(app.handle().clone(), desktop_notifier_yuuko_service);

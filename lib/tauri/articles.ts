@@ -3,6 +3,16 @@ import { isTauriRuntime } from "@/lib/tauri/settings";
 
 export type ArticleReadState = "unread" | "previewed" | "detail_viewed";
 
+// 自動要約の状態（Rust の SummaryState と一致させる）。
+// done は記事ファイルの要約済みフラグ、waiting / processing / failed は自動要約キューのメモリ上の状態。
+// none は未要約でキューに入っていない記事（自動要約が無効のときなど）。
+export type ArticleSummaryState =
+  | "none"
+  | "waiting"
+  | "processing"
+  | "done"
+  | "failed";
+
 export type ArticleSummaryDto = {
   articleId: string;
   title: string;
@@ -13,6 +23,7 @@ export type ArticleSummaryDto = {
   isFavorite: boolean;
   readState: ArticleReadState;
   recommendationScore: number;
+  summaryState: ArticleSummaryState;
 };
 
 export type ArticleHistoryFilter =
@@ -50,6 +61,7 @@ export type ArticleDetailDto = {
   yuukoComment?: string;
   isFavorite: boolean;
   keywordCandidates: string[];
+  summaryState: ArticleSummaryState;
 };
 
 export type GetRecommendedArticlesParams = {

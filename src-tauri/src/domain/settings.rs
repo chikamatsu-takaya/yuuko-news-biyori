@@ -82,6 +82,10 @@ pub struct UserSettingsDto {
     pub nickname: String,
     pub ai_provider: AiProvider,
     pub max_daily_recommendations: u32,
+    /// ニュース取得後の自動要約を有効にするか。外部AIの利用枠を使い切らないよう既定は無効。
+    /// 旧画面・旧データとの互換のため、欠落時は false とする。
+    #[serde(default)]
+    pub auto_summary_enabled: bool,
 }
 
 impl Default for UserSettingsDto {
@@ -104,6 +108,7 @@ impl Default for UserSettingsDto {
             nickname: String::new(),
             ai_provider: AiProvider::Mock,
             max_daily_recommendations: 10,
+            auto_summary_enabled: false,
         }
     }
 }
@@ -223,6 +228,7 @@ impl PersistedSettings {
             nickname: self.user.nickname.clone(),
             ai_provider: AiProvider::from_storage(&self.ai.provider),
             max_daily_recommendations: self.news.max_daily_recommendations,
+            auto_summary_enabled: self.ai.auto_summary_enabled,
         }
     }
 
@@ -244,6 +250,7 @@ impl PersistedSettings {
             }],
         };
         self.ai.provider = dto.ai_provider.as_storage().to_string();
+        self.ai.auto_summary_enabled = dto.auto_summary_enabled;
         self.explanation.level = dto.explanation_level.as_storage().to_string();
         self.ui.theme_id = dto.selected_theme_id;
         self.ui.tone_id = dto.selected_tone_id;
@@ -371,6 +378,8 @@ pub struct AiSettings {
     pub provider: String,
     pub allow_free_tier: bool,
     pub send_minimized_text_only: bool,
+    /// ニュース取得後に未要約記事を1件ずつ自動要約するか（既定は無効。ローカルLLM導入時に既定を見直す）。
+    pub auto_summary_enabled: bool,
 }
 
 impl Default for AiSettings {
@@ -379,6 +388,7 @@ impl Default for AiSettings {
             provider: "mock".to_string(),
             allow_free_tier: true,
             send_minimized_text_only: true,
+            auto_summary_enabled: false,
         }
     }
 }
@@ -465,6 +475,38 @@ mod tests {
             serde_json::from_str(legacy).expect("legacy settings should still load");
         assert_eq!(parsed.news.categories, vec!["AI".to_string()]);
         assert!(parsed.news.fetch_on_startup);
+    }
+
+    #[test]
+    fn auto_summary_is_disabled_by_default_and_for_legacy_data() {
+        assert!(!PersistedSettings::default().ai.auto_summary_enabled);
+        assert!(!UserSettingsDto::default().auto_summary_enabled);
+
+        // 旧 settings.json（ai.autoSummaryEnabled なし）は無効として読む。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ai": { "provider": "gemini" } }"#).unwrap();
+        assert!(!legacy.ai.auto_summary_enabled);
+        // 旧画面からの保存DTO（autoSummaryEnabled なし）も無効として受け取る。
+        let mut dto_json = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        dto_json
+            .as_object_mut()
+            .unwrap()
+            .remove("autoSummaryEnabled");
+        let dto: UserSettingsDto = serde_json::from_value(dto_json).unwrap();
+        assert!(!dto.auto_summary_enabled);
+    }
+
+    #[test]
+    fn auto_summary_enabled_round_trips_through_apply_and_to_dto() {
+        let mut settings = PersistedSettings::default();
+        settings.apply_from_dto(UserSettingsDto {
+            auto_summary_enabled: true,
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ai.auto_summary_enabled);
+        assert!(settings.to_dto().auto_summary_enabled);
+        let stored = serde_json::to_value(&settings).unwrap();
+        assert_eq!(stored["ai"]["autoSummaryEnabled"], true);
     }
 
     #[test]

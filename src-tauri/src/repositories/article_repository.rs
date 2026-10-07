@@ -10,7 +10,7 @@ use crate::domain::article::{
     ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
     ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
     ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
-    RestoreArchivedArticleResult,
+    RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -191,6 +191,11 @@ impl ArticleRepository {
     /// 本文を渡したくないゆうこのデスクトップ通知用に、補う前の値を取り出す。
     pub fn get_saved_summary(&self, article_id: &str) -> Result<Option<String>, AppError> {
         Ok(self.find_article_record(article_id)?.summary)
+    }
+
+    /// 記事が要約済み（status.summarized）かを返す。自動要約の上書き防止用で、書き込みはしない。
+    pub fn is_article_summarized(&self, article_id: &str) -> Result<bool, AppError> {
+        Ok(self.find_article_record(article_id)?.status.summarized)
     }
 
     /// 退避候補を月次ZIPへ圧縮し、`archive_index.json` を更新して archived 印を付ける（増分1・非破壊）。
@@ -1202,6 +1207,16 @@ impl PersistedArticleRecord {
             is_favorite,
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
+        }
+    }
+
+    /// 記事ファイルから分かる要約状態。保存済みなら Done、それ以外はキュー側で上書きされるまで None。
+    fn persisted_summary_state(&self) -> SummaryState {
+        if self.status.summarized {
+            SummaryState::Done
+        } else {
+            SummaryState::None
         }
     }
 
@@ -1236,6 +1251,7 @@ impl PersistedArticleRecord {
             yuuko_comment: self.yuuko_comment.clone(),
             is_favorite,
             keyword_candidates: self.keyword_candidates.clone(),
+            summary_state: self.persisted_summary_state(),
         }
     }
 

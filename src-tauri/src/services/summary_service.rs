@@ -33,9 +33,29 @@ impl SummaryService {
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<GeneratedArticleSummaryDto, AppError> {
-        self.generate_article_summary_with(params, |request, kind, provider, level| {
-            self.request_validated_text(request, kind, provider, level)
-        })
+        self.generate_article_summary_with(
+            params,
+            FallbackPolicy::SaveFallback,
+            |request, kind, provider, level| {
+                self.request_validated_text(request, kind, provider, level)
+            },
+        )
+    }
+
+    /// 自動要約キュー用。出力が1つでも Mock（実AIの失敗・利用枠超過・検証落ちの代替）になったら
+    /// 保存せずエラーを返す（判断台帳 D56）。記事は未要約のまま残り、キューの再試行に回る。
+    /// 手動の `generate_article_summary` は従来どおり Mock の結果も保存する。
+    pub fn generate_article_summary_without_fallback(
+        &self,
+        params: GenerateArticleSummaryParams,
+    ) -> Result<GeneratedArticleSummaryDto, AppError> {
+        self.generate_article_summary_with(
+            params,
+            FallbackPolicy::RejectFallback,
+            |request, kind, provider, level| {
+                self.request_validated_text(request, kind, provider, level)
+            },
+        )
     }
 
     /// 要約生成の本体。検証済み出力の取得手段（`request_validated`）を差し替えられるようにし、
@@ -43,6 +63,7 @@ impl SummaryService {
     fn generate_article_summary_with<F>(
         &self,
         params: GenerateArticleSummaryParams,
+        fallback_policy: FallbackPolicy,
         request_validated: F,
     ) -> Result<GeneratedArticleSummaryDto, AppError>
     where
@@ -111,6 +132,16 @@ impl SummaryService {
             &yuuko_explanation_response,
             &yuuko_comment_response,
         ]);
+        if fallback_policy == FallbackPolicy::RejectFallback && effective_provider == PROVIDER_MOCK
+        {
+            // 本文は出さず、記事IDだけを残す。
+            log::warn!(
+                "auto summary for {article_id} fell back to the mock provider; the output was not saved"
+            );
+            return Err(AppError::Network(
+                "real AI output was unavailable; fallback output was not saved".to_string(),
+            ));
+        }
         let summary = summary_response.text;
         let yuuko_explanation = yuuko_explanation_response.text;
         let yuuko_comment = yuuko_comment_response.text;
@@ -254,6 +285,13 @@ fn combined_provider(responses: &[&AiResponse]) -> String {
         .first()
         .map(|response| response.provider.clone())
         .unwrap_or_else(|| PROVIDER_MOCK.to_string())
+}
+
+/// Mock への切り替え結果を保存してよいか。手動生成は保存し、自動要約は保存しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackPolicy {
+    SaveFallback,
+    RejectFallback,
 }
 
 /// 検証対象の出力種別。ログには本文の代わりにこの種別名だけを出す。
@@ -543,7 +581,7 @@ mod tests {
 
     use super::{
         combined_provider, neutralize_seed_text, select_valid_output, validate_summary_output,
-        OutputRejection, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
+        FallbackPolicy, OutputRejection, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
         EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
@@ -876,17 +914,20 @@ mod tests {
 
         // 要約・再説明は有効だが、感想は実AI・Mock とも検証に落ちる出力を注入する。
         let error = service
-            .generate_article_summary_with(params(), |_request, kind, _provider, _level| match kind
-            {
-                SummaryOutputKind::Comment => select_valid_output(
-                    kind,
-                    response("<p>混入した出力</p>", "gemini"),
-                    || Ok(response("## ゆうこの一言\n混入した出力", "mock")),
-                ),
-                _ => select_valid_output(kind, response("新しい出力", "gemini"), || {
-                    panic!("fallback must not be called for valid output")
-                }),
-            })
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |_request, kind, _provider, _level| match kind {
+                    SummaryOutputKind::Comment => select_valid_output(
+                        kind,
+                        response("<p>混入した出力</p>", "gemini"),
+                        || Ok(response("## ゆうこの一言\n混入した出力", "mock")),
+                    ),
+                    _ => select_valid_output(kind, response("新しい出力", "gemini"), || {
+                        panic!("fallback must not be called for valid output")
+                    }),
+                },
+            )
             .unwrap_err();
         let command_error = CommandError::from(error);
         assert_eq!(command_error.code, "PARSE_ERROR");
@@ -901,6 +942,80 @@ mod tests {
         );
         assert_eq!(detail.yuuko_comment.as_deref(), Some("保存済みの一言"));
         assert_eq!(detail.focus_points, vec!["観点A".to_string()]);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    /// 実AI（gemini）の出力を、指定した種別だけ失敗させて Mock へ切り替える注入関数。
+    fn gemini_with_fallback_on(
+        failing: SummaryOutputKind,
+    ) -> impl Fn(
+        crate::domain::summary::AiRequest,
+        SummaryOutputKind,
+        crate::domain::settings::AiProvider,
+        crate::domain::settings::ExplanationLevel,
+    ) -> Result<AiResponse, AppError> {
+        move |_request, kind, _provider, _level| {
+            if kind == failing {
+                // 実AIが失敗・検証落ちし、Mock の有効な出力へ切り替わった状態を再現する。
+                select_valid_output(kind, response("<p>壊れた出力</p>", "gemini"), || {
+                    Ok(response("代わりの出力", "mock"))
+                })
+            } else {
+                Ok(response("実AIの出力", "gemini"))
+            }
+        }
+    }
+
+    #[test]
+    fn auto_summary_does_not_save_fallback_output() {
+        let root_dir = temp_root("strict-fallback");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let result = service.generate_article_summary_with(
+            params(),
+            FallbackPolicy::RejectFallback,
+            gemini_with_fallback_on(SummaryOutputKind::Explanation),
+        );
+
+        assert!(result.is_err());
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert!(detail.yuuko_comment.is_none());
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_saves_when_all_outputs_come_from_real_ai() {
+        let root_dir = temp_root("strict-real");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::RejectFallback,
+                |_request, _kind, _provider, _level| Ok(response("実AIの出力", "gemini")),
+            )
+            .unwrap();
+
+        assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn manual_summary_still_saves_fallback_output() {
+        let root_dir = temp_root("manual-fallback");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let generated = service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                gemini_with_fallback_on(SummaryOutputKind::Explanation),
+            )
+            .unwrap();
+
+        assert_eq!(generated.yuuko_explanation, "代わりの出力");
+        assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 }
