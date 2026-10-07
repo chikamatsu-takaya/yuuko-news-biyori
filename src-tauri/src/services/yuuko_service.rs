@@ -18,7 +18,11 @@ use crate::infra::fullscreen_detector::{
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::repositories::yuuko_state_repository::YuukoStateRepository;
 use crate::services::article_service::ArticleService;
+use crate::services::friendship_service::FriendshipService;
 use crate::services::reward_service::RewardService;
+
+/// 「詳しく見る」確定で記録する友情イベント（加算量 5pt は domain::friendship 側で定義）。
+const YUUKO_TO_MAIN_EVENT: &str = "yuuko_to_main";
 
 /// Clone しても全画面抑制の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
 /// 同じ猶予を見る。
@@ -28,6 +32,8 @@ pub struct YuukoService {
     yuuko_state_repository: YuukoStateRepository,
     article_service: ArticleService,
     reward_service: RewardService,
+    /// 「詳しく見る」確定時の友情ポイント（yuuko_to_main）加算用。clone は friendship.json のロックを共有する。
+    friendship_service: FriendshipService,
     fullscreen_detector: Arc<dyn FullscreenDetector>,
     fullscreen_tracker: Arc<Mutex<FullscreenSuppressionTracker>>,
 }
@@ -38,12 +44,14 @@ impl YuukoService {
         yuuko_state_repository: YuukoStateRepository,
         article_service: ArticleService,
         reward_service: RewardService,
+        friendship_service: FriendshipService,
     ) -> Self {
         Self {
             settings_repository,
             yuuko_state_repository,
             article_service,
             reward_service,
+            friendship_service,
             fullscreen_detector: Arc::new(SystemFullscreenDetector),
             fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
         }
@@ -313,10 +321,21 @@ impl YuukoService {
     }
 
     /// ゆうこクリックの2段階遷移（最小実装）。遷移が起きた場合のみ保存する。
+    ///
+    /// デスクトップのゆうこ用ウィンドウ・アプリ内通知のどちらの「詳しく見る」もこの関数を通るため、
+    /// 友情ポイント（yuuko_to_main）の加算はここで1か所だけ行う（詳細設計書 §10.4 / §13.2）。
     pub fn handle_yuuko_clicked(&self) -> Result<YuukoNotificationState, AppError> {
         let mut state = self.yuuko_state_repository.load_or_default()?;
+        let was_preview_visible = state.state == YuukoResidentState::PreviewVisible;
         if state.handle_click() {
             self.yuuko_state_repository.save(&state)?;
+            // PreviewVisible → Leaving は「詳しく見る」の確定。通知1件につき1回だけ起きる遷移なので、
+            // ここで yuuko_to_main を記録すれば通知ごとに1回になる（初回クリック・閉じる・無視では加算しない）。
+            // 日次上限はFriendshipService側で強制する。遷移の保存は済んでいるため、加算の失敗はログのみとし、
+            // クリック確定は成功として返す。
+            if was_preview_visible && state.state == YuukoResidentState::Leaving {
+                self.record_yuuko_to_main_point();
+            }
             // 初回クリック（PreviewVisible 遷移）で軽量プレビューを見せた記事を Previewed にする
             // （詳細設計書 §11.2）。ドメインの遷移は副作用を持たないため、既読保存はサービス側で行う。
             // 既読保存の失敗はログのみで、クリック遷移の結果は返す。
@@ -333,6 +352,16 @@ impl YuukoService {
             }
         }
         Ok(state.to_notification_state())
+    }
+
+    /// 「詳しく見る」確定の友情ポイントを記録する。失敗してもクリック確定は取り消さない。
+    fn record_yuuko_to_main_point(&self) {
+        if let Err(error) = self
+            .friendship_service
+            .record_friendship_event(YUUKO_TO_MAIN_EVENT)
+        {
+            log::warn!("ゆうこ経由の友情ポイントを記録できませんでした: {error}");
+        }
     }
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
@@ -424,11 +453,14 @@ mod tests {
             FriendshipRepository::new(&paths),
             settings_repository.clone(),
         );
+        let friendship_service =
+            FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone());
         let service = YuukoService::new(
             settings_repository.clone(),
             yuuko_state_repository.clone(),
             article_service,
             reward_service,
+            friendship_service,
         )
         .with_fullscreen_detector(fullscreen.clone());
 
@@ -963,6 +995,95 @@ mod tests {
         assert_eq!(result.state.preview_short_summary, expected);
         let current = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(current.preview_short_summary, expected);
+    }
+
+    /// 紹介中（吹き出し表示）のゆうこ通知を保存する。友情ポイントのテスト用。
+    fn save_balloon_notification(ctx: &ServiceContext, article_id: &str) {
+        let active_state = PersistedYuukoState {
+            state: YuukoResidentState::BalloonVisible,
+            current_article_id: Some(article_id.to_string()),
+            ..PersistedYuukoState::default()
+        };
+        ctx.yuuko_state_repository.save(&active_state).unwrap();
+    }
+
+    fn friendship_state(ctx: &ServiceContext) -> crate::domain::friendship::FriendshipStateDto {
+        ctx.service
+            .friendship_service
+            .get_friendship_state()
+            .unwrap()
+    }
+
+    /// 11. 「詳しく見る」確定（PreviewVisible → Leaving）でだけ yuuko_to_main（5pt）を1回記録し、
+    ///     初回クリック・閉じる・無視では加算しない。
+    #[test]
+    fn yuuko_to_main_is_recorded_only_on_detail_confirmation() {
+        let ctx = make_context();
+
+        // 初回クリック（BalloonVisible → PreviewVisible）では加算しない。
+        save_balloon_notification(&ctx, "article-a");
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+        assert_eq!(clicked.state, YuukoResidentState::PreviewVisible);
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 0);
+
+        // 確定（PreviewVisible → Leaving）で 5pt を1回だけ加算する。
+        let left = ctx.service.handle_yuuko_clicked().unwrap();
+        assert_eq!(left.state, YuukoResidentState::Leaving);
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
+
+        // プレビュー表示中に閉じる・無視した場合は加算しない。
+        save_balloon_notification(&ctx, "article-b");
+        ctx.service.handle_yuuko_clicked().unwrap();
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        save_balloon_notification(&ctx, "article-c");
+        ctx.service.handle_yuuko_clicked().unwrap();
+        ctx.service.mark_yuuko_ignored().unwrap();
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
+
+        // 通知が無い状態のクリック（遷移なし）でも加算しない。
+        ctx.yuuko_state_repository
+            .save(&PersistedYuukoState::default())
+            .unwrap();
+        ctx.service.handle_yuuko_clicked().unwrap();
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
+    }
+
+    /// 12. 確定を何度繰り返しても、yuuko_to_main は日次上限 25pt を超えて加算されない。
+    #[test]
+    fn yuuko_to_main_respects_daily_point_limit() {
+        let ctx = make_context();
+        for index in 0..7 {
+            save_balloon_notification(&ctx, &format!("article-{index}"));
+            ctx.service.handle_yuuko_clicked().unwrap();
+            let left = ctx.service.handle_yuuko_clicked().unwrap();
+            assert_eq!(left.state, YuukoResidentState::Leaving);
+            let state = friendship_state(&ctx);
+            assert!(state.daily_earned_point <= state.daily_point_limit);
+        }
+        let state = friendship_state(&ctx);
+        assert_eq!(state.daily_point_limit, 25);
+        assert_eq!(state.daily_earned_point, 25);
+    }
+
+    /// 13. 友情ポイントの保存に失敗しても、確定の遷移と保存は成功として扱う（ログのみ）。
+    #[test]
+    fn detail_confirmation_succeeds_even_when_friendship_save_fails() {
+        let ctx = make_context();
+        // 読めない friendship.json を置き、加算を必ず失敗させる。
+        let friendship_path = AppPaths::new(ctx.root.clone()).friendship_path;
+        std::fs::create_dir_all(friendship_path.parent().unwrap()).unwrap();
+        std::fs::write(&friendship_path, "not json").unwrap();
+
+        save_balloon_notification(&ctx, "article-a");
+        ctx.service.handle_yuuko_clicked().unwrap();
+        let left = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert_eq!(left.state, YuukoResidentState::Leaving);
+        assert_eq!(load_state(&ctx).state, YuukoResidentState::Leaving);
+        assert_eq!(
+            std::fs::read_to_string(&friendship_path).unwrap(),
+            "not json"
+        );
     }
 
     /// 累計 `total` の friendship.json を保存する（ランクは累計から導出）。
