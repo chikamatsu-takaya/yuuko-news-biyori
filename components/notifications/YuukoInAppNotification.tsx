@@ -202,6 +202,9 @@ export default function YuukoInAppNotification({
     <div
       role="region"
       aria-label="ゆうこからのお知らせ"
+      // 退場中は確定済みのため、支援技術・フォーカス移動の対象からも外す。
+      aria-hidden={exiting || undefined}
+      inert={exiting || undefined}
       className={`pointer-events-none fixed z-50 flex flex-col gap-2 ${POSITION_CLASS[positionMode]}`}
     >
       {/* 退場中は右下へ戻る演出（§8.4）を出し、クリックを受け付けない。 */}
