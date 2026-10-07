@@ -75,6 +75,8 @@ impl DictionaryService {
     ///   命中時は（固定サンプル記事でも実記事でも）AI を **一度も呼ばない**。
     /// - 未命中かつ **実ニュース記事のときだけ**、既存 AiProviderService 経路で解説を生成する（1回だけ）。
     /// - 未命中かつ固定サンプル記事は、従来どおり固定サンプル解説/汎用文を返す（AI 不使用）。
+    /// - 保存済み辞書の命中時は、その項目の最終参照日時と参照回数を更新する（新規項目は作らない）。
+    ///   更新に失敗しても解説の表示は続け、失敗は調査用ログに残すだけにする（要件 §9.3 / D20）。
     /// - AI結果は既存 DictionaryEntryDto へ変換して返すだけで、辞書へは保存・更新しない。
     pub fn explain_selected_term(
         &self,
@@ -89,6 +91,16 @@ impl DictionaryService {
             .repository
             .find_saved_entry(&article_id, &normalized_text)?
         {
+            // 参照記録は付随処理。失敗しても解説は返す（ログに選択語・本文・保存先パスは出さない）。
+            if let Err(error) = self
+                .repository
+                .record_entry_reference(&saved_entry.entry_id)
+            {
+                log::warn!(
+                    "Failed to record dictionary entry reference (kind: {})",
+                    reference_error_kind(&error)
+                );
+            }
             return Ok(saved_entry);
         }
 
@@ -203,6 +215,17 @@ impl DictionaryService {
     ) -> Result<String, AppError> {
         let entry_id = params.validated_entry_id()?;
         self.repository.delete_dictionary_entry(&entry_id)
+    }
+}
+
+/// 参照記録失敗ログ用のエラー種別名。エラー本文（項目ID・パス等）はログへ出さない。
+fn reference_error_kind(error: &AppError) -> &'static str {
+    match error {
+        AppError::NotFound(_) => "not_found",
+        AppError::Io(_) => "io",
+        AppError::Parse(_) => "parse",
+        AppError::Json(_) => "json",
+        _ => "other",
     }
 }
 
@@ -485,7 +508,7 @@ mod tests {
     use crate::domain::article::{ArticleReadState, FetchedArticle};
     use crate::domain::dictionary::{
         DictionaryEntryDto, DictionaryEntryType, ExplainSelectedTermParams,
-        SaveDictionaryEntryParams,
+        ListDictionaryEntriesParams, SaveDictionaryEntryParams,
     };
     use crate::domain::settings::{AiProvider, ExplanationLevel};
     use crate::domain::summary::{AiRequest, AiResponse, AiTermExplanation};
@@ -1437,5 +1460,131 @@ mod tests {
         let reused = explain(&context, REAL_ARTICLE_ID, "新しい概念");
         assert_eq!(reused.short_explanation, explained.short_explanation);
         assert_eq!(context.ai.call_count(), 1);
+    }
+
+    // 辞書ストア（entries.json）を JSON として読み直す（保存内容の直接確認用）。
+    fn read_store_json(context: &TestContext) -> serde_json::Value {
+        let path = context.root_dir.join("dictionary").join("entries.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    // 保存済み項目の最終参照日時を既知の過去値へ書き換える（更新されたかを決定的に判定するため）。
+    fn set_saved_reference(context: &TestContext, last_referenced_at: &str, reference_count: u32) {
+        let path = context.root_dir.join("dictionary").join("entries.json");
+        let mut store = read_store_json(context);
+        let entry = &mut store["entries"][0];
+        entry["lastReferencedAt"] = serde_json::json!(last_referenced_at);
+        entry["referenceCount"] = serde_json::json!(reference_count);
+        std::fs::write(path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn explain_saved_hit_updates_reference_time_and_count_without_new_entry() {
+        let context = build_service();
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: saved_entry(),
+            })
+            .unwrap();
+        context
+            .service
+            .update_dictionary_memo(crate::domain::dictionary::UpdateDictionaryMemoParams {
+                entry_id: saved_entry().entry_id,
+                memo: "自分のメモ".to_string(),
+            })
+            .unwrap();
+        set_saved_reference(&context, "1000", 1);
+        let before = now_secs();
+
+        // 同じ記事・記事横断の両方で再利用表示する（2回）。
+        let same = explain(&context, REAL_ARTICLE_ID, "生成AI");
+        let other = explain(&context, OTHER_ARTICLE_ID, "生成ai");
+        assert_eq!(same.short_explanation, "保存済みの短い説明");
+        assert_eq!(other.entry_id, saved_entry().entry_id);
+        assert_eq!(context.ai.call_count(), 0);
+
+        let store = read_store_json(&context);
+        let entries = store["entries"].as_array().unwrap();
+        // 新しい項目は作らない（同じ項目を更新する）。
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["referenceCount"], 3);
+        let last_referenced_at = entry["lastReferencedAt"].as_str().unwrap().to_string();
+        let last_referenced_secs: u64 = last_referenced_at.parse().unwrap();
+        assert!(last_referenced_secs >= before);
+        // 解説内容・お気に入り・メモ・関連記事は参照記録で変わらない。
+        assert_eq!(entry["shortExplanation"], "保存済みの短い説明");
+        assert_eq!(entry["favorite"], true);
+        assert_eq!(entry["memo"], "自分のメモ");
+        assert_eq!(entry["relatedArticleId"], REAL_ARTICLE_ID);
+
+        // 辞書画面の「最終閲覧」（lastViewedAtText）は更新後の最終参照日時を使う。
+        let listed = context
+            .service
+            .list_dictionary_entries(ListDictionaryEntriesParams {
+                keyword: None,
+                entry_type: None,
+                starred_only: None,
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].last_viewed_at_text.as_deref(),
+            Some(last_referenced_at.as_str())
+        );
+    }
+
+    #[test]
+    fn explain_saved_hit_still_returns_explanation_when_reference_update_fails() {
+        let context = build_service();
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: saved_entry(),
+            })
+            .unwrap();
+        set_saved_reference(&context, "1000", 1);
+        // 一時ファイルの位置にディレクトリを置き、保存（書き込み）だけを失敗させる（読み込みは成功する）。
+        let temp_path = context.root_dir.join("dictionary").join("entries.json.tmp");
+        std::fs::create_dir_all(&temp_path).unwrap();
+
+        // 更新に失敗しても解説は返る（エラーにしない）。
+        let entry = explain(&context, REAL_ARTICLE_ID, "生成AI");
+        assert_eq!(entry.short_explanation, "保存済みの短い説明");
+        assert_eq!(context.ai.call_count(), 0);
+
+        // 保存済みの内容は元のまま（中途半端な書き込みをしない）。
+        let store = read_store_json(&context);
+        assert_eq!(store["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(store["entries"][0]["lastReferencedAt"], "1000");
+        assert_eq!(store["entries"][0]["referenceCount"], 1);
+    }
+
+    #[test]
+    fn explain_miss_does_not_record_reference_on_other_entries() {
+        let context = build_service();
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: saved_entry(),
+            })
+            .unwrap();
+        set_saved_reference(&context, "1000", 1);
+
+        // 保存済み項目と一致しない語は参照扱いにしない。
+        explain(&context, REAL_ARTICLE_ID, "別の用語");
+
+        let store = read_store_json(&context);
+        assert_eq!(store["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(store["entries"][0]["lastReferencedAt"], "1000");
+        assert_eq!(store["entries"][0]["referenceCount"], 1);
     }
 }

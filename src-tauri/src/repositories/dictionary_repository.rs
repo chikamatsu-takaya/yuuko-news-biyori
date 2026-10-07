@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::dictionary::{
@@ -12,18 +13,25 @@ use crate::paths::AppPaths;
 #[derive(Debug, Clone)]
 pub struct DictionaryRepository {
     dictionary_path: PathBuf,
+    // 読み込み→変更→保存（read-modify-write）を直列化する。参照記録（解説表示時の書き込み）と
+    // メモ・お気に入り・保存・削除が同時に走っても、互いの変更を上書きで失わないようにする。
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl DictionaryRepository {
     pub fn new(paths: &AppPaths) -> Self {
         Self {
             dictionary_path: paths.dictionary_path.clone(),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_path(dictionary_path: PathBuf) -> Self {
-        Self { dictionary_path }
+        Self {
+            dictionary_path,
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// 保存済み辞書を正規化済み用語の完全一致で検索する（記事解決は Service 側で済み）。
@@ -69,6 +77,7 @@ impl DictionaryRepository {
         &self,
         entry: DictionaryEntryDto,
     ) -> Result<DictionaryEntryDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let now_text = current_unix_timestamp_text();
 
@@ -106,11 +115,28 @@ impl DictionaryRepository {
             .collect())
     }
 
+    /// 保存済み解説を再利用して表示したときに、その項目の最終参照日時と参照回数を更新する（要件 §9.3 / D20）。
+    /// 新しい項目は作らない。項目が見つからない（検索後に削除された等）場合は NotFound を返す。
+    /// 解説内容・関連記事・お気に入り・メモは変えない（明示保存の `apply_from_dto` とは別扱い）。
+    pub fn record_entry_reference(&self, entry_id: &str) -> Result<(), AppError> {
+        let _guard = self.lock_writes()?;
+        let mut store = self.load_store_or_default()?;
+        let entry = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.dictionary_id == entry_id)
+            .ok_or_else(|| AppError::NotFound(format!("dictionary entry not found: {entry_id}")))?;
+        entry.last_referenced_at = Some(current_unix_timestamp_text());
+        entry.reference_count = entry.reference_count.saturating_add(1);
+        self.save_store(&store)
+    }
+
     pub fn update_dictionary_memo(
         &self,
         entry_id: &str,
         memo: Option<String>,
     ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let entry = store
             .entries
@@ -128,6 +154,7 @@ impl DictionaryRepository {
         entry_id: &str,
         is_starred: bool,
     ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let entry = store
             .entries
@@ -141,6 +168,7 @@ impl DictionaryRepository {
     }
 
     pub fn delete_dictionary_entry(&self, entry_id: &str) -> Result<String, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let before = store.entries.len();
         store
@@ -153,6 +181,12 @@ impl DictionaryRepository {
         }
         self.save_store(&store)?;
         Ok(entry_id.to_string())
+    }
+
+    fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
+        self.write_lock
+            .lock()
+            .map_err(|_| AppError::Io(io::Error::other("dictionary write lock was poisoned")))
     }
 
     fn load_store_or_default(&self) -> Result<PersistedDictionaryStore, AppError> {
@@ -772,5 +806,72 @@ mod tests {
             .delete_dictionary_entry("entry-unknown")
             .unwrap_err();
         assert!(error.to_string().contains("dictionary entry not found"));
+    }
+
+    #[test]
+    fn record_entry_reference_updates_only_reference_fields() {
+        let context = TestRepositoryContext::new();
+        let mut entry = persisted_entry("entry-a", "生成ai", "100", &["article-001"], "説明A");
+        entry.last_referenced_at = Some("200".to_string());
+        entry.reference_count = 4;
+        entry.favorite = true;
+        entry.memo = Some("メモ".to_string());
+        let other = persisted_entry("entry-b", "別の語", "100", &["article-002"], "説明B");
+        context.write_store(vec![entry, other]);
+
+        context
+            .repository
+            .record_entry_reference("entry-a")
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&context.dictionary_path).unwrap();
+        let store: PersistedDictionaryStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(store.entries.len(), 2);
+        let updated = &store.entries[0];
+        assert_eq!(updated.reference_count, 5);
+        let referenced_at: u64 = updated
+            .last_referenced_at
+            .as_deref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(referenced_at > 200);
+        // 参照記録以外の項目（作成日時・解説・お気に入り・メモ）は変えない。
+        assert_eq!(updated.created_at, "100");
+        assert_eq!(updated.short_explanation, "説明A");
+        assert!(updated.favorite);
+        assert_eq!(updated.memo.as_deref(), Some("メモ"));
+        // 他の項目には触れない。
+        assert_eq!(store.entries[1].reference_count, 1);
+        assert_eq!(store.entries[1].last_referenced_at, None);
+    }
+
+    #[test]
+    fn record_entry_reference_saturates_count() {
+        let context = TestRepositoryContext::new();
+        let mut entry = persisted_entry("entry-a", "生成ai", "100", &["article-001"], "説明A");
+        entry.reference_count = u32::MAX;
+        context.write_store(vec![entry]);
+
+        context
+            .repository
+            .record_entry_reference("entry-a")
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&context.dictionary_path).unwrap();
+        let store: PersistedDictionaryStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(store.entries[0].reference_count, u32::MAX);
+    }
+
+    #[test]
+    fn record_entry_reference_unknown_entry_is_not_found_and_creates_nothing() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .record_entry_reference("entry-unknown")
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
+        // 存在しない項目への参照記録で辞書ストアを作成しない（新規項目を作らない）。
+        assert!(!context.dictionary_path.exists());
     }
 }
