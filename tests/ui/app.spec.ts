@@ -3297,6 +3297,52 @@ test("does not generate candidates while the window is hidden and generates afte
   ).toBeVisible();
 });
 
+test("does not generate candidates while reading an article and resumes after leaving the reader", async ({
+  page,
+}) => {
+  // setInterval を制御するため、遷移前に仮想クロックを導入する。
+  await page.clock.install();
+  // 候補なしで起動し、ホームの初回生成（1回）だけを済ませてから記事詳細へ入る。
+  await openReaderFromHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  // 閲覧中に候補が出る状態へ切り替えても、定期(5分)の request は呼ばれない。
+  // request が Rust へ届かない＝日次通知回数・クールタイム・紹介済みを消費しない（mock の backend active も立たない）。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_REQUEST_NOTIFIED__ =
+      true;
+  });
+  await page.clock.fastForward(300000);
+  await page.clock.fastForward(300000);
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    1
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>).__E2E_BACKEND_ACTIVE__ ??
+        null
+    )
+  ).toBeNull();
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+
+  // 閲覧画面を離れると、通常どおり候補生成が再開して通知が表示される。
+  await page.getByRole("button", { name: "戻る", exact: true }).first().click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(2);
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toBeVisible();
+});
+
 test("a request that resolves after the window hides is not shown, and re-surfaces on re-show without an extra request", async ({
   page,
 }) => {
