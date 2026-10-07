@@ -4008,8 +4008,16 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return eventArgs.handler;
           }
-          case "plugin:event|unlisten":
+          // 解除した購読は一覧から外し、破棄済みハンドラだけが残っている状態で発火が成功扱いにならないようにする。
+          case "plugin:event|unlisten": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const unlistenArgs = args as unknown as { event: string; eventId: number };
+            const listeners = (window as any).__E2E_EVENT_LISTENERS__ || {};
+            const ids: number[] = listeners[unlistenArgs.event] || [];
+            listeners[unlistenArgs.event] = ids.filter((id) => id !== unlistenArgs.eventId);
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return null;
+          }
           case "plugin:window|close":
             (
               window as typeof window & {
