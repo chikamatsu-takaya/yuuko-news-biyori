@@ -46,6 +46,8 @@ pub fn run() {
             app_lifecycle::handle_window_event(window, event);
         })
         .setup(|app| {
+            // 以降の初期化失敗も記録できるよう、ログは setup の最初に登録する。
+            register_log_plugin(app);
             let resident_ready = match app_lifecycle::setup(app) {
                 Ok(()) => true,
                 Err(error) => {
@@ -161,13 +163,6 @@ pub fn run() {
                 paths.app_data_dir.display()
             );
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -206,4 +201,24 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// ログプラグインを登録する（開発: Info 以上を従来どおり / 配布: 警告とエラーだけをファイルへ。D29）。
+/// ログが使えなくてもアプリ本体は動かせるため、失敗しても起動は止めず、ログなしで続行する。
+fn register_log_plugin(app: &tauri::App) {
+    let policy = infra::app_logging::log_policy(cfg!(debug_assertions));
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            // ロガー未設定のため log マクロでは残せない。開発時の調査用に標準エラーへ出す。
+            eprintln!("ログ保存先を決められないため、ログなしで起動します: {error}");
+            return;
+        }
+    };
+    if let Err(error) = app
+        .handle()
+        .plugin(infra::app_logging::build_log_plugin(&policy, &app_data_dir))
+    {
+        eprintln!("ログプラグインを初期化できないため、ログなしで起動します: {error}");
+    }
 }
