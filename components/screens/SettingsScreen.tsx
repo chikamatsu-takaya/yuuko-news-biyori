@@ -1671,7 +1671,8 @@ export default function SettingsScreen({
           <Button
             className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
             onClick={handleSave}
-            disabled={isUpdatingAutostart}
+            // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
+            disabled={isUpdatingAutostart || isSettingsCorrupt}
           >
             <Check className="w-4 h-4" />
             保存する

@@ -125,6 +125,12 @@ mod tests {
         assert_eq!(crate::error::CommandError::from(error).code, "JSON_ERROR");
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
 
+        // 通常の保存でも破損ファイルを上書きしない（初期化は明示的なリセットだけ）。
+        assert!(service
+            .save_user_settings(UserSettingsDto::default())
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+
         let reset = service.reset_user_settings().unwrap();
         assert_eq!(reset.notify_max_per_day, 3);
         assert!(service.get_user_settings().is_ok());

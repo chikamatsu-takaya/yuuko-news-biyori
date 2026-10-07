@@ -2551,6 +2551,9 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   await expect(page.getByText("secret/path")).toHaveCount(0);
   const resetButton = page.getByRole("button", { name: "設定を初期化する", exact: true });
   await expect(resetButton).toBeVisible();
+  // 破損中は保存できない（Rust 側も保存を拒否する）。
+  const saveButton = page.getByRole("button", { name: "保存する" });
+  await expect(saveButton).toBeDisabled();
 
   const resetCalls = () =>
     page.evaluate(
@@ -2575,15 +2578,16 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   // 確認して初期化すると、エラー表示が消えて既定値で表示される。
   await resetButton.click();
   await page.getByRole("alertdialog").getByRole("button", { name: "初期状態に戻す" }).click();
-  expect(await resetCalls()).toBe(1);
+  await expect.poll(resetCalls).toBe(1);
   await expect(notice).toHaveCount(0);
   await expect(resetButton).toHaveCount(0);
+  await expect(saveButton).toBeEnabled();
   await expect(
     page.getByRole("combobox").filter({ hasText: "1日3回まで" })
   ).toBeVisible();
 
   // 初期化後は通常どおり保存でき、初期化結果（Rust の既定値DTO）を土台に保存される。
-  await page.getByRole("button", { name: "保存する" }).click();
+  await saveButton.click();
   const saved = (await readSavedSettings(page)) as
     | (Record<string, unknown> & { notifyMaxPerDay?: number })
     | undefined;
