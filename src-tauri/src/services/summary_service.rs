@@ -230,7 +230,9 @@ fn neutralize_seed_article(article: &ArticleDetailDto) -> ArticleDetailDto {
     seed_article.excerpt = article
         .excerpt
         .as_deref()
-        .map(|excerpt| neutralize_seed_text(excerpt, SEED_EXCERPT_MAX_CHARS));
+        .map(|excerpt| neutralize_seed_text(excerpt, SEED_EXCERPT_MAX_CHARS))
+        // 無害化で空になった抜粋は「抜粋なし」と同じ扱いにし、タイトルからの定型文へ切り替える。
+        .filter(|excerpt| !excerpt.trim().is_empty());
     seed_article.focus_points = article
         .focus_points
         .iter()
