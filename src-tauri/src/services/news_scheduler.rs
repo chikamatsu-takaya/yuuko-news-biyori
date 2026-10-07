@@ -288,7 +288,12 @@ fn is_interval_due(state: &NewsRefreshState, now: DateTime<Utc>, within_work_hou
 /// 判定規則はアプリ内通知と同じもの（domain::yuuko）を使う。
 fn is_within_work_hours(settings: &PersistedSettings, now: DateTime<Utc>) -> bool {
     let local = now.with_timezone(&chrono::Local);
-    let current_minutes = local.hour() * 60 + local.minute();
+    is_within_work_hours_at(settings, local.hour() * 60 + local.minute())
+}
+
+/// ローカル時刻（0時からの分）が通知の時間帯内か。実行端末の時計・タイムゾーンに依存せず
+/// テストできるよう、現在時刻の取得と分けている。
+fn is_within_work_hours_at(settings: &PersistedSettings, current_minutes: u32) -> bool {
     is_within_any_notification_time_range(
         current_minutes,
         settings
@@ -524,17 +529,26 @@ mod tests {
     fn work_hours_check_uses_notification_work_time_ranges() {
         use crate::domain::settings::WorkTimeRange;
         let mut settings = PersistedSettings::default();
-        settings.notification.work_time_ranges = vec![WorkTimeRange {
-            start: "00:00".to_string(),
-            end: "23:59".to_string(),
-        }];
-        assert!(is_within_work_hours(&settings, Utc::now()));
+        settings.notification.work_time_ranges = vec![
+            WorkTimeRange {
+                start: "09:00".to_string(),
+                end: "12:00".to_string(),
+            },
+            WorkTimeRange {
+                start: "13:00".to_string(),
+                end: "18:00".to_string(),
+            },
+        ];
+        assert!(is_within_work_hours_at(&settings, 10 * 60));
+        assert!(is_within_work_hours_at(&settings, 14 * 60));
+        assert!(!is_within_work_hours_at(&settings, 12 * 60 + 30));
+        assert!(!is_within_work_hours_at(&settings, 20 * 60));
         // 開始と終了が同じ範囲は長さ0として扱う（アプリ内通知と同じ規則）。
         settings.notification.work_time_ranges = vec![WorkTimeRange {
             start: "10:00".to_string(),
             end: "10:00".to_string(),
         }];
-        assert!(!is_within_work_hours(&settings, Utc::now()));
+        assert!(!is_within_work_hours_at(&settings, 10 * 60));
     }
 
     #[test]
