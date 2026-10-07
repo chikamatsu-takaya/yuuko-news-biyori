@@ -1172,37 +1172,46 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <SettingRow label="会議中は通知を抑制する">
+                  {/* 会議中・マイク使用中は保存DTO(suppressDuringMeeting/MicUse)へ保存されるが、
+                      Rust 側に判定処理がまだ無く効果が無いため非活性＋「準備中」（判断台帳 D04）。
+                      非活性中も読み込んだ値を state に保持したまま保存するので、保存値は上書きされない。 */}
+                  <SettingRow label="会議中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="会議中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressInMeeting}
+                      disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressInMeeting", checked)
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="マイク使用中は通知を抑制する">
+                  <SettingRow label="マイク使用中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="マイク使用中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressWhenMicInUse}
+                      disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenMicInUse", checked)
                       }
                     />
                   </SettingRow>
+                  {/* フルスクリーン抑制は Rust 側で notification.suppressInFullscreen を参照して判定済み（D44）のため操作可能。 */}
                   <SettingRow label="フルスクリーン時は通知を抑制する">
                     <Switch
+                      aria-label="フルスクリーン時は通知を抑制する"
                       checked={settings.suppression.suppressWhenFullscreen}
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenFullscreen", checked)
                       }
                     />
                   </SettingRow>
-                  {/* suppressWhenGaming は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
-                      会議/マイク/フルスクリーンは DTO(suppressDuring*) へ保存されるため操作可能のまま。 */}
+                  {/* suppressWhenGaming は保存DTOに対応フィールドが無く個別判定も無いため非活性＋「準備中」。
+                      全画面で動くゲームはフルスクリーン抑制の対象になる。 */}
                   <SettingRow label="ゲーム実行中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="ゲーム実行中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressWhenGaming}
                       disabled
-                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenGaming", checked)
                       }
