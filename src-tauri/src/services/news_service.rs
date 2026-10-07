@@ -220,12 +220,14 @@ impl NewsService {
         let mut fetched = 0usize;
         let mut to_save: Vec<FetchedArticle> = Vec::new();
 
+        // URL（クエリを含みうる）と、URL を含む通信エラー文は debug にとどめ、配布版のログファイルへ残さない（D29）。
+        // 取得失敗の内容は戻り値の errors で画面側へ伝わる。
         for source in &config.sources {
             // (制約5) feed_url を RssClient へ渡す前に検証する。
             let validated_feed = match validate_url(&source.url, UrlPurpose::Rss, &allowlist) {
                 Ok(url) => url,
                 Err(error) => {
-                    log::warn!("rejected feed url '{}': {error}", source.url);
+                    log::debug!("rejected feed url '{}': {error}", source.url);
                     errors.push(RefreshError::new(&source.url, ERROR_FEED_URL_REJECTED));
                     continue;
                 }
@@ -234,7 +236,7 @@ impl NewsService {
             let items = match self.rss_client.fetch(validated_feed.as_str()).await {
                 Ok(items) => items,
                 Err(error) => {
-                    log::warn!("failed to fetch feed '{}': {error}", source.url);
+                    log::debug!("failed to fetch feed '{}': {error}", source.url);
                     errors.push(RefreshError::new(&source.url, ERROR_FEED_FETCH_FAILED));
                     continue;
                 }
@@ -250,7 +252,7 @@ impl NewsService {
                 // (制約6) 記事URLを HtmlFetcher へ渡す前に Article 用検証を通す。
                 if let Err(error) = validate_url(&item.article_url, UrlPurpose::Article, &allowlist)
                 {
-                    log::warn!("rejected article url '{}': {error}", item.article_url);
+                    log::debug!("rejected article url '{}': {error}", item.article_url);
                     errors.push(RefreshError::new(
                         &item.article_url,
                         ERROR_ARTICLE_URL_REJECTED,
@@ -262,7 +264,7 @@ impl NewsService {
                 let excerpt = match self.html_fetcher.fetch_and_extract(&item.article_url).await {
                     Ok(result) => result.excerpt,
                     Err(error) => {
-                        log::warn!("failed to fetch article '{}': {error}", item.article_url);
+                        log::debug!("failed to fetch article '{}': {error}", item.article_url);
                         errors.push(RefreshError::new(
                             &item.article_url,
                             ERROR_ARTICLE_FETCH_FAILED,
