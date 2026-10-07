@@ -563,7 +563,19 @@ export default function DictionaryScreen({
     setEditMemoValue("");
   }, [selectedEntryId]);
 
+  // 検索語・フィルタの連続変更で古い応答が後から届いても上書きしないよう、
+  // 最新リクエストの番号だけが結果（一覧・お知らせ・読込状態）を反映できるようにする。
+  const loadRequestIdRef = React.useRef(0);
+  // 表示中の一覧を取得したときに絞り込み条件が有効だったか。
+  // 空状態の出し分けは入力中の値ではなく、表示中データの取得条件で判定する。
+  const [loadedWithConditions, setLoadedWithConditions] =
+    React.useState(false);
+
   const loadEntries = React.useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const isLatest = () => requestId === loadRequestIdRef.current;
+    const requestHasConditions =
+      trimmedSearchQuery !== "" || activeFilter !== "all";
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
@@ -577,6 +589,11 @@ export default function DictionaryScreen({
             : undefined,
         starredOnly: activeFilter === "favorite" ? true : undefined,
       });
+
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
 
       if (!dictionaryEntries) {
         setEntries(
@@ -597,6 +614,10 @@ export default function DictionaryScreen({
         setLoadNoticeKind("empty");
       }
     } catch (error) {
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
       setEntries([]);
       setLoadNotice(
         "辞書一覧の取得に失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
@@ -604,7 +625,10 @@ export default function DictionaryScreen({
       setLoadNoticeKind("error");
       console.warn("Failed to load dictionary entries:", error);
     } finally {
-      setIsLoading(false);
+      // 古いリクエストが完了しても、新しいリクエストの読込中表示は解除しない。
+      if (isLatest()) {
+        setIsLoading(false);
+      }
     }
   }, [activeFilter, trimmedSearchQuery]);
 
@@ -651,6 +675,21 @@ export default function DictionaryScreen({
 
   const selectedEntry =
     sortedEntries.find((entry) => entry.id === selectedEntryId) ?? null;
+
+  // 絞り込みは list_dictionary_entries の引数（keyword / type / starredOnly）で
+  // Rust 側に任せているため、結果0件が「辞書そのものが空」か「条件に合う項目が無い」かは
+  // 一覧からは判別できない。表示中データの取得時に条件が有効なら「検索結果なし」として扱う。
+  const hasActiveConditions = loadedWithConditions;
+  // 読込失敗時は entries が空でもエラー表示（お知らせ＋再試行）を優先し、空状態は出さない。
+  const showEmptyState =
+    !isLoading && loadNoticeKind !== "error" && paginatedEntries.length === 0;
+
+  // 検索語・種別フィルタ・ページを既定値へ戻す（並び替えは絞り込み条件ではないため維持する）。
+  const handleClearConditions = () => {
+    setSearchQuery("");
+    setActiveFilter("all");
+    setCurrentPage(1);
+  };
 
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
@@ -925,12 +964,34 @@ export default function DictionaryScreen({
                   </div>
                 ) : null}
 
-                {!isLoading && paginatedEntries.length === 0 ? (
+                {showEmptyState && hasActiveConditions ? (
+                  <Card className="border-dashed border-border/60 py-0 shadow-none">
+                    <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
+                      <Search className="h-8 w-8 text-[var(--yuuko-green)]/60" />
+                      <p className="text-sm font-medium text-foreground">
+                        見つからなかったよ
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        検索ワードや絞り込みを変えると、見つかるかも。
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        onClick={handleClearConditions}
+                      >
+                        条件をクリア
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {showEmptyState && !hasActiveConditions ? (
                   <Card className="border-dashed border-border/60 py-0 shadow-none">
                     <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
                       <BookOpen className="h-8 w-8 text-[var(--yuuko-green)]/60" />
                       <p className="text-sm font-medium text-foreground">
-                        まだ表示できる辞書項目がありません
+                        まだ辞書に何もないよ
                       </p>
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         ニュース詳細画面で用語を保存すると、ここに一覧表示されます。
