@@ -55,7 +55,11 @@ pub fn run() {
             ) {
                 log::error!("自動起動プラグインを初期化できませんでした: {error}");
             }
-            app_lifecycle::apply_launch_visibility(app.handle(), resident_ready, std::env::args());
+            app_lifecycle::apply_launch_visibility(
+                app.handle(),
+                resident_ready,
+                std::env::args_os(),
+            );
 
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);

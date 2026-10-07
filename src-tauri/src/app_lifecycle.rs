@@ -3,6 +3,7 @@
 //! OSの閉じる操作ではプロセスを終了させず、既存の低頻度スケジューラを継続する。
 //! アプリ終了は固定トレイメニューからの明示操作だけに限定する。
 
+use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{
@@ -96,7 +97,7 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
 pub fn apply_launch_visibility<R: Runtime>(
     app: &AppHandle<R>,
     resident_ready: bool,
-    args: impl IntoIterator<Item = String>,
+    args: impl IntoIterator<Item = OsString>,
 ) {
     if should_start_hidden(resident_ready, is_autostart_launch(args)) {
         log::info!("自動起動のため、メインウィンドウを表示せずバックグラウンド待機で開始します");
@@ -116,11 +117,11 @@ pub fn apply_launch_visibility<R: Runtime>(
     }
 }
 
-fn is_autostart_launch(args: impl IntoIterator<Item = String>) -> bool {
+fn is_autostart_launch(args: impl IntoIterator<Item = OsString>) -> bool {
     // 先頭は実行ファイルのパスなので除外し、完全一致だけを自動起動とみなす。
-    args.into_iter()
-        .skip(1)
-        .any(|arg| arg == crate::services::autostart_service::AUTOSTART_LAUNCH_ARG)
+    // UTF-8 として不正な引数でも panic しないよう、OsStr のまま比較する（std::env::args は panic する）。
+    let expected = OsStr::new(crate::services::autostart_service::AUTOSTART_LAUNCH_ARG);
+    args.into_iter().skip(1).any(|arg| arg == expected)
 }
 
 fn should_start_hidden(resident_ready: bool, launched_by_autostart: bool) -> bool {
@@ -206,8 +207,39 @@ mod tests {
         assert_eq!(menu_action("unexpected"), None);
     }
 
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn autostart_launch_detection_does_not_panic_on_invalid_unicode_args() {
+        use std::os::windows::ffi::OsStringExt;
+        // 対にならないサロゲート（0xD800）は UTF-8 に変換できない引数。
+        let invalid = OsString::from_wide(&[0x0061, 0xD800, 0x0062]);
+        assert!(invalid.to_str().is_none());
+
+        let mut with_flag = args(&["app.exe"]);
+        with_flag.push(invalid.clone());
+        with_flag.push(OsString::from("--autostart"));
+        assert!(is_autostart_launch(with_flag));
+
+        let mut without_flag = args(&["app.exe"]);
+        without_flag.push(invalid);
+        assert!(!is_autostart_launch(without_flag));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autostart_launch_detection_does_not_panic_on_invalid_unicode_args() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(vec![0x61, 0xFF, 0x62]);
+        assert!(invalid.to_str().is_none());
+
+        let mut with_flag = args(&["app"]);
+        with_flag.push(invalid);
+        with_flag.push(OsString::from("--autostart"));
+        assert!(is_autostart_launch(with_flag));
     }
 
     #[test]
