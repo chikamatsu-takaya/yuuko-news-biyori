@@ -248,7 +248,8 @@ impl PersistedSettings {
         self.ui.theme_id = dto.selected_theme_id;
         self.ui.tone_id = dto.selected_tone_id;
         self.ui.personality_id = dto.selected_personality_id;
-        self.ui.auto_start_on_pc_boot = dto.auto_start_on_pc_boot;
+        // auto_start_on_pc_boot は OS 登録状態の写しのため、通常保存では上書きしない。
+        // 自動起動の ON/OFF は autostart command（autostart_service）からだけ変更する。
     }
 }
 

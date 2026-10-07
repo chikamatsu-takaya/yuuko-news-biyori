@@ -2373,6 +2373,85 @@ test("settings postponed controls without a DTO field are disabled", async ({
   await expect(page.getByRole("switch")).toBeDisabled();
 });
 
+// 自動起動の呼び出し履歴（set_autostart_enabled に渡した enabled の並び）。
+const readAutostartSetCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown>)
+        .__E2E_AUTOSTART_SET_CALLS__ ?? []
+  );
+
+const autostartSwitch = (page: Page) =>
+  page.getByRole("switch", { name: "PC起動時の自動起動" });
+
+test("settings autostart shows the OS state even when the saved value differs", async ({
+  page,
+}) => {
+  // 保存値は ON（モック既定 autoStartOnPcBoot: true）だが、OS には未登録（既定 OFF）。
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  await expect(autostartSwitch(page)).toBeEnabled();
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
+test("settings autostart toggle applies immediately without the save button", async ({
+  page,
+}) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await autostartSwitch(page).click();
+  await expect(autostartSwitch(page)).toBeChecked();
+  expect(await readAutostartSetCalls(page)).toEqual([true]);
+  // 保存ボタンを押していないので、通常の設定保存は呼ばれない。
+  expect(await readSavedSettings(page)).toBeUndefined();
+
+  // キャンセルしても OS へ反映済みの状態は戻さない。
+  await page.getByRole("button", { name: "キャンセル" }).click();
+  await expect(autostartSwitch(page)).toBeChecked();
+
+  await autostartSwitch(page).click();
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  expect(await readAutostartSetCalls(page)).toEqual([true, false]);
+});
+
+test("settings autostart toggle failure keeps the OS state and shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_WRITE_FAIL__ =
+      true;
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await autostartSwitch(page).click();
+  await expect(page.getByTestId("autostart-error")).toHaveText(
+    "自動起動の設定を変更できなかったよ。もう一度試してみてね。"
+  );
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+});
+
+test("settings autostart read failure disables the toggle with fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_READ_FAIL__ =
+      true;
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await expect(page.getByTestId("autostart-error")).toHaveText(
+    "自動起動の状態を確認できなかったよ。画面を開き直してみてね。"
+  );
+  await expect(autostartSwitch(page)).toBeDisabled();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+});
+
 // 抑制条件: 未実装の抑制は「準備中」で操作不可、フルスクリーン抑制は操作・保存でき、
 // 非活性項目の保存値は保存で上書きされないこと（判断台帳 D04 / D44）。
 test("settings suppression shows 準備中 for unimplemented switches and saves the fullscreen switch", async ({
@@ -4023,6 +4102,30 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
+          // 自動起動（OS 登録状態）。既定は OFF。失敗時の文言に生エラーが出ないことも確認できるよう識別子を含める。
+          case "get_autostart_enabled": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const autostartWin = window as any;
+            if (autostartWin.__E2E_AUTOSTART_READ_FAIL__) {
+              throw new Error("E2E autostart read failure HKCU/secret/path");
+            }
+            return autostartWin.__E2E_AUTOSTART_ENABLED__ ?? false;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "set_autostart_enabled": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const autostartWin = window as any;
+            autostartWin.__E2E_AUTOSTART_SET_CALLS__ = [
+              ...(autostartWin.__E2E_AUTOSTART_SET_CALLS__ || []),
+              params.enabled,
+            ];
+            if (autostartWin.__E2E_AUTOSTART_WRITE_FAIL__) {
+              throw new Error("E2E autostart write failure HKCU/secret/path");
+            }
+            autostartWin.__E2E_AUTOSTART_ENABLED__ = params.enabled;
+            return params.enabled;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "test_ai_provider": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const aiTestWin = window as any;
