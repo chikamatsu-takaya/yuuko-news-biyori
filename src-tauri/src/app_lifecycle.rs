@@ -3,6 +3,7 @@
 //! OSの閉じる操作ではプロセスを終了させず、既存の低頻度スケジューラを継続する。
 //! アプリ終了は固定トレイメニューからの明示操作だけに限定する。
 
+use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{
@@ -88,6 +89,56 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
     }
 }
 
+/// 起動直後にメインウィンドウを出すかを決めて反映する。
+///
+/// メインウィンドウは tauri.conf.json で非表示のまま作成し、ここで表示する（自動起動時に一瞬
+/// 映るのを防ぐため）。OS の自動起動（`--autostart` 付き）で立ち上がった場合だけ、トレイ常駐・
+/// ゆうこ通知の待機状態で始める。トレイを作れなかったときは再表示手段が無くなるため必ず表示する。
+pub fn apply_launch_visibility<R: Runtime>(
+    app: &AppHandle<R>,
+    resident_ready: bool,
+    args: impl IntoIterator<Item = OsString>,
+) {
+    if should_start_hidden(resident_ready, is_autostart_launch(args)) {
+        log::info!("自動起動のため、メインウィンドウを表示せずバックグラウンド待機で開始します");
+        return;
+    }
+
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        log::error!("起動時に表示するメインウィンドウが見つかりません");
+        return;
+    };
+    if let Err(error) = window.show() {
+        log::error!("起動時のメインウィンドウ表示に失敗しました: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("起動時のメインウィンドウへフォーカスできませんでした: {error}");
+    }
+}
+
+fn is_autostart_launch(args: impl IntoIterator<Item = OsString>) -> bool {
+    // 先頭は実行ファイルのパスなので除外し、完全一致だけを自動起動とみなす。
+    // UTF-8 として不正な引数でも panic しないよう、OsStr のまま比較する（std::env::args は panic する）。
+    let expected = OsStr::new(crate::services::autostart_service::AUTOSTART_LAUNCH_ARG);
+    args.into_iter().skip(1).any(|arg| arg == expected)
+}
+
+fn should_start_hidden(resident_ready: bool, launched_by_autostart: bool) -> bool {
+    resident_ready && launched_by_autostart
+}
+
+/// 2つ目の起動を受けたときの処理。利用者が手動で起動した場合は既存のメイン画面を前面へ出す。
+/// OS の自動起動が既に起動中のアプリへ重なった場合（--autostart 付き）は、待機中の画面を
+/// 勝手に開かないよう何もしない。
+pub(crate) fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, args: Vec<String>) {
+    if is_autostart_launch(args.into_iter().map(OsString::from)) {
+        log::info!("自動起動による2つ目の起動を受けたため、画面は表示しません");
+        return;
+    }
+    show_main_window(app);
+}
+
 /// メインウィンドウを最小化解除・表示・前面化する。トレイの「画面を開く」と、
 /// ゆうこ用ウィンドウの「詳しく見る」（yuuko_desktop_notifier）で同じ手順を使う。
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -165,6 +216,60 @@ mod tests {
             Some(ResidentMenuAction::QuitApplication)
         );
         assert_eq!(menu_action("unexpected"), None);
+    }
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn autostart_launch_detection_does_not_panic_on_invalid_unicode_args() {
+        use std::os::windows::ffi::OsStringExt;
+        // 対にならないサロゲート（0xD800）は UTF-8 に変換できない引数。
+        let invalid = OsString::from_wide(&[0x0061, 0xD800, 0x0062]);
+        assert!(invalid.to_str().is_none());
+
+        let mut with_flag = args(&["app.exe"]);
+        with_flag.push(invalid.clone());
+        with_flag.push(OsString::from("--autostart"));
+        assert!(is_autostart_launch(with_flag));
+
+        let mut without_flag = args(&["app.exe"]);
+        without_flag.push(invalid);
+        assert!(!is_autostart_launch(without_flag));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autostart_launch_detection_does_not_panic_on_invalid_unicode_args() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(vec![0x61, 0xFF, 0x62]);
+        assert!(invalid.to_str().is_none());
+
+        let mut with_flag = args(&["app"]);
+        with_flag.push(invalid);
+        with_flag.push(OsString::from("--autostart"));
+        assert!(is_autostart_launch(with_flag));
+    }
+
+    #[test]
+    fn autostart_launch_is_detected_only_by_exact_argument() {
+        assert!(is_autostart_launch(args(&["app.exe", "--autostart"])));
+        assert!(!is_autostart_launch(args(&["app.exe"])));
+        assert!(!is_autostart_launch(args(&["app.exe", "--autostart=1"])));
+        // 実行ファイルのパス自体は引数として扱わない。
+        assert!(!is_autostart_launch(args(&["--autostart"])));
+    }
+
+    #[test]
+    fn main_window_starts_hidden_only_for_autostart_with_tray() {
+        assert!(should_start_hidden(true, true));
+        // 手動起動は従来どおり表示する。
+        assert!(!should_start_hidden(true, false));
+        // トレイが無いと再表示できないため、自動起動でも表示する。
+        assert!(!should_start_hidden(false, true));
+        assert!(!should_start_hidden(false, false));
     }
 
     #[test]

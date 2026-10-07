@@ -2340,12 +2340,21 @@ test("settings postponed controls without a DTO field are disabled", async ({
     page.getByRole("combobox").filter({ hasText: "通常" })
   ).toBeDisabled();
 
-  // 抑制条件: ゲーム中のみ非活性。会議/マイク/フルスクリーンは DTO保存されるため操作可能。
+  // 抑制条件: 判定処理が無い会議/マイク/ゲームは非活性。フルスクリーンのみ操作可能。
   await openSettingsMenu(page, "抑制条件");
-  const suppressionSwitches = page.getByRole("switch");
-  await expect(suppressionSwitches).toHaveCount(4);
-  await expect(suppressionSwitches.nth(0)).toBeEnabled();
-  await expect(suppressionSwitches.nth(3)).toBeDisabled();
+  await expect(page.getByRole("switch")).toHaveCount(4);
+  await expect(
+    page.getByRole("switch", { name: "会議中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("switch", { name: "マイク使用中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("switch", { name: "フルスクリーン時は通知を抑制する", exact: true })
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("switch", { name: "ゲーム実行中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
 
   // 解説・AI設定: 専門用語/長文自動/優先モードは非活性。Provider/解説の詳しさは操作可能。
   await openSettingsMenu(page, "解説・AI設定");
@@ -2362,6 +2371,156 @@ test("settings postponed controls without a DTO field are disabled", async ({
     page.getByRole("combobox").filter({ hasText: "バランス重視" })
   ).toBeDisabled();
   await expect(page.getByRole("switch")).toBeDisabled();
+});
+
+// 自動起動の呼び出し履歴（set_autostart_enabled に渡した enabled の並び）。
+const readAutostartSetCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown>)
+        .__E2E_AUTOSTART_SET_CALLS__ ?? []
+  );
+
+const autostartSwitch = (page: Page) =>
+  page.getByRole("switch", { name: "PC起動時の自動起動" });
+
+test("settings autostart shows the OS state even when the saved value differs", async ({
+  page,
+}) => {
+  // 保存値は ON（モック既定 autoStartOnPcBoot: true）だが、OS には未登録（既定 OFF）。
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  await expect(autostartSwitch(page)).toBeEnabled();
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
+test("settings autostart toggle applies immediately without the save button", async ({
+  page,
+}) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await autostartSwitch(page).click();
+  await expect(autostartSwitch(page)).toBeChecked();
+  expect(await readAutostartSetCalls(page)).toEqual([true]);
+  // 保存ボタンを押していないので、通常の設定保存は呼ばれない。
+  expect(await readSavedSettings(page)).toBeUndefined();
+
+  // キャンセルしても OS へ反映済みの状態は戻さない。
+  await page.getByRole("button", { name: "キャンセル" }).click();
+  await expect(autostartSwitch(page)).toBeChecked();
+
+  await autostartSwitch(page).click();
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  expect(await readAutostartSetCalls(page)).toEqual([true, false]);
+});
+
+test("settings autostart toggle failure keeps the OS state and shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_WRITE_FAIL__ =
+      true;
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await autostartSwitch(page).click();
+  await expect(page.getByTestId("autostart-error")).toHaveText(
+    "自動起動の設定を変更できなかったよ。もう一度試してみてね。"
+  );
+  await expect(autostartSwitch(page)).not.toBeChecked();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+});
+
+test("settings autostart read failure disables the toggle with fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_READ_FAIL__ =
+      true;
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "起動・連携");
+
+  await expect(page.getByTestId("autostart-error")).toHaveText(
+    "自動起動の状態を確認できなかったよ。画面を開き直してみてね。"
+  );
+  await expect(autostartSwitch(page)).toBeDisabled();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+});
+
+// 抑制条件: 未実装の抑制は「準備中」で操作不可、フルスクリーン抑制は操作・保存でき、
+// 非活性項目の保存値は保存で上書きされないこと（判断台帳 D04 / D44）。
+test("settings suppression shows 準備中 for unimplemented switches and saves the fullscreen switch", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override（会議/マイクを既定と異なる false で保存済みにする）
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      suppressDuringMeeting: false,
+      suppressDuringMicUse: false,
+      suppressDuringFullscreen: true,
+    };
+  });
+
+  await openSettings(page);
+  await openSettingsMenu(page, "抑制条件");
+
+  // 画面上のラベル（「準備中」表示を含む）が見えること。
+  await expect(page.getByText("会議中は通知を抑制する（準備中）")).toBeVisible();
+  await expect(
+    page.getByText("マイク使用中は通知を抑制する（準備中）")
+  ).toBeVisible();
+  await expect(page.getByText("ゲーム実行中は通知を抑制する（準備中）")).toBeVisible();
+  await expect(
+    page.getByText("フルスクリーン時は通知を抑制する", { exact: true })
+  ).toBeVisible();
+
+  const meeting = page.getByRole("switch", {
+    name: "会議中は通知を抑制する（準備中）",
+  });
+  const mic = page.getByRole("switch", {
+    name: "マイク使用中は通知を抑制する（準備中）",
+  });
+  const fullscreen = page.getByRole("switch", {
+    name: "フルスクリーン時は通知を抑制する",
+    exact: true,
+  });
+
+  // 非活性スイッチはクリックしても状態が変わらない。
+  await expect(meeting).toBeDisabled();
+  await expect(mic).toBeDisabled();
+  await expect(meeting).not.toBeChecked();
+  await meeting.click({ force: true });
+  await expect(meeting).not.toBeChecked();
+
+  // フルスクリーンは読み込んだ値を反映し、切り替えられる。
+  await expect(fullscreen).toBeChecked();
+  await fullscreen.click();
+  await expect(fullscreen).not.toBeChecked();
+
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  const saved = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: {
+            suppressDuringMeeting?: boolean;
+            suppressDuringMicUse?: boolean;
+            suppressDuringFullscreen?: boolean;
+          };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__
+  );
+
+  expect(saved?.suppressDuringFullscreen).toBe(false);
+  // 非活性の会議/マイクは読み込んだ保存値（false）のまま保存される。
+  expect(saved?.suppressDuringMeeting).toBe(false);
+  expect(saved?.suppressDuringMicUse).toBe(false);
 });
 
 // APIキー入力欄を画面へ追加していないこと（秘密情報を画面で扱わない）。
@@ -3217,6 +3376,52 @@ test("does not generate candidates while the window is hidden and generates afte
   ).toBeVisible();
 });
 
+test("does not generate candidates while reading an article and resumes after leaving the reader", async ({
+  page,
+}) => {
+  // setInterval を制御するため、遷移前に仮想クロックを導入する。
+  await page.clock.install();
+  // 候補なしで起動し、ホームの初回生成（1回）だけを済ませてから記事詳細へ入る。
+  await openReaderFromHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  // 閲覧中に候補が出る状態へ切り替えても、定期(5分)の request は呼ばれない。
+  // request が Rust へ届かない＝日次通知回数・クールタイム・紹介済みを消費しない（mock の backend active も立たない）。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_REQUEST_NOTIFIED__ =
+      true;
+  });
+  await page.clock.fastForward(300000);
+  await page.clock.fastForward(300000);
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    1
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>).__E2E_BACKEND_ACTIVE__ ??
+        null
+    )
+  ).toBeNull();
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+
+  // 閲覧画面を離れると、通常どおり候補生成が再開して通知が表示される。
+  await page.getByRole("button", { name: "戻る", exact: true }).first().click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(2);
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toBeVisible();
+});
+
 test("a request that resolves after the window hides is not shown, and re-surfaces on re-show without an extra request", async ({
   page,
 }) => {
@@ -3897,6 +4102,30 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
+          // 自動起動（OS 登録状態）。既定は OFF。失敗時の文言に生エラーが出ないことも確認できるよう識別子を含める。
+          case "get_autostart_enabled": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const autostartWin = window as any;
+            if (autostartWin.__E2E_AUTOSTART_READ_FAIL__) {
+              throw new Error("E2E autostart read failure HKCU/secret/path");
+            }
+            return autostartWin.__E2E_AUTOSTART_ENABLED__ ?? false;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "set_autostart_enabled": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const autostartWin = window as any;
+            autostartWin.__E2E_AUTOSTART_SET_CALLS__ = [
+              ...(autostartWin.__E2E_AUTOSTART_SET_CALLS__ || []),
+              params.enabled,
+            ];
+            if (autostartWin.__E2E_AUTOSTART_WRITE_FAIL__) {
+              throw new Error("E2E autostart write failure HKCU/secret/path");
+            }
+            autostartWin.__E2E_AUTOSTART_ENABLED__ = params.enabled;
+            return params.enabled;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "test_ai_provider": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const aiTestWin = window as any;

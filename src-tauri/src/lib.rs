@@ -16,6 +16,7 @@ use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
 use repositories::friendship_repository::FriendshipRepository;
+use repositories::reward_repository::RewardRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
@@ -25,6 +26,7 @@ use services::friendship_service::FriendshipService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
+use services::reward_service::RewardService;
 use services::settings_service::SettingsService;
 use services::summary_service::SummaryService;
 use services::yuuko_service::YuukoService;
@@ -34,14 +36,37 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 二重起動の防止。公式の案内どおり最初に登録し、2つ目のプロセスが他の初期化
+        // （保存領域・スケジューラ・トレイ）を始める前に終了させる。
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            app_lifecycle::handle_second_instance(app, args);
+        }))
         .on_window_event(|window, event| {
             app_lifecycle::handle_window_event(window, event);
         })
         .setup(|app| {
-            if let Err(error) = app_lifecycle::setup(app) {
-                // トレイが無いままclose-to-hideだけ有効になると終了不能になるため、通常終了へ戻す。
-                log::error!("常駐ライフサイクルを初期化できませんでした: {error}");
+            let resident_ready = match app_lifecycle::setup(app) {
+                Ok(()) => true,
+                Err(error) => {
+                    // トレイが無いままclose-to-hideだけ有効になると終了不能になるため、通常終了へ戻す。
+                    log::error!("常駐ライフサイクルを初期化できませんでした: {error}");
+                    false
+                }
+            };
+            // 自動起動の ON/OFF は autostart command から Rust 側で操作する（capability は付与しない）。
+            // 初期化に失敗しても自動起動の設定だけが使えない状態にとどめ、アプリは起動を続ける。
+            if let Err(error) = app.handle().plugin(
+                tauri_plugin_autostart::Builder::new()
+                    .arg(services::autostart_service::AUTOSTART_LAUNCH_ARG)
+                    .build(),
+            ) {
+                log::error!("自動起動プラグインを初期化できませんでした: {error}");
             }
+            app_lifecycle::apply_launch_visibility(
+                app.handle(),
+                resident_ready,
+                std::env::args_os(),
+            );
 
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);
@@ -76,8 +101,17 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 std::sync::Arc::new(ai_provider_service.clone()),
             );
-            let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
+            let reward_service = RewardService::new(
+                RewardRepository::new(&paths),
+                FriendshipRepository::new(&paths),
+                SettingsRepository::new(&paths),
+            );
+            let friendship_service =
+                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone());
             friendship_service.initialize_default_if_missing()?;
+            // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
+            // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
+            reward_service.sync_on_startup();
             let summary_service = SummaryService::new(
                 ai_provider_service.clone(),
                 article_repository,
@@ -88,6 +122,7 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 yuuko_state_repository,
                 article_service.clone(),
+                reward_service.clone(),
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
@@ -97,6 +132,7 @@ pub fn run() {
                 dictionary_service,
                 friendship_service,
                 news_service,
+                reward_service,
                 settings_service,
                 summary_service,
                 yuuko_service,
@@ -132,6 +168,8 @@ pub fn run() {
             commands::article_commands::archive_old_articles,
             commands::article_commands::restore_archived_article,
             commands::article_commands::retire_archived_markdown,
+            commands::autostart_commands::get_autostart_enabled,
+            commands::autostart_commands::set_autostart_enabled,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
@@ -151,7 +189,8 @@ pub fn run() {
             commands::yuuko_commands::request_yuuko_notification,
             commands::yuuko_commands::mark_yuuko_ignored,
             commands::friendship_commands::get_friendship_state,
-            commands::friendship_commands::record_friendship_event
+            commands::friendship_commands::record_friendship_event,
+            commands::reward_commands::get_reward_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

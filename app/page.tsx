@@ -12,6 +12,7 @@ import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
+import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
 import {
   dismissYuukoNotification,
   handleYuukoClicked,
@@ -137,10 +138,18 @@ export default function Page() {
   // 通知候補生成（requestYuukoNotification）を定期実行し、結果状態を Page state へ反映する。
   // 生成結果は下のアプリ内通知表示と同一導線に接続されるため「未表示消費」にならない。
   // ウィンドウ非表示中は canGenerateCandidates=false となり生成自体を行わない。
+  // ニュース閲覧画面（記事詳細）の表示中も、すでに記事を読んでいるため生成しない（§5.2）。
+  // request が Rust へ届かないので日次回数・クールタイムも消費せず、閲覧画面を離れると再開する。
+  // reader でも記事ID未指定ならホームを描画しているため、実際に記事詳細を表示中の場合だけ止める。
+  // 既に表示中の通知は閲覧画面へ移っても消さず、無視扱いにもしない（ユーザー操作か自動退場に任せる）。
   // onStateChange は handleSchedulerStateChange 経由で、終端操作中の再表示を抑止する。
+  const isReadingArticle = currentScreen === "reader" && Boolean(selectedArticleId);
   useNotificationScheduler({
     generateCandidates: true,
-    canGenerateCandidates: isWindowVisible,
+    canGenerateCandidates: canGenerateNotificationCandidates({
+      isWindowVisible,
+      isReadingArticle,
+    }),
     onStateChange: handleSchedulerStateChange,
   });
 

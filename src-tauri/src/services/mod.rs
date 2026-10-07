@@ -1,11 +1,13 @@
 pub mod ai_provider_service;
 pub mod archive_scheduler;
 pub mod article_service;
+pub mod autostart_service;
 pub mod dictionary_service;
 pub mod friendship_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod recommendation_service;
+pub mod reward_service;
 pub mod settings_service;
 pub mod summary_service;
 pub mod yuuko_service;

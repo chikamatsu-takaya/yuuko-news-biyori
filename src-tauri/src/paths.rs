@@ -12,6 +12,7 @@ pub const DICTIONARY_RELATIVE_PATH: &str = "dictionary/entries.json";
 pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
 pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
+pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -24,6 +25,7 @@ pub struct AppPaths {
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
     pub news_sources_path: PathBuf,
+    pub rewards_path: PathBuf,
     pub settings_path: PathBuf,
     pub yuuko_state_path: PathBuf,
 }
@@ -39,6 +41,7 @@ impl AppPaths {
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
         let news_sources_path = app_data_dir.join(NEWS_SOURCES_RELATIVE_PATH);
+        let rewards_path = app_data_dir.join(REWARDS_RELATIVE_PATH);
         let settings_path = app_data_dir.join(SETTINGS_RELATIVE_PATH);
         let yuuko_state_path = app_data_dir.join(YUUKO_STATE_RELATIVE_PATH);
         Self {
@@ -51,6 +54,7 @@ impl AppPaths {
             network_allowlist_path,
             news_refresh_state_path,
             news_sources_path,
+            rewards_path,
             settings_path,
             yuuko_state_path,
         }
@@ -65,6 +69,7 @@ impl AppPaths {
         ensure_parent_dir(&self.network_allowlist_path)?;
         ensure_parent_dir(&self.news_refresh_state_path)?;
         ensure_parent_dir(&self.news_sources_path)?;
+        ensure_parent_dir(&self.rewards_path)?;
         ensure_parent_dir(&self.settings_path)?;
         ensure_parent_dir(&self.yuuko_state_path)
     }

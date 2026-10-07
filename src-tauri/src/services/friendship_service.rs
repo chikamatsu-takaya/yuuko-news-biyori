@@ -2,6 +2,7 @@
 //!
 //! サーバ(Rust)を正とし、**デイリー上限・有効イベント検証・ランクアップ判定をここで強制**する。
 //! フロントはイベント発生を `record_friendship_event` で伝えるだけで、加算量や上限は決められない。
+//! ランクアップ時はランク報酬の解放（rewards.json）も併せて行う。
 
 use crate::domain::friendship::{
     FriendshipEventType, FriendshipStateDto, RecordFriendshipEventResult,
@@ -9,20 +10,24 @@ use crate::domain::friendship::{
 use crate::domain::yuuko::local_date_key;
 use crate::error::AppError;
 use crate::repositories::friendship_repository::FriendshipRepository;
+use crate::services::reward_service::RewardService;
 use chrono::{DateTime, TimeZone, Utc};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct FriendshipService {
     friendship_repository: FriendshipRepository,
+    reward_service: RewardService,
     store_lock: Arc<Mutex<()>>,
 }
 
 impl FriendshipService {
-    pub fn new(friendship_repository: FriendshipRepository) -> Self {
+    pub fn new(friendship_repository: FriendshipRepository, reward_service: RewardService) -> Self {
         Self {
             friendship_repository,
-            store_lock: Arc::new(Mutex::new(())),
+            // 報酬側も friendship.json を読むため、同じロックを共有する（順序は friendship → reward）。
+            store_lock: reward_service.friendship_store_lock(),
+            reward_service,
         }
     }
 
@@ -79,6 +84,17 @@ impl FriendshipService {
         let outcome = state.earn(event, &today, &format_utc_timestamp(now));
         self.friendship_repository.save(&state)?;
 
+        // ランクアップしたら、飛び越えたランクの分も含めて報酬を解放する。
+        // 失敗してもポイント加算（保存済み）は取り消さない。解放はランクから冪等に導出するため、
+        // 次回の報酬状態取得・起動時に追いつく。
+        if outcome.ranked_up {
+            if let Err(error) = self.reward_service.sync_with_friendship(&state) {
+                log::warn!(
+                    "ランクアップ時の報酬解放の保存に失敗しました（次回に再試行します）: {error}"
+                );
+            }
+        }
+
         Ok(RecordFriendshipEventResult {
             ranked_up: outcome.ranked_up,
             new_rank: state.current_rank,
@@ -104,6 +120,8 @@ mod tests {
     use super::*;
     use crate::domain::friendship::{DailyPoints, FriendshipState, DEFAULT_DAILY_LIMIT};
     use crate::paths::AppPaths;
+    use crate::repositories::reward_repository::RewardRepository;
+    use crate::repositories::settings_repository::SettingsRepository;
     use chrono::FixedOffset;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -117,7 +135,12 @@ mod tests {
             std::process::id()
         ));
         let paths = AppPaths::new(root.clone());
-        let service = FriendshipService::new(FriendshipRepository::new(&paths));
+        let reward_service = RewardService::new(
+            RewardRepository::new(&paths),
+            FriendshipRepository::new(&paths),
+            SettingsRepository::new(&paths),
+        );
+        let service = FriendshipService::new(FriendshipRepository::new(&paths), reward_service);
         (service, root)
     }
 
@@ -282,6 +305,54 @@ mod tests {
             .unwrap();
         assert_eq!(result.earned_point, 5);
         assert_eq!(result.state.last_point_date.as_deref(), Some("2026-06-09"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rank_up_by_event_unlocks_rewards_into_rewards_json() {
+        let (service, root) = temp_service();
+        // 累計 24pt（Rank2・あと1pt で Rank3）から 1pt で Rank3 → テーマ①を解放。
+        save_legacy_daily(&service, "2026-06-01", 24);
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")
+            .unwrap();
+        assert!(result.ranked_up);
+        assert_eq!(result.new_rank, 3);
+
+        let saved = RewardRepository::new(&AppPaths::new(root.clone()))
+            .load()
+            .unwrap()
+            .expect("rewards.json is written on rank up");
+        assert_eq!(saved.unlocked_reward_ids, vec!["theme_001".to_string()]);
+        assert_eq!(saved.pending_reward_ids(), vec!["theme_001".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reward_service_reads_friendship_under_the_same_lock() {
+        let (service, root) = temp_service();
+        assert!(Arc::ptr_eq(
+            &service.store_lock,
+            &service.reward_service.friendship_store_lock()
+        ));
+
+        // 友情側のロック保持中は、報酬側の friendship.json 読み込みが待たされる。
+        let guard = service.lock_store().unwrap();
+        let reward_service = service.reward_service.clone();
+        let handle = std::thread::spawn(move || reward_service.get_reward_state());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!handle.is_finished());
+        drop(guard);
+        assert!(handle.join().unwrap().is_ok());
+
+        // ランクアップ（friendship → reward の順でロック）でもデッドロックしない。
+        save_legacy_daily(&service, "2026-06-01", 24);
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")
+            .unwrap();
+        assert!(result.ranked_up);
 
         let _ = std::fs::remove_dir_all(root);
     }
