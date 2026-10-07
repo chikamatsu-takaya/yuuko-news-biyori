@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
     ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
-    ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
-    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
-    RestoreArchivedArticleResult, SummaryState,
+    ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto,
+    ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult,
+    FetchedArticle, RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -787,28 +787,37 @@ impl ArticleRepository {
         Ok(true)
     }
 
-    /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
-    /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
-    /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない。
+    /// 既存記事の article_id 集合を返す（保存時の上書き防止に使う）。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
+        Ok(self.existing_dedupe_keys()?.into_article_ids())
+    }
+
+    /// 取得時の重複排除に使うキー集合（article_id と 出典名×正規化タイトル）を返す。
+    /// 通常Markdownとアーカイブ記事カタログ（元Markdown削除済みを含む）の両方を対象にする。
+    /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
+    /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない
+    /// （破損記事のタイトルは読めないため、タイトル側の判定には含めない）。
+    pub fn existing_dedupe_keys(&self) -> Result<ArticleDedupeKeys, AppError> {
         let loaded = self.load_readable_article_records()?;
-        let mut article_ids = loaded
-            .records
+        let mut keys = ArticleDedupeKeys::default();
+        for article in loaded.records {
+            keys.insert_source_title(&article.source_name, &article.title);
+            keys.insert_id(article.article_id);
+        }
+        for path in &loaded.skipped_paths {
+            if let Some(stem) = path.file_stem() {
+                keys.insert_id(stem.to_string_lossy().into_owned());
+            }
+        }
+        for article in self
+            .load_archive_index_or_default()?
+            .archives
             .into_iter()
-            .map(|article| article.article_id)
-            .collect::<HashSet<_>>();
-        article_ids.extend(loaded.skipped_paths.iter().filter_map(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-        }));
-        article_ids.extend(
-            self.load_archive_index_or_default()?
-                .archives
-                .into_iter()
-                .flat_map(|archive| archive.articles)
-                .map(|article| article.article_id),
-        );
-        Ok(article_ids)
+            .flat_map(|archive| archive.articles)
+        {
+            keys.insert(article.article_id, &article.source_name, &article.title);
+        }
+        Ok(keys)
     }
 
     /// 取得済みの新規記事を保存する（内部Rust API・Tauri commandとして公開しない）。
@@ -3245,6 +3254,43 @@ mod tests {
 
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].title, "Markdown側で更新したタイトル");
+    }
+
+    #[test]
+    fn existing_dedupe_keys_include_markdown_and_catalog_source_titles() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let archived = PersistedArticleRecord {
+            article_id: "archived-title".to_string(),
+            title: "アーカイブ\u{3000}記事".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&archived).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        std::fs::remove_file(context.news_dir.join("202605").join("archived-title.md")).unwrap();
+
+        let active = PersistedArticleRecord {
+            article_id: "active-title".to_string(),
+            title: " 通常  記事 ".to_string(),
+            source_name: "出典A".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&active).unwrap();
+
+        let keys = context.repository.existing_dedupe_keys().unwrap();
+
+        // URL（article_id）が違っても、同一出典・正規化後に同一のタイトルは重複。
+        assert!(keys.is_duplicate("new-id-1", "出典A", "アーカイブ 記事"));
+        assert!(keys.is_duplicate("new-id-2", "出典A", "通常 記事"));
+        // 出典が異なれば重複ではない。
+        assert!(!keys.is_duplicate("new-id-3", "出典B", "通常 記事"));
+        assert!(keys.is_duplicate("archived-title", "出典B", "別"));
     }
 
     #[test]

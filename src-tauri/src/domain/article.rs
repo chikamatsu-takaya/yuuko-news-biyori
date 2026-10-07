@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +25,63 @@ pub fn is_archive_candidate(
         Some(fetched) => fetched <= now - Duration::days(ARCHIVE_AGE_DAYS),
         None => false,
     }
+}
+
+/// 取得時の重複判定に使う既存記事のキー集合（要件定義書 §7.2.4・純粋データ・I/Oなし）。
+///
+/// - 同一 article_id（正規化URL由来）は重複。
+/// - URLが異なっても「同一出典名かつ正規化タイトルが同一」なら重複。出典が異なれば別記事として扱う。
+///
+/// 1回の取得（refresh）につき1度だけ構築し、保存予定に加えた記事も `insert` で追記して、
+/// 同じ取得内の重複も弾く。タイトル類似度による判定は扱わない。
+#[derive(Debug, Clone, Default)]
+pub struct ArticleDedupeKeys {
+    article_ids: HashSet<String>,
+    source_titles: HashSet<(String, String)>,
+}
+
+impl ArticleDedupeKeys {
+    pub fn insert_id(&mut self, article_id: String) {
+        self.article_ids.insert(article_id);
+    }
+
+    pub fn insert_source_title(&mut self, source_name: &str, title: &str) {
+        if let Some(key) = source_title_key(source_name, title) {
+            self.source_titles.insert(key);
+        }
+    }
+
+    pub fn insert(&mut self, article_id: String, source_name: &str, title: &str) {
+        self.insert_id(article_id);
+        self.insert_source_title(source_name, title);
+    }
+
+    /// 既存記事（または同じ取得で保存予定の記事）と重複するか。
+    pub fn is_duplicate(&self, article_id: &str, source_name: &str, title: &str) -> bool {
+        self.article_ids.contains(article_id)
+            || source_title_key(source_name, title)
+                .is_some_and(|key| self.source_titles.contains(&key))
+    }
+
+    pub fn into_article_ids(self) -> HashSet<String> {
+        self.article_ids
+    }
+}
+
+/// 出典名×正規化タイトルのキー。タイトルが空白だけなら同一視の根拠にならないため None。
+fn source_title_key(source_name: &str, title: &str) -> Option<(String, String)> {
+    let normalized = normalize_title_for_dedupe(title);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some((source_name.to_string(), normalized))
+}
+
+/// 重複判定用にタイトルを正規化する。
+/// 前後空白の除去と、連続空白（全角空白 U+3000・タブ・改行を含む）の半角空白1つへの集約だけを行う。
+/// 大文字小文字や全半角英数の統一はしない（要件にない同一視で別記事を落とさないため）。
+pub fn normalize_title_for_dedupe(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// RFC3339文字列を UTC の `DateTime` へ変換する。解釈不能なら `None`。
@@ -329,11 +388,50 @@ impl RestoreArchivedArticleParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_archive_candidate, ArticleHistoryFilter, GetArticleDetailParams,
-        GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-        UpdateArticleFavoriteParams,
+        is_archive_candidate, normalize_title_for_dedupe, ArticleDedupeKeys, ArticleHistoryFilter,
+        GetArticleDetailParams, GetRecommendedArticlesParams, ListArticleHistoryParams,
+        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn normalize_title_absorbs_surrounding_repeated_and_fullwidth_spaces() {
+        let expected = "新製品 発表";
+        assert_eq!(normalize_title_for_dedupe("  新製品 発表 "), expected);
+        assert_eq!(normalize_title_for_dedupe("新製品   発表"), expected);
+        assert_eq!(
+            normalize_title_for_dedupe("\u{3000}新製品\u{3000}発表\u{3000}"),
+            expected
+        );
+        assert_eq!(
+            normalize_title_for_dedupe("新製品 \u{3000}\t発表"),
+            expected
+        );
+        // 大文字小文字などは同一視しない。
+        assert_eq!(normalize_title_for_dedupe(" Apple  News "), "Apple News");
+    }
+
+    #[test]
+    fn dedupe_keys_match_same_source_and_normalized_title_regardless_of_url() {
+        let mut keys = ArticleDedupeKeys::default();
+        keys.insert("news_a".to_string(), "出典A", "同じ\u{3000}タイトル");
+
+        assert!(keys.is_duplicate("news_a", "出典B", "別タイトル"));
+        assert!(keys.is_duplicate("news_b", "出典A", " 同じ  タイトル "));
+        // 出典が異なる同一タイトルは別記事。
+        assert!(!keys.is_duplicate("news_b", "出典B", "同じ タイトル"));
+        assert!(!keys.is_duplicate("news_b", "出典A", "違う タイトル"));
+        // 大文字小文字の違いは同一視しない。
+        keys.insert("news_c".to_string(), "出典A", "Apple News");
+        assert!(!keys.is_duplicate("news_d", "出典A", "apple news"));
+    }
+
+    #[test]
+    fn dedupe_keys_ignore_blank_titles() {
+        let mut keys = ArticleDedupeKeys::default();
+        keys.insert("news_a".to_string(), "出典A", " \u{3000} ");
+        assert!(!keys.is_duplicate("news_b", "出典A", ""));
+    }
 
     #[test]
     fn read_state_advances_only_forward() {

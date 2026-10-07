@@ -2,7 +2,8 @@
 //!
 //! 取得元は `config/news_sources.json` に保存された許可URLのみ。任意URLは扱わない。
 //! フロー: 取得元読込 → feed_url 検証 → RSS取得 → 各記事URL検証 → 本文抽出 →
-//!         おすすめ採点 → 重複排除 → 保存。
+//!         おすすめ採点 → 保存。重複排除（同一URL／同一出典・同一タイトル）は
+//!         本文取得より前に行い、既知記事への外部通信を発生させない。
 //!
 //! セキュリティ方針:
 //! - news_sources.json は deny-by-default（空配列）。破損時は fail-close（Err）。
@@ -214,8 +215,9 @@ impl NewsService {
             important_keywords: RecommendationService::initial_important_keywords(),
         };
 
-        // 既存記事IDを起点に重複排除（既知記事は本文取得もスキップして通信を抑える）。
-        let mut seen_ids = self.article_repository.existing_article_ids()?;
+        // 既存記事（通常Markdown＋アーカイブ記事カタログ）の重複キーを取得ごとに1度だけ構築する。
+        // 同一URL（article_id）または同一出典・同一タイトルの記事は、本文取得もスキップして通信を抑える。
+        let mut dedupe_keys = self.article_repository.existing_dedupe_keys()?;
         let mut errors: Vec<RefreshError> = Vec::new();
         let mut fetched = 0usize;
         let mut to_save: Vec<FetchedArticle> = Vec::new();
@@ -245,7 +247,9 @@ impl NewsService {
             for item in items {
                 fetched += 1;
                 let article_id = article_id_from_url(&item.article_url);
-                if seen_ids.contains(&article_id) {
+                // 要件定義書 §7.2.4。URL検証・HTML本文取得（外部通信）より前に判定する。
+                // 定期取得では大半が既知記事になるため、スキップはログに残さない。
+                if dedupe_keys.is_duplicate(&article_id, &item.source_name, &item.title) {
                     continue;
                 }
 
@@ -286,7 +290,8 @@ impl NewsService {
                     &context,
                 );
 
-                seen_ids.insert(article_id.clone());
+                // 同じ取得内で後続する同一URL・同一出典同一タイトルの item も弾く。
+                dedupe_keys.insert(article_id.clone(), &item.source_name, &item.title);
                 to_save.push(FetchedArticle {
                     article_id,
                     title: item.title,
@@ -445,6 +450,38 @@ mod tests {
             article_id_from_url("https://news.example.com/articles/1/")
         );
         assert!(base.starts_with("news_"));
+    }
+
+    #[test]
+    fn same_refresh_keeps_only_first_item_with_same_source_and_title() {
+        use crate::domain::article::ArticleDedupeKeys;
+
+        // refresh 内の判定順（is_duplicate → 保存予定なら insert）を再現する。
+        let items = [
+            ("https://news.example.com/a", "出典A", "同じ タイトル"),
+            (
+                "https://news.example.com/b",
+                "出典A",
+                "同じ\u{3000}\u{3000}タイトル ",
+            ),
+            ("https://other.example.com/c", "出典B", "同じ タイトル"),
+            ("https://news.example.com/a#dup", "出典A", "別タイトル"),
+        ];
+        let mut keys = ArticleDedupeKeys::default();
+        let mut kept = Vec::new();
+        for (url, source, title) in items {
+            let article_id = article_id_from_url(url);
+            if keys.is_duplicate(&article_id, source, title) {
+                continue;
+            }
+            keys.insert(article_id, source, title);
+            kept.push(url);
+        }
+
+        assert_eq!(
+            kept,
+            vec!["https://news.example.com/a", "https://other.example.com/c"]
+        );
     }
 
     #[test]
