@@ -4437,6 +4437,47 @@ test("onboarding overlay stays open with a toast when saving fails", async ({
   await expect(dialog).toBeVisible();
 });
 
+test("onboarding overlay pauses notification candidates until it is closed", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  // 案内の表示中は request_yuuko_notification を呼ばない（背面で通知枠を消費しない）。
+  const countWhileOpen = await readCount(
+    page,
+    "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"
+  );
+  await page.waitForTimeout(1000);
+  expect(
+    await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")
+  ).toBe(countWhileOpen);
+
+  // 閉じると候補生成が再開する。
+  await dialog.getByRole("button", { name: "スキップ" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThan(countWhileOpen);
+});
+
+test("onboarding overlay rejects malformed times before saving", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("textbox").first().fill("9時");
+  await dialog.getByRole("button", { name: "はじめる" }).click();
+  await expect(page.getByText("時刻の形を確認してね", { exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect(await readSavedSettingsRecord(page)).toBeUndefined();
+});
+
 test("onboarding overlay is not shown for completed or legacy settings", async ({
   page,
 }) => {

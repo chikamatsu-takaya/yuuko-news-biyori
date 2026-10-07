@@ -37,7 +37,18 @@ import {
 const errorKind = (error: unknown) =>
   error instanceof Error ? error.name : typeof error;
 
-export default function OnboardingOverlay() {
+// 時刻が HH:MM（時 0〜23・分 0〜59）か。Rust 側 validate_time と同じ範囲で、保存前に分かりやすく伝えるため。
+const isValidTime = (value: string) => {
+  const match = /^(\d{1,2}):(\d{1,2})$/.exec(value);
+  return !!match && Number(match[1]) <= 23 && Number(match[2]) <= 59;
+};
+
+type OnboardingOverlayProps = {
+  // 案内の表示・非表示が変わったときに呼ぶ。表示中は親側で通知候補の生成を止めるために使う。
+  onOpenChange?: (open: boolean) => void;
+};
+
+export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayProps) {
   const { toast } = useToast();
   // 読み込んだ設定（既定値）。保存時は選択した項目だけを差し替え、他の項目はこのまま送る。
   const [baseDto, setBaseDto] = React.useState<UserSettingsDto | null>(null);
@@ -48,6 +59,11 @@ export default function OnboardingOverlay() {
   const [nickname, setNickname] = React.useState("");
   const [autoStart, setAutoStart] = React.useState(false);
   const [isSaving, setIsSaving] = React.useState(false);
+  const isOpen = baseDto !== null;
+
+  React.useEffect(() => {
+    onOpenChange?.(isOpen);
+  }, [isOpen, onOpenChange]);
 
   React.useEffect(() => {
     let disposed = false;
@@ -112,6 +128,14 @@ export default function OnboardingOverlay() {
       return;
     }
     const ranges = normalizeWorkTimeRanges(workTimeRanges);
+    if (ranges.some((range) => !isValidTime(range.start) || !isValidTime(range.end))) {
+      toast({
+        variant: "destructive",
+        title: "時刻の形を確認してね",
+        description: "通知の時間帯は「09:00」のように入力してね。",
+      });
+      return;
+    }
     const saved = await saveAndClose({
       ...baseDto,
       genres,
@@ -150,7 +174,7 @@ export default function OnboardingOverlay() {
 
   return (
     // 閉じるボタン・Esc・外側クリックでは閉じない（完了かスキップのどちらかを記録するため）。
-    <Dialog open={baseDto !== null}>
+    <Dialog open={isOpen}>
       <DialogContent
         showCloseButton={false}
         className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
