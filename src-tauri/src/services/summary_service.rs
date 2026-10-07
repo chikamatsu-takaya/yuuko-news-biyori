@@ -538,13 +538,13 @@ fn build_yuuko_explanation_seed(
 
     match explanation_level {
         ExplanationLevel::Simple => {
-            format!("この記事は、まず「{first_point}」を見ると読みやすいです。難しい用語より、何が変わるのかに注目すると掴みやすいですよ。")
+            format!("この記事は、まず「{first_point}」を見ると読みやすいよ。難しい用語より、何が変わるのかに注目するとつかみやすいはずだよ。")
         }
         ExplanationLevel::Normal => format!(
-            "この記事は、{genre} を起点に読むと理解しやすいです。特に {first_point} がどう現場や利用者に影響するかを見ると、話の流れが追いやすくなります。"
+            "この記事は、{genre} を起点に読むと理解しやすいよ。特に {first_point} がどう現場や利用者に影響するかを見ると、話の流れが追いやすくなるね。"
         ),
         ExplanationLevel::Detailed => format!(
-            "この記事は、{genre} の話題を扱っています。まずは {first_point} を押さえ、そのうえで {secondary_focus_point} がどのように広がるかを見ると、技術面と実用面の両方が整理しやすいです。"
+            "この記事は、{genre} の話題を扱っているよ。まずは {first_point} を押さえて、そのうえで {secondary_focus_point} がどう広がるかを見てみてね。技術面と実用面の両方が整理しやすくなるよ。"
         ),
     }
 }
@@ -557,13 +557,13 @@ fn build_yuuko_comment_seed(
     let title = &article.title;
     match explanation_level {
         ExplanationLevel::Simple => {
-            format!("{genre}って、結局どこが便利になるのかを見ると分かりやすそうですね。")
+            format!("{genre}って、結局どこが便利になるのかを見ると分かりやすそうだね。")
         }
         ExplanationLevel::Normal => format!(
-            "{title}の話だけど、仕組みより『使った先で何が変わるか』に目を向けると面白そうですね。"
+            "{title}の話だけど、仕組みより『使った先で何が変わるか』に目を向けると面白そうだね。"
         ),
         ExplanationLevel::Detailed => format!(
-            "{title}の話題は専門的に見えても、実際には現場でどう役立つかまでつながると理解しやすいですね。"
+            "{title}の話題は専門的に見えても、実際には現場でどう役立つかまでつながると理解しやすいね。"
         ),
     }
 }
@@ -828,6 +828,28 @@ mod tests {
             detail.excerpt.as_deref(),
             Some("新しい半導体工場の建設計画が発表されました。")
         );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn mock_explanation_and_comment_are_in_yuuko_tone_without_internal_labels() {
+        let root_dir = temp_root("tone");
+        let (service, _) = build_service(&root_dir, "新しい半導体工場の建設計画が発表されました。");
+
+        // 既定（provider=Mock・normal）で生成。出力検証（§12.5）を通って保存・返却される。
+        let generated = service.generate_article_summary(params()).unwrap();
+
+        assert!(
+            generated.yuuko_explanation.contains("だよ")
+                || generated.yuuko_explanation.contains("よ。")
+        );
+        assert!(!generated.yuuko_explanation.contains("です"));
+        assert!(generated.yuuko_comment.ends_with("だね。"));
+        for text in [&generated.yuuko_explanation, &generated.yuuko_comment] {
+            for label in ["mock", "normal", "simple", "detailed"] {
+                assert!(!text.contains(label), "must not show {label}: {text}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 

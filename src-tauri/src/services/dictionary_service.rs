@@ -410,10 +410,10 @@ fn build_generic_entry(
         key_text: selected_text.to_string(),
         entry_type: DictionaryEntryType::Term,
         short_explanation: format!(
-            "「{selected_text}」はこの記事を理解するための補助キーワードです。"
+            "「{selected_text}」は、この記事を理解するための手がかりになる言葉だよ。"
         ),
         detail_explanation: format!(
-            "「{selected_text}」は記事「{article_title}」の文脈で重要な用語です。現時点では記事理解のヒントになる簡易解説として返しています。"
+            "「{selected_text}」は、記事「{article_title}」の文脈で大事な言葉だよ。いまは簡単な説明だけだけど、記事を読むときのヒントにしてね。"
         ),
         related_article_id: Some(article_id.to_string()),
         related_article_title: Some(article_title.to_string()),
