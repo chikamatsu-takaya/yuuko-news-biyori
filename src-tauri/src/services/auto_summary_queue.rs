@@ -10,7 +10,7 @@
 //! - 失敗した記事は他の記事の後ろへ回して再試行し、合計 `MAX_ATTEMPTS` 回失敗したら
 //!   再起動まで `Failed` のままにする（他の記事の処理は止めない）。
 //! - 外部AIの利用枠を使い切らないよう、設定 `ai.autoSummaryEnabled` が有効なときだけ動く（既定は無効）。
-//! - 設定の AI プロバイダが Mock のときは動かない（判断台帳 D56）。固定応答で記事を「要約済み」に
+//! - 設定の AI プロバイダが実装済みの実AI（現在は Gemini）以外のときは動かない（判断台帳 D56）。固定応答で記事を「要約済み」に
 //!   してしまうと、後で実AIを使えるようになっても自動では作り直されないため。
 //! - 実AIの失敗・利用枠超過・検証落ちで Mock の代替出力になった場合は保存せず失敗として扱い、
 //!   再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56）。
@@ -344,10 +344,12 @@ impl AutoSummaryQueue {
     }
 }
 
-/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが Mock 以外のときだけ true。
-/// 画面へ渡す値と同じ解釈（未知の値は Mock）にするため DTO 変換を通す。
+/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AIのときだけ true。
+/// openai / local は現在実AI呼び出しが未実装で常に Mock 応答になり、毎回失敗するだけなので
+/// Mock と同じく動かさない（判断台帳 D56）。未知の値は DTO 変換で Mock 扱いになる。
+/// 同梱のローカルLLMプロバイダを実装したら、ここに追加する。
 fn is_auto_summary_allowed(settings: &PersistedSettings) -> bool {
-    settings.ai.auto_summary_enabled && settings.to_dto().ai_provider != AiProvider::Mock
+    settings.ai.auto_summary_enabled && matches!(settings.to_dto().ai_provider, AiProvider::Gemini)
 }
 
 /// 1回の投入件数を、おすすめ順の上位 `maxDailyRecommendations` 件に絞る（常駐負荷を抑えるため）。
@@ -449,6 +451,9 @@ mod tests {
         assert!(!is_auto_summary_allowed(&settings_with(
             true, "unknown", 10
         )));
+        // 実AI呼び出しが未実装の openai / local も動かさない。
+        assert!(!is_auto_summary_allowed(&settings_with(true, "openai", 10)));
+        assert!(!is_auto_summary_allowed(&settings_with(true, "local", 10)));
     }
 
     #[test]

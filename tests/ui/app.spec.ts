@@ -2164,6 +2164,9 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   });
   await expect(autoSummarySwitch).not.toBeChecked();
   await expect(autoSummarySwitch).toBeEnabled();
+  await expect(page.getByTestId("auto-summary-help")).toHaveText(
+    "AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）"
+  );
 
   await autoSummarySwitch.click();
   await expect(autoSummarySwitch).toBeChecked();
