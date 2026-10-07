@@ -9,10 +9,14 @@
 packages:
   - "."
 
-# 依存監査の除外設定（旧 package.json pnpm.auditConfig から移行・値は変更しない）。
+# 依存監査の除外設定（GHSA-r5fr-rjxr-66jc は旧 package.json pnpm.auditConfig から移行・値は変更しない）。
 auditConfig:
   ignoreGhsas:
     - GHSA-r5fr-rjxr-66jc
+    # braces<=3.0.3 の DoS（High）。修正版（>=3.0.4）が npm に未公開（2026-10-07 時点の最新は 3.0.3）。
+    # eslint-config-next > @next/eslint-plugin-next > fast-glob > micromatch 経由の開発時（lint）のみの依存で、
+    # アプリ本体には入らない。2026-10-07 藤井判断で除外する。修正版が出たら更新してこの行を外すこと。
+    - GHSA-vfj7-8cjw-p6xm
 
 # 推移依存の上書き。
 # next@16.3.x の optionalDependencies.sharp は "^0.35.4" で、0.35.4 には High 脆弱性（libvips 継承）が残る。
