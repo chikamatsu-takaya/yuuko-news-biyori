@@ -39,12 +39,17 @@ impl SettingsService {
     /// 既定値は `PersistedSettings::default()` を唯一の源とする。
     /// ただし自動起動は OS 登録が正で、リセットでは OS 登録を変えないため、写しの値は引き継ぐ
     /// （ここで OFF にすると OS 状態と設定値がずれる）。
+    /// 設定ファイルが破損（JSON_ERROR）している場合は、上書きする前に別名で1世代だけ退避する。
+    /// 退避に失敗したら初期化を中止し、元ファイルを残したままエラーを返す（判断台帳 D57）。
     pub fn reset_user_settings(&self) -> Result<UserSettingsDto, AppError> {
-        let current_auto_start = self
-            .repository
-            .load_or_default()
-            .map(|persisted| persisted.ui.auto_start_on_pc_boot)
-            .unwrap_or(false);
+        let current_auto_start = match self.repository.load_or_default() {
+            Ok(persisted) => persisted.ui.auto_start_on_pc_boot,
+            Err(AppError::Json(_)) => {
+                self.repository.backup_corrupt_file()?;
+                false
+            }
+            Err(_) => false,
+        };
         let mut defaults = PersistedSettings::default();
         defaults.ui.auto_start_on_pc_boot = current_auto_start;
         self.repository.save(&defaults)?;
@@ -137,6 +142,65 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
+        let _ = std::fs::remove_file(path.with_extension("corrupt.json"));
+    }
+
+    #[test]
+    fn reset_keeps_one_copy_of_corrupt_file_under_fixed_name() {
+        // 破損時の初期化では、壊れたファイルを同じフォルダへ別名で1世代だけ残す（判断台帳 D57）。
+        let (service, path) = temp_service();
+        let backup = path.with_extension("corrupt.json");
+
+        std::fs::write(&path, b"{ first broken").unwrap();
+        service.reset_user_settings().unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ first broken");
+        assert!(service.get_user_settings().is_ok());
+
+        // 再び壊れて初期化すると、古い退避ファイルは新しい中身で置き換わる（1世代のみ）。
+        std::fs::write(&path, b"{ second broken").unwrap();
+        service.reset_user_settings().unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ second broken");
+        assert!(!path.with_extension("corrupt.json.tmp").exists());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn reset_without_corruption_does_not_create_backup() {
+        let (service, path) = temp_service();
+        let backup = path.with_extension("corrupt.json");
+
+        // ファイルなし・正常ファイルのどちらの初期化でも退避ファイルは作らない。
+        service.reset_user_settings().unwrap();
+        assert!(!backup.exists());
+        service
+            .save_user_settings(UserSettingsDto::default())
+            .unwrap();
+        service.reset_user_settings().unwrap();
+        assert!(!backup.exists());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn reset_is_aborted_when_corrupt_backup_fails() {
+        // 退避先に同名フォルダがあり複製を置けない状況を作る。
+        let (service, path) = temp_service();
+        let backup = path.with_extension("corrupt.json");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+
+        let error = service.reset_user_settings().unwrap_err();
+        assert_eq!(crate::error::CommandError::from(error).code, "IO_ERROR");
+        // 初期化は中止され、元の破損ファイルはそのまま残る。
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+        assert!(!path.with_extension("corrupt.json.tmp").exists());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&backup);
     }
 
     #[test]

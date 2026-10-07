@@ -2617,6 +2617,18 @@ test("settings autostart read failure disables the toggle with fixed wording", a
   await expect(page.getByText("secret/path")).toHaveCount(0);
 });
 
+// 通常のリセット確認は従来の文言のままで、破損時の「別名で残す」文言は出さない（判断台帳 D57）。
+test("settings normal reset dialog keeps the standard wording", async ({ page }) => {
+  await openSettings(page);
+  await page.getByRole("button", { name: "設定を初期状態に戻す", exact: true }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("この操作は取り消せません")).toBeVisible();
+  await expect(dialog.getByText("別名でコピー")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 // 設定ファイル破損（JSON_ERROR）: 原因と「設定を初期化する」導線を出し、確認ダイアログ経由でだけ初期化する（判断台帳 D28）。
 test("settings corrupt file shows the reset path and resets to defaults after confirmation", async ({
   page,
@@ -2651,6 +2663,11 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   await resetButton.click();
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).toBeVisible();
+  // 破損時の確認文言は「壊れたファイルを別名で残す」ことを伝え、通常リセットの文言は出さない（判断台帳 D57）。
+  await expect(
+    dialog.getByText("壊れた設定ファイルは、初期化の前に別名でコピーを1つだけ残します。")
+  ).toBeVisible();
+  await expect(dialog.getByText("この操作は取り消せません")).toHaveCount(0);
   await dialog.getByRole("button", { name: "キャンセル" }).click();
   await expect(dialog).toHaveCount(0);
   expect(await resetCalls()).toBe(0);
