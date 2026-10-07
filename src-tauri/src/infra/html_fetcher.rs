@@ -5,6 +5,7 @@
 //! - resolved IPs must stay on public addresses before connecting
 //! - redirects are followed manually and every `Location` hop is re-validated
 //! - raw HTML is never returned; only a sanitized excerpt may leave this layer
+//! - 受信本文は MAX_HTML_BODY_BYTES まで（超過はこの記事の本文取得失敗として扱う）
 #![allow(dead_code)]
 
 use std::{
@@ -14,12 +15,17 @@ use std::{
     time::Duration,
 };
 
-use reqwest::{header::LOCATION, redirect::Policy, Client, Response};
+use reqwest::{
+    header::{HeaderValue, CONTENT_TYPE, LOCATION},
+    redirect::Policy,
+    Client, Response,
+};
 use scraper::{ElementRef, Html, Selector};
 use url::{Host, Url};
 
 use super::{
     allowlist::NetworkAllowlist,
+    http_body::{read_async_response_body_capped, BodyReadError},
     url_guard::{is_disallowed_ip_addr, validate_parsed_url, validate_url, UrlPurpose},
 };
 use crate::{error::AppError, paths::AppPaths};
@@ -28,6 +34,10 @@ const MAX_REDIRECTS: usize = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const HTML_USER_AGENT: &str = "yuuko-news-biyori/0.1";
 const MAX_EXCERPT_CHARS: usize = 2_000;
+/// 記事HTML応答本文の受信バイト上限（3 MiB）。セキュリティ詳細設計書 §9.2。
+/// 通常の記事ページは数百 KiB〜1 MiB 程度のため余裕を取りつつ、巨大応答の全量展開と
+/// 解析負荷を防ぐ（常駐負荷・AGENTS.md §2）。
+const MAX_HTML_BODY_BYTES: usize = 3 * 1024 * 1024;
 const MIN_BLOCK_CHARS: usize = 3;
 const ARTICLE_CONTAINER_SELECTORS: &[&str] = &[
     "article",
@@ -103,7 +113,7 @@ impl HtmlFetcher {
         let mut visited = HashSet::from([current_url.to_string()]);
 
         for redirect_count in 0..=self.max_redirects {
-            let response = self.send_request(&current_url).await?;
+            let mut response = self.send_request(&current_url).await?;
             if response.status().is_redirection() {
                 if redirect_count == self.max_redirects {
                     return Err(AppError::Network(format!(
@@ -131,9 +141,12 @@ impl HtmlFetcher {
                 )));
             }
 
-            let body = response.text().await.map_err(|error| {
-                AppError::Network(format!("failed to read HTML response body: {error}"))
-            })?;
+            // 本文は受信上限付きで読む。超過はこの記事の本文取得失敗として扱う（URL は載せない）。
+            let content_type = response.headers().get(CONTENT_TYPE).cloned();
+            let bytes = read_async_response_body_capped(&mut response, MAX_HTML_BODY_BYTES)
+                .await
+                .map_err(html_body_error)?;
+            let body = decode_html_body(bytes, content_type).await?;
             return Ok((current_url, body));
         }
 
@@ -166,6 +179,34 @@ impl HtmlFetcher {
             AppError::Network(format!("failed to build HTML HTTP client: {error}"))
         })
     }
+}
+
+/// 本文読み取り失敗を固定文言の AppError にする（本文・URL・生のエラー文を含めない）。
+fn html_body_error(error: BodyReadError) -> AppError {
+    match error {
+        BodyReadError::TooLarge => {
+            AppError::Network("HTML response body exceeded the receive size limit".to_string())
+        }
+        BodyReadError::Read => AppError::Network("failed to read HTML response body".to_string()),
+    }
+}
+
+/// 上限内で受信したバイト列を、従来の `Response::text()` と同じ規則（Content-Type の charset、
+/// なければ UTF-8・不正バイトは置換）で文字列にする。
+/// Shift_JIS 等の記事を扱うため、依存を増やさず reqwest の文字コード変換をそのまま使う
+/// （受信済みバイトから応答を組み直すだけで、追加の通信は発生しない）。
+async fn decode_html_body(
+    bytes: Vec<u8>,
+    content_type: Option<HeaderValue>,
+) -> Result<String, AppError> {
+    let mut buffered = tauri::http::Response::new(bytes);
+    if let Some(content_type) = content_type {
+        buffered.headers_mut().insert(CONTENT_TYPE, content_type);
+    }
+    Response::from(buffered)
+        .text()
+        .await
+        .map_err(|_| AppError::Network("failed to decode HTML response body".to_string()))
 }
 
 fn resolve_public_socket_addrs(host: &str, url: &Url) -> Result<Vec<SocketAddr>, AppError> {
@@ -559,6 +600,56 @@ mod tests {
         );
 
         assert!(excerpt.is_none());
+    }
+
+    #[test]
+    fn html_body_limit_is_three_mib() {
+        assert_eq!(MAX_HTML_BODY_BYTES, 3 * 1024 * 1024);
+    }
+
+    // 組み直した応答は Content-Length を持つため、ここでは読む前の早期拒否経路を確認する。
+    // Content-Length のない受信中の上限判定は http_body の append_chunk_capped 単体テストで確認する。
+    #[test]
+    fn rejects_html_body_over_limit_as_fetch_failure() {
+        // 上限 + 1 バイトの本文は TooLarge になり、固定文言の取得失敗（URL・本文なし）へ変換される。
+        let body = vec![b'a'; MAX_HTML_BODY_BYTES + 1];
+        let mut response = Response::from(tauri::http::Response::new(body));
+        let error = tauri::async_runtime::block_on(read_async_response_body_capped(
+            &mut response,
+            MAX_HTML_BODY_BYTES,
+        ))
+        .expect_err("over-limit HTML must be rejected");
+        assert_eq!(error, BodyReadError::TooLarge);
+        let message = html_body_error(error).to_string();
+        assert!(message.contains("exceeded the receive size limit"));
+        assert!(!message.contains("http"));
+    }
+
+    #[test]
+    fn accepts_html_body_at_limit() {
+        let body = vec![b'a'; MAX_HTML_BODY_BYTES];
+        let mut response = Response::from(tauri::http::Response::new(body));
+        let bytes = tauri::async_runtime::block_on(read_async_response_body_capped(
+            &mut response,
+            MAX_HTML_BODY_BYTES,
+        ))
+        .expect("body exactly at the limit must be accepted");
+        assert_eq!(bytes.len(), MAX_HTML_BODY_BYTES);
+    }
+
+    #[test]
+    fn decodes_html_body_with_declared_charset() {
+        // Shift_JIS の「あ」(0x82 0xA0) を、従来の text() と同じく charset に従って復号する。
+        let content_type = HeaderValue::from_static("text/html; charset=Shift_JIS");
+        let decoded =
+            tauri::async_runtime::block_on(decode_html_body(vec![0x82, 0xA0], Some(content_type)))
+                .unwrap();
+        assert_eq!(decoded, "あ");
+        // charset なしは UTF-8。
+        let decoded =
+            tauri::async_runtime::block_on(decode_html_body("い".as_bytes().to_vec(), None))
+                .unwrap();
+        assert_eq!(decoded, "い");
     }
 
     #[test]

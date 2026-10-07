@@ -12,5 +12,7 @@ pub mod archive_storage;
 pub mod fullscreen_detector;
 pub mod gemini_client;
 pub mod html_fetcher;
+/// 外部HTTP応答本文の受信バイト上限（RSS・記事HTML・Gemini 共通）。
+pub mod http_body;
 pub mod rss_client;
 pub mod url_guard;
