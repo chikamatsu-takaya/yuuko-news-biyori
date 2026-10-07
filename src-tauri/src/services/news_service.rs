@@ -23,11 +23,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::domain::article::{ArticleReadState, FetchedArticle};
+use crate::domain::article::{ArticleDedupeKeys, ArticleReadState, FetchedArticle};
 use crate::error::AppError;
 use crate::infra::allowlist::NetworkAllowlist;
 use crate::infra::html_fetcher::HtmlFetcher;
-use crate::infra::rss_client::RssClient;
+use crate::infra::rss_client::{RssClient, RssItem};
 use crate::infra::url_guard::{validate_url, UrlPurpose};
 use crate::paths::AppPaths;
 use crate::repositories::article_repository::ArticleRepository;
@@ -286,26 +286,24 @@ impl NewsService {
             for item in items {
                 fetched += 1;
                 let article_id = article_id_from_url(&item.article_url);
-                // 要件定義書 §7.2.4。URL検証・HTML本文取得（外部通信）より前に判定する。
-                // 定期取得では大半が既知記事になるため、スキップはログに残さない。
-                if dedupe_keys.is_duplicate(&article_id, &item.source_name, &item.title) {
-                    continue;
-                }
-                // 重複排除の後で数えるため、既知記事は上限を消費しない。超過分は保存も
-                // 重複キー登録もしないので、次回以降の取得で新着として処理される。
-                if !new_item_cap.admit() {
-                    continue;
-                }
-
-                // (制約6) 記事URLを HtmlFetcher へ渡す前に Article 用検証を通す。
-                if let Err(error) = validate_url(&item.article_url, UrlPurpose::Article, &allowlist)
-                {
-                    log::debug!("rejected article url '{}': {error}", item.article_url);
-                    errors.push(RefreshError::new(
-                        &item.article_url,
-                        ERROR_ARTICLE_URL_REJECTED,
-                    ));
-                    continue;
+                // 上限超過分は保存も重複キー登録もしないので、次回以降の取得で新着として処理される。
+                match decide_item(
+                    &article_id,
+                    &item,
+                    &dedupe_keys,
+                    &allowlist,
+                    &mut new_item_cap,
+                ) {
+                    ItemDecision::Process => {}
+                    ItemDecision::Duplicate | ItemDecision::Deferred => continue,
+                    ItemDecision::Rejected(error) => {
+                        log::debug!("rejected article url '{}': {error}", item.article_url);
+                        errors.push(RefreshError::new(
+                            &item.article_url,
+                            ERROR_ARTICLE_URL_REJECTED,
+                        ));
+                        continue;
+                    }
                 }
 
                 // (制約7) 本文取得失敗時も保存を継続。失敗は errors に記録する。
@@ -381,6 +379,45 @@ impl NewsService {
             }
         }
     }
+}
+
+/// 取得した item 1件をどう扱うかの判定結果。
+#[derive(Debug)]
+enum ItemDecision {
+    /// 既知記事（同一URL／同一出典・同一タイトル）。通信せずスキップする。
+    Duplicate,
+    /// 記事URLが Article 用検証を通らない。上限は消費しない。
+    Rejected(AppError),
+    /// 新着だが今回の上限を超えた。次回以降の取得で処理する。
+    Deferred,
+    /// 本文取得・保存へ進める。
+    Process,
+}
+
+/// item 1件の扱いを決める（判定順: 重複排除 → 記事URL検証 → 新着件数上限）。
+/// 上限は HTML 取得・保存のコストを抑えるためのものなので、検証を通った新着だけが消費する。
+/// 検証で弾かれる item は重複キーに登録されず毎回現れるため、上限を消費させると
+/// フィード先頭に並んだ場合に後続の正当な記事がいつまでも処理されなくなる（それを避ける）。
+fn decide_item(
+    article_id: &str,
+    item: &RssItem,
+    dedupe_keys: &ArticleDedupeKeys,
+    allowlist: &NetworkAllowlist,
+    cap: &mut NewItemCap,
+) -> ItemDecision {
+    // 要件定義書 §7.2.4。URL検証・HTML本文取得（外部通信）より前に判定する。
+    // 定期取得では大半が既知記事になるため、スキップはログに残さない。
+    if dedupe_keys.is_duplicate(article_id, &item.source_name, &item.title) {
+        return ItemDecision::Duplicate;
+    }
+    // (制約6) 記事URLを HtmlFetcher へ渡す前に Article 用検証を通す。
+    if let Err(error) = validate_url(&item.article_url, UrlPurpose::Article, allowlist) {
+        return ItemDecision::Rejected(error);
+    }
+    if !cap.admit() {
+        return ItemDecision::Deferred;
+    }
+    ItemDecision::Process
 }
 
 /// 正規化したURLから安定な article_id を生成する。
@@ -536,54 +573,64 @@ mod tests {
     }
 
     #[test]
-    fn new_item_cap_counts_only_new_items_and_keeps_feed_order() {
-        use crate::domain::article::ArticleDedupeKeys;
+    fn new_item_cap_counts_only_valid_new_items_and_keeps_feed_order() {
+        // 実際の判定関数 decide_item を refresh と同じ順（判定 → Process なら insert）で呼ぶ。
+        // 既知記事・URL検証で弾かれる記事が先頭に並んでいても上限を消費せず、
+        // 検証を通った新着だけがフィード順に上限件数まで処理される。
+        let allowlist = NetworkAllowlist {
+            allowed_article_domains: vec!["news.example.com".to_string()],
+            ..NetworkAllowlist::default()
+        };
+        let item = |url: String, title: String| RssItem {
+            title,
+            article_url: url,
+            summary: None,
+            source_name: "出典A".to_string(),
+            published_at: None,
+        };
 
-        // refresh 内の判定順（is_duplicate → 上限判定 → 保存予定なら insert）を再現する。
-        // 既知記事が先頭に並んでいても上限を消費せず、新着だけがフィード順に上限件数まで通る。
         let mut keys = ArticleDedupeKeys::default();
-        keys.insert(
-            article_id_from_url("https://news.example.com/known-0"),
-            "出典A",
-            "既知0",
-        );
-        keys.insert(
-            article_id_from_url("https://news.example.com/known-1"),
-            "出典A",
-            "既知1",
-        );
-
-        let mut items = vec![
-            (
-                "https://news.example.com/known-0".to_string(),
-                "既知0".to_string(),
-            ),
-            (
-                "https://news.example.com/known-1".to_string(),
-                "既知1".to_string(),
-            ),
-        ];
+        let mut items = Vec::new();
+        for index in 0..2 {
+            let url = format!("https://news.example.com/known-{index}");
+            let title = format!("既知{index}");
+            keys.insert(article_id_from_url(&url), "出典A", &title);
+            items.push(item(url, title));
+        }
+        // 上限を超える数の「許可リスト外」記事を新着より前に並べる（毎回現れる想定）。
+        for index in 0..(MAX_NEW_ITEMS_PER_FEED + 3) {
+            items.push(item(
+                format!("https://evil.example.com/rejected-{index}"),
+                format!("拒否{index}"),
+            ));
+        }
         for index in 0..(MAX_NEW_ITEMS_PER_FEED + 5) {
-            items.push((
+            items.push(item(
                 format!("https://news.example.com/new-{index}"),
                 format!("新着{index}"),
             ));
         }
 
         let mut cap = NewItemCap::new(MAX_NEW_ITEMS_PER_FEED);
+        let (mut duplicates, mut rejected, mut deferred) = (0, 0, 0);
         let mut kept = Vec::new();
-        for (url, title) in &items {
-            let article_id = article_id_from_url(url);
-            if keys.is_duplicate(&article_id, "出典A", title) {
-                continue;
+        for item in &items {
+            let article_id = article_id_from_url(&item.article_url);
+            match decide_item(&article_id, item, &keys, &allowlist, &mut cap) {
+                ItemDecision::Duplicate => duplicates += 1,
+                ItemDecision::Rejected(_) => rejected += 1,
+                ItemDecision::Deferred => deferred += 1,
+                ItemDecision::Process => {
+                    keys.insert(article_id, &item.source_name, &item.title);
+                    kept.push(item.article_url.clone());
+                }
             }
-            if !cap.admit() {
-                continue;
-            }
-            keys.insert(article_id, "出典A", title);
-            kept.push(url.clone());
         }
 
+        assert_eq!(duplicates, 2);
+        assert_eq!(rejected, MAX_NEW_ITEMS_PER_FEED + 3);
+        assert_eq!(deferred, 5);
+        assert_eq!(cap.deferred, 5);
         assert_eq!(kept.len(), MAX_NEW_ITEMS_PER_FEED);
         assert_eq!(kept[0], "https://news.example.com/new-0");
         assert_eq!(
@@ -593,7 +640,6 @@ mod tests {
                 MAX_NEW_ITEMS_PER_FEED - 1
             )
         );
-        assert_eq!(cap.deferred, 5);
     }
 
     #[test]

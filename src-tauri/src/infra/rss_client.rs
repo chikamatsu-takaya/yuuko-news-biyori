@@ -699,6 +699,8 @@ mod tests {
         assert_eq!(items[0].article_url, "https://news.example.com/articles/42");
     }
 
+    // 組み直した応答は Content-Length を持つため、ここでは読む前の早期拒否経路を確認する。
+    // Content-Length のない受信中の上限判定は http_body の append_chunk_capped 単体テストで確認する。
     #[test]
     fn rejects_feed_body_over_limit_as_fetch_failure() {
         // 上限 + 1 バイトの本文は TooLarge になり、固定文言の取得失敗（URL・本文なし）へ変換される。

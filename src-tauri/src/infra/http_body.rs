@@ -45,10 +45,12 @@ pub async fn read_async_response_body_capped(
     response: &mut reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, BodyReadError> {
-    if declared_length_exceeds(response.content_length(), max_bytes) {
+    let declared = response.content_length();
+    if declared_length_exceeds(declared, max_bytes) {
         return Err(BodyReadError::TooLarge);
     }
-    let mut buf = Vec::new();
+    // 宣言値（上限以内に丸める）で先に確保し、追記時の再確保で一時的に上限の約2倍を抱えないようにする。
+    let mut buf = Vec::with_capacity(declared.map_or(0, |len| len.min(max_bytes as u64) as usize));
     while let Some(chunk) = response.chunk().await.map_err(|_| BodyReadError::Read)? {
         append_chunk_capped(&mut buf, &chunk, max_bytes)?;
     }
