@@ -12,6 +12,7 @@ import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
+import { useNewsListRevision } from "@/hooks/use-news-list-revision";
 import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
 import {
   dismissYuukoNotification,
@@ -92,6 +93,10 @@ export default function Page() {
       document.removeEventListener("visibilitychange", updateVisibility);
     };
   }, []);
+
+  // 定期取得（news-refreshed）後、ウィンドウが表示に戻ったときに一覧を作り直して読み直すための版番号。
+  // 一覧画面はマウント時に読み込むため、key に含めて再マウントする（画面側は変更しない）。
+  const newsListRevision = useNewsListRevision(isWindowVisible);
 
   // 終端操作（閉じる/Esc/自動退場/詳しく見る）の進行中フラグ。
   // backend 解消が完了するまでの間、scheduler が拾った同一 active 通知を再表示しないために使う。
@@ -353,6 +358,7 @@ export default function Page() {
       if (!selectedArticleId) {
         return (
           <MainScreen
+            key={`home-${newsListRevision}`}
             onNavigate={handleNavigate}
             onOpenArticle={openArticleFrom("home")}
             yuukoNotificationState={yuukoNotificationState}
@@ -374,6 +380,7 @@ export default function Page() {
     if (currentScreen === "news") {
       return (
         <NewsListScreen
+          key={`news-${newsListRevision}`}
           onNavigate={handleNavigate}
           onOpenArticle={openArticleFrom("news")}
         />
@@ -418,6 +425,7 @@ export default function Page() {
     // 表示件数設定（maxDailyRecommendations）に従って制限して表示する。
     return (
       <MainScreen
+        key={`home-${newsListRevision}`}
         onNavigate={handleNavigate}
         onOpenArticle={openArticleFrom("home")}
         yuukoNotificationState={yuukoNotificationState}

@@ -10,9 +10,13 @@
 //! - HtmlFetcher 失敗時は本文なしで保存を継続するが、エラー件数・対象URLを結果へ含める。
 //! - 結果の errors はサニタイズ済み（対象URLと固定カテゴリのみ）。内部パスや
 //!   低レベルなエラー詳細は UI へ返さず、ログにのみ残す。
-//! - fetched_at は UTC で保存する。ローカル深夜0時などのトリガーは ⑥b で扱う。
+//! - fetched_at は UTC で保存する。定期取得のトリガーは news_scheduler で扱う。
+//! - 手動取得（refresh_news）と定期取得（NewsScheduler）が同時に走らないよう、
+//!   プロセス内ロック（RefreshLock）で直列化する。
 
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -125,6 +129,30 @@ pub struct RefreshNewsResult {
     pub errors: Vec<RefreshError>,
 }
 
+/// 取得処理の同時実行を防ぐプロセス内ロック。
+///
+/// 手動取得と定期取得が重なると、同じ記事の本文を二重に取得したり、既存記事IDの
+/// 確認と保存の間で競合したりするため、取得全体を1本ずつに絞る。
+/// NewsService は clone して共有されるため、clone 間で同じロックを指すよう Arc で持つ。
+#[derive(Debug, Clone, Default)]
+struct RefreshLock {
+    inner: Arc<tauri::async_runtime::Mutex<()>>,
+}
+
+impl RefreshLock {
+    /// 実行中の取得があれば終わるまで待ってから実行する（手動取得用）。
+    async fn run<T>(&self, task: impl Future<Output = T>) -> T {
+        let _guard = self.inner.lock().await;
+        task.await
+    }
+
+    /// 実行中の取得があれば実行せず None を返す（定期取得用。次の周期で再試行する）。
+    async fn try_run<T>(&self, task: impl Future<Output = T>) -> Option<T> {
+        let _guard = self.inner.try_lock().ok()?;
+        Some(task.await)
+    }
+}
+
 /// ニュース取得オーケストレーションサービス。
 #[derive(Debug, Clone)]
 pub struct NewsService {
@@ -135,6 +163,7 @@ pub struct NewsService {
     settings_repository: SettingsRepository,
     sources_path: std::path::PathBuf,
     allowlist_path: std::path::PathBuf,
+    refresh_lock: RefreshLock,
 }
 
 impl NewsService {
@@ -152,14 +181,29 @@ impl NewsService {
             settings_repository,
             sources_path: paths.news_sources_path.clone(),
             allowlist_path: paths.network_allowlist_path.clone(),
+            refresh_lock: RefreshLock::default(),
         }
     }
 
-    /// 保存済みの取得元からニュースを取得・保存する。
+    /// 保存済みの取得元からニュースを取得・保存する（手動取得用）。
+    ///
+    /// 定期取得の実行中なら、その完了を待ってから取得する（同時には走らせない）。
+    pub async fn refresh(&self) -> Result<RefreshNewsResult, AppError> {
+        self.refresh_lock.run(self.refresh_exclusive()).await
+    }
+
+    /// 他の取得が実行中でなければ取得する（定期取得用）。
+    ///
+    /// 実行中なら待たずに None を返す。呼び出し側は取得時刻を更新せず、次の周期で再試行する。
+    pub async fn try_refresh(&self) -> Option<Result<RefreshNewsResult, AppError>> {
+        self.refresh_lock.try_run(self.refresh_exclusive()).await
+    }
+
+    /// 取得本体。RefreshLock を取った状態でだけ呼ぶ。
     ///
     /// 取得元設定・許可リストの破損時は fail-close（Err）。個々のフィード/記事の
     /// 失敗は結果の `errors` に集約し、処理全体は継続する。
-    pub async fn refresh(&self) -> Result<RefreshNewsResult, AppError> {
+    async fn refresh_exclusive(&self) -> Result<RefreshNewsResult, AppError> {
         // fail-close 対象（破損で取得中止）。
         let config = NewsSourcesConfig::load(&self.sources_path)?;
         let allowlist = NetworkAllowlist::load(&self.allowlist_path)?;
@@ -355,6 +399,36 @@ mod tests {
             std::process::id(),
             n
         ))
+    }
+
+    #[test]
+    fn refresh_lock_skips_try_run_while_another_refresh_is_running() {
+        let lock = RefreshLock::default();
+        let shared = lock.clone();
+        // 実行中（run の内側）に定期取得側の try_run が来ても、待たずに見送る。
+        let inner = tauri::async_runtime::block_on(
+            lock.run(async move { shared.try_run(async { "scheduled" }).await }),
+        );
+        assert_eq!(inner, None);
+    }
+
+    #[test]
+    fn refresh_lock_runs_again_after_the_previous_refresh_finishes() {
+        let lock = RefreshLock::default();
+        tauri::async_runtime::block_on(lock.run(async {}));
+        // 前の取得が終わればロックは解放され、次の周期の try_run は実行される。
+        let result = tauri::async_runtime::block_on(lock.try_run(async { 1 }));
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn refresh_lock_is_shared_between_clones() {
+        // NewsService は clone して手動取得・定期取得へ配るため、clone 間で同じロックを使う。
+        let lock = RefreshLock::default();
+        let held = lock.inner.try_lock().expect("lock is free at first");
+        let result = tauri::async_runtime::block_on(lock.clone().try_run(async { 1 }));
+        assert_eq!(result, None);
+        drop(held);
     }
 
     #[test]
