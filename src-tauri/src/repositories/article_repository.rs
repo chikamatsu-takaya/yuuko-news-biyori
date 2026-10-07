@@ -193,6 +193,11 @@ impl ArticleRepository {
         Ok(self.find_article_record(article_id)?.summary)
     }
 
+    /// 記事が要約済み（status.summarized）かを返す。自動要約の上書き防止用で、書き込みはしない。
+    pub fn is_article_summarized(&self, article_id: &str) -> Result<bool, AppError> {
+        Ok(self.find_article_record(article_id)?.status.summarized)
+    }
+
     /// 退避候補を月次ZIPへ圧縮し、`archive_index.json` を更新して archived 印を付ける（増分1・非破壊）。
     /// 元の記事Markdownは削除せず保持する（容量解放＝元.md削除は後続）。候補が無ければ何もしない。
     /// ZIP整合性検証に成功した月だけ archived 印を付ける（破損時は印を付けない＝安全側）。

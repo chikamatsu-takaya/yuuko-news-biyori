@@ -12,8 +12,11 @@
 //! - 外部AIの利用枠を使い切らないよう、設定 `ai.autoSummaryEnabled` が有効なときだけ動く（既定は無効）。
 //!   MockProvider でも有効時は動かす（手動の要約生成と同じく Mock 結果を保存する既存の流れに合わせる）。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
-//!   一時ファイルへ書き切ってから差し替える方式（article_repository の atomic_write）のため、
-//!   途中で終了しても書きかけの記事ファイルは残らない。
+//!   一時ファイルへ書き切ってから tmp→bak→本体 の順に差し替える方式（article_repository の
+//!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
+//!   強制終了されると、.bak だけが残る短い隙間がある（既存の全保存処理に共通の制約）。
+//! - 取り出した記事は AI を呼ぶ前に記事ファイルで要約済みか確かめ直し、手動要約や並べ直しとの
+//!   競合で要約済みになった記事を上書きしない。
 //! - AI 呼び出し中はキューのロックを持たない（画面からの状態取得を待たせない）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -31,6 +34,10 @@ use crate::services::summary_service::SummaryService;
 /// 1記事あたりの試行回数の上限（初回を含めた合計）。
 const MAX_ATTEMPTS: u32 = 3;
 
+/// 起動後、最初の1件を処理するまでの待ち時間。起動時のニュース取得・画面表示と競合させず、
+/// OS 自動起動の直後でネットワークがまだ使えない時間帯に AI を呼ばないため 60 秒待つ。
+const STARTUP_DELAY: Duration = Duration::from_secs(60);
+
 /// 1件処理するごとに空ける間隔。1件で AI を3回呼ぶため、Gemini の無料枠の毎分上限に
 /// 近づかないよう、30秒空けて「1分あたり最大2件（AI呼び出し6回）」程度に抑える。
 const ITEM_INTERVAL: Duration = Duration::from_secs(30);
@@ -45,6 +52,8 @@ enum StepOutcome {
     /// 自動要約が無効のため、待機中の記事を捨てて何もしなかった。
     Disabled,
     Succeeded(String),
+    /// 取り出した時点で既に要約済みだったため、AI を呼ばずに外した。
+    Skipped(String),
     /// 失敗したが上限前のため、キューの最後へ戻した。
     Retrying(String),
     /// 上限に達したため、再起動まで Failed のままにする。
@@ -106,9 +115,11 @@ impl QueueCore {
     }
 
     /// 次の1件を処理する。`summarize` の実行中はロックを持たない。
-    fn process_next<E, S>(&self, is_enabled: E, summarize: S) -> StepOutcome
+    /// `is_done` は記事ファイルで要約済みかを副作用なしに確かめる（既読状態は進めない）。
+    fn process_next<E, D, S>(&self, is_enabled: E, is_done: D, summarize: S) -> StepOutcome
     where
         E: FnOnce() -> bool,
+        D: FnOnce(&str) -> bool,
         S: FnOnce(&str) -> Result<(), AppError>,
     {
         if self.stopped.load(Ordering::SeqCst) {
@@ -133,6 +144,13 @@ impl QueueCore {
             state.processing = Some(article_id.clone());
             article_id
         };
+
+        if is_done(&article_id) {
+            let mut state = self.lock();
+            state.processing = None;
+            state.failure_counts.remove(&article_id);
+            return StepOutcome::Skipped(article_id);
+        }
 
         let result = summarize(&article_id);
 
@@ -232,6 +250,8 @@ impl AutoSummaryQueue {
     pub fn start(&self) {
         let queue = self.clone();
         std::thread::spawn(move || {
+            // 終了要求があれば待ちを打ち切る（その後の wait_for_work が false を返して終わる）。
+            queue.core.wait_interval(STARTUP_DELAY);
             queue.enqueue_unsummarized();
             queue.run_worker();
         });
@@ -241,6 +261,7 @@ impl AutoSummaryQueue {
         while self.core.wait_for_work() {
             let outcome = self.core.process_next(
                 || self.is_enabled(),
+                |article_id| self.is_summarized(article_id),
                 |article_id| {
                     self.summary_service
                         .generate_article_summary(GenerateArticleSummaryParams {
@@ -257,7 +278,10 @@ impl AutoSummaryQueue {
                     log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
                     self.core.wait_interval(ITEM_INTERVAL)
                 }
-                StepOutcome::Idle | StepOutcome::Stopped | StepOutcome::Disabled => {}
+                StepOutcome::Skipped(_)
+                | StepOutcome::Idle
+                | StepOutcome::Stopped
+                | StepOutcome::Disabled => {}
             }
         }
     }
@@ -281,6 +305,17 @@ impl AutoSummaryQueue {
 
     fn resolve_state(&self, article_id: &str, persisted: SummaryState) -> SummaryState {
         resolve_summary_state(persisted, self.core.state_of(article_id))
+    }
+
+    /// 記事ファイルで要約済みかを確かめる。読めないときは未要約として扱い、要約側の失敗として数える。
+    fn is_summarized(&self, article_id: &str) -> bool {
+        match self.article_service.is_article_summarized(article_id) {
+            Ok(summarized) => summarized,
+            Err(error) => {
+                log::warn!("failed to check summary state for {article_id}: {error}");
+                false
+            }
+        }
     }
 
     /// 設定が読めないときは自動要約しない（外部AIの利用枠を守る安全側）。
@@ -314,6 +349,10 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    fn not_done(_: &str) -> bool {
+        false
+    }
+
     fn failure() -> Result<(), AppError> {
         Err(AppError::Validation("ai output rejected".to_string()))
     }
@@ -327,6 +366,7 @@ mod tests {
         loop {
             let outcome = core.process_next(
                 || true,
+                not_done,
                 |id| {
                     calls.borrow_mut().push(id.to_string());
                     summarize(id)
@@ -348,11 +388,28 @@ mod tests {
     }
 
     #[test]
+    fn already_summarized_article_is_skipped_without_calling_ai() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["done-elsewhere", "next"]));
+
+        // 手動要約・並べ直しの競合で要約済みになった記事は、AI を呼ばずに外す。
+        let outcome = core.process_next(
+            || true,
+            |id| id == "done-elsewhere",
+            |_| panic!("must not regenerate a summarized article"),
+        );
+        assert_eq!(outcome, StepOutcome::Skipped("done-elsewhere".to_string()));
+        assert_eq!(core.state_of("done-elsewhere"), SummaryState::None);
+        assert_eq!(drain(&core, |_| Ok(())), ids(&["next"]));
+    }
+
+    #[test]
     fn requeue_after_refresh_follows_the_latest_order_and_skips_processing() {
         let core = QueueCore::default();
         core.replace_pending(ids(&["a", "b"]));
         core.process_next(
             || true,
+            not_done,
             |id| {
                 // 処理中に取得が終わり並べ直されても、処理中の記事は二重に並ばない。
                 core.replace_pending(ids(&["c", id, "b"]));
@@ -369,12 +426,14 @@ mod tests {
 
         let outcome = core.process_next(
             || true,
+            not_done,
             |id| {
                 assert_eq!(core.state_of(id), SummaryState::Processing);
                 assert_eq!(core.state_of("b"), SummaryState::Waiting);
                 assert_eq!(core.state_of("c"), SummaryState::Waiting);
                 // 処理中にもう1件取り出そうとしても取り出さない。
-                let nested = core.process_next(|| true, |_| panic!("must not run concurrently"));
+                let nested =
+                    core.process_next(|| true, not_done, |_| panic!("must not run concurrently"));
                 assert_eq!(nested, StepOutcome::Idle);
                 assert!(!core.lock().pending.is_empty());
                 Ok(())
@@ -406,13 +465,13 @@ mod tests {
     fn article_waiting_for_retry_is_shown_as_waiting() {
         let core = QueueCore::default();
         core.replace_pending(ids(&["flaky"]));
-        let outcome = core.process_next(|| true, |_| failure());
+        let outcome = core.process_next(|| true, not_done, |_| failure());
         assert_eq!(outcome, StepOutcome::Retrying("flaky".to_string()));
         assert_eq!(core.state_of("flaky"), SummaryState::Waiting);
 
         // 2回目で成功すれば失敗回数は消える。
         assert_eq!(
-            core.process_next(|| true, |_| Ok(())),
+            core.process_next(|| true, not_done, |_| Ok(())),
             StepOutcome::Succeeded("flaky".to_string())
         );
         assert!(core.lock().failure_counts.is_empty());
@@ -423,7 +482,11 @@ mod tests {
         let core = QueueCore::default();
         core.replace_pending(ids(&["a", "b"]));
 
-        let outcome = core.process_next(|| false, |_| panic!("must not summarize when disabled"));
+        let outcome = core.process_next(
+            || false,
+            not_done,
+            |_| panic!("must not summarize when disabled"),
+        );
 
         assert_eq!(outcome, StepOutcome::Disabled);
         assert_eq!(core.state_of("a"), SummaryState::None);
@@ -436,7 +499,7 @@ mod tests {
         core.replace_pending(ids(&["a", "b"]));
         core.request_stop();
 
-        let outcome = core.process_next(|| true, |_| panic!("must not start after stop"));
+        let outcome = core.process_next(|| true, not_done, |_| panic!("must not start after stop"));
         assert_eq!(outcome, StepOutcome::Stopped);
         assert!(!core.wait_for_work());
     }
@@ -448,6 +511,7 @@ mod tests {
 
         let outcome = core.process_next(
             || true,
+            not_done,
             |_| {
                 core.request_stop();
                 Ok(())
@@ -457,7 +521,11 @@ mod tests {
         assert_eq!(outcome, StepOutcome::Succeeded("a".to_string()));
         assert_eq!(core.state_of("a"), SummaryState::None);
         assert_eq!(
-            core.process_next(|| true, |_| panic!("must not continue after stop")),
+            core.process_next(
+                || true,
+                not_done,
+                |_| panic!("must not continue after stop")
+            ),
             StepOutcome::Stopped
         );
     }

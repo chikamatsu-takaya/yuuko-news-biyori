@@ -64,6 +64,11 @@ impl ArticleService {
             .collect())
     }
 
+    /// 記事ファイルで要約済み（status.summarized）かを返す。既読状態は進めない（読み取りのみ）。
+    pub fn is_article_summarized(&self, article_id: &str) -> Result<bool, AppError> {
+        self.repository.is_article_summarized(article_id)
+    }
+
     /// 全候補をおすすめ順（現在時刻で再計算したスコア順）に並べて返す。
     fn rank_by_recommendation_at(
         &self,
@@ -371,6 +376,16 @@ mod tests {
             .unwrap();
         assert_eq!(queued, expected);
         assert_eq!(&queued[..2], &["fresh-1h", "fresh-2h"]);
+
+        // 自動要約の上書き防止チェックは読み取りのみで、既読状態を進めない。
+        assert!(ctx.service.is_article_summarized("summarized").unwrap());
+        assert!(!ctx.service.is_article_summarized("fresh-1h").unwrap());
+        let after_check = recommended_at(&ctx, None);
+        let fresh = after_check
+            .iter()
+            .find(|article| article.article_id == "fresh-1h")
+            .unwrap();
+        assert_eq!(fresh.read_state, ArticleReadState::Unread);
     }
 
     #[test]
