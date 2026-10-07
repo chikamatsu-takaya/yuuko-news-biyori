@@ -7,10 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
-    ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto,
-    ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult,
-    FetchedArticle, RestoreArchivedArticleResult, SummaryState,
+    is_within_title_dedupe_window, ArchiveRestoreStatus, ArchiveRetirementSummaryDto,
+    ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto,
+    ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto,
+    ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult,
+    SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -789,7 +790,8 @@ impl ArticleRepository {
 
     /// 既存記事の article_id 集合を返す（保存時の上書き防止に使う）。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
-        Ok(self.existing_dedupe_keys()?.into_article_ids())
+        // ID集合は期間に依存しないため、タイトル側の基準時刻は現在時刻で足りる（結果に使わない）。
+        Ok(self.existing_dedupe_keys(Utc::now())?.into_article_ids())
     }
 
     /// 取得時の重複排除に使うキー集合（article_id と 出典名×正規化タイトル）を返す。
@@ -797,11 +799,17 @@ impl ArticleRepository {
     /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
     /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない
     /// （破損記事のタイトルは読めないため、タイトル側の判定には含めない）。
-    pub fn existing_dedupe_keys(&self) -> Result<ArticleDedupeKeys, AppError> {
+    ///
+    /// article_id は期間なしで全件入れる。出典名×正規化タイトルは、取得日時（なければ公開日時）が
+    /// `now` から `TITLE_DEDUPE_WINDOW_DAYS` 以内の記事だけを入れる（D58）。`now` はテストで
+    /// 壁時計に依存しないよう呼び出し側から渡す。
+    pub fn existing_dedupe_keys(&self, now: DateTime<Utc>) -> Result<ArticleDedupeKeys, AppError> {
         let loaded = self.load_readable_article_records()?;
         let mut keys = ArticleDedupeKeys::default();
         for article in loaded.records {
-            keys.insert_source_title(&article.source_name, &article.title);
+            if is_within_title_dedupe_window(&article.fetched_at, &article.published_at_text, now) {
+                keys.insert_source_title(&article.source_name, &article.title);
+            }
             keys.insert_id(article.article_id);
         }
         for path in &loaded.skipped_paths {
@@ -815,7 +823,12 @@ impl ArticleRepository {
             .into_iter()
             .flat_map(|archive| archive.articles)
         {
-            keys.insert(article.article_id, &article.source_name, &article.title);
+            // アーカイブ済み記事は通常30日以上前なので実質タイトル側には入らないが、
+            // カタログにも取得日時・公開日時があるため同じ基準で判定する。
+            if is_within_title_dedupe_window(&article.fetched_at, &article.published_at_text, now) {
+                keys.insert_source_title(&article.source_name, &article.title);
+            }
+            keys.insert_id(article.article_id);
         }
         Ok(keys)
     }
@@ -3257,7 +3270,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_dedupe_keys_include_markdown_and_catalog_source_titles() {
+    fn existing_dedupe_keys_compare_titles_only_within_window_but_ids_always() {
         use chrono::{TimeZone, Utc};
         let context = TestRepositoryContext::new();
         let archived = PersistedArticleRecord {
@@ -3271,26 +3284,53 @@ mod tests {
             ..super::seed_articles().remove(0)
         };
         context.repository.save_article_record(&archived).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
-        context.repository.archive_candidates(now).unwrap();
+        let archive_now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(archive_now).unwrap();
         std::fs::remove_file(context.news_dir.join("202605").join("archived-title.md")).unwrap();
 
-        let active = PersistedArticleRecord {
-            article_id: "active-title".to_string(),
+        let recent = PersistedArticleRecord {
+            article_id: "recent-title".to_string(),
             title: " 通常  記事 ".to_string(),
             source_name: "出典A".to_string(),
+            fetched_at: "2026-07-10T00:00:00Z".to_string(),
+            published_at_text: "2026-07-10T00:00:00Z".to_string(),
             ..super::seed_articles().remove(1)
         };
-        context.repository.save_article_record(&active).unwrap();
+        context.repository.save_article_record(&recent).unwrap();
+        let old = PersistedArticleRecord {
+            article_id: "old-title".to_string(),
+            title: "毎日の 定例コラム".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "2026-07-07T23:59:59Z".to_string(),
+            published_at_text: "2026-07-07T23:59:59Z".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&old).unwrap();
+        // 取得日時が解釈できない記事は公開日時で判定する。
+        let fallback = PersistedArticleRecord {
+            article_id: "fallback-title".to_string(),
+            title: "公開日時で 判定".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "不明".to_string(),
+            published_at_text: "2026-07-14T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&fallback).unwrap();
 
-        let keys = context.repository.existing_dedupe_keys().unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let keys = context.repository.existing_dedupe_keys(now).unwrap();
 
-        // URL（article_id）が違っても、同一出典・正規化後に同一のタイトルは重複。
-        assert!(keys.is_duplicate("new-id-1", "出典A", "アーカイブ 記事"));
-        assert!(keys.is_duplicate("new-id-2", "出典A", "通常 記事"));
+        // 7日以内の同一出典・正規化後同一タイトルは、URL（article_id）が違っても重複。
+        assert!(keys.is_duplicate("new-id-1", "出典A", "通常 記事"));
+        assert!(keys.is_duplicate("new-id-2", "出典A", "公開日時で 判定"));
         // 出典が異なれば重複ではない。
         assert!(!keys.is_duplicate("new-id-3", "出典B", "通常 記事"));
+        // 7日より前の同一タイトル（アーカイブ済み・通常Markdown）とは比べず、新規として保存できる（D58）。
+        assert!(!keys.is_duplicate("new-id-4", "出典A", "アーカイブ 記事"));
+        assert!(!keys.is_duplicate("new-id-5", "出典A", "毎日の 定例コラム"));
+        // 同一URL（article_id）は期間に関係なく重複。
         assert!(keys.is_duplicate("archived-title", "出典B", "別"));
+        assert!(keys.is_duplicate("old-title", "出典B", "別"));
     }
 
     #[test]

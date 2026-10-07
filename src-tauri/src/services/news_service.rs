@@ -217,7 +217,10 @@ impl NewsService {
 
         // 既存記事（通常Markdown＋アーカイブ記事カタログ）の重複キーを取得ごとに1度だけ構築する。
         // 同一URL（article_id）または同一出典・同一タイトルの記事は、本文取得もスキップして通信を抑える。
-        let mut dedupe_keys = self.article_repository.existing_dedupe_keys()?;
+        // タイトル側は直近 TITLE_DEDUPE_WINDOW_DAYS 日以内の既存記事とだけ比べる（D58）。
+        let mut dedupe_keys = self
+            .article_repository
+            .existing_dedupe_keys(chrono::Utc::now())?;
         let mut errors: Vec<RefreshError> = Vec::new();
         let mut fetched = 0usize;
         let mut to_save: Vec<FetchedArticle> = Vec::new();
