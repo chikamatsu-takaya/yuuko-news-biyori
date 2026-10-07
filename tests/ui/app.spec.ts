@@ -2342,12 +2342,19 @@ test("settings postponed controls without a DTO field are disabled", async ({
 
   // 抑制条件: 判定処理が無い会議/マイク/ゲームは非活性。フルスクリーンのみ操作可能。
   await openSettingsMenu(page, "抑制条件");
-  const suppressionSwitches = page.getByRole("switch");
-  await expect(suppressionSwitches).toHaveCount(4);
-  await expect(suppressionSwitches.nth(0)).toBeDisabled();
-  await expect(suppressionSwitches.nth(1)).toBeDisabled();
-  await expect(suppressionSwitches.nth(2)).toBeEnabled();
-  await expect(suppressionSwitches.nth(3)).toBeDisabled();
+  await expect(page.getByRole("switch")).toHaveCount(4);
+  await expect(
+    page.getByRole("switch", { name: "会議中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("switch", { name: "マイク使用中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("switch", { name: "フルスクリーン時は通知を抑制する", exact: true })
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("switch", { name: "ゲーム実行中は通知を抑制する（準備中）" })
+  ).toBeDisabled();
 
   // 解説・AI設定: 専門用語/長文自動/優先モードは非活性。Provider/解説の詳しさは操作可能。
   await openSettingsMenu(page, "解説・AI設定");
@@ -2383,6 +2390,7 @@ test("settings suppression shows 準備中 for unimplemented switches and saves 
   await openSettings(page);
   await openSettingsMenu(page, "抑制条件");
 
+  // 画面上のラベル（「準備中」表示を含む）が見えること。
   await expect(page.getByText("会議中は通知を抑制する（準備中）")).toBeVisible();
   await expect(
     page.getByText("マイク使用中は通知を抑制する（準備中）")
@@ -2392,10 +2400,16 @@ test("settings suppression shows 準備中 for unimplemented switches and saves 
     page.getByText("フルスクリーン時は通知を抑制する", { exact: true })
   ).toBeVisible();
 
-  const switches = page.getByRole("switch");
-  const meeting = switches.nth(0);
-  const mic = switches.nth(1);
-  const fullscreen = switches.nth(2);
+  const meeting = page.getByRole("switch", {
+    name: "会議中は通知を抑制する（準備中）",
+  });
+  const mic = page.getByRole("switch", {
+    name: "マイク使用中は通知を抑制する（準備中）",
+  });
+  const fullscreen = page.getByRole("switch", {
+    name: "フルスクリーン時は通知を抑制する",
+    exact: true,
+  });
 
   // 非活性スイッチはクリックしても状態が変わらない。
   await expect(meeting).toBeDisabled();

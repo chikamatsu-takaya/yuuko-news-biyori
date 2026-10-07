@@ -1101,9 +1101,9 @@ export default function SettingsScreen({
                       非活性中も読み込んだ値を state に保持したまま保存するので、保存値は上書きされない。 */}
                   <SettingRow label="会議中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="会議中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressInMeeting}
                       disabled
-                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressInMeeting", checked)
                       }
@@ -1111,9 +1111,9 @@ export default function SettingsScreen({
                   </SettingRow>
                   <SettingRow label="マイク使用中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="マイク使用中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressWhenMicInUse}
                       disabled
-                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenMicInUse", checked)
                       }
@@ -1122,6 +1122,7 @@ export default function SettingsScreen({
                   {/* フルスクリーン抑制は Rust 側で notification.suppressInFullscreen を参照して判定済み（D44）のため操作可能。 */}
                   <SettingRow label="フルスクリーン時は通知を抑制する">
                     <Switch
+                      aria-label="フルスクリーン時は通知を抑制する"
                       checked={settings.suppression.suppressWhenFullscreen}
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenFullscreen", checked)
@@ -1132,9 +1133,9 @@ export default function SettingsScreen({
                       全画面で動くゲームはフルスクリーン抑制の対象になる。 */}
                   <SettingRow label="ゲーム実行中は通知を抑制する（準備中）">
                     <Switch
+                      aria-label="ゲーム実行中は通知を抑制する（準備中）"
                       checked={settings.suppression.suppressWhenGaming}
                       disabled
-                      aria-disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenGaming", checked)
                       }
