@@ -33,22 +33,47 @@ impl SummaryService {
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<GeneratedArticleSummaryDto, AppError> {
+        self.generate_article_summary_with(params, |request, kind, provider, level| {
+            self.request_validated_text(request, kind, provider, level)
+        })
+    }
+
+    /// 要約生成の本体。検証済み出力の取得手段（`request_validated`）を差し替えられるようにし、
+    /// 検証失敗時に既存保存値が残ることをテストで確認できるようにする。
+    fn generate_article_summary_with<F>(
+        &self,
+        params: GenerateArticleSummaryParams,
+        request_validated: F,
+    ) -> Result<GeneratedArticleSummaryDto, AppError>
+    where
+        F: Fn(
+            AiRequest,
+            SummaryOutputKind,
+            AiProvider,
+            ExplanationLevel,
+        ) -> Result<AiResponse, AppError>,
+    {
         let article_id = params.validated_article_id()?;
         let article = self.article_repository.get_article_detail(&article_id)?;
         let settings = self.settings_repository.load_or_default()?;
         let provider = settings.to_dto().ai_provider;
         let explanation_level = ExplanationLevel::from_storage(&settings.explanation.level);
 
+        // 保存する注目ポイントは従来どおり元の記事から作る。
         let focus_points = build_focus_points(&article, explanation_level);
-        let summary_seed = build_summary_seed(&article, explanation_level, &focus_points);
+        // 種（Mock 結果そのもの・実AIへの入力）は、外部由来の値を無害化した記事から作る。
+        // これにより Mock 結果が出力検証に落ちないこと（＝AIキー未設定でも要約できること）を構造的に保証する。
+        let seed_article = neutralize_seed_article(&article);
+        let seed_focus_points = build_focus_points(&seed_article, explanation_level);
+        let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
         let yuuko_explanation_seed =
-            build_yuuko_explanation_seed(&article, explanation_level, &focus_points);
-        let yuuko_comment_seed = build_yuuko_comment_seed(&article, explanation_level);
+            build_yuuko_explanation_seed(&seed_article, explanation_level, &seed_focus_points);
+        let yuuko_comment_seed = build_yuuko_comment_seed(&seed_article, explanation_level);
 
         // 3出力とも詳細設計書 §12.5 の出力検証を通ったものだけを保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
-        let summary_response = self.request_validated_text(
+        let summary_response = request_validated(
             AiRequest {
                 prompt_id: "summary_v1".to_string(),
                 input_text: summary_seed,
@@ -58,35 +83,37 @@ impl SummaryService {
             provider,
             explanation_level,
         )?;
-        // 永続化メタ用に、実際に要約を生成したプロバイダ（gemini/mock）を控える。
-        let effective_provider = summary_response.provider;
+        let yuuko_explanation_response = request_validated(
+            AiRequest {
+                prompt_id: "yuuko_explanation_v1".to_string(),
+                input_text: yuuko_explanation_seed,
+                context: Some(article.genre.clone()),
+            },
+            SummaryOutputKind::Explanation,
+            provider,
+            explanation_level,
+        )?;
+
+        let yuuko_comment_response = request_validated(
+            AiRequest {
+                prompt_id: "yuuko_comment_v1".to_string(),
+                input_text: yuuko_comment_seed,
+                context: Some(article.source_name.clone()),
+            },
+            SummaryOutputKind::Comment,
+            provider,
+            explanation_level,
+        )?;
+
+        // 永続化メタ用のプロバイダ。1つでも Mock に切り替わっていれば "mock" と記録する。
+        let effective_provider = combined_provider(&[
+            &summary_response,
+            &yuuko_explanation_response,
+            &yuuko_comment_response,
+        ]);
         let summary = summary_response.text;
-
-        let yuuko_explanation = self
-            .request_validated_text(
-                AiRequest {
-                    prompt_id: "yuuko_explanation_v1".to_string(),
-                    input_text: yuuko_explanation_seed,
-                    context: Some(article.genre.clone()),
-                },
-                SummaryOutputKind::Explanation,
-                provider,
-                explanation_level,
-            )?
-            .text;
-
-        let yuuko_comment = self
-            .request_validated_text(
-                AiRequest {
-                    prompt_id: "yuuko_comment_v1".to_string(),
-                    input_text: yuuko_comment_seed,
-                    context: Some(article.source_name.clone()),
-                },
-                SummaryOutputKind::Comment,
-                provider,
-                explanation_level,
-            )?
-            .text;
+        let yuuko_explanation = yuuko_explanation_response.text;
+        let yuuko_comment = yuuko_comment_response.text;
 
         // B-4: 生成要約を記事Markdownへ永続化（再表示はキャッシュ・更新は明示再生成）。
         // 保存失敗でもアプリは止めず、生成結果は返す（警告ログのみ）。CLAUDE.md §10「安全側へ倒す」。
@@ -141,8 +168,8 @@ impl SummaryService {
 // 保存しない・用語解説側と同じ扱い）。
 
 /// AI要約の上限。AI へは「1〜2文」で依頼するため実AIの正常出力はこれより十分短い。
-/// Mock 結果は本文抜粋（取得側上限 MAX_EXCERPT_CHARS = 2000文字）に定型文・注目ポイントを足した
-/// 種そのものなので、通常の記事で Mock まで上限超過にならないよう、抜粋上限＋余裕で 3000 文字とする。
+/// Mock 結果は本文抜粋に定型文・注目ポイントを足した種そのもの。種の抜粋は SEED_EXCERPT_MAX_CHARS
+/// （2300文字）で切り詰めるため、Mock 結果が必ずこの上限に収まるよう 3000 文字とする。
 const SUMMARY_MAX_CHARS: usize = 3_000;
 /// ゆうこの再説明（「ゆうこの用語解説」セクション）の上限。用語解説の detail 上限（2000文字）に揃える。
 const EXPLANATION_MAX_CHARS: usize = 2_000;
@@ -151,6 +178,81 @@ const COMMENT_MAX_CHARS: usize = 300;
 
 /// AiProviderService が Mock 応答に付けるプロバイダ名（保存メタ ai_provider と同じ値）。
 const PROVIDER_MOCK: &str = "mock";
+
+// --- 種（Mock 結果・AI入力）の無害化上限 ---
+// Mock 結果は種そのものなので、種の各部品をここで切り詰めておけば各出力上限に必ず収まる。
+// 要約の種 = 抜粋(2300) + 注目ポイント2件(各 タイトル200＋定型文 程度) + 定型文(約70) ≦ 3000。
+// 感想の種 = タイトル(200) または ジャンル(100) + 定型文(約60) ≦ 300。
+// 再説明の種 = ジャンル(100) + 注目ポイント2件(各 300 以下) + 定型文(約110) ≦ 2000。
+/// 種に使う本文抜粋の上限。RSS description 経由の抜粋は取得側で切り詰められないため、ここで抑える。
+const SEED_EXCERPT_MAX_CHARS: usize = 2_300;
+/// 種に使うタイトルの上限。
+const SEED_TITLE_MAX_CHARS: usize = 200;
+/// 種に使うジャンルの上限。
+const SEED_GENRE_MAX_CHARS: usize = 100;
+/// 種に使う注目ポイント1件の上限。
+const SEED_FOCUS_POINT_MAX_CHARS: usize = 200;
+
+/// 種へ入れる外部由来文字列（抜粋・タイトル・ジャンル・注目ポイント）を、出力検証に落ちない形へ無害化する。
+///
+/// 順序: 文字数で切り詰め → 制御文字（改行・タブ以外）を除去 → 行ごとに `<` を全角 `＜` へ、
+/// 行頭（先頭空白の後）の `#` を全角 `＃` へ置換し、区切り行を落とす。
+/// 切り詰めを先に行うのは、途中で切れて新たに `---` だけの行ができる、といったことを防ぐため
+/// （後段の処理は文字数を増やさない）。制御文字の除去を行処理より先に行うのは、
+/// 除去によって行頭に `#` が現れるケースを取りこぼさないため。
+fn neutralize_seed_text(text: &str, max_chars: usize) -> String {
+    let truncated = text
+        .chars()
+        .take(max_chars)
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect::<String>();
+    truncated
+        .split('\n')
+        .filter(|line| !is_markdown_separator_line(line))
+        .map(|line| {
+            let line = line.replace('<', "＜");
+            let indent_len = line.len() - line.trim_start().len();
+            let (indent, rest) = line.split_at(indent_len);
+            match rest.strip_prefix('#') {
+                Some(after) => format!("{indent}＃{after}"),
+                None => line.clone(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 種の組み立てに使う外部由来フィールドだけを無害化した記事のコピーを返す（保存には使わない）。
+fn neutralize_seed_article(article: &ArticleDetailDto) -> ArticleDetailDto {
+    let mut seed_article = article.clone();
+    seed_article.title = neutralize_seed_text(&article.title, SEED_TITLE_MAX_CHARS);
+    seed_article.genre = neutralize_seed_text(&article.genre, SEED_GENRE_MAX_CHARS);
+    seed_article.excerpt = article
+        .excerpt
+        .as_deref()
+        .map(|excerpt| neutralize_seed_text(excerpt, SEED_EXCERPT_MAX_CHARS));
+    seed_article.focus_points = article
+        .focus_points
+        .iter()
+        .map(|point| neutralize_seed_text(point, SEED_FOCUS_POINT_MAX_CHARS))
+        .collect();
+    seed_article
+}
+
+/// 保存メタ ai_provider の値。1つでも Mock に切り替わった出力があれば "mock"、
+/// すべて同じ実AIなら そのプロバイダ名を返す（実AIで生成したように見せないため）。
+fn combined_provider(responses: &[&AiResponse]) -> String {
+    if responses
+        .iter()
+        .any(|response| response.provider == PROVIDER_MOCK)
+    {
+        return PROVIDER_MOCK.to_string();
+    }
+    responses
+        .first()
+        .map(|response| response.provider.clone())
+        .unwrap_or_else(|| PROVIDER_MOCK.to_string())
+}
 
 /// 検証対象の出力種別。ログには本文の代わりにこの種別名だけを出す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,8 +540,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        select_valid_output, validate_summary_output, OutputRejection, SummaryOutputKind,
-        SummaryService, COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
+        combined_provider, neutralize_seed_text, select_valid_output, validate_summary_output,
+        OutputRejection, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
+        EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::summary::{AiResponse, GenerateArticleSummaryParams};
@@ -620,6 +723,14 @@ mod tests {
 
     // 設定ファイルは未作成 → 既定（provider=Mock）で外部通信なしに生成する。
     fn build_service(root_dir: &Path, excerpt: &str) -> (SummaryService, ArticleRepository) {
+        build_service_with_title(root_dir, "半導体工場の新設計画", excerpt)
+    }
+
+    fn build_service_with_title(
+        root_dir: &Path,
+        title: &str,
+        excerpt: &str,
+    ) -> (SummaryService, ArticleRepository) {
         let article_repository = ArticleRepository::with_paths(
             root_dir.join("news"),
             root_dir.join("article_favorites.json"),
@@ -628,7 +739,7 @@ mod tests {
         article_repository
             .save_fetched_articles(vec![FetchedArticle {
                 article_id: ARTICLE_ID.to_string(),
-                title: "半導体工場の新設計画".to_string(),
+                title: title.to_string(),
                 source_name: "Example News".to_string(),
                 original_url: format!("https://example.com/news/{ARTICLE_ID}"),
                 fetched_at: "2026-10-07T00:00:00Z".to_string(),
@@ -681,11 +792,72 @@ mod tests {
     }
 
     #[test]
+    fn mock_generation_succeeds_for_risky_external_text() {
+        // 抜粋の HTML・型引数風の `<`・行頭ハッシュタグ・区切り行、5000文字の抜粋、
+        // `<T>` を含み `#1` で始まるタイトルでも、Mock 結果は無害化された種から作られ検証を通る。
+        let risky_excerpt = "本文に<script>x</script>が混入。\nVec<String> と Promise<void> の話。\n#AI #生成AI\n---\n後半";
+        let long_excerpt = "あ".repeat(5_000);
+        let risky_title = "#1 LazyCell<T> の使い方";
+        for (name, title, excerpt) in [
+            ("risky-excerpt", "半導体工場の新設計画", risky_excerpt),
+            (
+                "long-excerpt",
+                "半導体工場の新設計画",
+                long_excerpt.as_str(),
+            ),
+            ("risky-title", risky_title, "通常の抜粋です。"),
+        ] {
+            let root_dir = temp_root(name);
+            let (service, repository) = build_service_with_title(&root_dir, title, excerpt);
+
+            let generated = service.generate_article_summary(params()).unwrap();
+            for (kind, text) in [
+                (SummaryOutputKind::Summary, &generated.summary),
+                (SummaryOutputKind::Explanation, &generated.yuuko_explanation),
+                (SummaryOutputKind::Comment, &generated.yuuko_comment),
+            ] {
+                assert!(validate_summary_output(kind, text).is_ok());
+            }
+
+            // Markdown 再読込でもセクションが崩れず、抜粋・生成値がそのまま読める。
+            let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+            assert_eq!(detail.excerpt.as_deref(), Some(excerpt));
+            assert_eq!(detail.summary.as_deref(), Some(generated.summary.as_str()));
+            assert_eq!(
+                detail.yuuko_explanation.as_deref(),
+                Some(generated.yuuko_explanation.as_str())
+            );
+            assert_eq!(
+                detail.yuuko_comment.as_deref(),
+                Some(generated.yuuko_comment.as_str())
+            );
+            let _ = std::fs::remove_dir_all(&root_dir);
+        }
+    }
+
+    #[test]
+    fn neutralize_seed_text_makes_text_pass_validation() {
+        let neutralized = neutralize_seed_text("a<b>c\n  #AI\n---\nok\u{0007}\t末尾", usize::MAX);
+        assert_eq!(neutralized, "a＜b>c\n  ＃AI\nok\t末尾");
+        assert!(validate_summary_output(SummaryOutputKind::Summary, &neutralized).is_ok());
+        // 文字数（chars）で切り詰める。
+        assert_eq!(neutralize_seed_text(&"あ".repeat(10), 3), "あああ");
+    }
+
+    #[test]
+    fn provider_is_recorded_as_mock_when_any_output_fell_back() {
+        let gemini = response("a", "gemini");
+        let mock = response("b", "mock");
+        assert_eq!(combined_provider(&[&gemini, &gemini, &gemini]), "gemini");
+        assert_eq!(combined_provider(&[&gemini, &gemini, &mock]), "mock");
+        assert_eq!(combined_provider(&[&mock, &gemini, &gemini]), "mock");
+    }
+
+    #[test]
     fn invalid_generation_keeps_existing_saved_summary() {
-        // 本文抜粋に HTML が含まれる記事では Mock 要約（抜粋が種）も検証に落ちる。
         let root_dir = temp_root("invalid");
         let (service, repository) =
-            build_service(&root_dir, "本文に<script>x</script>が混入した抜粋");
+            build_service(&root_dir, "新しい半導体工場の建設計画が発表されました。");
         repository
             .update_article_summary(
                 ARTICLE_ID,
@@ -700,12 +872,25 @@ mod tests {
             )
             .unwrap();
 
-        let error = service.generate_article_summary(params()).unwrap_err();
+        // 要約・再説明は有効だが、感想は実AI・Mock とも検証に落ちる出力を注入する。
+        let error = service
+            .generate_article_summary_with(params(), |_request, kind, _provider, _level| match kind
+            {
+                SummaryOutputKind::Comment => select_valid_output(
+                    kind,
+                    response("<p>混入した出力</p>", "gemini"),
+                    || Ok(response("## ゆうこの一言\n混入した出力", "mock")),
+                ),
+                _ => select_valid_output(kind, response("新しい出力", "gemini"), || {
+                    panic!("fallback must not be called for valid output")
+                }),
+            })
+            .unwrap_err();
         let command_error = CommandError::from(error);
         assert_eq!(command_error.code, "PARSE_ERROR");
-        assert!(!command_error.message.contains("混入した抜粋"));
+        assert!(!command_error.message.contains("混入した出力"));
 
-        // 既存の保存値は上書きされない。
+        // 一部だけ成功していても保存せず、既存の保存値は上書きされない。
         let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
         assert_eq!(detail.summary.as_deref(), Some("保存済みの要約"));
         assert_eq!(
@@ -713,6 +898,7 @@ mod tests {
             Some("保存済みの再説明")
         );
         assert_eq!(detail.yuuko_comment.as_deref(), Some("保存済みの一言"));
+        assert_eq!(detail.focus_points, vec!["観点A".to_string()]);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 }
