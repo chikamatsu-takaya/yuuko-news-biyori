@@ -563,7 +563,19 @@ export default function DictionaryScreen({
     setEditMemoValue("");
   }, [selectedEntryId]);
 
+  // 検索語・フィルタの連続変更で古い応答が後から届いても上書きしないよう、
+  // 最新リクエストの番号だけが結果（一覧・お知らせ・読込状態）を反映できるようにする。
+  const loadRequestIdRef = React.useRef(0);
+  // 表示中の一覧を取得したときに絞り込み条件が有効だったか。
+  // 空状態の出し分けは入力中の値ではなく、表示中データの取得条件で判定する。
+  const [loadedWithConditions, setLoadedWithConditions] =
+    React.useState(false);
+
   const loadEntries = React.useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const isLatest = () => requestId === loadRequestIdRef.current;
+    const requestHasConditions =
+      trimmedSearchQuery !== "" || activeFilter !== "all";
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
@@ -577,6 +589,11 @@ export default function DictionaryScreen({
             : undefined,
         starredOnly: activeFilter === "favorite" ? true : undefined,
       });
+
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
 
       if (!dictionaryEntries) {
         setEntries(
@@ -597,6 +614,10 @@ export default function DictionaryScreen({
         setLoadNoticeKind("empty");
       }
     } catch (error) {
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
       setEntries([]);
       setLoadNotice(
         "辞書一覧の取得に失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
@@ -604,7 +625,10 @@ export default function DictionaryScreen({
       setLoadNoticeKind("error");
       console.warn("Failed to load dictionary entries:", error);
     } finally {
-      setIsLoading(false);
+      // 古いリクエストが完了しても、新しいリクエストの読込中表示は解除しない。
+      if (isLatest()) {
+        setIsLoading(false);
+      }
     }
   }, [activeFilter, trimmedSearchQuery]);
 
@@ -654,9 +678,8 @@ export default function DictionaryScreen({
 
   // 絞り込みは list_dictionary_entries の引数（keyword / type / starredOnly）で
   // Rust 側に任せているため、結果0件が「辞書そのものが空」か「条件に合う項目が無い」かは
-  // 一覧からは判別できない。条件が1つでも有効なら「検索結果なし」として扱う。
-  const hasActiveConditions =
-    trimmedSearchQuery !== "" || activeFilter !== "all";
+  // 一覧からは判別できない。表示中データの取得時に条件が有効なら「検索結果なし」として扱う。
+  const hasActiveConditions = loadedWithConditions;
   // 読込失敗時は entries が空でもエラー表示（お知らせ＋再試行）を優先し、空状態は出さない。
   const showEmptyState =
     !isLoading && loadNoticeKind !== "error" && paginatedEntries.length === 0;

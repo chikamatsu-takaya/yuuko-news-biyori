@@ -607,6 +607,37 @@ test("dictionary shows the no-results state for an unmatched search and clearing
   await expect(page.getByText("見つからなかったよ")).toHaveCount(0);
 });
 
+test("dictionary shows the no-results state for the favorite filter and clearing resets the filter", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_NO_STARRED__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+  const main = page.locator("main");
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+
+  // 詳細ペインにも「お気に入り」切替ボタンがあるため、DOM 上で先に並ぶフィルタチップを選ぶ。
+  await main
+    .getByRole("button", { name: "お気に入り", exact: true })
+    .first()
+    .click();
+
+  await expect(page.getByText("見つからなかったよ")).toBeVisible();
+  await expect(page.getByText("まだ辞書に何もないよ")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "条件をクリア" }).click();
+
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(page.getByText("見つからなかったよ")).toHaveCount(0);
+  // フィルタが「すべて」に戻る（選択中チップは yuuko-green 背景）。
+  await expect(
+    main.getByRole("button", { name: "すべて", exact: true })
+  ).toHaveClass(/bg-\[var\(--yuuko-green\)\]/);
+});
+
 const collapseSelection = (page: Page) =>
   page.evaluate(() => {
     window.getSelection()?.removeAllRanges();
@@ -4571,6 +4602,13 @@ async function installTauriMocks(page: Page) {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             // 辞書が空の状態を再現する（空状態と検索結果なしの区別の検証用）。
             if ((window as any).__E2E_DICTIONARY_EMPTY__) {
+              return [];
+            }
+            // お気に入りフィルタで0件になる状態を再現する（フィルタ経由の検索結果なしの検証用）。
+            if (
+              (window as any).__E2E_DICTIONARY_NO_STARRED__ &&
+              params.starredOnly === true
+            ) {
               return [];
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
