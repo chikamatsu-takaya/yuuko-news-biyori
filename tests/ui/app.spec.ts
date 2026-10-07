@@ -2161,7 +2161,7 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
   await expect(page.getByTestId("storage-status-placeholder")).toHaveText(
     "保存データの使用状況の表示は準備中です。"
   );
-  await expect(page.getByText(/d+(.d+)?s*GB/)).toHaveCount(0);
+  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
   await expect(page.getByRole("progressbar")).toHaveCount(0);
 });
 
