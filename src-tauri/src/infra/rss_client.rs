@@ -560,9 +560,9 @@ mod tests {
         let addrs = validate_resolved_socket_addrs(
             "rss.example.com",
             vec![
-                SocketAddr::new(IpAddr::from([203, 0, 113, 10]), 443),
-                SocketAddr::new(IpAddr::from([203, 0, 113, 10]), 8443),
-                SocketAddr::new(IpAddr::from([203, 0, 113, 11]), 443),
+                SocketAddr::new(IpAddr::from([8, 8, 8, 8]), 443),
+                SocketAddr::new(IpAddr::from([8, 8, 8, 8]), 8443),
+                SocketAddr::new(IpAddr::from([8, 8, 4, 4]), 443),
             ],
         )
         .expect("public DNS results should pass");
@@ -570,8 +570,8 @@ mod tests {
         assert_eq!(
             addrs,
             vec![
-                SocketAddr::new(IpAddr::from([203, 0, 113, 10]), 0),
-                SocketAddr::new(IpAddr::from([203, 0, 113, 11]), 0),
+                SocketAddr::new(IpAddr::from([8, 8, 8, 8]), 0),
+                SocketAddr::new(IpAddr::from([8, 8, 4, 4]), 0),
             ]
         );
     }
