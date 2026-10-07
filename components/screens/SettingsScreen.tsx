@@ -42,8 +42,10 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  getAutostartEnabled,
   getUserSettings,
   saveUserSettings,
+  setAutostartEnabled,
   resetUserSettings,
   testAiProvider,
   type AiProviderConnectionTestResult,
@@ -521,8 +523,15 @@ export default function SettingsScreen({
     React.useState<AiConnectionTestView | null>(null);
   const [aiTestUnavailableInPreview, setAiTestUnavailableInPreview] =
     React.useState(false);
+  // 自動起動: OS 状態を読めなかったときは誤操作を防ぐためスイッチを無効化する。
+  const [isUpdatingAutostart, setIsUpdatingAutostart] = React.useState(false);
+  const [autostartReadFailed, setAutostartReadFailed] = React.useState(false);
+  const [autostartError, setAutostartError] = React.useState<string | null>(
+    null
+  );
   // state 更新前の連打でも二重実行しないよう、同期的に参照できる ref でも実行中を保持する。
   const isTestingAiRef = React.useRef(false);
+  const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
 
   const { toast } = useToast();
@@ -532,6 +541,43 @@ export default function SettingsScreen({
       onNavigate(screen);
     }
   };
+
+  // 自動起動は OS の登録状態を正とする。画面表示と「キャンセル」の戻り先（backendSettings）の
+  // 両方を OS 状態へ合わせ、保存済み設定値とずれていても OS 側を表示する。
+  const applyAutostartState = React.useCallback((enabled: boolean) => {
+    setSettings((prev) => ({
+      ...prev,
+      integration: { ...prev.integration, autoStartOnPcBoot: enabled },
+    }));
+    setBackendSettings((prev) =>
+      prev ? { ...prev, autoStartOnPcBoot: enabled } : prev
+    );
+  }, []);
+
+  const refreshAutostartState = React.useCallback(async () => {
+    try {
+      const enabled = await getAutostartEnabled();
+      if (!isMountedRef.current || enabled === null) {
+        return;
+      }
+      applyAutostartState(enabled);
+      setAutostartReadFailed(false);
+      setAutostartError(null);
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 調査用に種別だけ残す（OS エラー文・レジストリパスは画面へ出さない）。
+      console.error(
+        "Failed to read autostart state via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAutostartReadFailed(true);
+      setAutostartError(
+        "自動起動の状態を確認できなかったよ。画面を開き直してみてね。"
+      );
+    }
+  }, [applyAutostartState]);
 
   const loadSettings = React.useCallback(async () => {
     setIsLoading(true);
@@ -550,6 +596,8 @@ export default function SettingsScreen({
 
       setBackendSettings(dto);
       setSettings((prev) => mapSettingsFromDto(prev, dto));
+      // 保存値を反映した後に OS 状態で上書きする（順序が逆だと保存値で戻ってしまう）。
+      await refreshAutostartState();
     } catch (error) {
       if (!isMountedRef.current) {
         return;
@@ -564,7 +612,7 @@ export default function SettingsScreen({
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [refreshAutostartState]);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -683,14 +731,40 @@ export default function SettingsScreen({
     }));
   };
 
-  const updateIntegration = (
-    key: keyof IntegrationSettings,
-    value: boolean
-  ) => {
-    setSettings((prev) => ({
-      ...prev,
-      integration: { ...prev.integration, [key]: value },
-    }));
+  // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
+  // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
+  const handleToggleAutostart = async (enabled: boolean) => {
+    if (isUpdatingAutostartRef.current) {
+      return;
+    }
+    isUpdatingAutostartRef.current = true;
+    setIsUpdatingAutostart(true);
+    setAutostartError(null);
+
+    try {
+      const actual = await setAutostartEnabled(enabled);
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 非Tauri（プレビュー）では OS へ触れないため、表示だけ切り替える。
+      applyAutostartState(actual ?? enabled);
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      console.error(
+        "Failed to change autostart via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAutostartError(
+        "自動起動の設定を変更できなかったよ。もう一度試してみてね。"
+      );
+    } finally {
+      isUpdatingAutostartRef.current = false;
+      if (isMountedRef.current) {
+        setIsUpdatingAutostart(false);
+      }
+    }
   };
 
   const handleSave = async () => {
@@ -727,6 +801,8 @@ export default function SettingsScreen({
       if (dto) {
         setBackendSettings(dto);
         setSettings(mapSettingsFromDto(mockSettings, dto));
+        // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
+        await refreshAutostartState();
       } else {
         // 非Tauri（プレビュー）時は表示のみ初期化する。
         setSettings(mockSettings);
@@ -1401,14 +1477,25 @@ export default function SettingsScreen({
                 <CardContent className="pt-0">
                   <SettingRow label="PC起動時の自動起動設定">
                     <Switch
+                      aria-label="PC起動時の自動起動"
                       checked={settings.integration.autoStartOnPcBoot}
+                      disabled={isUpdatingAutostart || autostartReadFailed}
                       onCheckedChange={(checked) =>
-                        updateIntegration("autoStartOnPcBoot", checked)
+                        void handleToggleAutostart(checked)
                       }
                     />
                   </SettingRow>
+                  {autostartError && (
+                    <p
+                      role="alert"
+                      data-testid="autostart-error"
+                      className="text-xs text-destructive mt-2"
+                    >
+                      {autostartError}
+                    </p>
+                  )}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 この設定は今後の自動起動機能で利用されます。現在は設定値のみ保存されます。
+                    💡 この設定は切り替えるとすぐに反映されるよ（「保存する」は不要）。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
                   </p>
                 </CardContent>
               </Card>

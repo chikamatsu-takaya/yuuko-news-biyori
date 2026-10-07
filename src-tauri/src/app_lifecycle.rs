@@ -88,6 +88,45 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
     }
 }
 
+/// 起動直後にメインウィンドウを出すかを決めて反映する。
+///
+/// メインウィンドウは tauri.conf.json で非表示のまま作成し、ここで表示する（自動起動時に一瞬
+/// 映るのを防ぐため）。OS の自動起動（`--autostart` 付き）で立ち上がった場合だけ、トレイ常駐・
+/// ゆうこ通知の待機状態で始める。トレイを作れなかったときは再表示手段が無くなるため必ず表示する。
+pub fn apply_launch_visibility<R: Runtime>(
+    app: &AppHandle<R>,
+    resident_ready: bool,
+    args: impl IntoIterator<Item = String>,
+) {
+    if should_start_hidden(resident_ready, is_autostart_launch(args)) {
+        log::info!("自動起動のため、メインウィンドウを表示せずバックグラウンド待機で開始します");
+        return;
+    }
+
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        log::error!("起動時に表示するメインウィンドウが見つかりません");
+        return;
+    };
+    if let Err(error) = window.show() {
+        log::error!("起動時のメインウィンドウ表示に失敗しました: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("起動時のメインウィンドウへフォーカスできませんでした: {error}");
+    }
+}
+
+fn is_autostart_launch(args: impl IntoIterator<Item = String>) -> bool {
+    // 先頭は実行ファイルのパスなので除外し、完全一致だけを自動起動とみなす。
+    args.into_iter()
+        .skip(1)
+        .any(|arg| arg == crate::services::autostart_service::AUTOSTART_LAUNCH_ARG)
+}
+
+fn should_start_hidden(resident_ready: bool, launched_by_autostart: bool) -> bool {
+    resident_ready && launched_by_autostart
+}
+
 /// メインウィンドウを最小化解除・表示・前面化する。トレイの「画面を開く」と、
 /// ゆうこ用ウィンドウの「詳しく見る」（yuuko_desktop_notifier）で同じ手順を使う。
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -165,6 +204,29 @@ mod tests {
             Some(ResidentMenuAction::QuitApplication)
         );
         assert_eq!(menu_action("unexpected"), None);
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn autostart_launch_is_detected_only_by_exact_argument() {
+        assert!(is_autostart_launch(args(&["app.exe", "--autostart"])));
+        assert!(!is_autostart_launch(args(&["app.exe"])));
+        assert!(!is_autostart_launch(args(&["app.exe", "--autostart=1"])));
+        // 実行ファイルのパス自体は引数として扱わない。
+        assert!(!is_autostart_launch(args(&["--autostart"])));
+    }
+
+    #[test]
+    fn main_window_starts_hidden_only_for_autostart_with_tray() {
+        assert!(should_start_hidden(true, true));
+        // 手動起動は従来どおり表示する。
+        assert!(!should_start_hidden(true, false));
+        // トレイが無いと再表示できないため、自動起動でも表示する。
+        assert!(!should_start_hidden(false, true));
+        assert!(!should_start_hidden(false, false));
     }
 
     #[test]

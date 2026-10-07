@@ -38,10 +38,24 @@ pub fn run() {
             app_lifecycle::handle_window_event(window, event);
         })
         .setup(|app| {
-            if let Err(error) = app_lifecycle::setup(app) {
-                // トレイが無いままclose-to-hideだけ有効になると終了不能になるため、通常終了へ戻す。
-                log::error!("常駐ライフサイクルを初期化できませんでした: {error}");
+            let resident_ready = match app_lifecycle::setup(app) {
+                Ok(()) => true,
+                Err(error) => {
+                    // トレイが無いままclose-to-hideだけ有効になると終了不能になるため、通常終了へ戻す。
+                    log::error!("常駐ライフサイクルを初期化できませんでした: {error}");
+                    false
+                }
+            };
+            // 自動起動の ON/OFF は autostart command から Rust 側で操作する（capability は付与しない）。
+            // 初期化に失敗しても自動起動の設定だけが使えない状態にとどめ、アプリは起動を続ける。
+            if let Err(error) = app.handle().plugin(
+                tauri_plugin_autostart::Builder::new()
+                    .arg(services::autostart_service::AUTOSTART_LAUNCH_ARG)
+                    .build(),
+            ) {
+                log::error!("自動起動プラグインを初期化できませんでした: {error}");
             }
+            app_lifecycle::apply_launch_visibility(app.handle(), resident_ready, std::env::args());
 
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);
@@ -132,6 +146,8 @@ pub fn run() {
             commands::article_commands::archive_old_articles,
             commands::article_commands::restore_archived_article,
             commands::article_commands::retire_archived_markdown,
+            commands::autostart_commands::get_autostart_enabled,
+            commands::autostart_commands::set_autostart_enabled,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,

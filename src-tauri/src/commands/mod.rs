@@ -1,4 +1,5 @@
 pub mod article_commands;
+pub mod autostart_commands;
 pub mod dictionary_commands;
 pub mod friendship_commands;
 pub mod health_commands;
