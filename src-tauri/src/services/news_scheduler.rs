@@ -9,6 +9,9 @@
 //! - 設定 `news.fetch_on_startup` / `news.fetch_at_midnight` の ON/OFF を尊重する。
 //! - 同じtickで日次アーカイブ保守も確認し、追加の常駐スレッドを作らない。
 //! - アーカイブ保守はニュース取得設定とは独立し、完全成功した日だけ完了状態を保存する。
+//! - refresh 成功時はメインウィンドウへ `news-refreshed` を通知し、アプリ内通知の候補生成を
+//!   次の5分ポーリングを待たずに1回だけ促す（設計書「ゆうこ登場・通知挙動」§4.2 新着ニュース取得後）。
+//!   判定（日次上限・クールタイム等）は従来どおり request_yuuko_notification 側で行う。
 //!
 //! `last_news_refresh_date` はローカル日付（YYYY-MM-DD）。取得タイミング管理用の状態で
 //! セキュリティ境界ではないため、欠落・破損時は fail-open（未取得扱い＝再取得）とする。
@@ -18,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Runtime};
 
+use crate::app_lifecycle::MAIN_WINDOW_LABEL;
 use crate::error::AppError;
 use crate::paths::AppPaths;
 use crate::repositories::settings_repository::SettingsRepository;
@@ -28,6 +33,18 @@ use crate::services::news_service::NewsService;
 
 /// 日付確認の間隔（低頻度）。まずは30分とする。
 const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// ニュース取得（refresh）成功をメインウィンドウへ知らせるイベント名。
+/// lib/tauri/news.ts の NEWS_REFRESHED_EVENT と一致させる。
+pub const NEWS_REFRESHED_EVENT: &str = "news-refreshed";
+
+/// `news-refreshed` のペイロード。URL・本文など外部由来の情報は含めず、件数だけを渡す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewsRefreshedPayload {
+    /// 今回の取得で新たに保存した記事数。
+    pub saved_count: usize,
+}
 
 /// 取得タイミング状態。`state/news_refresh_state.json` に保存する。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,17 +120,18 @@ impl NewsScheduler {
 
     /// 専用スレッドでチェックを開始する。起動時に1回、その後 interval ごとに確認する。
     /// 取得は非同期だが UI/メインスレッドは阻害しない（別スレッドで実行）。
-    pub fn start(self) {
+    /// `app` は refresh 成功の通知（emit）にだけ使う。
+    pub fn start<R: Runtime>(self, app: AppHandle<R>) {
         std::thread::spawn(move || {
-            self.tick_blocking(TickKind::Startup);
+            self.tick_blocking(&app, TickKind::Startup);
             loop {
                 std::thread::sleep(self.interval);
-                self.tick_blocking(TickKind::Periodic);
+                self.tick_blocking(&app, TickKind::Periodic);
             }
         });
     }
 
-    fn tick_blocking(&self, kind: TickKind) {
+    fn tick_blocking<R: Runtime>(&self, app: &AppHandle<R>, kind: TickKind) {
         let today = local_today();
         match self.archive_scheduler.run_if_due(&today) {
             Ok(ArchiveMaintenanceOutcome::Skipped) => {}
@@ -135,17 +153,20 @@ impl NewsScheduler {
         }
 
         // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
-        tauri::async_runtime::block_on(self.tick_news(kind, &today));
+        if let Some(saved_count) = tauri::async_runtime::block_on(self.tick_news(kind, &today)) {
+            notify_news_refreshed(app, saved_count);
+        }
     }
 
-    async fn tick_news(&self, kind: TickKind, today: &str) {
+    /// 必要なら refresh する。成功した場合だけ新規保存件数を返す（未実行・失敗は None）。
+    async fn tick_news(&self, kind: TickKind, today: &str) -> Option<usize> {
         if !self.is_enabled(kind) {
-            return;
+            return None;
         }
 
         let state = NewsRefreshState::load(&self.state_path);
         if !should_refresh(state.last_news_refresh_date.as_deref(), today) {
-            return;
+            return None;
         }
 
         match self.news_service.refresh().await {
@@ -161,10 +182,12 @@ impl NewsScheduler {
                 if let Err(error) = updated.save(&self.state_path) {
                     log::warn!("failed to persist last_news_refresh_date: {error}");
                 }
+                Some(result.saved)
             }
             Err(error) => {
                 // 失敗時は日付を更新せず、次回チェックで再試行できるようにする。
                 log::warn!("scheduled news refresh failed; will retry on next check: {error}");
+                None
             }
         }
     }
@@ -182,6 +205,21 @@ impl NewsScheduler {
             TickKind::Startup => settings.news.fetch_on_startup,
             TickKind::Periodic => settings.news.fetch_at_midnight,
         }
+    }
+}
+
+/// refresh 成功をメインウィンドウへ通知する。
+///
+/// ゆうこ用ウィンドウへは送らない（非表示中の判定は yuuko_desktop_notifier の担当）。
+/// 通知は「候補生成を早める」補助にすぎないため、送れなくてもログだけ残し refresh の成否には影響させない。
+/// メインが非表示でも WebView と購読は生きているが、React 側は非表示中のイベントでは候補生成しない。
+fn notify_news_refreshed<R: Runtime>(app: &AppHandle<R>, saved_count: usize) {
+    if let Err(error) = app.emit_to(
+        MAIN_WINDOW_LABEL,
+        NEWS_REFRESHED_EVENT,
+        NewsRefreshedPayload { saved_count },
+    ) {
+        log::warn!("failed to notify main window of news refresh: {error}");
     }
 }
 
@@ -224,6 +262,13 @@ mod tests {
     #[test]
     fn should_not_refresh_when_already_today() {
         assert!(!should_refresh(Some("2026-06-04"), "2026-06-04"));
+    }
+
+    #[test]
+    fn news_refreshed_payload_contains_only_the_count() {
+        // URL・本文などを載せないことをシリアライズ結果で固定する。
+        let payload = serde_json::to_value(NewsRefreshedPayload { saved_count: 3 }).unwrap();
+        assert_eq!(payload, serde_json::json!({ "savedCount": 3 }));
     }
 
     #[test]
