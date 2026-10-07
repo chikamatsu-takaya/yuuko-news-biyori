@@ -652,6 +652,22 @@ export default function DictionaryScreen({
   const selectedEntry =
     sortedEntries.find((entry) => entry.id === selectedEntryId) ?? null;
 
+  // 絞り込みは list_dictionary_entries の引数（keyword / type / starredOnly）で
+  // Rust 側に任せているため、結果0件が「辞書そのものが空」か「条件に合う項目が無い」かは
+  // 一覧からは判別できない。条件が1つでも有効なら「検索結果なし」として扱う。
+  const hasActiveConditions =
+    trimmedSearchQuery !== "" || activeFilter !== "all";
+  // 読込失敗時は entries が空でもエラー表示（お知らせ＋再試行）を優先し、空状態は出さない。
+  const showEmptyState =
+    !isLoading && loadNoticeKind !== "error" && paginatedEntries.length === 0;
+
+  // 検索語・種別フィルタ・ページを既定値へ戻す（並び替えは絞り込み条件ではないため維持する）。
+  const handleClearConditions = () => {
+    setSearchQuery("");
+    setActiveFilter("all");
+    setCurrentPage(1);
+  };
+
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
   };
@@ -925,12 +941,34 @@ export default function DictionaryScreen({
                   </div>
                 ) : null}
 
-                {!isLoading && paginatedEntries.length === 0 ? (
+                {showEmptyState && hasActiveConditions ? (
+                  <Card className="border-dashed border-border/60 py-0 shadow-none">
+                    <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
+                      <Search className="h-8 w-8 text-[var(--yuuko-green)]/60" />
+                      <p className="text-sm font-medium text-foreground">
+                        見つからなかったよ
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        検索ワードや絞り込みを変えると、見つかるかも。
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        onClick={handleClearConditions}
+                      >
+                        条件をクリア
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {showEmptyState && !hasActiveConditions ? (
                   <Card className="border-dashed border-border/60 py-0 shadow-none">
                     <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
                       <BookOpen className="h-8 w-8 text-[var(--yuuko-green)]/60" />
                       <p className="text-sm font-medium text-foreground">
-                        まだ表示できる辞書項目がありません
+                        まだ辞書に何もないよ
                       </p>
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         ニュース詳細画面で用語を保存すると、ここに一覧表示されます。

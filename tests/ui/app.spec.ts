@@ -557,6 +557,56 @@ const selectContentsWithin = (page: Page, selector: string) =>
     return true;
   }, selector);
 
+const openDictionary = async (page: Page) => {
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+  ).toBeVisible();
+};
+
+test("dictionary shows the empty-dictionary state when there are no entries", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_EMPTY__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+
+  await expect(page.getByText("まだ辞書に何もないよ")).toBeVisible();
+  // 辞書が空のときは「検索結果なし」と条件クリアを出さない。
+  await expect(page.getByText("見つからなかったよ")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "条件をクリア" })
+  ).toHaveCount(0);
+});
+
+test("dictionary shows the no-results state for an unmatched search and clearing restores entries", async ({
+  page,
+}) => {
+  await openDictionary(page);
+  const main = page.locator("main");
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+
+  await page.getByPlaceholder("単語やフレーズで検索").fill("該当しない語");
+
+  await expect(page.getByText("見つからなかったよ")).toBeVisible();
+  // 辞書自体は空ではないので「辞書なし」の文言は出さない。
+  await expect(page.getByText("まだ辞書に何もないよ")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "条件をクリア" }).click();
+
+  await expect(page.getByPlaceholder("単語やフレーズで検索")).toHaveValue("");
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(page.getByText("見つからなかったよ")).toHaveCount(0);
+});
+
 const collapseSelection = (page: Page) =>
   page.evaluate(() => {
     window.getSelection()?.removeAllRanges();
@@ -4517,8 +4567,21 @@ async function installTauriMocks(page: Page) {
             );
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
-          case "list_dictionary_entries":
+          case "list_dictionary_entries": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            // 辞書が空の状態を再現する（空状態と検索結果なしの区別の検証用）。
+            if ((window as any).__E2E_DICTIONARY_EMPTY__) {
+              return [];
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            // keyword は見出し語の部分一致で簡易に絞り込む（検索結果なしの再現用）。
+            const keyword =
+              typeof params.keyword === "string" ? params.keyword : "";
+            if (keyword && !dictionaryEntry.keyText.includes(keyword)) {
+              return [];
+            }
             return [dictionaryEntry];
+          }
           case "explain_selected_term": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const explainWin = window as any;
