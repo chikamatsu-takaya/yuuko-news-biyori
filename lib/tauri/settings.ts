@@ -26,6 +26,8 @@ export type UserSettingsDto = {
   nickname: string;
   aiProvider: AiProvider;
   maxDailyRecommendations: number;
+  // ニュース取得後の自動要約（既定は無効）。旧データでは欠落し得るため任意扱い。
+  autoSummaryEnabled?: boolean;
 };
 
 type CommandOk = {

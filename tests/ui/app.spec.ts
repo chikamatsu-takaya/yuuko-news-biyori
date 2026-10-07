@@ -2152,6 +2152,52 @@ test("settings shows the default frequency 1日3回まで when there is no saved
 const openSettingsMenu = (page: Page, label: string) =>
   page.getByRole("button", { name: label, exact: true }).click();
 
+// 自動要約スイッチ: 既定は OFF、ON にして保存すると autoSummaryEnabled=true で保存され、再読込で復元される。
+test("settings auto summary switch is off by default and saves autoSummaryEnabled", async ({
+  page,
+}) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  const autoSummarySwitch = page.getByRole("switch", {
+    name: "ニュース取得後に自動で要約する",
+  });
+  await expect(autoSummarySwitch).not.toBeChecked();
+  await expect(autoSummarySwitch).toBeEnabled();
+
+  await autoSummarySwitch.click();
+  await expect(autoSummarySwitch).toBeChecked();
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  const saved = (await readSavedSettings(page)) as
+    | { autoSummaryEnabled?: boolean; aiProvider?: string }
+    | undefined;
+  expect(saved?.autoSummaryEnabled).toBe(true);
+  // 他の AI 設定は変えていないので既定のまま保存される。
+  expect(saved?.aiProvider).toBe("mock");
+
+  // 保存値を次回の読込値にして画面を開き直すと ON のまま表示される。
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      __E2E_SAVED_USER_SETTINGS__?: Record<string, unknown>;
+      __E2E_USER_SETTINGS_OVERRIDE__?: Record<string, unknown>;
+    };
+    target.__E2E_USER_SETTINGS_OVERRIDE__ = structuredClone(
+      target.__E2E_SAVED_USER_SETTINGS__
+    );
+  });
+  await page.getByRole("button", { name: "ホームへ戻る" }).click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
+  ).toBeChecked();
+});
+
 // ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
 test("settings storage panel shows 準備中 instead of dummy usage values", async ({
   page,
@@ -2398,7 +2444,14 @@ test("settings postponed controls without a DTO field are disabled", async ({
   await expect(
     page.getByRole("combobox").filter({ hasText: "バランス重視" })
   ).toBeDisabled();
-  await expect(page.getByRole("switch")).toBeDisabled();
+  // 自動要約スイッチは DTO 保存されるため操作可能、長文要点説明は準備中で非活性。
+  await expect(page.getByRole("switch")).toHaveCount(2);
+  await expect(
+    page.getByRole("switch", { name: "長文要点説明の自動候補（準備中）" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
+  ).toBeEnabled();
 });
 
 // 自動起動の呼び出し履歴（set_autostart_enabled に渡した enabled の並び）。
@@ -4008,6 +4061,7 @@ async function installTauriMocks(page: Page) {
       nickname: "E2E",
       aiProvider: "mock",
       maxDailyRecommendations: 10,
+      autoSummaryEnabled: false,
       /* eslint-disable @typescript-eslint/no-explicit-any */
       ...((window as any).__E2E_USER_SETTINGS_OVERRIDE__ || {}),
       /* eslint-enable @typescript-eslint/no-explicit-any */
