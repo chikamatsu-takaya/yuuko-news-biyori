@@ -6,6 +6,7 @@ pub mod friendship_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod recommendation_service;
+pub mod reward_service;
 pub mod settings_service;
 pub mod summary_service;
 pub mod yuuko_service;

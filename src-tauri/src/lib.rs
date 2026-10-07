@@ -16,6 +16,7 @@ use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
 use repositories::friendship_repository::FriendshipRepository;
+use repositories::reward_repository::RewardRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
@@ -25,6 +26,7 @@ use services::friendship_service::FriendshipService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
+use services::reward_service::RewardService;
 use services::settings_service::SettingsService;
 use services::summary_service::SummaryService;
 use services::yuuko_service::YuukoService;
@@ -76,8 +78,17 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 std::sync::Arc::new(ai_provider_service.clone()),
             );
-            let friendship_service = FriendshipService::new(FriendshipRepository::new(&paths));
+            let reward_service = RewardService::new(
+                RewardRepository::new(&paths),
+                FriendshipRepository::new(&paths),
+                SettingsRepository::new(&paths),
+            );
+            let friendship_service =
+                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone());
             friendship_service.initialize_default_if_missing()?;
+            // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
+            // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
+            reward_service.sync_on_startup();
             let summary_service = SummaryService::new(
                 ai_provider_service.clone(),
                 article_repository,
@@ -88,6 +99,7 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 yuuko_state_repository,
                 article_service.clone(),
+                reward_service.clone(),
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
@@ -97,6 +109,7 @@ pub fn run() {
                 dictionary_service,
                 friendship_service,
                 news_service,
+                reward_service,
                 settings_service,
                 summary_service,
                 yuuko_service,
@@ -151,7 +164,8 @@ pub fn run() {
             commands::yuuko_commands::request_yuuko_notification,
             commands::yuuko_commands::mark_yuuko_ignored,
             commands::friendship_commands::get_friendship_state,
-            commands::friendship_commands::record_friendship_event
+            commands::friendship_commands::record_friendship_event,
+            commands::reward_commands::get_reward_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
