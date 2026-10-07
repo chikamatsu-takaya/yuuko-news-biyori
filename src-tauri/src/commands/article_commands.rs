@@ -16,9 +16,13 @@ pub async fn get_recommended_articles(
     params: Option<GetRecommendedArticlesParams>,
 ) -> CommandResult<Vec<ArticleSummaryDto>> {
     let article_service = state.article_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     let normalized_params = params.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        article_service.get_recommended_articles(normalized_params)
+        let mut articles = article_service.get_recommended_articles(normalized_params)?;
+        // 自動要約の待機中・処理中・失敗はメモリ上の状態のため、ここで記事ファイル由来の値に重ねる。
+        auto_summary_queue.apply_to_summaries(&mut articles);
+        Ok::<_, crate::error::AppError>(articles)
     })
     .await
     .map_err(|error| {
@@ -56,15 +60,20 @@ pub async fn get_article_detail(
     params: GetArticleDetailParams,
 ) -> CommandResult<ArticleDetailDto> {
     let article_service = state.article_service.clone();
-    tauri::async_runtime::spawn_blocking(move || article_service.get_article_detail(params))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join article-detail task: {error}"),
-            )
-        })?
-        .map_err(CommandError::from)
+    let auto_summary_queue = state.auto_summary_queue.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = article_service.get_article_detail(params)?;
+        auto_summary_queue.apply_to_detail(&mut detail);
+        Ok::<_, crate::error::AppError>(detail)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "JOIN_ERROR",
+            format!("failed to join article-detail task: {error}"),
+        )
+    })?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

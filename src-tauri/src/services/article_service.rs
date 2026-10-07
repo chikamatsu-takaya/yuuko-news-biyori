@@ -2,7 +2,7 @@ use crate::domain::article::{
     ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
     ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
     GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-    RestoreArchivedArticleResult, UpdateArticleFavoriteParams,
+    RestoreArchivedArticleResult, SummaryState, UpdateArticleFavoriteParams,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -39,6 +39,36 @@ impl ArticleService {
         now: DateTime<Utc>,
     ) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let limit = params.normalized_limit()?;
+        Ok(self
+            .rank_by_recommendation_at(now)?
+            .into_iter()
+            .take(limit)
+            .collect())
+    }
+
+    /// 未要約の記事IDを、おすすめ一覧と同じ並び順で返す（自動要約キューの投入順）。
+    /// 並び順をおすすめ一覧とそろえるため、同じ再計算・同じ同点処理を使う。
+    pub fn list_unsummarized_article_ids(&self) -> Result<Vec<String>, AppError> {
+        self.list_unsummarized_article_ids_at(Utc::now())
+    }
+
+    fn list_unsummarized_article_ids_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(self
+            .rank_by_recommendation_at(now)?
+            .into_iter()
+            .filter(|summary| summary.summary_state != SummaryState::Done)
+            .map(|summary| summary.article_id)
+            .collect())
+    }
+
+    /// 全候補をおすすめ順（現在時刻で再計算したスコア順）に並べて返す。
+    fn rank_by_recommendation_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArticleSummaryDto>, AppError> {
         let recommendation_service = RecommendationService::new();
         let mut ranked = self
             .repository
@@ -64,11 +94,7 @@ impl ArticleService {
                 .then_with(|| left.article_id.cmp(&right.article_id))
         });
 
-        Ok(ranked
-            .into_iter()
-            .map(|(summary, _)| summary)
-            .take(limit)
-            .collect())
+        Ok(ranked.into_iter().map(|(summary, _)| summary).collect())
     }
 
     pub fn list_article_history(
@@ -293,6 +319,58 @@ mod tests {
             after[position("read-target")].read_state,
             ArticleReadState::DetailViewed
         );
+    }
+
+    #[test]
+    fn unsummarized_ids_follow_recommendation_order_and_skip_summarized_articles() {
+        let ctx = make_context();
+        save_fetched(&ctx, "fresh-1h", 0.93, 1);
+        save_fetched(&ctx, "summarized", 0.95, 1);
+        save_fetched(&ctx, "fresh-2h", 0.92, 2);
+        ctx.service
+            .repository
+            .update_article_summary(
+                "summarized",
+                crate::domain::article::ArticleSummaryUpdate {
+                    summary: "要約".to_string(),
+                    yuuko_explanation: "再説明".to_string(),
+                    focus_points: Vec::new(),
+                    yuuko_comment: "感想".to_string(),
+                    ai_provider: "mock".to_string(),
+                    generated_at: "2026-10-06T12:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        // 一覧 DTO には記事ファイル由来の要約状態が載る（保存済み=done、未要約=none）。
+        let articles = recommended_at(&ctx, None);
+        let state_of = |id: &str| {
+            articles
+                .iter()
+                .find(|article| article.article_id == id)
+                .unwrap()
+                .summary_state
+        };
+        assert_eq!(state_of("summarized"), SummaryState::Done);
+        assert_eq!(state_of("fresh-1h"), SummaryState::None);
+        let detail = ctx
+            .service
+            .get_article_detail(detail_params("summarized"))
+            .unwrap();
+        assert_eq!(detail.summary_state, SummaryState::Done);
+
+        // 自動要約の投入順は、おすすめ一覧から要約済みを除いた並びと一致する。
+        let expected: Vec<String> = articles
+            .iter()
+            .filter(|article| article.summary_state != SummaryState::Done)
+            .map(|article| article.article_id.clone())
+            .collect();
+        let queued = ctx
+            .service
+            .list_unsummarized_article_ids_at(fixed_now())
+            .unwrap();
+        assert_eq!(queued, expected);
+        assert_eq!(&queued[..2], &["fresh-1h", "fresh-2h"]);
     }
 
     #[test]

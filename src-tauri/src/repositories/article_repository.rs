@@ -10,7 +10,7 @@ use crate::domain::article::{
     ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
     ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
     ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
-    RestoreArchivedArticleResult,
+    RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -1202,6 +1202,16 @@ impl PersistedArticleRecord {
             is_favorite,
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
+        }
+    }
+
+    /// 記事ファイルから分かる要約状態。保存済みなら Done、それ以外はキュー側で上書きされるまで None。
+    fn persisted_summary_state(&self) -> SummaryState {
+        if self.status.summarized {
+            SummaryState::Done
+        } else {
+            SummaryState::None
         }
     }
 
@@ -1236,6 +1246,7 @@ impl PersistedArticleRecord {
             yuuko_comment: self.yuuko_comment.clone(),
             is_favorite,
             keyword_candidates: self.keyword_candidates.clone(),
+            summary_state: self.persisted_summary_state(),
         }
     }
 

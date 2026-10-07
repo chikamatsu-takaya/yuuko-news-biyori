@@ -12,6 +12,7 @@
 //! - refresh 成功時はメインウィンドウへ `news-refreshed` を通知し、アプリ内通知の候補生成を
 //!   次の5分ポーリングを待たずに1回だけ促す（設計書「ゆうこ登場・通知挙動」§4.2 新着ニュース取得後）。
 //!   判定（日次上限・クールタイム等）は従来どおり request_yuuko_notification 側で行う。
+//! - refresh 成功後は自動要約キューへ未要約記事を並べ直す（無効時は何もしない）。
 //!
 //! `last_news_refresh_date` はローカル日付（YYYY-MM-DD）。取得タイミング管理用の状態で
 //! セキュリティ境界ではないため、欠落・破損時は fail-open（未取得扱い＝再取得）とする。
@@ -29,6 +30,7 @@ use crate::paths::AppPaths;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::archive_scheduler::{ArchiveMaintenanceOutcome, ArchiveScheduler};
 use crate::services::article_service::ArticleService;
+use crate::services::auto_summary_queue::AutoSummaryQueue;
 use crate::services::news_service::NewsService;
 
 /// 日付確認の間隔（低頻度）。まずは30分とする。
@@ -96,6 +98,7 @@ enum TickKind {
 /// 低頻度チェック方式のニュース取得・アーカイブ保守スケジューラ。
 pub struct NewsScheduler {
     archive_scheduler: ArchiveScheduler,
+    auto_summary_queue: AutoSummaryQueue,
     news_service: NewsService,
     settings_repository: SettingsRepository,
     state_path: PathBuf,
@@ -108,9 +111,11 @@ impl NewsScheduler {
         news_service: NewsService,
         settings_repository: SettingsRepository,
         article_service: ArticleService,
+        auto_summary_queue: AutoSummaryQueue,
     ) -> Self {
         Self {
             archive_scheduler: ArchiveScheduler::new(paths, article_service),
+            auto_summary_queue,
             news_service,
             settings_repository,
             state_path: paths.news_refresh_state_path.clone(),
@@ -155,6 +160,7 @@ impl NewsScheduler {
         // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
         if let Some(saved_count) = tauri::async_runtime::block_on(self.tick_news(kind, &today)) {
             notify_news_refreshed(app, saved_count);
+            self.auto_summary_queue.enqueue_unsummarized();
         }
     }
 

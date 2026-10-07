@@ -57,6 +57,24 @@ impl ArticleReadState {
     }
 }
 
+/// 記事ごとの自動要約の状態（画面表示用）。
+///
+/// - `Done` は記事ファイルの `status.summarized` から決まる（保存済み＝完了）。
+/// - `Waiting` / `Processing` / `Failed` は自動要約キューのメモリ上の状態で、アプリ再起動で消える。
+///   再試行待ちの記事は `Waiting`、再試行上限に達した記事は `Failed`。
+/// - `None` は未要約でキューにも入っていない記事（自動要約が無効・まだ取得後の投入前など）。
+///   キューに入っていない記事を `Waiting` と見せると、自動要約が無効なのに待っているように誤解させるため分ける。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryState {
+    #[default]
+    None,
+    Waiting,
+    Processing,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleSummaryDto {
@@ -69,6 +87,9 @@ pub struct ArticleSummaryDto {
     pub is_favorite: bool,
     pub read_state: ArticleReadState,
     pub recommendation_score: f32,
+    /// 自動要約の状態。ゆうこ状態ファイルに保存された旧データにも無いため既定値で読む。
+    #[serde(default)]
+    pub summary_state: SummaryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +125,9 @@ pub struct ArticleDetailDto {
     pub yuuko_comment: Option<String>,
     pub is_favorite: bool,
     pub keyword_candidates: Vec<String>,
+    /// 自動要約の状態（ArticleSummaryDto と同じ意味）。
+    #[serde(default)]
+    pub summary_state: SummaryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
