@@ -492,6 +492,116 @@ test("news history favorite failure keeps the previous state and shows a fixed n
   await expectHistoryStars(page, registered);
 });
 
+// アーカイブ済み記事の再閲覧（確認後にZIPから1記事を取り出して記事詳細を開く）。
+const setArchivedHistory = (page: Page, flags: Record<string, unknown> = {}) =>
+  page.addInitScript((initFlags) => {
+    Object.assign(window as unknown as Record<string, unknown>, {
+      __E2E_HISTORY_ARCHIVED__: true,
+      ...initFlags,
+    });
+  }, flags);
+
+const readRestoreArchivedArgs = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown[] | undefined>)
+        .__E2E_RESTORE_ARCHIVED_ARGS__ ?? []
+  );
+
+test("news history archived article asks before restoring and cancel keeps the history", async ({
+  page,
+}) => {
+  await setArchivedHistory(page);
+  await openNewsHistory(page);
+
+  const main = page.locator("main");
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+
+  // 確認ダイアログを出し、この時点では復元しない。
+  const dialog = page.getByRole("alertdialog");
+  await expect(
+    dialog.getByRole("heading", { name: "アーカイブから取り出して開く" })
+  ).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+
+  // キャンセルでは復元も記事詳細への遷移もしない。
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+});
+
+test("news history archived article restores by id, opens the same article and clears the badge", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_GATE__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 復元中は「取り出し中...」で押せず、二重に復元を走らせない。
+  const restoringButton = page.getByRole("button", { name: "取り出し中..." });
+  await expect(restoringButton).toBeDisabled();
+  await restoringButton.click({ force: true });
+  // 記事IDだけを渡し、呼び出しは1回だけ。
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+
+  await page.evaluate(() => {
+    (
+      window as unknown as Record<string, () => void>
+    ).__E2E_RESTORE_ARCHIVED_RELEASE__();
+  });
+
+  // 復元後は同じ記事IDで記事詳細を開く。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRequestedArticleId(page)).toBe("arch-1");
+  expect(await readRestoreArchivedArgs(page)).toHaveLength(1);
+
+  // 戻ると履歴を読み直し、アーカイブ済みバッジが外れる。
+  await readerBackButton(page).first().click();
+  const main = page.locator("main");
+  await expect(main.getByText("アーカイブ済みの記事").first()).toBeVisible();
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toHaveCount(0);
+});
+
+test("news history archived restore failure stays on history with a fixed notice", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 固定文言だけを出し、生エラー・パスは出さない。一覧の「再試行」も出さない。
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+
+  // 記事詳細へは進まない。もう一度試せる状態に戻る。
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "もう一度見る" })).toBeEnabled();
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toBeVisible();
+});
+
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
   await openHome(page);
 
@@ -5853,6 +5963,18 @@ async function installTauriMocks(page: Page) {
                 : items;
             }
 
+            // アーカイブ復元テスト用: アーカイブ済み1件。復元に成功した後の読み直しでは未アーカイブとして返す。
+            if (historyWin.__E2E_HISTORY_ARCHIVED__) {
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "arch-1",
+                  title: "アーカイブ済みの記事",
+                  isArchived: !historyWin.__E2E_ARCHIVE_RESTORED__,
+                },
+              ];
+            }
+
             // 空状態テスト用: 空配列を返す。
             if (historyWin.__E2E_HISTORY_EMPTY__) {
               return [];
@@ -5969,6 +6091,31 @@ async function installTauriMocks(page: Page) {
               };
             }
             return params;
+          // アーカイブ済み1記事の復元。渡された params を記録する。
+          // 保留モードでは解放されるまで待ち（実行中の二重起動防止の検証用）、
+          // 失敗モードでは本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+          case "restore_archived_article": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const restoreWin = window as any;
+            restoreWin.__E2E_RESTORE_ARCHIVED_ARGS__ = [
+              ...(restoreWin.__E2E_RESTORE_ARCHIVED_ARGS__ || []),
+              args?.params ?? null,
+            ];
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_GATE__) {
+              await new Promise((resolve) => {
+                restoreWin.__E2E_RESTORE_ARCHIVED_RELEASE__ = resolve;
+              });
+            }
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_FAIL__) {
+              throw {
+                code: "ARCHIVE_ERROR",
+                message: "E2E raw restore failure /internal/secret/archive.zip",
+              };
+            }
+            restoreWin.__E2E_ARCHIVE_RESTORED__ = true;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return { articleId: params.articleId, status: "restored" };
+          }
           // 「元記事を開く」。渡された記事IDを記録する。失敗テストでは本番と同じ CommandError 形式で reject する
           // （生エラー文言・内部パスが UI へ出ないことを検証するための識別子を含める）。
           case "open_original_article": {
