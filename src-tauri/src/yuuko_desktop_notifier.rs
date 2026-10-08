@@ -347,6 +347,7 @@ fn decide_follow_up(
     };
     match (from_yuuko_window, action, state.state) {
         // 2回目のクリック（PreviewVisible → Leaving）は「詳しく見る」の確定。
+        // 退場中の追加クリックは状態を変えず Leaving のまま返るため、同じ記事への同じ要求になる（冪等）。
         (true, YuukoAction::Click, YuukoResidentState::Leaving) => {
             let article_id = state.current_article_id.clone().or_else(|| {
                 state
@@ -735,6 +736,23 @@ mod tests {
         };
         assert_eq!(
             decide_follow_up(true, YuukoAction::Click, Some(&without_article)),
+            FollowUp::Hide
+        );
+    }
+
+    #[test]
+    fn noop_click_while_leaving_does_not_reshow_preview() {
+        // 退場中のクリックは no-op で、結果は確定時と同じ Leaving のまま返る。
+        // ゆうこ用ウィンドウを軽量プレビューへ広げ直さず、同じ記事を開く要求（冪等）か隠すだけになる。
+        let again = state(YuukoResidentState::Leaving, true);
+        assert_eq!(
+            decide_follow_up(true, YuukoAction::Click, Some(&again)),
+            FollowUp::OpenInMain {
+                article_id: "article-001".to_string()
+            }
+        );
+        assert_eq!(
+            decide_follow_up(false, YuukoAction::Click, Some(&again)),
             FollowUp::Hide
         );
     }

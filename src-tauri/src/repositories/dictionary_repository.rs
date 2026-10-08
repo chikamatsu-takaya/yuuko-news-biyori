@@ -15,6 +15,10 @@ pub struct DictionaryRepository {
     dictionary_path: PathBuf,
     // 読み込み→変更→保存（read-modify-write）を直列化する。参照記録（解説表示時の書き込み）と
     // メモ・お気に入り・保存・削除が同時に走っても、互いの変更を上書きで失わないようにする。
+    // 読み込み（検索・一覧）も同じロックを取る。保存中の差し替え（本体→.bak→tmp昇格）の隙間に
+    // 読むと「本体なし」に見え、空の辞書を返したり .bak の復元が書き込み側と競合したりするため。
+    // std の Mutex は再入不可なので、ロックを取る公開メソッドから別の公開メソッドを呼ばない。
+    // AI 呼び出しはロック外（Service 側で find_saved_entry が戻った後）で行う。
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -50,7 +54,10 @@ impl DictionaryRepository {
         article_id: &str,
         normalized_text: &str,
     ) -> Result<Option<DictionaryEntryDto>, AppError> {
-        let store = self.load_store_or_default()?;
+        let store = {
+            let _guard = self.lock_writes()?;
+            self.load_store_or_default()?
+        };
 
         let (current_article, cross_article): (Vec<_>, Vec<_>) = store
             .entries
@@ -105,7 +112,10 @@ impl DictionaryRepository {
         entry_type: Option<DictionaryEntryType>,
         starred_only: bool,
     ) -> Result<Vec<DictionaryEntryListItemDto>, AppError> {
-        let mut entries = self.load_store_or_default()?.entries;
+        let mut entries = {
+            let _guard = self.lock_writes()?;
+            self.load_store_or_default()?.entries
+        };
         entries.sort_by(|left, right| entry_timestamp_key(right).cmp(entry_timestamp_key(left)));
 
         Ok(entries
@@ -189,6 +199,7 @@ impl DictionaryRepository {
             .map_err(|_| AppError::Io(io::Error::other("dictionary write lock was poisoned")))
     }
 
+    /// 呼び出し側で `lock_writes` を取得済みであること（.bak 復元と保存の差し替えを競合させないため）。
     fn load_store_or_default(&self) -> Result<PersistedDictionaryStore, AppError> {
         self.restore_backup_if_primary_missing();
 
@@ -867,5 +878,73 @@ mod tests {
         assert!(error.to_string().contains("dictionary entry not found"));
         // 存在しない項目への参照記録で辞書ストアを作成しない（新規項目を作らない）。
         assert!(!context.dictionary_path.exists());
+    }
+
+    #[test]
+    fn reads_wait_for_write_lock_and_never_see_swap_window() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+        let backup_path = context.dictionary_path.with_extension("json.bak");
+
+        // 保存処理の差し替え途中（本体が .bak へ退避され、本体が無い状態）をロック下で再現する。
+        let guard = context.repository.lock_writes().unwrap();
+        std::fs::rename(&context.dictionary_path, &backup_path).unwrap();
+
+        let reader = context.repository.clone();
+        let list_handle =
+            std::thread::spawn(move || reader.list_dictionary_entries(None, None, false));
+        let finder = context.repository.clone();
+        let find_handle =
+            std::thread::spawn(move || finder.find_saved_entry("article-001", "生成ai"));
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // ロック中は読み込みが進まず、.bak の復元も走らない。
+        assert!(!list_handle.is_finished());
+        assert!(!find_handle.is_finished());
+        assert!(backup_path.exists());
+        assert!(!context.dictionary_path.exists());
+
+        // 書き込み側が差し替えを完了（本体を戻す）してからロックを解放する。
+        std::fs::rename(&backup_path, &context.dictionary_path).unwrap();
+        drop(guard);
+
+        let listed = list_handle.join().unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        let found = find_handle.join().unwrap().unwrap();
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn concurrent_saves_and_reads_never_return_empty_dictionary() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let writer = context.repository.clone();
+        let writer_handle = std::thread::spawn(move || {
+            for index in 0..40 {
+                let mut entry = saved_entry();
+                entry.short_explanation = format!("更新 {index}");
+                writer.save_dictionary_entry(entry).unwrap();
+            }
+        });
+
+        let reader = context.repository.clone();
+        let reader_handle = std::thread::spawn(move || {
+            for _ in 0..40 {
+                let listed = reader.list_dictionary_entries(None, None, false).unwrap();
+                assert_eq!(listed.len(), 1);
+                let found = reader.find_saved_entry("article-001", "生成ai").unwrap();
+                assert!(found.is_some());
+            }
+        });
+
+        writer_handle.join().unwrap();
+        reader_handle.join().unwrap();
     }
 }
