@@ -58,10 +58,13 @@ impl NetworkAllowlist {
         }
 
         let raw = std::fs::read_to_string(path)?;
+        // 解析エラーには設定値の断片（ドメイン等）が入り得るため、文言は固定にして
+        // 詳細は debug ログにだけ残す（§16.3）。
         serde_json::from_str::<Self>(crate::util::strip_utf8_bom(&raw)).map_err(|error| {
-            AppError::Validation(format!(
-                "network allowlist is corrupted; refusing external access (fail-close): {error}"
-            ))
+            log::debug!("network allowlist parse failed: {error}");
+            AppError::Validation(
+                "network allowlist is corrupted; refusing external access (fail-close)".to_string(),
+            )
         })
     }
 
@@ -115,6 +118,30 @@ mod tests {
         let result = NetworkAllowlist::load(&path);
         let _ = std::fs::remove_file(&path);
         assert!(result.is_err(), "corrupted allowlist must fail-close");
+    }
+
+    #[test]
+    fn corrupted_file_error_message_excludes_parse_details() {
+        // 解析エラーの詳細（設定値の断片・行番号）は文言へ含めない（§16.3）。
+        let path = unique_temp_path();
+        std::fs::write(
+            &path,
+            br#"{"version": 1, "allowedRssDomains": "secret.example.com"}"#,
+        )
+        .unwrap();
+        let result = NetworkAllowlist::load(&path);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(AppError::Validation(message)) => {
+                assert_eq!(
+                    message,
+                    "network allowlist is corrupted; refusing external access (fail-close)"
+                );
+                assert!(!message.contains("secret.example.com"));
+                assert!(!message.contains("line"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]

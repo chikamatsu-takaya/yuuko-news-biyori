@@ -531,21 +531,20 @@ impl Default for UiSettings {
     }
 }
 
+/// 時刻文字列（HH:MM）を検証する。入力値はエラー文言へ含めず固定の理由だけを返す（§16.3）。
 fn validate_time(value: &str) -> Result<(), AppError> {
     let (hour_text, minute_text) = value
         .split_once(':')
-        .ok_or_else(|| AppError::Validation(format!("invalid time format: {value}")))?;
+        .ok_or_else(|| AppError::Validation("invalid time format".to_string()))?;
     let hour: u8 = hour_text
         .parse()
-        .map_err(|_| AppError::Validation(format!("invalid hour in time: {value}")))?;
+        .map_err(|_| AppError::Validation("invalid hour in time".to_string()))?;
     let minute: u8 = minute_text
         .parse()
-        .map_err(|_| AppError::Validation(format!("invalid minute in time: {value}")))?;
+        .map_err(|_| AppError::Validation("invalid minute in time".to_string()))?;
 
     if hour > 23 || minute > 59 {
-        return Err(AppError::Validation(format!(
-            "time value out of range: {value}"
-        )));
+        return Err(AppError::Validation("time value out of range".to_string()));
     }
 
     Ok(())
@@ -1002,6 +1001,25 @@ mod tests {
             ..UserSettingsDto::default()
         };
         assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validate_time_messages_exclude_input_value() {
+        // 時刻の入力値はエラー文言へ含めず、固定の理由だけを返す（§16.3）。
+        for (value, expected) in [
+            ("secret", "invalid time format"),
+            ("xx:00", "invalid hour in time"),
+            ("09:yy", "invalid minute in time"),
+            ("99:77", "time value out of range"),
+        ] {
+            let dto = UserSettingsDto {
+                notify_start_time: value.to_string(),
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, expected);
+            assert!(!message.contains(value));
+        }
     }
 
     #[test]
