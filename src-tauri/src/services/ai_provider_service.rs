@@ -161,6 +161,13 @@ fn mock_term_explanation_detail(term: &str, explanation_level: ExplanationLevel)
     }
 }
 
+/// Gemini APIキーが使える状態か（設定済みで空でないか）だけを返す。
+/// 自動要約キューなど、キーの値は要らず有無だけで動作を決める側のための窓口。
+/// キーの値は返さず、ここでも読み捨てる（ログ・戻り値・画面に出さないため）。
+pub fn is_gemini_key_configured() -> bool {
+    resolve_gemini_api_key().is_some()
+}
+
 /// 環境変数から Gemini APIキーを読む（Rust側のみ）。空文字は未設定扱い。値はログに出さない。
 fn resolve_gemini_api_key() -> Option<String> {
     std::env::var(GEMINI_API_KEY_ENV)
@@ -713,6 +720,13 @@ mod tests {
 
     fn service() -> AiProviderService {
         AiProviderService::new(&AppPaths::new(std::env::temp_dir().join("yuuko_ai_test")))
+    }
+
+    #[test]
+    fn gemini_key_check_returns_only_whether_the_key_is_usable() {
+        // 値は比べず有無だけを確かめる（環境変数は書き換えない：並列テストで干渉するため）。
+        let configured: bool = is_gemini_key_configured();
+        assert_eq!(configured, resolve_gemini_api_key().is_some());
     }
 
     #[test]

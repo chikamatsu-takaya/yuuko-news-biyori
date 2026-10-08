@@ -12,6 +12,9 @@
 //! - 外部AIの利用枠を使い切らないよう、設定 `ai.autoSummaryEnabled` が有効なときだけ動く（既定は無効）。
 //! - 設定の AI プロバイダが実装済みの実AI（現在は Gemini）以外のときは動かない（判断台帳 D56）。固定応答で記事を「要約済み」に
 //!   してしまうと、後で実AIを使えるようになっても自動では作り直されないため。
+//! - Gemini のキーが未設定のときも動かさない（投入・取り出しの両方で確かめる）。キー未設定では
+//!   必ず Mock 出力になり、保存されない出力のために失敗と再試行を繰り返すだけになるため。
+//!   確かめるのはキーの有無（bool）だけで、キーの値は読まない・ログに出さない。
 //! - 実AIの失敗・利用枠超過・検証落ちで Mock の代替出力になった場合は保存せず失敗として扱い、
 //!   再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56）。
 //! - 1回の投入はおすすめ順の上位 `maxDailyRecommendations` 件まで（常駐負荷を抑えるため、D56）。
@@ -38,6 +41,7 @@ use crate::domain::settings::{AiProvider, PersistedSettings};
 use crate::domain::summary::GenerateArticleSummaryParams;
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::ai_provider_service::is_gemini_key_configured;
 use crate::services::article_service::ArticleService;
 use crate::services::summary_service::{AutoSummaryOutcome, SummaryService};
 
@@ -233,6 +237,9 @@ impl QueueCore {
     }
 }
 
+/// Gemini のキーが使えるかを返す判定。キーの値ではなく有無だけを扱う。
+type KeyAvailableCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// 自動要約キュー。AppState と NewsScheduler で共有する（clone しても同じキューを指す）。
 #[derive(Clone)]
 pub struct AutoSummaryQueue {
@@ -240,6 +247,9 @@ pub struct AutoSummaryQueue {
     article_service: ArticleService,
     summary_service: SummaryService,
     settings_repository: SettingsRepository,
+    /// 本番は `is_gemini_key_configured`。テストでは環境変数を書き換えずに差し替える
+    /// （並列テストで環境変数を書き換えると互いに干渉するため）。
+    key_available: KeyAvailableCheck,
 }
 
 impl AutoSummaryQueue {
@@ -253,7 +263,15 @@ impl AutoSummaryQueue {
             article_service,
             summary_service,
             settings_repository,
+            key_available: Arc::new(is_gemini_key_configured),
         }
+    }
+
+    /// キーの有無の判定を差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_key_check(mut self, key_available: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.key_available = Arc::new(key_available);
+        self
     }
 
     /// 未要約の記事をおすすめ順で待機列へ並べ直す。ニュース取得の完了後・起動時・設定保存後に呼ぶ。
@@ -263,7 +281,7 @@ impl AutoSummaryQueue {
             self.core.clear_pending();
             return;
         };
-        if !is_auto_summary_allowed(&settings) {
+        if !is_auto_summary_allowed(&settings, || (self.key_available)()) {
             self.core.clear_pending();
             return;
         }
@@ -352,7 +370,7 @@ impl AutoSummaryQueue {
     /// 設定が読めないときは自動要約しない（外部AIの利用枠を守る安全側）。
     fn is_enabled(&self) -> bool {
         self.load_settings()
-            .is_some_and(|settings| is_auto_summary_allowed(&settings))
+            .is_some_and(|settings| is_auto_summary_allowed(&settings, || (self.key_available)()))
     }
 
     fn load_settings(&self) -> Option<PersistedSettings> {
@@ -366,12 +384,28 @@ impl AutoSummaryQueue {
     }
 }
 
-/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AIのときだけ true。
+/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AIで、そのキーが
+/// 使えるときだけ true。
 /// openai / local は現在実AI呼び出しが未実装で常に Mock 応答になり、毎回失敗するだけなので
 /// Mock と同じく動かさない（判断台帳 D56）。未知の値は DTO 変換で Mock 扱いになる。
+/// Gemini でもキーが未設定なら同じ理由で動かさない。`key_available` はキーの有無だけを返し、
+/// 設定で無効なときは呼ばない（不要な確認をしないため）。
 /// 同梱のローカルLLMプロバイダを実装したら、ここに追加する。
-fn is_auto_summary_allowed(settings: &PersistedSettings) -> bool {
-    settings.ai.auto_summary_enabled && matches!(settings.to_dto().ai_provider, AiProvider::Gemini)
+fn is_auto_summary_allowed(
+    settings: &PersistedSettings,
+    key_available: impl FnOnce() -> bool,
+) -> bool {
+    if !settings.ai.auto_summary_enabled
+        || !matches!(settings.to_dto().ai_provider, AiProvider::Gemini)
+    {
+        return false;
+    }
+    if !key_available() {
+        // キーの値は扱わず、固定文言だけを残す。
+        log::debug!("auto summary skipped: gemini key not configured");
+        return false;
+    }
+    true
 }
 
 /// 1回の投入件数を、おすすめ順の上位 `maxDailyRecommendations` 件に絞る（常駐負荷を抑えるため）。
@@ -477,20 +511,160 @@ mod tests {
         settings
     }
 
+    fn with_key() -> bool {
+        true
+    }
+
+    fn without_key() -> bool {
+        false
+    }
+
     #[test]
     fn auto_summary_runs_only_when_enabled_with_a_real_ai_provider() {
-        assert!(is_auto_summary_allowed(&settings_with(true, "gemini", 10)));
-        assert!(!is_auto_summary_allowed(&settings_with(
-            false, "gemini", 10
-        )));
+        assert!(is_auto_summary_allowed(
+            &settings_with(true, "gemini", 10),
+            with_key
+        ));
+        assert!(!is_auto_summary_allowed(
+            &settings_with(false, "gemini", 10),
+            with_key
+        ));
         // Mock（未知の値も Mock 扱い）では有効でも動かない。
-        assert!(!is_auto_summary_allowed(&settings_with(true, "mock", 10)));
-        assert!(!is_auto_summary_allowed(&settings_with(
-            true, "unknown", 10
-        )));
+        assert!(!is_auto_summary_allowed(
+            &settings_with(true, "mock", 10),
+            with_key
+        ));
+        assert!(!is_auto_summary_allowed(
+            &settings_with(true, "unknown", 10),
+            with_key
+        ));
         // 実AI呼び出しが未実装の openai / local も動かさない。
-        assert!(!is_auto_summary_allowed(&settings_with(true, "openai", 10)));
-        assert!(!is_auto_summary_allowed(&settings_with(true, "local", 10)));
+        assert!(!is_auto_summary_allowed(
+            &settings_with(true, "openai", 10),
+            with_key
+        ));
+        assert!(!is_auto_summary_allowed(
+            &settings_with(true, "local", 10),
+            with_key
+        ));
+    }
+
+    #[test]
+    fn auto_summary_does_not_run_without_a_gemini_key() {
+        // 有効・Gemini でも、キーが未設定なら動かさない。
+        assert!(!is_auto_summary_allowed(
+            &settings_with(true, "gemini", 10),
+            without_key
+        ));
+        // 無効・他プロバイダのときはキーの有無を確かめない。
+        for settings in [
+            settings_with(false, "gemini", 10),
+            settings_with(true, "mock", 10),
+        ] {
+            assert!(!is_auto_summary_allowed(&settings, || panic!(
+                "key check must not run when auto summary is off"
+            )));
+        }
+    }
+
+    /// 一時ディレクトリに記事（シード）と設定を置いた実キュー。終了時に片付ける。
+    struct QueueContext {
+        queue: AutoSummaryQueue,
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for QueueContext {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn queue_context(name: &str, key_available: bool) -> QueueContext {
+        use crate::paths::AppPaths;
+        use crate::repositories::article_repository::ArticleRepository;
+        use crate::services::ai_provider_service::AiProviderService;
+
+        let root = std::env::temp_dir().join(format!(
+            "auto-summary-queue-tests-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = AppPaths::new(root.clone());
+        paths.ensure_storage_dirs().expect("create storage dirs");
+        let article_repository = ArticleRepository::new(&paths);
+        article_repository
+            .initialize_default_if_missing()
+            .expect("seed articles");
+        // 取得直後と同じ、未要約の記事を1件置く。
+        let fetched_at = chrono::Utc::now().to_rfc3339();
+        article_repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: "unsummarized".to_string(),
+                title: "テスト記事".to_string(),
+                source_name: "テストソース".to_string(),
+                original_url: "https://example.com/unsummarized".to_string(),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at,
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some("抜粋".to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            }])
+            .expect("save fetched article");
+        let settings_repository = SettingsRepository::new(&paths);
+        settings_repository
+            .save(&settings_with(true, "gemini", 10))
+            .expect("save settings");
+        let queue = AutoSummaryQueue::new(
+            ArticleService::new(ArticleRepository::new(&paths)),
+            SummaryService::new(
+                AiProviderService::new(&paths),
+                article_repository,
+                SettingsRepository::new(&paths),
+            ),
+            settings_repository,
+        )
+        .with_key_check(move || key_available);
+        QueueContext { queue, root }
+    }
+
+    #[test]
+    fn queue_enqueues_and_processes_when_gemini_key_is_configured() {
+        let ctx = queue_context("with-key", true);
+        let queue = &ctx.queue;
+        queue.enqueue_unsummarized();
+        assert_eq!(
+            queue.core.state_of("unsummarized"),
+            SummaryState::Waiting,
+            "unsummarized article is enqueued"
+        );
+        let first = queue.core.lock().pending.front().cloned().unwrap();
+
+        // 実AIは呼ばず、要約処理を差し替えて取り出しまでを確かめる。
+        let outcome = queue
+            .core
+            .process_next(|| queue.is_enabled(), not_done, |_| Ok(SAVED));
+        assert_eq!(outcome, StepOutcome::Succeeded(first));
+    }
+
+    #[test]
+    fn queue_neither_enqueues_nor_processes_without_gemini_key() {
+        let ctx = queue_context("without-key", false);
+        let queue = &ctx.queue;
+        queue.enqueue_unsummarized();
+        assert!(queue.core.lock().pending.is_empty());
+
+        // キーが外れる前に並んでいた記事も、取り出し時の確認で捨てて処理しない。
+        queue.core.replace_pending(ids(&["queued-before"]));
+        let outcome = queue.core.process_next(
+            || queue.is_enabled(),
+            not_done,
+            |_| panic!("must not summarize without a gemini key"),
+        );
+        assert_eq!(outcome, StepOutcome::Disabled);
+        assert!(queue.core.lock().pending.is_empty());
+        assert_eq!(queue.core.state_of("queued-before"), SummaryState::None);
     }
 
     #[test]
