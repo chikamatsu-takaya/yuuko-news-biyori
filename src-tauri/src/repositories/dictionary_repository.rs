@@ -193,6 +193,11 @@ impl DictionaryRepository {
         Ok(entry_id.to_string())
     }
 
+    /// 辞書の読み書きロック。データ移行の取り込みが差し替え中に保持する。
+    pub(crate) fn write_lock_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write_lock)
+    }
+
     fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
         self.write_lock
             .lock()

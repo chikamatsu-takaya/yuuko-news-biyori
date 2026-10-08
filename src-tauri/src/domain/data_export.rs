@@ -1,8 +1,10 @@
 //! データ移行用ZIP書き出しのドメイン型（データ設計書 §15.4、判断台帳 D41）。
 //!
-//! - `MigrationManifest`: ZIP内の `manifest.json`。取り込み（別タスク）が中身と形式を確認するために使う。
+//! - `MigrationManifest`: ZIP内の `manifest.json`。取り込みが中身と形式を確認するために使う。
 //! - `MigrationExportResultDto`: `export_migration_data` が React へ返す結果。
 //!   保存先のフルパスは返さず、Rust 側で決めたファイル名と件数だけを返す。
+//! - `MigrationImportCandidateDto` / `MigrationImportResultDto`: 取り込み（§15.7）の候補一覧と結果。
+//!   こちらもフルパスは返さず、`imports/` 内のファイル名だけを扱う。
 
 use serde::{Deserialize, Serialize};
 
@@ -50,4 +52,33 @@ pub struct MigrationExportResultDto {
     pub archive_count: usize,
     /// 格納ファイルの合計サイズ（圧縮前）。
     pub total_bytes: u64,
+}
+
+/// `list_migration_imports` の1件（`imports/` に置かれた取り込み候補）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationImportCandidateDto {
+    /// `imports/` 内のファイル名だけ。`import_migration_data` にはこの値をそのまま渡す。
+    pub file_name: String,
+    pub size_bytes: u64,
+    /// manifest の `createdAt`（RFC 3339 として読めたときだけ、Rust 側で整形し直した値）。
+    /// ZIPの中身の検証は取り込み時に行うため、ここで値があっても取り込めるとは限らない。
+    pub created_at: Option<String>,
+}
+
+/// `import_migration_data` の戻り値。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationImportResultDto {
+    /// 取り込んだZIPのファイル名だけ。
+    pub file_name: String,
+    /// `manifest.json` を除いた取り込みファイル数。
+    pub file_count: usize,
+    pub article_count: usize,
+    pub archive_count: usize,
+    /// 取り込んだファイルの合計サイズ（展開後）。
+    pub total_bytes: u64,
+    /// 取り込み後はアプリの再起動を勧めるか。現状は常に true
+    /// （画面が持つ表示中の値や自動要約キューの記事ID、起動時の報酬同期が取り込み前のデータに基づくため）。
+    pub restart_required: bool,
 }

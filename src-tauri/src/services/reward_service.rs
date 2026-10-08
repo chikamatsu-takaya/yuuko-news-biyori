@@ -61,6 +61,11 @@ impl RewardService {
         Arc::clone(&self.friendship_lock)
     }
 
+    /// rewards.json のロック。データ移行の取り込みが差し替え中に保持する（friendship ロックの後に取る）。
+    pub fn rewards_store_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.store_lock)
+    }
+
     /// 報酬状態を返す（読み取り）。現ランクまでの未解放があればここで解放して保存する
     /// （既に高ランクの既存利用者への移行もこの経路で冪等に行う）。
     /// 保存に失敗しても表示は止めない（次回の取得・ランクアップで再度追いつく）。

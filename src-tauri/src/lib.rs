@@ -25,6 +25,7 @@ use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
 use services::auto_summary_queue::AutoSummaryQueue;
 use services::data_export_service::DataExportService;
+use services::data_import_service::{DataImportService, MigrationWriteLocks};
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
@@ -102,8 +103,9 @@ pub fn run() {
             );
             // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
             let ai_provider_service = AiProviderService::new(&paths);
+            let dictionary_repository = DictionaryRepository::new(&paths);
             let dictionary_service = DictionaryService::new(
-                DictionaryRepository::new(&paths),
+                dictionary_repository.clone(),
                 article_repository.clone(),
                 SettingsRepository::new(&paths),
                 std::sync::Arc::new(ai_provider_service.clone()),
@@ -120,6 +122,13 @@ pub fn run() {
             // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
             // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
             reward_service.sync_on_startup();
+            // データ移行の取り込みは、差し替え中に各保存処理と同じロックを取る（データ設計書 §15.7）。
+            let migration_write_locks = MigrationWriteLocks::new(
+                article_repository.write_lock_handle(),
+                dictionary_repository.write_lock_handle(),
+                reward_service.friendship_store_lock(),
+                reward_service.rewards_store_lock(),
+            );
             let summary_service = SummaryService::new(
                 ai_provider_service.clone(),
                 article_repository,
@@ -148,11 +157,19 @@ pub fn run() {
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
+            // 書き出しと取り込みは同じロックを共有し、同時には走らせない。
+            let data_export_service = DataExportService::new(&paths);
+            let data_import_service = DataImportService::new(
+                &paths,
+                data_export_service.migration_lock(),
+                migration_write_locks,
+            );
             app.manage(AppState {
                 ai_provider_service,
                 article_service,
                 auto_summary_queue: auto_summary_queue.clone(),
-                data_export_service: DataExportService::new(&paths),
+                data_export_service,
+                data_import_service,
                 dictionary_service,
                 friendship_service,
                 gacha_service,
@@ -195,6 +212,8 @@ pub fn run() {
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
             commands::data_export_commands::export_migration_data,
+            commands::data_import_commands::list_migration_imports,
+            commands::data_import_commands::import_migration_data,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
