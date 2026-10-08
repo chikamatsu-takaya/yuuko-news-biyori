@@ -180,6 +180,8 @@ pub fn run() {
             commands::article_commands::archive_old_articles,
             commands::article_commands::restore_archived_article,
             commands::article_commands::retire_archived_markdown,
+            commands::article_commands::list_archive_months,
+            commands::article_commands::list_archive_month_articles,
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
             commands::news_commands::refresh_news,

@@ -1,7 +1,8 @@
 use crate::domain::article::{
-    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
-    ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
-    GetRecommendedArticlesParams, ListArticleHistoryParams, OpenOriginalArticleParams,
+    ArchiveMonthArticlesDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArticleDetailDto, ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto,
+    FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ListArchiveMonthArticlesParams, ListArticleHistoryParams, OpenOriginalArticleParams,
     RestoreArchivedArticleParams, RestoreArchivedArticleResult, SummaryState,
     UpdateArticleFavoriteParams,
 };
@@ -208,6 +209,20 @@ impl ArticleService {
     ) -> Result<RestoreArchivedArticleResult, AppError> {
         let article_id = params.validated_article_id()?;
         self.repository.restore_archived_article(&article_id)
+    }
+
+    /// 過去ニュース画面の月別アーカイブ一覧（新しい月から）を返す。
+    pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
+        self.repository.list_archive_months()
+    }
+
+    /// 指定月のアーカイブ記事一覧を記事カタログから返す。年月はここで形式を検証する。
+    pub fn list_archive_month_articles(
+        &self,
+        params: ListArchiveMonthArticlesParams,
+    ) -> Result<ArchiveMonthArticlesDto, AppError> {
+        let month = params.validated_month()?;
+        self.repository.list_archive_month_articles(&month)
     }
 
     /// 完全な月次ZIPと記事カタログで検証できたarchived Markdownだけを退避付きで削除する。
