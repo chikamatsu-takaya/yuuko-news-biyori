@@ -418,6 +418,8 @@ function HistoryItemCard({
           </div>
           <div className="flex items-center gap-1.5">
             <Star
+              role="img"
+              aria-label={item.isFavorite ? "お気に入り登録済み" : "お気に入り未登録"}
               className={`w-4 h-4 ${
                 item.isFavorite ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground/40"
               }`}
@@ -448,13 +450,16 @@ export default function NewsHistoryScreen({
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
-  const [favoriteUpdatingArticleId, setFavoriteUpdatingArticleId] = React.useState<string | null>(null);
+  // 更新中のお気に入りの目標状態（true=登録 / false=解除 / null=更新なし）。
+  // 処理中に選択が変わっても「登録中/解除中」の表示が要求内容とずれないよう、選択中の記事からは導かない。
+  const [favoriteUpdatingTo, setFavoriteUpdatingTo] = React.useState<boolean | null>(null);
   // state反映前の連打も止め、古い一覧応答が解除結果を上書きしないようにする。
   const favoriteUpdateInFlightRef = React.useRef(false);
   const historyRequestRef = React.useRef(0);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
-    "info" | "error" | "empty"
+    // favorite-error はお気に入り更新の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
+    "info" | "error" | "empty" | "favorite-error"
   >("info");
 
   const visibleHistoryItems = React.useMemo(() => {
@@ -566,23 +571,27 @@ export default function NewsHistoryScreen({
     onNavigate?.("news");
   };
 
-  const handleRemoveFavorite = async () => {
-    if (!selectedItem?.isFavorite || isLoading || favoriteUpdateInFlightRef.current) {
+  // 詳細パネルのお気に入り登録/解除。Rust の更新結果を確認してから一覧・選択中の記事へ反映する
+  // （楽観更新はしない）。失敗時は状態を変えないため、表示は自動的に変更前のままになる。
+  const handleToggleFavorite = async () => {
+    if (!selectedItem || isLoading || favoriteUpdateInFlightRef.current) {
       return;
     }
 
+    const nextIsFavorite = !selectedItem.isFavorite;
     favoriteUpdateInFlightRef.current = true;
     historyRequestRef.current += 1;
-    setFavoriteUpdatingArticleId(selectedItem.id);
+    setFavoriteUpdatingTo(nextIsFavorite);
     setLoadNotice(null);
     setLoadNoticeKind("info");
     try {
       const result = await updateArticleFavorite({
         articleId: selectedItem.id,
-        isFavorite: false,
+        isFavorite: nextIsFavorite,
       });
       setHistoryItems((items) =>
-        activeFilter === "favorite"
+        // 「お気に入り」フィルタ中に解除した記事は、条件に合わなくなるので一覧から外す（従来どおり）。
+        activeFilter === "favorite" && !result.isFavorite
           ? items.filter((item) => item.id !== result.articleId)
           : items.map((item) =>
               item.id === result.articleId
@@ -591,12 +600,17 @@ export default function NewsHistoryScreen({
             )
       );
     } catch (error) {
-      setLoadNotice("お気に入りの解除に失敗しました。もう一度お試しください。");
-      setLoadNoticeKind("error");
-      console.warn("Failed to remove article favorite:", error);
+      // 生のエラー文言は画面へ出さず、固定文言だけを案内する。
+      setLoadNotice(
+        nextIsFavorite
+          ? "お気に入りの登録に失敗しました。もう一度お試しください。"
+          : "お気に入りの解除に失敗しました。もう一度お試しください。"
+      );
+      setLoadNoticeKind("favorite-error");
+      console.warn("Failed to update article favorite:", error);
     } finally {
       favoriteUpdateInFlightRef.current = false;
-      setFavoriteUpdatingArticleId(null);
+      setFavoriteUpdatingTo(null);
     }
   };
 
@@ -721,7 +735,7 @@ export default function NewsHistoryScreen({
                 key={chip.id}
                 chip={chip}
                 isActive={activeFilter === chip.id}
-                disabled={favoriteUpdatingArticleId !== null}
+                disabled={favoriteUpdatingTo !== null}
                 onClick={() => {
                   if (!favoriteUpdateInFlightRef.current && chip.id !== activeFilter && isHistoryFilter(chip.id)) {
                     historyRequestRef.current += 1;
@@ -738,7 +752,13 @@ export default function NewsHistoryScreen({
               <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
               <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                <span
+                  role={
+                    loadNoticeKind === "error" || loadNoticeKind === "favorite-error"
+                      ? "alert"
+                      : "status"
+                  }
+                >
                   {loadNotice}
                 </span>
                 {loadNoticeKind === "error" && (
@@ -882,11 +902,21 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     className="w-full gap-2"
-                    onClick={() => void handleRemoveFavorite()}
-                    disabled={!selectedItem.isFavorite || isLoading || favoriteUpdatingArticleId !== null}
+                    onClick={() => void handleToggleFavorite()}
+                    disabled={isLoading || favoriteUpdatingTo !== null}
                   >
-                    <Star className="w-4 h-4" aria-hidden="true" />
-                    {favoriteUpdatingArticleId !== null ? "解除中..." : "お気に入り解除"}
+                    <Star
+                      className={`w-4 h-4 ${selectedItem.isFavorite ? "fill-yellow-400 text-yellow-400" : ""}`}
+                      aria-hidden="true"
+                    />
+                    {/* 現在の状態に応じて「登録」/「解除」を切り替える（ラベル自体で操作が分かるため aria-pressed は使わない） */}
+                    {favoriteUpdatingTo !== null
+                      ? favoriteUpdatingTo
+                        ? "登録中..."
+                        : "解除中..."
+                      : selectedItem.isFavorite
+                        ? "お気に入り解除"
+                        : "お気に入り登録"}
                   </Button>
                   <Button
                     variant="outline"
