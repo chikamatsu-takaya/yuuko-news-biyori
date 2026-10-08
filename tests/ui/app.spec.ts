@@ -535,7 +535,7 @@ test("news history archived article asks before restoring and cancel keeps the h
   ).toBeVisible();
 });
 
-test("news history archived article restores by id, opens the same article and clears the badge", async ({
+test("news history archived article restores by id (button disabled while restoring), opens the same article and clears the badge", async ({
   page,
 }) => {
   await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_GATE__: true });
@@ -547,11 +547,12 @@ test("news history archived article restores by id, opens the same article and c
     .getByRole("button", { name: "取り出して開く" })
     .click();
 
-  // 復元中は「取り出し中...」で押せず、二重に復元を走らせない。
+  // 復元中はボタンが「取り出し中...」の無効状態になる（ここで確認するのは disabled 表示まで。
+  // 無効ボタンへの force クリックはイベントが発火しないため、ref ガード自体の検証にはならない）。
   const restoringButton = page.getByRole("button", { name: "取り出し中..." });
   await expect(restoringButton).toBeDisabled();
   await restoringButton.click({ force: true });
-  // 記事IDだけを渡し、呼び出しは1回だけ。
+  // 記事IDだけを渡し、呼び出しは1回のまま。
   expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
   expect(await readRequestedArticleId(page)).toBeNull();
 
@@ -600,6 +601,30 @@ test("news history archived restore failure stays on history with a fixed notice
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "もう一度見る" })).toBeEnabled();
   await expect(main.getByText("アーカイブ済み", { exact: true })).toBeVisible();
+});
+
+test("news history archived restore with a mismatched article id does not navigate", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_MISMATCH__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 別IDの応答は失敗扱い: 固定文言を出し、別記事・対象記事どちらの詳細も開かない。
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
 });
 
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
@@ -6111,6 +6136,10 @@ async function installTauriMocks(page: Page) {
                 code: "ARCHIVE_ERROR",
                 message: "E2E raw restore failure /internal/secret/archive.zip",
               };
+            }
+            // 応答の記事ID不一致を再現するモード（遷移せず失敗扱いになることの検証用）。
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_MISMATCH__) {
+              return { articleId: "other-article", status: "restored" };
             }
             restoreWin.__E2E_ARCHIVE_RESTORED__ = true;
             /* eslint-enable @typescript-eslint/no-explicit-any */

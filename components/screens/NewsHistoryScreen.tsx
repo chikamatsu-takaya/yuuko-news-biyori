@@ -473,11 +473,21 @@ export default function NewsHistoryScreen({
     // favorite-error / restore-error は個別操作の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
     "info" | "error" | "empty" | "favorite-error" | "restore-error"
   >("info");
-  // アーカイブから取り出す確認の対象記事（null=確認を出さない）。確認中に選択が変わっても対象をずらさないよう固定で持つ。
+  // アーカイブから取り出す確認の対象記事。確認中に選択が変わっても対象をずらさないよう固定で持つ。
+  // 閉じるアニメーション中にタイトルが空にならないよう、開閉は別の state で持ち、対象は次に開くまで残す。
   const [restoreTarget, setRestoreTarget] = React.useState<{
     id: string;
     title: string;
   } | null>(null);
+  const [isRestoreDialogOpen, setIsRestoreDialogOpen] = React.useState(false);
+  // 復元中に画面を離れた後で、記事詳細へ遷移したり state を更新したりしないためのフラグ。
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
   const [isRestoring, setIsRestoring] = React.useState(false);
   // state反映前の連打でも復元を二重に走らせないためのガード。
   const restoreInFlightRef = React.useRef(false);
@@ -586,6 +596,7 @@ export default function NewsHistoryScreen({
     // アーカイブ済みの記事は本文がZIP内にあるため、確認してから取り出す（確認なしに復元しない）。
     if (selectedItem.isArchived) {
       setRestoreTarget({ id: selectedItem.id, title: selectedItem.title });
+      setIsRestoreDialogOpen(true);
       return;
     }
 
@@ -603,7 +614,7 @@ export default function NewsHistoryScreen({
   // 記事詳細から戻ると履歴画面が再マウントされ一覧を読み直すため、アーカイブ済みバッジも更新される。
   const handleConfirmRestore = async () => {
     const target = restoreTarget;
-    setRestoreTarget(null);
+    setIsRestoreDialogOpen(false);
     if (!target || restoreInFlightRef.current) {
       return;
     }
@@ -614,6 +625,10 @@ export default function NewsHistoryScreen({
     setLoadNoticeKind("info");
     try {
       const result = await restoreArchivedArticle({ articleId: target.id });
+      // 画面を離れた後に完了した場合は、遷移も表示更新もしない。
+      if (!isMountedRef.current) {
+        return;
+      }
       const isRestored =
         result.articleId === target.id &&
         (result.status === "restored" || result.status === "already_available");
@@ -627,6 +642,9 @@ export default function NewsHistoryScreen({
         onNavigate?.("news");
       }
     } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
       setLoadNotice(
         "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
       );
@@ -634,7 +652,9 @@ export default function NewsHistoryScreen({
       console.warn("Failed to restore archived article:", error);
     } finally {
       restoreInFlightRef.current = false;
-      setIsRestoring(false);
+      if (isMountedRef.current) {
+        setIsRestoring(false);
+      }
     }
   };
 
@@ -1040,12 +1060,8 @@ export default function NewsHistoryScreen({
 
       {/* アーカイブ済み記事を開く前の確認。「取り出して開く」を選んだときだけ復元する。 */}
       <AlertDialog
-        open={restoreTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setRestoreTarget(null);
-          }
-        }}
+        open={isRestoreDialogOpen}
+        onOpenChange={setIsRestoreDialogOpen}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
