@@ -763,7 +763,33 @@ impl ArticleRepository {
         update: ArticleSummaryUpdate,
     ) -> Result<(), AppError> {
         let _write_guard = self.lock_writes()?;
-        let mut article = self.find_article_record(article_id)?;
+        let article = self.find_article_record(article_id)?;
+        self.save_summary_update(article, update)
+    }
+
+    /// 自動要約キュー用。まだ要約済みでないときだけ保存し、保存したら true を返す。
+    /// AI 呼び出し中に手動要約で要約済みになった記事を上書きしないよう、要約済みかの確認と保存を
+    /// 同じ書き込みロックの中で行う（確認と保存の間に別の保存が割り込まない）。
+    pub fn update_article_summary_if_unsummarized(
+        &self,
+        article_id: &str,
+        update: ArticleSummaryUpdate,
+    ) -> Result<bool, AppError> {
+        let _write_guard = self.lock_writes()?;
+        let article = self.find_article_record(article_id)?;
+        if article.status.summarized {
+            return Ok(false);
+        }
+        self.save_summary_update(article, update)?;
+        Ok(true)
+    }
+
+    /// 要約系フィールドとメタを反映して保存する。呼び出し側で書き込みロックを持つこと。
+    fn save_summary_update(
+        &self,
+        mut article: PersistedArticleRecord,
+        update: ArticleSummaryUpdate,
+    ) -> Result<(), AppError> {
         article.summary = Some(update.summary);
         article.yuuko_explanation = Some(update.yuuko_explanation);
         article.focus_points = update.focus_points;
