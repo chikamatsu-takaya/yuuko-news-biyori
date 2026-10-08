@@ -699,7 +699,14 @@ export default function NewsHistoryScreen({
         <main className="flex-1 min-w-0 flex flex-col p-4 overflow-hidden">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
-            <span className="hover:text-[var(--yuuko-green)] cursor-pointer">ホーム</span>
+            {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
+            <button
+              type="button"
+              className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              onClick={() => handleNavigate("home")}
+            >
+              ホーム
+            </button>
             <span aria-hidden="true">&gt;</span>
             <span className="text-foreground">ニュース履歴</span>
           </div>
