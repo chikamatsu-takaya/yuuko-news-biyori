@@ -16,6 +16,7 @@ use crate::error::AppError;
 use crate::infra::fullscreen_detector::{
     FullscreenDetector, FullscreenStatus, SystemFullscreenDetector,
 };
+use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::repositories::yuuko_state_repository::YuukoStateRepository;
 use crate::services::article_service::ArticleService;
@@ -37,6 +38,8 @@ pub struct YuukoService {
     friendship_service: FriendshipService,
     fullscreen_detector: Arc<dyn FullscreenDetector>,
     fullscreen_tracker: Arc<Mutex<FullscreenSuppressionTracker>>,
+    /// 会議中・マイク使用中の判定（OS 問い合わせ）。判定時に呼ぶだけで状態は持たない。
+    meeting_detector: Arc<dyn MeetingDetector>,
     /// スリープ復帰の検知（デスクトップ通知スレッドの心拍）と復帰後の猶予。
     resume_tracker: Arc<Mutex<ResumeGraceTracker>>,
 }
@@ -57,6 +60,7 @@ impl YuukoService {
             friendship_service,
             fullscreen_detector: Arc::new(SystemFullscreenDetector),
             fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
+            meeting_detector: Arc::new(SystemMeetingDetector),
             resume_tracker: Arc::new(Mutex::new(ResumeGraceTracker::default())),
         }
     }
@@ -65,6 +69,13 @@ impl YuukoService {
     #[cfg(test)]
     fn with_fullscreen_detector(mut self, detector: Arc<dyn FullscreenDetector>) -> Self {
         self.fullscreen_detector = detector;
+        self
+    }
+
+    /// テストで OS に依存しない会議中・マイク使用中の判定を差し込む。
+    #[cfg(test)]
+    fn with_meeting_detector(mut self, detector: Arc<dyn MeetingDetector>) -> Self {
+        self.meeting_detector = detector;
         self
     }
 
@@ -106,6 +117,48 @@ impl YuukoService {
             }
         };
         tracker.observe(now, busy, grace_from_seed(time_seed()))
+    }
+
+    /// 保存済みの active 通知を出し直してよいかの会議中・マイク使用中判定（デスクトップ通知スレッド用）。
+    /// 止める場合は request_yuuko_notification と同じ理由名を返す。設定を読めない場合は既定（抑制 ON）で判定する。
+    pub fn meeting_block_for_redisplay(&self) -> Option<&'static str> {
+        let (suppress_during_meeting, suppress_when_mic_in_use) = self
+            .settings_repository
+            .load_or_default()
+            .map(|settings| {
+                (
+                    settings.notification.suppress_during_meeting,
+                    settings.notification.suppress_when_mic_in_use,
+                )
+            })
+            .unwrap_or((true, true));
+        self.check_meeting(suppress_during_meeting, suppress_when_mic_in_use)
+    }
+
+    /// 会議中・マイク使用中の抑制判定（設計書 §5.2、判断台帳 D65 / D68 / D69）。
+    ///
+    /// - 会議中 = 既知の会議アプリが起動中 かつ マイク使用中（`meeting`）。
+    /// - マイク使用中（`mic_in_use`）。会議中に当たる場合は `meeting` を優先して返す。
+    ///
+    /// どちらの設定も OFF なら OS へ問い合わせない。マイク未使用なら会議判定も成立しないため、
+    /// プロセス一覧は「マイク使用中 かつ 会議中の設定 ON」のときだけ調べる。
+    /// 全画面と違い解除後の猶予は置かない（会議・マイク使用は長く続くため、解除の検知は通常の判定間隔に
+    /// 任せ、その間隔が実質的な猶予になる）。どのアプリかは扱わず、真偽値だけを使う。
+    fn check_meeting(
+        &self,
+        suppress_during_meeting: bool,
+        suppress_when_mic_in_use: bool,
+    ) -> Option<&'static str> {
+        if !suppress_during_meeting && !suppress_when_mic_in_use {
+            return None;
+        }
+        if !self.meeting_detector.is_mic_in_use() {
+            return None;
+        }
+        if suppress_during_meeting && self.meeting_detector.is_meeting_app_running() {
+            return Some("meeting");
+        }
+        suppress_when_mic_in_use.then_some("mic_in_use")
     }
 
     /// 記録はメモリ上の小さな状態だけなので、他スレッドの panic で毒化していても続行する。
@@ -347,6 +400,14 @@ impl YuukoService {
             }
             FullscreenGate::Allowed => {}
         }
+        // 会議中・マイク使用中も全画面と同じく候補選定の前で止め、候補は保留する（§5.3）。
+        // 優先順位は 全画面 → 会議中 → マイク使用中。
+        if let Some(reason) = self.check_meeting(
+            settings.notification.suppress_during_meeting,
+            settings.notification.suppress_when_mic_in_use,
+        ) {
+            return Ok(notification_result(false, reason, &state));
+        }
         if let ResumeGate::GracePeriod { .. } = resume_gate {
             return Ok(notification_result(false, "resume_grace", &state));
         }
@@ -444,7 +505,7 @@ mod tests {
     use crate::repositories::reward_repository::RewardRepository;
     use chrono::{Duration, Local, Timelike};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -464,6 +525,44 @@ mod tests {
         }
     }
 
+    /// テスト用の会議中・マイク使用中判定。実行端末のマイク・プロセスに依存させない（既定はどちらも false）。
+    /// 設定 OFF のとき OS へ問い合わせないことを確かめるため、呼び出し回数も数える。
+    #[derive(Debug, Default)]
+    struct FakeMeetingDetector {
+        mic_in_use: AtomicBool,
+        meeting_app_running: AtomicBool,
+        mic_queries: AtomicU32,
+        process_queries: AtomicU32,
+    }
+
+    impl FakeMeetingDetector {
+        fn set(&self, mic_in_use: bool, meeting_app_running: bool) {
+            self.mic_in_use.store(mic_in_use, Ordering::SeqCst);
+            self.meeting_app_running
+                .store(meeting_app_running, Ordering::SeqCst);
+        }
+
+        /// (マイク判定の回数, プロセス判定の回数)
+        fn queries(&self) -> (u32, u32) {
+            (
+                self.mic_queries.load(Ordering::SeqCst),
+                self.process_queries.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    impl MeetingDetector for FakeMeetingDetector {
+        fn is_mic_in_use(&self) -> bool {
+            self.mic_queries.fetch_add(1, Ordering::SeqCst);
+            self.mic_in_use.load(Ordering::SeqCst)
+        }
+
+        fn is_meeting_app_running(&self) -> bool {
+            self.process_queries.fetch_add(1, Ordering::SeqCst);
+            self.meeting_app_running.load(Ordering::SeqCst)
+        }
+    }
+
     /// 一時ディレクトリに各リポジトリを構成し、Drop で後始末する。
     struct ServiceContext {
         service: YuukoService,
@@ -471,6 +570,7 @@ mod tests {
         yuuko_state_repository: YuukoStateRepository,
         article_repository: ArticleRepository,
         fullscreen: Arc<FakeFullscreenDetector>,
+        meeting: Arc<FakeMeetingDetector>,
         root: PathBuf,
     }
 
@@ -507,6 +607,8 @@ mod tests {
             friendship_service,
         )
         .with_fullscreen_detector(fullscreen.clone());
+        let meeting = Arc::new(FakeMeetingDetector::default());
+        let service = service.with_meeting_detector(meeting.clone());
 
         ServiceContext {
             service,
@@ -514,6 +616,7 @@ mod tests {
             yuuko_state_repository,
             article_repository,
             fullscreen,
+            meeting,
             root,
         }
     }
@@ -1048,6 +1151,174 @@ mod tests {
         let result = ctx.service.request_yuuko_notification().unwrap();
 
         assert_eq!(result.reason, "daily_limit");
+    }
+
+    /// 会議中・マイク使用中の設定だけを変えて保存する（通知 ON・終日範囲）。
+    fn save_meeting_settings(ctx: &ServiceContext, during_meeting: bool, when_mic_in_use: bool) {
+        let mut settings = PersistedSettings::default();
+        settings.notification.work_time_ranges = all_day_ranges();
+        settings.notification.suppress_during_meeting = during_meeting;
+        settings.notification.suppress_when_mic_in_use = when_mic_in_use;
+        ctx.settings_repository.save(&settings).unwrap();
+    }
+
+    /// 15. 会議アプリ起動中かつマイク使用中は meeting で抑制し、候補を保留する。終われば猶予なしで通知する。
+    #[test]
+    fn request_holds_candidate_during_meeting_and_notifies_after_it_ends() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, true, true);
+        ctx.meeting.set(true, true);
+
+        let suppressed = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!suppressed.notified);
+        assert_eq!(suppressed.reason, "meeting");
+        assert_nothing_consumed(&ctx);
+
+        ctx.meeting.set(false, true);
+        let notified = ctx.service.request_yuuko_notification().unwrap();
+        assert!(notified.notified);
+        assert_eq!(notified.reason, "notified");
+    }
+
+    /// 16. 会議アプリが無くてもマイク使用中なら mic_in_use で抑制し、候補を保留する。
+    #[test]
+    fn request_holds_candidate_while_mic_in_use() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, true, true);
+        ctx.meeting.set(true, false);
+
+        let suppressed = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!suppressed.notified);
+        assert_eq!(suppressed.reason, "mic_in_use");
+        assert_nothing_consumed(&ctx);
+    }
+
+    /// 17. 会議アプリが起動していてもマイク未使用なら会議中ではなく通知する（プロセスも調べない）。
+    #[test]
+    fn meeting_app_without_mic_use_is_not_a_meeting() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, true, true);
+        ctx.meeting.set(false, true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(ctx.meeting.queries(), (1, 0));
+    }
+
+    /// 18. 両方の設定が OFF なら会議中でも通知し、OS へ一切問い合わせない。
+    #[test]
+    fn request_skips_detection_when_both_settings_are_off() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, false, false);
+        ctx.meeting.set(true, true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(ctx.meeting.queries(), (0, 0));
+    }
+
+    /// 19. 会議中の設定だけ ON: 会議中は meeting、会議アプリなしのマイク使用は抑制しない。
+    #[test]
+    fn only_meeting_setting_on_suppresses_meeting_but_not_plain_mic_use() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, true, false);
+
+        ctx.meeting.set(true, true);
+        let meeting = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(meeting.reason, "meeting");
+        assert_nothing_consumed(&ctx);
+
+        ctx.meeting.set(true, false);
+        let mic_only = ctx.service.request_yuuko_notification().unwrap();
+        assert!(mic_only.notified);
+    }
+
+    /// 20. マイク使用中の設定だけ ON: 会議中でも理由は mic_in_use で、プロセス一覧は調べない。
+    #[test]
+    fn only_mic_setting_on_reports_mic_in_use_without_process_query() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, false, true);
+        ctx.meeting.set(true, true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert_eq!(result.reason, "mic_in_use");
+        assert_nothing_consumed(&ctx);
+        assert_eq!(ctx.meeting.queries(), (1, 0));
+    }
+
+    /// 21. 優先順位: 全画面 → 会議中 → マイク使用中。全画面中は会議判定を行わない。
+    #[test]
+    fn fullscreen_takes_precedence_over_meeting() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_meeting_settings(&ctx, true, true);
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.meeting.set(true, true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert_eq!(result.reason, "fullscreen");
+        assert_eq!(ctx.meeting.queries(), (0, 0));
+    }
+
+    /// 22. 日次上限などの既存理由は会議判定より優先され、OS へ問い合わせない。
+    #[test]
+    fn existing_gates_take_precedence_over_meeting() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 0, all_day_ranges());
+        ctx.meeting.set(true, true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert_eq!(result.reason, "daily_limit");
+        assert_eq!(ctx.meeting.queries(), (0, 0));
+    }
+
+    /// 23. active 通知の出し直し判定も会議中・マイク使用中を見る（設定 OFF なら止めない）。
+    #[test]
+    fn redisplay_is_blocked_during_meeting_or_mic_use() {
+        let ctx = make_context();
+        save_meeting_settings(&ctx, true, true);
+
+        ctx.meeting.set(true, true);
+        assert_eq!(ctx.service.meeting_block_for_redisplay(), Some("meeting"));
+        ctx.meeting.set(true, false);
+        assert_eq!(
+            ctx.service.meeting_block_for_redisplay(),
+            Some("mic_in_use")
+        );
+        ctx.meeting.set(false, false);
+        assert_eq!(ctx.service.meeting_block_for_redisplay(), None);
+
+        save_meeting_settings(&ctx, false, false);
+        ctx.meeting.set(true, true);
+        assert_eq!(ctx.service.meeting_block_for_redisplay(), None);
     }
 
     /// AI 要約前（excerpt のみ）の記事を1件だけ保存する。

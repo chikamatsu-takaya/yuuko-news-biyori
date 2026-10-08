@@ -16,5 +16,7 @@ pub mod gemini_client;
 pub mod html_fetcher;
 /// 外部HTTP応答本文の受信バイト上限（RSS・記事HTML・Gemini 共通）。
 pub mod http_body;
+/// OS 連携（マイク使用中・会議アプリ起動中の判定）。外部通信は行わない。
+pub mod meeting_detector;
 pub mod rss_client;
 pub mod url_guard;
