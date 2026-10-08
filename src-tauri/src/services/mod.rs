@@ -6,6 +6,7 @@ pub mod autostart_service;
 pub mod data_export_service;
 pub mod dictionary_service;
 pub mod friendship_service;
+pub mod gacha_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod recommendation_service;

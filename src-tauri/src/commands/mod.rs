@@ -3,6 +3,7 @@ pub mod autostart_commands;
 pub mod data_export_commands;
 pub mod dictionary_commands;
 pub mod friendship_commands;
+pub mod gacha_commands;
 pub mod health_commands;
 pub mod news_commands;
 pub mod reward_commands;

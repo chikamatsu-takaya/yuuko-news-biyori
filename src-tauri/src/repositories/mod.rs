@@ -2,6 +2,7 @@ pub mod article_repository;
 mod corrupt_json;
 pub mod dictionary_repository;
 pub mod friendship_repository;
+pub mod gacha_repository;
 pub mod reward_repository;
 pub mod settings_repository;
 pub mod yuuko_state_repository;
