@@ -1144,24 +1144,21 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* 会議中・マイク使用中は保存DTO(suppressDuringMeeting/MicUse)へ保存されるが、
-                      Rust 側に判定処理がまだ無く効果が無いため非活性＋「準備中」（判断台帳 D04）。
-                      非活性中も読み込んだ値を state に保持したまま保存するので、保存値は上書きされない。 */}
-                  <SettingRow label="会議中は通知を抑制する（準備中）">
+                  {/* 会議中・マイク使用中は保存DTO(suppressDuringMeeting/MicUse)へ保存し、Rust 側が通知判定のたびに
+                      Windows のマイク利用記録・会議アプリの有無で判定する（判断台帳 D65 / D68 / D69）ため操作可能。 */}
+                  <SettingRow label="会議中は通知を抑制する">
                     <Switch
-                      aria-label="会議中は通知を抑制する（準備中）"
+                      aria-label="会議中は通知を抑制する"
                       checked={settings.suppression.suppressInMeeting}
-                      disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressInMeeting", checked)
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="マイク使用中は通知を抑制する（準備中）">
+                  <SettingRow label="マイク使用中は通知を抑制する">
                     <Switch
-                      aria-label="マイク使用中は通知を抑制する（準備中）"
+                      aria-label="マイク使用中は通知を抑制する"
                       checked={settings.suppression.suppressWhenMicInUse}
-                      disabled
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenMicInUse", checked)
                       }

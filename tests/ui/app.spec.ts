@@ -2723,15 +2723,15 @@ test("settings postponed controls without a DTO field are disabled", async ({
     page.getByRole("combobox").filter({ hasText: "通常" })
   ).toBeDisabled();
 
-  // 抑制条件: 判定処理が無い会議/マイク/ゲームは非活性。フルスクリーンのみ操作可能。
+  // 抑制条件: 判定処理が無いゲームは非活性。会議/マイク/フルスクリーンは操作可能。
   await openSettingsMenu(page, "抑制条件");
   await expect(page.getByRole("switch")).toHaveCount(4);
   await expect(
-    page.getByRole("switch", { name: "会議中は通知を抑制する（準備中）" })
-  ).toBeDisabled();
+    page.getByRole("switch", { name: "会議中は通知を抑制する", exact: true })
+  ).toBeEnabled();
   await expect(
-    page.getByRole("switch", { name: "マイク使用中は通知を抑制する（準備中）" })
-  ).toBeDisabled();
+    page.getByRole("switch", { name: "マイク使用中は通知を抑制する", exact: true })
+  ).toBeEnabled();
   await expect(
     page.getByRole("switch", { name: "フルスクリーン時は通知を抑制する", exact: true })
   ).toBeEnabled();
@@ -3061,8 +3061,8 @@ test("settings non-corrupt load failure keeps the generic message without the re
   await expect(page.getByText("secret/path")).toHaveCount(0);
 });
 
-// 抑制条件: 未実装の抑制は「準備中」で操作不可、フルスクリーン抑制は操作・保存でき、
-// 非活性項目の保存値は保存で上書きされないこと（判断台帳 D04 / D44）。
+// 抑制条件: 未実装の抑制は「準備中」で操作不可。会議中・マイク使用中・フルスクリーン抑制は
+// 操作・保存できること（判断台帳 D04 / D44 / D65）。
 test("settings suppression shows 準備中 for unimplemented switches and saves the fullscreen switch", async ({
   page,
 }) => {
@@ -3078,33 +3078,46 @@ test("settings suppression shows 準備中 for unimplemented switches and saves 
   await openSettings(page);
   await openSettingsMenu(page, "抑制条件");
 
-  // 画面上のラベル（「準備中」表示を含む）が見えること。
-  await expect(page.getByText("会議中は通知を抑制する（準備中）")).toBeVisible();
+  // 画面上のラベル（「準備中」表示を含む）が見えること。会議中・マイク使用中は「準備中」を外している。
+  await expect(
+    page.getByText("会議中は通知を抑制する", { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText("マイク使用中は通知を抑制する", { exact: true })
+  ).toBeVisible();
+  await expect(page.getByText("会議中は通知を抑制する（準備中）")).toHaveCount(0);
   await expect(
     page.getByText("マイク使用中は通知を抑制する（準備中）")
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByText("ゲーム実行中は通知を抑制する（準備中）")).toBeVisible();
   await expect(
     page.getByText("フルスクリーン時は通知を抑制する", { exact: true })
   ).toBeVisible();
 
   const meeting = page.getByRole("switch", {
-    name: "会議中は通知を抑制する（準備中）",
+    name: "会議中は通知を抑制する",
+    exact: true,
   });
   const mic = page.getByRole("switch", {
-    name: "マイク使用中は通知を抑制する（準備中）",
+    name: "マイク使用中は通知を抑制する",
+    exact: true,
   });
   const fullscreen = page.getByRole("switch", {
     name: "フルスクリーン時は通知を抑制する",
     exact: true,
   });
 
-  // 非活性スイッチはクリックしても状態が変わらない。
-  await expect(meeting).toBeDisabled();
-  await expect(mic).toBeDisabled();
+  // 会議中・マイク使用中は読み込んだ値（false）を反映し、切り替えられる。
+  await expect(meeting).toBeEnabled();
+  await expect(mic).toBeEnabled();
+  await expect(meeting).not.toHaveAttribute("aria-disabled", "true");
+  await expect(mic).not.toHaveAttribute("aria-disabled", "true");
   await expect(meeting).not.toBeChecked();
-  await meeting.click({ force: true });
-  await expect(meeting).not.toBeChecked();
+  await expect(mic).not.toBeChecked();
+  await meeting.click();
+  await mic.click();
+  await expect(meeting).toBeChecked();
+  await expect(mic).toBeChecked();
 
   // フルスクリーンは読み込んだ値を反映し、切り替えられる。
   await expect(fullscreen).toBeChecked();
@@ -3127,9 +3140,9 @@ test("settings suppression shows 準備中 for unimplemented switches and saves 
   );
 
   expect(saved?.suppressDuringFullscreen).toBe(false);
-  // 非活性の会議/マイクは読み込んだ保存値（false）のまま保存される。
-  expect(saved?.suppressDuringMeeting).toBe(false);
-  expect(saved?.suppressDuringMicUse).toBe(false);
+  // 切り替えた会議/マイクの値（true）が保存DTOへ渡る。
+  expect(saved?.suppressDuringMeeting).toBe(true);
+  expect(saved?.suppressDuringMicUse).toBe(true);
 });
 
 // APIキー入力欄を画面へ追加していないこと（秘密情報を画面で扱わない）。
