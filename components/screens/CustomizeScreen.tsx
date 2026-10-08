@@ -367,7 +367,14 @@ export default function CustomizeScreen({
           <div className="flex-1 p-4 overflow-y-auto">
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
-              <span>ホーム</span>
+              {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
+              <button
+                type="button"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                onClick={() => handleNavigate("home")}
+              >
+                ホーム
+              </button>
               <ChevronRight className="w-3 h-3" aria-hidden="true" />
               <span className="text-foreground">カスタマイズ</span>
             </div>

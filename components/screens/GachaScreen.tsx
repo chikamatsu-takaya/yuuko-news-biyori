@@ -394,7 +394,14 @@ export default function GachaScreen({
           <div className="flex items-center justify-between p-4 pb-2 shrink-0">
             {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>ホーム</span>
+              {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
+              <button
+                type="button"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                onClick={() => handleNavigate("home")}
+              >
+                ホーム
+              </button>
               <ChevronRight className="w-3 h-3" aria-hidden="true" />
               <span className="text-foreground">ガチャ</span>
             </div>
