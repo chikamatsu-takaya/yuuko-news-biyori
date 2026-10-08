@@ -7,11 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    is_within_title_dedupe_window, ArchiveRestoreStatus, ArchiveRetirementSummaryDto,
-    ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto,
-    ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto,
-    ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult,
-    SummaryState,
+    is_valid_archive_month, is_within_title_dedupe_window, ArchiveMonthArticlesDto,
+    ArchiveMonthDto, ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter,
+    ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
+    FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -882,6 +882,67 @@ impl ArticleRepository {
         }
 
         Ok(saved)
+    }
+
+    /// 過去ニュース画面向けに、`archive_index.json` の月別エントリを新しい月から順に返す。
+    /// ZIPは開かない。年月・ファイル名が安全な形式でないエントリは表示対象から外す。
+    pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
+        let index = self.load_archive_index_or_default()?;
+        let mut months = index
+            .archives
+            .iter()
+            .filter(|archive| match validate_archive_location(archive) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("Skipping unsafe archive index entry: {error}");
+                    false
+                }
+            })
+            .map(|archive| ArchiveMonthDto {
+                month: archive.month.clone(),
+                article_count: archive.article_count,
+                catalog_complete: archive.catalog_complete,
+            })
+            .collect::<Vec<_>>();
+        months.sort_by(|left, right| right.month.cmp(&left.month));
+        Ok(months)
+    }
+
+    /// 指定月のアーカイブ記事を、ZIPを展開せず記事カタログから返す（取得日時の新しい順）。
+    /// 年月は index 内の一致検索にだけ使い、パスの組み立てには使わない。
+    /// お気に入りは現在のお気に入りJSONを正とする（アーカイブ後の切り替えを反映するため）。
+    pub fn list_archive_month_articles(
+        &self,
+        month: &str,
+    ) -> Result<ArchiveMonthArticlesDto, AppError> {
+        if !is_valid_archive_month(month) {
+            return Err(AppError::Validation(
+                "month must be in YYYY-MM format".to_string(),
+            ));
+        }
+        let index = self.load_archive_index_or_default()?;
+        let archive = index
+            .archives
+            .iter()
+            .find(|archive| archive.month == month)
+            .ok_or_else(|| AppError::NotFound(format!("archive month not found: {month}")))?;
+        validate_archive_location(archive)?;
+
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let mut articles = archive
+            .articles
+            .iter()
+            .map(|article| {
+                article.to_history_item_dto(favorite_store.contains(&article.article_id))
+            })
+            .collect::<Vec<_>>();
+        articles.sort_by(compare_history_items);
+
+        Ok(ArchiveMonthArticlesDto {
+            month: archive.month.clone(),
+            catalog_complete: archive.catalog_complete,
+            articles,
+        })
     }
 
     /// 記事IDから月次ZIP内の1記事だけを検証・復元する。任意パスは受け取らない。
@@ -2002,17 +2063,7 @@ fn legacy_archive_index_version() -> u32 {
 }
 
 fn validate_archive_location(archive: &ArchiveIndexEntry) -> Result<(), AppError> {
-    let bytes = archive.month.as_bytes();
-    let month_number = archive
-        .month
-        .get(5..7)
-        .and_then(|value| value.parse::<u8>().ok());
-    let valid_month = bytes.len() == 7
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && month_number.is_some_and(|value| (1..=12).contains(&value));
-    if !valid_month || archive.file != format!("{}.zip", archive.month) {
+    if !is_valid_archive_month(&archive.month) || archive.file != format!("{}.zip", archive.month) {
         return Err(AppError::Archive(
             "archive index contains an unsafe archive location".to_string(),
         ));
@@ -2310,7 +2361,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::domain::article::{ArchiveRestoreStatus, ArticleHistoryFilter, ArticleReadState};
+    use crate::domain::article::{
+        ArchiveMonthDto, ArchiveRestoreStatus, ArticleHistoryFilter, ArticleReadState,
+    };
+    use crate::error::AppError;
 
     use super::{
         archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
@@ -3096,6 +3150,156 @@ mod tests {
         assert!(index.archives[0].catalog_complete);
         assert_eq!(index.archives[0].articles.len(), 3);
         assert_eq!(index.archives[0].articles[0].entry_name, "old-a.md");
+    }
+
+    fn archive_old_article(context: &TestRepositoryContext, article_id: &str, fetched_at: &str) {
+        use chrono::{TimeZone, Utc};
+        let record = PersistedArticleRecord {
+            article_id: article_id.to_string(),
+            title: format!("{article_id} のタイトル"),
+            fetched_at: fetched_at.to_string(),
+            published_at_text: fetched_at.to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&record).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+    }
+
+    #[test]
+    fn list_archive_months_returns_newest_month_first_with_counts() {
+        let context = TestRepositoryContext::new();
+        assert!(context.repository.list_archive_months().unwrap().is_empty());
+
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+
+        let months = context.repository.list_archive_months().unwrap();
+
+        assert_eq!(
+            months,
+            vec![
+                ArchiveMonthDto {
+                    month: "2026-05".to_string(),
+                    article_count: 2,
+                    catalog_complete: true,
+                },
+                ArchiveMonthDto {
+                    month: "2026-04".to_string(),
+                    article_count: 1,
+                    catalog_complete: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn list_archive_month_articles_reads_catalog_without_opening_zip() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        // アーカイブ後にお気に入りへ切り替えた記事は、現在のお気に入りJSONを反映する。
+        context
+            .repository
+            .update_article_favorite("may-a", true)
+            .unwrap();
+        // ZIPと元Markdownを消してもカタログだけで一覧を返せる（ZIPを展開しない）。
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::remove_file(archive_dir.join("2026-05.zip")).unwrap();
+        std::fs::remove_dir_all(context.news_dir.join("202605")).unwrap();
+
+        let result = context
+            .repository
+            .list_archive_month_articles("2026-05")
+            .unwrap();
+
+        assert_eq!(result.month, "2026-05");
+        assert!(result.catalog_complete);
+        let ids = result
+            .articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["may-b", "may-a"]);
+        let may_a = &result.articles[1];
+        assert_eq!(may_a.title, "may-a のタイトル");
+        assert_eq!(may_a.source_name, super::seed_articles()[0].source_name);
+        assert_eq!(may_a.published_at_text, "2026-05-01T00:00:00Z");
+        assert!(may_a.is_favorite);
+        assert!(may_a.is_archived);
+        assert!(!result.articles[0].is_favorite);
+    }
+
+    #[test]
+    fn list_archive_month_articles_rejects_invalid_or_unknown_month() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+
+        for invalid in ["../2026-05", "2026-05.zip", "2026-13", "archive_index", ""] {
+            assert!(matches!(
+                context.repository.list_archive_month_articles(invalid),
+                Err(AppError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            context.repository.list_archive_month_articles("2026-04"),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn archive_month_queries_handle_legacy_and_unsafe_index_entries() {
+        let context = TestRepositoryContext::new();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{
+  "archives": [
+    {
+      "month": "2026-05",
+      "file": "2026-05.zip",
+      "articleCount": 2,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    },
+    {
+      "month": "2026-06",
+      "file": "../outside.zip",
+      "articleCount": 1,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let months = context.repository.list_archive_months().unwrap();
+        assert_eq!(
+            months,
+            vec![ArchiveMonthDto {
+                month: "2026-05".to_string(),
+                article_count: 2,
+                catalog_complete: false,
+            }]
+        );
+
+        let legacy = context
+            .repository
+            .list_archive_month_articles("2026-05")
+            .unwrap();
+        assert!(!legacy.catalog_complete);
+        assert!(legacy.articles.is_empty());
+
+        assert!(matches!(
+            context.repository.list_archive_month_articles("2026-06"),
+            Err(AppError::Archive(_))
+        ));
     }
 
     #[test]

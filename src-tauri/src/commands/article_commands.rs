@@ -1,8 +1,9 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
-    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
+    ArchiveMonthArticlesDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
+    GetArticleDetailParams, GetRecommendedArticlesParams, ListArchiveMonthArticlesParams,
     ListArticleHistoryParams, OpenOriginalArticleParams, RestoreArchivedArticleParams,
     RestoreArchivedArticleResult, UpdateArticleFavoriteParams,
 };
@@ -146,4 +147,33 @@ pub async fn retire_archived_markdown(
         .await
         .map_err(|error| CommandError::join_error("retire-archived-markdown", error))?
         .map_err(CommandError::from)
+}
+
+/// 過去ニュース画面の月別アーカイブ一覧（年月・件数）を新しい月から返す read-only command。
+/// `archive_index.json` だけを読み、ZIPは開かない。
+#[tauri::command]
+pub async fn list_archive_months(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ArchiveMonthDto>> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.list_archive_months())
+        .await
+        .map_err(|error| CommandError::join_error("archive-months", error))?
+        .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、その月のアーカイブ記事一覧を記事カタログから返す read-only command。
+/// パス・ファイル名は受け取らず、ZIPも展開しない。
+#[tauri::command]
+pub async fn list_archive_month_articles(
+    state: State<'_, AppState>,
+    params: ListArchiveMonthArticlesParams,
+) -> CommandResult<ArchiveMonthArticlesDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        article_service.list_archive_month_articles(params)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("archive-month-articles", error))?
+    .map_err(CommandError::from)
 }

@@ -114,6 +114,25 @@ export type ArchiveRetirementSummaryDto = {
   cleanupPending: boolean;
 };
 
+// 過去ニュース画面の月別アーカイブ一覧の1行（Rust の ArchiveMonthDto と一致させる）。
+// month は "YYYY-MM"。「2026年9月」などの表示整形は画面側で行う。
+// catalogComplete が false の月は記事カタログ未移行のため、件数だけ表示できる。
+export type ArchiveMonthDto = {
+  month: string;
+  articleCount: number;
+  catalogComplete: boolean;
+};
+
+export type ListArchiveMonthArticlesParams = {
+  month: string;
+};
+
+export type ArchiveMonthArticlesDto = {
+  month: string;
+  catalogComplete: boolean;
+  articles: ArticleHistoryItemDto[];
+};
+
 export const getRecommendedArticles = async (
   params: GetRecommendedArticlesParams = {}
 ): Promise<ArticleSummaryDto[] | null> => {
@@ -201,4 +220,26 @@ export const retireArchivedMarkdown = async (): Promise<ArchiveRetirementSummary
   }
 
   return invoke<ArchiveRetirementSummaryDto>("retire_archived_markdown");
+};
+
+// 月別アーカイブ一覧（新しい月から）。Rust 側は archive_index.json だけを読み、ZIP は開かない。
+export const listArchiveMonths = async (): Promise<ArchiveMonthDto[] | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthDto[]>("list_archive_months");
+};
+
+// 指定月のアーカイブ記事一覧。年月（YYYY-MM）だけを渡し、パスやファイル名は渡さない。
+export const listArchiveMonthArticles = async (
+  params: ListArchiveMonthArticlesParams
+): Promise<ArchiveMonthArticlesDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthArticlesDto>("list_archive_month_articles", {
+    params,
+  });
 };
