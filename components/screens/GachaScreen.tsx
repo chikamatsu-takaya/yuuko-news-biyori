@@ -1,14 +1,36 @@
 "use client";
 
+/**
+ * ガチャ画面（画面詳細設計書 §13.2）。
+ * 所持かけら・1回引く・結果モーダル・コレクション一覧を表示する。
+ * 抽選・かけらの消費・保存はすべて Rust 側（get_gacha_state / draw_gacha_once / mark_gacha_items_seen）が行い、
+ * この画面は結果を受け取って表示するだけ。10連・レアリティ・提供割合・購入導線は置かない（D72）。
+ */
+
 import * as React from "react";
 import Image from "next/image";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import {
+  drawGachaOnce,
+  getGachaState,
+  markGachaItemsSeen,
+  type GachaDrawResult,
+  type GachaItemKind,
+  type GachaState,
+} from "@/lib/tauri/gacha";
 import {
   Home,
   Newspaper,
@@ -22,61 +44,15 @@ import {
   HelpCircle,
   ChevronRight,
   MessageCircle,
+  MessageSquare,
   Star,
-  Plus,
-  ShoppingCart,
-  History,
   Palette,
-  Heart,
-  Tag,
-  AudioWaveform,
-  Smile,
   Gift,
-  Clover,
-  Rainbow,
 } from "lucide-react";
 
 // ============================================
 // TypeScript Types
 // ============================================
-
-interface GachaState {
-  starFragments: number;
-  friendshipRank: number;
-  currentPoints: number;
-  nextRankPoints: number;
-  bonusText: string;
-  dailyDiscountText: string;
-  resetText: string;
-}
-
-interface PickupItem {
-  name: string;
-  description: string;
-  period: string;
-  rarity: number;
-}
-
-interface GachaButtonConfig {
-  id: string;
-  label: string;
-  cost: number;
-  guaranteedText: string | null;
-}
-
-interface LineupItem {
-  id: string;
-  name: string;
-  icon: React.ReactNode;
-  rarity: number;
-}
-
-interface RecentResult {
-  time: string;
-  name: string;
-  icon: React.ReactNode;
-  rarity: number;
-}
 
 interface NavigationItem {
   id: string;
@@ -85,52 +61,22 @@ interface NavigationItem {
   isActive: boolean;
 }
 
+/** 結果モーダル・コレクション詳細で見せる 1 件（獲得済みのものだけ）。 */
+interface DisplayItem {
+  itemId: string;
+  kind: GachaItemKind;
+  name: string;
+  text: string | null;
+}
+
+/** loading: 読み込み中 / ready: 表示可能 / unavailable: Tauri 外 / error: 読み込み失敗。 */
+type LoadStatus = "loading" | "ready" | "unavailable" | "error";
+
 // ============================================
-// Mock Data
+// Constants
 // ============================================
 
-const mockGachaState: GachaState = {
-  starFragments: 1250,
-  friendshipRank: 15,
-  currentPoints: 350,
-  nextRankPoints: 1000,
-  bonusText: "ランク15特典：★3以上の出現率 +1.5%",
-  dailyDiscountText: "1日1回限定割引",
-  resetText: "毎日5:00にリセットされます",
-};
-
-const mockPickup: PickupItem = {
-  name: "緑のずきん",
-  description: "出現率UP！",
-  period: "〜 6/23 13:59まで",
-  rarity: 4,
-};
-
-const mockGachaButtons: GachaButtonConfig[] = [
-  { id: "single", label: "1回まわす", cost: 100, guaranteedText: null },
-  { id: "ten", label: "10回まわす", cost: 1000, guaranteedText: "★3以上 1個確定！" },
-];
-
-const mockLineup: LineupItem[] = [
-  { id: "theme", name: "テーマ", icon: <Palette className="w-4 h-4" />, rarity: 4 },
-  { id: "balloon", name: "吹き出し", icon: <MessageCircle className="w-4 h-4" />, rarity: 3 },
-  { id: "deco_head", name: "デコ（頭）", icon: <Sparkles className="w-4 h-4" />, rarity: 4 },
-  { id: "deco_collar", name: "デコ（首輪）", icon: <Heart className="w-4 h-4" />, rarity: 3 },
-  { id: "deco_badge", name: "デコ（バッジ）", icon: <Gift className="w-4 h-4" />, rarity: 2 },
-  { id: "tone", name: "口調", icon: <AudioWaveform className="w-4 h-4" />, rarity: 4 },
-  { id: "expression", name: "表情", icon: <Smile className="w-4 h-4" />, rarity: 3 },
-  { id: "nickname", name: "呼び名", icon: <Tag className="w-4 h-4" />, rarity: 2 },
-];
-
-const mockRecentResults: RecentResult[] = [
-  { time: "12:34", name: "緑のずきん", icon: <div className="w-5 h-5 rounded bg-[var(--yuuko-green)]" />, rarity: 4 },
-  { time: "12:33", name: "ふんわり（吹き出し）", icon: <div className="w-5 h-5 rounded bg-sky-300" />, rarity: 2 },
-  { time: "12:32", name: "ひまわりバッジ", icon: <div className="w-5 h-5 rounded bg-yellow-400" />, rarity: 2 },
-  { time: "12:31", name: "やさしい（口調）", icon: <div className="w-5 h-5 rounded bg-pink-300" />, rarity: 3 },
-  { time: "12:30", name: "おしえてくれる（性格）", icon: <div className="w-5 h-5 rounded bg-purple-300" />, rarity: 3 },
-];
-
-const mockNavigationItems: NavigationItem[] = [
+const navigationItems: NavigationItem[] = [
   { id: "home", label: "ホーム", icon: Home, isActive: false },
   { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
   { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
@@ -139,6 +85,67 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "gacha", label: "ガチャ", icon: Dices, isActive: true },
   { id: "settings", label: "設定", icon: Settings, isActive: false },
 ];
+
+const KIND_LABELS: Record<GachaItemKind, string> = {
+  card: "カード",
+  theme: "テーマ",
+  deco: "飾り",
+  balloon: "吹き出し",
+};
+
+const KIND_ICONS: Record<GachaItemKind, React.ComponentType<{ className?: string }>> = {
+  card: MessageCircle,
+  theme: Palette,
+  deco: Gift,
+  balloon: MessageSquare,
+};
+
+// 生のエラー文・内部パスは画面へ出さず、固定文言だけを見せる。
+const UNAVAILABLE_MESSAGE = "ガチャはアプリ内でのみ使えます。";
+const LOAD_ERROR_MESSAGE =
+  "ガチャの情報を読み込めなかったよ。少し時間を置いてから、もう一度試してみてね。";
+const DRAW_ERROR_MESSAGE =
+  "ガチャをまわせなかったよ。少し時間を置いてから、もう一度試してみてね。";
+
+/** 引けない理由（かけら不足 / コンプリート）。引けるときは null。 */
+function drawBlockedReason(state: GachaState): string | null {
+  if (state.canDraw) {
+    return null;
+  }
+  if (state.isComplete) {
+    return "コンプリート！ぜんぶ集めたよ。ありがとう！";
+  }
+  if (state.starFragments < state.cost) {
+    const shortage = state.cost - state.starFragments;
+    return `かけらが足りないよ（あと ${shortage.toLocaleString()} 個）。ニュースを読んだり、用語を調べたりすると集まるよ。`;
+  }
+  return "いまはガチャをまわせないよ。";
+}
+
+/**
+ * 抽選結果を手元の状態へ反映する。保存済みの正は Rust 側にあり、
+ * 直後の mark_gacha_items_seen の戻り値（最新状態）で上書きされる。
+ */
+function applyDrawResult(prev: GachaState, result: GachaDrawResult): GachaState {
+  const drawn = result.status === "drawn" ? result.item : null;
+  let ownedCount = prev.ownedCount;
+  const items = prev.items.map((item) => {
+    if (!drawn || item.itemId !== drawn.itemId || item.owned) {
+      return item;
+    }
+    ownedCount += 1;
+    return { ...item, owned: true, isNew: true, name: drawn.name, text: drawn.text };
+  });
+  return {
+    ...prev,
+    items,
+    ownedCount,
+    starFragments: result.starFragments,
+    cost: result.cost,
+    isComplete: result.isComplete,
+    canDraw: !result.isComplete && result.starFragments >= result.cost,
+  };
+}
 
 // ============================================
 // Sub Components
@@ -158,26 +165,6 @@ function PawIcon({ className }: { className?: string }) {
       <circle cx="9" cy="6" r="2" />
       <circle cx="15" cy="6" r="2" />
     </svg>
-  );
-}
-
-function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
-  return (
-    <div
-      className="flex gap-0.5"
-      role="img"
-      aria-label={`レアリティ ${rating}つ星（最大${max}つ）`}
-    >
-      {Array.from({ length: max }).map((_, i) => (
-        <Star
-          key={i}
-          className={`w-3 h-3 ${
-            i < rating ? "text-yellow-500 fill-yellow-500" : "text-gray-300"
-          }`}
-          aria-hidden="true"
-        />
-      ))}
-    </div>
   );
 }
 
@@ -258,6 +245,70 @@ function YuukoCharacter() {
   );
 }
 
+/**
+ * ガチャ結果・コレクションの 1 件を見せるモーダル。
+ * 文面は外部由来ではないが、HTML としては扱わずプレーンテキストで表示する。
+ */
+function GachaItemDialog({
+  item,
+  heading,
+  onClose,
+}: {
+  item: DisplayItem | null;
+  heading: string;
+  onClose: () => void;
+}) {
+  const KindIcon = item ? KIND_ICONS[item.kind] : Sparkles;
+  return (
+    <Dialog
+      open={item !== null}
+      onOpenChange={(next) => {
+        if (!next) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent className="sm:max-w-sm" showCloseButton={false}>
+        {item && (
+          <>
+            <DialogHeader>
+              <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--yuuko-green-light)]">
+                <KindIcon className="h-6 w-6 text-[var(--yuuko-green)]" />
+              </div>
+              <p className="text-center text-xs text-muted-foreground">{heading}</p>
+              <DialogTitle className="text-center">{item.name}</DialogTitle>
+              <DialogDescription className="text-center">
+                種類：{KIND_LABELS[item.kind]}
+              </DialogDescription>
+            </DialogHeader>
+            {item.text && (
+              <p
+                className="rounded-lg bg-[var(--yuuko-cream)] p-3 text-sm leading-relaxed whitespace-pre-wrap break-words"
+                data-testid="gacha-item-text"
+              >
+                {item.text}
+              </p>
+            )}
+            {item.kind === "theme" && (
+              <p className="text-center text-xs text-muted-foreground">
+                カスタマイズ画面で切り替えられるよ
+              </p>
+            )}
+            <DialogFooter className="sm:justify-center">
+              <Button
+                className="bg-[var(--yuuko-green)] text-white hover:bg-[var(--yuuko-green)]/90"
+                onClick={onClose}
+              >
+                とじる
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ============================================
 // Main Component
 // ============================================
@@ -267,11 +318,51 @@ export default function GachaScreen({
 }: {
   onNavigate?: (screen: string) => void;
 }) {
-  const [gachaState] = React.useState<GachaState>(mockGachaState);
-  const [pickup] = React.useState<PickupItem>(mockPickup);
-  const [gachaButtons] = React.useState<GachaButtonConfig[]>(mockGachaButtons);
-  const [lineup] = React.useState<LineupItem[]>(mockLineup);
-  const [recentResults] = React.useState<RecentResult[]>(mockRecentResults);
+  const [loadStatus, setLoadStatus] = React.useState<LoadStatus>("loading");
+  const [gacha, setGacha] = React.useState<GachaState | null>(null);
+  const [isDrawing, setIsDrawing] = React.useState(false);
+  const [drawError, setDrawError] = React.useState<string | null>(null);
+  const [dialogItem, setDialogItem] = React.useState<DisplayItem | null>(null);
+  const [dialogHeading, setDialogHeading] = React.useState("");
+  // state 更新は非同期なので、連打による二重抽選は ref で確実に止める。
+  const drawingRef = React.useRef(false);
+  // 抽選の世代。抽選の開始・反映で進め、それより前に出した NEW 解除の応答で抽選後の状態を上書きしないようにする。
+  const drawGenerationRef = React.useRef(0);
+  const isMountedRef = React.useRef(true);
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const loadState = React.useCallback(async () => {
+    setLoadStatus("loading");
+    try {
+      const state = await getGachaState();
+      if (!isMountedRef.current) {
+        return;
+      }
+      if (!state) {
+        setLoadStatus("unavailable");
+        return;
+      }
+      setGacha(state);
+      setLoadStatus("ready");
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      // console.error だと開発時のエラー表示に生のエラー文が出るため warn で調査用に残す。
+      console.warn("Failed to load gacha state:", error);
+      setLoadStatus("error");
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadState();
+  }, [loadState]);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -279,31 +370,92 @@ export default function GachaScreen({
     }
   };
 
-  const handleDrawGacha = (type: string) => {
-    console.log(`Draw gacha: ${type}`);
+  // 確認したものの「NEW」を外す。失敗しても NEW が残るだけなので画面には出さない。
+  const markSeen = React.useCallback(async (itemId: string) => {
+    const generation = drawGenerationRef.current;
+    try {
+      const state = await markGachaItemsSeen([itemId]);
+      if (state && isMountedRef.current && generation === drawGenerationRef.current) {
+        setGacha(state);
+      }
+    } catch (error) {
+      console.warn("Failed to mark gacha item as seen:", error);
+    }
+  }, []);
+
+  const handleDraw = async () => {
+    if (drawingRef.current || !gacha?.canDraw) {
+      return;
+    }
+    drawingRef.current = true;
+    drawGenerationRef.current += 1;
+    setIsDrawing(true);
+    setDrawError(null);
+    try {
+      const result = await drawGachaOnce();
+      if (!isMountedRef.current) {
+        return;
+      }
+      if (!result) {
+        setLoadStatus("unavailable");
+        return;
+      }
+      // insufficient / complete は何も消費しないので、状態だけ合わせて理由表示に任せる。
+      drawGenerationRef.current += 1;
+      setGacha((prev) => (prev ? applyDrawResult(prev, result) : prev));
+      if (result.status === "drawn" && result.item) {
+        setDialogHeading("ガチャの結果");
+        setDialogItem({
+          itemId: result.item.itemId,
+          kind: result.item.kind,
+          name: result.item.name,
+          text: result.item.text,
+        });
+      }
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      console.warn("Failed to draw gacha:", error);
+      setDrawError(DRAW_ERROR_MESSAGE);
+    } finally {
+      drawingRef.current = false;
+      if (isMountedRef.current) {
+        setIsDrawing(false);
+      }
+    }
   };
 
-  const handlePurchaseFragments = () => {
-    console.log("Purchase fragments clicked");
+  // 結果モーダル・コレクション詳細のどちらも、閉じたときに NEW を外す（確認した扱い）。
+  const handleCloseDialog = () => {
+    const closing = dialogItem;
+    setDialogItem(null);
+    if (!closing) {
+      return;
+    }
+    const current = gacha?.items.find((item) => item.itemId === closing.itemId);
+    if (current?.isNew) {
+      void markSeen(closing.itemId);
+    }
   };
 
-  const handleViewGachaHistory = () => {
-    console.log("View gacha history clicked");
+  const handleOpenCollectionItem = (item: DisplayItem) => {
+    setDialogHeading("コレクション");
+    setDialogItem(item);
   };
 
-  const handleViewRates = () => {
-    console.log("View rates clicked");
-  };
+  const isReady = loadStatus === "ready" && gacha !== null;
+  const blockedReason = isReady ? drawBlockedReason(gacha) : null;
+  const canPressDraw = isReady && gacha.canDraw && !isDrawing;
+  const remainingCount = isReady ? gacha.totalCount - gacha.ownedCount : 0;
 
-  const handleViewRankRewards = () => {
-    console.log("View rank rewards clicked");
-  };
-
-  const handleViewAllResults = () => {
-    console.log("View all results clicked");
-  };
-
-  const progressPercent = (gachaState.currentPoints / gachaState.nextRankPoints) * 100;
+  // 実行ボタン下の案内。読み込み失敗・Tauri 外・抽選失敗・引けない理由の順に 1 つだけ出す。
+  const statusMessage =
+    loadStatus === "unavailable"
+      ? UNAVAILABLE_MESSAGE
+      : loadStatus === "error"
+        ? LOAD_ERROR_MESSAGE
+        : (drawError ?? blockedReason);
 
   return (
     <div className="h-dvh flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
@@ -337,7 +489,7 @@ export default function GachaScreen({
           </div>
 
           <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
+            {navigationItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
                 label={item.label}
@@ -358,11 +510,9 @@ export default function GachaScreen({
               </CardHeader>
               <CardContent className="p-3 pt-0">
                 <p className="text-xs text-foreground leading-relaxed">
-                  きらきらのかけら、
+                  きらきらのかけらで、
                   <br />
-                  たまってるよ〜！
-                  <br />
-                  何が出るかな？
+                  なにが出るかな？
                   <br />
                   わくわくっ♪
                 </p>
@@ -404,43 +554,19 @@ export default function GachaScreen({
               <span className="text-foreground">ガチャ</span>
             </div>
 
-            {/* Star Fragments & Actions */}
-            <div className="flex items-center gap-3">
-              <Card className="py-2 px-4 flex items-center gap-3 border-yellow-300 bg-gradient-to-r from-yellow-50 to-orange-50">
-                <Star className="w-6 h-6 text-yellow-500 fill-yellow-500" aria-hidden="true" />
-                <div className="flex flex-col">
-                  <span className="text-[10px] text-muted-foreground">流れ星のかけら</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl font-bold text-foreground">{gachaState.starFragments.toLocaleString()}</span>
-                    <button
-                      className="w-5 h-5 rounded-full bg-[var(--yuuko-green)] text-white flex items-center justify-center hover:bg-[var(--yuuko-green)]/90 transition-colors"
-                      onClick={handlePurchaseFragments}
-                      aria-label="かけらを増やす"
-                    >
-                      <Plus className="w-3 h-3" aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-              </Card>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5 text-xs h-9"
-                onClick={handlePurchaseFragments}
-              >
-                <ShoppingCart className="w-4 h-4" aria-hidden="true" />
-                かけらを購入
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5 text-xs h-9"
-                onClick={handleViewGachaHistory}
-              >
-                <History className="w-4 h-4" aria-hidden="true" />
-                ガチャ履歴
-              </Button>
-            </div>
+            {/* Star Fragments（Tauri 外・読み込み前は数値を出さない） */}
+            <Card className="py-2 px-4 flex items-center gap-3 border-yellow-300 bg-gradient-to-r from-yellow-50 to-orange-50">
+              <Star className="w-6 h-6 text-yellow-500 fill-yellow-500" aria-hidden="true" />
+              <div className="flex flex-col">
+                <span className="text-[10px] text-muted-foreground">流れ星のかけら</span>
+                <span
+                  className="text-xl font-bold text-foreground"
+                  data-testid="gacha-star-fragments"
+                >
+                  {isReady ? gacha.starFragments.toLocaleString() : "—"}
+                </span>
+              </div>
+            </Card>
           </div>
 
           {/* Title */}
@@ -450,38 +576,17 @@ export default function GachaScreen({
               <h1 className="text-2xl font-bold text-foreground">ゆうこガチャ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-2">
-              流れ星のかけらで、ゆうこのデコやテーマを集めよう！
+              流れ星のかけらで、ゆうこのひとことカードやテーマを集めよう！
             </p>
           </div>
 
           {/* Main Gacha Area - Grid Layout */}
-          <div className="flex-1 min-h-0 px-4 pb-2 overflow-x-auto">
+          <div className="flex-1 min-h-0 px-4 pb-4 overflow-x-auto">
             <div
-              className="flex flex-col lg:grid lg:grid-cols-[180px_minmax(420px,1fr)_240px] gap-4 h-full lg:min-w-[920px]"
+              className="flex flex-col lg:grid lg:grid-cols-[minmax(420px,1fr)_280px] gap-4 h-full lg:min-w-[720px]"
             >
-              {/* Left: Pickup */}
-              <div className="space-y-4 h-full overflow-y-auto pr-1">
-                <Card className="border-yellow-400 bg-gradient-to-br from-yellow-50 to-orange-50 overflow-hidden">
-                  <div className="bg-gradient-to-r from-yellow-400 to-orange-400 text-white text-xs font-bold py-1.5 px-3 text-center">
-                    ピックアップ中！
-                  </div>
-                  <CardContent className="p-4">
-                    <div className="w-full aspect-square rounded-lg bg-gradient-to-br from-[var(--yuuko-green)] to-emerald-400 mb-3 flex items-center justify-center shadow-inner" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" className="w-16 h-16 text-white/90" fill="currentColor">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
-                      </svg>
-                    </div>
-                    <div className="text-center">
-                      <p className="font-bold text-base text-foreground">{pickup.name}</p>
-                      <p className="text-sm text-orange-600 font-medium">{pickup.description}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{pickup.period}</p>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
               {/* Center: Gacha Animation Area */}
-              <Card className="overflow-hidden relative h-full">
+              <Card className="overflow-hidden relative h-full min-h-[420px]">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Background decorations */}
                   <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
@@ -530,168 +635,139 @@ export default function GachaScreen({
                   </div>
 
                   {/* Gacha Machine */}
-                  <div className="absolute bottom-20 left-12">
+                  <div className="absolute bottom-24 left-12">
                     <GachaMachine />
                   </div>
 
                   {/* Yuuko Character */}
-                  <div className="absolute bottom-16 left-1/2 -translate-x-1/2">
+                  <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
                     <YuukoCharacter />
                   </div>
                 </div>
 
-                {/* Gacha Buttons */}
+                {/* Gacha Button（1回引く・1個もらえる。かけら不足・コンプリート・抽選中は押せない） */}
                 <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-white via-white/95 to-transparent">
-                  <div className="flex items-center justify-center gap-6">
-                    {gachaButtons.map((btn) => (
-                      <div key={btn.id} className="relative">
-                        {btn.guaranteedText && (
-                          <Badge className="absolute -top-4 left-1/2 -translate-x-1/2 bg-red-500 text-white text-[10px] whitespace-nowrap z-10 px-2 py-0.5">
-                            {btn.guaranteedText}
-                          </Badge>
-                        )}
-                        <Button
-                          className={`h-16 px-10 text-lg font-bold rounded-xl ${
-                            btn.id === "ten"
-                              ? "bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white shadow-lg"
-                              : "bg-white border-2 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-                          }`}
-                          onClick={() => handleDrawGacha(btn.id)}
-                        >
-                          <span className="flex flex-col items-center gap-0.5">
-                            <span>{btn.label}</span>
-                            <span className="flex items-center gap-1 text-sm font-medium">
-                              <Star className={`w-4 h-4 ${btn.id === "ten" ? "text-yellow-300 fill-yellow-300" : "text-yellow-500 fill-yellow-500"}`} aria-hidden="true" />
-                              {btn.cost.toLocaleString()}
-                            </span>
-                          </span>
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex items-center justify-between mt-2 px-4">
-                    <div className="text-xs text-muted-foreground">
-                      <span className="text-[var(--yuuko-green)] font-medium">{gachaState.dailyDiscountText}</span>
-                      <br />
-                      <span>{gachaState.resetText}</span>
-                    </div>
+                  <div className="flex items-center justify-center">
                     <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-xs"
-                      onClick={handleViewRates}
+                      className="h-16 px-10 text-lg font-bold rounded-xl bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white shadow-lg"
+                      onClick={() => void handleDraw()}
+                      disabled={!canPressDraw}
+                      aria-busy={isDrawing}
                     >
-                      提供割合
+                      <span className="flex flex-col items-center gap-0.5">
+                        <span>{isDrawing ? "まわしています…" : "1回まわす"}</span>
+                        {isReady && (
+                          <span className="flex items-center gap-1 text-sm font-medium">
+                            <Star className="w-4 h-4 text-yellow-300 fill-yellow-300" aria-hidden="true" />
+                            {gacha.cost.toLocaleString()}
+                          </span>
+                        )}
+                      </span>
                     </Button>
                   </div>
+                  <p
+                    role="status"
+                    className="mt-2 min-h-4 text-center text-xs text-muted-foreground"
+                    data-testid="gacha-status-message"
+                  >
+                    {statusMessage}
+                  </p>
                 </div>
               </Card>
 
-              {/* Right: Lineup & History */}
-              <div className="flex flex-col gap-4 h-full overflow-y-auto pr-1">
-                {/* Lineup */}
-                <Card className="shrink-0 overflow-hidden flex flex-col">
-                  <CardHeader className="p-3 pb-2 shrink-0">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium">排出ラインナップ</CardTitle>
-                      <Button variant="outline" size="sm" className="text-[10px] h-6 px-2">
-                        レアリティ
+              {/* Right: Collection（D80。未所持は「？」、残り数を出す） */}
+              <Card className="flex flex-col overflow-hidden h-full min-h-[240px]">
+                <CardHeader className="p-3 pb-2 shrink-0">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm font-medium">コレクション</CardTitle>
+                    {isReady && (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        data-testid="gacha-collection-count"
+                      >
+                        {gacha.ownedCount} / {gacha.totalCount}
+                      </span>
+                    )}
+                  </div>
+                  {isReady && (
+                    <p
+                      className="text-xs text-[var(--yuuko-green)] font-medium"
+                      data-testid="gacha-collection-remaining"
+                    >
+                      {gacha.isComplete ? "コンプリート！" : `のこり ${remainingCount}`}
+                    </p>
+                  )}
+                </CardHeader>
+                <CardContent className="p-3 pt-0 flex-1 overflow-y-auto">
+                  {loadStatus === "loading" && (
+                    <p className="text-xs text-muted-foreground">読み込み中…</p>
+                  )}
+                  {loadStatus === "unavailable" && (
+                    <p className="text-xs text-muted-foreground">{UNAVAILABLE_MESSAGE}</p>
+                  )}
+                  {loadStatus === "error" && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">{LOAD_ERROR_MESSAGE}</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => void loadState()}
+                      >
+                        もう一度読み込む
                       </Button>
                     </div>
-                  </CardHeader>
-                  <CardContent className="p-3 pt-0 flex-1">
-                    <div className="space-y-2">
-                      {lineup.map((item) => (
-                        <div
-                          key={item.id}
-                          className="flex items-center gap-2 py-2 border-b border-border/50 last:border-0"
-                        >
-                          <div className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-muted-foreground shrink-0">
-                            {item.icon}
-                          </div>
-                          <span className="flex-1 text-sm font-medium">{item.name}</span>
-                          <StarRating rating={item.rarity} />
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                  <div className="px-3 pb-2 text-[10px] text-muted-foreground shrink-0">
-                    ※各アイテムは重複して獲得することがあります。
-                  </div>
-                </Card>
-
-                {/* Recent Results */}
-                <Card className="shrink-0">
-                  <CardHeader className="p-3 pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium">最近の獲得履歴</CardTitle>
-                      <button
-                        className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-0.5"
-                        onClick={handleViewAllResults}
-                      >
-                        すべて見る
-                        <ChevronRight className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="p-3 pt-0 space-y-2">
-                    {recentResults.map((result, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className="text-muted-foreground w-10">{result.time}</span>
-                        {result.icon}
-                        <span className="flex-1 truncate">{result.name}</span>
-                        <StarRating rating={result.rarity} />
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </div>
+                  )}
+                  {isReady && (
+                    <ul className="grid grid-cols-3 gap-2" aria-label="コレクション一覧">
+                      {gacha.items.map((item) => {
+                        if (!item.owned || item.name === null) {
+                          return (
+                            <li
+                              key={item.itemId}
+                              className="aspect-square rounded-lg border border-dashed border-border bg-muted/40 flex items-center justify-center text-xl font-bold text-muted-foreground"
+                              data-testid="gacha-collection-unowned"
+                            >
+                              <span aria-hidden="true">？</span>
+                              <span className="sr-only">まだ持っていないもの</span>
+                            </li>
+                          );
+                        }
+                        const KindIcon = KIND_ICONS[item.kind];
+                        const name = item.name;
+                        return (
+                          <li key={item.itemId} data-testid="gacha-collection-owned">
+                            <button
+                              type="button"
+                              className="relative w-full aspect-square rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 p-1 flex flex-col items-center justify-center gap-1 hover:bg-[var(--yuuko-green-light)] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+                              aria-label={`${name}（${KIND_LABELS[item.kind]}）${item.isNew ? " NEW" : ""}`}
+                              onClick={() => {
+                                handleOpenCollectionItem({
+                                  itemId: item.itemId,
+                                  kind: item.kind,
+                                  name,
+                                  text: item.text,
+                                });
+                              }}
+                            >
+                              {item.isNew && (
+                                <Badge className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] px-1 py-0">
+                                  NEW
+                                </Badge>
+                              )}
+                              <KindIcon className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                              <span className="w-full truncate text-center text-[10px] font-medium">
+                                {name}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
             </div>
-          </div>
-
-          {/* Bottom Section */}
-          <div className="px-4 pb-2 space-y-2 shrink-0">
-            {/* Rank Bonus Card */}
-            <Card className="bg-gradient-to-r from-[var(--yuuko-green-light)] to-white border-[var(--yuuko-green)]/20 shadow-none">
-              <CardContent className="p-3 flex items-center gap-6">
-                <div className="flex items-center gap-4 shrink-0">
-                  <div className="w-12 h-12 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
-                    <Clover className="w-6 h-6 text-white" />
-                  </div>
-                  <div>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-sm text-muted-foreground">なかよしランク</span>
-                      <span className="text-3xl font-bold text-[var(--yuuko-green)]">{gachaState.friendshipRank}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>つぎのランクまで</span>
-                      <span className="font-medium text-foreground">{gachaState.currentPoints} / {gachaState.nextRankPoints}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <Progress value={progressPercent} className="h-3 bg-[var(--yuuko-green)]/20" />
-                </div>
-                <div className="flex items-center gap-4 shrink-0">
-                  <div className="flex items-center gap-3">
-                    <Rainbow className="w-6 h-6 text-pink-400" />
-                    <div className="text-sm">
-                      <p className="font-medium text-foreground">ランクが上がるとガチャボーナス！</p>
-                      <p className="text-xs text-muted-foreground">{gachaState.bonusText}</p>
-                    </div>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs gap-1.5"
-                    onClick={handleViewRankRewards}
-                  >
-                    <Gift className="w-4 h-4" />
-                    ランク報酬を確認する
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
           </div>
         </main>
       </div>
@@ -718,6 +794,8 @@ export default function GachaScreen({
           </div>
         </div>
       </footer>
+
+      <GachaItemDialog item={dialogItem} heading={dialogHeading} onClose={handleCloseDialog} />
     </div>
   );
 }
