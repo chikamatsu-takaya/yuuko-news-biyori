@@ -24,6 +24,10 @@ export type DictionaryEntryListItemDto = {
   relatedArticleId?: string;
   relatedArticleTitle?: string;
   lastViewedAtText?: string;
+  // 作成日時（UNIX秒の文字列）。旧データで無い場合は null / 未定義。
+  createdAtText?: string;
+  // 参照回数。旧データで欠けている場合は 0 または未定義。
+  referenceCount?: number;
   memo?: string;
   isStarred: boolean;
 };
