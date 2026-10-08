@@ -112,6 +112,8 @@ export function ArchiveManagePanel() {
         "Failed to list archive months via tauri command:",
         consoleErrorKind(error)
       );
+      // 古い一覧を残すと削除済みの月が押せてしまうため、読み込めなかったときは一覧を消す。
+      setMonths([]);
       setListState("error");
     }
   }, []);
@@ -286,7 +288,7 @@ export function ArchiveManagePanel() {
             </div>
           )}
 
-          {months.length > 0 && (
+          {listState === "loaded" && months.length > 0 && (
             <ul
               className="divide-y divide-border rounded-lg border border-border"
               data-testid="archive-manage-list"
@@ -329,9 +331,10 @@ export function ArchiveManagePanel() {
             </ul>
           )}
 
+          {/* 失敗はすぐ伝わるよう alert、成功・案内は控えめな status にする。 */}
           <div
-            role="status"
-            aria-live="polite"
+            role={outcome?.kind === "error" ? "alert" : "status"}
+            aria-live={outcome?.kind === "error" ? "assertive" : "polite"}
             data-testid="archive-manage-status"
           >
             {outcome && (

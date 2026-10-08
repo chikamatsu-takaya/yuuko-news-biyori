@@ -3034,10 +3034,32 @@ test("settings archive management shows fixed wording when a month cannot be del
   await expect(page.getByTestId("archive-manage-status")).toHaveText(
     "この月はまだ削除できないよ。お気に入りの記事がアーカイブにだけ残っている月は、消えないように削除を止めているよ。"
   );
+  await expect(page.getByTestId("archive-manage-status")).toHaveAttribute("role", "alert");
   await expect(page.getByTestId("archive-delete-confirm-dialog")).toHaveCount(0);
   await expect(page.getByText(/secret|validation error/)).toHaveCount(0);
   expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toBeUndefined();
   await expect(page.getByTestId("archive-month-2026-07")).toBeVisible();
+});
+
+test("settings archive management hides stale months when the reload after delete fails", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年6月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年6月のアーカイブ（8件）を削除したよ。"
+  );
+  await expect(page.getByTestId("archive-manage-status")).toHaveAttribute("role", "status");
+  await expect(page.getByTestId("archive-manage-list-error")).toBeVisible();
+  await expect(page.getByTestId("archive-manage-list")).toHaveCount(0);
+  await expect(page.getByText(/secret/)).toHaveCount(0);
 });
 
 test("settings archive management shows an empty state without archives", async ({
@@ -6491,6 +6513,12 @@ async function installTauriMocks(page: Page) {
           case "list_archive_months": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const archiveWin = window as any;
+            if (
+              archiveWin.__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ &&
+              archiveWin.__E2E_ARCHIVE_DELETE_CALLS__
+            ) {
+              throw { code: "IO_ERROR", message: "failed to read C:/secret/archive_index.json" };
+            }
             if (!archiveWin.__E2E_ARCHIVE_MONTHS__) {
               archiveWin.__E2E_ARCHIVE_MONTHS__ = [
                 {
