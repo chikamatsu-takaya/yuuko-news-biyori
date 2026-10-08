@@ -16,6 +16,15 @@ impl CommandError {
             message: message.into(),
         }
     }
+
+    /// spawn_blocking 等のバックグラウンド処理の合流失敗を、固定文言の JOIN_ERROR にする。
+    ///
+    /// JoinError にはパニック時のメッセージ等の内部詳細が入り得るため、画面へは返さず
+    /// debug ログにだけ残す（§5.5 / §16.3）。`label` はログで処理を特定するためだけに使う。
+    pub fn join_error(label: &str, error: impl std::fmt::Display) -> Self {
+        log::debug!("command error JOIN_ERROR ({label}): {error}");
+        Self::new("JOIN_ERROR", "background task failed")
+    }
 }
 
 pub type CommandResult<T> = Result<T, CommandError>;
@@ -192,6 +201,19 @@ mod tests {
         assert_eq!(error.message, "failed to read or write JSON data");
         assert!(!error.message.contains("line"));
         assert!(!error.message.contains("secret-content"));
+    }
+
+    #[test]
+    fn join_error_hides_task_detail() {
+        let error = CommandError::join_error(
+            "article-detail",
+            r#"task 42 panicked with message "failed at C:\data\article-123.md""#,
+        );
+        assert_eq!(error.code, "JOIN_ERROR");
+        assert_eq!(error.message, "background task failed");
+        assert!(!error.message.contains("panicked"));
+        assert!(!error.message.contains("article-123"));
+        assert!(!error.message.contains("article-detail"));
     }
 
     #[test]

@@ -16,11 +16,6 @@ pub async fn get_reward_state(state: State<'_, AppState>) -> CommandResult<Rewar
     let reward_service = state.reward_service.clone();
     tauri::async_runtime::spawn_blocking(move || reward_service.get_reward_state())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join get-reward-state task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("get-reward-state", error))?
         .map_err(CommandError::from)
 }
