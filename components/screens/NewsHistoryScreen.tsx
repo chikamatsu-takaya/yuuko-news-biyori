@@ -418,6 +418,8 @@ function HistoryItemCard({
           </div>
           <div className="flex items-center gap-1.5">
             <Star
+              role="img"
+              aria-label={item.isFavorite ? "お気に入り登録済み" : "お気に入り未登録"}
               className={`w-4 h-4 ${
                 item.isFavorite ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground/40"
               }`}
@@ -566,11 +568,14 @@ export default function NewsHistoryScreen({
     onNavigate?.("news");
   };
 
-  const handleRemoveFavorite = async () => {
-    if (!selectedItem?.isFavorite || isLoading || favoriteUpdateInFlightRef.current) {
+  // 詳細パネルのお気に入り登録/解除。Rust の更新結果を確認してから一覧・選択中の記事へ反映する
+  // （楽観更新はしない）。失敗時は状態を変えないため、表示は自動的に変更前のままになる。
+  const handleToggleFavorite = async () => {
+    if (!selectedItem || isLoading || favoriteUpdateInFlightRef.current) {
       return;
     }
 
+    const nextIsFavorite = !selectedItem.isFavorite;
     favoriteUpdateInFlightRef.current = true;
     historyRequestRef.current += 1;
     setFavoriteUpdatingArticleId(selectedItem.id);
@@ -579,10 +584,11 @@ export default function NewsHistoryScreen({
     try {
       const result = await updateArticleFavorite({
         articleId: selectedItem.id,
-        isFavorite: false,
+        isFavorite: nextIsFavorite,
       });
       setHistoryItems((items) =>
-        activeFilter === "favorite"
+        // 「お気に入り」フィルタ中に解除した記事は、条件に合わなくなるので一覧から外す（従来どおり）。
+        activeFilter === "favorite" && !result.isFavorite
           ? items.filter((item) => item.id !== result.articleId)
           : items.map((item) =>
               item.id === result.articleId
@@ -591,9 +597,14 @@ export default function NewsHistoryScreen({
             )
       );
     } catch (error) {
-      setLoadNotice("お気に入りの解除に失敗しました。もう一度お試しください。");
+      // 生のエラー文言は画面へ出さず、固定文言だけを案内する。
+      setLoadNotice(
+        nextIsFavorite
+          ? "お気に入りの登録に失敗しました。もう一度お試しください。"
+          : "お気に入りの解除に失敗しました。もう一度お試しください。"
+      );
       setLoadNoticeKind("error");
-      console.warn("Failed to remove article favorite:", error);
+      console.warn("Failed to update article favorite:", error);
     } finally {
       favoriteUpdateInFlightRef.current = false;
       setFavoriteUpdatingArticleId(null);
@@ -882,11 +893,21 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     className="w-full gap-2"
-                    onClick={() => void handleRemoveFavorite()}
-                    disabled={!selectedItem.isFavorite || isLoading || favoriteUpdatingArticleId !== null}
+                    onClick={() => void handleToggleFavorite()}
+                    disabled={isLoading || favoriteUpdatingArticleId !== null}
                   >
-                    <Star className="w-4 h-4" aria-hidden="true" />
-                    {favoriteUpdatingArticleId !== null ? "解除中..." : "お気に入り解除"}
+                    <Star
+                      className={`w-4 h-4 ${selectedItem.isFavorite ? "fill-yellow-400 text-yellow-400" : ""}`}
+                      aria-hidden="true"
+                    />
+                    {/* 現在の状態に応じて「登録」/「解除」を切り替える（ラベル自体で操作が分かるため aria-pressed は使わない） */}
+                    {favoriteUpdatingArticleId !== null
+                      ? selectedItem.isFavorite
+                        ? "解除中..."
+                        : "登録中..."
+                      : selectedItem.isFavorite
+                        ? "お気に入り解除"
+                        : "お気に入り登録"}
                   </Button>
                   <Button
                     variant="outline"
