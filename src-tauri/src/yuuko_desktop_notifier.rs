@@ -8,6 +8,8 @@
 //!   判定を行わず、ゆうこ用ウィンドウを隠すだけにして二重通知を防ぐ。
 //! - 判定は保存済みの設定・状態・記事一覧の読み込みだけで、HTML取得や AI 呼び出しは行わない。
 //! - ゆうこ用ウィンドウの生成は Windows の同期 command デッドロックを避けるため、本スレッドからだけ行う。
+//! - 本スレッドはメインの表示状態に関係なく回り続けるため、各周期の心拍をスリープ復帰の検知に使う
+//!   （設計書 §5.2 / §5.4。domain::resume_grace）。OS の電源イベントは使わない。
 
 use std::time::Duration;
 
@@ -159,12 +161,18 @@ fn desktop_notification_from_state(
 }
 
 /// 判定スレッドを開始する。起動直後はメインが表示中のため、最初の判定は1周期待ってから行う。
+///
+/// 各周期の最初にスリープ復帰を検知し（前回の心拍から想定より大幅に時間が空いていたら復帰とみなす）、
+/// 周期の最後に次の待ち時間を心拍として記録する。判定処理そのものにかかった時間は空白に含めない。
 pub fn start<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
     std::thread::spawn(move || {
         let mut delay = CHECK_INTERVAL;
+        yuuko_service.record_notifier_heartbeat(delay);
         loop {
             std::thread::sleep(delay);
+            yuuko_service.observe_resume();
             delay = tick(&app, &yuuko_service);
+            yuuko_service.record_notifier_heartbeat(delay);
         }
     });
 }
@@ -190,12 +198,12 @@ fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duratio
 /// 判定結果の理由から次の判定までの待ち時間を決める。
 ///
 /// - 全画面・プレゼン中: 解除をすぐ検知できるよう短い間隔で再確認する。
-/// - 解除後の猶予中: 猶予が明けた直後に判定する（境界での取りこぼしを避けるため 1 秒足す）。
+/// - 全画面解除後・スリープ復帰後の猶予中: 猶予が明けた直後に判定する（境界での取りこぼしを避けるため 1 秒足す）。
 /// - それ以外: 通常間隔。
 fn next_check_delay(reason: &str, grace_remaining: Option<Duration>) -> Duration {
     match reason {
         "fullscreen" => FULLSCREEN_RECHECK_INTERVAL,
-        "fullscreen_grace" => grace_remaining
+        "fullscreen_grace" | "resume_grace" => grace_remaining
             .map(|remaining| (remaining + Duration::from_secs(1)).min(CHECK_INTERVAL))
             .unwrap_or(FULLSCREEN_RECHECK_INTERVAL),
         _ => CHECK_INTERVAL,
@@ -213,7 +221,10 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -
     // 出すものが無いときは、出し直し用の全画面判定（猶予の記録を余計に動かさない）も
     // 記事の読み込み（短い要約）も行わず、理由に応じた間隔だけ返す。
     if desktop_notification_from(&result).is_none() {
-        return next_check_delay(&result.reason, yuuko_service.fullscreen_grace_remaining());
+        return next_check_delay(
+            &result.reason,
+            grace_remaining_for(yuuko_service, &result.reason),
+        );
     }
     // already_active は全画面判定より先に返る理由なので、出し直す前にここで全画面判定を通す。
     let redisplay_block = if result.notified {
@@ -221,15 +232,21 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -
     } else {
         redisplay_block_reason(yuuko_service.fullscreen_gate_for_redisplay())
     };
-    let next_delay = next_check_delay(
-        redisplay_block.unwrap_or(result.reason.as_str()),
-        yuuko_service.fullscreen_grace_remaining(),
-    );
+    let reason = redisplay_block.unwrap_or(result.reason.as_str());
+    let next_delay = next_check_delay(reason, grace_remaining_for(yuuko_service, reason));
     // 全画面で止めた場合は表示しないため、要約のための記事読み込みも行わない。
     if redisplay_block.is_none() {
         present_if_needed(app, yuuko_service, &mut result);
     }
     next_delay
+}
+
+/// 理由に対応する猶予の残り時間（次回判定の間隔用）。
+fn grace_remaining_for(yuuko_service: &YuukoService, reason: &str) -> Option<Duration> {
+    match reason {
+        "resume_grace" => yuuko_service.resume_grace_remaining(),
+        _ => yuuko_service.fullscreen_grace_remaining(),
+    }
 }
 
 /// 出し直しを止める場合、その理由を request の理由と同じ名前で返す（次回判定の間隔にも使う）。
@@ -483,6 +500,18 @@ mod tests {
         // 猶予の残りが取れない場合も通常間隔まで待たない。
         assert_eq!(
             next_check_delay("fullscreen_grace", None),
+            FULLSCREEN_RECHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn resume_grace_rechecks_right_after_grace_ends() {
+        assert_eq!(
+            next_check_delay("resume_grace", Some(Duration::from_secs(40))),
+            Duration::from_secs(41)
+        );
+        assert_eq!(
+            next_check_delay("resume_grace", None),
             FULLSCREEN_RECHECK_INTERVAL
         );
     }

@@ -96,7 +96,9 @@ export type NotificationReason =
   | "outside_time_range"
   // 全画面・プレゼン中（設計書 §5.2）/ 解除後 30〜180 秒の猶予中（§5.4）。
   | "fullscreen"
-  | "fullscreen_grace";
+  | "fullscreen_grace"
+  // PCスリープ復帰後 30〜180 秒の猶予中（§5.2 / §5.4）。fullscreen_grace と同じく通知しない。
+  | "resume_grace";
 
 export type RequestYuukoNotificationResult = {
   notified: boolean;
