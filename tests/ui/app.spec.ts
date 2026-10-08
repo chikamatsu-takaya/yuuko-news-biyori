@@ -5076,6 +5076,27 @@ test("onboarding overlay is not shown for completed or legacy settings", async (
   expect(await readSavedSettingsRecord(page)).toBeUndefined();
 });
 
+// D31 / D84: 自動起動は初期値 OFF のまま、ON を勧める一言をスイッチの説明として出す。
+test("onboarding overlay recommends autostart while keeping it off by default", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  const autostartSwitch = dialog.getByRole("switch", {
+    name: "PC起動時の自動起動",
+  });
+  await expect(autostartSwitch).toHaveAttribute("aria-checked", "false");
+  await expect(
+    dialog.getByText("ONにしておくと、PCを起動したときにゆうこがすぐ来てくれるよ")
+  ).toBeVisible();
+  await expect(autostartSwitch).toHaveAccessibleDescription(
+    "ONにしておくと、PCを起動したときにゆうこがすぐ来てくれるよ"
+  );
+});
+
 test("onboarding overlay autostart opt-in calls set_autostart_enabled", async ({
   page,
 }) => {
