@@ -2,6 +2,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
+// 入力値の上限（セキュリティ詳細設計書 §15.2 / §15.3）。
+// 既存の保存データを読めなくしないよう、これらの検証は保存時（validate）だけで行い、読み込み時には行わない。
+/// 呼び名の最大文字数（lib/settings-options.ts の NICKNAME_MAX_LENGTH と一致）。
+const NICKNAME_MAX_CHARS: usize = 32;
+/// 関心ジャンルの最大件数。画面の選択肢は7件だが、将来の追加に余裕を持たせた従来値を維持する。
+const GENRES_MAX_ITEMS: usize = 20;
+/// 関心ジャンル1件の最大文字数。選択肢は短いラベル（最長「セキュリティ」6文字）なので、呼び名と同じ32に揃える。
+const GENRE_MAX_CHARS: usize = 32;
+/// 通知を抑止するアプリの最大件数。手動管理する一覧として十分な量に絞り、判定時の走査負荷を抑える。
+const SUPPRESSED_APPS_MAX_ITEMS: usize = 50;
+/// 抑止アプリ1件の最大文字数。実行ファイルのフルパス指定を想定し、Windows の MAX_PATH（260）に合わせる。
+const SUPPRESSED_APP_MAX_CHARS: usize = 260;
+
+/// 改行・タブを含むすべての制御文字を含むかを判定する（1行のラベル・名前向け）。
+fn contains_control_char(text: &str) -> bool {
+    text.chars().any(char::is_control)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
@@ -142,7 +160,7 @@ impl UserSettingsDto {
             ));
         }
 
-        if self.genres.len() > 20 {
+        if self.genres.len() > GENRES_MAX_ITEMS {
             return Err(AppError::Validation(
                 "genres must contain 20 items or fewer".to_string(),
             ));
@@ -154,9 +172,33 @@ impl UserSettingsDto {
             ));
         }
 
-        if self.nickname.chars().count() > 32 {
+        if self
+            .genres
+            .iter()
+            .any(|genre| genre.chars().count() > GENRE_MAX_CHARS)
+        {
+            return Err(AppError::Validation(
+                "each genre must be 32 characters or fewer".to_string(),
+            ));
+        }
+
+        // ジャンルは1行のラベルとして表示・保存するため、改行・タブを含む全制御文字を拒否する。
+        if self.genres.iter().any(|genre| contains_control_char(genre)) {
+            return Err(AppError::Validation(
+                "genres must not contain control characters".to_string(),
+            ));
+        }
+
+        if self.nickname.chars().count() > NICKNAME_MAX_CHARS {
             return Err(AppError::Validation(
                 "nickname must be 32 characters or fewer".to_string(),
+            ));
+        }
+
+        // 呼び名はゆうこの台詞に1行で埋め込むため、改行・タブも含めて制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
+        if contains_control_char(&self.nickname) {
+            return Err(AppError::Validation(
+                "nickname must not contain control characters".to_string(),
             ));
         }
 
@@ -332,6 +374,43 @@ impl Default for NotificationSettings {
             suppress_during_meeting: true,
             suppressed_apps: vec![],
         }
+    }
+}
+
+impl NotificationSettings {
+    /// 通知を抑止するアプリ一覧の保存前検証（件数・1件の文字数・空値・制御文字）。
+    /// 現時点では抑止アプリを編集する入力経路（DTO / Tauri command）が無いため未配線。
+    /// 入力経路を追加するときは、保存前にこれを呼ぶ。読み込み時には呼ばない（既存データを読めなくしないため）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn validate_suppressed_apps(apps: &[String]) -> Result<(), AppError> {
+        if apps.len() > SUPPRESSED_APPS_MAX_ITEMS {
+            return Err(AppError::Validation(
+                "suppressedApps must contain 50 items or fewer".to_string(),
+            ));
+        }
+
+        if apps.iter().any(|app| app.trim().is_empty()) {
+            return Err(AppError::Validation(
+                "suppressedApps must not contain empty values".to_string(),
+            ));
+        }
+
+        if apps
+            .iter()
+            .any(|app| app.chars().count() > SUPPRESSED_APP_MAX_CHARS)
+        {
+            return Err(AppError::Validation(
+                "each suppressedApps item must be 260 characters or fewer".to_string(),
+            ));
+        }
+
+        if apps.iter().any(|app| contains_control_char(app)) {
+            return Err(AppError::Validation(
+                "suppressedApps must not contain control characters".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -858,5 +937,148 @@ mod tests {
         assert_eq!(settings.notification.work_time_ranges.len(), 1);
         assert_eq!(settings.notification.work_time_ranges[0].start, "10:00");
         assert_eq!(settings.notification.work_time_ranges[0].end, "16:00");
+    }
+
+    fn validation_message(result: Result<(), AppError>) -> String {
+        match result {
+            Err(AppError::Validation(message)) => message,
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nickname_with_any_control_char() {
+        for nickname in [
+            "ゆう\nこ",
+            "ゆう\rこ",
+            "ゆう\tこ",
+            "ゆう\u{1b}[31mこ",
+            "\u{0}",
+            "\u{7f}",
+        ] {
+            let dto = UserSettingsDto {
+                nickname: nickname.to_string(),
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, "nickname must not contain control characters");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_plain_nickname_up_to_limit() {
+        let dto = UserSettingsDto {
+            nickname: "あ".repeat(NICKNAME_MAX_CHARS),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_ok());
+
+        let dto = UserSettingsDto {
+            nickname: "あ".repeat(NICKNAME_MAX_CHARS + 1),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validate_limits_genre_length_and_count() {
+        let dto = UserSettingsDto {
+            genres: vec!["あ".repeat(GENRE_MAX_CHARS)],
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_ok());
+
+        let secret = format!("秘密{}", "あ".repeat(GENRE_MAX_CHARS));
+        let dto = UserSettingsDto {
+            genres: vec!["AI".to_string(), secret.clone()],
+            ..UserSettingsDto::default()
+        };
+        let message = validation_message(dto.validate());
+        assert_eq!(message, "each genre must be 32 characters or fewer");
+        assert!(!message.contains("秘密"));
+
+        let dto = UserSettingsDto {
+            genres: (0..=GENRES_MAX_ITEMS).map(|i| format!("g{i}")).collect(),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_genre_with_control_char() {
+        for genre in ["A\nI", "A\tI", "A\u{1b}I"] {
+            let dto = UserSettingsDto {
+                genres: vec![genre.to_string()],
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, "genres must not contain control characters");
+        }
+    }
+
+    #[test]
+    fn legacy_settings_violating_new_rules_still_load() {
+        // 新しい制限より前に保存された値でも読み込み（get）は失敗させない。検証は保存時だけ。
+        let legacy = format!(
+            r#"{{
+                "version": 1,
+                "user": {{ "nickname": "ゆう\nこ" }},
+                "news": {{ "categories": ["{}"] }},
+                "notification": {{ "suppressedApps": ["{}"] }}
+            }}"#,
+            "あ".repeat(GENRE_MAX_CHARS + 1),
+            "a".repeat(SUPPRESSED_APP_MAX_CHARS + 1)
+        );
+
+        let mut settings: PersistedSettings = serde_json::from_str(&legacy).unwrap();
+        settings.normalize_after_load();
+        let dto = settings.to_dto();
+
+        assert_eq!(dto.nickname, "ゆう\nこ");
+        assert_eq!(settings.notification.suppressed_apps.len(), 1);
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn suppressed_apps_accept_values_within_limits() {
+        let apps: Vec<String> = (0..SUPPRESSED_APPS_MAX_ITEMS)
+            .map(|i| format!(r"C:\Apps\app{i}.exe"))
+            .collect();
+        assert!(NotificationSettings::validate_suppressed_apps(&apps).is_ok());
+        assert!(NotificationSettings::validate_suppressed_apps(&[
+            "a".repeat(SUPPRESSED_APP_MAX_CHARS)
+        ])
+        .is_ok());
+        assert!(NotificationSettings::validate_suppressed_apps(&[]).is_ok());
+    }
+
+    #[test]
+    fn suppressed_apps_reject_values_over_limits() {
+        let too_many: Vec<String> = (0..=SUPPRESSED_APPS_MAX_ITEMS)
+            .map(|i| format!("app{i}.exe"))
+            .collect();
+        assert_eq!(
+            validation_message(NotificationSettings::validate_suppressed_apps(&too_many)),
+            "suppressedApps must contain 50 items or fewer"
+        );
+
+        let too_long = format!("秘密{}", "a".repeat(SUPPRESSED_APP_MAX_CHARS));
+        let message =
+            validation_message(NotificationSettings::validate_suppressed_apps(&[too_long]));
+        assert_eq!(
+            message,
+            "each suppressedApps item must be 260 characters or fewer"
+        );
+        assert!(!message.contains("秘密"));
+
+        assert!(NotificationSettings::validate_suppressed_apps(&["  ".to_string()]).is_err());
+        for app in ["app\n.exe", "app\t.exe", "app\u{0}.exe"] {
+            assert_eq!(
+                validation_message(NotificationSettings::validate_suppressed_apps(&[
+                    app.to_string()
+                ])),
+                "suppressedApps must not contain control characters"
+            );
+        }
     }
 }
