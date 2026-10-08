@@ -16,7 +16,7 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::AiProviderService;
-use crate::util::text_safety::{contains_disallowed_control_char, contains_html_tag};
+use crate::util::text_safety::neutralize_html_and_control;
 
 /// DictionaryService が必要とする最小のAI呼び出し境界（辞書未命中時の用語解説生成のみ）。
 /// 本番は AiProviderService を注入し、テストは呼び出し回数を数えるダブルを注入する。
@@ -274,6 +274,7 @@ fn build_ai_context(article_title: &str, excerpt: Option<&str>) -> String {
 
 /// AI の単一文字列出力を、用語解説契約(JSON: short/detail)として **厳格に** 解析する（副作用なし）。
 /// 解析失敗・空フィールドは「AIから有効な解説を得られなかった」安全な内部エラーへ変換する。
+/// short/detail は `<` と制御文字（改行・タブ以外）を無害化し、trim した値で返す（拒否はしない）。
 /// 生の AI レスポンス本文・パス・秘密情報は公開エラーにもログにも載せない。
 /// 用語解説AI応答専用の上限（v1）。値だけで調整できる。
 /// 解析前に応答全体のバイト数、解析後に short/detail の Unicode 文字数を検証する。
@@ -297,9 +298,23 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
         AppError::Parse("ai term explanation could not be parsed".to_string())
     })?;
 
-    // 解析後: trim 済み short/detail の空判定。
-    let short = parsed.short.trim();
-    let detail = parsed.detail.trim();
+    // 解析後: 拒否せず無害化する（D62 / 詳細設計書 §12.5）。用語解説は `Vec<String>` のような
+    // 山括弧を含む語の説明が正当に出るため、要約と同じ基準（util::text_safety）で拒否すると
+    // Gemini 利用時に表示できない。`<` は全角 `＜` へ置換し、制御文字は改行・タブ以外を除去する
+    // （`\r` も除去されるが、表示上は `\n` だけで改行として足りる）。置換後は HTML タグとして解釈され得ず、
+    // React 側もテキストとして描画する。要約・再説明・感想は従来どおり拒否→Mock 切り替え（summary_service）。
+    // Markdown 見出し・区切り行は扱わない: 用語解説は辞書JSONの値として保存され、記事Markdownの
+    // セクションや front matter に埋め込まれないため、構造を壊す余地がない。
+    let short = neutralize_html_and_control(&parsed.short);
+    let detail = neutralize_html_and_control(&parsed.detail);
+    if short != parsed.short || detail != parsed.detail {
+        // 内容は出さず固定ラベルだけ残す（応答本文・選択語をログへ出さない）。
+        log::debug!("AI term explanation response was neutralized");
+    }
+
+    // 無害化後: trim 済み short/detail の空判定（制御文字だけの応答などはここで拒否される）。
+    let short = short.trim();
+    let detail = detail.trim();
     if short.is_empty() || detail.is_empty() {
         log::warn!("AI term explanation response was missing short or detail");
         return Err(AppError::Parse(
@@ -307,7 +322,8 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
         ));
     }
 
-    // 解析後: Unicode 文字数（バイト数ではない）で上限検証。超過は自動切り詰めせず拒否する。
+    // 無害化後: Unicode 文字数（バイト数ではない）で上限検証。超過は自動切り詰めせず拒否する。
+    // 無害化は文字を置換・除去するだけで文字数を増やさない。
     if short.chars().count() > TERM_EXPLANATION_SHORT_MAX_CHARS
         || detail.chars().count() > TERM_EXPLANATION_DETAIL_MAX_CHARS
     {
@@ -317,20 +333,10 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
         ));
     }
 
-    // 解析後: 要約と同じ基準（util::text_safety）で HTML タグらしき並び・制御文字（改行・タブ以外）を拒否する
-    // （詳細設計書 §12.5 / セキュリティ詳細設計書 §7.5）。他の不正応答と同じく加工せず拒否し、辞書へは保存しない。
-    // Markdown 見出し・区切り行は判定しない: 用語解説は辞書JSONの値として保存され、記事Markdownの
-    // セクションや front matter に埋め込まれないため、構造を壊す余地がない。
-    for field in [short, detail] {
-        if contains_html_tag(field) || contains_disallowed_control_char(field) {
-            log::warn!("AI term explanation response contained unsafe text");
-            return Err(AppError::Parse(
-                "ai term explanation contained unsafe text".to_string(),
-            ));
-        }
-    }
-
-    Ok(parsed)
+    Ok(AiTermExplanation {
+        short: short.to_string(),
+        detail: detail.to_string(),
+    })
 }
 
 /// AI 解析結果を既存 DictionaryEntryDto へ変換する（保存はしない・そのまま save_dictionary_entry へ渡せる）。
@@ -1143,31 +1149,45 @@ mod tests {
     }
 
     #[test]
-    fn explain_ai_unsafe_output_is_rejected_and_not_persisted() {
-        // AI が HTML・制御文字を含む解説を返した場合は既存の不正応答と同じ PARSE_ERROR にし、辞書へは保存しない。
-        for response in [
-            json_of("<script>alert(1)</script>", "詳しい説明"),
-            json_of("短い説明", "詳しい説明</p>"),
-            json_of("短い\u{1b}[31m説明", "詳しい説明"),
-            json_of("短い説明", "詳しい\u{0}説明"),
+    fn explain_ai_unsafe_output_is_neutralized_and_returned() {
+        // AI が HTML タグらしき並び・制御文字を含む解説を返しても拒否せず、`<` を `＜` へ置換し、
+        // 制御文字（改行・タブ以外）を除去して返す（D62 / 詳細設計書 §12.5）。
+        for (response, expected_short, expected_detail) in [
+            (
+                json_of("<script>alert(1)</script>", "詳しい説明"),
+                "＜script>alert(1)＜/script>",
+                "詳しい説明",
+            ),
+            (
+                json_of("短い説明", "詳しい説明</p>"),
+                "短い説明",
+                "詳しい説明＜/p>",
+            ),
+            (
+                json_of("短い\u{1b}[31m説明", "詳しい説明"),
+                "短い[31m説明",
+                "詳しい説明",
+            ),
+            (
+                json_of("短い説明", "詳しい\u{0}説明"),
+                "短い説明",
+                "詳しい説明",
+            ),
         ] {
             let context = build_service();
             context.ai.set_response_text(&response);
 
-            let error = context
+            let entry = context
                 .service
                 .explain_selected_term(ExplainSelectedTermParams {
                     article_id: REAL_ARTICLE_ID.to_string(),
                     selected_text: "新しい概念".to_string(),
                 })
-                .unwrap_err();
+                .unwrap();
 
-            let command_error = CommandError::from(error);
-            assert_eq!(command_error.code, "PARSE_ERROR");
-            // 応答本文・選択語を公開エラーへ含めない。
-            assert!(!command_error.message.contains("alert"));
-            assert!(!command_error.message.contains("新しい概念"));
-            // 再試行せず、辞書ストアも作らない。
+            assert_eq!(entry.short_explanation, expected_short);
+            assert_eq!(entry.detail_explanation, expected_detail);
+            // 再試行しない。生成だけでは辞書へ保存しない（保存は save_dictionary_entry で明示的に行う）。
             assert_eq!(context.ai.call_count(), 1);
             assert!(!context
                 .root_dir
@@ -1175,6 +1195,79 @@ mod tests {
                 .join("entries.json")
                 .exists());
         }
+    }
+
+    #[test]
+    fn explain_ai_output_empty_after_neutralize_is_rejected_and_not_persisted() {
+        // 無害化で空になる応答（制御文字・空白だけ）は従来どおり PARSE_ERROR にし、辞書へは保存しない。
+        let context = build_service();
+        context
+            .ai
+            .set_response_text(&json_of("\u{1b}\u{7}  ", "詳しい説明"));
+
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: "新しい概念".to_string(),
+            })
+            .unwrap_err();
+
+        let command_error = CommandError::from(error);
+        assert_eq!(command_error.code, "PARSE_ERROR");
+        assert!(!command_error.message.contains("新しい概念"));
+        assert_eq!(context.ai.call_count(), 1);
+        assert!(!context
+            .root_dir
+            .join("dictionary")
+            .join("entries.json")
+            .exists());
+    }
+
+    #[test]
+    fn explain_gemini_like_response_with_generic_type_is_displayed_and_savable() {
+        // Gemini 利用時を想定し、AI 境界（FakeAi）へ Gemini 成功時と同じ形の JSON 応答を注入する。
+        // `Vec<String>` のような山括弧を含む用語の解説も PARSE_ERROR にならず表示でき、そのまま保存できる。
+        let context = build_service();
+        context.ai.set_response_text(&json_of(
+            "Vec<String> は String を並べて持てる可変長の配列だよ。",
+            "Rust の Vec<T> は要素数を後から増やせる配列で、\nVec<String> なら文字列を順番に持てるよ。\r\n\t例: let v: Vec<String> = Vec::new();",
+        ));
+
+        let entry = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: "Vec<String>".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            entry.short_explanation,
+            "Vec＜String> は String を並べて持てる可変長の配列だよ。"
+        );
+        assert_eq!(
+            entry.detail_explanation,
+            "Rust の Vec＜T> は要素数を後から増やせる配列で、\nVec＜String> なら文字列を順番に持てるよ。\n\t例: let v: Vec＜String> = Vec::new();"
+        );
+        // 選択語（keyText）はユーザー選択表記のまま維持する（AI 出力だけを無害化する）。
+        assert_eq!(entry.key_text, "Vec<String>");
+        assert!(!crate::util::text_safety::contains_html_tag(
+            &entry.short_explanation
+        ));
+        assert!(!crate::util::text_safety::contains_html_tag(
+            &entry.detail_explanation
+        ));
+
+        // 無害化済みの解説は既存の保存経路へそのまま渡せる。
+        let saved = context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: entry.clone(),
+            })
+            .unwrap();
+        assert_eq!(saved.short_explanation, entry.short_explanation);
+        assert_eq!(saved.detail_explanation, entry.detail_explanation);
     }
 
     #[test]
@@ -1435,52 +1528,89 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_html_tag_in_short_or_detail() {
+    fn parse_neutralizes_html_tag_in_short_or_detail() {
+        // HTML タグらしき並びは拒否せず `<` を全角 `＜` へ置換して返す（D62）。
+        let parsed = parse(&json_of("<b>短い説明</b>", "詳しい<!-- x -->説明")).unwrap();
+        assert_eq!(parsed.short, "＜b>短い説明＜/b>");
+        assert_eq!(parsed.detail, "詳しい＜!-- x -->説明");
+
+        let parsed = parse(&json_of("Vec<String> の説明", "Vec<String> の詳しい説明")).unwrap();
+        assert_eq!(parsed.short, "Vec＜String> の説明");
+        assert_eq!(parsed.detail, "Vec＜String> の詳しい説明");
+        assert!(!crate::util::text_safety::contains_html_tag(&parsed.short));
+        assert!(!crate::util::text_safety::contains_html_tag(&parsed.detail));
+    }
+
+    #[test]
+    fn parse_removes_control_characters_in_short_or_detail() {
+        // 制御文字（改行・タブ以外）は除去して返す。`\r` も除去される（改行は `\n` だけで足りる）。
+        let parsed = parse(&json_of("短い\u{1b}説明", "詳しい\u{7f}説明\r\n次の行")).unwrap();
+        assert_eq!(parsed.short, "短い説明");
+        assert_eq!(parsed.detail, "詳しい説明\n次の行");
+        assert!(!crate::util::text_safety::contains_disallowed_control_char(
+            &parsed.short
+        ));
+        assert!(!crate::util::text_safety::contains_disallowed_control_char(
+            &parsed.detail
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_fields_empty_after_neutralize() {
+        // 無害化・trim 後に空になる場合は従来どおり PARSE_ERROR。
         assert_eq!(
-            parse_error_code(&json_of("<b>短い説明</b>", "詳しい説明")),
+            parse_error_code(&json_of("\u{1b}\u{0}", "詳しい説明")),
             "PARSE_ERROR"
         );
         assert_eq!(
-            parse_error_code(&json_of("短い説明", "詳しい<!-- x -->説明")),
-            "PARSE_ERROR"
-        );
-        assert_eq!(
-            parse_error_code(&json_of("短い説明", "Vec<String> の説明")),
+            parse_error_code(&json_of("短い説明", " \u{7}\r\n ")),
             "PARSE_ERROR"
         );
     }
 
     #[test]
-    fn parse_rejects_control_characters_in_short_or_detail() {
-        assert_eq!(
-            parse_error_code(&json_of("短い\u{1b}説明", "詳しい説明")),
-            "PARSE_ERROR"
+    fn parse_length_limit_still_applies_after_neutralize() {
+        // `<` の置換は文字数を変えないため、上限ちょうどは成功し、超過は従来どおり拒否する。
+        let ok = json_of(
+            &"<".repeat(super::TERM_EXPLANATION_SHORT_MAX_CHARS),
+            "詳しい説明",
         );
         assert_eq!(
-            parse_error_code(&json_of("短い説明", "詳しい\u{7f}説明")),
-            "PARSE_ERROR"
+            parse(&ok).unwrap().short,
+            "＜".repeat(super::TERM_EXPLANATION_SHORT_MAX_CHARS)
         );
+
+        let over = json_of(
+            "短い説明",
+            &"<".repeat(super::TERM_EXPLANATION_DETAIL_MAX_CHARS + 1),
+        );
+        assert_eq!(parse_error_code(&over), "PARSE_ERROR");
+
+        // 除去された制御文字は文字数に数えない（除去後に上限内なら成功）。
+        let with_controls = json_of(
+            &format!(
+                "{}\u{1b}\u{1b}",
+                "a".repeat(super::TERM_EXPLANATION_SHORT_MAX_CHARS)
+            ),
+            "詳しい説明",
+        );
+        assert!(parse(&with_controls).is_ok());
     }
 
     #[test]
     fn parse_accepts_newlines_tabs_comparisons_and_markdown_like_lines() {
-        // 改行・タブ・比較表現・全角括弧は従来どおり許可する。
+        // 改行・タブ・比較表現・全角括弧はそのまま残す。
         // 見出し・区切り行は辞書JSONの値として保存されるだけなので用語解説では判定しない。
         let parsed = parse(&json_of(
             "「生成AI」は 1 < 2 のように比べられる言葉だよ。",
             "一行目\n\t二行目\r\n# 見出し風\n---",
         ))
         .unwrap();
-        assert!(parsed.detail.contains("\t二行目"));
-    }
-
-    #[test]
-    fn parse_unsafe_text_error_does_not_leak_content() {
-        let text = json_of("<script>秘密の短文</script>", "詳しい説明");
-        let command_error = CommandError::from(parse(&text).unwrap_err());
-        assert_eq!(command_error.code, "PARSE_ERROR");
-        assert!(!command_error.message.contains("秘密の短文"));
-        assert!(!command_error.message.contains("<script>"));
+        assert_eq!(
+            parsed.short,
+            "「生成AI」は 1 ＜ 2 のように比べられる言葉だよ。"
+        );
+        assert_eq!(parsed.detail, "一行目\n\t二行目\n# 見出し風\n---");
     }
 
     #[test]
