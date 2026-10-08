@@ -13,6 +13,7 @@ pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
 pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
 pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
+pub const GACHA_STATE_RELATIVE_PATH: &str = "gacha/gacha_state.json";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -22,6 +23,7 @@ pub struct AppPaths {
     pub archive_maintenance_state_path: PathBuf,
     pub dictionary_path: PathBuf,
     pub friendship_path: PathBuf,
+    pub gacha_state_path: PathBuf,
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
     pub news_sources_path: PathBuf,
@@ -38,6 +40,7 @@ impl AppPaths {
             app_data_dir.join(ARCHIVE_MAINTENANCE_STATE_RELATIVE_PATH);
         let dictionary_path = app_data_dir.join(DICTIONARY_RELATIVE_PATH);
         let friendship_path = app_data_dir.join(FRIENDSHIP_RELATIVE_PATH);
+        let gacha_state_path = app_data_dir.join(GACHA_STATE_RELATIVE_PATH);
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
         let news_sources_path = app_data_dir.join(NEWS_SOURCES_RELATIVE_PATH);
@@ -51,6 +54,7 @@ impl AppPaths {
             archive_maintenance_state_path,
             dictionary_path,
             friendship_path,
+            gacha_state_path,
             network_allowlist_path,
             news_refresh_state_path,
             news_sources_path,
@@ -66,6 +70,7 @@ impl AppPaths {
         ensure_parent_dir(&self.archive_maintenance_state_path)?;
         ensure_parent_dir(&self.dictionary_path)?;
         ensure_parent_dir(&self.friendship_path)?;
+        ensure_parent_dir(&self.gacha_state_path)?;
         ensure_parent_dir(&self.network_allowlist_path)?;
         ensure_parent_dir(&self.news_refresh_state_path)?;
         ensure_parent_dir(&self.news_sources_path)?;

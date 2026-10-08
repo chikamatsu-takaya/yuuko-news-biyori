@@ -17,6 +17,7 @@ use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
 use repositories::friendship_repository::FriendshipRepository;
+use repositories::gacha_repository::GachaRepository;
 use repositories::reward_repository::RewardRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
@@ -25,6 +26,7 @@ use services::article_service::ArticleService;
 use services::auto_summary_queue::AutoSummaryQueue;
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
+use services::gacha_service::GachaService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
@@ -140,12 +142,15 @@ pub fn run() {
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
+            // ガチャ状態は画面から取得・実行されたときに読む（起動時には読まない）。
+            let gacha_service = GachaService::new(GachaRepository::new(&paths));
             app.manage(AppState {
                 ai_provider_service,
                 article_service,
                 auto_summary_queue: auto_summary_queue.clone(),
                 dictionary_service,
                 friendship_service,
+                gacha_service,
                 news_service,
                 reward_service,
                 settings_service,
@@ -204,7 +209,10 @@ pub fn run() {
             commands::yuuko_commands::mark_yuuko_ignored,
             commands::friendship_commands::get_friendship_state,
             commands::friendship_commands::record_friendship_event,
-            commands::reward_commands::get_reward_state
+            commands::reward_commands::get_reward_state,
+            commands::gacha_commands::get_gacha_state,
+            commands::gacha_commands::draw_gacha_once,
+            commands::gacha_commands::mark_gacha_items_seen
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
