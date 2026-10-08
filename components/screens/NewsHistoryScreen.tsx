@@ -11,6 +11,7 @@ import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   listArticleHistory,
+  restoreArchivedArticle,
   updateArticleFavorite,
   type ArticleHistoryFilter,
   type ArticleHistoryItemDto,
@@ -20,6 +21,16 @@ import {
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Home,
   Newspaper,
@@ -459,9 +470,27 @@ export default function NewsHistoryScreen({
   const historyRequestRef = React.useRef(0);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
-    // favorite-error はお気に入り更新の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
-    "info" | "error" | "empty" | "favorite-error"
+    // favorite-error / restore-error は個別操作の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
+    "info" | "error" | "empty" | "favorite-error" | "restore-error"
   >("info");
+  // アーカイブから取り出す確認の対象記事。確認中に選択が変わっても対象をずらさないよう固定で持つ。
+  // 閉じるアニメーション中にタイトルが空にならないよう、開閉は別の state で持ち、対象は次に開くまで残す。
+  const [restoreTarget, setRestoreTarget] = React.useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [isRestoreDialogOpen, setIsRestoreDialogOpen] = React.useState(false);
+  // 復元中に画面を離れた後で、記事詳細へ遷移したり state を更新したりしないためのフラグ。
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+  const [isRestoring, setIsRestoring] = React.useState(false);
+  // state反映前の連打でも復元を二重に走らせないためのガード。
+  const restoreInFlightRef = React.useRef(false);
 
   const visibleHistoryItems = React.useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -560,7 +589,14 @@ export default function NewsHistoryScreen({
   };
 
   const handleOpenSelectedArticle = () => {
-    if (!selectedItem) {
+    if (!selectedItem || restoreInFlightRef.current) {
+      return;
+    }
+
+    // アーカイブ済みの記事は本文がZIP内にあるため、確認してから取り出す（確認なしに復元しない）。
+    if (selectedItem.isArchived) {
+      setRestoreTarget({ id: selectedItem.id, title: selectedItem.title });
+      setIsRestoreDialogOpen(true);
       return;
     }
 
@@ -570,6 +606,56 @@ export default function NewsHistoryScreen({
     }
 
     onNavigate?.("news");
+  };
+
+  // 確認で「アーカイブから取り出して開く」を選んだときだけ、記事IDだけを渡して1記事を復元する。
+  // 復元できた（restored / already_available）同じ記事IDのときだけ記事詳細へ進み、
+  // 失敗時は履歴画面に留まって固定文言だけを出す（パスや生のエラーは画面へ出さない）。
+  // 記事詳細から戻ると履歴画面が再マウントされ一覧を読み直すため、アーカイブ済みバッジも更新される。
+  const handleConfirmRestore = async () => {
+    const target = restoreTarget;
+    setIsRestoreDialogOpen(false);
+    if (!target || restoreInFlightRef.current) {
+      return;
+    }
+
+    restoreInFlightRef.current = true;
+    setIsRestoring(true);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
+    try {
+      const result = await restoreArchivedArticle({ articleId: target.id });
+      // 画面を離れた後に完了した場合は、遷移も表示更新もしない。
+      if (!isMountedRef.current) {
+        return;
+      }
+      const isRestored =
+        result.articleId === target.id &&
+        (result.status === "restored" || result.status === "already_available");
+      if (!isRestored) {
+        throw new Error("unexpected restore result");
+      }
+
+      if (onOpenArticle) {
+        onOpenArticle(target.id);
+      } else {
+        onNavigate?.("news");
+      }
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      setLoadNotice(
+        "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+      );
+      setLoadNoticeKind("restore-error");
+      console.warn("Failed to restore archived article:", error);
+    } finally {
+      restoreInFlightRef.current = false;
+      if (isMountedRef.current) {
+        setIsRestoring(false);
+      }
+    }
   };
 
   // 詳細パネルのお気に入り登録/解除。Rust の更新結果を確認してから一覧・選択中の記事へ反映する
@@ -759,7 +845,9 @@ export default function NewsHistoryScreen({
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span
                   role={
-                    loadNoticeKind === "error" || loadNoticeKind === "favorite-error"
+                    loadNoticeKind === "error" ||
+                    loadNoticeKind === "favorite-error" ||
+                    loadNoticeKind === "restore-error"
                       ? "alert"
                       : "status"
                   }
@@ -900,9 +988,10 @@ export default function NewsHistoryScreen({
                   <Button
                     className="w-full bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
                     onClick={handleOpenSelectedArticle}
+                    disabled={isRestoring}
                   >
                     <RotateCcw className="w-4 h-4" aria-hidden="true" />
-                    もう一度見る
+                    {isRestoring ? "取り出し中..." : "もう一度見る"}
                   </Button>
                   <Button
                     variant="outline"
@@ -968,6 +1057,32 @@ export default function NewsHistoryScreen({
           <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
         </div>
       </footer>
+
+      {/* アーカイブ済み記事を開く前の確認。「取り出して開く」を選んだときだけ復元する。 */}
+      <AlertDialog
+        open={isRestoreDialogOpen}
+        onOpenChange={setIsRestoreDialogOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>アーカイブから取り出して開く</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p className="break-all">
+                  「{restoreTarget?.title}」はアーカイブに保管されています。
+                </p>
+                <p>アーカイブから取り出して、記事詳細を開きますか？</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void handleConfirmRestore()}>
+              取り出して開く
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <style jsx>{`
         @keyframes float {
