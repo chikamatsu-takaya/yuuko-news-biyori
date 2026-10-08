@@ -1,5 +1,6 @@
 pub mod article_commands;
 pub mod autostart_commands;
+pub mod data_export_commands;
 pub mod dictionary_commands;
 pub mod friendship_commands;
 pub mod gacha_commands;

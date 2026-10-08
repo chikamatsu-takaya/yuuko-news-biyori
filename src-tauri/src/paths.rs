@@ -14,6 +14,8 @@ pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.j
 pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
 pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
 pub const GACHA_STATE_RELATIVE_PATH: &str = "gacha/gacha_state.json";
+/// データ移行用ZIPの固定の書き出し先（データ設計書 §15.6、判断台帳 D41）。
+pub const MIGRATION_EXPORTS_RELATIVE_DIR: &str = "exports";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {

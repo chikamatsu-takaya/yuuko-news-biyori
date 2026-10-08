@@ -3,6 +3,7 @@ pub mod archive_scheduler;
 pub mod article_service;
 pub mod auto_summary_queue;
 pub mod autostart_service;
+pub mod data_export_service;
 pub mod dictionary_service;
 pub mod friendship_service;
 pub mod gacha_service;

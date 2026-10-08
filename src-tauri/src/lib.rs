@@ -24,6 +24,7 @@ use repositories::yuuko_state_repository::YuukoStateRepository;
 use services::ai_provider_service::AiProviderService;
 use services::article_service::ArticleService;
 use services::auto_summary_queue::AutoSummaryQueue;
+use services::data_export_service::DataExportService;
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
@@ -148,6 +149,7 @@ pub fn run() {
                 ai_provider_service,
                 article_service,
                 auto_summary_queue: auto_summary_queue.clone(),
+                data_export_service: DataExportService::new(&paths),
                 dictionary_service,
                 friendship_service,
                 gacha_service,
@@ -189,6 +191,7 @@ pub fn run() {
             commands::article_commands::list_archive_month_articles,
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
+            commands::data_export_commands::export_migration_data,
             commands::news_commands::refresh_news,
             commands::dictionary_commands::explain_selected_term,
             commands::dictionary_commands::list_dictionary_entries,
