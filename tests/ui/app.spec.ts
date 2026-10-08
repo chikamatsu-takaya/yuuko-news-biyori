@@ -137,6 +137,61 @@ for (const screen of majorScreens) {
   });
 }
 
+// パンくず「ホーム」で各画面からホームへ戻れること（画面詳細設計書 §3.3 / §9.9）。
+// サイドバーにも「ホーム」があるため、main 内のパンくずボタンに限定して操作する。
+const breadcrumbHomeScreens = [
+  { id: "history", navName: "ニュース履歴", heading: "ニュース履歴" },
+  { id: "customize", navName: "カスタマイズ", heading: "ゆうこカスタマイズ" },
+  { id: "gacha", navName: "ガチャ", heading: "ゆうこガチャ" },
+] as const;
+
+const openScreenFromSidebar = async (
+  page: Page,
+  navName: string,
+  heading: string
+) => {
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: navName, exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: heading }).first()).toBeVisible();
+};
+
+const breadcrumbHomeButton = (page: Page) =>
+  page.locator("main").getByRole("button", { name: "ホーム", exact: true });
+
+for (const screen of breadcrumbHomeScreens) {
+  test(`breadcrumb ホーム on ${screen.id} returns to the home screen`, async ({
+    page,
+  }) => {
+    await openScreenFromSidebar(page, screen.navName, screen.heading);
+
+    await breadcrumbHomeButton(page).click();
+
+    await expect(
+      page.getByRole("heading", { name: "今日のおすすめニュース" })
+    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: screen.heading })).toHaveCount(0);
+  });
+}
+
+test("breadcrumb ホーム on history is keyboard operable (focus + Enter)", async ({
+  page,
+}) => {
+  await openScreenFromSidebar(page, "ニュース履歴", "ニュース履歴");
+
+  const homeButton = breadcrumbHomeButton(page);
+  await homeButton.focus();
+  await expect(homeButton).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+});
+
 // ニュース閲覧への遷移整理（一覧を入口に、記事詳細は選択した記事IDで開き、戻るは遷移元へ）。
 
 const readRequestedArticleId = (page: Page) =>

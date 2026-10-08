@@ -14,12 +14,7 @@ pub async fn get_user_settings(state: State<'_, AppState>) -> CommandResult<User
     let settings_service = state.settings_service.clone();
     tauri::async_runtime::spawn_blocking(move || settings_service.get_user_settings())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join settings task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("settings", error))?
         .map_err(CommandError::from)
 }
 
@@ -37,12 +32,7 @@ pub async fn save_user_settings(
         Ok::<(), crate::error::AppError>(())
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join settings task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("settings", error))?
     .map_err(CommandError::from)?;
 
     Ok(CommandOk { ok: true })
@@ -54,12 +44,7 @@ pub async fn reset_user_settings(state: State<'_, AppState>) -> CommandResult<Us
     let settings_service = state.settings_service.clone();
     tauri::async_runtime::spawn_blocking(move || settings_service.reset_user_settings())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join settings task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("settings", error))?
         .map_err(CommandError::from)
 }
 

@@ -25,12 +25,7 @@ pub async fn get_recommended_articles(
         Ok::<_, crate::error::AppError>(articles)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join recommended-articles task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("recommended-articles", error))?
     .map_err(CommandError::from)
 }
 
@@ -45,12 +40,7 @@ pub async fn list_article_history(
         article_service.list_article_history(normalized_params)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join article-history task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("article-history", error))?
     .map_err(CommandError::from)
 }
 
@@ -67,12 +57,7 @@ pub async fn get_article_detail(
         Ok::<_, crate::error::AppError>(detail)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join article-detail task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("article-detail", error))?
     .map_err(CommandError::from)
 }
 
@@ -84,12 +69,7 @@ pub async fn update_article_favorite(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.update_article_favorite(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join update-article-favorite task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("update-article-favorite", error))?
         .map_err(CommandError::from)
 }
 
@@ -103,12 +83,7 @@ pub async fn open_original_article(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.open_original_article(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join open-original-article task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("open-original-article", error))?
         .map_err(CommandError::from)
 }
 
@@ -120,12 +95,7 @@ pub async fn generate_article_summary(
     let summary_service = state.summary_service.clone();
     tauri::async_runtime::spawn_blocking(move || summary_service.generate_article_summary(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join generate-article-summary task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("generate-article-summary", error))?
         .map_err(CommandError::from)
 }
 
@@ -138,12 +108,7 @@ pub async fn get_archive_candidates(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.list_archive_candidates())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join archive-candidates task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("archive-candidates", error))?
         .map_err(CommandError::from)
 }
 
@@ -154,12 +119,7 @@ pub async fn archive_old_articles(state: State<'_, AppState>) -> CommandResult<A
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.archive_candidates())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join archive-old-articles task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("archive-old-articles", error))?
         .map_err(CommandError::from)
 }
 
@@ -172,12 +132,7 @@ pub async fn restore_archived_article(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.restore_archived_article(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join restore-archived-article task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("restore-archived-article", error))?
         .map_err(CommandError::from)
 }
 
@@ -189,11 +144,6 @@ pub async fn retire_archived_markdown(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.retire_archived_markdown())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join retire-archived-markdown task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("retire-archived-markdown", error))?
         .map_err(CommandError::from)
 }
