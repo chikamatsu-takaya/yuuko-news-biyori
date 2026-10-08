@@ -462,6 +462,9 @@ export default function SettingsScreen({
   const [settings, setSettings] = React.useState<SettingsState>(mockSettings);
   const [backendSettings, setBackendSettings] =
     React.useState<UserSettingsDto | null>(null);
+  // 保存済みジャンルに合う取得元が無く、全取得元から取得している状態か（D10）。
+  // 判定は Rust 側（取得元ファイルとの照合）で行い、設定読み込み時の DTO から受け取るだけにする。
+  const [genreFilterFallback, setGenreFilterFallback] = React.useState(false);
   const [activeMenu, setActiveMenu] = React.useState("notification");
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(true);
@@ -549,6 +552,7 @@ export default function SettingsScreen({
       }
 
       setBackendSettings(dto);
+      setGenreFilterFallback(dto.genreFilterFallback ?? false);
       setSettings((prev) => mapSettingsFromDto(prev, dto));
       // 保存値を反映した後に OS 状態で上書きする（順序が逆だと保存値で戻ってしまう）。
       await refreshAutostartState();
@@ -717,6 +721,22 @@ export default function SettingsScreen({
     }
   };
 
+  // 注記の表示用に、保存済み設定から取得元フォールバックの有無だけを読む。
+  // 読めなくても保存自体は成功しているため、注記は直前の状態のまま残す。
+  const refreshGenreFilterFallback = async () => {
+    try {
+      const dto = await getUserSettings();
+      if (dto && isMountedRef.current) {
+        setGenreFilterFallback(dto.genreFilterFallback ?? false);
+      }
+    } catch (error) {
+      console.error(
+        "Failed to reload genre filter state:",
+        error instanceof Error ? error.name : typeof error
+      );
+    }
+  };
+
   const handleSave = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
     if (isUpdatingAutostartRef.current) {
@@ -736,6 +756,8 @@ export default function SettingsScreen({
         title: "設定を保存したよ",
         description: "新しい設定が反映されたよ。ありがとう！",
       });
+      // 保存したジャンルでの取得元フォールバック有無だけを読み直す（他の画面状態は触らない）。
+      void refreshGenreFilterFallback();
     } catch (error) {
       console.error("Failed to save settings via tauri command:", error);
       toast({
@@ -768,6 +790,7 @@ export default function SettingsScreen({
       const dto = await resetUserSettings();
       if (dto) {
         setBackendSettings(dto);
+        setGenreFilterFallback(dto.genreFilterFallback ?? false);
         setSettings(mapSettingsFromDto(mockSettings, dto));
         // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
         await refreshAutostartState();
@@ -1347,6 +1370,15 @@ export default function SettingsScreen({
                         </div>
                       ))}
                     </div>
+                    {genreFilterFallback && (
+                      <p
+                        role="status"
+                        className="mt-3 text-xs text-muted-foreground"
+                        data-testid="genre-filter-fallback-note"
+                      >
+                        選んだジャンルに合う取得元がないため、すべての取得元から取得しています
+                      </p>
+                    )}
                   </div>
                 </CardContent>
               </Card>

@@ -109,6 +109,11 @@ pub struct UserSettingsDto {
     /// 未指定（設定画面など案内と無関係な保存）や false では既存値を変えない（案内を再表示させないため）。
     #[serde(default)]
     pub onboarding_completed: Option<bool>,
+    /// 読み取り専用。保存済みの興味ジャンルに合う取得元が無く、ニュース取得が全取得元へ
+    /// フォールバックする状態か（D10。設定画面のジャンル欄の注記用）。
+    /// 取得元ファイルから command 層で算出して載せる。保存時に送られても無視する。
+    #[serde(default, skip_deserializing)]
+    pub genre_filter_fallback: bool,
 }
 
 impl Default for UserSettingsDto {
@@ -133,6 +138,7 @@ impl Default for UserSettingsDto {
             max_daily_recommendations: 10,
             auto_summary_enabled: false,
             onboarding_completed: None,
+            genre_filter_fallback: false,
         }
     }
 }
@@ -278,6 +284,7 @@ impl PersistedSettings {
             max_daily_recommendations: self.news.max_daily_recommendations,
             auto_summary_enabled: self.ai.auto_summary_enabled,
             onboarding_completed: Some(self.ui.onboarding_completed),
+            genre_filter_fallback: false,
         }
     }
 
@@ -634,6 +641,16 @@ mod tests {
             ..UserSettingsDto::default()
         });
         assert!(settings.ui.onboarding_completed);
+    }
+
+    #[test]
+    fn genre_filter_fallback_is_output_only() {
+        // 画面から送られても読み取らず（保存対象ではない）、出力時は camelCase で載る。
+        let mut value = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        assert_eq!(value["genreFilterFallback"], false);
+        value["genreFilterFallback"] = serde_json::json!(true);
+        let dto: UserSettingsDto = serde_json::from_value(value).unwrap();
+        assert!(!dto.genre_filter_fallback);
     }
 
     #[test]

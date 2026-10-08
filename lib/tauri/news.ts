@@ -12,6 +12,8 @@ export type RefreshNewsResult = {
   fetched: number;
   saved: number;
   errors: RefreshError[];
+  // 興味ジャンルに合う取得元が無く、すべての取得元から取得したか（D10）。
+  genreFilterFallback: boolean;
 };
 
 export const refreshNews = async (): Promise<RefreshNewsResult | null> => {

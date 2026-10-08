@@ -6,16 +6,23 @@ use crate::domain::ai_connection::{
 use crate::domain::settings::UserSettingsDto;
 use crate::error::{CommandError, CommandResult};
 use crate::services::ai_provider_service::AiProviderService;
+use crate::services::news_service::NewsService;
 use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 
+/// 設定を読み込む。興味ジャンルの絞り込みが全取得元へフォールバックする状態かも併せて返す（D10）。
 #[tauri::command]
 pub async fn get_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
     let settings_service = state.settings_service.clone();
-    tauri::async_runtime::spawn_blocking(move || settings_service.get_user_settings())
-        .await
-        .map_err(|error| CommandError::join_error("settings", error))?
-        .map_err(CommandError::from)
+    let news_service = state.news_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_service
+            .get_user_settings()
+            .map(|dto| with_genre_filter_fallback(dto, &news_service))
+    })
+    .await
+    .map_err(|error| CommandError::join_error("settings", error))?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -42,10 +49,24 @@ pub async fn save_user_settings(
 #[tauri::command]
 pub async fn reset_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
     let settings_service = state.settings_service.clone();
-    tauri::async_runtime::spawn_blocking(move || settings_service.reset_user_settings())
-        .await
-        .map_err(|error| CommandError::join_error("settings", error))?
-        .map_err(CommandError::from)
+    let news_service = state.news_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_service
+            .reset_user_settings()
+            .map(|dto| with_genre_filter_fallback(dto, &news_service))
+    })
+    .await
+    .map_err(|error| CommandError::join_error("settings", error))?
+    .map_err(CommandError::from)
+}
+
+/// 設定DTOへ、保存済みジャンルでの取得元フォールバック有無を載せる（読み取り専用の表示用）。
+fn with_genre_filter_fallback(
+    mut dto: UserSettingsDto,
+    news_service: &NewsService,
+) -> UserSettingsDto {
+    dto.genre_filter_fallback = news_service.genre_filter_fallback_for(&dto.genres);
+    dto
 }
 
 /// AIプロバイダ接続テスト（接続確認専用・画面詳細設計書 SCR-003 §7.5 / §7.10）。

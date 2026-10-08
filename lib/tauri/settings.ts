@@ -31,6 +31,9 @@ export type UserSettingsDto = {
   // 初回起動時の案内を完了／スキップ済みか。読み込み時は常に返る（旧データは true 扱い）。
   // 保存時は true のときだけ完了として記録され、未指定なら既存値のまま（設定画面の保存では送らない）。
   onboardingCompleted?: boolean;
+  // 読み取り専用。保存済みジャンルに合う取得元が無く、全取得元から取得する状態か（D10）。
+  // Rust 側は保存時にこの値を読まないため、保存 DTO には含めない。
+  genreFilterFallback?: boolean;
 };
 
 type CommandOk = {
