@@ -28,8 +28,8 @@ use crate::domain::data_export::{
 use crate::error::AppError;
 use crate::paths::{
     AppPaths, ARTICLE_FAVORITES_RELATIVE_PATH, ARTICLE_NEWS_RELATIVE_DIR, DICTIONARY_RELATIVE_PATH,
-    FRIENDSHIP_RELATIVE_PATH, MIGRATION_EXPORTS_RELATIVE_DIR, REWARDS_RELATIVE_PATH,
-    SETTINGS_RELATIVE_PATH,
+    FRIENDSHIP_RELATIVE_PATH, GACHA_STATE_RELATIVE_PATH, MIGRATION_EXPORTS_RELATIVE_DIR,
+    REWARDS_RELATIVE_PATH, SETTINGS_RELATIVE_PATH,
 };
 
 pub(crate) const MANIFEST_ENTRY_NAME: &str = "manifest.json";
@@ -40,24 +40,31 @@ pub(crate) const ARCHIVE_INDEX_RELATIVE_PATH: &str = "archive/archive_index.json
 const MAX_NAME_ATTEMPTS: u32 = 100;
 
 /// 区分の並び（manifest の `included` の順序にも使う）。
-pub(crate) const CATEGORY_ORDER: [&str; 7] = [
+pub(crate) const CATEGORY_ORDER: [&str; 8] = [
     "config",
     "news",
     "favorites",
     "dictionary",
     "user",
     "rewards",
+    "gacha",
     "archive",
 ];
 
+/// ガチャ状態の区分。取り込みでこの区分を含まないZIP（ガチャ保存の実装前に書き出したもの）は、
+/// 移行先の現在のガチャ状態を置き換えずに残す（`data_import_service`・データ設計書 §15.7）。
+pub(crate) const GACHA_CATEGORY: &str = "gacha";
+
 /// 1ファイル単位で許可するもの（アプリデータ直下からの相対パス）。取り込み（`data_import_service`）も同じ一覧を使う。
 /// config/ からは settings.json だけを入れる（news_sources.json / network_allowlist.json は §15 の対象外扱い）。
-pub(crate) const FIXED_FILES: [&str; 6] = [
+/// ガチャは `gacha/gacha_state.json` だけを入れる（`gacha_state.corrupt.json` / `.bak` / `.tmp` は入れない）。
+pub(crate) const FIXED_FILES: [&str; 7] = [
     SETTINGS_RELATIVE_PATH,
     ARTICLE_FAVORITES_RELATIVE_PATH,
     DICTIONARY_RELATIVE_PATH,
     FRIENDSHIP_RELATIVE_PATH,
     REWARDS_RELATIVE_PATH,
+    GACHA_STATE_RELATIVE_PATH,
     ARCHIVE_INDEX_RELATIVE_PATH,
 ];
 
@@ -528,6 +535,7 @@ mod tests {
         write(root, "dictionary/entries.json", "[]");
         write(root, "user/friendship.json", "{}");
         write(root, "rewards/rewards.json", "{}");
+        write(root, "gacha/gacha_state.json", r#"{"starFragments":43}"#);
         write(
             root,
             "news/202610/news_0123456789abcdef.md",
@@ -550,6 +558,9 @@ mod tests {
         write(root, "cache/page.html", "cache");
         write(root, "state/yuuko_notification_state.json", "{}");
         write(root, "user/friendship.corrupt.json", "CORRUPT");
+        write(root, "gacha/gacha_state.corrupt.json", "CORRUPT");
+        write(root, "gacha/gacha_state.json.bak", "BAK");
+        write(root, "gacha/gacha_state.json.tmp", "TMP");
         write(root, "news/202610/notes.txt", "txt");
         write(root, "news/202610/deep/nested.md", "nested");
         write(root, "news/bad name/x.md", "bad");
@@ -597,7 +608,7 @@ mod tests {
         let result = service.export_at(fixed_now()).unwrap();
 
         assert_eq!(result.file_name, "yuuko_transfer_tr_20261008140000.zip");
-        assert_eq!(result.file_count, 10);
+        assert_eq!(result.file_count, 11);
         assert_eq!(result.article_count, 3);
         assert_eq!(result.archive_count, 1);
         let zip_path = root.join("exports").join(&result.file_name);
@@ -609,6 +620,7 @@ mod tests {
                 "config/settings.json",
                 "dictionary/entries.json",
                 "favorites/article_favorites.json",
+                "gacha/gacha_state.json",
                 "manifest.json",
                 "news/202610/news_0123456789abcdef.md",
                 "news/article-002.md",
@@ -633,6 +645,7 @@ mod tests {
                 "dictionary",
                 "user",
                 "rewards",
+                "gacha",
                 "archive"
             ]
         );
@@ -684,6 +697,8 @@ mod tests {
                 "SOURCES",
                 "ALLOWLIST",
                 "CORRUPT",
+                "BAK",
+                "TMP",
                 "previous export",
             ] {
                 assert!(
@@ -894,7 +909,7 @@ mod tests {
 
         let plan = plan_migration_files(&root).unwrap();
 
-        assert_eq!(plan.len(), 10);
+        assert_eq!(plan.len(), 11);
         for planned in &plan {
             assert_eq!(
                 classify_entry_name(&planned.entry_name),
@@ -917,6 +932,10 @@ mod tests {
             "config/news_sources.json",
             "config/network_allowlist.json",
             "config/settings.json.bak",
+            "gacha/gacha_state.corrupt.json",
+            "gacha/gacha_state.json.bak",
+            "gacha/gacha_state.json.tmp",
+            "gacha/other.json",
             "news/../x.md",
             "news/a/b/c.md",
             "news//x.md",
