@@ -133,6 +133,28 @@ export type ArchiveMonthArticlesDto = {
   articles: ArticleHistoryItemDto[];
 };
 
+// 古い月のアーカイブ削除（判断台帳 D26）の引数。年月（YYYY-MM）だけを渡し、パスやファイル名は渡さない。
+export type ArchiveMonthDeleteParams = {
+  month: string;
+};
+
+// 削除前の確認用。articleCount はアーカイブから消える件数、keptArticleCount は
+// 通常のニュースとして残る件数（復元済み・お気に入り等）。sizeBytes は月次ZIPのサイズ。
+export type ArchiveMonthDeletePreviewDto = {
+  month: string;
+  articleCount: number;
+  sizeBytes: number;
+  keptArticleCount: number;
+};
+
+// cleanupPending が true のときは一覧からは消えたが、ZIP ファイル自体を消せなかった。
+export type ArchiveMonthDeleteResultDto = {
+  month: string;
+  deletedArticleCount: number;
+  keptArticleCount: number;
+  cleanupPending: boolean;
+};
+
 export const getRecommendedArticles = async (
   params: GetRecommendedArticlesParams = {}
 ): Promise<ArticleSummaryDto[] | null> => {
@@ -242,4 +264,28 @@ export const listArchiveMonthArticles = async (
   return invoke<ArchiveMonthArticlesDto>("list_archive_month_articles", {
     params,
   });
+};
+
+// 古い月のアーカイブ削除の事前確認（件数・サイズ）。削除できない月は削除時と同じエラーになる。
+export const getArchiveMonthDeletePreview = async (
+  params: ArchiveMonthDeleteParams
+): Promise<ArchiveMonthDeletePreviewDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthDeletePreviewDto>("get_archive_month_delete_preview", {
+    params,
+  });
+};
+
+// 古い月の月次ZIPと一覧（archive_index.json）の月を削除する。通常のニュースのMarkdownは消さない。
+export const deleteArchiveMonth = async (
+  params: ArchiveMonthDeleteParams
+): Promise<ArchiveMonthDeleteResultDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthDeleteResultDto>("delete_archive_month", { params });
 };
