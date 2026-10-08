@@ -498,7 +498,7 @@ mod tests {
         let error = validate_resolved_socket_addrs(
             "news.example.com",
             vec![
-                SocketAddr::new(IpAddr::from([203, 0, 113, 42]), 443),
+                SocketAddr::new(IpAddr::from([8, 8, 4, 4]), 443),
                 SocketAddr::new(IpAddr::from([192, 168, 1, 20]), 443),
             ],
         )
