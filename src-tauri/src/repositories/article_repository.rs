@@ -1010,6 +1010,8 @@ impl ArticleRepository {
         now: DateTime<Utc>,
     ) -> Result<ArchiveMonthDeletePreviewDto, AppError> {
         let _write_guard = self.lock_writes()?;
+        // 中断した退避がrollback領域に残っていると、ローカルに残る記事を数え損ねるため先に戻す。
+        self.recover_retirement_staging()?;
         let plan = self.plan_archive_month_delete(month, now)?;
         Ok(ArchiveMonthDeletePreviewDto {
             month: plan.entry.month.clone(),
@@ -1033,6 +1035,8 @@ impl ArticleRepository {
         now: DateTime<Utc>,
     ) -> Result<ArchiveMonthDeleteResultDto, AppError> {
         let _write_guard = self.lock_writes()?;
+        // 中断した退避のMarkdownは、ZIPを消す前に通常領域へ戻す（戻さないとZIP削除で唯一の本文を失う）。
+        self.recover_retirement_staging()?;
         let plan = self.plan_archive_month_delete(month, now)?;
 
         // index から月が消えた後も archived のまま残ると、退避処理が「index にない月」として
@@ -4852,6 +4856,46 @@ mod tests {
         assert_eq!(months.len(), 1);
         assert_eq!(months[0].month, "2026-04");
         assert!(context.repository.load_archive_index_or_default().is_ok());
+        assert!(context.repository.retire_archived_markdown().is_ok());
+    }
+
+    #[test]
+    fn delete_archive_month_recovers_interrupted_retirement_before_planning() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        // 退避の途中で停止した状態（Markdownがrollback領域にだけある）を再現する。
+        let source = context.news_dir.join("202605").join("may-a.md");
+        let rollback_root = context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR);
+        let staged = rollback_root.join("202605").join("may-a.md");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now())
+            .unwrap();
+        // 先に通常領域へ戻すため、ローカルに残る記事として数えられる。
+        assert_eq!(preview.kept_article_count, 1);
+        assert!(source.exists());
+        assert!(!rollback_root.exists());
+
+        // 削除前にも同じ状態にしておき、削除でも復旧してから処理することを確認する。
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 1);
+        assert!(!rollback_root.exists());
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Restored
+        );
         assert!(context.repository.retire_archived_markdown().is_ok());
     }
 

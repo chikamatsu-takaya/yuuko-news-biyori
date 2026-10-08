@@ -273,11 +273,14 @@ pub fn is_valid_archive_month(month: &str) -> bool {
             .is_some_and(|value| (1..=12).contains(&value))
 }
 
-/// 月単位アーカイブ削除（判断台帳 D26）の対象にできる「古い月」かを判定する（純粋関数・I/Oなし）。
+/// 月単位アーカイブ削除（判断台帳 D26）の対象にできる「通常は追記されなくなった月」かを判定する
+/// （純粋関数・I/Oなし）。
 ///
 /// 記事の月は公開日時（無ければ取得日時）で決まり、取得から `ARCHIVE_AGE_DAYS` 日経つと
 /// その月のZIPへ追記される。翌月1日（UTC）から `ARCHIVE_AGE_DAYS` 日＋時差吸収の1日が過ぎるまでは
-/// まだ追記され得る月として扱い、削除させない（削除直後に同じ月のZIPが作り直されるのを避けるため）。
+/// 通常の取得でも追記され得る月として扱い、削除させない。
+/// ただし公開日時の古い記事を後から取得した場合は、この期間後でも同じ月のZIPが作り直されることがある
+/// （新しく取得した記事だけのZIPになるだけで、既存データは失われない）。
 /// 形式が不正な年月は false（安全側）。
 pub fn is_archive_month_deletable(month: &str, now: DateTime<Utc>) -> bool {
     if !is_valid_archive_month(month) {
