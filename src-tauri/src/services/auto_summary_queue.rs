@@ -20,7 +20,12 @@
 //!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
 //!   強制終了されると、.bak だけが残る短い隙間がある（既存の全保存処理に共通の制約）。
 //! - 取り出した記事は AI を呼ぶ前に記事ファイルで要約済みか確かめ直し、手動要約や並べ直しとの
-//!   競合で要約済みになった記事を上書きしない。
+//!   競合で要約済みになった記事を上書きしない。AI 呼び出し中に手動要約された場合も、保存の直前に
+//!   同じ書き込みロック内で確かめ直して上書きせず、失敗ではなく完了として外す。
+//! - 実AIの出力が1つでも Mock に切り替わったら、その記事の残りの AI 呼び出しはしない
+//!   （キー未設定・利用枠超過で、保存しない出力のために外部AIを呼び続けないため）。
+//! - 上限まで失敗した記事は投入件数の上限に数えない（失敗した記事で枠が埋まり、他の記事が
+//!   自動要約されなくなるのを防ぐため）。
 //! - AI 呼び出し中はキューのロックを持たない（画面からの状態取得を待たせない）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -34,7 +39,7 @@ use crate::domain::summary::GenerateArticleSummaryParams;
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::article_service::ArticleService;
-use crate::services::summary_service::SummaryService;
+use crate::services::summary_service::{AutoSummaryOutcome, SummaryService};
 
 /// 1記事あたりの試行回数の上限（初回を含めた合計）。
 const MAX_ATTEMPTS: u32 = 3;
@@ -59,6 +64,8 @@ enum StepOutcome {
     Succeeded(String),
     /// 取り出した時点で既に要約済みだったため、AI を呼ばずに外した。
     Skipped(String),
+    /// AI 呼び出し中に手動要約などで要約済みになったため、保存せずに外した（失敗に数えない）。
+    AlreadySummarized(String),
     /// 失敗したが上限前のため、キューの最後へ戻した。
     Retrying(String),
     /// 上限に達したため、再起動まで Failed のままにする。
@@ -102,6 +109,11 @@ impl QueueCore {
         self.signal.notify_all();
     }
 
+    /// 上限まで失敗した記事IDの写し。投入件数の上限から除くために使う。
+    fn failed_ids(&self) -> HashSet<String> {
+        self.lock().failed.clone()
+    }
+
     fn clear_pending(&self) {
         self.lock().pending.clear();
     }
@@ -125,7 +137,7 @@ impl QueueCore {
     where
         E: FnOnce() -> bool,
         D: FnOnce(&str) -> bool,
-        S: FnOnce(&str) -> Result<(), AppError>,
+        S: FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
     {
         if self.stopped.load(Ordering::SeqCst) {
             return StepOutcome::Stopped;
@@ -162,9 +174,15 @@ impl QueueCore {
         let mut state = self.lock();
         state.processing = None;
         match result {
-            Ok(()) => {
+            Ok(AutoSummaryOutcome::Saved) => {
                 state.failure_counts.remove(&article_id);
                 StepOutcome::Succeeded(article_id)
+            }
+            // AI 呼び出し中に手動要約で要約済みになっていた（保存側で上書きを止めた）。
+            // 失敗ではなく完了として外す。
+            Ok(AutoSummaryOutcome::AlreadySummarized) => {
+                state.failure_counts.remove(&article_id);
+                StepOutcome::AlreadySummarized(article_id)
             }
             Err(error) => {
                 // 本文は出さず、記事IDとエラー種別だけを残す。
@@ -250,7 +268,11 @@ impl AutoSummaryQueue {
             return;
         }
         match self.article_service.list_unsummarized_article_ids() {
-            Ok(ids) => self.core.replace_pending(cap_for_enqueue(ids, &settings)),
+            Ok(ids) => {
+                let failed = self.core.failed_ids();
+                self.core
+                    .replace_pending(cap_for_enqueue(ids, &settings, &failed));
+            }
             Err(error) => log::warn!("failed to list unsummarized articles: {error}"),
         }
     }
@@ -276,13 +298,13 @@ impl AutoSummaryQueue {
                         .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
                             article_id: article_id.to_string(),
                         })
-                        .map(|_| ())
                 },
             );
             match outcome {
-                StepOutcome::Succeeded(_) | StepOutcome::Retrying(_) => {
-                    self.core.wait_interval(ITEM_INTERVAL)
-                }
+                // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける（外部AIの毎分上限を守る）。
+                StepOutcome::Succeeded(_)
+                | StepOutcome::AlreadySummarized(_)
+                | StepOutcome::Retrying(_) => self.core.wait_interval(ITEM_INTERVAL),
                 StepOutcome::Failed(article_id) => {
                     log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
                     self.core.wait_interval(ITEM_INTERVAL)
@@ -353,10 +375,20 @@ fn is_auto_summary_allowed(settings: &PersistedSettings) -> bool {
 }
 
 /// 1回の投入件数を、おすすめ順の上位 `maxDailyRecommendations` 件に絞る（常駐負荷を抑えるため）。
+/// 上限まで失敗した記事（`failed`）は再起動まで並ばないため、先に除いてから数える
+/// （除かないと失敗した記事が枠を埋め、その分ほかの記事が自動要約されなくなる）。
 /// 件数と処理間隔は、ローカルLLM導入時に見直す。
-fn cap_for_enqueue(ordered_ids: Vec<String>, settings: &PersistedSettings) -> Vec<String> {
+fn cap_for_enqueue(
+    ordered_ids: Vec<String>,
+    settings: &PersistedSettings,
+    failed: &HashSet<String>,
+) -> Vec<String> {
     let limit = settings.news.max_daily_recommendations as usize;
-    ordered_ids.into_iter().take(limit).collect()
+    ordered_ids
+        .into_iter()
+        .filter(|id| !failed.contains(id))
+        .take(limit)
+        .collect()
 }
 
 /// 記事ファイルの状態（Done/None）とキューの状態を合わせる。保存済みなら常に Done。
@@ -374,6 +406,8 @@ mod tests {
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
 
+    const SAVED: AutoSummaryOutcome = AutoSummaryOutcome::Saved;
+
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -382,14 +416,14 @@ mod tests {
         false
     }
 
-    fn failure() -> Result<(), AppError> {
+    fn failure() -> Result<AutoSummaryOutcome, AppError> {
         Err(AppError::Validation("ai output rejected".to_string()))
     }
 
     /// 待機列が空になるまで処理し、summarize が呼ばれた順を返す。
     fn drain(
         core: &QueueCore,
-        mut summarize: impl FnMut(&str) -> Result<(), AppError>,
+        mut summarize: impl FnMut(&str) -> Result<AutoSummaryOutcome, AppError>,
     ) -> Vec<String> {
         let calls = RefCell::new(Vec::new());
         loop {
@@ -412,7 +446,10 @@ mod tests {
         let core = QueueCore::default();
         core.replace_pending(ids(&["top", "second", "third"]));
 
-        assert_eq!(drain(&core, |_| Ok(())), ids(&["top", "second", "third"]));
+        assert_eq!(
+            drain(&core, |_| Ok(SAVED)),
+            ids(&["top", "second", "third"])
+        );
         assert_eq!(core.state_of("top"), SummaryState::None);
     }
 
@@ -429,7 +466,7 @@ mod tests {
         );
         assert_eq!(outcome, StepOutcome::Skipped("done-elsewhere".to_string()));
         assert_eq!(core.state_of("done-elsewhere"), SummaryState::None);
-        assert_eq!(drain(&core, |_| Ok(())), ids(&["next"]));
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["next"]));
     }
 
     fn settings_with(enabled: bool, provider: &str, max: u32) -> PersistedSettings {
@@ -460,13 +497,58 @@ mod tests {
     fn enqueue_is_capped_to_max_daily_recommendations_in_order() {
         let ordered = ids(&["a", "b", "c", "d"]);
         assert_eq!(
-            cap_for_enqueue(ordered.clone(), &settings_with(true, "gemini", 2)),
+            cap_for_enqueue(
+                ordered.clone(),
+                &settings_with(true, "gemini", 2),
+                &HashSet::new()
+            ),
             ids(&["a", "b"])
         );
         assert_eq!(
-            cap_for_enqueue(ordered.clone(), &settings_with(true, "gemini", 10)),
+            cap_for_enqueue(
+                ordered.clone(),
+                &settings_with(true, "gemini", 10),
+                &HashSet::new()
+            ),
             ordered
         );
+    }
+
+    #[test]
+    fn enqueue_cap_does_not_count_failed_articles() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["bad", "a"]));
+        drain(&core, |id| if id == "bad" { failure() } else { Ok(SAVED) });
+        assert_eq!(core.state_of("bad"), SummaryState::Failed);
+
+        // 上限2件でも、上限まで失敗した記事は枠に数えず、その次の記事までを並べる。
+        let failed = core.failed_ids();
+        let capped = cap_for_enqueue(
+            ids(&["bad", "b", "c", "d"]),
+            &settings_with(true, "gemini", 2),
+            &failed,
+        );
+        assert_eq!(capped, ids(&["b", "c"]));
+        core.replace_pending(capped);
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["b", "c"]));
+    }
+
+    #[test]
+    fn article_summarized_manually_during_the_ai_call_is_done_not_failed() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["raced", "next"]));
+
+        // 保存直前の確認で要約済みと分かった（上書きしなかった）記事は、失敗に数えず完了として外す。
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| Ok(AutoSummaryOutcome::AlreadySummarized),
+        );
+        assert_eq!(outcome, StepOutcome::AlreadySummarized("raced".to_string()));
+        assert_eq!(core.state_of("raced"), SummaryState::None);
+        assert!(core.lock().failure_counts.is_empty());
+        assert!(core.failed_ids().is_empty());
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["next"]));
     }
 
     #[test]
@@ -479,10 +561,10 @@ mod tests {
             |id| {
                 // 処理中に取得が終わり並べ直されても、処理中の記事は二重に並ばない。
                 core.replace_pending(ids(&["c", id, "b"]));
-                Ok(())
+                Ok(SAVED)
             },
         );
-        assert_eq!(drain(&core, |_| Ok(())), ids(&["c", "b"]));
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["c", "b"]));
     }
 
     #[test]
@@ -502,7 +584,7 @@ mod tests {
                     core.process_next(|| true, not_done, |_| panic!("must not run concurrently"));
                 assert_eq!(nested, StepOutcome::Idle);
                 assert!(!core.lock().pending.is_empty());
-                Ok(())
+                Ok(SAVED)
             },
         );
         assert_eq!(outcome, StepOutcome::Succeeded("a".to_string()));
@@ -514,7 +596,7 @@ mod tests {
         let core = QueueCore::default();
         core.replace_pending(ids(&["bad", "good1", "good2"]));
 
-        let calls = drain(&core, |id| if id == "bad" { failure() } else { Ok(()) });
+        let calls = drain(&core, |id| if id == "bad" { failure() } else { Ok(SAVED) });
 
         // 失敗した記事は後ろへ回り、他の記事が先に処理される。合計3回で打ち切る。
         assert_eq!(calls, ids(&["bad", "good1", "good2", "bad", "bad"]));
@@ -523,7 +605,7 @@ mod tests {
 
         // 上限到達後は再投入しても並ばない（再起動まで Failed）。
         core.replace_pending(ids(&["bad", "next"]));
-        assert_eq!(drain(&core, |_| Ok(())), ids(&["next"]));
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["next"]));
         assert_eq!(core.state_of("bad"), SummaryState::Failed);
     }
 
@@ -537,7 +619,7 @@ mod tests {
 
         // 2回目で成功すれば失敗回数は消える。
         assert_eq!(
-            core.process_next(|| true, not_done, |_| Ok(())),
+            core.process_next(|| true, not_done, |_| Ok(SAVED)),
             StepOutcome::Succeeded("flaky".to_string())
         );
         assert!(core.lock().failure_counts.is_empty());
@@ -580,7 +662,7 @@ mod tests {
             not_done,
             |_| {
                 core.request_stop();
-                Ok(())
+                Ok(SAVED)
             },
         );
 

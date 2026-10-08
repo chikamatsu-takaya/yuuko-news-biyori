@@ -36,29 +36,42 @@ impl SummaryService {
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<GeneratedArticleSummaryDto, AppError> {
-        self.generate_article_summary_with(
+        let generation = self.generate_article_summary_with(
             params,
             FallbackPolicy::SaveFallback,
             |request, kind, provider, level| {
                 self.request_validated_text(request, kind, provider, level)
             },
-        )
+        )?;
+        match generation {
+            SummaryGeneration::Generated(generated) => Ok(generated),
+            // 手動生成（SaveFallback）は要約済みでも上書き保存するため、この分岐には来ない。
+            SummaryGeneration::AlreadySummarized => Err(AppError::Validation(
+                "article summary was not regenerated".to_string(),
+            )),
+        }
     }
 
     /// 自動要約キュー用。出力が1つでも Mock（実AIの失敗・利用枠超過・検証落ちの代替）になったら
-    /// 保存せずエラーを返す（判断台帳 D56）。記事は未要約のまま残り、キューの再試行に回る。
-    /// 手動の `generate_article_summary` は従来どおり Mock の結果も保存する。
+    /// 残りの AI 呼び出しをせず、保存せずにエラーを返す（判断台帳 D56）。記事は未要約のまま残り、
+    /// キューの再試行に回る。AI 呼び出し中に手動要約で要約済みになっていた場合は上書きせず
+    /// `AutoSummaryOutcome::AlreadySummarized` を返す。
+    /// 手動の `generate_article_summary` は従来どおり Mock の結果も保存し、要約済みでも作り直す。
     pub fn generate_article_summary_without_fallback(
         &self,
         params: GenerateArticleSummaryParams,
-    ) -> Result<GeneratedArticleSummaryDto, AppError> {
-        self.generate_article_summary_with(
+    ) -> Result<AutoSummaryOutcome, AppError> {
+        let generation = self.generate_article_summary_with(
             params,
             FallbackPolicy::RejectFallback,
             |request, kind, provider, level| {
                 self.request_validated_text(request, kind, provider, level)
             },
-        )
+        )?;
+        Ok(match generation {
+            SummaryGeneration::Generated(_) => AutoSummaryOutcome::Saved,
+            SummaryGeneration::AlreadySummarized => AutoSummaryOutcome::AlreadySummarized,
+        })
     }
 
     /// 要約生成の本体。検証済み出力の取得手段（`request_validated`）を差し替えられるようにし、
@@ -68,7 +81,7 @@ impl SummaryService {
         params: GenerateArticleSummaryParams,
         fallback_policy: FallbackPolicy,
         request_validated: F,
-    ) -> Result<GeneratedArticleSummaryDto, AppError>
+    ) -> Result<SummaryGeneration, AppError>
     where
         F: Fn(
             AiRequest,
@@ -97,6 +110,8 @@ impl SummaryService {
         // 3出力とも詳細設計書 §12.5 の出力検証を通ったものだけを保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
+        // 自動要約（RejectFallback）では、Mock に切り替わった時点で残りの AI 呼び出しをせずに止める
+        // （キー未設定・利用枠超過のときに、保存しない出力のために外部AIを呼び続けないため）。
         let summary_response = request_validated(
             AiRequest {
                 prompt_id: "summary_v1".to_string(),
@@ -107,6 +122,7 @@ impl SummaryService {
             provider,
             explanation_level,
         )?;
+        reject_fallback_early(fallback_policy, &article_id, &summary_response)?;
         let yuuko_explanation_response = request_validated(
             AiRequest {
                 prompt_id: "yuuko_explanation_v1".to_string(),
@@ -117,6 +133,7 @@ impl SummaryService {
             provider,
             explanation_level,
         )?;
+        reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
 
         let yuuko_comment_response = request_validated(
             AiRequest {
@@ -128,6 +145,7 @@ impl SummaryService {
             provider,
             explanation_level,
         )?;
+        reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
 
         // 永続化メタ用のプロバイダ。1つでも Mock に切り替わっていれば "mock" と記録する。
         let effective_provider = combined_provider(&[
@@ -135,44 +153,51 @@ impl SummaryService {
             &yuuko_explanation_response,
             &yuuko_comment_response,
         ]);
-        if fallback_policy == FallbackPolicy::RejectFallback && effective_provider == PROVIDER_MOCK
-        {
-            // 本文は出さず、記事IDだけを残す。
-            log::warn!(
-                "auto summary for {article_id} fell back to the mock provider; the output was not saved"
-            );
-            return Err(AppError::Network(
-                "real AI output was unavailable; fallback output was not saved".to_string(),
-            ));
-        }
         let summary = summary_response.text;
         let yuuko_explanation = yuuko_explanation_response.text;
         let yuuko_comment = yuuko_comment_response.text;
+        let update = ArticleSummaryUpdate {
+            summary: summary.clone(),
+            yuuko_explanation: yuuko_explanation.clone(),
+            focus_points: focus_points.clone(),
+            yuuko_comment: yuuko_comment.clone(),
+            ai_provider: effective_provider,
+            generated_at: current_utc_timestamp(),
+        };
 
-        // B-4: 生成要約を記事Markdownへ永続化（再表示はキャッシュ・更新は明示再生成）。
-        // 保存失敗でもアプリは止めず、生成結果は返す（警告ログのみ）。CLAUDE.md §10「安全側へ倒す」。
-        let persist_result = self.article_repository.update_article_summary(
-            &article_id,
-            ArticleSummaryUpdate {
-                summary: summary.clone(),
-                yuuko_explanation: yuuko_explanation.clone(),
-                focus_points: focus_points.clone(),
-                yuuko_comment: yuuko_comment.clone(),
-                ai_provider: effective_provider,
-                generated_at: current_utc_timestamp(),
-            },
-        );
-        if let Err(error) = persist_result {
-            log::warn!("failed to persist generated summary for {article_id}: {error}");
+        match fallback_policy {
+            FallbackPolicy::SaveFallback => {
+                // B-4: 生成要約を記事Markdownへ永続化（再表示はキャッシュ・更新は明示再生成）。
+                // 保存失敗でもアプリは止めず、生成結果は返す（警告ログのみ）。CLAUDE.md §10「安全側へ倒す」。
+                let persist_result = self
+                    .article_repository
+                    .update_article_summary(&article_id, update);
+                if let Err(error) = persist_result {
+                    log::warn!("failed to persist generated summary for {article_id}: {error}");
+                }
+            }
+            FallbackPolicy::RejectFallback => {
+                // 自動要約は、AI 呼び出し中に手動要約で要約済みになっていたら上書きしない。
+                // 確認と保存は同じ書き込みロック内で行う。保存失敗は返して、キューの再試行に回す。
+                let saved = self
+                    .article_repository
+                    .update_article_summary_if_unsummarized(&article_id, update)?;
+                if !saved {
+                    log::info!(
+                        "auto summary for {article_id} was not saved because it was already summarized"
+                    );
+                    return Ok(SummaryGeneration::AlreadySummarized);
+                }
+            }
         }
 
-        Ok(GeneratedArticleSummaryDto {
+        Ok(SummaryGeneration::Generated(GeneratedArticleSummaryDto {
             article_id,
             summary,
             yuuko_explanation,
             focus_points,
             yuuko_comment,
-        })
+        }))
     }
 
     /// AI 出力を取得し、§12.5 の出力検証を通した結果だけを返す。
@@ -287,10 +312,46 @@ fn combined_provider(responses: &[&AiResponse]) -> String {
 }
 
 /// Mock への切り替え結果を保存してよいか。手動生成は保存し、自動要約は保存しない。
+/// 自動要約（RejectFallback）は、要約済みの記事を上書きしない保存も兼ねる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackPolicy {
     SaveFallback,
     RejectFallback,
+}
+
+/// 自動要約1件の結果。キューはどちらも「完了」として扱い、失敗回数に数えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSummaryOutcome {
+    /// 実AIの出力を保存した。
+    Saved,
+    /// AI 呼び出し中に手動要約などで要約済みになっていたため、上書きせずに保存をやめた。
+    AlreadySummarized,
+}
+
+/// 要約生成本体の結果。`AlreadySummarized` は自動要約（RejectFallback）でだけ返る。
+#[derive(Debug)]
+enum SummaryGeneration {
+    Generated(GeneratedArticleSummaryDto),
+    AlreadySummarized,
+}
+
+/// 自動要約で、出力が Mock の代替に切り替わっていたら直ちにエラーを返す（残りの AI 呼び出しをしない）。
+/// 手動生成（SaveFallback）では何もしない（従来どおり Mock の結果も保存する）。
+fn reject_fallback_early(
+    fallback_policy: FallbackPolicy,
+    article_id: &str,
+    response: &AiResponse,
+) -> Result<(), AppError> {
+    if fallback_policy == FallbackPolicy::RejectFallback && response.provider == PROVIDER_MOCK {
+        // 本文は出さず、記事IDだけを残す。
+        log::warn!(
+            "auto summary for {article_id} fell back to the mock provider; the remaining AI calls were skipped and nothing was saved"
+        );
+        return Err(AppError::Network(
+            "real AI output was unavailable; fallback output was not saved".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// 検証対象の出力種別。ログには本文の代わりにこの種別名だけを出す。
@@ -559,8 +620,8 @@ mod tests {
 
     use super::{
         combined_provider, neutralize_seed_text, select_valid_output, validate_summary_output,
-        FallbackPolicy, OutputRejection, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
-        EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
+        FallbackPolicy, OutputRejection, SummaryGeneration, SummaryOutputKind, SummaryService,
+        COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::summary::{AiResponse, GenerateArticleSummaryParams};
@@ -569,6 +630,7 @@ mod tests {
     use crate::repositories::article_repository::ArticleRepository;
     use crate::repositories::settings_repository::SettingsRepository;
     use crate::services::ai_provider_service::AiProviderService;
+    use std::cell::RefCell;
 
     const ARTICLE_ID: &str = "rss-20261007-tech-01";
 
@@ -1014,8 +1076,134 @@ mod tests {
             )
             .unwrap();
 
+        let SummaryGeneration::Generated(generated) = generated else {
+            panic!("manual generation must always save");
+        };
         assert_eq!(generated.yuuko_explanation, "代わりの出力");
         assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    /// 呼ばれた出力種別を記録しつつ、指定した種別だけ Mock へ切り替える注入関数を使って生成する。
+    fn generate_counting_calls(
+        service: &SummaryService,
+        policy: FallbackPolicy,
+        failing: SummaryOutputKind,
+    ) -> (Result<SummaryGeneration, AppError>, Vec<SummaryOutputKind>) {
+        let calls = RefCell::new(Vec::new());
+        let inner = gemini_with_fallback_on(failing);
+        let result = service.generate_article_summary_with(
+            params(),
+            policy,
+            |request, kind, provider, level| {
+                calls.borrow_mut().push(kind);
+                inner(request, kind, provider, level)
+            },
+        );
+        (result, calls.into_inner())
+    }
+
+    #[test]
+    fn auto_summary_stops_calling_ai_after_the_first_fallback() {
+        let root_dir = temp_root("strict-abort");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        // 1つ目（要約）で Mock に切り替わったら、再説明・感想の AI 呼び出しはしない。
+        let (result, calls) = generate_counting_calls(
+            &service,
+            FallbackPolicy::RejectFallback,
+            SummaryOutputKind::Summary,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, vec![SummaryOutputKind::Summary]);
+
+        // 2つ目（再説明）で切り替わったら、感想は呼ばない。
+        let (result, calls) = generate_counting_calls(
+            &service,
+            FallbackPolicy::RejectFallback,
+            SummaryOutputKind::Explanation,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            vec![SummaryOutputKind::Summary, SummaryOutputKind::Explanation]
+        );
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+
+        // 手動生成は従来どおり3出力とも生成する。
+        let (result, calls) = generate_counting_calls(
+            &service,
+            FallbackPolicy::SaveFallback,
+            SummaryOutputKind::Summary,
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.len(), 3);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_does_not_overwrite_a_manual_summary_saved_during_the_ai_call() {
+        let root_dir = temp_root("strict-concurrent-manual");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let result = service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::RejectFallback,
+                |_request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Comment {
+                        // 自動要約の AI 呼び出し中に、同じ記事を手動で要約・保存した状態を再現する。
+                        repository
+                            .update_article_summary(
+                                ARTICLE_ID,
+                                ArticleSummaryUpdate {
+                                    summary: "手動の要約".to_string(),
+                                    yuuko_explanation: "手動の再説明".to_string(),
+                                    focus_points: vec!["手動の観点".to_string()],
+                                    yuuko_comment: "手動の一言".to_string(),
+                                    ai_provider: "gemini".to_string(),
+                                    generated_at: "2026-10-08T00:00:00Z".to_string(),
+                                },
+                            )
+                            .unwrap();
+                    }
+                    Ok(response("自動の出力", "gemini"))
+                },
+            )
+            .unwrap();
+
+        // 失敗ではなく「要約済みのため保存しなかった」として返り、手動の保存値が残る。
+        assert!(matches!(result, SummaryGeneration::AlreadySummarized));
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.summary.as_deref(), Some("手動の要約"));
+        assert_eq!(detail.yuuko_explanation.as_deref(), Some("手動の再説明"));
+        assert_eq!(detail.yuuko_comment.as_deref(), Some("手動の一言"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn manual_summary_still_overwrites_an_existing_summary() {
+        let root_dir = temp_root("manual-overwrite");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |_request, _kind, _provider, _level| Ok(response("1回目の出力", "gemini")),
+            )
+            .unwrap();
+
+        // 手動の再生成は要約済みでも作り直す（従来どおり）。
+        let regenerated = service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |_request, _kind, _provider, _level| Ok(response("2回目の出力", "gemini")),
+            )
+            .unwrap();
+        assert!(matches!(regenerated, SummaryGeneration::Generated(_)));
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.summary.as_deref(), Some("2回目の出力"));
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 }
