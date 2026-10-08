@@ -37,6 +37,11 @@ pub struct DictionaryEntryListItemDto {
     pub related_article_id: Option<String>,
     pub related_article_title: Option<String>,
     pub last_viewed_at_text: Option<String>,
+    /// 作成日時（UNIX秒の文字列）。`last_viewed_at_text` と同様に表示用の整形は画面側で行う。
+    /// 旧データで作成日時が空のときは `None`。
+    pub created_at_text: Option<String>,
+    /// 参照回数。旧データで欠けているときは 0（画面側で「—」扱い）。
+    pub reference_count: u32,
     pub memo: Option<String>,
     pub is_starred: bool,
 }
@@ -294,8 +299,11 @@ pub struct PersistedDictionaryEntry {
     pub entry_type: DictionaryEntryType,
     pub short_explanation: String,
     pub detail_explanation: String,
+    // 旧データに無い場合でも辞書全体の読み込みを失敗させないため既定値で補う（空文字 / 0）。
+    #[serde(default)]
     pub created_at: String,
     pub last_referenced_at: Option<String>,
+    #[serde(default)]
     pub reference_count: u32,
     pub source_article_ids: Vec<String>,
     pub favorite: bool,
@@ -381,6 +389,10 @@ impl PersistedDictionaryEntry {
                 .last_referenced_at
                 .clone()
                 .or_else(|| Some(self.created_at.clone())),
+            created_at_text: Some(self.created_at.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            reference_count: self.reference_count,
             memo: self.memo.clone(),
             is_starred: self.favorite,
         }
@@ -395,8 +407,8 @@ pub fn normalize_text(value: &str) -> String {
 mod tests {
     use super::{
         DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryType,
-        ExplainSelectedTermParams, ListDictionaryEntriesParams, SaveDictionaryEntryParams,
-        UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
+        ExplainSelectedTermParams, ListDictionaryEntriesParams, PersistedDictionaryEntry,
+        SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
     };
 
     #[test]
@@ -653,5 +665,65 @@ mod tests {
         }
         .validated_entry_id()
         .is_err());
+    }
+
+    fn persisted_entry_json() -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "dictionaryId": "entry-1",
+            "targetText": "生成AI",
+            "normalizedText": "生成ai",
+            "entryType": "term",
+            "shortExplanation": "短い説明",
+            "detailExplanation": "詳しい説明",
+            "createdAt": "1779246000",
+            "lastReferencedAt": "1779332400",
+            "referenceCount": 3,
+            "sourceArticleIds": ["article-1"],
+            "favorite": false,
+            "memo": null,
+            "relatedArticleTitle": null,
+            "relatedArticleId": null
+        })
+    }
+
+    #[test]
+    fn list_item_dto_includes_created_at_and_reference_count() {
+        let entry: PersistedDictionaryEntry =
+            serde_json::from_value(persisted_entry_json()).unwrap();
+        let dto = entry.to_list_item_dto();
+        assert_eq!(dto.created_at_text.as_deref(), Some("1779246000"));
+        assert_eq!(dto.reference_count, 3);
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["createdAtText"], "1779246000");
+        assert_eq!(value["referenceCount"], 3);
+    }
+
+    #[test]
+    fn legacy_entry_without_created_at_and_reference_count_still_maps() {
+        // 作成日時・参照回数を持たない旧データでも読み込めて、作成日時なし・参照回数0として返す。
+        let mut json = persisted_entry_json();
+        let object = json.as_object_mut().unwrap();
+        object.remove("createdAt");
+        object.remove("referenceCount");
+
+        let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
+        let dto = entry.to_list_item_dto();
+        assert_eq!(dto.created_at_text, None);
+        assert_eq!(dto.reference_count, 0);
+        assert_eq!(dto.last_viewed_at_text.as_deref(), Some("1779332400"));
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert!(value["createdAtText"].is_null());
+        assert_eq!(value["referenceCount"], 0);
+    }
+
+    #[test]
+    fn blank_created_at_maps_to_none() {
+        let mut json = persisted_entry_json();
+        json["createdAt"] = serde_json::json!("  ");
+        let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.to_list_item_dto().created_at_text, None);
     }
 }

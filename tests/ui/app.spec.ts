@@ -721,6 +721,42 @@ test("dictionary shows the empty-dictionary state when there are no entries", as
   ).toHaveCount(0);
 });
 
+test("dictionary detail shows the created-at date and reference count", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_WITH_META__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+
+  const meta = page.getByTestId("dictionary-detail-meta");
+  await expect(meta).toContainText("作成日時");
+  await expect(page.getByTestId("dictionary-detail-created-at")).toHaveText(
+    "2026/05/20"
+  );
+  await expect(meta).toContainText("参照回数");
+  await expect(
+    page.getByTestId("dictionary-detail-reference-count")
+  ).toHaveText("3回");
+});
+
+test("dictionary detail falls back to a dash when created-at and reference count are missing", async ({
+  page,
+}) => {
+  // 既定モックは createdAtText / referenceCount を持たない旧データ相当。
+  await openDictionary(page);
+
+  const meta = page.getByTestId("dictionary-detail-meta");
+  await expect(page.getByTestId("dictionary-detail-created-at")).toHaveText("—");
+  await expect(
+    page.getByTestId("dictionary-detail-reference-count")
+  ).toHaveText("—");
+  await expect(meta).not.toContainText("NaN");
+  await expect(meta).not.toContainText("Invalid Date");
+});
+
 test("dictionary shows the no-results state for an unmatched search and clearing restores entries", async ({
   page,
 }) => {
@@ -5199,6 +5235,19 @@ async function installTauriMocks(page: Page) {
             if (keyword && !dictionaryEntry.keyText.includes(keyword)) {
               return [];
             }
+            // 作成日時・参照回数の表示検証用。既定の dictionaryEntry は両方を持たない旧データ相当。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            if ((window as any).__E2E_DICTIONARY_WITH_META__) {
+              return [
+                {
+                  ...dictionaryEntry,
+                  // 2026-05-20T03:00:00Z。UTC±11h 以内ならローカル日付は 2026/05/20 になる。
+                  createdAtText: "1779246000",
+                  referenceCount: 3,
+                },
+              ];
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return [dictionaryEntry];
           }
           case "explain_selected_term": {

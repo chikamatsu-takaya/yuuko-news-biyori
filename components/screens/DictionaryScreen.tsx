@@ -81,6 +81,8 @@ type DictionaryEntry = {
   fullDescription: string;
   lastViewedText: string;
   lastViewedRaw?: string;
+  createdAtText: string;
+  referenceCountText: string;
   relatedArticleId?: string;
   relatedArticle?: string;
   isFavorite: boolean;
@@ -108,6 +110,8 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
       "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
+    createdAtText: "2025/05/20",
+    referenceCountText: "1回",
     relatedArticleId: "article-001",
     relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: true,
@@ -123,6 +127,8 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
       "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
+    createdAtText: "2025/05/20",
+    referenceCountText: "1回",
     relatedArticleId: "article-001",
     relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: false,
@@ -137,6 +143,8 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
       "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
+    createdAtText: "2025/05/18",
+    referenceCountText: "1回",
     relatedArticleId: "article-002",
     relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
@@ -151,6 +159,8 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
       "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
+    createdAtText: "2025/05/18",
+    referenceCountText: "1回",
     relatedArticleId: "article-002",
     relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
@@ -165,6 +175,8 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
       "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
     lastViewedText: "2025/05/16",
     lastViewedRaw: "1747353600",
+    createdAtText: "2025/05/16",
+    referenceCountText: "1回",
     relatedArticleId: "article-003",
     relatedArticle: "量子コンピュータ研究で新たな誤り訂正手法",
     isFavorite: false,
@@ -225,11 +237,8 @@ function iconTypeFor(type: TauriDictionaryEntryType): DictionaryIconType {
   return "robot";
 }
 
-function formatLastViewedText(value?: string): string {
-  if (!value) {
-    return "未参照";
-  }
-
+// UNIX秒の文字列をローカル時刻の YYYY/MM/DD にする。数値でなければ null（NaN / Invalid Date を出さない）。
+function formatUnixSecondsDate(value: string): string | null {
   const unixSeconds = Number(value);
   if (Number.isFinite(unixSeconds) && unixSeconds > 0) {
     const date = new Date(unixSeconds * 1000);
@@ -241,7 +250,34 @@ function formatLastViewedText(value?: string): string {
     }
   }
 
-  return value;
+  return null;
+}
+
+function formatLastViewedText(value?: string): string {
+  if (!value) {
+    return "未参照";
+  }
+
+  return formatUnixSecondsDate(value) ?? value;
+}
+
+// 作成日時は最終閲覧と同じ整形にそろえる。旧データで無い・空のときは「—」。
+function formatCreatedAtText(value?: string | null): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "—";
+  }
+
+  return formatUnixSecondsDate(trimmed) ?? trimmed;
+}
+
+// 保存時に必ず1回以上になるため、0 や欠損は旧データ由来の「不明」として「—」にする。
+function formatReferenceCountText(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "—";
+  }
+
+  return `${Math.floor(value)}回`;
 }
 
 function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
@@ -253,6 +289,8 @@ function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
     fullDescription: entry.detailExplanation,
     lastViewedText: formatLastViewedText(entry.lastViewedAtText),
     lastViewedRaw: entry.lastViewedAtText,
+    createdAtText: formatCreatedAtText(entry.createdAtText),
+    referenceCountText: formatReferenceCountText(entry.referenceCount),
     relatedArticleId: entry.relatedArticleId,
     relatedArticle: entry.relatedArticleTitle,
     isFavorite: entry.isStarred,
@@ -1098,6 +1136,19 @@ export default function DictionaryScreen({
                         </span>
                       </button>
                     </div>
+                    <dl
+                      className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground"
+                      data-testid="dictionary-detail-meta"
+                    >
+                      <dt>作成日時</dt>
+                      <dd data-testid="dictionary-detail-created-at">
+                        {selectedEntry.createdAtText}
+                      </dd>
+                      <dt>参照回数</dt>
+                      <dd data-testid="dictionary-detail-reference-count">
+                        {selectedEntry.referenceCountText}
+                      </dd>
+                    </dl>
                   </CardContent>
                 </Card>
 
