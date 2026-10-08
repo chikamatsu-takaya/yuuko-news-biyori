@@ -194,6 +194,11 @@ impl ArticleRepository {
         Ok(self.find_article_record(article_id)?.summary)
     }
 
+    /// 記事ファイルに保存済みの元記事 URL を返す（検証は呼び出し側）。既読状態は進めない（読み取りのみ）。
+    pub fn get_original_url(&self, article_id: &str) -> Result<String, AppError> {
+        Ok(self.find_article_record(article_id)?.original_url)
+    }
+
     /// 記事が要約済み（status.summarized）かを返す。自動要約の上書き防止用で、書き込みはしない。
     pub fn is_article_summarized(&self, article_id: &str) -> Result<bool, AppError> {
         Ok(self.find_article_record(article_id)?.status.summarized)

@@ -174,6 +174,7 @@ pub fn run() {
             commands::article_commands::list_article_history,
             commands::article_commands::get_article_detail,
             commands::article_commands::update_article_favorite,
+            commands::article_commands::open_original_article,
             commands::article_commands::generate_article_summary,
             commands::article_commands::get_archive_candidates,
             commands::article_commands::archive_old_articles,
