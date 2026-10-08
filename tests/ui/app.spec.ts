@@ -2842,6 +2842,81 @@ test("settings autostart read failure disables the toggle with fixed wording", a
   await expect(page.getByText("secret/path")).toHaveCount(0);
 });
 
+// サイドバーの「自動起動」表示は OS の登録状態（get_autostart_enabled）に合わせる（画面詳細設計書 §3.5 / §7.10）。
+// 4画面とも共通の AutostartStatus を使うため、各画面で ON / OFF / 取得失敗時の非表示を確認する。
+const sidebarAutostartScreens = [
+  { id: "history", navName: "ニュース履歴", heading: "ニュース履歴" },
+  { id: "dictionary", navName: "ゆうこ辞書", heading: "ゆうこ辞書" },
+  { id: "customize", navName: "カスタマイズ", heading: "ゆうこカスタマイズ" },
+  { id: "gacha", navName: "ガチャ", heading: "ゆうこガチャ" },
+] as const;
+
+const sidebarAutostartStatus = (page: Page) =>
+  page.getByTestId("sidebar-autostart-status");
+
+for (const screen of sidebarAutostartScreens) {
+  test(`sidebar autostart status on ${screen.id} shows ON when the OS has it registered`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_ENABLED__ =
+        true;
+    });
+    await openScreenFromSidebar(page, screen.navName, screen.heading);
+
+    await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：ON");
+  });
+
+  test(`sidebar autostart status on ${screen.id} shows OFF when the OS has it unregistered`, async ({
+    page,
+  }) => {
+    // モック既定は OS 未登録（OFF）。
+    await openScreenFromSidebar(page, screen.navName, screen.heading);
+
+    await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：OFF");
+  });
+
+  test(`sidebar autostart status on ${screen.id} is hidden when the OS state cannot be read`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_READ_FAIL__ =
+        true;
+    });
+    await openScreenFromSidebar(page, screen.navName, screen.heading);
+
+    // 画面本体は表示されたまま、自動起動の表示だけ出さない（生エラーも出さない）。
+    await expect(
+      page.getByRole("button", { name: "常駐を終了する" }).first()
+    ).toBeVisible();
+    await expect(sidebarAutostartStatus(page)).toHaveCount(0);
+    await expect(page.getByText("自動起動：", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("secret/path")).toHaveCount(0);
+  });
+}
+
+test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_ENABLED__ =
+      true;
+  });
+  await openDictionary(page);
+
+  await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：ON");
+  // 表示専用で、押せる ON/OFF ボタンやスイッチを置かない。
+  await expect(
+    sidebarAutostartStatus(page).locator("button, [role=switch]")
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^(ON|OFF)$/ })
+  ).toHaveCount(0);
+  await sidebarAutostartStatus(page).click();
+  await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：ON");
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
 // 通常のリセット確認は従来の文言のままで、破損時の「別名で残す」文言は出さない（判断台帳 D57）。
 test("settings normal reset dialog keeps the standard wording", async ({ page }) => {
   await openSettings(page);

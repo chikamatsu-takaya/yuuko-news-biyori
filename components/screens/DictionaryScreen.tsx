@@ -44,6 +44,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   Select,
   SelectContent,
@@ -579,7 +580,6 @@ export default function DictionaryScreen({
     null
   );
   const [currentPage, setCurrentPage] = React.useState(1);
-  const [isAutoStart, setIsAutoStart] = React.useState(true);
   const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -859,23 +859,7 @@ export default function DictionaryScreen({
           </div>
 
           <div className="border-t border-border/50 p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">自動起動：</span>
-              <button
-                type="button"
-                className={`text-xs font-medium ${
-                  isAutoStart
-                    ? "text-[var(--yuuko-green)]"
-                    : "text-muted-foreground"
-                }`}
-                onClick={() => setIsAutoStart((currentValue) => !currentValue)}
-              >
-                {isAutoStart ? "ON" : "OFF"}
-              </button>
-              {isAutoStart ? (
-                <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
-              ) : null}
-            </div>
+            <AutostartStatus className="mb-2" />
             <Button
               variant="outline"
               size="sm"

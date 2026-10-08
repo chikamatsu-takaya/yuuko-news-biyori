@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   Home,
   Newspaper,
@@ -348,10 +349,7 @@ export default function CustomizeScreen({
 
           {/* Auto Start & Exit */}
           <div className="p-3 border-t border-border space-y-2">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true"></span>
-            </div>
+            <AutostartStatus />
             <Button
               variant="outline"
               size="sm"

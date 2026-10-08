@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   listArticleHistory,
   updateArticleFavorite,
@@ -685,10 +686,7 @@ export default function NewsHistoryScreen({
 
           {/* Auto Start */}
           <div className="mt-4 space-y-2">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true" />
-            </div>
+            <AutostartStatus />
             <Button variant="outline" size="sm" className="w-full text-xs">
               常駐を終了する
             </Button>
