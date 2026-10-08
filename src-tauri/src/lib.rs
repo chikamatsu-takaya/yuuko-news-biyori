@@ -210,6 +210,8 @@ pub fn run() {
             commands::article_commands::retire_archived_markdown,
             commands::article_commands::list_archive_months,
             commands::article_commands::list_archive_month_articles,
+            commands::article_commands::get_archive_month_delete_preview,
+            commands::article_commands::delete_archive_month,
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
             commands::app_commands::restart_app,

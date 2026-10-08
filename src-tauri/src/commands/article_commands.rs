@@ -1,7 +1,8 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArchiveMonthArticlesDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArchiveMonthArticlesDto, ArchiveMonthDeleteParams, ArchiveMonthDeletePreviewDto,
+    ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
     ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
     GetArticleDetailParams, GetRecommendedArticlesParams, ListArchiveMonthArticlesParams,
     ListArticleHistoryParams, OpenOriginalArticleParams, RestoreArchivedArticleParams,
@@ -176,4 +177,34 @@ pub async fn list_archive_month_articles(
     .await
     .map_err(|error| CommandError::join_error("archive-month-articles", error))?
     .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、その月のアーカイブ削除で消える件数・ZIPサイズを返す command。
+/// 削除と同じ検証（古い月か・index にあるか等）を行い、削除できない月はエラーを返す。
+#[tauri::command]
+pub async fn get_archive_month_delete_preview(
+    state: State<'_, AppState>,
+    params: ArchiveMonthDeleteParams,
+) -> CommandResult<ArchiveMonthDeletePreviewDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        article_service.get_archive_month_delete_preview(params)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("archive-month-delete-preview", error))?
+    .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、古い月の月次ZIPと index の月エントリを削除する command。
+/// パス・ファイル名は受け取らず、通常のニュース領域のMarkdownは削除しない。
+#[tauri::command]
+pub async fn delete_archive_month(
+    state: State<'_, AppState>,
+    params: ArchiveMonthDeleteParams,
+) -> CommandResult<ArchiveMonthDeleteResultDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.delete_archive_month(params))
+        .await
+        .map_err(|error| CommandError::join_error("delete-archive-month", error))?
+        .map_err(CommandError::from)
 }
