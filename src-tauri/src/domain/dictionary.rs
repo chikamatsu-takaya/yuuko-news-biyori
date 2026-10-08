@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::util::text_safety::contains_disallowed_control_char;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -202,10 +203,22 @@ impl UpdateDictionaryMemoParams {
             ));
         }
 
-        let memo = self.memo.trim();
+        // 改行コードは \n に統一する。画面の textarea は既に \n だが、command 直接呼び出しの \r\n / \r も
+        // 同じ改行として受け入れ、保存データに \r を残さない。
+        let normalized = self.memo.replace("\r\n", "\n").replace('\r', "\n");
+        let memo = normalized.trim();
         if memo.chars().count() > 1000 {
             return Err(AppError::Validation(
                 "memo must be 1000 characters or fewer".to_string(),
+            ));
+        }
+
+        // メモは複数行の自由記述なので改行は許可する。タブも表示上は空白と同じで無害なうえ、
+        // 表計算などからの貼り付けに含まれやすいため許可する。それ以外の制御文字（ESC・NUL など）は拒否する
+        // （セキュリティ詳細設計書 §15.2）。
+        if contains_disallowed_control_char(memo) {
+            return Err(AppError::Validation(
+                "memo must not contain control characters".to_string(),
             ));
         }
 
@@ -555,6 +568,54 @@ mod tests {
             memo: "x".to_string(),
         };
         assert!(params.validated().is_err());
+    }
+
+    #[test]
+    fn update_memo_params_allow_newline_and_tab() {
+        let params = UpdateDictionaryMemoParams {
+            entry_id: "entry-1".to_string(),
+            memo: "一行目\n\t二行目".to_string(),
+        };
+        let (_, memo) = params.validated().unwrap();
+        assert_eq!(memo.as_deref(), Some("一行目\n\t二行目"));
+    }
+
+    #[test]
+    fn update_memo_params_normalize_crlf_and_cr_to_lf() {
+        let params = UpdateDictionaryMemoParams {
+            entry_id: "entry-1".to_string(),
+            memo: "一行目\r\n二行目\r三行目\r\n".to_string(),
+        };
+        let (_, memo) = params.validated().unwrap();
+        assert_eq!(memo.as_deref(), Some("一行目\n二行目\n三行目"));
+    }
+
+    #[test]
+    fn update_memo_params_reject_other_control_chars_without_leaking_body() {
+        for memo in ["秘密\u{1b}[31m", "秘密\u{0}", "秘密\u{7f}", "秘密\u{8}"] {
+            let params = UpdateDictionaryMemoParams {
+                entry_id: "entry-1".to_string(),
+                memo: memo.to_string(),
+            };
+            match params.validated() {
+                Err(crate::error::AppError::Validation(message)) => {
+                    assert_eq!(message, "memo must not contain control characters");
+                    assert!(!message.contains("秘密"));
+                }
+                other => panic!("expected validation error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn update_memo_params_count_crlf_as_one_char() {
+        // \r\n を \n に揃えてから数えるので、Windows 改行のメモが上限で不当に弾かれない。
+        let memo = format!("{}\r\n{}", "あ".repeat(499), "い".repeat(500));
+        let params = UpdateDictionaryMemoParams {
+            entry_id: "entry-1".to_string(),
+            memo,
+        };
+        assert!(params.validated().is_ok());
     }
 
     #[test]
