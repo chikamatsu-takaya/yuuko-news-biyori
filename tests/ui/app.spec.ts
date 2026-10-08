@@ -59,7 +59,8 @@ const majorScreens = [
     navName: "設定",
     expectedHeading: "設定",
     expectedText: "設定",
-    criticalButtons: ["ホームへ戻る", "保存する", "キャンセル"],
+    // 保存ボタンは未保存の変更があるときだけ有効になるため（§7.7）、有効確認の対象に含めない。
+    criticalButtons: ["ホームへ戻る", "キャンセル"],
   },
 ] as const;
 
@@ -2306,9 +2307,9 @@ test("settings save keeps morning and afternoon work time ranges", async ({
     .first()
     .getByRole("button", { name: settingsScreen.navName, exact: true })
     .click();
-  await page
-    .getByRole("button", { name: settingsScreen.criticalButtons[1] })
-    .click();
+  // 保存ボタンは変更があるときだけ押せるため、時間帯以外（通知ON/OFF）を変えてから保存する。
+  await page.getByRole("switch").click();
+  await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = await page.evaluate(
     () =>
@@ -2352,9 +2353,9 @@ test("settings save keeps single work time range", async ({ page }) => {
     .getByRole("button", { name: settingsScreen.navName, exact: true })
     .click();
 
-  await page
-    .getByRole("button", { name: settingsScreen.criticalButtons[1] })
-    .click();
+  // 保存ボタンは変更があるときだけ押せるため、時間帯以外（通知ON/OFF）を変えてから保存する。
+  await page.getByRole("switch").click();
+  await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = await page.evaluate(
     () =>
@@ -2773,6 +2774,138 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   ).toBeVisible();
 });
 
+// 未保存の変更表示と保存ボタンの活性（画面詳細設計書 SCR-003 §7.7）。
+// 変更 → 「未保存の変更あり」＋保存可 → 保存 → 「保存済み」＋保存不可、に戻ること。
+test("settings shows unsaved changes and returns to 保存済み after saving", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  const saveButton = page.getByRole("button", { name: "保存する" });
+  const saveState = page.getByTestId("settings-save-state");
+
+  // 読み込んだだけでは変更なし。
+  await expect(saveState).toHaveText("保存済み");
+  await expect(saveButton).toBeDisabled();
+
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await expect(saveState).toHaveText("未保存の変更あり");
+  await expect(saveButton).toBeEnabled();
+
+  // 元の値へ戻せば変更なしに戻る（保存と同じ正規化で比較している）。
+  await page.getByRole("combobox").filter({ hasText: "1日5回まで" }).click();
+  await page.getByRole("option", { name: "1日3回まで" }).click();
+  await expect(saveState).toHaveText("保存済み");
+  await expect(saveButton).toBeDisabled();
+
+  // ジャンルの付け外しで順序だけ変わっても変更なしとみなす。
+  await openSettingsMenu(page, "その他");
+  await page.getByRole("checkbox", { name: "AI" }).click();
+  await expect(saveState).toHaveText("未保存の変更あり");
+  await page.getByRole("checkbox", { name: "AI" }).click();
+  await expect(saveState).toHaveText("保存済み");
+
+  await openSettingsMenu(page, "通知");
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await expect(saveState).toHaveText("未保存の変更あり");
+
+  await saveButton.click();
+  await expect(saveState).toHaveText("保存済み");
+  await expect(saveButton).toBeDisabled();
+  const saved = await readSavedSettings(page);
+  expect(saved?.notifyMaxPerDay).toBe(5);
+});
+
+// 保存済みのジャンルが画面の並び（選択肢の順）と違う順で返っても、読み込み直後は「保存済み」のまま。
+// あわせて、変更が無いときの保存ボタンは表示されたうえで非活性であることを確認する。
+test("settings treats genres in a different saved order as 保存済み right after loading", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      genres: ["セキュリティ", "AI", "IT"],
+    };
+  });
+  await openSettings(page);
+
+  const saveButton = page.getByRole("button", { name: "保存する" });
+  await expect(saveButton).toBeVisible();
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByRole("checkbox", { name: "セキュリティ" })).toBeChecked();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  await expect(saveButton).toBeDisabled();
+});
+
+test("settings cancel discards unsaved changes and returns to the main screen", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText(
+    "未保存の変更あり"
+  );
+
+  // 設計（§7.5「変更破棄して戻る」）どおり確認なしで破棄し、メイン画面へ戻る。
+  await page.getByRole("button", { name: "キャンセル" }).click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  expect(await readSavedSettings(page)).toBeUndefined();
+
+  // 開き直すと保存済みの値のまま。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
+  ).toBeVisible();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+});
+
+test("settings save failure keeps the unsaved state", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SAVE_USER_SETTINGS_FAIL__ =
+      true;
+  });
+  await openSettings(page);
+
+  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
+  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  await expect(page.getByText("保存に失敗しちゃった").first()).toBeVisible();
+  await expect(page.getByTestId("settings-save-state")).toHaveText(
+    "未保存の変更あり"
+  );
+  await expect(page.getByRole("button", { name: "保存する" })).toBeEnabled();
+});
+
+// Mock 選択中だけ開発・デモ用の注記を出す（§7.7）。
+test("settings shows the development note only while MockProvider is selected", async ({
+  page,
+}) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  const note = page.getByTestId("mock-provider-note");
+  await expect(note).toHaveText(
+    "MockProvider は開発・デモ用です（外部AIは使いません）。"
+  );
+
+  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+  await expect(note).toHaveCount(0);
+});
+
 // 以前に OpenAI を保存していた場合も画面が壊れず、MockProvider として表示・保存できること。
 test("settings treats a saved openai provider as MockProvider", async ({
   page,
@@ -2834,8 +2967,17 @@ test("settings autostart toggle applies immediately without the save button", as
   // 保存ボタンを押していないので、通常の設定保存は呼ばれない。
   expect(await readSavedSettings(page)).toBeUndefined();
 
-  // キャンセルしても OS へ反映済みの状態は戻さない。
+  // キャンセルしても OS へ反映済みの状態は戻さない（キャンセルはメイン画面へ戻るため、開き直して確認する）。
   await page.getByRole("button", { name: "キャンセル" }).click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await openSettingsMenu(page, "起動・連携");
   await expect(autostartSwitch(page)).toBeChecked();
 
   await autostartSwitch(page).click();
@@ -3062,10 +3204,14 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   await expect.poll(resetCalls).toBe(1);
   await expect(notice).toHaveCount(0);
   await expect(resetButton).toHaveCount(0);
-  await expect(saveButton).toBeEnabled();
+  // 初期化結果がそのまま保存済みの基準になるため、変更するまでは保存ボタンは押せない。
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
   await expect(
     page.getByRole("combobox").filter({ hasText: "1日3回まで" })
   ).toBeVisible();
+  await page.getByRole("switch").click();
+  await expect(saveButton).toBeEnabled();
 
   // 初期化後は通常どおり保存でき、初期化結果（Rust の既定値DTO）を土台に保存される。
   await saveButton.click();
