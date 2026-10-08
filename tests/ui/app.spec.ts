@@ -52,7 +52,7 @@ const majorScreens = [
     navName: "ガチャ",
     expectedHeading: "ゆうこガチャ",
     expectedText: "ガチャ",
-    criticalButtons: ["ホームへ戻る", "まわす"], // Partial match for "1回まわす" and "10回まわす"
+    criticalButtons: ["ホームへ戻る", "まわす"], // Partial match for "1回まわす"
   },
   {
     id: "settings",
@@ -5002,6 +5002,233 @@ test("reader 元記事 failure shows a fixed toast without raw error", async ({
   expect(await readWindowOpenCalls(page)).toBe(0);
 });
 
+// ガチャ画面（画面詳細設計書 §13.2 / D72・D76・D80）。抽選・保存は Rust 側で、画面は結果を表示するだけ。
+const openGacha = (page: Page) =>
+  openScreenFromSidebar(page, "ガチャ", "ゆうこガチャ");
+
+const gachaDrawButton = (page: Page) =>
+  page.locator("main").getByRole("button", { name: /まわ/ });
+
+const gachaSeenIds = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, string[] | undefined>)
+        .__E2E_GACHA_SEEN_IDS__ ?? []
+  );
+
+const gachaDrawCallCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, number | undefined>)
+        .__E2E_GACHA_DRAW_CALL_COUNT__ ?? 0
+  );
+
+test("gacha screen shows real fragments, collection with ？ and remaining count", async ({
+  page,
+}) => {
+  await openGacha(page);
+
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("30");
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("2 / 4");
+  await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("のこり 2");
+  await expect(page.getByTestId("gacha-collection-owned")).toHaveCount(2);
+  await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(2);
+  await expect(page.getByTestId("gacha-collection-unowned").first()).toHaveText("？");
+  // 未所持の名前は出さない。
+  await expect(page.getByText("おつかれカード")).toHaveCount(0);
+  await expect(gachaDrawButton(page)).toBeEnabled();
+  await expect(gachaDrawButton(page)).toContainText("1回まわす");
+
+  // 置かないもの（10連・レアリティ・提供割合・購入・ガチャ履歴・ランク報酬）が無いこと。
+  for (const removed of [
+    "10回まわす",
+    "提供割合",
+    "レアリティ",
+    "かけらを購入",
+    "ガチャ履歴",
+    "ランク報酬を確認する",
+    "排出ラインナップ",
+    "ピックアップ中！",
+  ]) {
+    await expect(page.getByText(removed)).toHaveCount(0);
+  }
+  await expect(page.getByRole("button", { name: "かけらを増やす" })).toHaveCount(0);
+});
+
+test("gacha draw shows result dialog, marks it seen, then shows complete", async ({
+  page,
+}) => {
+  await openGacha(page);
+
+  // 1回目: カード。名前・種類・文面を出す。
+  await gachaDrawButton(page).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  await expect(dialog.getByText("種類：カード")).toBeVisible();
+  await expect(dialog.getByTestId("gacha-item-text")).toHaveText(
+    "がんばったね。ひと休みしよう？"
+  );
+  await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => gachaSeenIds(page)).toContain("card-002");
+
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("20");
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("3 / 4");
+  await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("のこり 1");
+  await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(1);
+
+  // 2回目: テーマ。切り替え先の案内（文言のみ）を出す。
+  await gachaDrawButton(page).click();
+  await expect(dialog.getByRole("heading", { name: "よぞら色テーマ" })).toBeVisible();
+  await expect(dialog.getByText("種類：テーマ")).toBeVisible();
+  await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect.poll(() => gachaSeenIds(page)).toContain("theme-002");
+
+  // すべて所持 → コンプリート表示で実行ボタンを無効にする（D76）。
+  await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(0);
+  await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("コンプリート！");
+  await expect(page.getByTestId("gacha-status-message")).toContainText("コンプリート");
+  await expect(gachaDrawButton(page)).toBeDisabled();
+});
+
+test("gacha disables the draw button and explains when fragments are insufficient", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_OVERRIDE__ = {
+      starFragments: 4,
+    };
+  });
+  await openGacha(page);
+
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("4");
+  await expect(gachaDrawButton(page)).toBeDisabled();
+  await expect(page.getByTestId("gacha-status-message")).toContainText(
+    "かけらが足りないよ（あと 6 個）"
+  );
+});
+
+test("gacha disables the draw button when the collection is already complete", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_OVERRIDE__ = {
+      ownedIds: ["card-001", "theme-001", "card-002", "theme-002"],
+      newIds: [],
+    };
+  });
+  await openGacha(page);
+
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("4 / 4");
+  await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(0);
+  await expect(gachaDrawButton(page)).toBeDisabled();
+  await expect(page.getByTestId("gacha-status-message")).toContainText("コンプリート");
+});
+
+test("gacha draw button is disabled while a draw is in flight (no double draw)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_GACHA_DRAW_GATE__ = new Promise<void>((resolve) => {
+      w.__E2E_GACHA_DRAW_RELEASE__ = resolve;
+    });
+  });
+  await openGacha(page);
+
+  await gachaDrawButton(page).click();
+  await expect(gachaDrawButton(page)).toBeDisabled();
+  await expect(gachaDrawButton(page)).toContainText("まわしています");
+  await gachaDrawButton(page).click({ force: true });
+  await page.evaluate(() =>
+    (window as unknown as Record<string, () => void>).__E2E_GACHA_DRAW_RELEASE__()
+  );
+
+  await expect(page.getByRole("dialog")).toBeVisible();
+  expect(await gachaDrawCallCount(page)).toBe(1);
+});
+
+test("gacha collection shows NEW and clears it after viewing the card text", async ({
+  page,
+}) => {
+  await openGacha(page);
+
+  const newCard = page.getByRole("button", { name: /おはようカード/ });
+  await expect(newCard).toContainText("NEW");
+  await newCard.click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "おはようカード" })).toBeVisible();
+  await expect(dialog.getByTestId("gacha-item-text")).toHaveText(
+    "きょうもいっしょにニュースを読もうね。"
+  );
+  await dialog.getByRole("button", { name: "とじる" }).click();
+
+  await expect.poll(() => gachaSeenIds(page)).toEqual(["card-001"]);
+  await expect(newCard).not.toContainText("NEW");
+});
+
+test("gacha load failure shows a fixed friendly message without raw errors", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_LOAD_FAIL__ = true;
+  });
+  await openGacha(page);
+
+  await expect(page.getByTestId("gacha-status-message")).toContainText(
+    "ガチャの情報を読み込めなかったよ"
+  );
+  await expect(gachaDrawButton(page)).toBeDisabled();
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("—");
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "もう一度読み込む" })).toBeVisible();
+});
+
+test("gacha draw failure shows a fixed friendly message without raw errors", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_DRAW_FAIL__ = true;
+  });
+  await openGacha(page);
+
+  await gachaDrawButton(page).click();
+  await expect(page.getByTestId("gacha-status-message")).toContainText(
+    "ガチャをまわせなかったよ"
+  );
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("30");
+  await expect(gachaDrawButton(page)).toBeEnabled();
+});
+
+test("gacha outside Tauri shows an app-only notice and no invented data", async ({
+  page,
+}) => {
+  await openHome(page);
+  // 開いたあとで Tauri 外にする（ガチャ画面のマウント時に isTauriRuntime が false になる）。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこガチャ" })).toBeVisible();
+
+  await expect(page.getByTestId("gacha-status-message")).toHaveText(
+    "ガチャはアプリ内でのみ使えます。"
+  );
+  await expect(gachaDrawButton(page)).toBeDisabled();
+  await expect(page.getByTestId("gacha-star-fragments")).toHaveText("—");
+  await expect(page.getByTestId("gacha-collection-owned")).toHaveCount(0);
+  await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(0);
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -5726,6 +5953,105 @@ async function installTauriMocks(page: Page) {
               state: "Waiting",
               positionMode: "RightBottom",
               hasNotification: false,
+            };
+          }
+          // ガチャ（get_gacha_state / draw_gacha_once / mark_gacha_items_seen）。
+          // 抽選は「未所持の先頭」を決め打ちで返す（テストを決定的にするため）。
+          // __E2E_GACHA_OVERRIDE__ で所持かけら・所持状況、__E2E_GACHA_LOAD_FAIL__ / __E2E_GACHA_DRAW_FAIL__ で失敗、
+          // __E2E_GACHA_DRAW_GATE__（Promise）で抽選の応答を保留できる。
+          case "get_gacha_state":
+          case "draw_gacha_once":
+          case "mark_gacha_items_seen": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const gachaWin = window as any;
+            if (!gachaWin.__E2E_GACHA__) {
+              const override = gachaWin.__E2E_GACHA_OVERRIDE__ || {};
+              const master = [
+                { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
+                { itemId: "theme-001", kind: "theme", name: "さくら色テーマ", text: null },
+                { itemId: "card-002", kind: "card", name: "おつかれカード", text: "がんばったね。ひと休みしよう？" },
+                { itemId: "theme-002", kind: "theme", name: "よぞら色テーマ", text: null },
+              ];
+              const owned: string[] = override.ownedIds ?? ["card-001", "theme-001"];
+              const isNewIds: string[] = override.newIds ?? ["card-001"];
+              gachaWin.__E2E_GACHA__ = {
+                starFragments: override.starFragments ?? 30,
+                cost: 10,
+                master,
+                owned: new Set(owned),
+                isNew: new Set(isNewIds),
+              };
+            }
+            const g = gachaWin.__E2E_GACHA__;
+            const snapshot = () => {
+              const ownedCount = g.master.filter((m: any) => g.owned.has(m.itemId)).length;
+              const isComplete = ownedCount === g.master.length;
+              return {
+                starFragments: g.starFragments,
+                cost: g.cost,
+                canDraw: !isComplete && g.starFragments >= g.cost,
+                isComplete,
+                ownedCount,
+                totalCount: g.master.length,
+                items: g.master.map((m: any) => {
+                  const has = g.owned.has(m.itemId);
+                  return {
+                    itemId: m.itemId,
+                    kind: m.kind,
+                    owned: has,
+                    isNew: has && g.isNew.has(m.itemId),
+                    name: has ? m.name : null,
+                    text: has ? m.text : null,
+                  };
+                }),
+              };
+            };
+            if (cmd === "get_gacha_state") {
+              if (gachaWin.__E2E_GACHA_LOAD_FAIL__) {
+                throw new Error("E2E gacha failure /internal/secret/path");
+              }
+              return snapshot();
+            }
+            if (cmd === "mark_gacha_items_seen") {
+              const ids: string[] = (params.itemIds as string[]) ?? [];
+              gachaWin.__E2E_GACHA_SEEN_IDS__ = [
+                ...(gachaWin.__E2E_GACHA_SEEN_IDS__ || []),
+                ...ids,
+              ];
+              ids.forEach((id) => g.isNew.delete(id));
+              return snapshot();
+            }
+            gachaWin.__E2E_GACHA_DRAW_CALL_COUNT__ =
+              (gachaWin.__E2E_GACHA_DRAW_CALL_COUNT__ || 0) + 1;
+            const drawGate = gachaWin.__E2E_GACHA_DRAW_GATE__;
+            if (drawGate) {
+              await drawGate;
+            }
+            if (gachaWin.__E2E_GACHA_DRAW_FAIL__) {
+              throw new Error("E2E gacha failure /internal/secret/path");
+            }
+            const before = snapshot();
+            if (before.isComplete || before.starFragments < before.cost) {
+              return {
+                status: before.isComplete ? "complete" : "insufficient",
+                item: null,
+                starFragments: before.starFragments,
+                cost: before.cost,
+                isComplete: before.isComplete,
+              };
+            }
+            const next = g.master.find((m: any) => !g.owned.has(m.itemId));
+            g.owned.add(next.itemId);
+            g.isNew.add(next.itemId);
+            g.starFragments -= g.cost;
+            const after = snapshot();
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return {
+              status: "drawn",
+              item: { itemId: next.itemId, kind: next.kind, name: next.name, text: next.text },
+              starFragments: after.starFragments,
+              cost: after.cost,
+              isComplete: after.isComplete,
             };
           }
           default:
