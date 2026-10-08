@@ -2818,6 +2818,29 @@ test("settings shows unsaved changes and returns to 保存済み after saving", 
   expect(saved?.notifyMaxPerDay).toBe(5);
 });
 
+// 保存済みのジャンルが画面の並び（選択肢の順）と違う順で返っても、読み込み直後は「保存済み」のまま。
+// あわせて、変更が無いときの保存ボタンは表示されたうえで非活性であることを確認する。
+test("settings treats genres in a different saved order as 保存済み right after loading", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      genres: ["セキュリティ", "AI", "IT"],
+    };
+  });
+  await openSettings(page);
+
+  const saveButton = page.getByRole("button", { name: "保存する" });
+  await expect(saveButton).toBeVisible();
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByRole("checkbox", { name: "セキュリティ" })).toBeChecked();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  await expect(saveButton).toBeDisabled();
+});
+
 test("settings cancel discards unsaved changes and returns to the main screen", async ({
   page,
 }) => {

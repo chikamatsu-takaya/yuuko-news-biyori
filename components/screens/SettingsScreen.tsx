@@ -727,7 +727,11 @@ export default function SettingsScreen({
       await saveUserSettings(dto);
       // save_user_settings は DTO を返さず、受け取った値を検証してそのまま保存する。
       // 送った DTO を新しい比較基準にして「保存済み」へ戻す（失敗時は基準を変えず未保存のまま）。
-      setBackendSettings(dto);
+      // 自動起動は保存中に切り替えられることがあり、OS 状態が正のため、最新の値を残す（古い DTO で上書きしない）。
+      setBackendSettings((prev) => ({
+        ...dto,
+        autoStartOnPcBoot: prev?.autoStartOnPcBoot ?? dto.autoStartOnPcBoot,
+      }));
       toast({
         title: "設定を保存したよ",
         description: "新しい設定が反映されたよ。ありがとう！",
