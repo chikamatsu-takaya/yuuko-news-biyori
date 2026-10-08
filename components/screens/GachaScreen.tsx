@@ -326,6 +326,8 @@ export default function GachaScreen({
   const [dialogHeading, setDialogHeading] = React.useState("");
   // state 更新は非同期なので、連打による二重抽選は ref で確実に止める。
   const drawingRef = React.useRef(false);
+  // 抽選の世代。抽選の開始・反映で進め、それより前に出した NEW 解除の応答で抽選後の状態を上書きしないようにする。
+  const drawGenerationRef = React.useRef(0);
   const isMountedRef = React.useRef(true);
 
   React.useEffect(() => {
@@ -370,9 +372,10 @@ export default function GachaScreen({
 
   // 確認したものの「NEW」を外す。失敗しても NEW が残るだけなので画面には出さない。
   const markSeen = React.useCallback(async (itemId: string) => {
+    const generation = drawGenerationRef.current;
     try {
       const state = await markGachaItemsSeen([itemId]);
-      if (state && isMountedRef.current) {
+      if (state && isMountedRef.current && generation === drawGenerationRef.current) {
         setGacha(state);
       }
     } catch (error) {
@@ -385,6 +388,7 @@ export default function GachaScreen({
       return;
     }
     drawingRef.current = true;
+    drawGenerationRef.current += 1;
     setIsDrawing(true);
     setDrawError(null);
     try {
@@ -397,6 +401,7 @@ export default function GachaScreen({
         return;
       }
       // insufficient / complete は何も消費しないので、状態だけ合わせて理由表示に任せる。
+      drawGenerationRef.current += 1;
       setGacha((prev) => (prev ? applyDrawResult(prev, result) : prev));
       if (result.status === "drawn" && result.item) {
         setDialogHeading("ガチャの結果");
@@ -722,9 +727,9 @@ export default function GachaScreen({
                               key={item.itemId}
                               className="aspect-square rounded-lg border border-dashed border-border bg-muted/40 flex items-center justify-center text-xl font-bold text-muted-foreground"
                               data-testid="gacha-collection-unowned"
-                              aria-label="まだ持っていないもの"
                             >
-                              ？
+                              <span aria-hidden="true">？</span>
+                              <span className="sr-only">まだ持っていないもの</span>
                             </li>
                           );
                         }

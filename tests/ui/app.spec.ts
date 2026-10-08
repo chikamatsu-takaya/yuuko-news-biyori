@@ -5033,9 +5033,11 @@ test("gacha screen shows real fragments, collection with ？ and remaining count
   await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("のこり 2");
   await expect(page.getByTestId("gacha-collection-owned")).toHaveCount(2);
   await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(2);
-  await expect(page.getByTestId("gacha-collection-unowned").first()).toHaveText("？");
-  // 未所持の名前は出さない。
+  await expect(page.getByTestId("gacha-collection-unowned").first()).toContainText("？");
+  // 未所持の名前・ID は出さない。
   await expect(page.getByText("おつかれカード")).toHaveCount(0);
+  await expect(page.getByText("card-002")).toHaveCount(0);
+  await expect(page.getByText("theme-002")).toHaveCount(0);
   await expect(gachaDrawButton(page)).toBeEnabled();
   await expect(gachaDrawButton(page)).toContainText("1回まわす");
 
