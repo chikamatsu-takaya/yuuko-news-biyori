@@ -15,12 +15,7 @@ pub async fn get_yuuko_notification_state(
     let yuuko_service = state.yuuko_service.clone();
     tauri::async_runtime::spawn_blocking(move || yuuko_service.get_yuuko_notification_state())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join yuuko-notification-state task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("yuuko-notification-state", error))?
         .map_err(CommandError::from)
 }
 
@@ -32,12 +27,7 @@ pub async fn confirm_rank_up_reward(
     let yuuko_service = state.yuuko_service.clone();
     tauri::async_runtime::spawn_blocking(move || yuuko_service.confirm_rank_up_reward(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join confirm-rank-up-reward task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("confirm-rank-up-reward", error))?
         .map_err(CommandError::from)
 }
 
@@ -53,12 +43,7 @@ pub async fn dismiss_yuuko_notification(
     let result =
         tauri::async_runtime::spawn_blocking(move || yuuko_service.dismiss_yuuko_notification())
             .await
-            .map_err(|error| {
-                CommandError::new(
-                    "JOIN_ERROR",
-                    format!("failed to join dismiss-yuuko-notification task: {error}"),
-                )
-            })
+            .map_err(|error| CommandError::join_error("dismiss-yuuko-notification", error))
             .and_then(|result| result.map_err(CommandError::from));
     yuuko_desktop_notifier::after_yuuko_action(&app, window.label(), YuukoAction::Dismiss, &result);
     result
@@ -75,12 +60,7 @@ pub async fn handle_yuuko_clicked(
     let yuuko_service = state.yuuko_service.clone();
     let result = tauri::async_runtime::spawn_blocking(move || yuuko_service.handle_yuuko_clicked())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join handle-yuuko-clicked task: {error}"),
-            )
-        })
+        .map_err(|error| CommandError::join_error("handle-yuuko-clicked", error))
         .and_then(|result| result.map_err(CommandError::from));
     yuuko_desktop_notifier::after_yuuko_action(&app, window.label(), YuukoAction::Click, &result);
     result
@@ -94,12 +74,7 @@ pub async fn request_yuuko_notification(
     let yuuko_service = state.yuuko_service.clone();
     tauri::async_runtime::spawn_blocking(move || yuuko_service.request_yuuko_notification())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join request-yuuko-notification task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("request-yuuko-notification", error))?
         .map_err(CommandError::from)
 }
 
@@ -114,12 +89,7 @@ pub async fn mark_yuuko_ignored(
     let yuuko_service = state.yuuko_service.clone();
     let result = tauri::async_runtime::spawn_blocking(move || yuuko_service.mark_yuuko_ignored())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join mark-yuuko-ignored task: {error}"),
-            )
-        })
+        .map_err(|error| CommandError::join_error("mark-yuuko-ignored", error))
         .and_then(|result| result.map_err(CommandError::from));
     yuuko_desktop_notifier::after_yuuko_action(&app, window.label(), YuukoAction::Ignore, &result);
     result

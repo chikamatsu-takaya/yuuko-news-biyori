@@ -22,7 +22,7 @@ pub async fn get_autostart_enabled(
         autostart_service::read_autostart_state(&registry, &settings_service)
     })
     .await
-    .map_err(|_| join_error())?
+    .map_err(|error| CommandError::join_error("autostart", error))?
     .map_err(|_| unavailable_error())
 }
 
@@ -39,7 +39,7 @@ pub async fn set_autostart_enabled(
         autostart_service::apply_autostart_state(&registry, &settings_service, params.enabled)
     })
     .await
-    .map_err(|_| join_error())?
+    .map_err(|error| CommandError::join_error("autostart", error))?
     .map_err(|_| unavailable_error())
 }
 
@@ -84,8 +84,4 @@ impl AutostartRegistry for PluginAutostartRegistry<'_> {
 // OS エラー文・レジストリパスは React へ返さず、固定コード・固定文言だけにする。
 fn unavailable_error() -> CommandError {
     CommandError::new("AUTOSTART_UNAVAILABLE", "autostart is unavailable")
-}
-
-fn join_error() -> CommandError {
-    CommandError::new("JOIN_ERROR", "failed to join autostart task")
 }
