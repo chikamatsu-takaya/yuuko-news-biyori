@@ -2521,15 +2521,13 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
-// 他の「準備中」項目は残ることも確かめる。
-test("settings data panel has no dictionary export item", async ({ page }) => {
+// 「キャッシュを削除」も外した。残す「準備中」項目（アーカイブを管理）は残ることも確かめる。
+test("settings data panel has no dictionary export or cache delete item", async ({ page }) => {
   await openSettings(page);
 
   await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
   await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "キャッシュを削除（準備中）" })
-  ).toBeDisabled();
+  await expect(page.getByText(/キャッシュを削除/)).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "アーカイブを管理（準備中）" })
   ).toBeDisabled();
@@ -2704,28 +2702,31 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
   await expect(page.getByRole("checkbox", { name: "AI" })).toBeChecked();
 });
 
-// 保存DTOに対応フィールドが無い後回し項目が非活性であること。
-test("settings postponed controls without a DTO field are disabled", async ({
+// 保存DTOに対応フィールドが無い後回し項目のうち、残すものは非活性であること。
+// 外した項目（ゆうこ表示の4項目・専門用語の解説レベル・AI処理の優先モード・OpenAI）は表示されないこと。
+test("settings postponed controls without a DTO field are disabled or removed", async ({
   page,
 }) => {
   await openSettings(page);
 
-  // ゆうこ表示: 常駐スイッチ＋3ドロップダウンは DTO非接続のため非活性。
+  // ゆうこ表示: 現在のテーマ（読み取り専用）だけが残り、外した4項目は表示されない。
   await openSettingsMenu(page, "ゆうこ表示");
-  await expect(page.getByRole("switch")).toBeDisabled();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "控えめに" })
-  ).toBeDisabled();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "ふつう" })
-  ).toBeDisabled();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "通常" })
-  ).toBeDisabled();
+  await expect(page.getByTestId("current-theme-id")).toBeVisible();
+  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  await expect(page.getByRole("combobox")).toHaveCount(0);
+  for (const label of [
+    "常駐時のゆうこを表示する",
+    "吹き出しの自動表示",
+    "ゆうこの話しかけ頻度",
+    "ゆうこのアニメーション",
+  ]) {
+    await expect(page.getByText(label)).toHaveCount(0);
+  }
 
-  // 抑制条件: 判定処理が無いゲームは非活性。会議/マイク/フルスクリーンは操作可能。
+  // 抑制条件: 会議/マイク/フルスクリーンは操作可能。ゲームは外した。
   await openSettingsMenu(page, "抑制条件");
-  await expect(page.getByRole("switch")).toHaveCount(4);
+  await expect(page.getByRole("switch")).toHaveCount(3);
   await expect(
     page.getByRole("switch", { name: "会議中は通知を抑制する", exact: true })
   ).toBeEnabled();
@@ -2735,11 +2736,9 @@ test("settings postponed controls without a DTO field are disabled", async ({
   await expect(
     page.getByRole("switch", { name: "フルスクリーン時は通知を抑制する", exact: true })
   ).toBeEnabled();
-  await expect(
-    page.getByRole("switch", { name: "ゲーム実行中は通知を抑制する（準備中）" })
-  ).toBeDisabled();
+  await expect(page.getByText(/ゲーム実行中は通知を抑制する/)).toHaveCount(0);
 
-  // 解説・AI設定: 専門用語/長文自動/優先モードは非活性。Provider/解説の詳しさは操作可能。
+  // 解説・AI設定: Provider/解説の詳しさは操作可能。専門用語の解説レベル・優先モードは表示しない。
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
     page.getByRole("combobox").filter({ hasText: "MockProvider" })
@@ -2747,12 +2746,9 @@ test("settings postponed controls without a DTO field are disabled", async ({
   await expect(
     page.getByRole("combobox").filter({ hasText: "ふつう" })
   ).toBeEnabled();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "中学生レベル" })
-  ).toBeDisabled();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "バランス重視" })
-  ).toBeDisabled();
+  await expect(page.getByRole("combobox")).toHaveCount(2);
+  await expect(page.getByText("専門用語の解説レベル")).toHaveCount(0);
+  await expect(page.getByText("AI処理の優先モード")).toHaveCount(0);
   // 自動要約スイッチは DTO 保存されるため操作可能、長文要点説明は準備中で非活性。
   await expect(page.getByRole("switch")).toHaveCount(2);
   await expect(
@@ -2761,6 +2757,46 @@ test("settings postponed controls without a DTO field are disabled", async ({
   await expect(
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeEnabled();
+
+  // AIプロバイダーの選択肢: OpenAI は無く、ローカルは「準備中」で残る。
+  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await expect(page.getByRole("option")).toHaveText([
+    "MockProvider（APIキー不要）",
+    "Gemini",
+    "ローカル（準備中）",
+  ]);
+  await page.keyboard.press("Escape");
+  // 案内文も OpenAI に触れず、ローカルだけを準備中として案内する。
+  await expect(page.getByText(/OpenAI/)).toHaveCount(0);
+  await expect(
+    page.getByText(/ローカルは準備中のため、選んでも現在は MockProvider で動作します。/)
+  ).toBeVisible();
+});
+
+// 以前に OpenAI を保存していた場合も画面が壊れず、MockProvider として表示・保存できること。
+test("settings treats a saved openai provider as MockProvider", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override（選択肢から外した openai を保存済みとして返させる）
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      aiProvider: "openai",
+    };
+  });
+
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+  ).toBeVisible();
+  await expect(page.getByText(/OpenAI/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "保存する" }).click();
+
+  const saved = (await readSavedSettings(page)) as
+    | { aiProvider?: string }
+    | undefined;
+  expect(saved?.aiProvider).toBe("mock");
 });
 
 // 自動起動の呼び出し履歴（set_autostart_enabled に渡した enabled の並び）。
@@ -3089,7 +3125,8 @@ test("settings suppression shows 準備中 for unimplemented switches and saves 
   await expect(
     page.getByText("マイク使用中は通知を抑制する（準備中）")
   ).toHaveCount(0);
-  await expect(page.getByText("ゲーム実行中は通知を抑制する（準備中）")).toBeVisible();
+  // ゲーム実行中の抑制は画面から外した（判断台帳 D70）。
+  await expect(page.getByText(/ゲーム実行中は通知を抑制する/)).toHaveCount(0);
   await expect(
     page.getByText("フルスクリーン時は通知を抑制する", { exact: true })
   ).toBeVisible();

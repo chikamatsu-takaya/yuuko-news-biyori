@@ -15,7 +15,6 @@ import {
   Lightbulb,
   RotateCcw,
   HelpCircle,
-  Trash2,
   Archive,
   Check,
   Info,
@@ -80,25 +79,15 @@ type NotificationSettings = {
 };
 
 
-type YuukoDisplaySettings = {
-  showResident: boolean;
-  balloonMode: string;
-  talkFrequency: string;
-  animationMode: string;
-};
-
 type SuppressionSettings = {
   suppressInMeeting: boolean;
   suppressWhenMicInUse: boolean;
   suppressWhenFullscreen: boolean;
-  suppressWhenGaming: boolean;
 };
 
 type AiSettings = {
   explanationDetail: string;
-  termExplanationLevel: string;
   autoSuggestLongSummary: boolean;
-  priorityMode: string;
   provider: string;
   providerStatus: string;
   autoSummaryEnabled: boolean;
@@ -119,7 +108,6 @@ type IntegrationSettings = {
 
 type SettingsState = {
   notification: NotificationSettings;
-  yuuko: YuukoDisplaySettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
   user: UserProfileSettingsState;
@@ -162,23 +150,14 @@ const mockSettings: SettingsState = {
     frequency: "1日3回まで",
     maxPerDay: 3,
   },
-  yuuko: {
-    showResident: true,
-    balloonMode: "控えめに",
-    talkFrequency: "ふつう",
-    animationMode: "通常",
-  },
   suppression: {
     suppressInMeeting: true,
     suppressWhenMicInUse: true,
     suppressWhenFullscreen: true,
-    suppressWhenGaming: false,
   },
   ai: {
     explanationDetail: "ふつう",
-    termExplanationLevel: "中学生レベル",
     autoSuggestLongSummary: true,
-    priorityMode: "バランス重視",
     provider: "mock",
     providerStatus: "MockProviderで動作中",
     autoSummaryEnabled: false,
@@ -292,6 +271,10 @@ const mapSettingsFromDto = (
   dto: UserSettingsDto
 ): SettingsState => {
   const workTimeRanges = normalizeWorkTimeRanges(dto.workTimeRanges);
+  // OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
+  // もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
+  const providerForDisplay =
+    dto.aiProvider === "openai" ? "mock" : dto.aiProvider;
 
   return {
     ...base,
@@ -311,8 +294,8 @@ const mapSettingsFromDto = (
     },
     ai: {
       ...base.ai,
-      provider: dto.aiProvider,
-      providerStatus: dto.aiProvider,
+      provider: providerForDisplay,
+      providerStatus: providerForDisplay,
       // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
       explanationDetail: explanationLevelToLabel(dto.explanationLevel),
       autoSummaryEnabled: dto.autoSummaryEnabled ?? false,
@@ -341,7 +324,6 @@ const buildDtoForSave = (
   const normalizedProvider =
     settingsState.ai.provider === "mock" ||
       settingsState.ai.provider === "gemini" ||
-      settingsState.ai.provider === "openai" ||
       settingsState.ai.provider === "local"
       ? settingsState.ai.provider
       : source.aiProvider;
@@ -630,16 +612,6 @@ export default function SettingsScreen({
         notification: { ...prev.notification, workTimeRanges },
       };
     });
-  };
-
-  const updateYuuko = (
-    key: keyof YuukoDisplaySettings,
-    value: boolean | string
-  ) => {
-    setSettings((prev) => ({
-      ...prev,
-      yuuko: { ...prev.yuuko, [key]: value },
-    }));
   };
 
   const updateSuppression = (
@@ -1068,68 +1040,6 @@ export default function SettingsScreen({
                       </span>
                     </div>
                   </SettingRow>
-                  {/* 以下4項目は保存DTOに対応フィールドが無く永続化されないため、誤操作防止に非活性＋「準備中」。 */}
-                  <SettingRow label="常駐時のゆうこを表示する（準備中）">
-                    <Switch
-                      checked={settings.yuuko.showResident}
-                      disabled
-                      aria-disabled
-                      onCheckedChange={(checked) =>
-                        updateYuuko("showResident", checked)
-                      }
-                    />
-                  </SettingRow>
-                  <SettingRow label="吹き出しの自動表示（準備中）">
-                    <Select
-                      value={settings.yuuko.balloonMode}
-                      disabled
-                      onValueChange={(v) => updateYuuko("balloonMode", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="常に表示">常に表示</SelectItem>
-                        <SelectItem value="控えめに">控えめに</SelectItem>
-                        <SelectItem value="ほぼ表示しない">
-                          ほぼ表示しない
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="ゆうこの話しかけ頻度（準備中）">
-                    <Select
-                      value={settings.yuuko.talkFrequency}
-                      disabled
-                      onValueChange={(v) => updateYuuko("talkFrequency", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="多め">多め</SelectItem>
-                        <SelectItem value="ふつう">ふつう</SelectItem>
-                        <SelectItem value="少なめ">少なめ</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="ゆうこのアニメーション（準備中）">
-                    <Select
-                      value={settings.yuuko.animationMode}
-                      disabled
-                      onValueChange={(v) => updateYuuko("animationMode", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="派手">派手</SelectItem>
-                        <SelectItem value="通常">通常</SelectItem>
-                        <SelectItem value="控えめ">控えめ</SelectItem>
-                        <SelectItem value="なし">なし</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
                 </CardContent>
               </Card>
             )}
@@ -1174,18 +1084,8 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  {/* suppressWhenGaming は保存DTOに対応フィールドが無く個別判定も無いため非活性＋「準備中」。
+                  {/* ゲーム実行中の抑制は保存先も個別判定も無いため画面から外した（判断台帳 D70。再検討の余地あり）。
                       全画面で動くゲームはフルスクリーン抑制の対象になる。 */}
-                  <SettingRow label="ゲーム実行中は通知を抑制する（準備中）">
-                    <Switch
-                      aria-label="ゲーム実行中は通知を抑制する（準備中）"
-                      checked={settings.suppression.suppressWhenGaming}
-                      disabled
-                      onCheckedChange={(checked) =>
-                        updateSuppression("suppressWhenGaming", checked)
-                      }
-                    />
-                  </SettingRow>
                 </CardContent>
               </Card>
             )}
@@ -1215,9 +1115,9 @@ export default function SettingsScreen({
                       <SelectContent>
                         <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
                         <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* openai / local は enum 上は保存できるが、実AI呼び出しは未実装（常に mock 動作）。 */}
+                        {/* local は enum 上は保存できるが、実AI呼び出しは未実装（常に mock 動作）。 */}
                         {/* MVP 未検証のため「準備中」と明示し、選んでも安全側で mock で動くことを案内する。 */}
-                        <SelectItem value="openai">OpenAI（準備中）</SelectItem>
+                        {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
                         <SelectItem value="local">ローカル（準備中）</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1302,25 +1202,8 @@ export default function SettingsScreen({
                       />
                     </div>
                   </div>
-                  {/* 以下3項目は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
+                  {/* 長文要点説明の自動候補は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
                       AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
-                  <SettingRow label="専門用語の解説レベル（準備中）">
-                    <Select
-                      value={settings.ai.termExplanationLevel}
-                      disabled
-                      onValueChange={(v) => updateAi("termExplanationLevel", v)}
-                    >
-                      <SelectTrigger className="w-36" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="小学生レベル">小学生レベル</SelectItem>
-                        <SelectItem value="中学生レベル">中学生レベル</SelectItem>
-                        <SelectItem value="高校生レベル">高校生レベル</SelectItem>
-                        <SelectItem value="専門家レベル">専門家レベル</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
                   <SettingRow label="長文要点説明の自動候補（準備中）">
                     <Switch
                       aria-label="長文要点説明の自動候補（準備中）"
@@ -1332,26 +1215,10 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="AI処理の優先モード（準備中）">
-                    <Select
-                      value={settings.ai.priorityMode}
-                      disabled
-                      onValueChange={(v) => updateAi("priorityMode", v)}
-                    >
-                      <SelectTrigger className="w-36" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="速度重視">速度重視</SelectItem>
-                        <SelectItem value="バランス重視">バランス重視</SelectItem>
-                        <SelectItem value="品質重視">品質重視</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
                   {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。現在、実際の外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。OpenAI・ローカルは準備中のため、選んでも現在は MockProvider で動作します。
+                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。現在、実際の外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。ローカルは準備中のため、選んでも現在は MockProvider で動作します。
                   </p>
                 </CardContent>
               </Card>
@@ -1560,15 +1427,6 @@ export default function SettingsScreen({
               <div className="space-y-2">
                 {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
                 {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
-                >
-                  <Trash2 className="w-4 h-4" />
-                  キャッシュを削除（準備中）
-                </Button>
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
