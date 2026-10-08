@@ -465,7 +465,8 @@ pub struct ConfirmRankUpRewardResult {
 pub struct RequestYuukoNotificationResult {
     pub notified: bool,
     /// "notified" / "disabled" / "reward_pending" / "already_active" / "daily_limit" / "cooling_down" /
-    /// "outside_time_range" / "fullscreen"（全画面・プレゼン中）/ "fullscreen_grace"（解除後の猶予中）/ "no_candidate"
+    /// "outside_time_range" / "fullscreen"（全画面・プレゼン中）/ "fullscreen_grace"（解除後の猶予中）/
+    /// "resume_grace"（スリープ復帰後の猶予中）/ "no_candidate"
     pub reason: String,
     pub state: YuukoNotificationState,
 }

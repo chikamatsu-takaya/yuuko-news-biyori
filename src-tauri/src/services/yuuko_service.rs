@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::domain::article::GetRecommendedArticlesParams;
 use crate::domain::fullscreen_suppression::{
     grace_from_seed, time_seed, FullscreenGate, FullscreenSuppressionTracker,
 };
+use crate::domain::resume_grace::{ResumeGate, ResumeGraceTracker};
 use crate::domain::yuuko::{
     short_preview_summary, ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate,
     PersistedYuukoState, RequestYuukoNotificationResult, YuukoNotificationState,
@@ -24,7 +25,7 @@ use crate::services::reward_service::RewardService;
 /// 「詳しく見る」確定で記録する友情イベント（加算量 5pt は domain::friendship 側で定義）。
 const YUUKO_TO_MAIN_EVENT: &str = "yuuko_to_main";
 
-/// Clone しても全画面抑制の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
+/// Clone しても全画面抑制・スリープ復帰の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
 /// 同じ猶予を見る。
 #[derive(Debug, Clone)]
 pub struct YuukoService {
@@ -36,6 +37,8 @@ pub struct YuukoService {
     friendship_service: FriendshipService,
     fullscreen_detector: Arc<dyn FullscreenDetector>,
     fullscreen_tracker: Arc<Mutex<FullscreenSuppressionTracker>>,
+    /// スリープ復帰の検知（デスクトップ通知スレッドの心拍）と復帰後の猶予。
+    resume_tracker: Arc<Mutex<ResumeGraceTracker>>,
 }
 
 impl YuukoService {
@@ -54,6 +57,7 @@ impl YuukoService {
             friendship_service,
             fullscreen_detector: Arc::new(SystemFullscreenDetector),
             fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
+            resume_tracker: Arc::new(Mutex::new(ResumeGraceTracker::default())),
         }
     }
 
@@ -107,6 +111,40 @@ impl YuukoService {
     /// 記録はメモリ上の小さな状態だけなので、他スレッドの panic で毒化していても続行する。
     fn lock_fullscreen_tracker(&self) -> MutexGuard<'_, FullscreenSuppressionTracker> {
         self.fullscreen_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// デスクトップ通知スレッドの心拍を記録する。`expected_next` は次の判定までの待ち時間。
+    ///
+    /// スリープ復帰の検知は、常に回り続けるこのスレッドの間隔だけを基準にする（アプリ内通知の
+    /// ポーリングは非表示中に止まるため、その空白はスリープと区別できない）。
+    pub fn record_notifier_heartbeat(&self, expected_next: std::time::Duration) {
+        let expected = Duration::from_std(expected_next).unwrap_or_else(|_| Duration::days(1));
+        self.lock_resume_tracker().heartbeat(Utc::now(), expected);
+    }
+
+    /// スリープ復帰を検知していれば猶予を始める（デスクトップ通知スレッドが各周期の最初に呼ぶ）。
+    /// メイン表示中で判定を行わない周期でも検知しておき、アプリ内通知の判定にも猶予を効かせる。
+    pub fn observe_resume(&self) {
+        self.check_resume(Utc::now());
+    }
+
+    /// スリープ復帰後の猶予中なら残り時間を返す（デスクトップ通知スレッドの次回判定用）。
+    pub fn resume_grace_remaining(&self) -> Option<std::time::Duration> {
+        self.lock_resume_tracker()
+            .grace_remaining(Utc::now())
+            .and_then(|remaining| remaining.to_std().ok())
+    }
+
+    /// スリープ復帰の検知と猶予判定（設計書 §5.2 / §5.4）。OS の電源イベントは使わない。
+    fn check_resume(&self, now: DateTime<Utc>) -> ResumeGate {
+        self.lock_resume_tracker()
+            .observe(now, grace_from_seed(time_seed()))
+    }
+
+    fn lock_resume_tracker(&self) -> MutexGuard<'_, ResumeGraceTracker> {
+        self.resume_tracker
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -248,7 +286,7 @@ impl YuukoService {
     }
 
     /// ゆうこにニュース通知を出させる。MVP抑制条件（enabled / 日次上限 / クールタイム / cooldown /
-    /// 全画面・プレゼン中と解除後の猶予）と
+    /// 全画面・プレゼン中と解除後の猶予 / スリープ復帰後の猶予）と
     /// 候補選定（未紹介・未読・スコア順／お気に入り除外）を満たす場合のみ、おすすめから1件を
     /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。報酬 pending 時は誤消し防止のため何もしない。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
@@ -297,6 +335,9 @@ impl YuukoService {
 
         // 全画面・プレゼン中と解除後の猶予中は出さない。候補選定（紹介済み記録・通知枠の消費）の前に
         // 止めるため、候補は捨てられず解除後の判定で再び選ばれる（§5.3 次回判定まで保留）。
+        // スリープ復帰の検知は全画面で返す場合も取りこぼさないよう先に行い、復帰後の猶予も同じく
+        // 候補選定の前で止める（全画面の理由を優先して返す）。
+        let resume_gate = self.check_resume(now);
         match self.check_fullscreen(now, settings.notification.suppress_in_fullscreen) {
             FullscreenGate::Suppressed => {
                 return Ok(notification_result(false, "fullscreen", &state));
@@ -305,6 +346,9 @@ impl YuukoService {
                 return Ok(notification_result(false, "fullscreen_grace", &state));
             }
             FullscreenGate::Allowed => {}
+        }
+        if let ResumeGate::GracePeriod { .. } = resume_gate {
+            return Ok(notification_result(false, "resume_grace", &state));
         }
 
         // おすすめ候補（スコア順）から未紹介・未読を優先して1件選ぶ。選定はRust側責務（§2.3）。
@@ -820,6 +864,100 @@ mod tests {
             notified.state.current_article_id.as_deref(),
             Some("article-001")
         );
+    }
+
+    /// デスクトップ通知スレッドの心拍を、想定間隔（5分）より大幅に前に記録したことにする。
+    fn simulate_sleep_since_last_heartbeat(ctx: &ServiceContext) {
+        ctx.service
+            .lock_resume_tracker()
+            .heartbeat(Utc::now() - Duration::hours(2), Duration::minutes(5));
+    }
+
+    /// 11a. スリープ復帰（心拍の大きな空白）を検知したら、猶予（30〜180秒）の間は候補を保留し、
+    /// 猶予明けの判定で同じ候補を出す（全画面解除後の猶予と同じ流れ）。
+    #[test]
+    fn request_holds_candidate_after_resume_and_notifies_after_grace() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        simulate_sleep_since_last_heartbeat(&ctx);
+
+        let grace = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!grace.notified);
+        assert_eq!(grace.reason, "resume_grace");
+        assert_nothing_consumed(&ctx);
+        let remaining = ctx
+            .service
+            .resume_grace_remaining()
+            .expect("resume grace should be pending");
+        assert!(remaining <= std::time::Duration::from_secs(180));
+        assert!(remaining > std::time::Duration::from_secs(25));
+
+        // 猶予中に繰り返し判定しても保留のまま（同じ空白で二重検知しない）。
+        let again = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(again.reason, "resume_grace");
+        assert_nothing_consumed(&ctx);
+
+        // 猶予が明けた時点を観測させる（実時間を待たない）。
+        let after_grace = ctx
+            .service
+            .lock_resume_tracker()
+            .observe(Utc::now() + Duration::seconds(181), Duration::seconds(30));
+        assert_eq!(after_grace, ResumeGate::Allowed);
+        let notified = ctx.service.request_yuuko_notification().unwrap();
+        assert!(notified.notified);
+        assert_eq!(notified.reason, "notified");
+        assert_eq!(
+            notified.state.current_article_id.as_deref(),
+            Some("article-001")
+        );
+    }
+
+    /// 11a-2. 心拍が想定どおり届いていれば（またはまだ無ければ）復帰とみなさない。
+    #[test]
+    fn request_is_not_held_without_resume_gap() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        ctx.service
+            .record_notifier_heartbeat(std::time::Duration::from_secs(5 * 60));
+        ctx.service.observe_resume();
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(result.reason, "notified");
+        assert!(ctx.service.resume_grace_remaining().is_none());
+    }
+
+    /// 11a-3. デスクトップ通知スレッドの周期で先に検知した猶予は、アプリ内通知の判定にも効く。
+    /// 全画面中は全画面の理由を優先し、解除後も復帰猶予が残っていれば出さない。
+    #[test]
+    fn resume_detected_by_notifier_is_honored_and_fullscreen_takes_precedence() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        simulate_sleep_since_last_heartbeat(&ctx);
+        ctx.service.observe_resume();
+        ctx.service
+            .record_notifier_heartbeat(std::time::Duration::from_secs(5 * 60));
+        assert!(ctx.service.resume_grace_remaining().is_some());
+
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+        let fullscreen = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(fullscreen.reason, "fullscreen");
+
+        // 全画面の抑制を切ると全画面の猶予も捨てられ、復帰猶予だけが残る。
+        let mut settings = ctx.settings_repository.load_or_default().unwrap();
+        settings.notification.suppress_in_fullscreen = false;
+        ctx.settings_repository.save(&settings).unwrap();
+        let resume = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(resume.reason, "resume_grace");
+        assert_nothing_consumed(&ctx);
     }
 
     /// 11b. active 通知が残ったまま全画面になった場合、already_active の優先順位は変えずに、

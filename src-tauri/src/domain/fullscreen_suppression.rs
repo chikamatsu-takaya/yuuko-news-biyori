@@ -78,8 +78,8 @@ impl FullscreenSuppressionTracker {
     }
 }
 
-/// 猶予を 30〜180 秒に収める。
-fn clamp_grace(grace: Duration) -> Duration {
+/// 猶予を 30〜180 秒に収める（スリープ復帰後の猶予 domain::resume_grace でも使う）。
+pub fn clamp_grace(grace: Duration) -> Duration {
     grace.clamp(
         Duration::seconds(GRACE_MIN_SECONDS),
         Duration::seconds(GRACE_MAX_SECONDS),

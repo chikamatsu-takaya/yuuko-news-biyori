@@ -3,6 +3,7 @@ pub mod article;
 pub mod dictionary;
 pub mod friendship;
 pub mod fullscreen_suppression;
+pub mod resume_grace;
 pub mod reward;
 pub mod settings;
 pub mod summary;
