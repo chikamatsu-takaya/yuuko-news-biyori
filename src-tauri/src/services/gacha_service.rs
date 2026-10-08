@@ -72,6 +72,11 @@ impl GachaService {
         self
     }
 
+    /// gacha_state.json のロック。データ移行の取り込みが差し替え中に保持する（他のロックの後に最後に取る）。
+    pub fn migration_store_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.store_lock)
+    }
+
     /// ガチャ画面用の状態を返す（読み取り）。未保存なら初期値（初期かけら・所持なし）を返す。
     pub fn get_gacha_state(&self) -> Result<GachaStateDto, AppError> {
         self.update(|state| (state.to_dto(), false))

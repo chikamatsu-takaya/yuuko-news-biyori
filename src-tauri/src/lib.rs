@@ -128,6 +128,7 @@ pub fn run() {
                 dictionary_repository.write_lock_handle(),
                 reward_service.friendship_store_lock(),
                 reward_service.rewards_store_lock(),
+                gacha_service.migration_store_lock(),
             );
             let summary_service = SummaryService::new(
                 ai_provider_service.clone(),
