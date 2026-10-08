@@ -285,6 +285,25 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_rewards_file_is_reset_and_unlocks_are_rederived_from_rank() {
+        let ctx = ctx();
+        save_friendship_total(&ctx, 160); // Rank7
+        std::fs::create_dir_all(ctx.paths.rewards_path.parent().unwrap()).unwrap();
+        std::fs::write(&ctx.paths.rewards_path, b"{ broken").unwrap();
+
+        // 壊れた rewards.json は退避・初期化され、解放済み報酬はランクから導出し直される。
+        // 確認済みだった報酬も未確認として再び現れる（確認状態は退避ファイルにだけ残る）。
+        let dto = ctx.service.get_reward_state().unwrap();
+        assert_eq!(dto.pending_reward_ids, ids(&["theme_001", "theme_002"]));
+        assert_eq!(
+            std::fs::read(ctx.paths.rewards_path.with_extension("corrupt.json")).unwrap(),
+            b"{ broken"
+        );
+        let saved = RewardRepository::new(&ctx.paths).load().unwrap().unwrap();
+        assert_eq!(saved.unlocked_reward_ids, ids(&["theme_001", "theme_002"]));
+    }
+
+    #[test]
     fn sync_unlocks_on_rank_up_and_confirm_persists() {
         let ctx = ctx();
         let friendship = save_friendship_total(&ctx, 25); // Rank3

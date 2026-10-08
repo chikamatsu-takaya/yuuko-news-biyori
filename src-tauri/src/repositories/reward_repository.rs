@@ -22,7 +22,10 @@ impl RewardRepository {
     }
 
     /// 保存済みの報酬状態を読む。未保存なら `None`（呼び出し側が旧データから作る）。
-    /// 壊れたファイルはエラーにする（既定値で上書きして解放済み報酬を失わないため）。
+    /// JSON として読めない場合は `rewards.corrupt.json` へ退避して既定値（空）で作り直す
+    /// （セキュリティ詳細設計書 §11.4）。解放済み報酬は友情ランクから冪等に導出し直されるため
+    /// （`RewardsState::unlock_up_to_rank`）失われないが、確認済みだった報酬は未確認として再び現れる。
+    /// 退避に失敗したら上書きせずエラーを返す。
     pub fn load(&self) -> Result<Option<RewardsState>, AppError> {
         self.restore_backup_if_primary_missing();
 
@@ -30,8 +33,12 @@ impl RewardRepository {
             return Ok(None);
         }
 
-        let raw = std::fs::read_to_string(&self.state_path)?;
-        Ok(Some(serde_json::from_str::<RewardsState>(&raw)?))
+        let state = super::corrupt_json::read_json_or_reset(&self.state_path, "rewards", || {
+            let state = RewardsState::default();
+            self.save(&state)?;
+            Ok(state)
+        })?;
+        Ok(Some(state))
     }
 
     /// rewards.json（または復旧可能な bak）があるか。無ければ旧データからの移行が必要。
@@ -142,11 +149,34 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_is_an_error_not_silently_reset() {
+    fn corrupt_file_is_backed_up_and_reset_to_defaults() {
         let (repo, root) = temp_repo();
         std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
         std::fs::write(&repo.state_path, "{not json").unwrap();
+
+        // 読めない rewards.json は退避してから空の既定値で作り直す（§11.4）。
+        let loaded = repo.load().unwrap().unwrap();
+        assert_eq!(loaded, RewardsState::default());
+        let backup = root.join("rewards").join("rewards.corrupt.json");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{not json");
+        // 作り直したファイルは次回そのまま読める。
+        assert_eq!(repo.load().unwrap().unwrap(), RewardsState::default());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_file_is_kept_when_backup_fails() {
+        let (repo, root) = temp_repo();
+        std::fs::create_dir_all(repo.state_path.parent().unwrap()).unwrap();
+        std::fs::write(&repo.state_path, "{not json").unwrap();
+        // 退避先にディレクトリを置いて退避を失敗させる。
+        std::fs::create_dir_all(root.join("rewards").join("rewards.corrupt.json")).unwrap();
+
         assert!(repo.load().is_err());
+        // 上書きせず元のまま残す。
+        assert_eq!(std::fs::read(&repo.state_path).unwrap(), b"{not json");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }
