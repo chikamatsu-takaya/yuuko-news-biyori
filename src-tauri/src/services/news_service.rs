@@ -5,6 +5,7 @@
 //!         おすすめ採点 → 保存。重複排除（同一URL／同一出典・同一タイトル）は
 //!         本文取得より前に行い、既知記事への外部通信を発生させない。
 //!         1フィード・1回の取得で処理する新着は MAX_NEW_ITEMS_PER_FEED 件まで（重複排除後に数える）。
+//!         取得元は設定の興味ジャンル（news.categories）で絞り込む（D10・select_sources_by_genre）。
 //!
 //! セキュリティ方針:
 //! - news_sources.json は deny-by-default（空配列）。破損時は fail-close（Err）。
@@ -32,7 +33,9 @@ use crate::infra::url_guard::{validate_url, UrlPurpose};
 use crate::paths::AppPaths;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::services::recommendation_service::{RecommendationContext, RecommendationService};
+use crate::services::recommendation_service::{
+    genre_matches, RecommendationContext, RecommendationService,
+};
 
 // 結果の errors に載せる固定カテゴリ（UI返却用・低レベル詳細を含めない）。
 const ERROR_FEED_URL_REJECTED: &str = "feed_url_rejected";
@@ -166,6 +169,53 @@ pub struct RefreshNewsResult {
     pub saved: usize,
     /// サニタイズ済みエラー一覧。
     pub errors: Vec<RefreshError>,
+    /// 興味ジャンルに合う取得元が無く、すべての取得元から取得したか（D10）。
+    pub genre_filter_fallback: bool,
+}
+
+/// 興味ジャンルによる取得元の絞り込み結果。
+#[derive(Debug, PartialEq, Eq)]
+struct SourceSelection<'a> {
+    sources: Vec<&'a NewsSource>,
+    /// 絞り込みで0件になったため、全取得元へ戻したか。
+    fallback: bool,
+}
+
+/// 設定の興味ジャンルに合う取得元だけを選ぶ（D10）。
+///
+/// - 興味ジャンルが未設定（空・空白のみ）: 全取得元。
+/// - ジャンル欄が無い／空の取得元: 常に含める（仮の設計判断。取得元ファイルの形式を変えずに、
+///   ジャンル未記入の取得元が黙って取得対象から外れるのを避けるため）。
+/// - 一致判定はおすすめ採点と同じ genre_matches（大文字小文字無視・部分一致）。
+/// - 絞り込みで0件になった場合: 取得を止めないよう全取得元へ戻し、fallback を立てて画面へ伝える。
+fn select_sources_by_genre<'a>(
+    sources: &'a [NewsSource],
+    interest_genres: &[String],
+) -> SourceSelection<'a> {
+    let all = || sources.iter().collect::<Vec<_>>();
+    if interest_genres.iter().all(|genre| genre.trim().is_empty()) {
+        return SourceSelection {
+            sources: all(),
+            fallback: false,
+        };
+    }
+
+    let selected: Vec<&NewsSource> = sources
+        .iter()
+        .filter(|source| {
+            source.genre.trim().is_empty() || genre_matches(&source.genre, interest_genres)
+        })
+        .collect();
+    if selected.is_empty() && !sources.is_empty() {
+        return SourceSelection {
+            sources: all(),
+            fallback: true,
+        };
+    }
+    SourceSelection {
+        sources: selected,
+        fallback: false,
+    }
 }
 
 /// 取得処理の同時実行を防ぐプロセス内ロック。
@@ -247,8 +297,24 @@ impl NewsService {
         let config = NewsSourcesConfig::load(&self.sources_path)?;
         let allowlist = NetworkAllowlist::load(&self.allowlist_path)?;
 
+        let preferred_genres = self.load_preferred_genres();
+        let selection = select_sources_by_genre(&config.sources, &preferred_genres);
+        // URL は載せない（データ設計書 §16.4）。件数のみ記録する。
+        if selection.fallback {
+            log::info!(
+                "no news source matched interest genres; fetching all {} sources",
+                config.sources.len()
+            );
+        } else {
+            log::debug!(
+                "genre filter selected {} of {} news sources",
+                selection.sources.len(),
+                config.sources.len()
+            );
+        }
+
         let context = RecommendationContext {
-            preferred_genres: self.load_preferred_genres(),
+            preferred_genres,
             // 重要キーワードの初期候補（MVP）。docs/02_design/おすすめ判定ポリシー.md §3。
             important_keywords: RecommendationService::initial_important_keywords(),
         };
@@ -265,7 +331,7 @@ impl NewsService {
 
         // URL（クエリを含みうる）と、URL を含む通信エラー文は debug にとどめ、配布版のログファイルへ残さない（D29）。
         // 取得失敗の内容は戻り値の errors で画面側へ伝わる。
-        for source in &config.sources {
+        for source in selection.sources.iter().copied() {
             // (制約5) feed_url を RssClient へ渡す前に検証する。
             let validated_feed = match validate_url(&source.url, UrlPurpose::Rss, &allowlist) {
                 Ok(url) => url,
@@ -363,15 +429,30 @@ impl NewsService {
         let saved = self.article_repository.save_fetched_articles(to_save)?;
 
         Ok(RefreshNewsResult {
-            sources_processed: config.sources.len(),
+            sources_processed: selection.sources.len(),
             fetched,
             saved,
             errors,
+            genre_filter_fallback: selection.fallback,
         })
     }
 
-    /// 推薦コンテキスト用の選好ジャンルを設定から取得する。
-    /// 設定の読み込み失敗は取得の致命傷ではないため、空ジャンルへフォールバックする
+    /// 指定の興味ジャンルで取得すると全取得元へのフォールバックになるか（設定画面の注記用）。
+    ///
+    /// 取得元ファイルをローカルで読むだけで通信はしない。読めない場合は注記を出さない（false）。
+    /// 破損時の fail-close は取得本体（refresh_exclusive）側で扱う。
+    pub fn genre_filter_fallback_for(&self, interest_genres: &[String]) -> bool {
+        match NewsSourcesConfig::load(&self.sources_path) {
+            Ok(config) => select_sources_by_genre(&config.sources, interest_genres).fallback,
+            Err(error) => {
+                log::debug!("failed to load news sources for genre filter check: {error}");
+                false
+            }
+        }
+    }
+
+    /// 推薦コンテキストと取得元の絞り込みに使う興味ジャンルを設定から取得する。
+    /// 設定の読み込み失敗は取得の致命傷ではないため、空ジャンル（＝全取得元）へフォールバックする
     /// （fail-close は news_sources / allowlist 側で担保する）。
     fn load_preferred_genres(&self) -> Vec<String> {
         match self.settings_repository.load_or_default() {
@@ -759,5 +840,106 @@ mod tests {
         let loaded = NewsSourcesConfig::load(&path).expect("BOM-prefixed news sources should load");
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded, config);
+    }
+
+    fn source(url: &str, genre: &str) -> NewsSource {
+        NewsSource {
+            url: url.to_string(),
+            genre: genre.to_string(),
+        }
+    }
+
+    fn genres(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn selected_urls(selection: &SourceSelection<'_>) -> Vec<String> {
+        selection
+            .sources
+            .iter()
+            .map(|source| source.url.clone())
+            .collect()
+    }
+
+    #[test]
+    fn genre_filter_keeps_only_sources_matching_interest_genres() {
+        let sources = vec![
+            source("https://a.example/rss", "AI・テクノロジー"),
+            source("https://b.example/rss", "ビジネス"),
+            source("https://c.example/rss", "セキュリティ"),
+        ];
+
+        let selection = select_sources_by_genre(&sources, &genres(&["ai", "セキュリティ"]));
+
+        assert_eq!(
+            selected_urls(&selection),
+            vec!["https://a.example/rss", "https://c.example/rss"]
+        );
+        assert!(!selection.fallback);
+    }
+
+    #[test]
+    fn genre_filter_selects_all_sources_when_no_interest_genre_is_set() {
+        let sources = vec![
+            source("https://a.example/rss", "AI"),
+            source("https://b.example/rss", "ビジネス"),
+        ];
+
+        for interest in [genres(&[]), genres(&["", "  "])] {
+            let selection = select_sources_by_genre(&sources, &interest);
+            assert_eq!(selection.sources.len(), 2);
+            assert!(!selection.fallback);
+        }
+    }
+
+    #[test]
+    fn genre_filter_always_keeps_sources_without_genre() {
+        // ジャンル欄が無い取得元（serde の既定で空文字）は常に取得対象にする（仮の設計判断）。
+        let config: NewsSourcesConfig = serde_json::from_str(
+            r#"{"version":1,"sources":[{"url":"https://a.example/rss"},{"url":"https://b.example/rss","genre":"ビジネス"},{"url":"https://c.example/rss","genre":" "}]}"#,
+        )
+        .unwrap();
+
+        let selection = select_sources_by_genre(&config.sources, &genres(&["AI"]));
+
+        assert_eq!(
+            selected_urls(&selection),
+            vec!["https://a.example/rss", "https://c.example/rss"]
+        );
+        assert!(!selection.fallback);
+    }
+
+    #[test]
+    fn genre_filter_falls_back_to_all_sources_when_nothing_matches() {
+        let sources = vec![
+            source("https://a.example/rss", "ビジネス"),
+            source("https://b.example/rss", "スポーツ"),
+        ];
+
+        let selection = select_sources_by_genre(&sources, &genres(&["ガジェット"]));
+
+        assert_eq!(selection.sources.len(), 2);
+        assert!(selection.fallback);
+    }
+
+    #[test]
+    fn genre_filter_does_not_report_fallback_without_any_source() {
+        let selection = select_sources_by_genre(&[], &genres(&["AI"]));
+
+        assert!(selection.sources.is_empty());
+        assert!(!selection.fallback);
+    }
+
+    #[test]
+    fn genre_filter_keeps_source_file_format_round_trip() {
+        // 取得元ファイルの形式は変えない（ジャンル無しの取得元も読み込める）。
+        let raw = r#"{"version":1,"sources":[{"url":"https://a.example/rss"}]}"#;
+        let config: NewsSourcesConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(config.sources[0].genre, "");
+        let stored = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"version":1,"sources":[{"url":"https://a.example/rss","genre":""}]})
+        );
     }
 }

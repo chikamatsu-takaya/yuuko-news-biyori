@@ -204,7 +204,8 @@ impl RecommendationService {
 
 /// ジャンル一致判定。ASCII大文字小文字を無視し、部分一致も許容する
 /// （例: 設定「テクノロジー」が記事ジャンル「AI・テクノロジー」に一致）。
-fn genre_matches(genre: &str, preferred_genres: &[String]) -> bool {
+/// 取得元の絞り込み（NewsService）でも同じ判定を使い、採点と取得対象の基準を揃える。
+pub(crate) fn genre_matches(genre: &str, preferred_genres: &[String]) -> bool {
     let genre = genre.trim().to_lowercase();
     if genre.is_empty() {
         return false;

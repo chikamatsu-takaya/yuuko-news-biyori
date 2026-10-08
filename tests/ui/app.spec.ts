@@ -2841,6 +2841,41 @@ test("settings treats genres in a different saved order as 保存済み right af
   await expect(saveButton).toBeDisabled();
 });
 
+// 興味ジャンルに合う取得元が無く全取得元から取得している状態（D10）は、ジャンル欄にだけ注記する。
+// 判定値は読み取り専用で、保存 DTO には含めない（未保存の誤表示も起こさない）。
+test("settings genre section notes the all-sources fallback only when Rust reports it", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      genreFilterFallback: true,
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "その他");
+
+  const note = page.getByTestId("genre-filter-fallback-note");
+  await expect(note).toHaveText(
+    "選んだジャンルに合う取得元がないため、すべての取得元から取得しています"
+  );
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  await page.getByRole("checkbox", { name: "セキュリティ" }).click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  const saved = await readSavedSettings(page);
+  expect(saved).toBeDefined();
+  expect(saved).not.toHaveProperty("genreFilterFallback");
+  await expect(note).toBeVisible();
+});
+
+test("settings genre section has no fallback note by default", async ({ page }) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByRole("checkbox", { name: "AI" })).toBeVisible();
+  await expect(page.getByTestId("genre-filter-fallback-note")).toHaveCount(0);
+});
+
 test("settings cancel discards unsaved changes and returns to the main screen", async ({
   page,
 }) => {
@@ -5688,6 +5723,7 @@ async function installTauriMocks(page: Page) {
               fetched: 1,
               saved: 1,
               errors: [],
+              genreFilterFallback: false,
             };
           case "get_yuuko_notification_state": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
