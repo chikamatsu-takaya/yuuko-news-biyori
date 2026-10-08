@@ -58,9 +58,31 @@ impl AppError {
     }
 }
 
+impl AppError {
+    /// React へ返す固定文言（セキュリティ詳細設計書 §5.5 / §16.3）。
+    ///
+    /// Network / Io などの内部詳細には URL・OS のエラー文・記事ID・パスが入り得るため、
+    /// 画面側へは種別ごとの固定文言だけを返す。Validation だけは各検証箇所で
+    /// 人向けの固定的な理由を組み立てているため、従来どおり詳細をそのまま返す。
+    fn public_message(&self) -> String {
+        match self {
+            Self::Validation(_) => self.to_string(),
+            Self::Network(_) => "network request failed".to_string(),
+            Self::NotFound(_) => "requested item was not found".to_string(),
+            Self::Parse(_) => "failed to parse stored data".to_string(),
+            Self::Archive(_) => "archive operation failed".to_string(),
+            Self::Io(_) => "failed to access local data".to_string(),
+            Self::Json(_) => "failed to read or write JSON data".to_string(),
+        }
+    }
+}
+
 impl From<AppError> for CommandError {
     fn from(value: AppError) -> Self {
-        Self::new(value.code(), value.to_string())
+        let code = value.code();
+        // 詳細は調査用にログへだけ残す。URL 等を含み得るため debug より上げない。
+        log::debug!("command error {code}: {value}");
+        Self::new(code, value.public_message())
     }
 }
 
@@ -101,5 +123,86 @@ impl From<OpenOriginalArticleError> for CommandError {
                 Self::new("OPEN_BROWSER_FAILED", "failed to open the default browser")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_error(error: AppError) -> CommandError {
+        CommandError::from(error)
+    }
+
+    #[test]
+    fn network_error_hides_url_and_detail() {
+        let error = command_error(AppError::Network(
+            "request to https://example.com/secret?token=abc failed: connection refused"
+                .to_string(),
+        ));
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert_eq!(error.message, "network request failed");
+        assert!(!error.message.contains("example.com"));
+        assert!(!error.message.contains("connection refused"));
+    }
+
+    #[test]
+    fn not_found_error_hides_identifier() {
+        let error = command_error(AppError::NotFound("article article-123".to_string()));
+        assert_eq!(error.code, "NOT_FOUND_ERROR");
+        assert_eq!(error.message, "requested item was not found");
+        assert!(!error.message.contains("article-123"));
+    }
+
+    #[test]
+    fn parse_error_hides_detail() {
+        let error = command_error(AppError::Parse(
+            r"bad front matter in C:\data\a.md".to_string(),
+        ));
+        assert_eq!(error.code, "PARSE_ERROR");
+        assert_eq!(error.message, "failed to parse stored data");
+        assert!(!error.message.contains("a.md"));
+    }
+
+    #[test]
+    fn archive_error_hides_detail() {
+        let error = command_error(AppError::Archive("rename /tmp/x failed".to_string()));
+        assert_eq!(error.code, "ARCHIVE_ERROR");
+        assert_eq!(error.message, "archive operation failed");
+        assert!(!error.message.contains("/tmp/x"));
+    }
+
+    #[test]
+    fn io_error_hides_os_message() {
+        let error = command_error(AppError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            r"Access is denied. (os error 5) C:\Users\someone",
+        )));
+        assert_eq!(error.code, "IO_ERROR");
+        assert_eq!(error.message, "failed to access local data");
+        assert!(!error.message.contains("os error"));
+        assert!(!error.message.contains("someone"));
+    }
+
+    #[test]
+    fn json_error_hides_parser_detail() {
+        let json_error = serde_json::from_str::<serde_json::Value>("{ secret-content").unwrap_err();
+        let error = command_error(AppError::Json(json_error));
+        assert_eq!(error.code, "JSON_ERROR");
+        assert_eq!(error.message, "failed to read or write JSON data");
+        assert!(!error.message.contains("line"));
+        assert!(!error.message.contains("secret-content"));
+    }
+
+    #[test]
+    fn validation_error_keeps_message() {
+        let error = command_error(AppError::Validation(
+            "nickname must not be empty".to_string(),
+        ));
+        assert_eq!(error.code, "VALIDATION_ERROR");
+        assert_eq!(
+            error.message,
+            "validation error: nickname must not be empty"
+        );
     }
 }

@@ -609,10 +609,7 @@ mod tests {
 
         let command_error = crate::error::CommandError::from(error);
         assert_eq!(command_error.code, "PARSE_ERROR");
-        assert_eq!(
-            command_error.message,
-            "parse error: dictionary store is corrupted"
-        );
+        assert_eq!(command_error.message, "failed to parse stored data");
         assert!(!command_error.message.contains("生成AIの本文"));
         assert!(!command_error.message.contains(".json"));
         assert!(!command_error.message.contains("this is not valid json"));
@@ -631,10 +628,7 @@ mod tests {
 
         let command_error = crate::error::CommandError::from(error);
         assert_eq!(command_error.code, "IO_ERROR");
-        assert_eq!(
-            command_error.message,
-            "io error: dictionary store could not be read"
-        );
+        assert_eq!(command_error.message, "failed to access local data");
         // 公開エラーに保存先パス・拡張子・一時ディレクトリ名・OS絶対パス・生の io メッセージを含めない。
         assert!(!command_error.message.contains(".json"));
         assert!(!command_error.message.contains("yuuko-dictionary-tests"));
