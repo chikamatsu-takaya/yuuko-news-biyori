@@ -32,15 +32,15 @@ use crate::paths::{
     SETTINGS_RELATIVE_PATH,
 };
 
-const MANIFEST_ENTRY_NAME: &str = "manifest.json";
-const EXPORT_FILE_PREFIX: &str = "yuuko_transfer_";
-const ARCHIVE_RELATIVE_DIR: &str = "archive";
-const ARCHIVE_INDEX_RELATIVE_PATH: &str = "archive/archive_index.json";
+pub(crate) const MANIFEST_ENTRY_NAME: &str = "manifest.json";
+pub(crate) const EXPORT_FILE_PREFIX: &str = "yuuko_transfer_";
+pub(crate) const ARCHIVE_RELATIVE_DIR: &str = "archive";
+pub(crate) const ARCHIVE_INDEX_RELATIVE_PATH: &str = "archive/archive_index.json";
 /// 同じ秒に書き出しが重なったときに付ける連番の上限。
 const MAX_NAME_ATTEMPTS: u32 = 100;
 
 /// 区分の並び（manifest の `included` の順序にも使う）。
-const CATEGORY_ORDER: [&str; 7] = [
+pub(crate) const CATEGORY_ORDER: [&str; 7] = [
     "config",
     "news",
     "favorites",
@@ -50,9 +50,9 @@ const CATEGORY_ORDER: [&str; 7] = [
     "archive",
 ];
 
-/// 1ファイル単位で許可するもの（アプリデータ直下からの相対パス）。
+/// 1ファイル単位で許可するもの（アプリデータ直下からの相対パス）。取り込み（`data_import_service`）も同じ一覧を使う。
 /// config/ からは settings.json だけを入れる（news_sources.json / network_allowlist.json は §15 の対象外扱い）。
-const FIXED_FILES: [&str; 6] = [
+pub(crate) const FIXED_FILES: [&str; 6] = [
     SETTINGS_RELATIVE_PATH,
     ARTICLE_FAVORITES_RELATIVE_PATH,
     DICTIONARY_RELATIVE_PATH,
@@ -61,8 +61,9 @@ const FIXED_FILES: [&str; 6] = [
     ARCHIVE_INDEX_RELATIVE_PATH,
 ];
 
+/// 移行ZIPに入る1ファイルの種類（書き出し・取り込みで共通）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportFileKind {
+pub(crate) enum ExportFileKind {
     Article,
     ArchiveZip,
     Other,
@@ -70,16 +71,17 @@ enum ExportFileKind {
 
 /// ZIPへ入れる予定の1ファイル。`entry_name` は検証済みの名前だけから組み立てる。
 #[derive(Debug, Clone)]
-struct PlannedFile {
-    entry_name: String,
-    source: PathBuf,
-    kind: ExportFileKind,
+pub(crate) struct PlannedFile {
+    pub(crate) entry_name: String,
+    pub(crate) source: PathBuf,
+    pub(crate) kind: ExportFileKind,
 }
 
 #[derive(Clone)]
 pub struct DataExportService {
     app_data_dir: PathBuf,
     /// 書き出しを1件ずつにする（残った一時ファイルの掃除と連番の決定を、別の書き出しと競合させないため）。
+    /// 取り込み（`DataImportService`）とも共有し、書き出しと取り込みを同時に走らせない。
     export_lock: Arc<Mutex<()>>,
 }
 
@@ -116,84 +118,86 @@ impl DataExportService {
         }
         remove_stale_temp_files(&exports_dir);
 
-        let plan = self.plan_files()?;
+        let plan = plan_migration_files(&self.app_data_dir)?;
         write_export(&exports_dir, &plan, now)
     }
 
-    /// 許可リストに一致する通常ファイルだけを、エントリ名の順に並べて返す。
-    fn plan_files(&self) -> Result<Vec<PlannedFile>, AppError> {
-        let root = &self.app_data_dir;
-        let mut plan = Vec::new();
+    /// 書き出しと取り込みで共有するロック（取り込み側の `DataImportService` に渡す）。
+    pub fn migration_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.export_lock)
+    }
+}
 
-        for relative in FIXED_FILES {
-            let source = root.join(relative);
-            if parents_are_real_dirs(root, relative) && is_regular_file(&source) {
-                plan.push(PlannedFile {
-                    entry_name: relative.to_string(),
-                    source,
-                    kind: ExportFileKind::Other,
-                });
-            }
+/// 許可リストに一致する通常ファイルだけを、エントリ名の順に並べて返す。
+/// 取り込み時は、置き換え前に退避する「現在のデータ」の一覧としても使う。
+pub(crate) fn plan_migration_files(root: &Path) -> Result<Vec<PlannedFile>, AppError> {
+    let mut plan = Vec::new();
+
+    for relative in FIXED_FILES {
+        let source = root.join(relative);
+        if parents_are_real_dirs(root, relative) && is_regular_file(&source) {
+            plan.push(PlannedFile {
+                entry_name: relative.to_string(),
+                source,
+                kind: ExportFileKind::Other,
+            });
         }
+    }
 
-        // 記事: news/<id>.md と news/<月フォルダ>/<id>.md（データ設計書 §4.2）。それより深い階層は入れない。
-        let news_dir = root.join(ARTICLE_NEWS_RELATIVE_DIR);
-        if is_real_dir(&news_dir) {
-            for entry in std::fs::read_dir(&news_dir)? {
-                let entry = entry?;
-                // DirEntry::file_type はリンク先を辿らない。
-                let file_type = entry.file_type()?;
-                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                    continue;
-                };
-                if file_type.is_file() && is_article_file_name(&name) {
-                    plan.push(PlannedFile {
-                        entry_name: format!("{ARTICLE_NEWS_RELATIVE_DIR}/{name}"),
-                        source: entry.path(),
-                        kind: ExportFileKind::Article,
-                    });
-                } else if file_type.is_dir() && is_safe_name_component(&name) {
-                    for child in std::fs::read_dir(entry.path())? {
-                        let child = child?;
-                        let Some(child_name) = child.file_name().to_str().map(str::to_string)
-                        else {
-                            continue;
-                        };
-                        if child.file_type()?.is_file() && is_article_file_name(&child_name) {
-                            plan.push(PlannedFile {
-                                entry_name: format!(
-                                    "{ARTICLE_NEWS_RELATIVE_DIR}/{name}/{child_name}"
-                                ),
-                                source: child.path(),
-                                kind: ExportFileKind::Article,
-                            });
-                        }
+    // 記事: news/<id>.md と news/<月フォルダ>/<id>.md（データ設計書 §4.2）。それより深い階層は入れない。
+    let news_dir = root.join(ARTICLE_NEWS_RELATIVE_DIR);
+    if is_real_dir(&news_dir) {
+        for entry in std::fs::read_dir(&news_dir)? {
+            let entry = entry?;
+            // DirEntry::file_type はリンク先を辿らない。
+            let file_type = entry.file_type()?;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if file_type.is_file() && is_article_file_name(&name) {
+                plan.push(PlannedFile {
+                    entry_name: format!("{ARTICLE_NEWS_RELATIVE_DIR}/{name}"),
+                    source: entry.path(),
+                    kind: ExportFileKind::Article,
+                });
+            } else if file_type.is_dir() && is_safe_name_component(&name) {
+                for child in std::fs::read_dir(entry.path())? {
+                    let child = child?;
+                    let Some(child_name) = child.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if child.file_type()?.is_file() && is_article_file_name(&child_name) {
+                        plan.push(PlannedFile {
+                            entry_name: format!("{ARTICLE_NEWS_RELATIVE_DIR}/{name}/{child_name}"),
+                            source: child.path(),
+                            kind: ExportFileKind::Article,
+                        });
                     }
                 }
             }
         }
+    }
 
-        // 月次アーカイブ: archive/YYYY-MM.zip だけ（退避用フォルダや *.zip.tmp / *.zip.bak は入れない）。
-        let archive_dir = root.join(ARCHIVE_RELATIVE_DIR);
-        if is_real_dir(&archive_dir) {
-            for entry in std::fs::read_dir(&archive_dir)? {
-                let entry = entry?;
-                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                    continue;
-                };
-                if entry.file_type()?.is_file() && is_month_archive_file_name(&name) {
-                    plan.push(PlannedFile {
-                        entry_name: format!("{ARCHIVE_RELATIVE_DIR}/{name}"),
-                        source: entry.path(),
-                        kind: ExportFileKind::ArchiveZip,
-                    });
-                }
+    // 月次アーカイブ: archive/YYYY-MM.zip だけ（退避用フォルダや *.zip.tmp / *.zip.bak は入れない）。
+    let archive_dir = root.join(ARCHIVE_RELATIVE_DIR);
+    if is_real_dir(&archive_dir) {
+        for entry in std::fs::read_dir(&archive_dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if entry.file_type()?.is_file() && is_month_archive_file_name(&name) {
+                plan.push(PlannedFile {
+                    entry_name: format!("{ARCHIVE_RELATIVE_DIR}/{name}"),
+                    source: entry.path(),
+                    kind: ExportFileKind::ArchiveZip,
+                });
             }
         }
-
-        plan.sort_by(|left, right| left.entry_name.cmp(&right.entry_name));
-        Ok(plan)
     }
+
+    plan.sort_by(|left, right| left.entry_name.cmp(&right.entry_name));
+    Ok(plan)
 }
 
 /// 計画したファイルを一時ファイルへ書き、検証できたら最終名へ変える。失敗時は一時ファイルを消す。
@@ -407,7 +411,7 @@ fn remove_stale_temp_files(exports_dir: &Path) {
     }
 }
 
-fn category_of(entry_name: &str) -> &'static str {
+pub(crate) fn category_of(entry_name: &str) -> &'static str {
     let first = entry_name.split('/').next().unwrap_or_default();
     CATEGORY_ORDER
         .iter()
@@ -417,17 +421,17 @@ fn category_of(entry_name: &str) -> &'static str {
 }
 
 /// リンクを辿らずに、実体のディレクトリかどうか。
-fn is_real_dir(path: &Path) -> bool {
+pub(crate) fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
 /// リンクを辿らずに、通常ファイルかどうか。
-fn is_regular_file(path: &Path) -> bool {
+pub(crate) fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 /// 相対パスの途中のフォルダがすべて実体のディレクトリか（リンク経由で別の場所を読まないため）。
-fn parents_are_real_dirs(root: &Path, relative: &str) -> bool {
+pub(crate) fn parents_are_real_dirs(root: &Path, relative: &str) -> bool {
     let mut current = root.to_path_buf();
     let mut components: Vec<&str> = relative.split('/').collect();
     components.pop();
@@ -438,7 +442,7 @@ fn parents_are_real_dirs(root: &Path, relative: &str) -> bool {
 }
 
 /// 英数字・ハイフン・アンダースコアだけの名前（記事ID・月フォルダ名）。
-fn is_safe_name_component(name: &str) -> bool {
+pub(crate) fn is_safe_name_component(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name
@@ -451,7 +455,7 @@ fn is_article_file_name(name: &str) -> bool {
 }
 
 /// `YYYY-MM.zip`（月は01〜12）だけを許す。
-fn is_month_archive_file_name(name: &str) -> bool {
+pub(crate) fn is_month_archive_file_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".zip") else {
         return false;
     };
@@ -461,6 +465,31 @@ fn is_month_archive_file_name(name: &str) -> bool {
     }
     let digits_ok = bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit);
     digits_ok && matches!(stem[5..].parse::<u32>(), Ok(1..=12))
+}
+
+/// ZIP内のエントリ名が許可リストのどれに当たるかを返す（当たらなければ `None`）。
+///
+/// 書き出し（`plan_migration_files`）が作る名前と同じ規則で判定し、取り込みはこれに通った名前しか受け付けない。
+/// 名前の各部分は英数字・`-`・`_`（と固定のファイル名）だけなので、`..`・`\`・絶対パス・ドライブ文字は通らない。
+pub(crate) fn classify_entry_name(entry_name: &str) -> Option<ExportFileKind> {
+    if FIXED_FILES.contains(&entry_name) {
+        return Some(ExportFileKind::Other);
+    }
+    let parts: Vec<&str> = entry_name.split('/').collect();
+    match parts.as_slice() {
+        [ARTICLE_NEWS_RELATIVE_DIR, name] if is_article_file_name(name) => {
+            Some(ExportFileKind::Article)
+        }
+        [ARTICLE_NEWS_RELATIVE_DIR, folder, name]
+            if is_safe_name_component(folder) && is_article_file_name(name) =>
+        {
+            Some(ExportFileKind::Article)
+        }
+        [ARCHIVE_RELATIVE_DIR, name] if is_month_archive_file_name(name) => {
+            Some(ExportFileKind::ArchiveZip)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -856,5 +885,50 @@ mod tests {
         assert!(!is_month_archive_file_name("2026-5.zip"));
         assert!(!is_month_archive_file_name("2026-05.zip.tmp"));
         assert!(!is_month_archive_file_name("archive_index.json"));
+    }
+
+    #[test]
+    fn every_exported_entry_passes_the_shared_entry_rule() {
+        let root = temp_dir("classify");
+        seed_app_data(&root);
+
+        let plan = plan_migration_files(&root).unwrap();
+
+        assert_eq!(plan.len(), 10);
+        for planned in &plan {
+            assert_eq!(
+                classify_entry_name(&planned.entry_name),
+                Some(planned.kind),
+                "{}",
+                planned.entry_name
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_entry_rule_rejects_unsafe_or_unlisted_names() {
+        for name in [
+            "manifest.json",
+            "../config/settings.json",
+            "/config/settings.json",
+            "config\\settings.json",
+            "C:/config/settings.json",
+            "config/news_sources.json",
+            "config/network_allowlist.json",
+            "config/settings.json.bak",
+            "news/../x.md",
+            "news/a/b/c.md",
+            "news//x.md",
+            "news/x.txt",
+            "archive/2026-13.zip",
+            "archive/2026-05.zip.tmp",
+            "archive/.markdown-retirement.rollback/202605/a.md",
+            "state/yuuko_notification_state.json",
+            "news/",
+            "",
+        ] {
+            assert_eq!(classify_entry_name(name), None, "{name}");
+        }
     }
 }

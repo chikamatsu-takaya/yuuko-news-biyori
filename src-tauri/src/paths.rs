@@ -15,6 +15,12 @@ pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
 pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
 /// データ移行用ZIPの固定の書き出し先（データ設計書 §15.6、判断台帳 D41）。
 pub const MIGRATION_EXPORTS_RELATIVE_DIR: &str = "exports";
+/// データ移行用ZIPの取り込み元（データ設計書 §15.7）。ここに置いたZIPだけを取り込み候補にする。
+pub const MIGRATION_IMPORTS_RELATIVE_DIR: &str = "imports";
+/// 取り込み前に退避した現在のデータの置き場（1世代分のフォルダを残す。データ設計書 §15.7）。
+pub const MIGRATION_BACKUPS_RELATIVE_DIR: &str = "migration-backups";
+/// 取り込みZIPの展開先（検証用の一時フォルダ。取り込みの終わりに消す）。
+pub const MIGRATION_IMPORT_STAGING_RELATIVE_DIR: &str = ".migration-import-staging";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {

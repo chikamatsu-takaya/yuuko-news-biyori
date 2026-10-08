@@ -2,6 +2,7 @@ use crate::services::ai_provider_service::AiProviderService;
 use crate::services::article_service::ArticleService;
 use crate::services::auto_summary_queue::AutoSummaryQueue;
 use crate::services::data_export_service::DataExportService;
+use crate::services::data_import_service::DataImportService;
 use crate::services::dictionary_service::DictionaryService;
 use crate::services::friendship_service::FriendshipService;
 use crate::services::news_service::NewsService;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub article_service: ArticleService,
     pub auto_summary_queue: AutoSummaryQueue,
     pub data_export_service: DataExportService,
+    pub data_import_service: DataImportService,
     pub dictionary_service: DictionaryService,
     pub friendship_service: FriendshipService,
     pub news_service: NewsService,

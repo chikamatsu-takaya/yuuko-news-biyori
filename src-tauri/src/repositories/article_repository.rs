@@ -21,8 +21,8 @@ const ARCHIVE_INDEX_VERSION: u32 = 2;
 const MAX_ARCHIVE_ZIP_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL_ENTRY_SIZE: u64 = 128 * 1024 * 1024;
-const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
-const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
+pub(crate) const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
+pub(crate) const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
 
 /// おすすめ再計算用の候補。`summary.recommendation_score` は保存スコア（取得時の基礎点）のまま。
 #[derive(Debug, Clone)]
@@ -1000,6 +1000,11 @@ impl ArticleRepository {
         })
     }
 
+    /// 記事・お気に入り・アーカイブの書き込みロック。データ移行の取り込みが差し替え中に保持する。
+    pub(crate) fn write_lock_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write_lock)
+    }
+
     fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
         self.write_lock
             .lock()
@@ -1893,6 +1898,17 @@ fn format_month_label(bucket: &str) -> String {
 /// アーカイブ index の createdAt 用タイムスタンプ（UTC・他サービスと同形式）。
 fn format_archive_timestamp(now: DateTime<Utc>) -> String {
     now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// 取り込むお気に入りJSONが、読み込み時と同じ型として読めるか（データ移行の取り込み用）。
+pub(crate) fn validate_imported_favorites_json(raw: &str) -> Result<(), AppError> {
+    serde_json::from_str::<ArticleFavoriteStore>(raw)?;
+    Ok(())
+}
+
+/// 取り込む `archive_index.json` が、読み込み時と同じ型・検証を通るか（データ移行の取り込み用）。
+pub(crate) fn validate_imported_archive_index_json(raw: &str) -> Result<(), AppError> {
+    serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(raw))?.validate()
 }
 
 /// `archive/archive_index.json` の構造（データ設計書 §14.4）。
