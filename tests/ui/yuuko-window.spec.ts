@@ -51,6 +51,8 @@ async function installMocks(page: Page, options: MockOptions = {}) {
     const w = window as any;
     w.__E2E_CALLS__ = [];
     w.__E2E_STATE__ = opts.state ?? null;
+    // 同じページのままメイン側でテーマが変わった状況を再現できるよう、書き換え可能にしておく。
+    w.__E2E_THEME_ID__ = opts.themeId ?? "default";
     const callbacks: Record<number, (event: unknown) => void> = {};
     const listeners: Record<string, number[]> = {};
     let seq = 0;
@@ -80,7 +82,7 @@ async function installMocks(page: Page, options: MockOptions = {}) {
             return w.__E2E_STATE__ ?? waiting;
           // テーマ反映（hooks/use-ui-theme.ts）が読む。ここで使うのはテーマ ID だけ。
           case "get_user_settings":
-            return { selectedThemeId: opts.themeId ?? "default" };
+            return { selectedThemeId: w.__E2E_THEME_ID__ };
           case "handle_yuuko_clicked": {
             const current = w.__E2E_STATE__;
             if (!current) {
@@ -514,5 +516,46 @@ test("the yuuko window applies the saved UI theme and falls back on unknown ids"
   await installMocks(page, { state: activeState(), themeId: "gacha_theme_001" });
   await openYuukoWindow(page);
   await expect(page.getByRole("region", { name: REGION })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
+});
+
+test("the yuuko window re-reads the saved UI theme when a new notification arrives", async ({
+  page,
+}) => {
+  await installMocks(page, { state: activeState(), themeId: "theme_001" });
+  await openYuukoWindow(page);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_001");
+
+  // ウィンドウは作り直さず、メイン側でテーマが変わった後に次の通知が届く。
+  await page.evaluate(() => {
+    (window as unknown as { __E2E_THEME_ID__: string }).__E2E_THEME_ID__ =
+      "theme_002";
+  });
+  await emit(page, {
+    articleId: "desk-article-2",
+    title: "テーマ変更後のニュース",
+    balloonText: "テーマ変更後の吹き出し",
+    previewVisible: false,
+  });
+  await expect(
+    page.getByRole("region", { name: REGION }).getByText("テーマ変更後の吹き出し")
+  ).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_002");
+});
+
+test("the yuuko window keeps the default theme and still shows the notification when settings fail to load", async ({
+  page,
+}) => {
+  await installMocks(page, {
+    state: activeState(),
+    themeId: "theme_001",
+    failCommands: ["get_user_settings"],
+  });
+  await openYuukoWindow(page);
+
+  await expect(page.getByRole("region", { name: REGION })).toBeVisible();
+  await expect
+    .poll(() => commandCalls(page, "get_user_settings"))
+    .toBeGreaterThan(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });

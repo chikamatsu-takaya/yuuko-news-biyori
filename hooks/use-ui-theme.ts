@@ -28,6 +28,9 @@ export const refreshUiThemeFromSettings = async (): Promise<void> => {
   try {
     const settings = await getUserSettings();
     if (settings) {
+      // ここでは「既知の ID か」だけを見る。解放済みかの制限は、カスタマイズ画面が themeId を
+      // 書き込む時点で行う（タスク qQsEaWBW）。読み元は将来、報酬状態の activeThemeId
+      // （Rust effective_theme_id で解放判定済み）へ揃える可能性がある。
       applyUiTheme(settings.selectedThemeId);
     }
   } catch {
