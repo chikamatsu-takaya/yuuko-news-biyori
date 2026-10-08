@@ -13,6 +13,7 @@
 
 import React from "react";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
+import { refreshUiThemeFromSettings } from "@/hooks/use-ui-theme";
 import {
   dismissYuukoNotification,
   getYuukoNotificationState,
@@ -52,6 +53,11 @@ export default function YuukoWindowPage() {
       seqRef.current += 1;
       setLeaving(false);
       setDisplayed(data ? { data, seq: seqRef.current } : null);
+      // このウィンドウは隠すだけで作り直さないため、メイン側でテーマを変えても起動時の配色のままになる。
+      // 通知を出すたびに保存済みテーマを読み直して揃える（失敗時は今の配色のまま）。
+      if (data) {
+        void refreshUiThemeFromSettings();
+      }
     },
     []
   );

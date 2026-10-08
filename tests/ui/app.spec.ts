@@ -540,6 +540,35 @@ test("home limits by maxDailyRecommendations while the today-news list shows all
   await expect(countCards(page.locator("main"))).toHaveCount(5);
 });
 
+// 報酬テーマ: 保存済みの selectedThemeId（設定 ui.themeId）を <html data-theme> へ反映し、
+// CSS 変数経由で画面の配色が切り替わる。未知の ID は既定（クリーム）へ倒す。
+for (const { themeId, expectedTheme, background } of [
+  { themeId: "theme_001", expectedTheme: "theme_001", background: "rgb(243, 249, 254)" },
+  { themeId: "theme_002", expectedTheme: "theme_002", background: "rgb(255, 247, 249)" },
+  { themeId: "theme_999", expectedTheme: "default", background: "rgb(255, 253, 245)" },
+]) {
+  test(`saved UI theme ${themeId} is applied app-wide as data-theme=${expectedTheme}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((id: string) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_USER_SETTINGS_OVERRIDE__ = { selectedThemeId: id };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, themeId);
+
+    await openHome(page);
+
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-theme",
+      expectedTheme
+    );
+    await expect(page.locator("body")).toHaveCSS(
+      "background-color",
+      background
+    );
+  });
+}
+
 // サイドバー「ニュースを見る」で当日ニュース一覧を開く共通操作。
 const openTodayNewsList = async (page: Page) => {
   await page

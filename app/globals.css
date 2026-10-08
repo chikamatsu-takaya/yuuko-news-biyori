@@ -47,6 +47,86 @@
   --yuuko-text-muted: #6B6B6B;
 }
 
+/*
+ * 報酬テーマ（ランク報酬 theme_001 / theme_002）。<html data-theme="<id>"> で切り替える。
+ * 既定（クリーム）は上の :root のまま変えない。適用する ID の検証は lib/ui-theme.mjs、反映は hooks/use-ui-theme.ts。
+ * テーマを足すときは同じ変数一式を持つブロックを追加し、lib/ui-theme.mjs の UI_THEMES に ID を足す。
+ * 文字色は WCAG AA（本文 4.5:1 以上）を満たす組み合わせにする:
+ *   本文 foreground/背景 ≒ 10.8:1、muted-foreground/背景・muted ≧ 5.2:1、
+ *   primary ボタン（白文字）≧ 5.2:1、サイドバー選択中（--yuuko-green 文字/--yuuko-green-light）≧ 4.6:1。
+ * --yuuko-green 系は名前に反してアプリのアクセント色として使われているため、テーマ色で上書きする。
+ * 夜間（.dark）は報酬テーマではないため、ここには含めない。
+ */
+[data-theme="theme_001"] {
+  /* そらいろ（仮称）: 明るい水色 */
+  --background: #F3F9FE;
+  --foreground: #2F3B47;
+  --card: #FFFFFF;
+  --card-foreground: #2F3B47;
+  --popover: #FFFFFF;
+  --popover-foreground: #2F3B47;
+  --primary: #2B70AD;
+  --primary-foreground: #FFFFFF;
+  --secondary: #E6F2FC;
+  --secondary-foreground: #2F3B47;
+  --muted: #EAF2F9;
+  --muted-foreground: #5B6670;
+  --accent: #E6F2FC;
+  --accent-foreground: #2F3B47;
+  --border: #D6E4F0;
+  --input: #D6E4F0;
+  --ring: #2B70AD;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #2F3B47;
+  --sidebar-primary: #2B70AD;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #E6F2FC;
+  --sidebar-accent-foreground: #2F3B47;
+  --sidebar-border: #D6E4F0;
+  --sidebar-ring: #2B70AD;
+  --yuuko-green: #2B70AD;
+  --yuuko-green-light: #E6F2FC;
+  --yuuko-cream: #F3F9FE;
+  --yuuko-cream-dark: #EAF2F9;
+  --yuuko-text: #2F3B47;
+  --yuuko-text-muted: #5B6670;
+}
+
+[data-theme="theme_002"] {
+  /* さくら（仮称）: 明るい桜色 */
+  --background: #FFF7F9;
+  --foreground: #44363B;
+  --card: #FFFFFF;
+  --card-foreground: #44363B;
+  --popover: #FFFFFF;
+  --popover-foreground: #44363B;
+  --primary: #B53F61;
+  --primary-foreground: #FFFFFF;
+  --secondary: #FCEBF0;
+  --secondary-foreground: #44363B;
+  --muted: #F9EEF1;
+  --muted-foreground: #6E5A61;
+  --accent: #FCEBF0;
+  --accent-foreground: #44363B;
+  --border: #F0DCE2;
+  --input: #F0DCE2;
+  --ring: #B53F61;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #44363B;
+  --sidebar-primary: #B53F61;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #FCEBF0;
+  --sidebar-accent-foreground: #44363B;
+  --sidebar-border: #F0DCE2;
+  --sidebar-ring: #B53F61;
+  --yuuko-green: #B53F61;
+  --yuuko-green-light: #FCEBF0;
+  --yuuko-cream: #FFF7F9;
+  --yuuko-cream-dark: #F9EEF1;
+  --yuuko-text: #44363B;
+  --yuuko-text-muted: #6E5A61;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

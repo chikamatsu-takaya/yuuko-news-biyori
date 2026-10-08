@@ -51,6 +51,7 @@ import {
   type UserSettingsDto,
   type ExplanationLevel,
 } from "@/lib/tauri/settings";
+import { applyUiTheme } from "@/hooks/use-ui-theme";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -792,6 +793,8 @@ export default function SettingsScreen({
         setBackendSettings(dto);
         setGenreFilterFallback(dto.genreFilterFallback ?? false);
         setSettings(mapSettingsFromDto(mockSettings, dto));
+        // テーマも初期値へ戻るため、開いている画面の配色をその場で揃える。
+        applyUiTheme(dto.selectedThemeId);
         // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
         await refreshAutostartState();
       } else {

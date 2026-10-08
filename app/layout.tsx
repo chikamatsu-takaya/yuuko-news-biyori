@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Noto_Sans_JP } from 'next/font/google'
 import { Toaster } from "@/components/ui/toaster";
+import UiThemeApplier from "@/components/layout/UiThemeApplier";
 import './globals.css'
 
 const notoSansJP = Noto_Sans_JP({ 
@@ -38,8 +39,11 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="ja" className="bg-[#FFFDF5]">
+    // 配色は data-theme で切り替わる CSS 変数（app/globals.css）に従わせる。
+    // 初期 HTML は既定テーマで描き、保存済みテーマは UiThemeApplier がマウント後に反映する。
+    <html lang="ja" data-theme="default" className="bg-background">
       <body className={`${notoSansJP.className} antialiased`}>
+        <UiThemeApplier />
         {children}
         <Toaster />
       </body>

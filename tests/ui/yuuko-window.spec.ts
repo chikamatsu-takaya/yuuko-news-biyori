@@ -18,6 +18,8 @@ const REGION = "ゆうこからのお知らせ";
 type MockOptions = {
   state?: Record<string, unknown> | null;
   failCommands?: string[];
+  // 設定 ui.themeId（DTO の selectedThemeId）。テーマ反映の確認に使う。
+  themeId?: string;
 };
 
 const activeState = (overrides: Record<string, unknown> = {}) => ({
@@ -76,6 +78,9 @@ async function installMocks(page: Page, options: MockOptions = {}) {
             return null;
           case "get_yuuko_notification_state":
             return w.__E2E_STATE__ ?? waiting;
+          // テーマ反映（hooks/use-ui-theme.ts）が読む。ここで使うのはテーマ ID だけ。
+          case "get_user_settings":
+            return { selectedThemeId: opts.themeId ?? "default" };
           case "handle_yuuko_clicked": {
             const current = w.__E2E_STATE__;
             if (!current) {
@@ -300,7 +305,10 @@ test("first click then close keeps the click → dismiss order", async ({
     .poll(() => commandCalls(page, "dismiss_yuuko_notification"))
     .toBe(1);
   expect(
-    (await calls(page)).filter((cmd) => cmd !== "get_yuuko_notification_state")
+    (await calls(page)).filter(
+      (cmd) =>
+        cmd !== "get_yuuko_notification_state" && cmd !== "get_user_settings"
+    )
   ).toEqual(["handle_yuuko_clicked", "dismiss_yuuko_notification"]);
 });
 
@@ -492,4 +500,19 @@ test.describe("reduced motion", () => {
       .toBe(1);
     await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
   });
+});
+
+test("the yuuko window applies the saved UI theme and falls back on unknown ids", async ({
+  page,
+}) => {
+  await installMocks(page, { state: activeState(), themeId: "theme_001" });
+  await openYuukoWindow(page);
+  await expect(page.getByRole("region", { name: REGION })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_001");
+
+  // 未知の ID（解放前のガチャテーマ名や不正値）は既定テーマのまま。
+  await installMocks(page, { state: activeState(), themeId: "gacha_theme_001" });
+  await openYuukoWindow(page);
+  await expect(page.getByRole("region", { name: REGION })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });
