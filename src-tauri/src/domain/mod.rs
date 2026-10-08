@@ -1,5 +1,6 @@
 pub mod ai_connection;
 pub mod article;
+pub mod data_export;
 pub mod dictionary;
 pub mod friendship;
 pub mod fullscreen_suppression;
