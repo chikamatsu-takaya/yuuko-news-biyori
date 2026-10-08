@@ -238,6 +238,41 @@ pub struct ArchiveZipInfoDto {
     pub size_bytes: u64,
 }
 
+/// 過去ニュース画面の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
+/// ZIPファイル名・サイズなどの保存場所の情報は画面に不要なため返さない。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDto {
+    /// `YYYY-MM` 形式。表示用の「2026年9月」への整形は画面側で行う。
+    pub month: String,
+    pub article_count: usize,
+    /// false は記事カタログ未移行（v1）の月。記事一覧は返せないが件数は表示できる。
+    pub catalog_complete: bool,
+}
+
+/// 指定月のアーカイブ記事一覧。ZIPは開かず、記事カタログのスナップショットを返す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthArticlesDto {
+    pub month: String,
+    pub catalog_complete: bool,
+    pub articles: Vec<ArticleHistoryItemDto>,
+}
+
+/// アーカイブの年月（`YYYY-MM`・月は01〜12）かを判定する。
+/// 年月はアーカイブファイル名の元になるため、区切り文字や相対パスを含む値を通さない。
+pub fn is_valid_archive_month(month: &str) -> bool {
+    let bytes = month.as_bytes();
+    bytes.len() == 7
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && month
+            .get(5..7)
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|value| (1..=12).contains(&value))
+}
+
 /// ZIPとindexの整合確認後に、通常ニュース領域から退避したMarkdownの結果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -429,13 +464,32 @@ impl RestoreArchivedArticleParams {
     }
 }
 
+/// 月別アーカイブ記事一覧の引数。年月だけを受け取り、パスやファイル名は受け取らない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListArchiveMonthArticlesParams {
+    pub month: String,
+}
+
+impl ListArchiveMonthArticlesParams {
+    pub fn validated_month(&self) -> Result<String, AppError> {
+        let month = self.month.trim();
+        if !is_valid_archive_month(month) {
+            return Err(AppError::Validation(
+                "month must be in YYYY-MM format".to_string(),
+            ));
+        }
+        Ok(month.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_archive_candidate, is_within_title_dedupe_window, normalize_title_for_dedupe,
         ArticleDedupeKeys, ArticleHistoryFilter, GetArticleDetailParams,
-        GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-        UpdateArticleFavoriteParams,
+        GetRecommendedArticlesParams, ListArchiveMonthArticlesParams, ListArticleHistoryParams,
+        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
 
@@ -628,6 +682,35 @@ mod tests {
         };
 
         assert!(params.validated_inputs().is_err());
+    }
+
+    #[test]
+    fn list_archive_month_articles_params_accept_only_year_month() {
+        let params = ListArchiveMonthArticlesParams {
+            month: " 2026-09 ".to_string(),
+        };
+        assert_eq!(params.validated_month().unwrap(), "2026-09");
+
+        for invalid in [
+            "",
+            "2026-9",
+            "2026-00",
+            "2026-13",
+            "202609",
+            "2026/09",
+            "../2026-09",
+            "2026-09.zip",
+            "2026-09/../../x",
+            "２０２６-０９",
+        ] {
+            let params = ListArchiveMonthArticlesParams {
+                month: invalid.to_string(),
+            };
+            assert!(
+                params.validated_month().is_err(),
+                "{invalid} should be rejected"
+            );
+        }
     }
 
     #[test]
