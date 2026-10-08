@@ -887,7 +887,11 @@ impl ArticleRepository {
 
     /// 過去ニュース画面向けに、`archive_index.json` の月別エントリを新しい月から順に返す。
     /// ZIPは開かない。年月・ファイル名が安全な形式でないエントリは表示対象から外す。
-    pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
+    /// 削除可否は `now` を基準に、削除処理と同じ月の判定（`is_archive_month_deletable`）で決める。
+    pub fn list_archive_months(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArchiveMonthDto>, AppError> {
         let index = self.load_archive_index_or_default()?;
         let mut months = index
             .archives
@@ -903,6 +907,8 @@ impl ArticleRepository {
                 month: archive.month.clone(),
                 article_count: archive.article_count,
                 catalog_complete: archive.catalog_complete,
+                size_bytes: archive.size_bytes,
+                deletable: is_archive_month_deletable(&archive.month, now),
             })
             .collect::<Vec<_>>();
         months.sort_by(|left, right| right.month.cmp(&left.month));
@@ -3355,14 +3361,32 @@ mod tests {
     #[test]
     fn list_archive_months_returns_newest_month_first_with_counts() {
         let context = TestRepositoryContext::new();
-        assert!(context.repository.list_archive_months().unwrap().is_empty());
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
 
         archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
         archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
         archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
 
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
 
+        // サイズは index の sizeBytes（実際のZIPサイズ）をそのまま返す。
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let size_of = |month: &str| {
+            index
+                .archives
+                .iter()
+                .find(|entry| entry.month == month)
+                .unwrap()
+                .size_bytes
+        };
+        assert!(size_of("2026-05") > 0);
         assert_eq!(
             months,
             vec![
@@ -3370,14 +3394,37 @@ mod tests {
                     month: "2026-05".to_string(),
                     article_count: 2,
                     catalog_complete: true,
+                    size_bytes: size_of("2026-05"),
+                    deletable: true,
                 },
                 ArchiveMonthDto {
                     month: "2026-04".to_string(),
                     article_count: 1,
                     catalog_complete: true,
+                    size_bytes: size_of("2026-04"),
+                    deletable: true,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn list_archive_months_marks_recent_months_as_not_deletable() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+
+        // 削除処理と同じ判定: 翌月1日から30日＋1日が過ぎるまでは削除できない。
+        let too_early = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let months = context.repository.list_archive_months(too_early).unwrap();
+        assert_eq!(months.len(), 1);
+        assert!(!months[0].deletable);
+
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert!(months[0].deletable);
     }
 
     #[test]
@@ -3463,13 +3510,18 @@ mod tests {
         )
         .unwrap();
 
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
         assert_eq!(
             months,
             vec![ArchiveMonthDto {
                 month: "2026-05".to_string(),
                 article_count: 2,
                 catalog_complete: false,
+                size_bytes: 1024,
+                deletable: true,
             }]
         );
 
@@ -4554,7 +4606,14 @@ mod tests {
             .join("archive")
             .join("2026-05.zip")
             .exists());
-        assert_eq!(context.repository.list_archive_months().unwrap().len(), 1);
+        assert_eq!(
+            context
+                .repository
+                .list_archive_months(archive_delete_now())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -4630,7 +4689,10 @@ mod tests {
         assert!(!archive_dir.join("2026-05.zip").exists());
         assert!(archive_dir.join("2026-04.zip").exists());
         assert!(unrelated_file.exists());
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
         assert_eq!(months.len(), 1);
         assert_eq!(months[0].month, "2026-04");
 
@@ -4852,7 +4914,10 @@ mod tests {
 
         assert!(result.cleanup_pending);
         // index は月を参照しないため、残ったものは参照されない残骸にすぎない。
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
         assert_eq!(months.len(), 1);
         assert_eq!(months[0].month, "2026-04");
         assert!(context.repository.load_archive_index_or_default().is_ok());
@@ -4911,6 +4976,10 @@ mod tests {
             .unwrap();
 
         assert!(!result.cleanup_pending);
-        assert!(context.repository.list_archive_months().unwrap().is_empty());
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
     }
 }
