@@ -74,9 +74,9 @@ impl FriendshipService {
         now: DateTime<Utc>,
         event_type: &str,
     ) -> Result<RecordFriendshipEventResult, AppError> {
-        let event = FriendshipEventType::from_storage(event_type).ok_or_else(|| {
-            AppError::Validation(format!("unknown friendship event type: {event_type}"))
-        })?;
+        // 入力値はエラー文言へ含めない（§16.3）。
+        let event = FriendshipEventType::from_storage(event_type)
+            .ok_or_else(|| AppError::Validation("unknown friendship event type".to_string()))?;
 
         let _guard = self.lock_store()?;
         let mut state = self.friendship_repository.load_or_default()?;
@@ -142,6 +142,20 @@ mod tests {
         );
         let service = FriendshipService::new(FriendshipRepository::new(&paths), reward_service);
         (service, root)
+    }
+
+    #[test]
+    fn unknown_event_type_message_excludes_input_value() {
+        let (service, root) = temp_service();
+        let result = service.record_friendship_event("secret_event<script>");
+        let _ = std::fs::remove_dir_all(root);
+        match result {
+            Err(AppError::Validation(message)) => {
+                assert_eq!(message, "unknown friendship event type");
+                assert!(!message.contains("secret_event"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]

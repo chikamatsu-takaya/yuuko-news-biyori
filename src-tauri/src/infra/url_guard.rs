@@ -73,8 +73,11 @@ pub fn validate_url(
         )));
     }
 
+    // 解析エラーの内容には入力URLの断片が入り得るため、画面へは固定の理由だけを返し、
+    // 詳細は debug ログにだけ残す（セキュリティ詳細設計書 §16.3）。
     let url = Url::parse(trimmed).map_err(|error| {
-        AppError::Validation(format!("invalid {} URL: {error}", purpose.label()))
+        log::debug!("{} URL parse failed: {error}", purpose.label());
+        AppError::Validation(format!("invalid {} URL", purpose.label()))
     })?;
 
     validate_parsed_url(&url, purpose, allowlist)?;
@@ -103,15 +106,17 @@ fn validate_scheme(url: &Url, allowlist: &NetworkAllowlist) -> Result<(), AppErr
         .iter()
         .any(|blocked| blocked.eq_ignore_ascii_case(&scheme))
     {
-        return Err(AppError::Validation(format!(
-            "scheme '{scheme}' is blocked by network allowlist"
-        )));
+        log::debug!("URL scheme '{scheme}' is blocked by network allowlist");
+        return Err(AppError::Validation(
+            "URL scheme is blocked by network allowlist".to_string(),
+        ));
     }
 
     if scheme != "http" && scheme != "https" {
-        return Err(AppError::Validation(format!(
-            "scheme '{scheme}' is not allowed; only http and https are supported"
-        )));
+        log::debug!("URL scheme '{scheme}' is not http/https");
+        return Err(AppError::Validation(
+            "URL scheme is not allowed; only http and https are supported".to_string(),
+        ));
     }
 
     Ok(())
@@ -152,28 +157,17 @@ fn validate_host(
     match host {
         NormalizedHost::Domain(domain) => {
             if domain == "localhost" || domain.ends_with(".localhost") {
-                return Err(AppError::Validation(format!(
-                    "{} URL host '{domain}' is not allowed",
-                    purpose.label()
-                )));
+                return Err(host_rejected(purpose, host, "is not allowed"));
             }
         }
         NormalizedHost::Ipv4(ip) => {
             if is_disallowed_ip_addr(IpAddr::V4(*ip)) {
-                return Err(AppError::Validation(format!(
-                    "{} URL host '{}' is not allowed",
-                    purpose.label(),
-                    ip
-                )));
+                return Err(host_rejected(purpose, host, "is not allowed"));
             }
         }
         NormalizedHost::Ipv6(ip) => {
             if is_disallowed_ip_addr(IpAddr::V6(*ip)) {
-                return Err(AppError::Validation(format!(
-                    "{} URL host '{}' is not allowed",
-                    purpose.label(),
-                    ip
-                )));
+                return Err(host_rejected(purpose, host, "is not allowed"));
             }
         }
     }
@@ -193,11 +187,11 @@ fn validate_host(
         return Ok(());
     }
 
-    Err(AppError::Validation(format!(
-        "{} URL host '{}' is not present in the allowlist",
-        purpose.label(),
-        host.display()
-    )))
+    Err(host_rejected(
+        purpose,
+        host,
+        "is not present in the allowlist",
+    ))
 }
 
 fn normalized_allowed_hosts(entries: &[String]) -> Vec<String> {
@@ -234,6 +228,17 @@ fn host_matches_allowed(host: &NormalizedHost, allowed: &str) -> bool {
         NormalizedHost::Ipv4(ip) => ip.to_string() == allowed,
         NormalizedHost::Ipv6(ip) => ip.to_string() == allowed,
     }
+}
+
+/// ホスト拒否の Validation エラーを作る。ホスト名・IP は外部由来の入力なので
+/// エラー文言には含めず固定の理由だけにし、詳細は debug ログにだけ残す（§16.3）。
+fn host_rejected(purpose: UrlPurpose, host: &NormalizedHost, reason: &'static str) -> AppError {
+    log::debug!(
+        "{} URL host '{}' rejected: {reason}",
+        purpose.label(),
+        host.display()
+    );
+    AppError::Validation(format!("{} URL host {reason}", purpose.label()))
 }
 
 /// 接続先として拒否する IPv4 か（セキュリティ詳細設計書 §6.3）。
@@ -461,6 +466,54 @@ mod tests {
             let error = validate_url(url, UrlPurpose::Article, &allowlist)
                 .expect_err("reserved ranges must be rejected even when allowlisted");
             assert!(error.to_string().contains("is not allowed"));
+        }
+    }
+
+    #[test]
+    fn rejection_messages_exclude_url_host_and_input_values() {
+        // 画面へ返る文言に URL・ホスト名・IP・スキーム・解析エラー内容を含めない（§16.3）。
+        let allowlist = allowlist_for(UrlPurpose::Article, &["example.com", "10.0.0.8"]);
+        let cases = [
+            ("not a url secret-token", "invalid article URL"),
+            ("https://[secret-token/", "invalid article URL"),
+            (
+                "file://secret-token.example.com/a",
+                "URL scheme is blocked by network allowlist",
+            ),
+            (
+                "secretscheme://example.com/a",
+                "URL scheme is not allowed; only http and https are supported",
+            ),
+            (
+                "http://secret-token.localhost/a",
+                "article URL host is not allowed",
+            ),
+            (
+                "http://10.0.0.8/secret-token",
+                "article URL host is not allowed",
+            ),
+            (
+                "http://[::1]/secret-token",
+                "article URL host is not allowed",
+            ),
+            (
+                "https://secret-token.example.org/a",
+                "article URL host is not present in the allowlist",
+            ),
+        ];
+
+        for (url, expected) in cases {
+            let message = match validate_url(url, UrlPurpose::Article, &allowlist) {
+                Err(crate::error::AppError::Validation(message)) => message,
+                other => panic!("expected validation error for {url}, got {other:?}"),
+            };
+            assert_eq!(message, expected, "unexpected message for {url}");
+            for leaked in ["secret", "10.0.0.8", "::1", "file", "example", "localhost"] {
+                assert!(
+                    !message.contains(leaked),
+                    "message for {url} must not contain {leaked}: {message}"
+                );
+            }
         }
     }
 
