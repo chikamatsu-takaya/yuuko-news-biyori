@@ -16,12 +16,7 @@ pub async fn explain_selected_term(
     let dictionary_service = state.dictionary_service.clone();
     tauri::async_runtime::spawn_blocking(move || dictionary_service.explain_selected_term(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join explain-selected-term task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("explain-selected-term", error))?
         .map_err(CommandError::from)
 }
 
@@ -36,12 +31,7 @@ pub async fn list_dictionary_entries(
         dictionary_service.list_dictionary_entries(normalized_params)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join list-dictionary-entries task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("list-dictionary-entries", error))?
     .map_err(CommandError::from)
 }
 
@@ -53,12 +43,7 @@ pub async fn save_dictionary_entry(
     let dictionary_service = state.dictionary_service.clone();
     tauri::async_runtime::spawn_blocking(move || dictionary_service.save_dictionary_entry(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join save-dictionary-entry task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("save-dictionary-entry", error))?
         .map_err(CommandError::from)
 }
 
@@ -70,12 +55,7 @@ pub async fn update_dictionary_memo(
     let dictionary_service = state.dictionary_service.clone();
     tauri::async_runtime::spawn_blocking(move || dictionary_service.update_dictionary_memo(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join update-dictionary-memo task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("update-dictionary-memo", error))?
         .map_err(CommandError::from)
 }
 
@@ -89,12 +69,7 @@ pub async fn update_dictionary_favorite(
         dictionary_service.update_dictionary_favorite(params)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join update-dictionary-favorite task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("update-dictionary-favorite", error))?
     .map_err(CommandError::from)
 }
 
@@ -106,11 +81,6 @@ pub async fn delete_dictionary_entry(
     let dictionary_service = state.dictionary_service.clone();
     tauri::async_runtime::spawn_blocking(move || dictionary_service.delete_dictionary_entry(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join delete-dictionary-entry task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("delete-dictionary-entry", error))?
         .map_err(CommandError::from)
 }

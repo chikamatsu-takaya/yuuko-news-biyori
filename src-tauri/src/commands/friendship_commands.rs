@@ -17,12 +17,7 @@ pub async fn get_friendship_state(state: State<'_, AppState>) -> CommandResult<F
     let friendship_service = state.friendship_service.clone();
     tauri::async_runtime::spawn_blocking(move || friendship_service.get_friendship_state())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join get-friendship-state task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("get-friendship-state", error))?
         .map_err(CommandError::from)
 }
 
@@ -36,11 +31,6 @@ pub async fn record_friendship_event(
         friendship_service.record_friendship_event(&params.event_type)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join record-friendship-event task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("record-friendship-event", error))?
     .map_err(CommandError::from)
 }
