@@ -6,6 +6,7 @@ use crate::domain::dictionary::{
     UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
 };
 use crate::error::{CommandError, CommandResult};
+use crate::services::gacha_service::log_grant_failure;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -14,10 +15,17 @@ pub async fn explain_selected_term(
     params: ExplainSelectedTermParams,
 ) -> CommandResult<DictionaryEntryDto> {
     let dictionary_service = state.dictionary_service.clone();
-    tauri::async_runtime::spawn_blocking(move || dictionary_service.explain_selected_term(params))
-        .await
-        .map_err(|error| CommandError::join_error("explain-selected-term", error))?
-        .map_err(CommandError::from)
+    let gacha_service = state.gacha_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = dictionary_service.explain_selected_term(params)?;
+        // 用語解説を表示できたら、流れ星のかけらを付与する（データ設計書 §12.4。辞書保存と合わせて
+        // 1日の上限あり）。辞書サービスの処理を終えてから呼び、付与の失敗は解説の表示を止めない。
+        log_grant_failure("term_explained", gacha_service.grant_for_term_action());
+        Ok::<_, crate::error::AppError>(entry)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("explain-selected-term", error))?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -41,10 +49,16 @@ pub async fn save_dictionary_entry(
     params: SaveDictionaryEntryParams,
 ) -> CommandResult<DictionaryEntryDto> {
     let dictionary_service = state.dictionary_service.clone();
-    tauri::async_runtime::spawn_blocking(move || dictionary_service.save_dictionary_entry(params))
-        .await
-        .map_err(|error| CommandError::join_error("save-dictionary-entry", error))?
-        .map_err(CommandError::from)
+    let gacha_service = state.gacha_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = dictionary_service.save_dictionary_entry(params)?;
+        // 辞書へ保存できたら、流れ星のかけらを付与する（用語解説と合わせて1日の上限あり・§12.4）。
+        log_grant_failure("dictionary_saved", gacha_service.grant_for_term_action());
+        Ok::<_, crate::error::AppError>(entry)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("save-dictionary-entry", error))?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
