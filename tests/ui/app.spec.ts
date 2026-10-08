@@ -302,6 +302,140 @@ test("news history opens an article by id and 戻る returns to history", async 
   ).toBeVisible();
 });
 
+const openNewsHistory = async (page: Page) => {
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュース履歴", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+};
+
+// 一覧の星（aria-label で状態を示す）の件数を数える。絶対値ではなく操作前後の差で検証するため。
+const countHistoryStars = async (page: Page) => {
+  const main = page.locator("main");
+  return {
+    favorite: await main.getByRole("img", { name: "お気に入り登録済み" }).count(),
+    plain: await main.getByRole("img", { name: "お気に入り未登録" }).count(),
+  };
+};
+
+const expectHistoryStars = async (
+  page: Page,
+  expected: { favorite: number; plain: number }
+) => {
+  const main = page.locator("main");
+  await expect(
+    main.getByRole("img", { name: "お気に入り登録済み" })
+  ).toHaveCount(expected.favorite);
+  await expect(
+    main.getByRole("img", { name: "お気に入り未登録" })
+  ).toHaveCount(expected.plain);
+};
+
+test("news history detail registers and removes a favorite and the list star follows", async ({
+  page,
+}) => {
+  await openNewsHistory(page);
+
+  const main = page.locator("main");
+  // 未登録の記事は「お気に入り登録」を出す。
+  const registerButton = page.getByRole("button", { name: "お気に入り登録" });
+  await expect(registerButton).toBeEnabled();
+  const before = await countHistoryStars(page);
+  expect(before.plain).toBeGreaterThan(0);
+
+  // 登録するとボタンが「お気に入り解除」に切り替わり、一覧の星も1件登録済みに変わる。
+  await registerButton.click();
+  const removeButton = page.getByRole("button", { name: "お気に入り解除" });
+  await expect(removeButton).toBeEnabled();
+  await expectHistoryStars(page, {
+    favorite: before.favorite + 1,
+    plain: before.plain - 1,
+  });
+
+  // 解除も従来どおり動き、ボタンと星が元に戻る。
+  await removeButton.click();
+  await expect(page.getByRole("button", { name: "お気に入り登録" })).toBeEnabled();
+  await expectHistoryStars(page, before);
+  await expect(main.getByRole("alert")).toHaveCount(0);
+});
+
+test("news history unfavorite under the favorite filter removes the item from the list", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_HISTORY_FAVORITES__ = true;
+  });
+  await openNewsHistory(page);
+
+  const main = page.locator("main");
+  await main.getByRole("button", { name: "お気に入り", exact: true }).click();
+  await expect(main.getByText("未登録の記事")).toHaveCount(0);
+  const before = await countHistoryStars(page);
+  expect(before.favorite).toBeGreaterThan(1);
+
+  // 先頭の記事（自動選択）を解除すると、「お気に入り」フィルタ中なので一覧から外れる。
+  await main.getByText("お気に入り記事1").first().click();
+  await page.getByRole("button", { name: "お気に入り解除" }).click();
+  await expect(main.getByText("お気に入り記事1")).toHaveCount(0);
+  await expectHistoryStars(page, {
+    favorite: before.favorite - 1,
+    plain: before.plain,
+  });
+  await expect(main.getByText("お気に入り記事2").first()).toBeVisible();
+});
+
+test("news history favorite failure keeps the previous state and shows a fixed notice", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_UPDATE_ARTICLE_FAVORITE_FAIL__ = true;
+  });
+  await openNewsHistory(page);
+
+  const main = page.locator("main");
+  const before = await countHistoryStars(page);
+  await page.getByRole("button", { name: "お気に入り登録" }).click();
+
+  // 固定文言のお知らせを出し、生エラー文言は出さない。一覧再読込の「再試行」は出さない。
+  await expect(main.getByRole("alert")).toHaveText(
+    "お気に入りの登録に失敗しました。もう一度お試しください。"
+  );
+  await expect(page.getByText("E2E raw favorite failure")).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  // 変更前の状態（未登録）のまま。ボタンも再操作できる。
+  await expect(page.getByRole("button", { name: "お気に入り登録" })).toBeEnabled();
+  await expectHistoryStars(page, before);
+
+  // 解除の失敗でも登録済みのまま残る。
+  const setFavoriteFail = (fail: boolean) =>
+    page.evaluate((value) => {
+      (
+        window as unknown as Record<string, unknown>
+      ).__E2E_UPDATE_ARTICLE_FAVORITE_FAIL__ = value;
+    }, fail);
+  await setFavoriteFail(false);
+  await page.getByRole("button", { name: "お気に入り登録" }).click();
+  const registered = { favorite: before.favorite + 1, plain: before.plain - 1 };
+  await expectHistoryStars(page, registered);
+  await setFavoriteFail(true);
+  await page.getByRole("button", { name: "お気に入り解除" }).click();
+  await expect(main.getByRole("alert")).toHaveText(
+    "お気に入りの解除に失敗しました。もう一度お試しください。"
+  );
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "お気に入り解除" })).toBeEnabled();
+  await expectHistoryStars(page, registered);
+});
+
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
   await openHome(page);
 
@@ -4756,6 +4890,18 @@ async function installTauriMocks(page: Page) {
             const historyWin = window as any;
             /* eslint-enable @typescript-eslint/no-explicit-any */
 
+            // お気に入り切替テスト用: 登録済み2件＋未登録1件。「お気に入り」フィルタ時は登録済みだけ返す。
+            if (historyWin.__E2E_HISTORY_FAVORITES__) {
+              const items = [
+                { ...articleHistoryItem, articleId: "fav-1", title: "お気に入り記事1", isFavorite: true },
+                { ...articleHistoryItem, articleId: "fav-2", title: "お気に入り記事2", isFavorite: true },
+                { ...articleHistoryItem, articleId: "plain-1", title: "未登録の記事", isFavorite: false },
+              ];
+              return params?.filter === "favorite"
+                ? items.filter((item) => item.isFavorite)
+                : items;
+            }
+
             // 空状態テスト用: 空配列を返す。
             if (historyWin.__E2E_HISTORY_EMPTY__) {
               return [];
@@ -4859,7 +5005,18 @@ async function installTauriMocks(page: Page) {
                 : ["E2E用語", "Playwright"],
             };
           }
+          // お気に入り更新。失敗テストでは本番と同じ CommandError 形式で reject する
+          // （生エラー文言・内部パスが UI へ出ないことを検証するための識別子を含める）。
           case "update_article_favorite":
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_UPDATE_ARTICLE_FAVORITE_FAIL__
+            ) {
+              throw {
+                code: "STORAGE_ERROR",
+                message: "E2E raw favorite failure /internal/secret/path",
+              };
+            }
             return params;
           // 「元記事を開く」。渡された記事IDを記録する。失敗テストでは本番と同じ CommandError 形式で reject する
           // （生エラー文言・内部パスが UI へ出ないことを検証するための識別子を含める）。
