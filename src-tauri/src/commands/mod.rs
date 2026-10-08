@@ -1,3 +1,4 @@
+pub mod app_commands;
 pub mod article_commands;
 pub mod autostart_commands;
 pub mod data_export_commands;

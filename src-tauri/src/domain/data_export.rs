@@ -5,8 +5,21 @@
 //!   保存先のフルパスは返さず、Rust 側で決めたファイル名と件数だけを返す。
 //! - `MigrationImportCandidateDto` / `MigrationImportResultDto`: 取り込み（§15.7）の候補一覧と結果。
 //!   こちらもフルパスは返さず、`imports/` 内のファイル名だけを扱う。
+//! - `MigrationFolderKind`: `open_migration_folder` で開ける固定フォルダの種類（`exports/` / `imports/` だけ）。
 
 use serde::{Deserialize, Serialize};
+
+/// `open_migration_folder` で開ける固定フォルダ（画面詳細設計書 §7 データ管理）。
+///
+/// React からはこの2種類のどちらかだけを受け取り、実際のパスは Rust 側で固定名から組み立てる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrationFolderKind {
+    /// 書き出し先 `exports/`（§15.6）。
+    Exports,
+    /// 取り込み元 `imports/`（§15.7）。利用者が移行用ZIPを置く場所。
+    Imports,
+}
 
 /// `manifest.json` の形式バージョン。項目の意味を変えたら上げる。
 pub const MIGRATION_MANIFEST_VERSION: u32 = 1;
@@ -81,4 +94,33 @@ pub struct MigrationImportResultDto {
     /// 取り込み後はアプリの再起動を勧めるか。現状は常に true
     /// （画面が持つ表示中の値や自動要約キューの記事ID、起動時の報酬同期が取り込み前のデータに基づくため）。
     pub restart_required: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_folder_kind_accepts_only_the_two_fixed_names() {
+        assert_eq!(
+            serde_json::from_str::<MigrationFolderKind>(r#""exports""#).unwrap(),
+            MigrationFolderKind::Exports
+        );
+        assert_eq!(
+            serde_json::from_str::<MigrationFolderKind>(r#""imports""#).unwrap(),
+            MigrationFolderKind::Imports
+        );
+        for raw in [
+            r#""Exports""#,
+            r#""logs""#,
+            r#""../config""#,
+            r#""C:\Windows""#,
+            r#""""#,
+        ] {
+            assert!(
+                serde_json::from_str::<MigrationFolderKind>(raw).is_err(),
+                "{raw}"
+            );
+        }
+    }
 }

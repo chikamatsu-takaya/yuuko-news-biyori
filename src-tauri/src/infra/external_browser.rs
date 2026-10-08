@@ -5,6 +5,10 @@
 //! Windows では ShellExecuteW へ URL を直接渡し、cmd.exe などのシェル経由のコマンド実行はしない。
 //! それ以外の OS は開く手段を持たないため、固定のエラーで安全側に失敗させる。
 //!
+//! データ移行の固定フォルダ（`exports/` / `imports/`）をエクスプローラーで開く処理も、同じ ShellExecuteW を使う
+//! （`open_verified_folder`）。渡せるのはサービス側が固定の名前から組み立てて実体のフォルダと確かめたパスだけで、
+//! React からパスを受け取る経路は無い。
+//!
 //! 記事 URL は取り込み時に記事用の許可リストで検証済み（rss_client の validate_url）。
 //! 開く時点ではユーザーの操作でユーザー自身のブラウザへ渡すだけのため、許可リストは再照合しない。
 //! ただし多層防御として、localhost・プライベート/予約済み IP を指す URL は拒否する（DNS 解決はしない）。
@@ -102,14 +106,45 @@ pub fn open_in_default_browser(_url: &Url) -> Result<(), BrowserOpenError> {
     Err(BrowserOpenError::Unsupported)
 }
 
+/// サービス側で実体のフォルダと確かめた固定フォルダを、エクスプローラーで開く。
+///
+/// 呼び出し側（`DataExportService::open_migration_folder`）は、アプリデータ直下の固定名のフォルダを
+/// リンクを辿らずに実体のフォルダと確かめてから渡す。任意のパスを開く入口にしないため、ここは crate 内専用。
+#[cfg(windows)]
+pub(crate) fn open_verified_folder(dir: &std::path::Path) -> Result<(), BrowserOpenError> {
+    windows_impl::shell_explore(dir)
+}
+
+/// Windows 以外は開く手段を持たないため、固定のエラーを返す（安全側）。
+#[cfg(not(windows))]
+pub(crate) fn open_verified_folder(_dir: &std::path::Path) -> Result<(), BrowserOpenError> {
+    Err(BrowserOpenError::Unsupported)
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::BrowserOpenError;
+    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     fn to_wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// フォルダを "explore" 動詞で開く。"explore" はフォルダにしか効かないため、確認後にフォルダが
+    /// ファイル（実行ファイルなど）へ差し替えられていても、それを実行することは無い。
+    pub(super) fn shell_explore(dir: &std::path::Path) -> Result<(), BrowserOpenError> {
+        let file: Vec<u16> = dir
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // 途中に NUL があると別のパスとして解釈されるため拒否する（固定名から作るので通常は起きない）。
+        if file[..file.len() - 1].contains(&0) {
+            return Err(BrowserOpenError::LaunchFailed);
+        }
+        shell_execute("explore", &file)
     }
 
     /// ShellExecuteW の "open" 動詞で URL を既定のハンドラ（http/https は既定のブラウザ）へ渡す。
@@ -121,8 +156,12 @@ mod windows_impl {
         if url.contains('\0') {
             return Err(BrowserOpenError::LaunchFailed);
         }
-        let verb = to_wide("open");
-        let file = to_wide(url);
+        shell_execute("open", &to_wide(url))
+    }
+
+    /// ShellExecuteW を引数・作業ディレクトリなしで呼ぶ（`file` は NUL 終端の UTF-16）。
+    fn shell_execute(verb: &str, file: &[u16]) -> Result<(), BrowserOpenError> {
+        let verb = to_wide(verb);
         // SAFETY: verb / file は NUL 終端の UTF-16 で、呼び出し中は生存している。
         // hwnd・引数・作業ディレクトリは null（指定なし）で、所有権の受け渡しは無い。
         let result = unsafe {

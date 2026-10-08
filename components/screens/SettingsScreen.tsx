@@ -64,6 +64,7 @@ import {
 
 import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
+import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import {
   GENRE_OPTIONS,
   NICKNAME_MAX_LENGTH,
@@ -489,6 +490,17 @@ export default function SettingsScreen({
   const isTestingAiRef = React.useRef(false);
   const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
+  // データ取り込み（全置き換え）の実行中か。settings.json には書き込みロックが無いため、
+  // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
+  const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
+  const isMigrationImportingRef = React.useRef(false);
+  const handleMigrationImportingChange = React.useCallback(
+    (importing: boolean) => {
+      isMigrationImportingRef.current = importing;
+      setIsMigrationImporting(importing);
+    },
+    []
+  );
 
   const { toast } = useToast();
 
@@ -688,7 +700,7 @@ export default function SettingsScreen({
   // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
   // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
   const handleToggleAutostart = async (enabled: boolean) => {
-    if (isUpdatingAutostartRef.current) {
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     isUpdatingAutostartRef.current = true;
@@ -739,7 +751,8 @@ export default function SettingsScreen({
 
   const handleSave = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current) {
+    // データ取り込み中も、置き換え中の設定ファイルへ書き込まないよう止める。
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     try {
@@ -783,7 +796,7 @@ export default function SettingsScreen({
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current) {
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     try {
@@ -1384,27 +1397,11 @@ export default function SettingsScreen({
               </Card>
             )}
 
-            {/* Placeholder categories */}
+            {/* データ管理: データ移行（ZIPの書き出し・読み込み）。ストレージ状況・アーカイブ管理は右サイドバーで準備中のまま。 */}
             {activeMenu === "data" && (
-              <Card className="border-0 shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                    <Database className="w-5 h-5" />
-                    データ管理
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="py-8 flex flex-col items-center justify-center text-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                    <Settings className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                  <h3 className="text-sm font-medium text-foreground mb-1">
-                    データ管理は準備中だよ
-                  </h3>
-                  <p className="text-xs text-muted-foreground max-w-[280px]">
-                    データ管理機能は今後のアップデートで追加される予定です。ストレージの使用状況の表示も準備中だよ。
-                  </p>
-                </CardContent>
-              </Card>
+              <DataMigrationPanel
+                onImportingChange={handleMigrationImportingChange}
+              />
             )}
 
             {/* Integration Settings */}
@@ -1561,7 +1558,10 @@ export default function SettingsScreen({
             // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
             // 変更が無いときも押せない（§7.7「設定変更あり → 保存ボタンを有効化」）。
             disabled={
-              !hasUnsavedChanges || isUpdatingAutostart || isSettingsCorrupt
+              !hasUnsavedChanges ||
+              isUpdatingAutostart ||
+              isSettingsCorrupt ||
+              isMigrationImporting
             }
           >
             <Check className="w-4 h-4" />

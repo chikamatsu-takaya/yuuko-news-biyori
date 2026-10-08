@@ -2534,6 +2534,263 @@ test("settings data panel has no dictionary export or cache delete item", async 
   ).toBeDisabled();
 });
 
+// データ移行（設定画面「データ管理」。画面詳細設計書 SCR-003 §7 / データ設計書 §15.6・§15.7）。
+const readWindowValue = (page: Page, key: string) =>
+  page.evaluate(
+    (name) => (window as unknown as Record<string, unknown>)[name],
+    key
+  );
+
+const openDataManagement = async (page: Page) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "データ管理");
+};
+
+test("settings data management exports and opens only the exports folder", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await expect(
+    page.getByRole("button", { name: "書き出し先フォルダを開く" })
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "データを書き出す" }).click();
+
+  const result = page.getByTestId("migration-export-result");
+  await expect(page.getByTestId("migration-export-status")).toContainText(
+    "書き出しが終わったよ！"
+  );
+  await expect(result).toContainText("yuuko_transfer_tr_20261008140000.zip");
+  await expect(result).toContainText("12件");
+  await expect(result).toContainText("ニュース9件");
+  // フルパスは表示しない（Rust もファイル名しか返さない）。
+  await expect(page.getByText(/exports[\\/]/)).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_MIGRATION_EXPORT_CALLS__")).toBe(1);
+
+  await page.getByRole("button", { name: "書き出し先フォルダを開く" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_MIGRATION_OPEN_FOLDER_CALLS__"))
+    .toEqual(["exports"]);
+  await expect(page.getByTestId("migration-folder-error")).toHaveCount(0);
+});
+
+test("settings data management export failure shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_EXPORT_FAIL__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "データを書き出す" }).click();
+  await expect(page.getByTestId("migration-export-status")).toHaveText(
+    "書き出しに失敗しちゃった。少し時間を置いて、もう一度試してみてね。"
+  );
+  await expect(page.getByTestId("migration-export-result")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "書き出し先フォルダを開く" })
+  ).toHaveCount(0);
+  await expect(page.getByText(/secret/)).toHaveCount(0);
+});
+
+test("settings data management lists import candidates with name, date and size", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  const list = page.getByTestId("migration-import-list");
+  await expect(list).toContainText("yuuko_transfer_tr_20261001090000.zip");
+  await expect(list).toContainText(/作成日時 2026\/(09\/30|10\/01) \d{2}:\d{2}/);
+  await expect(list).toContainText("5.0 MB");
+  await expect(page.getByTestId("migration-import-empty")).toHaveCount(0);
+});
+
+test("settings data management shows the empty state and opens the imports folder", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORTS__ = [];
+  });
+  await openDataManagement(page);
+
+  await expect(page.getByTestId("migration-import-empty")).toContainText(
+    "imports フォルダに移行用ZIPを置いてね"
+  );
+  await page.getByRole("button", { name: "imports フォルダを開く" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_MIGRATION_OPEN_FOLDER_CALLS__"))
+    .toEqual(["imports"]);
+
+  // 置いた後に「一覧を更新」で候補が出る。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORTS__ = [
+      {
+        fileName: "yuuko_transfer_tr_new.zip",
+        sizeBytes: 10,
+        createdAt: null,
+      },
+    ];
+  });
+  await page.getByRole("button", { name: "一覧を更新" }).click();
+  await expect(page.getByTestId("migration-import-list")).toContainText(
+    "yuuko_transfer_tr_new.zip"
+  );
+  await expect(page.getByTestId("migration-import-list")).toContainText(
+    "作成日時 不明"
+  );
+});
+
+test("settings data management folder open failure shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_MIGRATION_OPEN_FOLDER_FAIL__ = true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "imports フォルダを開く" }).click();
+  await expect(page.getByTestId("migration-folder-error")).toHaveText(
+    "フォルダを開けなかったよ。もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret/)).toHaveCount(0);
+});
+
+test("settings data management imports only after confirmation, blocks other actions, then restarts", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_MIGRATION_IMPORT_DELAY_MS__ = 800;
+  });
+  await openDataManagement(page);
+
+  const importButton = page.getByRole("button", {
+    name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+  });
+
+  // キャンセルでは取り込まない。
+  await importButton.click();
+  const confirm = page.getByRole("alertdialog", {
+    name: "データを読み込みますか？",
+  });
+  await expect(confirm).toContainText("すべて置き換わります");
+  await expect(confirm).toContainText("自動でバックアップ");
+  await expect(confirm).toContainText("再起動します");
+  await confirm.getByRole("button", { name: "キャンセル" }).click();
+  await expect(confirm).toHaveCount(0);
+  expect(
+    await readWindowValue(page, "__E2E_MIGRATION_IMPORT_CALLS__")
+  ).toBeUndefined();
+
+  await importButton.click();
+  await confirm.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  // 取り込み中は閉じられないダイアログで覆い、保存ボタンも無効にする。
+  const importing = page.getByTestId("migration-importing-dialog");
+  await expect(importing).toBeVisible();
+  // モーダル表示中は背景が支援技術から隠れるため includeHidden で探す。
+  await expect(
+    page.getByRole("button", { name: "保存する", includeHidden: true })
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(importing).toBeVisible();
+
+  const done = page.getByTestId("migration-import-done-dialog");
+  await expect(done).toBeVisible();
+  await expect(importing).toHaveCount(0);
+  await expect(done).toContainText("20件のファイル");
+  expect(await readWindowValue(page, "__E2E_MIGRATION_IMPORT_CALLS__")).toEqual([
+    "yuuko_transfer_tr_20261001090000.zip",
+  ]);
+  // 取り込み中に設定の保存は呼ばれていない。
+  expect(await readSavedSettings(page)).toBeUndefined();
+
+  await done.getByRole("button", { name: "再起動する" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_RESTART_APP_CALLS__"))
+    .toBe(1);
+});
+
+test("settings data management later-button after import reloads the screen", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+  const done = page.getByTestId("migration-import-done-dialog");
+  await expect(done).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_BEFORE_RELOAD__ = true;
+  });
+  await done
+    .getByRole("button", { name: "あとで（画面だけ読み込み直す）" })
+    .click();
+  // 読み込み直すと window の値が消え、ホームから表示し直される。
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_BEFORE_RELOAD__"))
+    .toBeUndefined();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  expect(await readWindowValue(page, "__E2E_RESTART_APP_CALLS__")).toBeUndefined();
+});
+
+test("settings data management import failure shows fixed wording and keeps the screen", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORT_FAIL__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  await expect(page.getByTestId("migration-import-status")).toHaveText(
+    "このZIPは取り込めなかったよ。ゆうこで書き出した移行用ZIPか、壊れていないか確かめてね。今のデータはそのままだよ。"
+  );
+  await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("migration-importing-dialog")).toHaveCount(0);
+  await expect(page.getByText(/import zip was rejected/)).toHaveCount(0);
+});
+
+test("settings data management unfinished previous import shows the restore guidance", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORT_FAIL__ =
+      "incomplete";
+  });
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  await expect(page.getByTestId("migration-import-status")).toHaveText(
+    "前回の取り込みが途中で止まっているため、取り込めなかったよ。バックアップからデータを戻してから、もう一度試してね。"
+  );
+  await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
+});
+
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
 test("settings load reflects saved MVP settings and shows the theme read-only", async ({
   page,
@@ -5851,6 +6108,102 @@ async function installTauriMocks(page: Page) {
             }
             autostartWin.__E2E_AUTOSTART_ENABLED__ = params.enabled;
             return params.enabled;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // データ移行（設定画面「データ管理」）。呼び出しを記録し、失敗・遅延はフラグで切り替える。
+          // 失敗時のエラー文には内部パス風の識別子を含め、画面へ出ないことを確かめる。
+          case "export_migration_data": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_EXPORT_CALLS__ =
+              (migrationWin.__E2E_MIGRATION_EXPORT_CALLS__ || 0) + 1;
+            if (migrationWin.__E2E_MIGRATION_EXPORT_FAIL__) {
+              throw {
+                code: "IO_ERROR",
+                message: "E2E export failure C:/secret/path/exports",
+              };
+            }
+            return {
+              fileName: "yuuko_transfer_tr_20261008140000.zip",
+              fileCount: 12,
+              articleCount: 9,
+              archiveCount: 1,
+              totalBytes: 2048,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "list_migration_imports": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            return (
+              migrationWin.__E2E_MIGRATION_IMPORTS__ ?? [
+                {
+                  fileName: "yuuko_transfer_tr_20261001090000.zip",
+                  sizeBytes: 5 * 1024 * 1024,
+                  createdAt: "2026-10-01T09:00:00+09:00",
+                },
+              ]
+            );
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "import_migration_data": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_IMPORT_CALLS__ = [
+              ...(migrationWin.__E2E_MIGRATION_IMPORT_CALLS__ || []),
+              (args as any)?.fileName,
+            ];
+            if (migrationWin.__E2E_MIGRATION_IMPORT_DELAY_MS__) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, migrationWin.__E2E_MIGRATION_IMPORT_DELAY_MS__)
+              );
+            }
+            // 本番の CommandError と同じ形（専用コード＋固定文言）で返す。
+            if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__ === "incomplete") {
+              throw {
+                code: "IMPORT_INCOMPLETE_PREVIOUS",
+                message:
+                  "a previous import did not finish; restore from the backup first",
+              };
+            }
+            if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__) {
+              throw {
+                code: "IMPORT_ZIP_REJECTED",
+                message: "import zip was rejected",
+              };
+            }
+            return {
+              fileName: (args as any)?.fileName,
+              fileCount: 20,
+              articleCount: 15,
+              archiveCount: 2,
+              totalBytes: 4096,
+              restartRequired: true,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "open_migration_folder": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_OPEN_FOLDER_CALLS__ = [
+              ...(migrationWin.__E2E_MIGRATION_OPEN_FOLDER_CALLS__ || []),
+              (args as any)?.kind,
+            ];
+            if (migrationWin.__E2E_MIGRATION_OPEN_FOLDER_FAIL__) {
+              throw {
+                code: "OPEN_FOLDER_FAILED",
+                message: "failed to open C:/secret/path",
+              };
+            }
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "restart_app": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_RESTART_APP_CALLS__ =
+              (migrationWin.__E2E_RESTART_APP_CALLS__ || 0) + 1;
+            return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "test_ai_provider": {

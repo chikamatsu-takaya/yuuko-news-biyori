@@ -358,7 +358,7 @@ fn read_candidate_created_at(path: &Path, limits: &ImportLimits) -> Option<Strin
 }
 
 fn rejected(reason: &str) -> AppError {
-    AppError::Validation(format!("import zip was rejected: {reason}"))
+    AppError::ImportRejected(reason.to_string())
 }
 
 /// ZIPを検証しながら一時フォルダへ展開する。戻り値はエントリ名の順に並べた展開済みファイル。
@@ -736,9 +736,7 @@ fn ensure_no_incomplete_backup(backups_root: &Path) -> Result<(), AppError> {
             && std::fs::symlink_metadata(entry.path().join(INCOMPLETE_MARKER)).is_ok()
         {
             log::error!("A previous migration import did not finish; manual restore is required");
-            return Err(AppError::Validation(
-                "a previous import did not finish. Restore the data from the backup folder before importing again".to_string(),
-            ));
+            return Err(AppError::ImportIncompletePrevious);
         }
     }
     Ok(())
@@ -1194,7 +1192,7 @@ mod tests {
 
     fn assert_rejected(result: Result<MigrationImportResultDto, AppError>) {
         assert!(
-            matches!(result, Err(AppError::Validation(ref message)) if message.starts_with("import zip was rejected")),
+            matches!(result, Err(AppError::ImportRejected(_))),
             "{result:?}"
         );
     }
@@ -1620,7 +1618,7 @@ mod tests {
 
         let result = copy_exact(&data[..], &mut out, 10);
 
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(result, Err(AppError::ImportRejected(_))));
         assert!(read_limited(&data[..], 10).unwrap().len() > 10);
         std::fs::remove_dir_all(target).unwrap();
     }
@@ -1673,7 +1671,7 @@ mod tests {
 
         let result = service(&target).import_at(&file_name, fixed_now());
 
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(result, Err(AppError::ImportIncompletePrevious)));
         assert_eq!(
             read(&target, "config/settings.json"),
             r#"{"aiProvider":"gemini"}"#

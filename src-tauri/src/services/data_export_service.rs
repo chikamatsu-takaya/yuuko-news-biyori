@@ -16,20 +16,22 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::domain::data_export::{
-    MigrationExportResultDto, MigrationManifest, MigrationManifestFile, MIGRATION_MANIFEST_VERSION,
+    MigrationExportResultDto, MigrationFolderKind, MigrationManifest, MigrationManifestFile,
+    MIGRATION_MANIFEST_VERSION,
 };
-use crate::error::AppError;
+use crate::error::{AppError, OpenMigrationFolderError};
+use crate::infra::external_browser::{self, BrowserOpenError};
 use crate::paths::{
     AppPaths, ARTICLE_FAVORITES_RELATIVE_PATH, ARTICLE_NEWS_RELATIVE_DIR, DICTIONARY_RELATIVE_PATH,
     FRIENDSHIP_RELATIVE_PATH, GACHA_STATE_RELATIVE_PATH, MIGRATION_EXPORTS_RELATIVE_DIR,
-    REWARDS_RELATIVE_PATH, SETTINGS_RELATIVE_PATH,
+    MIGRATION_IMPORTS_RELATIVE_DIR, REWARDS_RELATIVE_PATH, SETTINGS_RELATIVE_PATH,
 };
 
 pub(crate) const MANIFEST_ENTRY_NAME: &str = "manifest.json";
@@ -132,6 +134,54 @@ impl DataExportService {
     /// 書き出しと取り込みで共有するロック（取り込み側の `DataImportService` に渡す）。
     pub fn migration_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.export_lock)
+    }
+
+    /// 書き出し・取り込みのどちらかが実行中か（再起動の前に確かめる。途中で止めると退避の印が残り得るため）。
+    pub fn is_migration_running(&self) -> bool {
+        matches!(self.export_lock.try_lock(), Err(TryLockError::WouldBlock))
+    }
+
+    /// 書き出し先 `exports/` / 取り込み元 `imports/` をエクスプローラーで開く（本番用）。
+    pub fn open_migration_folder(
+        &self,
+        kind: MigrationFolderKind,
+    ) -> Result<(), OpenMigrationFolderError> {
+        self.open_migration_folder_with(kind, external_browser::open_verified_folder)
+    }
+
+    /// 種類に対応する固定フォルダを（無ければ作って）実体のフォルダと確かめ、`opener` で開く。
+    ///
+    /// パスは React から受け取らず、アプリデータ直下の固定名からだけ組み立てる。
+    /// リンク（ジャンクションを含む）やファイルになっていたら開かない（別の場所を開かせないため）。
+    /// 実際の起動（OS 連携）は `opener` として受け取り、テストでは起動せずに確かめる。ログにパスは出さない。
+    pub fn open_migration_folder_with(
+        &self,
+        kind: MigrationFolderKind,
+        opener: impl FnOnce(&Path) -> Result<(), BrowserOpenError>,
+    ) -> Result<(), OpenMigrationFolderError> {
+        let relative = match kind {
+            MigrationFolderKind::Exports => MIGRATION_EXPORTS_RELATIVE_DIR,
+            MigrationFolderKind::Imports => MIGRATION_IMPORTS_RELATIVE_DIR,
+        };
+        let dir = self.app_data_dir.join(relative);
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            log::warn!(
+                "Failed to prepare migration folder {kind:?}: {:?}",
+                error.kind()
+            );
+            return Err(OpenMigrationFolderError::Unavailable);
+        }
+        if !is_real_dir(&dir) {
+            log::warn!("Refused to open migration folder {kind:?}: not a regular directory");
+            return Err(OpenMigrationFolderError::Unavailable);
+        }
+        opener(&dir).map_err(|error| {
+            log::warn!("Failed to open migration folder {kind:?}: {error:?}");
+            match error {
+                BrowserOpenError::Unsupported => OpenMigrationFolderError::Unsupported,
+                BrowserOpenError::LaunchFailed => OpenMigrationFolderError::LaunchFailed,
+            }
+        })
     }
 }
 
@@ -949,5 +999,118 @@ mod tests {
         ] {
             assert_eq!(classify_entry_name(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn open_migration_folder_creates_and_opens_only_the_fixed_folder() {
+        let root = temp_dir("open-folder");
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        for (kind, name) in [
+            (MigrationFolderKind::Exports, "exports"),
+            (MigrationFolderKind::Imports, "imports"),
+        ] {
+            let mut opened = None;
+            service
+                .open_migration_folder_with(kind, |dir| {
+                    opened = Some(dir.to_path_buf());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(opened, Some(root.join(name)));
+            assert!(is_real_dir(&root.join(name)));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_migration_folder_maps_open_failures_to_fixed_errors() {
+        let root = temp_dir("open-folder-fail");
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        assert!(matches!(
+            service.open_migration_folder_with(MigrationFolderKind::Exports, |_| Err(
+                BrowserOpenError::LaunchFailed
+            )),
+            Err(OpenMigrationFolderError::LaunchFailed)
+        ));
+        assert!(matches!(
+            service.open_migration_folder_with(MigrationFolderKind::Imports, |_| Err(
+                BrowserOpenError::Unsupported
+            )),
+            Err(OpenMigrationFolderError::Unsupported)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_migration_folder_refuses_a_file_in_place_of_the_folder() {
+        let root = temp_dir("open-folder-file");
+        write(&root, "imports", "not a folder");
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        let result = service.open_migration_folder_with(MigrationFolderKind::Imports, |_| {
+            panic!("must not open a non-directory")
+        });
+
+        assert!(matches!(result, Err(OpenMigrationFolderError::Unavailable)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_migration_folder_refuses_a_junction() {
+        let root = temp_dir("open-folder-junction");
+        let outside = temp_dir("open-folder-junction-outside");
+        let link = root.join("exports");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status;
+        assert!(status.success(), "mklink /J failed");
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        let result = service.open_migration_folder_with(MigrationFolderKind::Exports, |_| {
+            panic!("must not open a junction")
+        });
+
+        assert!(matches!(result, Err(OpenMigrationFolderError::Unavailable)));
+        // ジャンクションだけを外してから消す（リンク先を消さないため）。
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_migration_folder_refuses_a_symlink() {
+        let root = temp_dir("open-folder-symlink");
+        let outside = temp_dir("open-folder-symlink-outside");
+        std::os::unix::fs::symlink(&outside, root.join("imports")).unwrap();
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        let result = service.open_migration_folder_with(MigrationFolderKind::Imports, |_| {
+            panic!("must not open a symlink")
+        });
+
+        assert!(matches!(result, Err(OpenMigrationFolderError::Unavailable)));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn is_migration_running_reflects_the_shared_lock() {
+        let root = temp_dir("running");
+        let service = DataExportService::with_app_data_dir(root.clone());
+        assert!(!service.is_migration_running());
+        let lock = service.migration_lock();
+        let guard = lock.lock().unwrap();
+        assert!(service.is_migration_running());
+        drop(guard);
+        assert!(!service.is_migration_running());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
