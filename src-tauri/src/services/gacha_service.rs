@@ -29,11 +29,15 @@ use crate::repositories::gacha_repository::GachaRepository;
 /// 抽選に使う関数。`n`（1 以上）を受け取り 0..n の添字を返す。
 pub type GachaPicker = Arc<dyn Fn(usize) -> usize + Send + Sync>;
 
+/// 今日の日付（"YYYY-MM-DD"）を返す関数。日次上限の判定に使う（テストで日付を固定するため差し替え可能）。
+pub type GachaTodayFn = Arc<dyn Fn() -> String + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GachaService {
     gacha_repository: GachaRepository,
     store_lock: Arc<Mutex<()>>,
     picker: GachaPicker,
+    today_fn: GachaTodayFn,
 }
 
 impl std::fmt::Debug for GachaService {
@@ -57,7 +61,15 @@ impl GachaService {
             gacha_repository,
             store_lock: Arc::new(Mutex::new(())),
             picker,
+            today_fn: Arc::new(local_today),
         }
+    }
+
+    /// 今日の日付を返す関数を差し替える（テストで日付境界をまたいでも結果が変わらないようにするため）。
+    #[cfg(test)]
+    pub(crate) fn with_today(mut self, today_fn: GachaTodayFn) -> Self {
+        self.today_fn = today_fn;
+        self
     }
 
     /// ガチャ画面用の状態を返す（読み取り）。未保存なら初期値（初期かけら・所持なし）を返す。
@@ -89,7 +101,7 @@ impl GachaService {
     /// 記事が1件既読になったときの付与（§12.4: その日3件で +10、1日1回まで）。付与した量を返す。
     /// 同じ記事を二重に数えないよう、呼び出し側は既読へ実際に遷移したときだけ呼ぶ。
     pub fn grant_for_news_read(&self) -> Result<u32, AppError> {
-        self.grant_for_news_read_on(&local_today())
+        self.grant_for_news_read_on(&(self.today_fn)())
     }
 
     /// `grant_for_news_read` の本体（日付注入版。テストで日付境界を固定するため分ける）。
@@ -99,7 +111,7 @@ impl GachaService {
 
     /// 用語解説・辞書保存1回ぶんの付与（§12.4: +1、合計で1日 +3 まで）。付与した量を返す。
     pub fn grant_for_term_action(&self) -> Result<u32, AppError> {
-        self.grant_for_term_action_on(&local_today())
+        self.grant_for_term_action_on(&(self.today_fn)())
     }
 
     /// `grant_for_term_action` の本体（日付注入版）。

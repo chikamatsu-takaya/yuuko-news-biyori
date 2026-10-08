@@ -543,10 +543,10 @@ mod tests {
 
         let ctx = make_context();
         let gacha_repository = GachaRepository::new(&AppPaths::new(ctx.root.clone()));
-        let service = ctx
-            .service
-            .clone()
-            .with_gacha_service(GachaService::new(gacha_repository.clone()));
+        let service = ctx.service.clone().with_gacha_service(
+            GachaService::new(gacha_repository.clone())
+                .with_today(std::sync::Arc::new(|| "2026-10-08".to_string())),
+        );
         let read_count = || {
             gacha_repository
                 .load()
