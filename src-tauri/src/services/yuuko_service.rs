@@ -1186,6 +1186,24 @@ mod tests {
         assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
     }
 
+    /// 11b. 退場中（Leaving）の追加クリックはプレビューへ戻らず、yuuko_to_main も二重に加算しない。
+    #[test]
+    fn clicks_while_leaving_do_not_award_yuuko_to_main_again() {
+        let ctx = make_context();
+        save_balloon_notification(&ctx, "article-a");
+        ctx.service.handle_yuuko_clicked().unwrap();
+        let left = ctx.service.handle_yuuko_clicked().unwrap();
+        assert_eq!(left.state, YuukoResidentState::Leaving);
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
+
+        for _ in 0..3 {
+            let again = ctx.service.handle_yuuko_clicked().unwrap();
+            assert_eq!(again.state, YuukoResidentState::Leaving);
+            assert_eq!(load_state(&ctx).state, YuukoResidentState::Leaving);
+        }
+        assert_eq!(friendship_state(&ctx).daily_earned_point, 5);
+    }
+
     /// 12. 確定を何度繰り返しても、yuuko_to_main は日次上限 25pt を超えて加算されない。
     #[test]
     fn yuuko_to_main_respects_daily_point_limit() {
