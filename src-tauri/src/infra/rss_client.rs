@@ -179,9 +179,11 @@ where
     for addr in addrs {
         let ip = addr.ip();
         if is_disallowed_ip_addr(ip) {
-            return Err(AppError::Validation(format!(
-                "RSS host '{host}' resolved to disallowed IP '{ip}'"
-            )));
+            // ホスト名・解決先 IP は画面へ返さず debug ログにだけ残す（§16.3）。
+            log::debug!("RSS host '{host}' resolved to disallowed IP '{ip}'");
+            return Err(AppError::Validation(
+                "RSS host resolved to a disallowed IP".to_string(),
+            ));
         }
 
         if seen.insert(ip) {
@@ -228,7 +230,8 @@ fn resolve_redirect_location(
     }
 
     let next_url = current_url.join(location).map_err(|error| {
-        AppError::Validation(format!("redirect Location is not a valid URL: {error}"))
+        log::debug!("redirect Location could not be joined: {error}");
+        AppError::Validation("redirect Location is not a valid URL".to_string())
     })?;
     validate_parsed_url(&next_url, UrlPurpose::Rss, allowlist)?;
     canonicalize_request_url(next_url)
@@ -247,7 +250,8 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
     match normalized_host {
         NormalizedRequestHost::Domain(domain) => {
             url.set_host(Some(&domain)).map_err(|error| {
-                AppError::Validation(format!("failed to normalize URL host for request: {error}"))
+                log::debug!("failed to normalize URL host for request: {error}");
+                AppError::Validation("failed to normalize URL host for request".to_string())
             })?;
         }
         NormalizedRequestHost::Ip(ip) => {
@@ -583,7 +587,11 @@ mod tests {
         )
         .expect_err("private address in DNS results must fail closed");
 
-        assert!(error.to_string().contains("disallowed IP"));
+        let message = error.to_string();
+        assert!(message.contains("disallowed IP"));
+        // ホスト名・解決先 IP は文言へ含めない（§16.3）。
+        assert!(!message.contains("rss.example.com"));
+        assert!(!message.contains("10.0.0.8"));
     }
 
     #[test]
@@ -626,7 +634,24 @@ mod tests {
         )
         .expect_err("redirect must stay inside the RSS allowlist");
 
-        assert!(error.to_string().contains("not present in the allowlist"));
+        let message = error.to_string();
+        assert!(message.contains("not present in the allowlist"));
+        assert!(!message.contains("evil.example.com"));
+    }
+
+    #[test]
+    fn invalid_redirect_location_message_excludes_parse_details() {
+        let current_url = Url::parse("https://rss.example.com/feed.xml").unwrap();
+        let error = resolve_redirect_location(&current_url, "https://[secret", &allowlist())
+            .expect_err("unparseable redirect must be rejected");
+
+        match error {
+            AppError::Validation(message) => {
+                assert_eq!(message, "redirect Location is not a valid URL");
+                assert!(!message.contains("secret"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]

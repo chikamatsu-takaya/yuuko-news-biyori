@@ -86,9 +86,10 @@ impl DictionaryEntryType {
             "term" => Ok(Self::Term),
             "phrase" => Ok(Self::Phrase),
             "key_point" => Ok(Self::KeyPoint),
-            _ => Err(AppError::Validation(format!(
-                "type must be one of term, phrase, key_point: {value}"
-            ))),
+            // 入力値はエラー文言へ含めない（§16.3）。
+            _ => Err(AppError::Validation(
+                "type must be one of term, phrase, key_point".to_string(),
+            )),
         }
     }
 }
@@ -725,5 +726,16 @@ mod tests {
         json["createdAt"] = serde_json::json!("  ");
         let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
         assert_eq!(entry.to_list_item_dto().created_at_text, None);
+    }
+
+    #[test]
+    fn unknown_type_filter_message_excludes_input_value() {
+        match DictionaryEntryType::from_filter_value("secret-type<script>") {
+            Err(crate::error::AppError::Validation(message)) => {
+                assert_eq!(message, "type must be one of term, phrase, key_point");
+                assert!(!message.contains("secret-type"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 }

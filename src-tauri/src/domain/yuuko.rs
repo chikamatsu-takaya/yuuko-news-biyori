@@ -430,6 +430,8 @@ impl PersistedYuukoState {
     /// 2段階クリックの最小遷移。操作対象（preview_article / current_article_id）が
     /// 無ければ no-op（安全側）。初回クリック → PreviewVisible、
     /// PreviewVisible での再クリック → Leaving（確定）。
+    /// Leaving は退場中で戻らない（詳細設計書 YS-008）ため、退場中のクリックは no-op。
+    /// プレビューへ戻すと再確定で「詳しく見る」の友情ポイントが二重に加算されるのも防ぐ。
     /// 記事既読・画面遷移・クールタイム等の副作用は持たない。
     /// 戻り値は状態遷移が起きたか。
     pub fn handle_click(&mut self) -> bool {
@@ -438,6 +440,7 @@ impl PersistedYuukoState {
         }
 
         self.state = match self.state {
+            YuukoResidentState::Leaving => return false,
             YuukoResidentState::PreviewVisible => YuukoResidentState::Leaving,
             _ => YuukoResidentState::PreviewVisible,
         };
@@ -637,6 +640,23 @@ mod tests {
         // 再クリック → 確定（退場）
         assert!(state.handle_click());
         assert_eq!(state.state, YuukoResidentState::Leaving);
+    }
+
+    #[test]
+    fn handle_click_is_noop_while_leaving() {
+        let mut state = state_with_notification();
+        state.handle_click();
+        state.handle_click();
+        assert_eq!(state.state, YuukoResidentState::Leaving);
+        let before = state.clone();
+
+        // 退場中のクリックはプレビューへ戻さず、何も変えない。
+        assert!(!state.handle_click());
+        assert_eq!(state.state, YuukoResidentState::Leaving);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
     }
 
     /// テスト用の固定タイムゾーン（JST, +09:00）。実行端末のタイムゾーンに依存させない。
