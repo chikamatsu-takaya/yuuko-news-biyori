@@ -154,6 +154,23 @@ export const updateArticleFavorite = async (
   return invoke<FavoriteUpdateResult>("update_article_favorite", { params });
 };
 
+// 「元記事を開く」。記事IDだけを渡し、保存済み URL の検証と既定のブラウザ起動は Rust 側で行う（判断台帳 D13）。
+// 画面から URL を渡さないため、任意の URL を開く入口にはしない。
+// ブラウザでのプレビュー（Tauri 外）では Rust を呼べないため、開発・E2E 用に画面が持つ URL を新しいタブで開く。
+export const openOriginalArticle = async (
+  articleId: string,
+  previewFallbackUrl?: string
+): Promise<void> => {
+  if (!isTauriRuntime()) {
+    if (previewFallbackUrl) {
+      window.open(previewFallbackUrl, "_blank", "noopener,noreferrer");
+    }
+    return;
+  }
+
+  await invoke<void>("open_original_article", { params: { articleId } });
+};
+
 export const generateArticleSummary = async (
   params: GenerateArticleSummaryParams
 ): Promise<GeneratedArticleSummaryDto | null> => {

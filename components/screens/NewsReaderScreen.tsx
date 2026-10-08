@@ -37,6 +37,7 @@ import {
   generateArticleSummary,
   getArticleDetail,
   getRecommendedArticles,
+  openOriginalArticle,
   updateArticleFavorite,
   type ArticleDetailDto as TauriArticleDetail,
   type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
@@ -1401,12 +1402,22 @@ export default function NewsReaderScreen({
     onNavigate?.("home");
   };
 
-  const handleOpenExternal = () => {
+  // 元記事は記事IDだけを Rust へ渡して開く（URL の検証とブラウザ起動は Rust 側）。
+  const handleOpenExternal = async () => {
     if (!article.externalUrl) {
       return;
     }
 
-    window.open(article.externalUrl, "_blank", "noopener,noreferrer");
+    try {
+      await openOriginalArticle(article.id, article.externalUrl);
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "元記事を開けなかったよ",
+        description: "ブラウザで元記事を開けなかったよ。時間をおいてもう一度試してみてね。",
+      });
+      console.warn("Failed to open original article:", error);
+    }
   };
 
   const handleToggleFavorite = React.useCallback(async () => {

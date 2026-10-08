@@ -4540,6 +4540,71 @@ test("onboarding overlay completes even when autostart fails", async ({
   });
 });
 
+// 「元記事を開く」: Tauri 上では window.open を使わず、記事IDだけを open_original_article へ渡す。
+const spyWindowOpen = (page: Page) =>
+  page.addInitScript(() => {
+    const spyWindow = window as unknown as Record<string, unknown>;
+    spyWindow.__E2E_WINDOW_OPEN_CALLS__ = 0;
+    window.open = () => {
+      spyWindow.__E2E_WINDOW_OPEN_CALLS__ =
+        (spyWindow.__E2E_WINDOW_OPEN_CALLS__ as number) + 1;
+      return null;
+    };
+  });
+
+const readOpenOriginalArticleArgs = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>)
+        .__E2E_OPEN_ORIGINAL_ARTICLE_ARGS__ as unknown[] | undefined) ?? []
+  );
+
+const readWindowOpenCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown>)
+        .__E2E_WINDOW_OPEN_CALLS__ as number
+  );
+
+test("reader 元記事 button passes only the article ID to Rust", async ({
+  page,
+}) => {
+  await spyWindowOpen(page);
+  await openReaderFromHome(page);
+
+  await page.getByRole("button", { name: "外部記事を開く" }).click();
+
+  await expect
+    .poll(() => readOpenOriginalArticleArgs(page))
+    .toEqual([{ articleId: "e2e-article-1" }]);
+  // URL は画面から渡さず、Tauri 上では window.open（WebView では開けない）も使わない。
+  expect(await readWindowOpenCalls(page)).toBe(0);
+  await expect(page.getByText("元記事を開けなかったよ")).toHaveCount(0);
+});
+
+test("reader 元記事 failure shows a fixed toast without raw error", async ({
+  page,
+}) => {
+  await spyWindowOpen(page);
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_OPEN_ORIGINAL_ARTICLE_FAIL__ = true;
+  });
+  await openReaderFromHome(page);
+
+  await page.getByRole("button", { name: "外部記事を開く" }).click();
+
+  await expect(
+    page.getByText("元記事を開けなかったよ", { exact: true })
+  ).toBeVisible();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  expect(await readOpenOriginalArticleArgs(page)).toEqual([
+    { articleId: "e2e-article-1" },
+  ]);
+  expect(await readWindowOpenCalls(page)).toBe(0);
+});
+
 async function openHome(page: Page) {
   await page.goto("/");
   await expect(
@@ -4796,6 +4861,24 @@ async function installTauriMocks(page: Page) {
           }
           case "update_article_favorite":
             return params;
+          // 「元記事を開く」。渡された記事IDを記録する。失敗テストでは本番と同じ CommandError 形式で reject する
+          // （生エラー文言・内部パスが UI へ出ないことを検証するための識別子を含める）。
+          case "open_original_article": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const openWin = window as any;
+            openWin.__E2E_OPEN_ORIGINAL_ARTICLE_ARGS__ = [
+              ...(openWin.__E2E_OPEN_ORIGINAL_ARTICLE_ARGS__ || []),
+              args?.params ?? null,
+            ];
+            if (openWin.__E2E_OPEN_ORIGINAL_ARTICLE_FAIL__) {
+              throw {
+                code: "OPEN_BROWSER_FAILED",
+                message: "E2E raw open failure /internal/secret/path",
+              };
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return null;
+          }
           case "generate_article_summary":
             return {
               articleId: "e2e-article-1",

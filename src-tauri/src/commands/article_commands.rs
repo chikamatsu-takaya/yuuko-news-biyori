@@ -3,8 +3,8 @@ use tauri::State;
 use crate::domain::article::{
     ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
     ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
-    ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
-    UpdateArticleFavoriteParams,
+    ListArticleHistoryParams, OpenOriginalArticleParams, RestoreArchivedArticleParams,
+    RestoreArchivedArticleResult, UpdateArticleFavoriteParams,
 };
 use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
@@ -88,6 +88,25 @@ pub async fn update_article_favorite(
             CommandError::new(
                 "JOIN_ERROR",
                 format!("failed to join update-article-favorite task: {error}"),
+            )
+        })?
+        .map_err(CommandError::from)
+}
+
+/// 記事IDだけを受け取り、保存済みの元記事 URL を検証して既定のブラウザで開く（判断台帳 D13）。
+/// URL・パスは受け取らないため、任意の URL を開く入口にはならない。失敗は固定のコードで返す。
+#[tauri::command]
+pub async fn open_original_article(
+    state: State<'_, AppState>,
+    params: OpenOriginalArticleParams,
+) -> CommandResult<()> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.open_original_article(params))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "JOIN_ERROR",
+                format!("failed to join open-original-article task: {error}"),
             )
         })?
         .map_err(CommandError::from)

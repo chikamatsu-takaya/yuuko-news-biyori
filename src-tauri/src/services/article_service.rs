@@ -1,10 +1,12 @@
 use crate::domain::article::{
     ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
     ArticleReadState, ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams,
-    GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-    RestoreArchivedArticleResult, SummaryState, UpdateArticleFavoriteParams,
+    GetRecommendedArticlesParams, ListArticleHistoryParams, OpenOriginalArticleParams,
+    RestoreArchivedArticleParams, RestoreArchivedArticleResult, SummaryState,
+    UpdateArticleFavoriteParams,
 };
-use crate::error::AppError;
+use crate::error::{AppError, OpenOriginalArticleError};
+use crate::infra::external_browser::{self, BrowserOpenError};
 use crate::repositories::article_repository::ArticleRepository;
 use crate::services::recommendation_service::RecommendationService;
 use chrono::{DateTime, Utc};
@@ -144,6 +146,38 @@ impl ArticleService {
         {
             log::warn!("Failed to persist article read state for {article_id}: {error}");
         }
+    }
+
+    /// 記事IDから保存済みの元記事 URL を引き、検証できたものだけを `opener` で開く（判断台帳 D13）。
+    ///
+    /// 実際の起動処理（OS 連携）は `opener` として受け取り、テストでは起動せずに検証だけ確認する。
+    /// ログには記事IDと失敗種別だけを出し、URL は出さない。既読状態は進めない。
+    pub fn open_original_article_with(
+        &self,
+        params: OpenOriginalArticleParams,
+        opener: impl FnOnce(&url::Url) -> Result<(), BrowserOpenError>,
+    ) -> Result<(), OpenOriginalArticleError> {
+        let article_id = params.validated_article_id()?;
+        let raw_url = self.repository.get_original_url(&article_id)?;
+        let url = external_browser::validate_openable_url(&raw_url).map_err(|rejection| {
+            log::warn!("Refused to open original article {article_id}: {rejection:?}");
+            OpenOriginalArticleError::UrlRejected
+        })?;
+        opener(&url).map_err(|error| {
+            log::warn!("Failed to open original article {article_id}: {error:?}");
+            match error {
+                BrowserOpenError::Unsupported => OpenOriginalArticleError::Unsupported,
+                BrowserOpenError::LaunchFailed => OpenOriginalArticleError::LaunchFailed,
+            }
+        })
+    }
+
+    /// 元記事を既定のブラウザで開く（本番用。OS 連携は infra::external_browser）。
+    pub fn open_original_article(
+        &self,
+        params: OpenOriginalArticleParams,
+    ) -> Result<(), OpenOriginalArticleError> {
+        self.open_original_article_with(params, external_browser::open_in_default_browser)
     }
 
     pub fn update_article_favorite(
@@ -479,5 +513,110 @@ mod tests {
             recommended_read_state(&ctx, "article-001"),
             ArticleReadState::Unread
         );
+    }
+
+    /// 保存済みの元記事 URL を指定して記事を1件保存する（元記事を開く処理のテスト用）。
+    fn save_with_original_url(ctx: &ServiceContext, article_id: &str, original_url: &str) {
+        let fetched_at = fixed_now().to_rfc3339();
+        let saved = ctx
+            .service
+            .repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: article_id.to_string(),
+                title: format!("テスト記事 {article_id}"),
+                source_name: "テストソース".to_string(),
+                original_url: original_url.to_string(),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at,
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some("抜粋".to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            }])
+            .unwrap();
+        assert_eq!(saved, 1);
+    }
+
+    fn open_with_recorder(
+        ctx: &ServiceContext,
+        article_id: &str,
+        result: Result<(), BrowserOpenError>,
+    ) -> (Result<(), OpenOriginalArticleError>, Option<String>) {
+        let mut opened = None;
+        let outcome = ctx.service.open_original_article_with(
+            OpenOriginalArticleParams {
+                article_id: article_id.to_string(),
+            },
+            |url| {
+                opened = Some(url.as_str().to_string());
+                result
+            },
+        );
+        (outcome, opened)
+    }
+
+    #[test]
+    fn open_original_article_opens_saved_https_url() {
+        let ctx = make_context();
+        save_with_original_url(&ctx, "open-ok", "https://example.com/news/1");
+
+        let (outcome, opened) = open_with_recorder(&ctx, "open-ok", Ok(()));
+        assert!(outcome.is_ok());
+        assert_eq!(opened.as_deref(), Some("https://example.com/news/1"));
+    }
+
+    #[test]
+    fn open_original_article_rejects_unknown_or_empty_id_without_opening() {
+        let ctx = make_context();
+
+        let (outcome, opened) = open_with_recorder(&ctx, "no-such-article", Ok(()));
+        assert!(matches!(
+            outcome,
+            Err(OpenOriginalArticleError::Article(AppError::NotFound(_)))
+        ));
+        assert!(opened.is_none());
+
+        let (outcome, opened) = open_with_recorder(&ctx, "   ", Ok(()));
+        assert!(matches!(
+            outcome,
+            Err(OpenOriginalArticleError::Article(AppError::Validation(_)))
+        ));
+        assert!(opened.is_none());
+    }
+
+    #[test]
+    fn open_original_article_refuses_unsafe_saved_url_without_opening() {
+        let ctx = make_context();
+        save_with_original_url(&ctx, "open-js", "javascript:alert(1)");
+        save_with_original_url(&ctx, "open-file", "file:///C:/Windows/System32/calc.exe");
+
+        for article_id in ["open-js", "open-file"] {
+            let (outcome, opened) = open_with_recorder(&ctx, article_id, Ok(()));
+            assert!(
+                matches!(outcome, Err(OpenOriginalArticleError::UrlRejected)),
+                "{article_id}"
+            );
+            assert!(opened.is_none(), "{article_id}");
+        }
+    }
+
+    #[test]
+    fn open_original_article_maps_launch_failures_to_fixed_errors() {
+        let ctx = make_context();
+        save_with_original_url(&ctx, "open-fail", "https://example.com/news/2");
+
+        let (outcome, _) =
+            open_with_recorder(&ctx, "open-fail", Err(BrowserOpenError::LaunchFailed));
+        assert!(matches!(
+            outcome,
+            Err(OpenOriginalArticleError::LaunchFailed)
+        ));
+
+        let (outcome, _) =
+            open_with_recorder(&ctx, "open-fail", Err(BrowserOpenError::Unsupported));
+        let error: crate::error::CommandError = outcome.unwrap_err().into();
+        assert_eq!(error.code, "OPEN_BROWSER_UNSUPPORTED");
+        assert!(!error.message.contains("example.com"));
     }
 }

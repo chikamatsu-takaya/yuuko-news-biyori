@@ -53,4 +53,7 @@ tauri-plugin-single-instance = "~2.4.1"
 # 既に依存ツリーにあり、追加の取得・ビルドはほぼ増えない。std には該当 API が無い。
 # MIT / Apache-2.0。常駐負荷は判定時の API 呼び出し 1 回のみ（常駐スレッド・フックなし）。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
+# 元記事を既定のブラウザで開く ShellExecuteW（判断台帳 D13）も同じ Win32_UI_Shell を使う。
+# ShellExecuteW の表示方法引数（SHOW_WINDOW_CMD / SW_SHOWNORMAL）が Win32_UI_WindowsAndMessaging に
+# 定義されているため、その feature だけを追加する（新規クレート・取得物の追加なし）。
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

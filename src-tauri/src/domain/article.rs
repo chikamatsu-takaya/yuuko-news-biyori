@@ -367,6 +367,26 @@ impl GetArticleDetailParams {
     }
 }
 
+/// 「元記事を開く」の入力。URL は受け取らず、記事IDから保存済みの元記事 URL を Rust 側で引く（判断台帳 D13）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenOriginalArticleParams {
+    pub article_id: String,
+}
+
+impl OpenOriginalArticleParams {
+    pub fn validated_article_id(&self) -> Result<String, AppError> {
+        let article_id = self.article_id.trim();
+        if article_id.is_empty() {
+            return Err(AppError::Validation(
+                "articleId must not be empty".to_string(),
+            ));
+        }
+
+        Ok(article_id.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateArticleFavoriteParams {
