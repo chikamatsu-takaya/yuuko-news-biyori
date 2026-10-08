@@ -135,6 +135,37 @@ impl From<OpenOriginalArticleError> for CommandError {
     }
 }
 
+/// 「移行フォルダを開く」（open_migration_folder）の失敗種別。
+///
+/// React には固定のコードと文言だけを返し、フォルダのパス・OS のエラー詳細は含めない。
+#[derive(Debug)]
+pub enum OpenMigrationFolderError {
+    /// フォルダを作れない、またはリンク・ファイルになっていて実体のフォルダでない。
+    Unavailable,
+    /// この OS ではフォルダを開く手段を持たない（Windows 以外）。
+    Unsupported,
+    /// OS がエクスプローラーの起動に失敗した。
+    LaunchFailed,
+}
+
+impl From<OpenMigrationFolderError> for CommandError {
+    fn from(value: OpenMigrationFolderError) -> Self {
+        match value {
+            OpenMigrationFolderError::Unavailable => Self::new(
+                "MIGRATION_FOLDER_UNAVAILABLE",
+                "migration folder is not available",
+            ),
+            OpenMigrationFolderError::Unsupported => Self::new(
+                "OPEN_FOLDER_UNSUPPORTED",
+                "opening a folder is not supported on this platform",
+            ),
+            OpenMigrationFolderError::LaunchFailed => {
+                Self::new("OPEN_FOLDER_FAILED", "failed to open the folder")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

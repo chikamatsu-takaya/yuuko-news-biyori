@@ -8,7 +8,7 @@ pub mod allowlist;
 /// ログ出力設定（tauri-plugin-log の構成）。外部通信は行わない。
 pub mod app_logging;
 pub mod archive_storage;
-/// OS 連携（保存済み元記事 URL を既定のブラウザで開く）。アプリ自身は通信しない。
+/// OS 連携（保存済み元記事 URL を既定のブラウザで開く・データ移行の固定フォルダを開く）。アプリ自身は通信しない。
 pub mod external_browser;
 /// OS 連携（全画面・プレゼン判定）。外部通信は行わない。
 pub mod fullscreen_detector;
