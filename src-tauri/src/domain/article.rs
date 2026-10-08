@@ -238,8 +238,9 @@ pub struct ArchiveZipInfoDto {
     pub size_bytes: u64,
 }
 
-/// 過去ニュース画面の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
-/// ZIPファイル名・サイズなどの保存場所の情報は画面に不要なため返さない。
+/// 過去ニュース画面・設定画面「アーカイブ管理」の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
+/// 設定画面のアーカイブ管理で月ごとの容量と削除可否を示すため（判断台帳 D26）、サイズと削除可否も返す。
+/// どちらも index の値と現在時刻だけで決まり、ZIPは開かない。ZIPファイル名・保存場所は画面に不要なため返さない。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveMonthDto {
@@ -248,6 +249,11 @@ pub struct ArchiveMonthDto {
     pub article_count: usize,
     /// false は記事カタログ未移行（v1）の月。記事一覧は返せないが件数は表示できる。
     pub catalog_complete: bool,
+    /// 月次ZIPのサイズ（index の `sizeBytes`）。設定画面のアーカイブ管理で容量表示に使う。
+    pub size_bytes: u64,
+    /// 古い月として削除できる時期か（`is_archive_month_deletable`）。true でも、アーカイブにしか
+    /// 本文が無いお気に入りを含む月は削除の事前確認で検証エラーになる。
+    pub deletable: bool,
 }
 
 /// 指定月のアーカイブ記事一覧。ZIPは開かず、記事カタログのスナップショットを返す。

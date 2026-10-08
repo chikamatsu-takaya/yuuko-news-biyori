@@ -2657,16 +2657,20 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
-// 「キャッシュを削除」も外した。残す「準備中」項目（アーカイブを管理）は残ることも確かめる。
+// 「キャッシュを削除」も外した。「アーカイブを管理」は準備中をやめ、データ管理タブのアーカイブ管理へ移動する（判断台帳 D26）。
 test("settings data panel has no dictionary export or cache delete item", async ({ page }) => {
   await openSettings(page);
 
   await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
   await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
   await expect(page.getByText(/キャッシュを削除/)).toHaveCount(0);
+  await expect(page.getByText("アーカイブを管理（準備中）")).toHaveCount(0);
+  await page.getByRole("button", { name: "アーカイブを管理", exact: true }).click();
+  // データ管理タブへ切り替わり、アーカイブ管理の見出しまでスクロールされる。
+  await expect(page.getByTestId("archive-manage-card")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "アーカイブを管理（準備中）" })
-  ).toBeDisabled();
+    page.getByTestId("archive-manage-card").getByText("アーカイブ管理", { exact: true })
+  ).toBeInViewport();
 });
 
 // データ移行（設定画面「データ管理」。画面詳細設計書 SCR-003 §7 / データ設計書 §15.6・§15.7）。
@@ -2924,6 +2928,130 @@ test("settings data management unfinished previous import shows the restore guid
     "前回の取り込みが途中で止まっているため、取り込めなかったよ。バックアップからデータを戻してから、もう一度試してね。"
   );
   await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
+});
+
+// アーカイブ管理（設定画面「データ管理」。判断台帳 D26 / データ設計書 §14.8）。
+test("settings archive management lists months newest first with count, size and delete state", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  const list = page.getByTestId("archive-manage-list");
+  await expect(list.getByRole("listitem")).toHaveCount(3);
+  await expect(list.getByRole("listitem").nth(0)).toContainText("2026年9月");
+  await expect(list.getByRole("listitem").nth(1)).toContainText("2026年7月");
+  await expect(list.getByRole("listitem").nth(2)).toContainText("2026年6月");
+
+  const september = page.getByTestId("archive-month-2026-09");
+  await expect(september).toContainText("12件・1.5 MB");
+  await expect(september).toContainText("最近の月はまだ削除できないよ");
+  await expect(
+    page.getByRole("button", { name: "2026年9月のアーカイブを削除" })
+  ).toBeDisabled();
+
+  const july = page.getByTestId("archive-month-2026-07");
+  await expect(july).toContainText("30件・3.3 MB");
+  await expect(july).not.toContainText("まだ削除できない");
+  await expect(
+    page.getByRole("button", { name: "2026年7月のアーカイブを削除" })
+  ).toBeEnabled();
+  await expect(page.getByTestId("archive-month-2026-06")).toContainText("8件・0.8 MB");
+});
+
+test("settings archive management deletes a month after confirming and refreshes the list", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  const dialog = page.getByTestId("archive-delete-confirm-dialog");
+  await expect(dialog).toContainText("2026年7月のアーカイブを削除しますか？");
+  await expect(page.getByTestId("archive-delete-confirm-summary")).toHaveText(
+    "30件 / 3.3 MBのアーカイブが削除され、元に戻せません。"
+  );
+  await expect(dialog).toContainText("2件は、通常のニュースとして残ります。");
+
+  // キャンセルでは何も消さない。
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toBeUndefined();
+  await expect(page.getByTestId("archive-month-2026-07")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_DELETE_DELAY_MS__ = 400;
+  });
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  // 削除中は他の月の削除・一覧更新を押せない。
+  await expect(
+    page.getByRole("button", { name: "2026年6月のアーカイブを削除" })
+  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "アーカイブを読み直す" })).toBeDisabled();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年7月のアーカイブ（30件）を削除したよ。"
+  );
+  await expect(page.getByTestId("archive-month-2026-07")).toHaveCount(0);
+  await expect(page.getByTestId("archive-manage-list").getByRole("listitem")).toHaveCount(2);
+  await expect(
+    page.getByRole("button", { name: "2026年6月のアーカイブを削除" })
+  ).toBeEnabled();
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toEqual([
+    "2026-07",
+  ]);
+});
+
+test("settings archive management still reports success when zip cleanup is pending", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_DELETE_CLEANUP_PENDING__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年6月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年6月のアーカイブ（8件）を削除したよ。ファイルの片付けが一部終わらなかったけど、表示や動作には影響ないよ。"
+  );
+  await expect(page.getByTestId("archive-month-2026-06")).toHaveCount(0);
+});
+
+test("settings archive management shows fixed wording when a month cannot be deleted", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_PREVIEW_FAIL__ =
+      "2026-07";
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "この月はまだ削除できないよ。お気に入りの記事がアーカイブにだけ残っている月は、消えないように削除を止めているよ。"
+  );
+  await expect(page.getByTestId("archive-delete-confirm-dialog")).toHaveCount(0);
+  await expect(page.getByText(/secret|validation error/)).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toBeUndefined();
+  await expect(page.getByTestId("archive-month-2026-07")).toBeVisible();
+});
+
+test("settings archive management shows an empty state without archives", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_MONTHS__ = [];
+  });
+  await openDataManagement(page);
+
+  await expect(page.getByTestId("archive-manage-empty")).toContainText(
+    "アーカイブはまだないよ"
+  );
+  await expect(page.getByTestId("archive-manage-list")).toHaveCount(0);
 });
 
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
@@ -6355,6 +6483,95 @@ async function installTauriMocks(page: Page) {
               archiveCount: 2,
               totalBytes: 4096,
               restartRequired: true,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // アーカイブ管理（設定画面「データ管理」。判断台帳 D26）。月の一覧は window に持ち、削除で減らす。
+          // 失敗時のエラー文には内部向けの英語・パス風の文字列を含め、画面へ出ないことを確かめる。
+          case "list_archive_months": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            if (!archiveWin.__E2E_ARCHIVE_MONTHS__) {
+              archiveWin.__E2E_ARCHIVE_MONTHS__ = [
+                {
+                  month: "2026-09",
+                  articleCount: 12,
+                  catalogComplete: true,
+                  sizeBytes: 1.5 * 1024 * 1024,
+                  deletable: false,
+                },
+                {
+                  month: "2026-07",
+                  articleCount: 30,
+                  catalogComplete: true,
+                  sizeBytes: 3.25 * 1024 * 1024,
+                  deletable: true,
+                },
+                {
+                  month: "2026-06",
+                  articleCount: 8,
+                  catalogComplete: true,
+                  sizeBytes: 800 * 1024,
+                  deletable: true,
+                },
+              ];
+            }
+            return archiveWin.__E2E_ARCHIVE_MONTHS__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_archive_month_delete_preview": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            const month = params.month as string;
+            archiveWin.__E2E_ARCHIVE_PREVIEW_CALLS__ = [
+              ...(archiveWin.__E2E_ARCHIVE_PREVIEW_CALLS__ || []),
+              month,
+            ];
+            if (archiveWin.__E2E_ARCHIVE_PREVIEW_FAIL__ === month) {
+              throw {
+                code: "VALIDATION_ERROR",
+                message:
+                  "validation error: a favorite article exists only in this archive C:/secret/archive",
+              };
+            }
+            const entry = (archiveWin.__E2E_ARCHIVE_MONTHS__ || []).find(
+              (item: any) => item.month === month
+            );
+            if (!entry) {
+              throw { code: "NOT_FOUND_ERROR", message: "archive month not found" };
+            }
+            return {
+              month,
+              articleCount: entry.articleCount,
+              sizeBytes: entry.sizeBytes,
+              keptArticleCount: 2,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "delete_archive_month": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            const month = params.month as string;
+            archiveWin.__E2E_ARCHIVE_DELETE_CALLS__ = [
+              ...(archiveWin.__E2E_ARCHIVE_DELETE_CALLS__ || []),
+              month,
+            ];
+            if (archiveWin.__E2E_ARCHIVE_DELETE_DELAY_MS__) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, archiveWin.__E2E_ARCHIVE_DELETE_DELAY_MS__)
+              );
+            }
+            const entry = (archiveWin.__E2E_ARCHIVE_MONTHS__ || []).find(
+              (item: any) => item.month === month
+            );
+            archiveWin.__E2E_ARCHIVE_MONTHS__ = (
+              archiveWin.__E2E_ARCHIVE_MONTHS__ || []
+            ).filter((item: any) => item.month !== month);
+            return {
+              month,
+              deletedArticleCount: entry?.articleCount ?? 0,
+              keptArticleCount: 2,
+              cleanupPending: Boolean(archiveWin.__E2E_ARCHIVE_DELETE_CLEANUP_PENDING__),
             };
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }

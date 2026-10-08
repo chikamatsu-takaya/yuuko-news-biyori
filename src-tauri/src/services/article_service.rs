@@ -239,7 +239,7 @@ impl ArticleService {
 
     /// 過去ニュース画面の月別アーカイブ一覧（新しい月から）を返す。
     pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
-        self.repository.list_archive_months()
+        self.repository.list_archive_months(chrono::Utc::now())
     }
 
     /// 指定月のアーカイブ記事一覧を記事カタログから返す。年月はここで形式を検証する。

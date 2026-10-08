@@ -114,13 +114,16 @@ export type ArchiveRetirementSummaryDto = {
   cleanupPending: boolean;
 };
 
-// 過去ニュース画面の月別アーカイブ一覧の1行（Rust の ArchiveMonthDto と一致させる）。
+// 過去ニュース画面・設定画面「アーカイブ管理」の月別アーカイブ一覧の1行（Rust の ArchiveMonthDto と一致させる）。
 // month は "YYYY-MM"。「2026年9月」などの表示整形は画面側で行う。
 // catalogComplete が false の月は記事カタログ未移行のため、件数だけ表示できる。
+// sizeBytes は月次ZIPのサイズ。deletable は削除できる時期（古い月）か。判定は Rust 側で行い、画面では持たない。
 export type ArchiveMonthDto = {
   month: string;
   articleCount: number;
   catalogComplete: boolean;
+  sizeBytes: number;
+  deletable: boolean;
 };
 
 export type ListArchiveMonthArticlesParams = {

@@ -65,6 +65,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
+import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
 import {
   GENRE_OPTIONS,
   NICKNAME_MAX_LENGTH,
@@ -467,6 +468,22 @@ export default function SettingsScreen({
   // 判定は Rust 側（取得元ファイルとの照合）で行い、設定読み込み時の DTO から受け取るだけにする。
   const [genreFilterFallback, setGenreFilterFallback] = React.useState(false);
   const [activeMenu, setActiveMenu] = React.useState("notification");
+  // 右サイドバーの「アーカイブを管理」から来たときだけ、データ管理タブの描画後にアーカイブ管理へスクロールする。
+  const [scrollToArchiveManage, setScrollToArchiveManage] =
+    React.useState(false);
+  const handleOpenArchiveManage = React.useCallback(() => {
+    setActiveMenu("data");
+    setScrollToArchiveManage(true);
+  }, []);
+  React.useEffect(() => {
+    if (!scrollToArchiveManage || activeMenu !== "data") {
+      return;
+    }
+    setScrollToArchiveManage(false);
+    document
+      .getElementById("archive-manage")
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [scrollToArchiveManage, activeMenu]);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -1397,11 +1414,15 @@ export default function SettingsScreen({
               </Card>
             )}
 
-            {/* データ管理: データ移行（ZIPの書き出し・読み込み）。ストレージ状況・アーカイブ管理は右サイドバーで準備中のまま。 */}
+            {/* データ管理: データ移行（ZIPの書き出し・読み込み）とアーカイブ管理（古い月の削除。判断台帳 D26）。
+                ストレージ状況は右サイドバーで準備中のまま。 */}
             {activeMenu === "data" && (
-              <DataMigrationPanel
-                onImportingChange={handleMigrationImportingChange}
-              />
+              <>
+                <DataMigrationPanel
+                  onImportingChange={handleMigrationImportingChange}
+                />
+                <ArchiveManagePanel />
+              </>
             )}
 
             {/* Integration Settings */}
@@ -1504,16 +1525,15 @@ export default function SettingsScreen({
                 保存データの使用状況の表示は準備中です。
               </p>
               <div className="space-y-2">
-                {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
                 {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
+                {/* アーカイブ管理の本体は「データ管理」タブに置き、ここからはそこへ移動するだけにする（判断台帳 D26） */}
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
+                  onClick={handleOpenArchiveManage}
                 >
                   <Archive className="w-4 h-4" />
-                  アーカイブを管理（準備中）
+                  アーカイブを管理
                 </Button>
                 <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
                   「準備中」の機能は今後のアップデートで対応予定です。
