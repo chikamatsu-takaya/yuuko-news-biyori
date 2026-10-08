@@ -2895,6 +2895,53 @@ for (const screen of sidebarAutostartScreens) {
   });
 }
 
+// ホーム・記事詳細のサイドバーも同じ共通部品に置き換えた（固定の「ON」表示をやめる）。
+const sidebarAutostartOpeners = [
+  { id: "home", open: openHome },
+  { id: "reader", open: openReaderFromHome },
+] as const;
+
+for (const screen of sidebarAutostartOpeners) {
+  test(`sidebar autostart status on ${screen.id} shows ON when the OS has it registered`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_ENABLED__ =
+        true;
+    });
+    await screen.open(page);
+
+    await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：ON");
+  });
+
+  test(`sidebar autostart status on ${screen.id} shows OFF when the OS has it unregistered`, async ({
+    page,
+  }) => {
+    // モック既定は OS 未登録（OFF）。固定表示だった頃の「ON」が出ないことも確認する。
+    await screen.open(page);
+
+    await expect(sidebarAutostartStatus(page)).toHaveText("自動起動：OFF");
+  });
+
+  test(`sidebar autostart status on ${screen.id} is hidden when the OS state cannot be read`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_READ_FAIL__ =
+        true;
+    });
+    await screen.open(page);
+
+    // 画面本体は表示されたまま、自動起動の表示だけ出さない（生エラーも出さない）。
+    await expect(
+      page.getByRole("button", { name: "常駐を終了する" }).first()
+    ).toBeVisible();
+    await expect(sidebarAutostartStatus(page)).toHaveCount(0);
+    await expect(page.getByText("自動起動", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("secret/path")).toHaveCount(0);
+  });
+}
+
 test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
   page,
 }) => {

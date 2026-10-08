@@ -9,6 +9,7 @@ import { Progress } from "@/components/ui/progress";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   Alert,
   AlertDescription,
@@ -488,7 +489,6 @@ export default function MainScreen({
   // 通知状態は Page 側スケジューラが一元取得する。MainScreen は受け取って表示するだけ。
   yuukoNotificationState?: YuukoNotificationState | null;
 }) {
-  const [isAutoStart] = React.useState(true);
   const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
   const [favoriteSavingArticleId, setFavoriteSavingArticleId] =
     React.useState<string | null>(null);
@@ -743,17 +743,7 @@ export default function MainScreen({
 
           {/* Auto Start & Exit */}
           <div className="p-3 border-t border-border/50">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-muted-foreground">自動起動：</span>
-              <span
-                className={`text-xs font-medium ${isAutoStart ? "text-[var(--yuuko-green)]" : "text-muted-foreground"}`}
-              >
-                {isAutoStart ? "ON" : "OFF"}
-              </span>
-              <span
-                className={`w-2 h-2 rounded-full ${isAutoStart ? "bg-[var(--yuuko-green)]" : "bg-muted-foreground"}`}
-              />
-            </div>
+            <AutostartStatus className="mb-2" />
             <Button
               variant="outline"
               size="sm"

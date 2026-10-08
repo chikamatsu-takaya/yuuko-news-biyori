@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import {
   Alert,
   AlertDescription,
@@ -989,7 +990,6 @@ export default function NewsReaderScreen({
   // ボタン表示は遷移元によらず「戻る」に統一し、戻り先の制御は onBack が担う。
   onBack?: () => void;
 }) {
-  const [isAutoStart] = React.useState(true);
   const { toast } = useToast();
   const [article, setArticle] = React.useState<ReaderArticleDetail>(() =>
     getFallbackArticleById(articleId)
@@ -1626,17 +1626,7 @@ export default function NewsReaderScreen({
           </div>
 
           <div className="border-t border-border/50 p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">自動起動</span>
-              <span
-                className={`text-xs font-medium ${isAutoStart ? "text-[var(--yuuko-green)]" : "text-muted-foreground"}`}
-              >
-                {isAutoStart ? "ON" : "OFF"}
-              </span>
-              <span
-                className={`h-2 w-2 rounded-full ${isAutoStart ? "bg-[var(--yuuko-green)]" : "bg-muted-foreground"}`}
-              />
-            </div>
+            <AutostartStatus className="mb-2" />
             <Button
               variant="outline"
               size="sm"
