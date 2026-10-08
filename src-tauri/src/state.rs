@@ -5,6 +5,7 @@ use crate::services::data_export_service::DataExportService;
 use crate::services::data_import_service::DataImportService;
 use crate::services::dictionary_service::DictionaryService;
 use crate::services::friendship_service::FriendshipService;
+use crate::services::gacha_service::GachaService;
 use crate::services::news_service::NewsService;
 use crate::services::reward_service::RewardService;
 use crate::services::settings_service::SettingsService;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub data_import_service: DataImportService,
     pub dictionary_service: DictionaryService,
     pub friendship_service: FriendshipService,
+    pub gacha_service: GachaService,
     pub news_service: NewsService,
     pub reward_service: RewardService,
     pub settings_service: SettingsService,

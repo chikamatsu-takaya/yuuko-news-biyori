@@ -2,7 +2,7 @@
 //!
 //! サーバ(Rust)を正とし、**デイリー上限・有効イベント検証・ランクアップ判定をここで強制**する。
 //! フロントはイベント発生を `record_friendship_event` で伝えるだけで、加算量や上限は決められない。
-//! ランクアップ時はランク報酬の解放（rewards.json）も併せて行う。
+//! ランクアップ時はランク報酬の解放（rewards.json）と、流れ星のかけらの付与（gacha_state.json）も併せて行う。
 
 use crate::domain::friendship::{
     FriendshipEventType, FriendshipStateDto, RecordFriendshipEventResult,
@@ -10,6 +10,7 @@ use crate::domain::friendship::{
 use crate::domain::yuuko::local_date_key;
 use crate::error::AppError;
 use crate::repositories::friendship_repository::FriendshipRepository;
+use crate::services::gacha_service::{log_grant_failure, GachaService};
 use crate::services::reward_service::RewardService;
 use chrono::{DateTime, TimeZone, Utc};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ pub struct FriendshipService {
     friendship_repository: FriendshipRepository,
     reward_service: RewardService,
     store_lock: Arc<Mutex<()>>,
+    /// ランクアップ時の流れ星のかけら付与先（データ設計書 §12.4）。未設定なら付与しない。
+    gacha_service: Option<GachaService>,
 }
 
 impl FriendshipService {
@@ -28,7 +31,14 @@ impl FriendshipService {
             // 報酬側も friendship.json を読むため、同じロックを共有する（順序は friendship → reward）。
             store_lock: reward_service.friendship_store_lock(),
             reward_service,
+            gacha_service: None,
         }
+    }
+
+    /// ランクアップ時にかけらを付与するガチャサービスを設定する（アプリ起動時の組み立て用）。
+    pub fn with_gacha_service(mut self, gacha_service: GachaService) -> Self {
+        self.gacha_service = Some(gacha_service);
+        self
     }
 
     /// 初回起動時に既定状態を保存する（未保存なら）。
@@ -78,8 +88,10 @@ impl FriendshipService {
         let event = FriendshipEventType::from_storage(event_type)
             .ok_or_else(|| AppError::Validation("unknown friendship event type".to_string()))?;
 
-        let _guard = self.lock_store()?;
+        let guard = self.lock_store()?;
         let mut state = self.friendship_repository.load_or_default()?;
+        // 読み込み時に累計からランクを導出し直しているので、加算前のランクとしてそのまま使える。
+        let rank_before = state.current_rank;
         let today = local_date_key(now, tz);
         let outcome = state.earn(event, &today, &format_utc_timestamp(now));
         self.friendship_repository.save(&state)?;
@@ -92,6 +104,16 @@ impl FriendshipService {
                 log::warn!(
                     "ランクアップ時の報酬解放の保存に失敗しました（次回に再試行します）: {error}"
                 );
+            }
+        }
+        drop(guard);
+
+        // ランクアップしたら、上がったランク数ぶんかけらを付与する（§12.4）。デッドロックを避けるため
+        // 友情側のロックを手放してから呼ぶ。付与に失敗してもポイント加算（保存済み）は成功として返す。
+        let ranks_gained = state.current_rank.saturating_sub(rank_before);
+        if ranks_gained > 0 {
+            if let Some(gacha_service) = &self.gacha_service {
+                log_grant_failure("rank_up", gacha_service.grant_for_rank_up(ranks_gained));
             }
         }
 
@@ -340,6 +362,45 @@ mod tests {
             .expect("rewards.json is written on rank up");
         assert_eq!(saved.unlocked_reward_ids, vec!["theme_001".to_string()]);
         assert_eq!(saved.pending_reward_ids(), vec!["theme_001".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rank_up_grants_star_fragments_and_non_rank_up_does_not() {
+        use crate::domain::gacha::{INITIAL_FRAGMENTS, RANK_UP_GRANT};
+        use crate::repositories::gacha_repository::GachaRepository;
+
+        let (service, root) = temp_service();
+        let gacha_repository = GachaRepository::new(&AppPaths::new(root.clone()));
+        let service = service.with_gacha_service(GachaService::new(gacha_repository.clone()));
+
+        // 累計 23pt（Rank2）から 1pt ではランクアップしない → 付与しない。
+        save_legacy_daily(&service, "2026-06-01", 23);
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")
+            .unwrap();
+        assert!(!result.ranked_up);
+        assert!(gacha_repository.load().unwrap().is_none());
+
+        // 次の 1pt で Rank3 → +30。
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 1), "term_explained")
+            .unwrap();
+        assert!(result.ranked_up);
+        assert_eq!(
+            gacha_repository.load().unwrap().unwrap().star_fragments,
+            INITIAL_FRAGMENTS + RANK_UP_GRANT
+        );
+
+        // 同じランク内の加算では二重に付与しない。
+        service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 2), "term_explained")
+            .unwrap();
+        assert_eq!(
+            gacha_repository.load().unwrap().unwrap().star_fragments,
+            INITIAL_FRAGMENTS + RANK_UP_GRANT
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

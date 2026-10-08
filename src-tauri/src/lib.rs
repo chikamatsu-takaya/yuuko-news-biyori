@@ -17,6 +17,7 @@ use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
 use repositories::friendship_repository::FriendshipRepository;
+use repositories::gacha_repository::GachaRepository;
 use repositories::reward_repository::RewardRepository;
 use repositories::settings_repository::SettingsRepository;
 use repositories::yuuko_state_repository::YuukoStateRepository;
@@ -27,6 +28,7 @@ use services::data_export_service::DataExportService;
 use services::data_import_service::{DataImportService, MigrationWriteLocks};
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
+use services::gacha_service::GachaService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
@@ -88,7 +90,11 @@ pub fn run() {
             settings_service.initialize_default_if_missing()?;
             let article_repository = ArticleRepository::new(&paths);
             article_repository.initialize_default_if_missing()?;
-            let article_service = ArticleService::new(article_repository.clone());
+            // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
+            // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
+            let gacha_service = GachaService::new(GachaRepository::new(&paths));
+            let article_service = ArticleService::new(article_repository.clone())
+                .with_gacha_service(gacha_service.clone());
             let news_service = NewsService::new(
                 &paths,
                 article_repository.clone(),
@@ -110,7 +116,8 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             let friendship_service =
-                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone());
+                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone())
+                    .with_gacha_service(gacha_service.clone());
             friendship_service.initialize_default_if_missing()?;
             // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
             // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
@@ -165,6 +172,7 @@ pub fn run() {
                 data_import_service,
                 dictionary_service,
                 friendship_service,
+                gacha_service,
                 news_service,
                 reward_service,
                 settings_service,
@@ -226,7 +234,10 @@ pub fn run() {
             commands::yuuko_commands::mark_yuuko_ignored,
             commands::friendship_commands::get_friendship_state,
             commands::friendship_commands::record_friendship_event,
-            commands::reward_commands::get_reward_state
+            commands::reward_commands::get_reward_state,
+            commands::gacha_commands::get_gacha_state,
+            commands::gacha_commands::draw_gacha_once,
+            commands::gacha_commands::mark_gacha_items_seen
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
