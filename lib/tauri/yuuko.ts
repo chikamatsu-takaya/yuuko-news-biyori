@@ -97,6 +97,9 @@ export type NotificationReason =
   // 全画面・プレゼン中（設計書 §5.2）/ 解除後 30〜180 秒の猶予中（§5.4）。
   | "fullscreen"
   | "fullscreen_grace"
+  // 会議中（既知の会議アプリ起動中かつマイク使用中）/ マイク使用中（§5.2）。候補は保留され、猶予は置かない。
+  | "meeting"
+  | "mic_in_use"
   // PCスリープ復帰後 30〜180 秒の猶予中（§5.2 / §5.4）。fullscreen_grace と同じく通知しない。
   | "resume_grace";
 

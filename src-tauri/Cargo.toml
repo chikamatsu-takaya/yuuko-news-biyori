@@ -56,4 +56,15 @@ tauri-plugin-single-instance = "~2.4.1"
 # 元記事を既定のブラウザで開く ShellExecuteW（判断台帳 D13）も同じ Win32_UI_Shell を使う。
 # ShellExecuteW の表示方法引数（SHOW_WINDOW_CMD / SW_SHOWNORMAL）が Win32_UI_WindowsAndMessaging に
 # 定義されているため、その feature だけを追加する（新規クレート・取得物の追加なし）。
-windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# マイク使用中・会議中のゆうこ通知抑制（§5.2、判断台帳 D65 / D68 / D69）のため、次の 2 feature だけを追加する
+# （新規クレート・取得物の追加なし。判定は通知判定のたびに 1 回だけで、常駐スレッド・フックなし）。
+# - Win32_System_Registry: マイクの利用記録（CapabilityAccessManager\ConsentStore\microphone）を
+#   読み取り専用で列挙する RegOpenKeyExW / RegEnumKeyExW / RegGetValueW / RegCloseKey。
+# - Win32_System_Diagnostics_ToolHelp: 既知の会議アプリのプロセス有無を調べる
+#   CreateToolhelp32Snapshot / Process32FirstW / Process32NextW（CloseHandle は既定の Win32_Foundation）。
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

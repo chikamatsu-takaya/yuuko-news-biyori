@@ -199,6 +199,8 @@ fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duratio
 ///
 /// - 全画面・プレゼン中: 解除をすぐ検知できるよう短い間隔で再確認する。
 /// - 全画面解除後・スリープ復帰後の猶予中: 猶予が明けた直後に判定する（境界での取りこぼしを避けるため 1 秒足す）。
+/// - 会議中・マイク使用中（meeting / mic_in_use）: 通常間隔。会議は長く続くため短い間隔で問い合わせを
+///   繰り返さず、解除後の猶予も置かないので、通常間隔の待ちが会議直後にすぐ出ない役割も兼ねる。
 /// - それ以外: 通常間隔。
 fn next_check_delay(reason: &str, grace_remaining: Option<Duration>) -> Duration {
     match reason {
@@ -226,11 +228,13 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -
             grace_remaining_for(yuuko_service, &result.reason),
         );
     }
-    // already_active は全画面判定より先に返る理由なので、出し直す前にここで全画面判定を通す。
+    // already_active は全画面・会議中の判定より先に返る理由なので、出し直す前にここで同じ順
+    // （全画面 → 会議中 → マイク使用中）に判定を通す。
     let redisplay_block = if result.notified {
         None
     } else {
         redisplay_block_reason(yuuko_service.fullscreen_gate_for_redisplay())
+            .or_else(|| yuuko_service.meeting_block_for_redisplay())
     };
     let reason = redisplay_block.unwrap_or(result.reason.as_str());
     let next_delay = next_check_delay(reason, grace_remaining_for(yuuko_service, reason));
@@ -533,7 +537,14 @@ mod tests {
 
     #[test]
     fn other_reasons_use_normal_interval() {
-        for reason in ["notified", "cooling_down", "daily_limit", "no_candidate"] {
+        for reason in [
+            "notified",
+            "cooling_down",
+            "daily_limit",
+            "no_candidate",
+            "meeting",
+            "mic_in_use",
+        ] {
             assert_eq!(next_check_delay(reason, None), CHECK_INTERVAL);
         }
     }
