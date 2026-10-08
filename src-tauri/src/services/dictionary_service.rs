@@ -16,6 +16,7 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::AiProviderService;
+use crate::util::text_safety::{contains_disallowed_control_char, contains_html_tag};
 
 /// DictionaryService が必要とする最小のAI呼び出し境界（辞書未命中時の用語解説生成のみ）。
 /// 本番は AiProviderService を注入し、テストは呼び出し回数を数えるダブルを注入する。
@@ -314,6 +315,19 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
         return Err(AppError::Parse(
             "ai term explanation exceeded the length limit".to_string(),
         ));
+    }
+
+    // 解析後: 要約と同じ基準（util::text_safety）で HTML タグらしき並び・制御文字（改行・タブ以外）を拒否する
+    // （詳細設計書 §12.5 / セキュリティ詳細設計書 §7.5）。他の不正応答と同じく加工せず拒否し、辞書へは保存しない。
+    // Markdown 見出し・区切り行は判定しない: 用語解説は辞書JSONの値として保存され、記事Markdownの
+    // セクションや front matter に埋め込まれないため、構造を壊す余地がない。
+    for field in [short, detail] {
+        if contains_html_tag(field) || contains_disallowed_control_char(field) {
+            log::warn!("AI term explanation response contained unsafe text");
+            return Err(AppError::Parse(
+                "ai term explanation contained unsafe text".to_string(),
+            ));
+        }
     }
 
     Ok(parsed)
@@ -1129,6 +1143,80 @@ mod tests {
     }
 
     #[test]
+    fn explain_ai_unsafe_output_is_rejected_and_not_persisted() {
+        // AI が HTML・制御文字を含む解説を返した場合は既存の不正応答と同じ PARSE_ERROR にし、辞書へは保存しない。
+        for response in [
+            json_of("<script>alert(1)</script>", "詳しい説明"),
+            json_of("短い説明", "詳しい説明</p>"),
+            json_of("短い\u{1b}[31m説明", "詳しい説明"),
+            json_of("短い説明", "詳しい\u{0}説明"),
+        ] {
+            let context = build_service();
+            context.ai.set_response_text(&response);
+
+            let error = context
+                .service
+                .explain_selected_term(ExplainSelectedTermParams {
+                    article_id: REAL_ARTICLE_ID.to_string(),
+                    selected_text: "新しい概念".to_string(),
+                })
+                .unwrap_err();
+
+            let command_error = CommandError::from(error);
+            assert_eq!(command_error.code, "PARSE_ERROR");
+            // 応答本文・選択語を公開エラーへ含めない。
+            assert!(!command_error.message.contains("alert"));
+            assert!(!command_error.message.contains("新しい概念"));
+            // 再試行せず、辞書ストアも作らない。
+            assert_eq!(context.ai.call_count(), 1);
+            assert!(!context
+                .root_dir
+                .join("dictionary")
+                .join("entries.json")
+                .exists());
+        }
+    }
+
+    #[test]
+    fn explain_real_mock_path_neutralizes_selected_text_with_angle_bracket_or_control() {
+        // 実 AiProviderService（既定 provider=Mock）で、`<` や制御文字を含む選択語でも
+        // Mock 解説が出力検証に落ちずに返ること。keyText はユーザーの選択表記のまま。
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root_dir = std::env::temp_dir().join(format!(
+            "yuuko-dictionary-mock-neutralize-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let ai: Arc<dyn TermExplanationAi> =
+            Arc::new(AiProviderService::new(&AppPaths::new(root_dir.join("ai"))));
+        let service = build_service_with_ai(&root_dir, ai);
+
+        for selected_text in ["Vec<String>", "<script>", "ESC\u{1b}[31m語"] {
+            let entry = service
+                .explain_selected_term(ExplainSelectedTermParams {
+                    article_id: REAL_ARTICLE_ID.to_string(),
+                    selected_text: selected_text.to_string(),
+                })
+                .unwrap();
+            assert_eq!(entry.key_text, selected_text);
+            assert!(!entry.short_explanation.contains('<'));
+            assert!(!entry.detail_explanation.contains('\u{1b}'));
+        }
+
+        let entry = service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: "Vec<String>".to_string(),
+            })
+            .unwrap();
+        assert!(entry.short_explanation.contains("「Vec＜String>」"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
     fn explain_uses_real_ai_provider_mock_path_without_network() {
         // 実 AiProviderService を注入し、既定設定（provider=Mock）で外部通信なしに解説を得る。
         // ＝APIキー未設定・非Gemini時の既存 Mock fallback 経路で、有効な short/detail が得られる。
@@ -1344,6 +1432,55 @@ mod tests {
         assert!(!command_error.message.contains("選択語ABC"));
         assert!(!command_error.message.contains("記事本文XYZ"));
         assert!(!command_error.message.contains("秘密"));
+    }
+
+    #[test]
+    fn parse_rejects_html_tag_in_short_or_detail() {
+        assert_eq!(
+            parse_error_code(&json_of("<b>短い説明</b>", "詳しい説明")),
+            "PARSE_ERROR"
+        );
+        assert_eq!(
+            parse_error_code(&json_of("短い説明", "詳しい<!-- x -->説明")),
+            "PARSE_ERROR"
+        );
+        assert_eq!(
+            parse_error_code(&json_of("短い説明", "Vec<String> の説明")),
+            "PARSE_ERROR"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_control_characters_in_short_or_detail() {
+        assert_eq!(
+            parse_error_code(&json_of("短い\u{1b}説明", "詳しい説明")),
+            "PARSE_ERROR"
+        );
+        assert_eq!(
+            parse_error_code(&json_of("短い説明", "詳しい\u{7f}説明")),
+            "PARSE_ERROR"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_newlines_tabs_comparisons_and_markdown_like_lines() {
+        // 改行・タブ・比較表現・全角括弧は従来どおり許可する。
+        // 見出し・区切り行は辞書JSONの値として保存されるだけなので用語解説では判定しない。
+        let parsed = parse(&json_of(
+            "「生成AI」は 1 < 2 のように比べられる言葉だよ。",
+            "一行目\n\t二行目\r\n# 見出し風\n---",
+        ))
+        .unwrap();
+        assert!(parsed.detail.contains("\t二行目"));
+    }
+
+    #[test]
+    fn parse_unsafe_text_error_does_not_leak_content() {
+        let text = json_of("<script>秘密の短文</script>", "詳しい説明");
+        let command_error = CommandError::from(parse(&text).unwrap_err());
+        assert_eq!(command_error.code, "PARSE_ERROR");
+        assert!(!command_error.message.contains("秘密の短文"));
+        assert!(!command_error.message.contains("<script>"));
     }
 
     #[test]

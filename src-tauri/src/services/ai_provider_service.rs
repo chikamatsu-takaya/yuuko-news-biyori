@@ -13,6 +13,7 @@ use crate::domain::summary::{AiRequest, AiResponse, TERM_EXPLANATION_PROMPT_ID};
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
 use crate::paths::AppPaths;
+use crate::util::text_safety::neutralize_html_and_control;
 
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// 永続化メタ（ai_provider）用：実際に応答を生成したプロバイダ名。
@@ -130,7 +131,10 @@ impl AiProviderService {
             // 用語解説: 決定的で解析可能な JSON を返す（外部通信なし・APIキー未設定/失敗フォールバックでも
             // 用語解説を返せるようにする）。選択語＝input_text。記事本文・context の生値は載せない。
             id if id == TERM_EXPLANATION_PROMPT_ID => {
-                let term = request.input_text.trim();
+                // 選択語はユーザー由来（例: `Vec<String>`）。そのまま埋め込むと用語解説の出力検証
+                // （HTML・制御文字）に落ちて Mock fallback でも解説を返せなくなるため、要約の種と同じく無害化する。
+                let term = neutralize_html_and_control(request.input_text.trim());
+                let term = term.as_str();
                 serde_json::json!({
                     "short": format!("「{term}」は、この記事を読むときに押さえておきたい言葉だよ。"),
                     "detail": mock_term_explanation_detail(term, explanation_level),

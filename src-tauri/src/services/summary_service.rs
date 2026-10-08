@@ -6,6 +6,9 @@ use crate::domain::summary::{
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::util::text_safety::{
+    contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
+};
 
 use super::ai_provider_service::AiProviderService;
 
@@ -232,21 +235,17 @@ const SEED_FOCUS_POINT_MAX_CHARS: usize = 200;
 /// （後段の処理は文字数を増やさない）。制御文字の除去を行処理より先に行うのは、
 /// 除去によって行頭に `#` が現れるケースを取りこぼさないため。
 fn neutralize_seed_text(text: &str, max_chars: usize) -> String {
-    let truncated = text
-        .chars()
-        .take(max_chars)
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect::<String>();
-    truncated
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    // 制御文字の除去と `<` の置換は用語解説 Mock と共通（util::text_safety）。
+    neutralize_html_and_control(&truncated)
         .split('\n')
         .filter(|line| !is_markdown_separator_line(line))
         .map(|line| {
-            let line = line.replace('<', "＜");
             let indent_len = line.len() - line.trim_start().len();
             let (indent, rest) = line.split_at(indent_len);
             match rest.strip_prefix('#') {
                 Some(after) => format!("{indent}＃{after}"),
-                None => line.clone(),
+                None => line.to_string(),
             }
         })
         .collect::<Vec<_>>()
@@ -360,10 +359,7 @@ fn validate_summary_output(kind: SummaryOutputKind, text: &str) -> Result<String
         return Err(OutputRejection::TooLong);
     }
     // 改行・タブ以外の制御文字は表示上危険なため拒否する（§12.5「表示上危険な文字列」）。
-    if trimmed
-        .chars()
-        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-    {
+    if contains_disallowed_control_char(trimmed) {
         return Err(OutputRejection::ControlCharacter);
     }
     for line in trimmed.lines() {
@@ -394,24 +390,6 @@ fn is_markdown_separator_line(line: &str) -> bool {
         }
     }
     dash_count >= 3
-}
-
-/// HTMLタグらしき並び（`<` の直後が英字・`/`・`!`・`?`）を含むかを判定する。
-/// `<script>` `</p>` `<!-- -->` `<?xml` などを拾う。「1 < 2」のような比較表現は対象外。
-/// 英字の比較（`a<b`）も拒否側に倒れるが、Mock / 既存値へ切り替わるだけなので安全側として許容する。
-fn contains_html_tag(text: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '<' {
-            continue;
-        }
-        if let Some(next) = chars.peek() {
-            if next.is_ascii_alphabetic() || matches!(next, '/' | '!' | '?') {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// 実AI出力を検証し、落ちたら fallback（Mock）出力を検証して返す。
