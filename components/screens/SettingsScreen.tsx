@@ -354,6 +354,35 @@ const buildDtoForSave = (
   };
 };
 
+// 未保存の変更があるか（画面詳細設計書 SCR-003 §7.7「設定変更あり → 保存ボタンを有効化」）。
+// 比較は「保存したら書かれる DTO」同士で行う。保存済み DTO も一度画面状態へ写してから
+// 保存と同じ正規化（通知時間帯・解説レベル・ジャンル既定値など）を通すため、
+// 読み込んだだけで「未保存」になる誤表示を防ぐ。
+// ただし aiProvider だけは保存値そのものと比べる。選択肢から外した openai は画面上 MockProvider と
+// 表示され、保存すると mock へ書き換わるため、ファイルとずれている事実を「未保存」として示す。
+const toComparableDto = (dto: UserSettingsDto): UserSettingsDto => ({
+  ...dto,
+  // ジャンルは選択の順序に意味が無いため、付け外しで順序だけ変わっても変更なしとみなす。
+  genres: [...dto.genres].sort(),
+});
+
+const hasUnsavedSettingsChanges = (
+  settingsState: SettingsState,
+  savedDto: UserSettingsDto | null
+): boolean => {
+  const baseline = savedDto
+    ? {
+        ...buildDtoForSave(mapSettingsFromDto(mockSettings, savedDto), savedDto),
+        aiProvider: savedDto.aiProvider,
+      }
+    : buildDtoForSave(mockSettings, null);
+  const current = buildDtoForSave(settingsState, savedDto);
+  return (
+    JSON.stringify(toComparableDto(current)) !==
+    JSON.stringify(toComparableDto(baseline))
+  );
+};
+
 // AI接続テストの画面表示（固定文言のみ）。
 type AiConnectionTestView = {
   tone: "success" | "warning";
@@ -696,7 +725,13 @@ export default function SettingsScreen({
     try {
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
-      setBackendSettings(dto);
+      // save_user_settings は DTO を返さず、受け取った値を検証してそのまま保存する。
+      // 送った DTO を新しい比較基準にして「保存済み」へ戻す（失敗時は基準を変えず未保存のまま）。
+      // 自動起動は保存中に切り替えられることがあり、OS 状態が正のため、最新の値を残す（古い DTO で上書きしない）。
+      setBackendSettings((prev) => ({
+        ...dto,
+        autoStartOnPcBoot: prev?.autoStartOnPcBoot ?? dto.autoStartOnPcBoot,
+      }));
       toast({
         title: "設定を保存したよ",
         description: "新しい設定が反映されたよ。ありがとう！",
@@ -711,11 +746,15 @@ export default function SettingsScreen({
     }
   };
 
+  // キャンセルは変更を破棄してメイン画面へ戻る（画面詳細設計書 SCR-003 §7.5 / §7.9）。
+  // 設計に確認ダイアログの指定が無いため、未保存の変更があっても確認せずに破棄する。
+  // 自動起動は OS へ即時反映済みのため戻さない（backendSettings も OS 状態に合わせてある）。
   const handleCancel = () => {
     const rollback = backendSettings
       ? mapSettingsFromDto(mockSettings, backendSettings)
       : mockSettings;
     setSettings(rollback);
+    handleNavigate("home");
   };
 
   // リセットは破壊的操作のため確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
@@ -756,6 +795,8 @@ export default function SettingsScreen({
       setResetDialogOpen(false);
     }
   };
+
+  const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
 
   // AI接続テスト（画面詳細設計書 SCR-003 §7.5 / §7.8）。Rust 側は保存済み設定の Provider を確認するため、
   // 画面上の未保存の選択は反映されない（UI にその旨を明記する）。失敗してもアプリは止めず警告表示のみ。
@@ -1122,6 +1163,15 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
+                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。 */}
+                  {settings.ai.provider === "mock" && (
+                    <p
+                      className="text-xs text-muted-foreground py-2"
+                      data-testid="mock-provider-note"
+                    >
+                      MockProvider は開発・デモ用です（外部AIは使いません）。
+                    </p>
+                  )}
                   <div className="py-3 border-b border-border/50">
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-0.5">
@@ -1449,13 +1499,25 @@ export default function SettingsScreen({
       <footer className="h-14 bg-white border-t border-border flex items-center justify-between px-6 shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-sm text-muted-foreground">設定の保存状況</span>
-          <Badge
-            variant="outline"
-            className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
-          >
-            <Check className="w-3 h-3" />
-            保存済み
-          </Badge>
+          {/* 保存済み DTO と画面の値の差分で切り替える（§7.7）。 */}
+          <span role="status" aria-live="polite" data-testid="settings-save-state">
+            {hasUnsavedChanges ? (
+              <Badge
+                variant="outline"
+                className="bg-amber-50 text-amber-800 border-amber-300 gap-1"
+              >
+                未保存の変更あり
+              </Badge>
+            ) : (
+              <Badge
+                variant="outline"
+                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
+              >
+                <Check className="w-3 h-3" />
+                保存済み
+              </Badge>
+            )}
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <Button variant="outline" onClick={handleCancel}>
@@ -1465,7 +1527,10 @@ export default function SettingsScreen({
             className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
             onClick={handleSave}
             // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
-            disabled={isUpdatingAutostart || isSettingsCorrupt}
+            // 変更が無いときも押せない（§7.7「設定変更あり → 保存ボタンを有効化」）。
+            disabled={
+              !hasUnsavedChanges || isUpdatingAutostart || isSettingsCorrupt
+            }
           >
             <Check className="w-4 h-4" />
             保存する
