@@ -450,13 +450,16 @@ export default function NewsHistoryScreen({
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
-  const [favoriteUpdatingArticleId, setFavoriteUpdatingArticleId] = React.useState<string | null>(null);
+  // 更新中のお気に入りの目標状態（true=登録 / false=解除 / null=更新なし）。
+  // 処理中に選択が変わっても「登録中/解除中」の表示が要求内容とずれないよう、選択中の記事からは導かない。
+  const [favoriteUpdatingTo, setFavoriteUpdatingTo] = React.useState<boolean | null>(null);
   // state反映前の連打も止め、古い一覧応答が解除結果を上書きしないようにする。
   const favoriteUpdateInFlightRef = React.useRef(false);
   const historyRequestRef = React.useRef(0);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
-    "info" | "error" | "empty"
+    // favorite-error はお気に入り更新の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
+    "info" | "error" | "empty" | "favorite-error"
   >("info");
 
   const visibleHistoryItems = React.useMemo(() => {
@@ -578,7 +581,7 @@ export default function NewsHistoryScreen({
     const nextIsFavorite = !selectedItem.isFavorite;
     favoriteUpdateInFlightRef.current = true;
     historyRequestRef.current += 1;
-    setFavoriteUpdatingArticleId(selectedItem.id);
+    setFavoriteUpdatingTo(nextIsFavorite);
     setLoadNotice(null);
     setLoadNoticeKind("info");
     try {
@@ -603,11 +606,11 @@ export default function NewsHistoryScreen({
           ? "お気に入りの登録に失敗しました。もう一度お試しください。"
           : "お気に入りの解除に失敗しました。もう一度お試しください。"
       );
-      setLoadNoticeKind("error");
+      setLoadNoticeKind("favorite-error");
       console.warn("Failed to update article favorite:", error);
     } finally {
       favoriteUpdateInFlightRef.current = false;
-      setFavoriteUpdatingArticleId(null);
+      setFavoriteUpdatingTo(null);
     }
   };
 
@@ -732,7 +735,7 @@ export default function NewsHistoryScreen({
                 key={chip.id}
                 chip={chip}
                 isActive={activeFilter === chip.id}
-                disabled={favoriteUpdatingArticleId !== null}
+                disabled={favoriteUpdatingTo !== null}
                 onClick={() => {
                   if (!favoriteUpdateInFlightRef.current && chip.id !== activeFilter && isHistoryFilter(chip.id)) {
                     historyRequestRef.current += 1;
@@ -749,7 +752,13 @@ export default function NewsHistoryScreen({
               <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
               <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                <span
+                  role={
+                    loadNoticeKind === "error" || loadNoticeKind === "favorite-error"
+                      ? "alert"
+                      : "status"
+                  }
+                >
                   {loadNotice}
                 </span>
                 {loadNoticeKind === "error" && (
@@ -894,17 +903,17 @@ export default function NewsHistoryScreen({
                     variant="outline"
                     className="w-full gap-2"
                     onClick={() => void handleToggleFavorite()}
-                    disabled={isLoading || favoriteUpdatingArticleId !== null}
+                    disabled={isLoading || favoriteUpdatingTo !== null}
                   >
                     <Star
                       className={`w-4 h-4 ${selectedItem.isFavorite ? "fill-yellow-400 text-yellow-400" : ""}`}
                       aria-hidden="true"
                     />
                     {/* 現在の状態に応じて「登録」/「解除」を切り替える（ラベル自体で操作が分かるため aria-pressed は使わない） */}
-                    {favoriteUpdatingArticleId !== null
-                      ? selectedItem.isFavorite
-                        ? "解除中..."
-                        : "登録中..."
+                    {favoriteUpdatingTo !== null
+                      ? favoriteUpdatingTo
+                        ? "登録中..."
+                        : "解除中..."
                       : selectedItem.isFavorite
                         ? "お気に入り解除"
                         : "お気に入り登録"}
