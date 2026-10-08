@@ -12,7 +12,9 @@
 //!   読めることを確かめる。ここまでは現在のデータに触れない。
 //! - 差し替えは「現在のデータを `migration-backups/<日時>/` へ移す → 展開したものを所定の場所へ移す」の順で行い、
 //!   途中で失敗したら置いたものを消して退避分を戻す。成功後は退避フォルダを1世代だけ残す。
-//! - 差し替え中は、他の書き込み（記事・お気に入り・アーカイブ・辞書・友情ランク・報酬）と同じロックを取る。
+//! - ガチャ状態（`gacha/gacha_state.json`）を含まないZIP（ガチャ保存の実装前に書き出したもの）では、
+//!   移行先の現在のガチャ状態を退避・置き換えせずに残す（仮の設計判断。獲得済みのものを失わないため）。
+//! - 差し替え中は、他の書き込み（記事・お気に入り・アーカイブ・辞書・友情ランク・報酬・ガチャ）と同じロックを取る。
 //!   書き出しとも同じロックを共有し、書き出しと取り込みを同時に走らせない。
 
 use std::collections::HashSet;
@@ -30,12 +32,13 @@ use crate::domain::data_export::{
 };
 use crate::domain::dictionary::PersistedDictionaryStore;
 use crate::domain::friendship::FriendshipState;
+use crate::domain::gacha::GachaState;
 use crate::domain::reward::RewardsState;
 use crate::domain::settings::PersistedSettings;
 use crate::error::AppError;
 use crate::paths::{
     AppPaths, ARTICLE_FAVORITES_RELATIVE_PATH, DICTIONARY_RELATIVE_PATH, FRIENDSHIP_RELATIVE_PATH,
-    MIGRATION_BACKUPS_RELATIVE_DIR, MIGRATION_IMPORTS_RELATIVE_DIR,
+    GACHA_STATE_RELATIVE_PATH, MIGRATION_BACKUPS_RELATIVE_DIR, MIGRATION_IMPORTS_RELATIVE_DIR,
     MIGRATION_IMPORT_STAGING_RELATIVE_DIR, REWARDS_RELATIVE_PATH, SETTINGS_RELATIVE_PATH,
 };
 use crate::repositories::article_repository::{
@@ -43,9 +46,10 @@ use crate::repositories::article_repository::{
     RETIREMENT_COMMITTED_DIR, RETIREMENT_ROLLBACK_DIR,
 };
 use crate::services::data_export_service::{
-    classify_entry_name, is_month_archive_file_name, is_real_dir, is_safe_name_component,
-    parents_are_real_dirs, plan_migration_files, ExportFileKind, ARCHIVE_INDEX_RELATIVE_PATH,
-    ARCHIVE_RELATIVE_DIR, CATEGORY_ORDER, EXPORT_FILE_PREFIX, FIXED_FILES, MANIFEST_ENTRY_NAME,
+    category_of, classify_entry_name, is_month_archive_file_name, is_real_dir,
+    is_safe_name_component, parents_are_real_dirs, plan_migration_files, ExportFileKind,
+    ARCHIVE_INDEX_RELATIVE_PATH, ARCHIVE_RELATIVE_DIR, CATEGORY_ORDER, EXPORT_FILE_PREFIX,
+    FIXED_FILES, GACHA_CATEGORY, MANIFEST_ENTRY_NAME,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -111,8 +115,10 @@ impl ImportLimits {
 
 /// 差し替え中に取る、他の書き込みと共有のロック。
 ///
-/// 取る順番は 記事 → 辞書 → 友情ランク → 報酬 で固定する。記事・辞書のロックは他のロックと入れ子にならず、
+/// 取る順番は 記事 → 辞書 → 友情ランク → 報酬 → ガチャ で固定する。記事・辞書のロックは他のロックと入れ子にならず、
 /// 友情ランク → 報酬 の順は `RewardService` / `FriendshipService` と同じなので、デッドロックしない。
+/// ガチャのロックは最後に取る。`GachaService` はロック中に他のサービスを呼ばない（他のロックを取らない）ので、
+/// ガチャのロックを持ったまま別のロックを待つ処理は無く、最後に取ればデッドロックしない。
 /// 設定（settings.json）には書き込みロックが無いため、差し替え中の設定保存とは競合し得る（§15.7）。
 #[derive(Clone, Default)]
 pub struct MigrationWriteLocks {
@@ -120,6 +126,7 @@ pub struct MigrationWriteLocks {
     dictionary: Arc<Mutex<()>>,
     friendship: Arc<Mutex<()>>,
     rewards: Arc<Mutex<()>>,
+    gacha: Arc<Mutex<()>>,
 }
 
 impl MigrationWriteLocks {
@@ -128,21 +135,24 @@ impl MigrationWriteLocks {
         dictionary: Arc<Mutex<()>>,
         friendship: Arc<Mutex<()>>,
         rewards: Arc<Mutex<()>>,
+        gacha: Arc<Mutex<()>>,
     ) -> Self {
         Self {
             article,
             dictionary,
             friendship,
             rewards,
+            gacha,
         }
     }
 
-    fn acquire(&self) -> [MutexGuard<'_, ()>; 4] {
+    fn acquire(&self) -> [MutexGuard<'_, ()>; 5] {
         [
             lock_ignoring_poison(&self.article),
             lock_ignoring_poison(&self.dictionary),
             lock_ignoring_poison(&self.friendship),
             lock_ignoring_poison(&self.rewards),
+            lock_ignoring_poison(&self.gacha),
         ]
     }
 }
@@ -598,6 +608,9 @@ fn validate_json_entry(entry_name: &str, bytes: &[u8]) -> Result<(), AppError> {
         REWARDS_RELATIVE_PATH => serde_json::from_str::<RewardsState>(without_bom)
             .map(drop)
             .map_err(AppError::from),
+        GACHA_STATE_RELATIVE_PATH => serde_json::from_str::<GachaState>(without_bom)
+            .map(drop)
+            .map_err(AppError::from),
         // 辞書の読み込みは BOM を除かないので、ここでも除かずに読む。
         DICTIONARY_RELATIVE_PATH => serde_json::from_str::<PersistedDictionaryStore>(raw)
             .map(drop)
@@ -763,12 +776,19 @@ fn remove_staging_dir(staging: &Path) {
 /// 許可リストのファイルに加え、置き換え後に古いデータが復元されないよう、各リポジトリが起動時・読み込み時に
 /// 自動で戻す退避物（`*.json.bak` / `*.json.tmp`、月次ZIPの `*.zip.rollback` 等、Markdown退避の一時フォルダ）も
 /// 一緒に退避フォルダへ移す。`state/`・ニュース取得設定・ログなど許可リスト外のものは触らない。
-fn current_migration_entries(root: &Path) -> Result<Vec<String>, AppError> {
+///
+/// `replace_gacha` が false（取り込むZIPにガチャ状態が無い）のときは、ガチャ状態とその退避物
+/// （`gacha_state.json.bak` / `.tmp`）を一覧に入れず、移行先の現在のガチャ状態をそのまま残す。
+fn current_migration_entries(root: &Path, replace_gacha: bool) -> Result<Vec<String>, AppError> {
     let mut entries: Vec<String> = plan_migration_files(root)?
         .into_iter()
         .map(|planned| planned.entry_name)
+        .filter(|entry_name| replace_gacha || category_of(entry_name) != GACHA_CATEGORY)
         .collect();
     for fixed in FIXED_FILES {
+        if !replace_gacha && category_of(fixed) == GACHA_CATEGORY {
+            continue;
+        }
         for suffix in [".bak", ".tmp"] {
             let relative = format!("{fixed}{suffix}");
             if parents_are_real_dirs(root, &relative)
@@ -862,7 +882,12 @@ fn move_and_place(
     files: &[ExpectedFile],
     journal: &mut SwapJournal,
 ) -> Result<(), AppError> {
-    for relative in current_migration_entries(root)? {
+    // ガチャ状態を含まない古いZIPでは、現在のガチャ状態を残す（仮の設計判断・データ設計書 §15.7）。
+    // 全置き換えにすると、ガチャ保存の実装前に書き出したZIPを取り込んだだけで獲得済みのものとかけらが消えるため。
+    let replace_gacha = files
+        .iter()
+        .any(|file| category_of(&file.entry_name) == GACHA_CATEGORY);
+    for relative in current_migration_entries(root, replace_gacha)? {
         let destination = create_real_parent_dirs(backup_dir, &relative)?;
         std::fs::rename(root.join(&relative), destination)?;
         journal.moved_out.push(relative);
@@ -1035,6 +1060,7 @@ mod tests {
         );
         write(root, "user/friendship.json", &friendship_json(42));
         write(root, "rewards/rewards.json", "{}");
+        write(root, "gacha/gacha_state.json", GACHA_SOURCE);
         write(root, "news/202610/new-1.md", "---\n---\nnew article");
         write(root, "news/new-2.md", "---\n---\nnew article 2");
         write(
@@ -1055,6 +1081,10 @@ mod tests {
             r#"{"version":1,"entries":[]}"#,
         );
         write(root, "user/friendship.json", &friendship_json(7));
+        write(root, "gacha/gacha_state.json", GACHA_TARGET);
+        // ガチャ保存の退避物（取り込みで置き換えるときは一緒に退避する）と破損退避（触らない）。
+        write(root, "gacha/gacha_state.json.bak", GACHA_STALE);
+        write(root, "gacha/gacha_state.corrupt.json", "CORRUPT");
         write(root, "news/202609/old-1.md", "---\n---\nold article");
         write(root, "archive/2026-04.zip.rollback", "rollback");
         // 許可リスト外（取り込みで触らない）
@@ -1135,6 +1165,9 @@ mod tests {
     type RejectCase<'a> = (&'a str, Vec<(&'a str, &'a [u8])>, MigrationManifest);
 
     const SETTINGS: &[u8] = br#"{"aiProvider":"mock"}"#;
+    const GACHA_SOURCE: &str = r#"{"starFragments":43,"ownedItemIds":["card_001"]}"#;
+    const GACHA_TARGET: &str = r#"{"starFragments":7,"ownedItemIds":["gacha_theme_001"]}"#;
+    const GACHA_STALE: &str = r#"{"starFragments":1}"#;
 
     /// 拒否されたあとも現在のデータがそのままで、一時フォルダ・退避フォルダが残っていないこと。
     fn assert_target_untouched(target: &Path) {
@@ -1147,6 +1180,8 @@ mod tests {
             r#"{"aiProvider":"old"}"#
         );
         assert_eq!(read(target, "user/friendship.json"), friendship_json(7));
+        assert_eq!(read(target, "gacha/gacha_state.json"), GACHA_TARGET);
+        assert_eq!(read(target, "gacha/gacha_state.json.bak"), GACHA_STALE);
         assert_eq!(
             read(target, "news/202609/old-1.md"),
             "---\n---\nold article"
@@ -1182,7 +1217,7 @@ mod tests {
         let result = service(&target).import_at(&file_name, fixed_now()).unwrap();
 
         assert_eq!(result.file_name, file_name);
-        assert_eq!(result.file_count, 9);
+        assert_eq!(result.file_count, 10);
         assert_eq!(result.article_count, 2);
         assert_eq!(result.archive_count, 1);
         assert!(result.restart_required);
@@ -1193,6 +1228,7 @@ mod tests {
             "dictionary/entries.json",
             "user/friendship.json",
             "rewards/rewards.json",
+            "gacha/gacha_state.json",
             "news/202610/new-1.md",
             "news/new-2.md",
             "archive/archive_index.json",
@@ -1226,6 +1262,12 @@ mod tests {
         );
         assert_eq!(read(&backup, "user/friendship.json"), friendship_json(7));
         assert_eq!(read(&backup, "archive/2026-04.zip.rollback"), "rollback");
+        // ガチャ状態も置き換わり、古い .bak は退避フォルダへ移る（次回の読み込みで復元されない）。
+        assert!(!target.join("gacha/gacha_state.json.bak").exists());
+        assert_eq!(read(&backup, "gacha/gacha_state.json"), GACHA_TARGET);
+        assert_eq!(read(&backup, "gacha/gacha_state.json.bak"), GACHA_STALE);
+        // 破損退避は許可リスト外なので触らない。
+        assert_eq!(read(&target, "gacha/gacha_state.corrupt.json"), "CORRUPT");
         assert!(!backup.join(INCOMPLETE_MARKER).exists());
         assert!(!target.join("migration-backups/20260101000000").exists());
         assert_eq!(read(&target, "migration-backups/keep-me/note.txt"), "note");
@@ -1237,6 +1279,66 @@ mod tests {
         assert!(!target.join(MIGRATION_IMPORT_STAGING_RELATIVE_DIR).exists());
         // 取り込みZIP自体は残す。
         assert!(target.join("imports").join(&file_name).exists());
+
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn import_without_gacha_state_keeps_the_current_gacha_state() {
+        let source = temp_dir("no-gacha-source");
+        let target = temp_dir("no-gacha-target");
+        seed_source(&source);
+        // ガチャ保存の実装前に書き出したZIP（gacha 区分が無い）を再現する。
+        std::fs::remove_file(source.join("gacha/gacha_state.json")).unwrap();
+        seed_target(&target);
+        let file_name = place_exported_zip(&source, &target);
+
+        let result = service(&target).import_at(&file_name, fixed_now()).unwrap();
+
+        assert_eq!(result.file_count, 9);
+        // 他のデータは置き換わる。
+        assert_eq!(read(&target, "user/friendship.json"), friendship_json(42));
+        assert!(!target.join("news/202609/old-1.md").exists());
+        // 現在のガチャ状態とその退避物は、退避も置き換えもせずに残す。
+        assert_eq!(read(&target, "gacha/gacha_state.json"), GACHA_TARGET);
+        assert_eq!(read(&target, "gacha/gacha_state.json.bak"), GACHA_STALE);
+        assert_eq!(read(&target, "gacha/gacha_state.corrupt.json"), "CORRUPT");
+        let backup = target.join("migration-backups/20261008150000");
+        assert!(!backup.join("gacha").exists());
+
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn import_waits_for_the_gacha_store_lock() {
+        let source = temp_dir("gacha-lock-source");
+        let target = temp_dir("gacha-lock-target");
+        seed_source(&source);
+        seed_target(&target);
+        let file_name = place_exported_zip(&source, &target);
+        let gacha_lock = Arc::new(Mutex::new(()));
+        let import = DataImportService {
+            write_locks: MigrationWriteLocks::new(
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Arc::clone(&gacha_lock),
+            ),
+            ..service(&target)
+        };
+
+        // ガチャの保存（引く・かけら付与）がロックを持っている間は差し替えを始めない。
+        let held = gacha_lock.lock().unwrap();
+        let handle = std::thread::spawn(move || import.import_at(&file_name, fixed_now()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(read(&target, "gacha/gacha_state.json"), GACHA_TARGET);
+        assert_eq!(read(&target, "user/friendship.json"), friendship_json(7));
+        drop(held);
+        handle.join().unwrap().unwrap();
+        assert_eq!(read(&target, "gacha/gacha_state.json"), GACHA_SOURCE);
 
         std::fs::remove_dir_all(source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
@@ -1329,6 +1431,8 @@ mod tests {
             "C:/config/settings.json",
             "config/news_sources.json",
             "secrets/api_key.txt",
+            "gacha/gacha_state.corrupt.json",
+            "gacha/gacha_state.json.bak",
         ] {
             let entries = vec![(bad_name, SETTINGS)];
             let manifest = manifest_for(&entries);
@@ -1365,6 +1469,7 @@ mod tests {
             ("dictionary/entries.json", b"\"x\""),
             ("favorites/article_favorites.json", b"\"x\""),
             ("rewards/rewards.json", b"{\"version\":\"one\"}"),
+            ("gacha/gacha_state.json", b"{\"starFragments\":\"many\"}"),
             ("archive/archive_index.json", b"{\"version\":99}"),
         ] {
             let entries = vec![(path, bytes)];
