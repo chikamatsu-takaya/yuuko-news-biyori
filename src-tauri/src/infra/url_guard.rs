@@ -236,14 +236,67 @@ fn host_matches_allowed(host: &NormalizedHost, allowed: &str) -> bool {
     }
 }
 
+/// 接続先として拒否する IPv4 か（セキュリティ詳細設計書 §6.3）。
+/// `is_global` は nightly 限定のため、拒否帯を明示的に列挙する。
+/// 「公開インターネット上の通常ホストではない帯」はすべて拒否側へ倒す。
 fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+    let [a, b, c, _] = ip.octets();
+    ip.is_private() // 10/8, 172.16/12, 192.168/16
+        || ip.is_loopback() // 127/8
+        || ip.is_link_local() // 169.254/16
+        || ip.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
+        || ip.is_multicast() // 224/4
+        || ip.is_broadcast() // 255.255.255.255（240/4 にも含まれる）
+        || a == 0 // 0/8（"this network"。0.0.0.0 を含む）
+        || (a == 100 && (b & 0xc0) == 64) // 100.64/10（CGNAT 共有アドレス）
+        || (a == 192 && b == 0 && c == 0) // 192.0.0/24（IETF プロトコル割当）
+        || (a == 198 && (b & 0xfe) == 18) // 198.18/15（ベンチマーク用）
+        || a >= 240 // 240/4（予約帯）
 }
 
+/// IPv6 アドレスに IPv4 が埋め込まれている場合、その IPv4 を返す。
+/// IPv4射影（::ffff:a.b.c.d）・IPv4互換（::a.b.c.d）・NAT64 既知プレフィックス
+/// （64:ff9b::/96）は IPv4 として判定しないと、::ffff:127.0.0.1 等で内部宛て拒否をすり抜けられる。
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(ipv4) = ip.to_ipv4_mapped() {
+        return Some(ipv4);
+    }
+    let segments = ip.segments();
+    let tail = Ipv4Addr::new(
+        (segments[6] >> 8) as u8,
+        segments[6] as u8,
+        (segments[7] >> 8) as u8,
+        segments[7] as u8,
+    );
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        // IPv4互換（非推奨）。:: と ::1 もここに入るが、0/8 として拒否される。
+        return Some(tail);
+    }
+    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return Some(tail);
+    }
+    None
+}
+
+/// 接続先として拒否する IPv6 か（セキュリティ詳細設計書 §6.3）。
 fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
-    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_unspecified()
+    if let Some(ipv4) = embedded_ipv4(ip) {
+        return is_disallowed_ipv4(ipv4);
+    }
+    let segments = ip.segments();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_unique_local() // fc00::/7
+        || ip.is_unicast_link_local() // fe80::/10
+        || ip.is_multicast() // ff00::/8
+        || (segments[0] & 0xffc0) == 0xfec0 // fec0::/10（廃止済みサイトローカル）
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8) // 2001:db8::/32（文書用）
+        // 64:ff9b:1::/48（ローカル用 NAT64）
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001)
 }
 
+/// IP の拒否判定の唯一の入口。URL リテラルの検証と、RSS・記事HTML取得での
+/// DNS 解決後の再検証の両方がこの関数を使う（判定ロジックを複製しない）。
 pub(crate) fn is_disallowed_ip_addr(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => is_disallowed_ipv4(ipv4),
@@ -253,7 +306,163 @@ pub(crate) fn is_disallowed_ip_addr(ip: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_url, NetworkAllowlist, UrlPurpose};
+    use super::{is_disallowed_ip_addr, validate_url, NetworkAllowlist, UrlPurpose};
+    use std::net::IpAddr;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("test IP must parse")
+    }
+
+    fn assert_all_disallowed(cases: &[&str]) {
+        for case in cases {
+            assert!(is_disallowed_ip_addr(ip(case)), "{case} must be rejected");
+        }
+    }
+
+    fn assert_all_allowed(cases: &[&str]) {
+        for case in cases {
+            assert!(!is_disallowed_ip_addr(ip(case)), "{case} must be allowed");
+        }
+    }
+
+    #[test]
+    fn allows_normal_public_ipv4_and_ipv6() {
+        assert_all_allowed(&[
+            "8.8.8.8",
+            "1.1.1.1",
+            "142.250.196.110",
+            "100.63.255.255",
+            "100.128.0.0",
+            "198.17.255.255",
+            "198.20.0.0",
+            "223.255.255.255",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+            "2001:db9::1",
+            "64:ff9b:2::1",
+            "2001:db7:ffff::1",
+            "1.0.0.0",
+        ]);
+    }
+
+    #[test]
+    fn rejects_existing_private_loopback_link_local_ranges() {
+        assert_all_disallowed(&[
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.0.1",
+            "127.0.0.1",
+            "127.255.255.254",
+            "169.254.169.254",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+        ]);
+    }
+
+    #[test]
+    fn rejects_this_network_0_0_0_0_slash_8() {
+        assert_all_disallowed(&["0.0.0.0", "0.1.2.3", "0.255.255.255"]);
+    }
+
+    #[test]
+    fn rejects_cgnat_100_64_slash_10() {
+        assert_all_disallowed(&["100.64.0.0", "100.100.100.100", "100.127.255.255"]);
+    }
+
+    #[test]
+    fn rejects_ietf_protocol_assignments_192_0_0_slash_24() {
+        assert_all_disallowed(&["192.0.0.0", "192.0.0.8", "192.0.0.255"]);
+        assert_all_allowed(&["192.0.1.1"]);
+    }
+
+    #[test]
+    fn rejects_ipv4_documentation_ranges() {
+        assert_all_disallowed(&["192.0.2.1", "198.51.100.7", "203.0.113.42", "203.0.113.255"]);
+    }
+
+    #[test]
+    fn rejects_benchmarking_198_18_slash_15() {
+        assert_all_disallowed(&["198.18.0.0", "198.19.255.255"]);
+    }
+
+    #[test]
+    fn rejects_ipv4_multicast_224_slash_4() {
+        assert_all_disallowed(&["224.0.0.1", "239.255.255.250"]);
+    }
+
+    #[test]
+    fn rejects_reserved_240_slash_4_and_broadcast() {
+        assert_all_disallowed(&["240.0.0.1", "250.1.2.3", "255.255.255.255"]);
+    }
+
+    #[test]
+    fn judges_ipv4_mapped_ipv6_as_ipv4() {
+        assert_all_disallowed(&[
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.1",
+            "::ffff:169.254.169.254",
+            "::ffff:100.64.0.1",
+            "::ffff:0.0.0.0",
+        ]);
+        assert_all_allowed(&["::ffff:8.8.8.8"]);
+    }
+
+    #[test]
+    fn judges_ipv4_compatible_ipv6_as_ipv4() {
+        assert_all_disallowed(&["::127.0.0.1", "::10.0.0.1", "::192.168.0.1"]);
+        assert_all_allowed(&["::8.8.8.8"]);
+    }
+
+    #[test]
+    fn judges_nat64_well_known_prefix_by_embedded_ipv4() {
+        assert_all_disallowed(&[
+            "64:ff9b::127.0.0.1",
+            "64:ff9b::10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+        ]);
+        assert_all_allowed(&["64:ff9b::8.8.8.8"]);
+        // ローカル用 NAT64（RFC 8215）は埋め込み先に関わらず拒否する。
+        assert_all_disallowed(&["64:ff9b:1::8.8.8.8"]);
+    }
+
+    #[test]
+    fn rejects_ipv6_multicast_ff00_slash_8() {
+        assert_all_disallowed(&["ff02::1", "ff05::2", "ff0e::1"]);
+    }
+
+    #[test]
+    fn rejects_ipv6_site_local_fec0_slash_10() {
+        assert_all_disallowed(&["fec0::1", "feff:ffff::1"]);
+    }
+
+    #[test]
+    fn rejects_ipv6_documentation_2001_db8_slash_32() {
+        assert_all_disallowed(&["2001:db8::1", "2001:db8:ffff::1"]);
+    }
+
+    #[test]
+    fn rejects_new_ranges_as_url_literals() {
+        let allowlist = allowlist_for(
+            UrlPurpose::Article,
+            &["100.64.0.1", "::ffff:127.0.0.1", "ff02::1", "203.0.113.1"],
+        );
+
+        for url in [
+            "http://100.64.0.1/article",
+            "http://[::ffff:127.0.0.1]/article",
+            "http://[ff02::1]/article",
+            "http://203.0.113.1/article",
+        ] {
+            let error = validate_url(url, UrlPurpose::Article, &allowlist)
+                .expect_err("reserved ranges must be rejected even when allowlisted");
+            assert!(error.to_string().contains("is not allowed"));
+        }
+    }
 
     fn allowlist_for(purpose: UrlPurpose, allowed_hosts: &[&str]) -> NetworkAllowlist {
         let mut allowlist = NetworkAllowlist::default();
