@@ -5,12 +5,13 @@
 //! Windows では ShellExecuteW へ URL を直接渡し、cmd.exe などのシェル経由のコマンド実行はしない。
 //! それ以外の OS は開く手段を持たないため、固定のエラーで安全側に失敗させる。
 //!
-//! ネットワーク許可リスト（url_guard）は照合しない。アプリ自身が取得するのではなく、
-//! ユーザーが明示的に押した操作でユーザー自身のブラウザへ渡すだけで、AGENTS.md が禁じる
-//! 「任意URL取得」には当たらないため。また記事の配信ドメインは RSS 取得元と異なることがあり、
-//! 照合すると正当な元記事まで開けなくなる。
+//! 記事 URL は取り込み時に記事用の許可リストで検証済み（rss_client の validate_url）。
+//! 開く時点ではユーザーの操作でユーザー自身のブラウザへ渡すだけのため、許可リストは再照合しない。
+//! ただし多層防御として、localhost・プライベート/予約済み IP を指す URL は拒否する（DNS 解決はしない）。
 
-use url::Url;
+use url::{Host, Url};
+
+use super::url_guard::is_disallowed_ip_addr;
 
 /// 既定のブラウザへ渡す URL の最大長。Windows の URL 長上限（INTERNET_MAX_URL_LENGTH = 2083）未満に抑える。
 const MAX_OPENABLE_URL_LEN: usize = 2048;
@@ -24,6 +25,8 @@ pub enum OpenableUrlRejection {
     UnsupportedScheme,
     HasUserinfo,
     MissingHost,
+    /// localhost・プライベート/予約済み IP を指す（多層防御）。
+    PrivateHost,
 }
 
 /// ブラウザ起動の失敗理由。
@@ -39,6 +42,7 @@ pub enum BrowserOpenError {
 /// 保存済みの元記事 URL を、既定のブラウザへ渡してよい形か検証する（純粋関数）。
 ///
 /// http / https のみ許可し、ユーザー情報（user:pass@）付き・ホスト無し・解釈できない URL は拒否する。
+/// localhost（`*.localhost` を含む）と、url_guard が拒否するプライベート/予約済み IP のリテラルも拒否する。
 /// 返す `Url` は正規化済み（空白・引用符などはパーセントエンコード済み）で、そのまま OS へ渡す。
 pub fn validate_openable_url(raw_url: &str) -> Result<Url, OpenableUrlRejection> {
     let trimmed = raw_url.trim();
@@ -56,9 +60,27 @@ pub fn validate_openable_url(raw_url: &str) -> Result<Url, OpenableUrlRejection>
     if !url.username().is_empty() || url.password().is_some() {
         return Err(OpenableUrlRejection::HasUserinfo);
     }
-    match url.host_str() {
-        Some(host) if !host.trim_end_matches('.').is_empty() => {}
-        _ => return Err(OpenableUrlRejection::MissingHost),
+    match url.host() {
+        Some(Host::Domain(domain)) => {
+            let normalized = domain.trim_end_matches('.').to_ascii_lowercase();
+            if normalized.is_empty() {
+                return Err(OpenableUrlRejection::MissingHost);
+            }
+            if normalized == "localhost" || normalized.ends_with(".localhost") {
+                return Err(OpenableUrlRejection::PrivateHost);
+            }
+        }
+        Some(Host::Ipv4(ip)) => {
+            if is_disallowed_ip_addr(ip.into()) {
+                return Err(OpenableUrlRejection::PrivateHost);
+            }
+        }
+        Some(Host::Ipv6(ip)) => {
+            if is_disallowed_ip_addr(ip.into()) {
+                return Err(OpenableUrlRejection::PrivateHost);
+            }
+        }
+        None => return Err(OpenableUrlRejection::MissingHost),
     }
     // 正規化で長さが伸びることがあるため、OS へ渡す文字列でも上限を確認する。
     if url.as_str().len() > MAX_OPENABLE_URL_LEN {
@@ -92,6 +114,8 @@ mod windows_impl {
 
     /// ShellExecuteW の "open" 動詞で URL を既定のハンドラ（http/https は既定のブラウザ）へ渡す。
     /// 引数・作業ディレクトリは渡さず、コマンドラインを組み立てないためシェル解釈は起きない。
+    /// MSDN は ShellExecute の前に CoInitializeEx での COM 初期化を推奨しているが、http/https を
+    /// 開くだけのため行っていない。起動に失敗した場合は LaunchFailed となり、画面はトーストで案内する。
     pub(super) fn shell_open(url: &str) -> Result<(), BrowserOpenError> {
         // 検証済み URL に NUL は含まれないが、途中で切れた別文字列を渡さないよう念のため拒否する。
         if url.contains('\0') {
@@ -207,6 +231,33 @@ mod tests {
             validate_openable_url("not a url"),
             Err(OpenableUrlRejection::Malformed)
         );
+    }
+
+    #[test]
+    fn rejects_localhost_and_private_ip_hosts() {
+        for raw in [
+            "http://localhost/",
+            "http://LOCALHOST./",
+            "http://a.localhost/",
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://192.168.1.1/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            assert_eq!(
+                validate_openable_url(raw),
+                Err(OpenableUrlRejection::PrivateHost),
+                "{raw}"
+            );
+        }
+        // 公開ホスト（localhost を含むだけの別ドメイン・公開 IP）は通す。
+        for raw in [
+            "https://news.example.com/a",
+            "https://localhost.example.com/a",
+            "http://93.184.216.34/",
+        ] {
+            assert!(validate_openable_url(raw).is_ok(), "{raw}");
+        }
     }
 
     #[test]
