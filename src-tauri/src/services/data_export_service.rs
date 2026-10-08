@@ -296,15 +296,13 @@ fn write_and_verify(
     let mut included: Vec<&str> = Vec::new();
 
     for planned in plan {
-        let mut source = match File::open(&planned.source) {
-            Ok(source) => source,
-            // 計画後に消えたもの（同時に動くアーカイブ保守で退避された記事など）は入れない。
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                log::warn!("Skipped a file that disappeared during migration export");
-                continue;
+        // 計画後に消えたファイルがあれば書き出し全体を失敗にする。同時に動くアーカイブ保守が記事を
+        // 計画に無い新しい月次ZIPへ移した場合、飛ばすとその記事がどこにも入らないため（再実行で解消する）。
+        let mut source = File::open(&planned.source).inspect_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                log::warn!("A planned file disappeared during migration export; aborting");
             }
-            Err(error) => return Err(error.into()),
-        };
+        })?;
         let metadata = source.metadata()?;
         if !metadata.is_file() {
             return Err(AppError::Archive(
@@ -763,6 +761,64 @@ mod tests {
             "not a dir"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_aborts_without_leaving_files_when_a_planned_file_disappears() {
+        let root = temp_dir("disappeared");
+        let exports_dir = root.join("exports");
+        std::fs::create_dir_all(&exports_dir).unwrap();
+        write(&root, "config/settings.json", "{}");
+        // 計画後にアーカイブ保守が記事を移した状況（計画にあるファイルがもう無い）。
+        let plan = vec![
+            PlannedFile {
+                entry_name: "config/settings.json".to_string(),
+                source: root.join("config/settings.json"),
+                kind: ExportFileKind::Other,
+            },
+            PlannedFile {
+                entry_name: "news/202605/moved.md".to_string(),
+                source: root.join("news/202605/moved.md"),
+                kind: ExportFileKind::Article,
+            },
+        ];
+
+        let result = write_export(&exports_dir, &plan, fixed_now());
+
+        assert!(
+            matches!(result, Err(AppError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+        assert!(exports_listing(&root).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn export_does_not_follow_junctions() {
+        let root = temp_dir("junction");
+        let outside = temp_dir("junction-outside");
+        write(&outside, "inner.md", "secret");
+        std::fs::create_dir_all(root.join("news")).unwrap();
+        let link = root.join("news").join("202610");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status;
+        assert!(status.success(), "mklink /J failed");
+        assert!(link.join("inner.md").exists());
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        let result = service.export_at(fixed_now()).unwrap();
+
+        assert_eq!(result.file_count, 0);
+        assert_eq!(result.article_count, 0);
+        // ジャンクションだけを外してから消す（リンク先を消さないため）。
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
