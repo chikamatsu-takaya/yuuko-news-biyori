@@ -51,6 +51,15 @@ pub enum AppError {
 
     #[error("json parse error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// データ移行の取り込みZIPが検証で弾かれた（現在のデータには触れていない。データ設計書 §15.7）。
+    /// 画面が「今のデータはそのまま」と案内できるよう、専用のコードで返す。理由はログ用。
+    #[error("import zip was rejected: {0}")]
+    ImportRejected(String),
+
+    /// 前回の取り込みが途中で止まり、退避フォルダに印が残っている（手動で戻すまで取り込まない）。
+    #[error("a previous import did not finish")]
+    ImportIncompletePrevious,
 }
 
 impl AppError {
@@ -63,6 +72,8 @@ impl AppError {
             Self::Archive(_) => "ARCHIVE_ERROR",
             Self::Io(_) => "IO_ERROR",
             Self::Json(_) => "JSON_ERROR",
+            Self::ImportRejected(_) => "IMPORT_ZIP_REJECTED",
+            Self::ImportIncompletePrevious => "IMPORT_INCOMPLETE_PREVIOUS",
         }
     }
 }
@@ -82,6 +93,11 @@ impl AppError {
             Self::Archive(_) => "archive operation failed".to_string(),
             Self::Io(_) => "failed to access local data".to_string(),
             Self::Json(_) => "failed to read or write JSON data".to_string(),
+            // 弾いた理由（エントリ名など ZIP 由来の文字列を含み得る）は画面へ返さない。
+            Self::ImportRejected(_) => "import zip was rejected".to_string(),
+            Self::ImportIncompletePrevious => {
+                "a previous import did not finish; restore from the backup first".to_string()
+            }
         }
     }
 }
@@ -245,6 +261,19 @@ mod tests {
         assert!(!error.message.contains("panicked"));
         assert!(!error.message.contains("article-123"));
         assert!(!error.message.contains("article-detail"));
+    }
+
+    #[test]
+    fn import_errors_use_dedicated_codes_and_hide_the_reason() {
+        let rejected = command_error(AppError::ImportRejected(
+            "entry C:/secret/path is not allowed".to_string(),
+        ));
+        assert_eq!(rejected.code, "IMPORT_ZIP_REJECTED");
+        assert_eq!(rejected.message, "import zip was rejected");
+
+        let incomplete = command_error(AppError::ImportIncompletePrevious);
+        assert_eq!(incomplete.code, "IMPORT_INCOMPLETE_PREVIOUS");
+        assert!(!incomplete.message.contains("secret"));
     }
 
     #[test]

@@ -2766,8 +2766,29 @@ test("settings data management import failure shows fixed wording and keeps the 
   );
   await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
   await expect(page.getByTestId("migration-importing-dialog")).toHaveCount(0);
-  await expect(page.getByText(/secret/)).toHaveCount(0);
-  await expect(page.getByText(/manifest is missing/)).toHaveCount(0);
+  await expect(page.getByText(/import zip was rejected/)).toHaveCount(0);
+});
+
+test("settings data management unfinished previous import shows the restore guidance", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORT_FAIL__ =
+      "incomplete";
+  });
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  await expect(page.getByTestId("migration-import-status")).toHaveText(
+    "前回の取り込みが途中で止まっているため、取り込めなかったよ。バックアップからデータを戻してから、もう一度試してね。"
+  );
+  await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
 });
 
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
@@ -6137,11 +6158,18 @@ async function installTauriMocks(page: Page) {
                 setTimeout(resolve, migrationWin.__E2E_MIGRATION_IMPORT_DELAY_MS__)
               );
             }
+            // 本番の CommandError と同じ形（専用コード＋固定文言）で返す。
+            if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__ === "incomplete") {
+              throw {
+                code: "IMPORT_INCOMPLETE_PREVIOUS",
+                message:
+                  "a previous import did not finish; restore from the backup first",
+              };
+            }
             if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__) {
               throw {
-                code: "VALIDATION_ERROR",
-                message:
-                  "import zip was rejected: manifest is missing C:/secret/path/imports",
+                code: "IMPORT_ZIP_REJECTED",
+                message: "import zip was rejected",
               };
             }
             return {
