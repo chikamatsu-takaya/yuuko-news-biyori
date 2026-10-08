@@ -89,7 +89,11 @@ pub fn run() {
             settings_service.initialize_default_if_missing()?;
             let article_repository = ArticleRepository::new(&paths);
             article_repository.initialize_default_if_missing()?;
-            let article_service = ArticleService::new(article_repository.clone());
+            // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
+            // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
+            let gacha_service = GachaService::new(GachaRepository::new(&paths));
+            let article_service = ArticleService::new(article_repository.clone())
+                .with_gacha_service(gacha_service.clone());
             let news_service = NewsService::new(
                 &paths,
                 article_repository.clone(),
@@ -110,7 +114,8 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             let friendship_service =
-                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone());
+                FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone())
+                    .with_gacha_service(gacha_service.clone());
             friendship_service.initialize_default_if_missing()?;
             // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
             // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
@@ -143,8 +148,6 @@ pub fn run() {
             );
             yuuko_service.initialize_default_if_missing()?;
             let desktop_notifier_yuuko_service = yuuko_service.clone();
-            // ガチャ状態は画面から取得・実行されたときに読む（起動時には読まない）。
-            let gacha_service = GachaService::new(GachaRepository::new(&paths));
             app.manage(AppState {
                 ai_provider_service,
                 article_service,

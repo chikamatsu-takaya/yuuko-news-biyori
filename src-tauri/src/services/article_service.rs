@@ -9,17 +9,29 @@ use crate::domain::article::{
 use crate::error::{AppError, OpenOriginalArticleError};
 use crate::infra::external_browser::{self, BrowserOpenError};
 use crate::repositories::article_repository::ArticleRepository;
+use crate::services::gacha_service::{log_grant_failure, GachaService};
 use crate::services::recommendation_service::RecommendationService;
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct ArticleService {
     repository: ArticleRepository,
+    /// 記事を読んだときの流れ星のかけら付与先（データ設計書 §12.4）。未設定なら付与しない。
+    gacha_service: Option<GachaService>,
 }
 
 impl ArticleService {
     pub fn new(repository: ArticleRepository) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            gacha_service: None,
+        }
+    }
+
+    /// 記事を読んだときにかけらを付与するガチャサービスを設定する（アプリ起動時の組み立て用）。
+    pub fn with_gacha_service(mut self, gacha_service: GachaService) -> Self {
+        self.gacha_service = Some(gacha_service);
+        self
     }
 
     /// おすすめ一覧を返す。基準時刻は現在UTC（要件定義書 §7.4A.6 / §7.4A.8）。
@@ -122,7 +134,14 @@ impl ArticleService {
         let detail = self.repository.get_article_detail(&article_id)?;
         // 詳細設計書 §10.3: 詳細表示に成功した記事を DetailViewed へ進める。
         // 既読保存は付随処理なので、失敗しても詳細表示自体は成功させる。
-        self.advance_read_state_or_log(&article_id, ArticleReadState::DetailViewed);
+        if self.advance_read_state_or_log(&article_id, ArticleReadState::DetailViewed) {
+            // 初めて詳細を開いた（既読になった）ときだけ、その日の既読数に数える（データ設計書 §12.3）。
+            // DetailViewed は一方向の最終状態なので、同じ記事を二重に数えることはない。
+            // 記事側のロックは advance の中で手放し済み。付与の失敗は詳細表示を止めない。
+            if let Some(gacha_service) = &self.gacha_service {
+                log_grant_failure("news_read", gacha_service.grant_for_news_read());
+            }
+        }
         Ok(detail)
     }
 
@@ -134,18 +153,24 @@ impl ArticleService {
 
     /// ゆうこ軽量プレビュー表示（初回クリック）時に、紹介記事を Previewed へ進める（詳細設計書 §11.2）。
     /// プレビュー表示を止めないよう、失敗はログのみとする。
+    /// ゆうこの通知への反応なので、かけらは付与しない（D74。既読数にも数えない）。
     pub fn mark_article_previewed(&self, article_id: &str) {
         self.advance_read_state_or_log(article_id, ArticleReadState::Previewed);
     }
 
     /// 既読状態を前進方向にだけ保存し、失敗時は調査用ログだけ残す。
+    /// 実際に状態を進めて保存できたときだけ true を返す（後退・同じ状態・失敗は false）。
     /// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
-    fn advance_read_state_or_log(&self, article_id: &str, target: ArticleReadState) {
-        if let Err(error) = self
+    fn advance_read_state_or_log(&self, article_id: &str, target: ArticleReadState) -> bool {
+        match self
             .repository
             .advance_article_read_state(article_id, target)
         {
-            log::warn!("Failed to persist article read state for {article_id}: {error}");
+            Ok(advanced) => advanced,
+            Err(error) => {
+                log::warn!("Failed to persist article read state for {article_id}: {error}");
+                false
+            }
         }
     }
 
@@ -509,6 +534,52 @@ mod tests {
             recommended_read_state(&ctx, "article-002"),
             ArticleReadState::DetailViewed
         );
+    }
+
+    #[test]
+    fn first_detail_view_counts_for_gacha_once_and_preview_does_not() {
+        use crate::domain::gacha::{INITIAL_FRAGMENTS, NEWS_DAILY_GRANT};
+        use crate::repositories::gacha_repository::GachaRepository;
+
+        let ctx = make_context();
+        let gacha_repository = GachaRepository::new(&AppPaths::new(ctx.root.clone()));
+        let service = ctx
+            .service
+            .clone()
+            .with_gacha_service(GachaService::new(gacha_repository.clone()));
+        let read_count = || {
+            gacha_repository
+                .load()
+                .unwrap()
+                .map(|state| state.daily_grant.news_read_count)
+                .unwrap_or(0)
+        };
+
+        // 同じ記事を何度開いても1件として数える。
+        service
+            .get_article_detail(detail_params("article-001"))
+            .unwrap();
+        service
+            .get_article_detail(detail_params("article-001"))
+            .unwrap();
+        assert_eq!(read_count(), 1);
+
+        // ゆうこの軽量プレビュー（通知への反応）では数えない（D74）。
+        service.mark_article_previewed("article-002");
+        assert_eq!(read_count(), 1);
+        // プレビュー済みの記事も、詳細を開いて読んだら1件として数える。
+        service
+            .get_article_detail(detail_params("article-002"))
+            .unwrap();
+        assert_eq!(read_count(), 2);
+
+        service
+            .get_article_detail(detail_params("article-003"))
+            .unwrap();
+        let saved = gacha_repository.load().unwrap().unwrap();
+        assert_eq!(saved.daily_grant.news_read_count, 3);
+        assert!(saved.daily_grant.news_granted);
+        assert_eq!(saved.star_fragments, INITIAL_FRAGMENTS + NEWS_DAILY_GRANT);
     }
 
     #[test]

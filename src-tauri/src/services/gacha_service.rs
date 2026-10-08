@@ -2,8 +2,13 @@
 //! （データ設計書 §12・詳細設計書 §5.3.7 / §10.6）。
 //!
 //! 状態の読み込み→変更→保存は `update` に集め、ロックの中で1回の保存にまとめる
-//! （かけらの消費と獲得の記録を片方だけ反映させない。§12.5）。かけらの付与（UyaDrMln）を足すときも
-//! `update` の中で `GachaState::add_fragments` を呼べばよい。
+//! （かけらの消費と獲得の記録を片方だけ反映させない。§12.5）。かけらの付与（`grant_for_*`）も
+//! 同じ `update` を通し、付与と日次記録を1回の保存にまとめる。
+//!
+//! 付与は他のサービス（記事・友情ランク）や command から、その操作が成功した後に呼ばれる。
+//! ガチャは付随機能なので、付与に失敗しても元の操作は失敗させない（`log_grant_failure` でログのみ）。
+//! デッドロックを避けるため、呼び出し側は自分のロックを手放してから呼ぶ（本サービスもロック中に
+//! 他のサービスを呼ばない）。
 //!
 //! 抽選の乱数は差し替え可能（`with_picker`）にして、テストでは結果を固定する。
 
@@ -12,9 +17,12 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::Utc;
+
 use crate::domain::gacha::{
     find_gacha_item, DrawOutcome, GachaDrawResultDto, GachaState, GachaStateDto, GACHA_MASTER,
 };
+use crate::domain::yuuko::local_date_key;
 use crate::error::AppError;
 use crate::repositories::gacha_repository::GachaRepository;
 
@@ -26,6 +34,16 @@ pub struct GachaService {
     gacha_repository: GachaRepository,
     store_lock: Arc<Mutex<()>>,
     picker: GachaPicker,
+}
+
+impl std::fmt::Debug for GachaService {
+    // 抽選関数（クロージャ）は Debug を持たないため、手書きで省略する
+    // （Debug を要求する記事・友情ランクのサービスに持たせるため）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GachaService")
+            .field("gacha_repository", &self.gacha_repository)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GachaService {
@@ -68,6 +86,38 @@ impl GachaService {
         })
     }
 
+    /// 記事が1件既読になったときの付与（§12.4: その日3件で +10、1日1回まで）。付与した量を返す。
+    /// 同じ記事を二重に数えないよう、呼び出し側は既読へ実際に遷移したときだけ呼ぶ。
+    pub fn grant_for_news_read(&self) -> Result<u32, AppError> {
+        self.grant_for_news_read_on(&local_today())
+    }
+
+    /// `grant_for_news_read` の本体（日付注入版。テストで日付境界を固定するため分ける）。
+    pub(crate) fn grant_for_news_read_on(&self, today: &str) -> Result<u32, AppError> {
+        self.update(|state| (state.grant_for_news_read(today), true))
+    }
+
+    /// 用語解説・辞書保存1回ぶんの付与（§12.4: +1、合計で1日 +3 まで）。付与した量を返す。
+    pub fn grant_for_term_action(&self) -> Result<u32, AppError> {
+        self.grant_for_term_action_on(&local_today())
+    }
+
+    /// `grant_for_term_action` の本体（日付注入版）。
+    pub(crate) fn grant_for_term_action_on(&self, today: &str) -> Result<u32, AppError> {
+        self.update(|state| {
+            let granted = state.grant_for_term_action(today);
+            (granted, granted > 0)
+        })
+    }
+
+    /// 友情ランクのランクアップによる付与（§12.4: 上がったランク1つごとに +30）。付与した量を返す。
+    pub fn grant_for_rank_up(&self, ranks_gained: u32) -> Result<u32, AppError> {
+        if ranks_gained == 0 {
+            return Ok(0);
+        }
+        self.update(|state| (state.grant_for_rank_up(ranks_gained), true))
+    }
+
     /// ロックの中で状態を読み、`apply` で変更し、必要なら1回だけ保存する。
     ///
     /// - `apply` は (戻り値, 保存が必要な変更をしたか) を返す。変更したのに保存できなければエラー。
@@ -93,6 +143,19 @@ impl GachaService {
         self.store_lock
             .lock()
             .map_err(|_| AppError::Io(std::io::Error::other("gacha store lock was poisoned")))
+    }
+}
+
+/// 今日のローカル日付（"YYYY-MM-DD"）。友情ランクの日次上限と同じ区切り（ローカル深夜0時）にする（§12.3）。
+fn local_today() -> String {
+    local_date_key(Utc::now(), &chrono::Local)
+}
+
+/// かけら付与の結果をログに残す。失敗しても元の操作（記事を読む・用語解説・ランクアップ）は成功のまま
+/// にするため、エラーは warn ログだけにして呼び出し側へ返さない。`action` は付与のきっかけの種類。
+pub fn log_grant_failure(action: &str, result: Result<u32, AppError>) {
+    if let Err(error) = result {
+        log::warn!("流れ星のかけらの付与に失敗しました（{action}）: {error}");
     }
 }
 
@@ -137,7 +200,10 @@ fn random_index(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::gacha::{GachaDrawStatus, GACHA_COST, INITIAL_FRAGMENTS};
+    use crate::domain::gacha::{
+        GachaDrawStatus, GACHA_COST, INITIAL_FRAGMENTS, NEWS_DAILY_GRANT, RANK_UP_GRANT,
+        TERM_DAILY_MAX, TERM_GRANT,
+    };
     use crate::paths::AppPaths;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -319,6 +385,66 @@ mod tests {
         let saved = ctx.repository.load().unwrap().unwrap();
         assert!(saved.new_item_ids.is_empty());
         assert_eq!(saved.owned_item_ids, ids(&["card_001"]));
+    }
+
+    #[test]
+    fn news_read_grant_is_saved_once_per_day() {
+        let ctx = ctx();
+        assert_eq!(ctx.service.grant_for_news_read_on("2026-10-08").unwrap(), 0);
+        assert_eq!(ctx.service.grant_for_news_read_on("2026-10-08").unwrap(), 0);
+        assert_eq!(
+            ctx.service.grant_for_news_read_on("2026-10-08").unwrap(),
+            NEWS_DAILY_GRANT
+        );
+        assert_eq!(ctx.service.grant_for_news_read_on("2026-10-08").unwrap(), 0);
+        let saved = ctx.repository.load().unwrap().unwrap();
+        assert_eq!(saved.star_fragments, INITIAL_FRAGMENTS + NEWS_DAILY_GRANT);
+        assert_eq!(saved.daily_grant.date, "2026-10-08");
+        assert_eq!(saved.daily_grant.news_read_count, 4);
+        assert!(saved.daily_grant.news_granted);
+
+        // 日付が変わると数え直す。
+        assert_eq!(ctx.service.grant_for_news_read_on("2026-10-09").unwrap(), 0);
+        let saved = ctx.repository.load().unwrap().unwrap();
+        assert_eq!(saved.daily_grant.news_read_count, 1);
+        assert!(!saved.daily_grant.news_granted);
+    }
+
+    #[test]
+    fn term_grant_is_capped_and_capped_call_does_not_rewrite_file() {
+        let ctx = ctx();
+        for _ in 0..TERM_DAILY_MAX {
+            assert_eq!(
+                ctx.service.grant_for_term_action_on("2026-10-08").unwrap(),
+                TERM_GRANT
+            );
+        }
+        let before = std::fs::read(&ctx.paths.gacha_state_path).unwrap();
+        assert_eq!(
+            ctx.service.grant_for_term_action_on("2026-10-08").unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read(&ctx.paths.gacha_state_path).unwrap(), before);
+        assert_eq!(
+            ctx.service.get_gacha_state().unwrap().star_fragments,
+            INITIAL_FRAGMENTS + TERM_GRANT * TERM_DAILY_MAX
+        );
+        assert_eq!(
+            ctx.service.grant_for_term_action_on("2026-10-09").unwrap(),
+            TERM_GRANT
+        );
+    }
+
+    #[test]
+    fn rank_up_grant_adds_per_rank_and_zero_ranks_saves_nothing() {
+        let ctx = ctx();
+        assert_eq!(ctx.service.grant_for_rank_up(0).unwrap(), 0);
+        assert!(ctx.repository.load().unwrap().is_none());
+        assert_eq!(ctx.service.grant_for_rank_up(2).unwrap(), RANK_UP_GRANT * 2);
+        assert_eq!(
+            ctx.repository.load().unwrap().unwrap().star_fragments,
+            INITIAL_FRAGMENTS + RANK_UP_GRANT * 2
+        );
     }
 
     #[test]

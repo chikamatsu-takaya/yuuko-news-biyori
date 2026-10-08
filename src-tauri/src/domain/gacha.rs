@@ -6,7 +6,8 @@
 //! - 読み取り用 DTO（`get_gacha_state` / `draw_gacha_once` / `mark_gacha_items_seen` が返す形）。
 //!
 //! 乱数は引数（`pick(n)` が 0..n の添字を返す関数）で受け取り、本モジュールは純粋に保つ（テスト容易化）。
-//! かけらの付与（ニュース閲覧・用語解説・ランクアップ）と日次上限 `dailyGrant` は別タスク（UyaDrMln）で足す。
+//! - かけらの付与（ニュース閲覧・用語解説/辞書保存・ランクアップ）と日次上限 `dailyGrant`（§12.3 / §12.4）。
+//!   今日の日付（"YYYY-MM-DD"・ローカル日付）は引数で受け取る。
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,19 @@ use serde::{Deserialize, Serialize};
 pub const GACHA_COST: u32 = 30;
 /// 初期の所持かけら（仮の値・D81。§12.4）。
 pub const INITIAL_FRAGMENTS: u32 = 30;
+
+// --- かけらの付与量・日次上限（すべて仮の値・D81。§12.4）。使ってみてから調整するため、ここに集める。 ---
+
+/// ニュース閲覧分を付与するのに必要な、その日の既読記事数。
+pub const NEWS_READ_REQUIRED: u32 = 3;
+/// ニュース閲覧分の付与量（1日1回まで）。
+pub const NEWS_DAILY_GRANT: u32 = 10;
+/// 用語解説・辞書保存1回あたりの付与量。
+pub const TERM_GRANT: u32 = 1;
+/// 用語解説・辞書保存で付与する1日の上限回数（用語解説と辞書保存の合計）。
+pub const TERM_DAILY_MAX: u32 = 3;
+/// 上がったランク1つごとの付与量（複数ランク上がればランク数ぶん）。
+pub const RANK_UP_GRANT: u32 = 30;
 
 /// 排出対象の種類（§12.4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -129,8 +143,8 @@ pub fn find_gacha_item(item_id: &str) -> Option<&'static GachaItemDefinition> {
 
 /// 永続化するガチャ状態（`gacha/gacha_state.json`・§12.3）。
 ///
-/// 未知のフィールドは読み込み時に無視する。日次付与記録 `dailyGrant` は付与の実装（UyaDrMln）で足す
-/// （`#[serde(default)]` のため、項目を足しても既存ファイルはそのまま読める）。
+/// 未知のフィールドは読み込み時に無視する。`#[serde(default)]` のため、`dailyGrant` を持たない
+/// 既存ファイルもそのまま読める（日次付与記録は空＝今日はまだ何も付与していない扱い）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +156,23 @@ pub struct GachaState {
     pub owned_item_ids: Vec<String>,
     /// 獲得したがまだ確認していない ID（「NEW」表示用。確認したら外す）。
     pub new_item_ids: Vec<String>,
+    /// 日次上限の判定用に、その日の付与状況を1日分だけ持つ（§12.3）。
+    pub daily_grant: DailyGrant,
+}
+
+/// その日の付与状況（§12.3 の `dailyGrant`）。`date` が今日と違えば0から数え直す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyGrant {
+    /// 記録した日（ローカル日付 "YYYY-MM-DD"。友情ランクの日次上限と同じ基準）。空なら未記録。
+    pub date: String,
+    /// その日に既読になった記事の数（同じ記事を二重に数えないことは呼び出し側の遷移判定で保証する）。
+    pub news_read_count: u32,
+    /// その日のニュース閲覧分を付与済みか（1日1回まで）。
+    pub news_granted: bool,
+    /// その日に用語解説・辞書保存で付与した回数（上限 `TERM_DAILY_MAX`）。
+    pub term_granted_count: u32,
 }
 
 impl Default for GachaState {
@@ -152,6 +183,7 @@ impl Default for GachaState {
             star_fragments: INITIAL_FRAGMENTS,
             owned_item_ids: Vec::new(),
             new_item_ids: Vec::new(),
+            daily_grant: DailyGrant::default(),
         }
     }
 }
@@ -211,11 +243,54 @@ impl GachaState {
         GACHA_MASTER.iter().all(|def| self.is_owned(def.item_id))
     }
 
-    /// かけらを足す（u32 の最大で頭打ち）。付与の判定（日次上限など）は呼び出し側で行う。
-    /// 付与の実装（UyaDrMln）から呼ぶための入口で、それまではテストでのみ使う。
-    #[allow(dead_code)]
+    /// かけらを足す（u32 の最大で頭打ち）。日次上限の判定は下の `grant_for_*` で行う。
     pub fn add_fragments(&mut self, amount: u32) {
         self.star_fragments = self.star_fragments.saturating_add(amount);
+    }
+
+    /// 日付が変わっていれば、その日の付与状況を0から数え直す（日次上限のリセット）。
+    fn roll_daily_grant(&mut self, today: &str) {
+        if self.daily_grant.date != today {
+            self.daily_grant = DailyGrant {
+                date: today.to_string(),
+                ..DailyGrant::default()
+            };
+        }
+    }
+
+    /// 記事1件が既読になったことを数え、その日の既読数が `NEWS_READ_REQUIRED` に達したら
+    /// `NEWS_DAILY_GRANT` を付与する（1日1回まで）。付与した量（0 もあり得る）を返す。
+    /// 既読数は付与の有無に関係なく数えるため、呼ぶたびに状態は変わる（呼び出し側は保存する）。
+    pub fn grant_for_news_read(&mut self, today: &str) -> u32 {
+        self.roll_daily_grant(today);
+        let daily = &mut self.daily_grant;
+        daily.news_read_count = daily.news_read_count.saturating_add(1);
+        if daily.news_granted || daily.news_read_count < NEWS_READ_REQUIRED {
+            return 0;
+        }
+        daily.news_granted = true;
+        self.add_fragments(NEWS_DAILY_GRANT);
+        NEWS_DAILY_GRANT
+    }
+
+    /// 用語解説・辞書保存1回ぶんを付与する（合計で1日 `TERM_DAILY_MAX` 回まで）。
+    /// 付与した量を返す。上限に達していれば 0 を返し、状態を変えない
+    /// （日付が変わったときは0から数え直してから付与するため、0 にはならない）。
+    pub fn grant_for_term_action(&mut self, today: &str) -> u32 {
+        if self.daily_grant.date == today && self.daily_grant.term_granted_count >= TERM_DAILY_MAX {
+            return 0;
+        }
+        self.roll_daily_grant(today);
+        self.daily_grant.term_granted_count += 1;
+        self.add_fragments(TERM_GRANT);
+        TERM_GRANT
+    }
+
+    /// ランクアップで上がったランク数ぶん `RANK_UP_GRANT` を付与する（日次上限なし）。付与した量を返す。
+    pub fn grant_for_rank_up(&mut self, ranks_gained: u32) -> u32 {
+        let amount = RANK_UP_GRANT.saturating_mul(ranks_gained);
+        self.add_fragments(amount);
+        amount
     }
 
     /// 1回引く（§12.5）。
@@ -597,5 +672,103 @@ mod tests {
         assert!(raw.contains("\"starFragments\":30"));
         assert!(raw.contains("\"ownedItemIds\""));
         assert!(raw.contains("\"newItemIds\""));
+        assert!(raw.contains("\"dailyGrant\""));
+        assert!(raw.contains("\"newsReadCount\""));
+        assert!(raw.contains("\"newsGranted\""));
+        assert!(raw.contains("\"termGrantedCount\""));
+    }
+
+    #[test]
+    fn state_without_daily_grant_still_loads() {
+        let state: GachaState = serde_json::from_str(
+            r#"{"version":1,"starFragments":12,"ownedItemIds":["card_001"],"newItemIds":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(state.star_fragments, 12);
+        assert_eq!(state.daily_grant, DailyGrant::default());
+    }
+
+    #[test]
+    fn news_read_grants_once_when_reaching_required_count() {
+        let mut state = GachaState::default();
+        assert_eq!(state.grant_for_news_read("2026-10-08"), 0);
+        assert_eq!(state.grant_for_news_read("2026-10-08"), 0);
+        assert_eq!(state.grant_for_news_read("2026-10-08"), NEWS_DAILY_GRANT);
+        // 同じ日はそれ以上読んでも付与しない（既読数は数え続ける）。
+        assert_eq!(state.grant_for_news_read("2026-10-08"), 0);
+        assert_eq!(state.star_fragments, INITIAL_FRAGMENTS + NEWS_DAILY_GRANT);
+        assert_eq!(state.daily_grant.news_read_count, 4);
+        assert!(state.daily_grant.news_granted);
+    }
+
+    #[test]
+    fn news_read_count_resets_at_date_boundary() {
+        let mut state = GachaState::default();
+        state.grant_for_news_read("2026-10-08");
+        state.grant_for_news_read("2026-10-08");
+        // 前日の2件は持ち越さない。
+        assert_eq!(state.grant_for_news_read("2026-10-09"), 0);
+        assert_eq!(state.daily_grant.date, "2026-10-09");
+        assert_eq!(state.daily_grant.news_read_count, 1);
+        assert_eq!(state.grant_for_news_read("2026-10-09"), 0);
+        assert_eq!(state.grant_for_news_read("2026-10-09"), NEWS_DAILY_GRANT);
+        // 翌日はまた付与できる。
+        for _ in 0..2 {
+            assert_eq!(state.grant_for_news_read("2026-10-10"), 0);
+        }
+        assert_eq!(state.grant_for_news_read("2026-10-10"), NEWS_DAILY_GRANT);
+        assert_eq!(
+            state.star_fragments,
+            INITIAL_FRAGMENTS + NEWS_DAILY_GRANT * 2
+        );
+    }
+
+    #[test]
+    fn term_action_is_capped_per_day_and_resets_next_day() {
+        let mut state = GachaState::default();
+        for _ in 0..TERM_DAILY_MAX {
+            assert_eq!(state.grant_for_term_action("2026-10-08"), TERM_GRANT);
+        }
+        let capped = state.clone();
+        assert_eq!(state.grant_for_term_action("2026-10-08"), 0);
+        // 上限到達後は状態を変えない（保存も不要）。
+        assert_eq!(state, capped);
+        assert_eq!(
+            state.star_fragments,
+            INITIAL_FRAGMENTS + TERM_GRANT * TERM_DAILY_MAX
+        );
+
+        assert_eq!(state.grant_for_term_action("2026-10-09"), TERM_GRANT);
+        assert_eq!(state.daily_grant.term_granted_count, 1);
+    }
+
+    #[test]
+    fn date_change_resets_all_daily_counters_together() {
+        let mut state = GachaState::default();
+        for _ in 0..NEWS_READ_REQUIRED {
+            state.grant_for_news_read("2026-10-08");
+        }
+        state.grant_for_term_action("2026-10-08");
+        state.grant_for_term_action("2026-10-09");
+        assert_eq!(
+            state.daily_grant,
+            DailyGrant {
+                date: "2026-10-09".to_string(),
+                news_read_count: 0,
+                news_granted: false,
+                term_granted_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rank_up_grants_per_rank_gained() {
+        let mut state = GachaState::default();
+        assert_eq!(state.grant_for_rank_up(1), RANK_UP_GRANT);
+        assert_eq!(state.grant_for_rank_up(2), RANK_UP_GRANT * 2);
+        assert_eq!(state.grant_for_rank_up(0), 0);
+        assert_eq!(state.star_fragments, INITIAL_FRAGMENTS + RANK_UP_GRANT * 3);
+        // 日次記録には影響しない。
+        assert_eq!(state.daily_grant, DailyGrant::default());
     }
 }
