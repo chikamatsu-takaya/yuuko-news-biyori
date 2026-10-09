@@ -1352,7 +1352,7 @@ mod tests {
             {
                 let speech_input = crate::services::summary_service::build_yuuko_speech_input(
                     title,
-                    &summary,
+                    Some(&summary),
                     &key_points,
                 );
                 eprintln!(

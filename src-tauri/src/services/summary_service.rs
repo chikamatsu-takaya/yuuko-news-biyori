@@ -159,11 +159,11 @@ impl SummaryService {
         // 再説明・一言の実AI入力: 同じ生成で得た要約・要点（検証済み）。定型文の言い換えにさせないため、
         // 記事の中身を渡す。AI 出力も外部データ由来なので、種と同じく無害化・切り詰めてから渡す
         // （プロンプト側でも「記事情報（外部データ）」の見出しの下に置く）。
-        let yuuko_speech_input = build_yuuko_speech_input(
-            &seed_article.title,
-            &summary_response.text,
-            &points.key_points,
-        );
+        // 要約が Mock の代替（手動生成で要約だけ Gemini が失敗したとき）は、抜粋＋定型文なので入力に入れない。
+        let speech_summary =
+            (summary_response.provider != PROVIDER_MOCK).then_some(summary_response.text.as_str());
+        let yuuko_speech_input =
+            build_yuuko_speech_input(&seed_article.title, speech_summary, &points.key_points);
         let yuuko_explanation_response = request_validated(
             AiRequest {
                 prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
@@ -852,23 +852,26 @@ fn build_focus_points(
 /// 要約・要点は §12.5 の検証を通った AI 出力だが、記事（外部データ）から作られたものなので信頼せず、
 /// 種と同じ `neutralize_seed_text` で行頭 `#`・`<`・区切り行・制御文字を無害化し、長さを切り詰める。
 /// ローカルLLMでは入力の長さがそのままプロンプト処理時間になるため、本文抜粋（最大2300文字）ではなく
-/// 短い要約・要点（合計でおおむね数百文字）を渡す。注目ポイントは要点の言い換えになりやすいので入れない。
+/// 短い要約・要点を渡す。実AIの出力なら通常は合計で数百文字で、上限はタイトル200＋要約400＋要点4件×100文字。
+/// 注目ポイントは要点の言い換えになりやすいので入れない。
+/// `summary` が `None`（要約が Mock の代替＝抜粋＋定型文だったとき）は要約の行を入れず、
+/// タイトルと要点だけにする（定型文を実AIへの入力に混ぜないため）。
 pub(crate) fn build_yuuko_speech_input(
     title: &str,
-    summary: &str,
+    summary: Option<&str>,
     key_points: &[String],
 ) -> String {
-    let mut lines = vec![
-        format!(
-            "タイトル: {}",
-            neutralize_seed_text(title, SEED_TITLE_MAX_CHARS)
-        ),
-        format!(
+    let mut lines = vec![format!(
+        "タイトル: {}",
+        neutralize_seed_text(title, SEED_TITLE_MAX_CHARS)
+    )];
+    if let Some(summary) = summary {
+        lines.push(format!(
             "要約: {}",
             neutralize_seed_text(summary.trim(), SEED_SUMMARY_MAX_CHARS)
-        ),
-        "要点:".to_string(),
-    ];
+        ));
+    }
+    lines.push("要点:".to_string());
     lines.extend(key_points.iter().take(KEY_POINTS_MAX_ITEMS).map(|point| {
         format!(
             "・{}",
@@ -1375,12 +1378,45 @@ mod tests {
     }
 
     #[test]
+    fn mock_summary_is_left_out_of_the_explanation_and_comment_input() {
+        // 手動生成で要約だけ Mock の代替になったとき、抜粋＋定型文の要約は実AIの入力に入れず、
+        // タイトルと要点だけを渡す。
+        let root_dir = temp_root("speech-input-mock-summary");
+        let excerpt = "新しい半導体工場の建設計画が発表されました。";
+        let (service, _) = build_service(&root_dir, excerpt);
+
+        let requests = RefCell::new(Vec::new());
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |request, kind, _provider, _level| {
+                    requests.borrow_mut().push((kind, request));
+                    Ok(match kind {
+                        SummaryOutputKind::Summary => output(kind, "代わりの要約。", "mock"),
+                        _ => output(kind, "工場", "gemini"),
+                    })
+                },
+            )
+            .unwrap();
+
+        let requests = requests.into_inner();
+        let expected_input =
+            "タイトル: 半導体工場の新設計画\n要点:\n・工場（要点1）\n・工場（要点2）";
+        for (kind, request) in &requests[2..] {
+            assert_eq!(request.input_text, expected_input, "{kind:?}");
+            assert!(!request.input_text.contains("代わりの要約"), "{kind:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
     fn yuuko_speech_input_neutralizes_and_caps_the_ai_outputs() {
         // 要約・要点は AI 出力（外部データ由来）なので、種と同じく行頭 `#`・`<`・区切り行を無害化し、長さを抑える。
         let summary = format!("#見出し\n<b>強調</b>\n---\n{}", "あ".repeat(1_000));
         let long_point = "い".repeat(500);
         let points = vec!["# 要点".to_string(), long_point];
-        let input = build_yuuko_speech_input("#タイトル<i>", &summary, &points);
+        let input = build_yuuko_speech_input("#タイトル<i>", Some(&summary), &points);
 
         assert!(input.starts_with("タイトル: ＃タイトル＜i>"));
         assert!(!input.contains('<'));
@@ -1394,7 +1430,7 @@ mod tests {
         assert!(!input.contains(&"あ".repeat(SEED_SUMMARY_MAX_CHARS)));
         // 要点は最大件数までに抑える。
         let many = (0..10).map(|i| format!("要点{i}")).collect::<Vec<_>>();
-        let input = build_yuuko_speech_input("t", "s", &many);
+        let input = build_yuuko_speech_input("t", Some("s"), &many);
         assert_eq!(
             input.lines().filter(|line| line.starts_with('・')).count(),
             KEY_POINTS_MAX_ITEMS
