@@ -48,6 +48,13 @@ pub struct AiResponse {
     pub provider: String,
 }
 
+/// ゆうこの再説明（記事の「ゆうこの解説」）をAIへ依頼するときの prompt_id。出力は1段落の文字列。
+/// プロンプトの言い回し・長さの指示を変えても出力の契約（1つの文字列）は同じなので、版は上げない。
+pub const YUUKO_EXPLANATION_PROMPT_ID: &str = "yuuko_explanation_v1";
+
+/// ゆうこの一言（記事の「ゆうこの一言」）をAIへ依頼するときの prompt_id。出力は短い1文の文字列。
+pub const YUUKO_COMMENT_PROMPT_ID: &str = "yuuko_comment_v1";
+
 /// 用語解説をAIへ依頼するときの prompt_id（v1）。AiProviderService と DictionaryService で共有する。
 /// 単一文字列出力の既存契約に、用語解説だけの構造化出力（JSON: short/detail）契約を1つ追加する。
 pub const TERM_EXPLANATION_PROMPT_ID: &str = "term_explanation_v1";

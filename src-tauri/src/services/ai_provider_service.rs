@@ -17,7 +17,8 @@ use crate::domain::summary::{
     AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
     ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
     FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-    POINT_ITEM_MAX_CHARS, TERM_EXPLANATION_PROMPT_ID,
+    POINT_ITEM_MAX_CHARS, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
+    YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
@@ -40,6 +41,18 @@ const LOCAL_MAX_OUTPUT_TOKENS: u32 = 1024;
 /// ローカルLLMで用語解説（JSON `{short, detail}`）を作るときの出力上限（トークン）。
 /// 短い解説＋2〜4文の解説で足りるため、ほかより小さくして待ち時間の上振れを抑える。
 const LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 768;
+/// ローカルLLMでゆうこの再説明（`yuuko_explanation_v1`）を作るときの出力上限（トークン）。
+/// プロンプトで最大300文字（詳しく）までに抑えるため、止まらずに書き続ける回の待ち時間を詰める。
+/// 上限で途切れた出力は使われない（`finish_reason=length` は失敗扱い）ので、300文字に余裕を持たせる。
+const LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 512;
+/// ローカルLLMでゆうこの一言（`yuuko_comment_v1`）を作るときの出力上限（トークン）。
+/// 一言は60文字程度を頼むので、保存上限（300文字）に収まる大きさにする。
+const LOCAL_YUUKO_COMMENT_MAX_OUTPUT_TOKENS: u32 = 256;
+// 再説明・一言の上限は、ほかの自由文の上限より小さい（短く頼む出力の待ち時間を詰めるための値）。
+const _: () = assert!(
+    LOCAL_YUUKO_COMMENT_MAX_OUTPUT_TOKENS < LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS
+        && LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS < LOCAL_MAX_OUTPUT_TOKENS
+);
 
 /// ゆうこの口調の固定指示（用語解説・再説明・感想で共通）。プロンプト内では必ず固定指示側
 /// （外部データの区切り・入力本文より前）に置く。
@@ -49,6 +62,23 @@ const LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 768;
 const YUUKO_TONE_INSTRUCTION: &str = "文章はマスコットキャラクター「ゆうこ」の話し方で書いてください。\
 ゆうこは読者の横で教えてくれる親しみやすい案内役で、「〜だよ」「〜だね」「〜してね」のような、\
 やわらかい常体の語尾で話します。キャラクターらしさのために内容を不正確にしたり、誇張したりしないでください。";
+
+/// ゆうこの再説明・一言で、出力に混ぜてほしくないものの固定指示（Gemini・ローカルLLM共通）。
+/// 小さいローカルLLM（Qwen3.5-2B）は、括弧のト書き・中国語の感嘆詞・挨拶を混ぜ、長く書き続けやすかった
+/// （2026-10-09 の実測）。混ざった場合は summary_service で取り除く（`util::speech_cleanup`）が、
+/// まずはプロンプトで出させないようにする。禁止例の字そのもの（中国語の助詞など）は、小さいモデルが
+/// まねて出しやすくなるため書かない。
+const YUUKO_SPEECH_RULES: &str = "出力はゆうこが話す本文だけにしてください。\
+日本語だけで書き、日本語以外の言語の単語や感嘆詞を混ぜないでください。\
+挨拶・自己紹介・前置き・締めの言葉は書かず、すぐに記事の中身から話し始めてください。\
+括弧書きのト書き（動作・表情・声の調子の説明）や、ゆうこの様子を外から説明する文は書かないでください。\
+絵文字・見出し・箇条書きは使わないでください。";
+
+/// 再説明・一言のプロンプトの最後（記事情報の後ろ）に置く、出力の形の念押し（固定指示）。
+/// 小さいローカルLLMはプロンプトの末尾に近い指示ほど守りやすく、記事情報の前に置いた規則だけでは
+/// ト書き・挨拶が残った（2026-10-09 の実測）。記事情報は区切り見出しで囲った外部データのままで、
+/// ここは利用者の入力を含まない固定文なので、防御指示・区切りの構造は崩さない。
+const YUUKO_SPEECH_REMINDER_HEADING: &str = "### 出力のきまり（固定指示）";
 
 #[derive(Debug, Clone)]
 pub struct AiProviderService {
@@ -199,8 +229,9 @@ impl AiProviderService {
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
             "summary_v1" => request.input_text,
-            "yuuko_explanation_v1" => request.input_text,
-            "yuuko_comment_v1" => request.input_text,
+            id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => {
+                request.input_text
+            }
             // 要点・注目ポイント・タグ: 種（無害化済みのタイトル＋本文抜粋）と context の無害化済みジャンルから
             // 決定的な JSON を組む（外部通信なし）。
             id if id == ARTICLE_POINTS_PROMPT_ID => serde_json::to_string(&mock_article_points(
@@ -334,6 +365,10 @@ fn local_output_shape(prompt_id: &str) -> (u32, Option<ResponseFormat>) {
             LOCAL_MAX_OUTPUT_TOKENS,
             Some(article_points_response_format()),
         )
+    } else if prompt_id == YUUKO_EXPLANATION_PROMPT_ID {
+        (LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS, None)
+    } else if prompt_id == YUUKO_COMMENT_PROMPT_ID {
+        (LOCAL_YUUKO_COMMENT_MAX_OUTPUT_TOKENS, None)
     } else {
         (LOCAL_MAX_OUTPUT_TOKENS, None)
     }
@@ -473,14 +508,22 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     // 要約（AI要約セクション）は中立な文体のままにする（データ設計書の記事Markdown例に合わせる）。
     let instruction = match request.prompt_id.as_str() {
         "summary_v1" => format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。"),
-        "yuuko_explanation_v1" => {
+        // 再説明は画面の1段落に収まる長さにする（解説レベルで文の数と上限だけを変える）。
+        id if id == YUUKO_EXPLANATION_PROMPT_ID => {
+            let length = match explanation_level {
+                ExplanationLevel::Simple => "2〜3文、全体で150文字以内",
+                ExplanationLevel::Normal => "3〜4文、全体で200文字以内",
+                ExplanationLevel::Detailed => "4〜5文、全体で300文字以内",
+            };
             format!(
-                "次のニュースを、日本語で{level}読者にやさしく再説明してください。{YUUKO_TONE_INSTRUCTION}"
+                "次のニュースの内容を、日本語で{level}読者にやさしく再説明してください。\
+                 {length}の1段落にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}"
             )
         }
-        "yuuko_comment_v1" => {
+        id if id == YUUKO_COMMENT_PROMPT_ID => {
             format!(
-                "次のニュースに対する、親しみやすい短い感想を日本語で一言書いてください。{YUUKO_TONE_INSTRUCTION}"
+                "次のニュースに対する、親しみやすい短い感想を日本語で一言書いてください。\
+                 改行のない1文、60文字以内にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}"
             )
         }
         // 要点・注目ポイント・タグ（D18 / D11）。要点と注目ポイントは別の観点で書かせ、要点に注目ポイントを混ぜない。
@@ -502,10 +545,32 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     // 記事タイトル・抜粋などの入力本文は外部データとして、防御指示の後に区切り見出し付きで渡す
     // （用語解説と同じ構造。指示文へ直接連結しない＝プロンプトインジェクション対策）。
     // 要約も同じ防御・区切りを適用するが、口調指示は入れず中立な文体のままにする。
-    format!(
+    let mut prompt = format!(
         "{instruction}\n{ARTICLE_DATA_DEFENSE_INSTRUCTION}\n\n{ARTICLE_DATA_HEADING}\n{}",
         request.input_text.trim()
-    )
+    );
+    // 再説明・一言だけ、記事情報の後ろに出力の形の念押し（固定文）を付ける（YUUKO_SPEECH_REMINDER_HEADING）。
+    if let Some(reminder) = yuuko_speech_reminder(&request.prompt_id) {
+        prompt.push_str(&format!("\n\n{YUUKO_SPEECH_REMINDER_HEADING}\n{reminder}"));
+    }
+    prompt
+}
+
+/// 再説明・一言の末尾の念押し（固定文）。ほかの prompt_id では付けない。
+fn yuuko_speech_reminder(prompt_id: &str) -> Option<&'static str> {
+    if prompt_id == YUUKO_EXPLANATION_PROMPT_ID {
+        Some(
+            "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
+             1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
+        )
+    } else if prompt_id == YUUKO_COMMENT_PROMPT_ID {
+        Some(
+            "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
+             括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
+        )
+    } else {
+        None
+    }
 }
 
 /// 要約・再説明・感想プロンプトの外部データ防御指示（固定指示側・区切り見出しより前に置く）。
@@ -701,11 +766,78 @@ mod tests {
             format["json_schema"]["schema"]["required"],
             serde_json::json!(["short", "detail"])
         );
-        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+        // 自由文の出力はスキーマで縛らない。再説明・一言は短く頼むので上限も小さくする。
+        for (prompt_id, expected) in [
+            ("summary_v1", LOCAL_MAX_OUTPUT_TOKENS),
+            (
+                YUUKO_EXPLANATION_PROMPT_ID,
+                LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS,
+            ),
+            (
+                YUUKO_COMMENT_PROMPT_ID,
+                LOCAL_YUUKO_COMMENT_MAX_OUTPUT_TOKENS,
+            ),
+        ] {
             let (max_tokens, format) = local_output_shape(prompt_id);
-            assert_eq!(max_tokens, LOCAL_MAX_OUTPUT_TOKENS, "{prompt_id}");
+            assert_eq!(max_tokens, expected, "{prompt_id}");
             assert!(format.is_none(), "{prompt_id}");
         }
+    }
+
+    #[test]
+    fn yuuko_prompts_ask_for_plain_japanese_speech_with_a_length_limit() {
+        let prompt_for = |prompt_id: &str, level| {
+            build_prompt(
+                &AiRequest {
+                    prompt_id: prompt_id.to_string(),
+                    input_text: "入力本文".to_string(),
+                    context: None,
+                },
+                level,
+            )
+        };
+        for prompt_id in [YUUKO_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID] {
+            let prompt = prompt_for(prompt_id, ExplanationLevel::Normal);
+            // ト書き・日本語以外・挨拶を出さない指示は、外部データより前の固定指示側に置く。
+            let rules = prompt.find(YUUKO_SPEECH_RULES).expect("speech rules");
+            assert!(rules < prompt.find(ARTICLE_DATA_HEADING).unwrap());
+            assert!(prompt.contains("日本語だけで書き"));
+            assert!(prompt.contains("挨拶"));
+            assert!(prompt.contains("ト書き"));
+            // 禁止例として中国語の字そのものは書かない（小さいモデルがまねしやすいため）。
+            assert!(!prompt.contains('哦'));
+            // 念押しの固定文は記事情報の後ろに1回だけ付く（入力本文は区切り見出しの中のまま）。
+            let input = prompt.find("入力本文").unwrap();
+            let reminder = prompt
+                .find(YUUKO_SPEECH_REMINDER_HEADING)
+                .expect("reminder");
+            assert!(input < reminder, "{prompt_id}");
+            assert_eq!(prompt.matches(YUUKO_SPEECH_REMINDER_HEADING).count(), 1);
+            assert!(prompt.ends_with("書かないでください。"), "{prompt_id}");
+        }
+        // 長さは画面の1段落に収まる範囲で、解説レベルに応じて変える。
+        assert!(
+            prompt_for(YUUKO_EXPLANATION_PROMPT_ID, ExplanationLevel::Simple)
+                .contains("150文字以内")
+        );
+        assert!(
+            prompt_for(YUUKO_EXPLANATION_PROMPT_ID, ExplanationLevel::Normal)
+                .contains("200文字以内")
+        );
+        assert!(
+            prompt_for(YUUKO_EXPLANATION_PROMPT_ID, ExplanationLevel::Detailed)
+                .contains("300文字以内")
+        );
+        assert!(
+            prompt_for(YUUKO_COMMENT_PROMPT_ID, ExplanationLevel::Normal).contains("60文字以内")
+        );
+        // 要約・要点には念押しを付けない（中立な文体・JSON の契約を変えないため）。
+        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+            assert!(!prompt_for(prompt_id, ExplanationLevel::Normal)
+                .contains(YUUKO_SPEECH_REMINDER_HEADING));
+        }
+        // 用語解説は口調指示だけを共有し、再説明向けの規則は混ぜない（JSON 契約を崩さないため）。
+        assert!(!term_explanation_prompt_for(ExplanationLevel::Normal).contains(YUUKO_SPEECH_RULES));
     }
 
     #[test]
@@ -1183,8 +1315,8 @@ mod tests {
         eprintln!("input chars: {}", input.chars().count());
         for prompt_id in [
             "summary_v1",
-            "yuuko_explanation_v1",
-            "yuuko_comment_v1",
+            YUUKO_EXPLANATION_PROMPT_ID,
+            YUUKO_COMMENT_PROMPT_ID,
             ARTICLE_POINTS_PROMPT_ID,
         ] {
             let started = Instant::now();
@@ -1206,6 +1338,14 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
+            if prompt_id == YUUKO_EXPLANATION_PROMPT_ID || prompt_id == YUUKO_COMMENT_PROMPT_ID {
+                // 保存前に summary_service が行う後処理（ト書き・挨拶・中国語の助詞の除去）の結果も見る。
+                let cleaned = crate::util::speech_cleanup::clean_yuuko_speech(&response.text);
+                eprintln!(
+                    "{prompt_id} (cleaned): {} chars\n{cleaned}\n",
+                    cleaned.chars().count()
+                );
+            }
             if prompt_id == ARTICLE_POINTS_PROMPT_ID {
                 // 要点・注目ポイントと一緒に、タグ（3〜5件・各20文字以内）も JSON スキーマどおりに出る。
                 let points: AiArticlePoints =
