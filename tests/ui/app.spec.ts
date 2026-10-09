@@ -1818,7 +1818,13 @@ test("reader: 解説 shows the loading state then the explanation on success", a
   await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
 });
 
-test("reader: 解説 command failure shows a safe helper text and 再試行, and reading continues", async ({
+// 用語解説失敗時の固定文言（lib/explain-selection.mjs の termExplainFailureMessage と同じ）。
+const TERM_EXPLAIN_FAILURE_GENERIC =
+  "うまく説明できなかったよ。別のところを選び直すか、再試行してみてね。";
+const TERM_EXPLAIN_FAILURE_VALIDATION =
+  "この選び方だとうまく解説できなかったよ。もう少し短く選び直してみてね。";
+
+test("reader: 解説 command failure shows a reselect hint and 再試行 without a savable provisional entry", async ({
   page,
 }) => {
   await openReaderWithoutExplain(page);
@@ -1832,13 +1838,14 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await explainButton(page).click();
 
-  // 安全な補助説明（失敗の通知）が表示される。
-  await expect(
-    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
-  ).toBeVisible();
+  // 再選択の案内（固定文言）が表示される。
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toBeVisible();
   // 生エラー文言・内部パスはUIへ出ない。
   await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // フロント生成の仮解説は出さず、辞書へ保存できない（保存ボタン自体が無い）。
+  await expect(page.getByText("はこの記事を理解するためのキーワードです。")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   expect(await saveDictionaryCallCount(page)).toBe(0);
   // 再試行ボタンが出る。
   const retry = page.getByRole("button", { name: "再試行" });
@@ -1846,15 +1853,49 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   // 失敗してもニュース閲覧は継続できる（記事本文が表示され続ける）。
   await expect(page.getByText(READER_SUMMARY_TEXT).first()).toBeVisible();
 
-  // 失敗フラグを解除して再試行 → 解説が表示され、失敗表示が消える。
+  // 失敗フラグを解除して再試行 → 解説が表示され、失敗表示が消え、保存できるようになる。
   await page.evaluate(() => {
     (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = false;
   });
   await retry.click();
   await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
-  await expect(
-    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
-  ).toHaveCount(0);
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+});
+
+test("reader: 解説 failure message is chosen by error code and the selected text is not logged", async ({
+  page,
+}) => {
+  const consoleTexts: string[] = [];
+  page.on("console", (message) => consoleTexts.push(message.text()));
+  await openReaderWithoutExplain(page);
+
+  // AI 応答の解析失敗（PARSE_ERROR）→ 汎用の再選択案内。保存不可。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_EXPLAIN_TERM_FAIL_CODE__ =
+      "PARSE_ERROR";
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toBeVisible();
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "再試行" })).toBeVisible();
+
+  // 検証エラー（VALIDATION_ERROR）→ 短く選び直す案内。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_EXPLAIN_TERM_FAIL_CODE__ =
+      "VALIDATION_ERROR";
+  });
+  await page.getByRole("button", { name: "再試行" }).click();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_VALIDATION)).toBeVisible();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+
+  // console へは選択文字列もエラー本文も出さない（コードだけ）。
+  expect(consoleTexts.some((text) => text.includes(READER_SUMMARY_TEXT))).toBe(false);
+  expect(consoleTexts.some((text) => text.includes("/internal/secret/path"))).toBe(false);
 });
 
 test("reader: spamming the 解説 button calls explain_selected_term only once", async ({
@@ -7366,6 +7407,13 @@ async function installTauriMocks(page: Page) {
             // 失敗テスト用: 生エラー文言・内部パスがUIへ出ないことも確認できる識別子を含める。
             if (explainWin.__E2E_EXPLAIN_TERM_FAIL__) {
               throw new Error("E2E explain term failure /internal/secret/path");
+            }
+            // コード別失敗テスト用: 実 Tauri と同じ CommandError 形（code/message）で失敗させる。
+            if (explainWin.__E2E_EXPLAIN_TERM_FAIL_CODE__) {
+              throw {
+                code: explainWin.__E2E_EXPLAIN_TERM_FAIL_CODE__,
+                message: "E2E explain term failure /internal/secret/path",
+              };
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
