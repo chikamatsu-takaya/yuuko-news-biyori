@@ -617,9 +617,14 @@ fn validate_article_tags(value: &serde_json::Value) -> Result<Vec<String>, Outpu
 /// タグ1件を検証し、trim 済みの値を返す。
 /// タグは記事ファイルの front matter（YAML の配列 `tags`）へ保存する。YAML としては serde_yaml が
 /// 必要に応じて引用符を付けるため往復で壊れないが、画面・おすすめ判定でタグとして扱いやすいよう、
-/// 1行・短い・記号で始まらない・区切り文字を含まない値だけを受け付ける。
+/// 1行・短い・区切り文字を含まない値だけを受け付ける（先頭の `#`・`＃` は取り除く）。
 fn validate_article_tag(item: &str) -> Result<String, OutputRejection> {
-    let trimmed = item.trim();
+    // 小さいモデル（ローカルLLM）は指示しても `#タグ` のハッシュタグ形式で返しがちで、拒否するとタグが
+    // 全部捨てられる。先頭の `#`・`＃` は意味を持たない飾りなので、拒否せず取り除いてから検証する。
+    // `# #AI` のように記号と空白が交互に続いても残らないよう、両方をまとめて取り除く。
+    let trimmed = item
+        .trim()
+        .trim_start_matches(|c: char| c == '#' || c == '＃' || c.is_whitespace());
     if trimmed.is_empty() {
         return Err(OutputRejection::Empty);
     }
@@ -632,10 +637,6 @@ fn validate_article_tag(item: &str) -> Result<String, OutputRejection> {
     // タブも含めて制御文字は拒否する（タグは1語の短い値なので、要約のように改行・タブを許す理由がない）。
     if trimmed.contains('\t') || contains_disallowed_control_char(trimmed) {
         return Err(OutputRejection::ControlCharacter);
-    }
-    // `#タグ` 形式（ハッシュタグ・Markdown 見出し）は受け付けない。全角の「＃」も同じ扱いにする。
-    if trimmed.starts_with(['#', '＃']) {
-        return Err(OutputRejection::MarkdownHeading);
     }
     // HTML の山括弧は、タグの形になっていなくても拒否する（短い値なので比較の `<` を許す必要がない）。
     if trimmed.contains(['<', '>']) {
@@ -1993,6 +1994,26 @@ mod tests {
         .unwrap();
         assert_eq!(validated.tags_rejection, None);
         assert_eq!(validated.points.tags.len(), 5);
+
+        // ローカルLLMが返しがちなハッシュタグ形式（実機で6回とも `#中小企業補助金` の形だった）は、
+        // 先頭の `#`・`＃` を取り除いて受け付ける。取り除いた結果の重複もまとめる。
+        let validated = validate_article_points(&points_with_tags(serde_json::json!([
+            "#中小企業補助金",
+            "＃デジタル化",
+            "## 人手不足",
+            "#デジタル化",
+            "＃＃量子計算",
+        ])))
+        .unwrap();
+        assert_eq!(validated.tags_rejection, None);
+        assert_eq!(
+            validated.points.tags,
+            vec!["中小企業補助金", "デジタル化", "人手不足", "量子計算"]
+        );
+        let validated =
+            validate_article_points(&points_with_tags(serde_json::json!(["# #AI", "b", "c"])))
+                .unwrap();
+        assert_eq!(validated.points.tags, vec!["AI", "b", "c"]);
     }
 
     #[test]
@@ -2032,13 +2053,10 @@ mod tests {
                 serde_json::json!(["a", "b", "c\u{7}"]),
                 OutputRejection::ControlCharacter,
             ),
+            (serde_json::json!(["a", "b", "#"]), OutputRejection::Empty),
             (
-                serde_json::json!(["a", "b", "#AI"]),
-                OutputRejection::MarkdownHeading,
-            ),
-            (
-                serde_json::json!(["a", "b", "＃AI"]),
-                OutputRejection::MarkdownHeading,
+                serde_json::json!(["a", "b", " ＃ "]),
+                OutputRejection::Empty,
             ),
             (
                 serde_json::json!(["a", "b", "<b>AI</b>"]),
@@ -2124,7 +2142,7 @@ mod tests {
                 let result = generate_with_points(
                     &service,
                     policy,
-                    &points_with_tags(serde_json::json!(["#AI", "半導体", "経済"])),
+                    &points_with_tags(serde_json::json!(["<b>AI</b>", "半導体", "経済"])),
                     provider,
                 )
                 .unwrap();

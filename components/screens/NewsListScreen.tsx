@@ -37,6 +37,10 @@ import {
   type ArticleSummaryState,
 } from "@/lib/tauri/articles";
 import { SummaryStateTag } from "@/components/news/SummaryStateTag";
+import {
+  ArticleTagList,
+  normalizeArticleTags,
+} from "@/components/news/ArticleTagList";
 
 // 当日ニュースカードの表示モデル（履歴とは別目的のため独自に持つ）。
 type TodayArticle = {
@@ -50,6 +54,8 @@ type TodayArticle = {
   isFavorite: boolean;
   thumbnailType: "ai" | "energy" | "mobile" | "business" | "space" | "lifestyle";
   summaryState?: ArticleSummaryState;
+  // 記事のタグ（表示のみ。絞り込みはニュース履歴画面で行う）。
+  tags: string[];
 };
 
 type NavigationItem = {
@@ -125,6 +131,7 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   isFavorite: article.isFavorite,
   thumbnailType: toThumbnailType(article.genre),
   summaryState: article.summaryState,
+  tags: normalizeArticleTags(article.tags),
 });
 
 // ブラウザ単体プレビュー（非Tauri）向けのサンプル。実データが取れないときだけ使う。
@@ -140,6 +147,7 @@ const fallbackTodayArticles: TodayArticle[] = [
     isNew: true,
     isFavorite: false,
     thumbnailType: "ai",
+    tags: ["AI", "サンプル"],
   },
 ];
 
@@ -192,6 +200,7 @@ function TodayArticleCard({
           <p className="text-xs text-muted-foreground line-clamp-2">
             {article.description}
           </p>
+          <ArticleTagList tags={article.tags} className="mt-1.5" />
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
           <div className="flex items-center gap-1.5">
