@@ -39,13 +39,16 @@ export function QuitResidentButton({ className = "" }: QuitResidentButtonProps) 
   const { toast } = useToast();
   const [open, setOpen] = React.useState(false);
   const [quitting, setQuitting] = React.useState(false);
+  // state は再描画まで反映されないため、同一フレームの連打でも二重に呼ばないよう ref で同期的に止める。
+  const quittingRef = React.useRef(false);
 
   const handleConfirm = async (event: React.MouseEvent) => {
     // 既定動作で即閉じると二重押下の抑止や失敗時の表示順が崩れるため、閉じる時機はここで決める。
     event.preventDefault();
-    if (quitting) {
+    if (quittingRef.current) {
       return;
     }
+    quittingRef.current = true;
     setQuitting(true);
     try {
       // 成功時はプロセスが終了するので、画面側の後処理は行わない（プレビューでは何も起きない）。
@@ -59,6 +62,7 @@ export function QuitResidentButton({ className = "" }: QuitResidentButtonProps) 
         variant: "destructive",
       });
     } finally {
+      quittingRef.current = false;
       setQuitting(false);
     }
   };
