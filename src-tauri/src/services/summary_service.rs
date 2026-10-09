@@ -1,4 +1,4 @@
-use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate};
+use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate, ArticleTagsUpdate};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{
     AiArticlePoints, AiRequest, AiResponse, GenerateArticleSummaryParams,
@@ -189,9 +189,17 @@ impl SummaryService {
             focus_points,
             tags,
         } = points;
-        // タグは検証を通ったとき（3〜5件）だけ置き換え、落ちたとき（空）は既存のタグを残す。
+        // タグは検証を通ったとき（3〜5件）だけ反映し、落ちたとき（空）は既存のタグを残す。
         // タグの失敗では要約の保存を止めない（D11。要点・注目ポイントの検証落ちとは扱いが違う）。
-        let tags = (!tags.is_empty()).then_some(tags);
+        // Mock（provider=Mock・Gemini 失敗時の代替）のタグはジャンルからの定型なので、既存のタグを
+        // 上書きせず、空のときだけ入れる（安全側。実AIの有効なタグは置き換える）。
+        let tags = if tags.is_empty() {
+            ArticleTagsUpdate::Keep
+        } else if points_response.provider == PROVIDER_MOCK {
+            ArticleTagsUpdate::FillIfEmpty(tags)
+        } else {
+            ArticleTagsUpdate::Replace(tags)
+        };
         let update = ArticleSummaryUpdate {
             summary: summary.clone(),
             yuuko_explanation: yuuko_explanation.clone(),
@@ -583,8 +591,9 @@ fn validate_article_tags(value: &serde_json::Value) -> Result<Vec<String>, Outpu
         serde_json::Value::Array(items) => items,
         _ => return Err(OutputRejection::InvalidJson),
     };
-    // 重複除去の前に上限で切る（極端に長い配列を1件ずつ検証しない）。
-    if items.len() > ARTICLE_TAGS_MAX_ITEMS {
+    // 重複除去の前に、生の件数を上限の2倍で切る（極端に長い配列を1件ずつ検証しない）。
+    // 3〜5件の確認は重複を除いた後に行う（["AI", "ai", ...] のような重複で落とさないため）。
+    if items.len() > ARTICLE_TAGS_MAX_ITEMS * 2 {
         return Err(OutputRejection::ItemCount);
     }
     let mut tags: Vec<String> = Vec::with_capacity(items.len());
@@ -598,7 +607,7 @@ fn validate_article_tags(value: &serde_json::Value) -> Result<Vec<String>, Outpu
             tags.push(tag);
         }
     }
-    if tags.len() < ARTICLE_TAGS_MIN_ITEMS {
+    if !(ARTICLE_TAGS_MIN_ITEMS..=ARTICLE_TAGS_MAX_ITEMS).contains(&tags.len()) {
         return Err(OutputRejection::ItemCount);
     }
     Ok(tags)
@@ -1254,7 +1263,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["観点A".to_string()],
                     yuuko_comment: "保存済みの一言".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     ai_provider: "mock".to_string(),
                     generated_at: "2026-10-01T00:00:00Z".to_string(),
                 },
@@ -1502,7 +1511,7 @@ mod tests {
                                     key_points: Vec::new(),
                                     focus_points: vec!["手動の観点".to_string()],
                                     yuuko_comment: "手動の一言".to_string(),
-                                    tags: None,
+                                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                                     ai_provider: "gemini".to_string(),
                                     generated_at: "2026-10-08T00:00:00Z".to_string(),
                                 },
@@ -1894,6 +1903,14 @@ mod tests {
         assert_eq!(validated.tags_rejection, None);
         assert_eq!(validated.points.tags, vec!["半導体", "AI", "地域経済"]);
 
+        // 件数は重複を除いた後で数える（生の6件でも、除いて5件なら受け付ける）。
+        let validated = validate_article_points(&points_with_tags(serde_json::json!([
+            "AI", "ai", "b", "c", "d", "e"
+        ])))
+        .unwrap();
+        assert_eq!(validated.tags_rejection, None);
+        assert_eq!(validated.points.tags, vec!["AI", "b", "c", "d", "e"]);
+
         // 上限の文字数（20文字）と、YAML で特別な意味を持ちうる値もタグとしては受け付ける
         // （保存時は serde_yaml が引用符を付ける）。
         let at_limit = "あ".repeat(ARTICLE_TAG_MAX_CHARS);
@@ -1910,8 +1927,14 @@ mod tests {
         let too_long = "あ".repeat(ARTICLE_TAG_MAX_CHARS + 1);
         for (tags, expected) in [
             (serde_json::json!(["a", "b"]), OutputRejection::ItemCount),
+            // 重複を除いても6件。
             (
                 serde_json::json!(["a", "b", "c", "d", "e", "f"]),
+                OutputRejection::ItemCount,
+            ),
+            // 生の件数が上限の2倍（10件）を超える。
+            (
+                serde_json::json!(["a", "a", "a", "a", "a", "a", "a", "a", "b", "c", "d"]),
                 OutputRejection::ItemCount,
             ),
             // 重複を除くと2件になる。
@@ -2086,11 +2109,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
+    /// 初回起動時のサンプル記事（タグ付き）を置いた、既定（provider=Mock）のサービス。
+    fn build_service_with_sample_articles(root_dir: &Path) -> (SummaryService, ArticleRepository) {
+        let article_repository = ArticleRepository::with_paths(
+            root_dir.join("news"),
+            root_dir.join("article_favorites.json"),
+            root_dir.join("archive"),
+        );
+        article_repository.initialize_default_if_missing().unwrap();
+        let service = SummaryService::new(
+            AiProviderService::new(&AppPaths::new(root_dir.join("ai"))),
+            article_repository.clone(),
+            SettingsRepository::with_path(root_dir.join("settings.json")),
+        );
+        (service, article_repository)
+    }
+
+    #[test]
+    fn mock_summary_keeps_existing_tags_but_real_ai_tags_replace_them() {
+        let root_dir = temp_root("tags-sample-mock");
+        let (service, repository) = build_service_with_sample_articles(&root_dir);
+        let sample_id = "article-001";
+        let sample_params = || GenerateArticleSummaryParams {
+            article_id: sample_id.to_string(),
+        };
+        let sample_tags = repository.get_article_tags(sample_id).unwrap();
+        assert!(!sample_tags.is_empty());
+
+        // Mock の要約（provider=Mock）は保存されるが、既存のタグは定型タグで上書きしない。
+        service.generate_article_summary(sample_params()).unwrap();
+        assert!(repository.is_article_summarized(sample_id).unwrap());
+        assert_eq!(repository.get_article_tags(sample_id).unwrap(), sample_tags);
+
+        // Gemini の失敗で Mock に切り替わった要点（タグ付き）も、既存のタグを上書きしない。
+        service
+            .generate_article_summary_with(
+                sample_params(),
+                FallbackPolicy::SaveFallback,
+                |request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Points {
+                        let mock = service
+                            .ai_provider_service
+                            .request_text(
+                                request,
+                                crate::domain::settings::AiProvider::Mock,
+                                crate::domain::settings::ExplanationLevel::Normal,
+                            )
+                            .unwrap();
+                        return select_valid_output(kind, mock);
+                    }
+                    select_valid_output(kind, response("geminiの出力", "gemini"))
+                },
+            )
+            .unwrap();
+        assert_eq!(repository.get_article_tags(sample_id).unwrap(), sample_tags);
+
+        // 実AIの有効なタグは置き換える。
+        service
+            .generate_article_summary_with(
+                sample_params(),
+                FallbackPolicy::SaveFallback,
+                |_request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Points {
+                        return select_valid_output(
+                            kind,
+                            response(
+                                &points_with_tags(serde_json::json!([
+                                    "生成AI",
+                                    "投資",
+                                    "新興企業"
+                                ])),
+                                "local",
+                            ),
+                        );
+                    }
+                    select_valid_output(kind, response("localの出力", "local"))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            repository.get_article_tags(sample_id).unwrap(),
+            vec!["生成AI", "投資", "新興企業"]
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
     #[test]
     fn mock_generation_saves_deterministic_tags_from_the_genre() {
         let root_dir = temp_root("tags-mock");
         let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
-        // 既定（provider=Mock）。ジャンル「テクノロジー」を先頭にした3件が保存される。
+        // 既定（provider=Mock）。タグの無い記事には、ジャンル「テクノロジー」を先頭にした3件が入る。
         service.generate_article_summary(params()).unwrap();
         assert_eq!(
             repository.get_article_tags(ARTICLE_ID).unwrap(),

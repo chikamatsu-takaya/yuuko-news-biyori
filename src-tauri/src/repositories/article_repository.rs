@@ -12,7 +12,8 @@ use crate::domain::article::{
     ArchiveMonthDto, ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
     ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter,
     ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
-    FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult, SummaryState,
+    ArticleTagsUpdate, FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult,
+    SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -802,9 +803,16 @@ impl ArticleRepository {
         article.yuuko_explanation = Some(update.yuuko_explanation);
         article.key_points = update.key_points;
         article.focus_points = update.focus_points;
-        // タグは検証を通ったときだけ置き換える（失敗時は既存のタグを残す・D11）。
-        if let Some(tags) = update.tags {
-            article.tags = tags;
+        // タグは検証を通ったときだけ反映する（失敗時は既存のタグを残す・D11）。
+        // Mock の定型タグは、既存のタグが空のときだけ入れる（実在のタグを上書きしない）。
+        match update.tags {
+            ArticleTagsUpdate::Keep => {}
+            ArticleTagsUpdate::Replace(tags) => article.tags = tags,
+            ArticleTagsUpdate::FillIfEmpty(tags) => {
+                if article.tags.is_empty() {
+                    article.tags = tags;
+                }
+            }
         }
         article.yuuko_comment = Some(update.yuuko_comment);
         article.status.summarized = true;
@@ -3005,7 +3013,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "更新後のコメント".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -3099,7 +3107,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "変更あり".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -4384,7 +4392,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["注目".to_string()],
                     yuuko_comment: "コメント".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -4554,7 +4562,7 @@ mod tests {
             key_points: vec!["要点A".to_string(), "要点B".to_string()],
             focus_points: vec!["観点A".to_string(), "観点B".to_string()],
             yuuko_comment: "新しい一言".to_string(),
-            tags: None,
+            tags: crate::domain::article::ArticleTagsUpdate::Keep,
             ai_provider: "gemini".to_string(),
             generated_at: "2026-06-08T00:00:00Z".to_string(),
         };
@@ -4639,7 +4647,7 @@ mod tests {
                         "AIが書いた注目ポイント".to_string(),
                     ],
                     yuuko_comment: "一言".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     ai_provider: "mock".to_string(),
                     generated_at: "2026-06-08T00:00:00Z".to_string(),
                 },

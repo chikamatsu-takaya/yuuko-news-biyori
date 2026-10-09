@@ -1534,7 +1534,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: Vec::new(),
                     yuuko_comment: "ひとこと".to_string(),
-                    tags: None,
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     ai_provider: "mock".to_string(),
                     generated_at: "2026-06-20T00:00:00Z".to_string(),
                 },
