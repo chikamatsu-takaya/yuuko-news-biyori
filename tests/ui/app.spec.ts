@@ -2209,6 +2209,139 @@ test("reader: a stale dictionary save failure must not surface on the new articl
 
 // --- 用語解説ダイアログのドラッグ移動 ---
 
+// ブラウザプレビュー用サンプル記事（article-001）の要点・注目ポイント。実記事では出てはいけない。
+const READER_SAMPLE_KEY_POINT = "投資対象が研究寄りから業務課題の解決寄りへ移っている";
+const READER_SAMPLE_TITLE = "生成AIスタートアップの資金調達が再加速";
+const READER_UNSUMMARIZED_TEXT = "要約はまだ準備中だよ。「要約を作成」で作れるよ。";
+
+test("reader summary: a summarized article shows its summary, key points and 要約を更新", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    READER_SUMMARY_TEXT
+  );
+  await expect(main.getByText("クリックできること")).toBeVisible();
+  await expect(main.getByText("UI確認中だよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
+test("reader summary: an unsummarized article shows the not-ready state without sample or excerpt text", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ =
+      true;
+  });
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toHaveCount(0);
+  await expect(
+    main.getByText("ゆうこの解説はまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(main.getByText("要点はまだ作成されていないよ。")).toBeVisible();
+  await expect(
+    main.getByText("注目ポイントはまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(
+    main.getByText("ゆうこの感想はまだ作成されていないよ。")
+  ).toBeVisible();
+  // サンプル記事の要点や、本文抜粋の流用が出ていない。
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  await expect(main.getByText(READER_SUMMARY_TEXT)).toHaveCount(0);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
+
+  // 「要約を作成」で既存の要約生成を呼び、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "要約を作成" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(main.getByText("主要ボタン")).toBeVisible();
+  await expect(main.getByText("確認できたよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+});
+
+test("reader summary: browser preview (outside Tauri) keeps the sample article display", async ({
+  page,
+}) => {
+  await openHome(page);
+  // ホームのモック記事カードが出てから Tauri 外にする（記事詳細のマウント時に isTauriRuntime が false になる）。
+  await expect(
+    page.locator("main").getByText("E2Eテスト用ニュース").first()
+  ).toBeVisible();
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(
+    main.getByRole("heading", { name: READER_SAMPLE_TITLE })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+});
+
+test("reader summary: while the real article loads, a loading state is shown instead of the sample", async ({
+  page,
+}) => {
+  await openHome(page);
+  await enableArticleDetailGate(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByText("記事を読み込んでいるよ…")).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_TITLE)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+
+  // 開発時の StrictMode で取得が2回走ることがあるため、保留中の呼び出しをすべて解放する。
+  await releaseArticleDetail(page, 0);
+  await releaseArticleDetail(page, 1);
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText("記事を読み込んでいるよ…")).toHaveCount(0);
+});
+
+test("reader summary: a failed article load shows an error state with 再試行 instead of the sample", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = true;
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByRole("alert")).toHaveText(
+    "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
+  );
+  await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_TITLE)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 再試行で取得できれば記事を表示する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = false;
+  });
+  await main.getByRole("button", { name: "再試行" }).click();
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
 test("term popup: dragging the background moves the dialog", async ({ page }) => {
   await openReaderFromHome(page);
   await expect(termPopup(page)).toBeVisible();
@@ -6458,10 +6591,28 @@ async function installTauriMocks(page: Page) {
                 resolvers.push(resolve);
               });
             }
+            // 取得失敗モード: 本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+            if (detailWin.__E2E_ARTICLE_DETAIL_FAIL__) {
+              throw {
+                code: "STORAGE_ERROR",
+                message: "E2E raw detail failure /internal/secret/path",
+              };
+            }
+            // 未要約モード: Rust と同じく summary には本文抜粋が入り、AI 生成項目は空で届く。
+            if (detailWin.__E2E_ARTICLE_DETAIL_UNSUMMARIZED__) {
+              return {
+                ...articleSummary,
+                originalUrl: "https://example.com/e2e-article",
+                focusPoints: [],
+                keywordCandidates: ["E2E用語", "Playwright"],
+                summaryState: "none",
+              };
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
               originalUrl: "https://example.com/e2e-article",
+              summaryState: "done",
               yuukoExplanation: "E2E用の要約です。",
               focusPoints: ["クリックできること", "表示が崩れないこと"],
               yuukoComment: "UI確認中だよ。",
