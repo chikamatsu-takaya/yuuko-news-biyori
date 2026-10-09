@@ -774,7 +774,12 @@ export default function GachaScreen({
           <span className="text-xs text-muted-foreground">お知らせ</span>
           <span className="text-xs text-[var(--yuuko-green)]">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" aria-hidden="true" />
-            新しいニュースが3件届いてるよ！
+            {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みのコレクション状況を出す。 */}
+            {loadStatus === "loading"
+              ? "読み込み中..."
+              : gacha
+                ? `コレクション ${gacha.ownedCount} / ${gacha.totalCount}`
+                : "ガチャ"}
           </span>
         </div>
         <div className="flex items-center gap-3">

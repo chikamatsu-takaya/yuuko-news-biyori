@@ -1286,8 +1286,13 @@ export default function DictionaryScreen({
           <span className="text-xs text-muted-foreground">|</span>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
+            {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、この画面の表示件数を出す。 */}
             <span className="text-xs text-foreground">
-              新しいニュースが3件届いてるよ！
+              {isLoading
+                ? "読み込み中..."
+                : loadNoticeKind === "error"
+                  ? "辞書"
+                  : `辞書項目 ${sortedEntries.length}件を表示中`}
             </span>
           </div>
         </div>
