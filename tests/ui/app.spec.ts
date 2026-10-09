@@ -1149,6 +1149,11 @@ test("dictionary detail shows the created-at date and reference count", async ({
   await expect(
     page.getByTestId("dictionary-detail-reference-count")
   ).toHaveText("3回");
+  // フッターは固定の「3件届いてるよ」ではなく、表示中の辞書件数を出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(
+    page.locator("footer").getByText(/辞書項目 \d+件を表示中/)
+  ).toBeVisible();
 });
 
 test("dictionary detail falls back to a dash when created-at and reference count are missing", async ({
@@ -4680,6 +4685,9 @@ test("settings non-corrupt load failure keeps the generic message without the re
   ).toHaveCount(0);
   await expect(page.getByText("設定ファイルが壊れていて")).toHaveCount(0);
   await expect(page.getByText("secret/path")).toHaveCount(0);
+  // 画面の値は既定値なので、変更しても保存で実ファイルを上書きできない。
+  await page.getByRole("switch").first().click();
+  await expect(page.getByRole("button", { name: "保存する", exact: true })).toBeDisabled();
 });
 
 // 抑制条件: 未実装の抑制は「準備中」で操作不可。会議中・マイク使用中・フルスクリーン抑制は
@@ -6725,6 +6733,9 @@ test("gacha screen shows real fragments, collection with ？ and remaining count
   await expect(page.getByTestId("gacha-star-fragments")).toHaveText("30");
   await expect(page.getByTestId("gacha-collection-count")).toHaveText("2 / 4");
   await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("のこり 2");
+  // フッターは固定の「3件届いてるよ」ではなく、取得済みのコレクション状況を出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.locator("footer").getByText("コレクション 2 / 4")).toBeVisible();
   await expect(page.getByTestId("gacha-collection-owned")).toHaveCount(2);
   await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(2);
   await expect(page.getByTestId("gacha-collection-unowned").first()).toContainText("？");
