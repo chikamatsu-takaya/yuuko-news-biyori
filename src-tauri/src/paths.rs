@@ -12,6 +12,8 @@ pub const DICTIONARY_RELATIVE_PATH: &str = "dictionary/entries.json";
 pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
 pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
+/// 友情ポイント加算イベントの直近履歴（データ設計書 §10.3）。移行ZIPには含めない。
+pub const FRIENDSHIP_EVENTS_RELATIVE_PATH: &str = "user/friendship_events.json";
 pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
 pub const GACHA_STATE_RELATIVE_PATH: &str = "gacha/gacha_state.json";
 /// データ移行用ZIPの固定の書き出し先（データ設計書 §15.6、判断台帳 D41）。
@@ -31,6 +33,7 @@ pub struct AppPaths {
     pub archive_maintenance_state_path: PathBuf,
     pub dictionary_path: PathBuf,
     pub friendship_path: PathBuf,
+    pub friendship_events_path: PathBuf,
     pub gacha_state_path: PathBuf,
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
@@ -48,6 +51,7 @@ impl AppPaths {
             app_data_dir.join(ARCHIVE_MAINTENANCE_STATE_RELATIVE_PATH);
         let dictionary_path = app_data_dir.join(DICTIONARY_RELATIVE_PATH);
         let friendship_path = app_data_dir.join(FRIENDSHIP_RELATIVE_PATH);
+        let friendship_events_path = app_data_dir.join(FRIENDSHIP_EVENTS_RELATIVE_PATH);
         let gacha_state_path = app_data_dir.join(GACHA_STATE_RELATIVE_PATH);
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
@@ -62,6 +66,7 @@ impl AppPaths {
             archive_maintenance_state_path,
             dictionary_path,
             friendship_path,
+            friendship_events_path,
             gacha_state_path,
             network_allowlist_path,
             news_refresh_state_path,

@@ -45,6 +45,16 @@ impl FriendshipEventType {
         }
     }
 
+    /// 保存用の文字列（`from_storage` の逆）。イベント履歴（§10.3）の `eventType` に使う。
+    pub fn as_storage(self) -> &'static str {
+        match self {
+            Self::YuukoToMain => "yuuko_to_main",
+            Self::NewsDetailOpened => "news_detail_opened",
+            Self::ExplanationViewed => "explanation_viewed",
+            Self::TermExplained => "term_explained",
+        }
+    }
+
     /// 加算ポイント（§10.4）。
     pub fn points(self) -> u32 {
         match self {
@@ -253,6 +263,47 @@ impl Default for FriendshipStateDto {
     }
 }
 
+/// 加算イベント履歴の保存件数上限（直近 N 件。データ設計書 §10.3）。
+pub const FRIENDSHIP_EVENT_HISTORY_LIMIT: usize = 200;
+
+/// 加算イベント履歴の1件（`user/friendship_events.json` の `events[]`・データ設計書 §10.3）。
+/// 外部由来の文字列（記事本文・選択語・記事ID など）は持たない。`event_type` は検証済みの種別だけ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendshipEventRecord {
+    pub event_type: String,
+    /// 実際に加算されたポイント（1 以上。上限で 0 になった加算は記録しない）。
+    pub points: u32,
+    /// 加算時刻（UTC・"YYYY-MM-DDThh:mm:ssZ"）。
+    pub created_at: String,
+}
+
+/// 加算イベント履歴ファイル全体（古い順。末尾が最新）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendshipEventLog {
+    #[serde(default = "event_log_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub events: Vec<FriendshipEventRecord>,
+}
+
+fn event_log_version() -> u32 {
+    1
+}
+
+impl FriendshipEventLog {
+    /// 末尾へ追加し、上限を超えた古いものから捨てる（直近 `FRIENDSHIP_EVENT_HISTORY_LIMIT` 件だけ残す）。
+    pub fn push_truncated(&mut self, record: FriendshipEventRecord) {
+        self.version = event_log_version();
+        self.events.push(record);
+        if self.events.len() > FRIENDSHIP_EVENT_HISTORY_LIMIT {
+            let excess = self.events.len() - FRIENDSHIP_EVENT_HISTORY_LIMIT;
+            self.events.drain(..excess);
+        }
+    }
+}
+
 /// `record_friendship_event` の入力（フロントからのイベント通知）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -276,6 +327,40 @@ pub struct RecordFriendshipEventResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_type_storage_round_trips() {
+        for event in [
+            FriendshipEventType::YuukoToMain,
+            FriendshipEventType::NewsDetailOpened,
+            FriendshipEventType::ExplanationViewed,
+            FriendshipEventType::TermExplained,
+        ] {
+            assert_eq!(
+                FriendshipEventType::from_storage(event.as_storage()),
+                Some(event)
+            );
+        }
+    }
+
+    #[test]
+    fn event_log_keeps_only_most_recent_records() {
+        let mut log = FriendshipEventLog::default();
+        for i in 0..(FRIENDSHIP_EVENT_HISTORY_LIMIT + 5) {
+            log.push_truncated(FriendshipEventRecord {
+                event_type: "term_explained".to_string(),
+                points: 1,
+                created_at: format!("t{i}"),
+            });
+        }
+        assert_eq!(log.version, 1);
+        assert_eq!(log.events.len(), FRIENDSHIP_EVENT_HISTORY_LIMIT);
+        assert_eq!(log.events.first().unwrap().created_at, "t5");
+        assert_eq!(
+            log.events.last().unwrap().created_at,
+            format!("t{}", FRIENDSHIP_EVENT_HISTORY_LIMIT + 4)
+        );
+    }
 
     #[test]
     fn default_friendship_state_starts_at_rank_one() {
