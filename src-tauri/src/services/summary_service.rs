@@ -1206,4 +1206,37 @@ mod tests {
         assert_eq!(detail.summary.as_deref(), Some("2回目の出力"));
         let _ = std::fs::remove_dir_all(&root_dir);
     }
+
+    #[test]
+    fn nickname_is_never_sent_to_ai() {
+        // 呼び名は吹き出しの表示にだけ使い、AI へ送る入力（本文・文脈）には含めない（要件定義書 §7.6.5）。
+        let root_dir = temp_root("nickname-not-sent");
+        let (service, _repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        let nickname = "呼び名検査用ニックネーム";
+        let mut settings = crate::domain::settings::PersistedSettings::default();
+        settings.user.nickname = nickname.to_string();
+        SettingsRepository::with_path(root_dir.join("settings.json"))
+            .save(&settings)
+            .unwrap();
+
+        let requests = RefCell::new(Vec::new());
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |request, _kind, _provider, _level| {
+                    requests.borrow_mut().push(request);
+                    Ok(response("実AIの出力", "gemini"))
+                },
+            )
+            .unwrap();
+
+        let requests = requests.into_inner();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert!(!request.input_text.contains(nickname));
+            assert!(!request.context.unwrap_or_default().contains(nickname));
+        }
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
 }
