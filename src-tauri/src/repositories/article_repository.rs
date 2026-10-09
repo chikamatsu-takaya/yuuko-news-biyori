@@ -793,6 +793,7 @@ impl ArticleRepository {
     ) -> Result<(), AppError> {
         article.summary = Some(update.summary);
         article.yuuko_explanation = Some(update.yuuko_explanation);
+        article.key_points = update.key_points;
         article.focus_points = update.focus_points;
         article.yuuko_comment = Some(update.yuuko_comment);
         article.status.summarized = true;
@@ -1376,6 +1377,8 @@ struct PersistedArticleRecord {
     excerpt: Option<String>,
     summary: Option<String>,
     yuuko_explanation: Option<String>,
+    /// 要点（「要点」節）。節が無い既存ファイルは空として読む（旧データ互換）。
+    key_points: Vec<String>,
     focus_points: Vec<String>,
     yuuko_comment: Option<String>,
     keyword_candidates: Vec<String>,
@@ -1431,6 +1434,7 @@ impl PersistedArticleRecord {
             excerpt: sections.excerpt,
             summary: sections.summary,
             yuuko_explanation: sections.yuuko_explanation,
+            key_points: sections.key_points,
             focus_points: sections.focus_points,
             yuuko_comment: sections.yuuko_comment,
             keyword_candidates: sections.keyword_candidates,
@@ -1473,6 +1477,7 @@ impl PersistedArticleRecord {
             excerpt: article.excerpt,
             summary: None,
             yuuko_explanation: None,
+            key_points: Vec::new(),
             focus_points: Vec::new(),
             yuuko_comment: None,
             keyword_candidates: Vec::new(),
@@ -1531,7 +1536,13 @@ impl PersistedArticleRecord {
             summary: self.summary.clone().or_else(|| self.excerpt.clone()),
             excerpt: self.excerpt.clone(),
             yuuko_explanation: self.yuuko_explanation.clone(),
-            focus_points: self.focus_points.clone(),
+            key_points: self.key_points.clone(),
+            focus_points: self
+                .focus_points
+                .iter()
+                .filter(|point| !is_legacy_template_focus_point(point))
+                .cloned()
+                .collect(),
             yuuko_comment: self.yuuko_comment.clone(),
             is_favorite,
             keyword_candidates: self.keyword_candidates.clone(),
@@ -1644,6 +1655,8 @@ struct ArticleBodySections {
     excerpt: Option<String>,
     summary: Option<String>,
     yuuko_explanation: Option<String>,
+    /// 要点（「要点」節）。節が無い既存ファイルは空として読む（旧データ互換）。
+    key_points: Vec<String>,
     focus_points: Vec<String>,
     yuuko_comment: Option<String>,
     keyword_candidates: Vec<String>,
@@ -1654,6 +1667,7 @@ enum ArticleBodySection {
     Excerpt,
     Summary,
     Explanation,
+    KeyPoints,
     FocusPoints,
     Comment,
     Keywords,
@@ -1665,6 +1679,7 @@ impl ArticleBodySection {
             "## 本文抜粋" => Some(Self::Excerpt),
             "## AI要約" => Some(Self::Summary),
             "## ゆうこの用語解説" => Some(Self::Explanation),
+            "## 要点" => Some(Self::KeyPoints),
             "## 注目ポイント" => Some(Self::FocusPoints),
             "## ゆうこの一言" => Some(Self::Comment),
             "## 解説対象キーワード" => Some(Self::Keywords),
@@ -1677,6 +1692,7 @@ impl ArticleBodySection {
             Self::Excerpt => "本文抜粋",
             Self::Summary => "AI要約",
             Self::Explanation => "ゆうこの用語解説",
+            Self::KeyPoints => "要点",
             Self::FocusPoints => "注目ポイント",
             Self::Comment => "ゆうこの一言",
             Self::Keywords => "解説対象キーワード",
@@ -1900,6 +1916,9 @@ fn flush_body_section(
         ArticleBodySection::Comment => {
             sections.yuuko_comment = normalize_text_block(lines);
         }
+        ArticleBodySection::KeyPoints => {
+            sections.key_points = normalize_list_block(lines);
+        }
         ArticleBodySection::FocusPoints => {
             sections.focus_points = normalize_list_block(lines);
         }
@@ -1907,6 +1926,16 @@ fn flush_body_section(
             sections.keyword_candidates = normalize_list_block(lines);
         }
     }
+}
+
+/// D18 以前の要約生成は、注目ポイントを AI ではなく定型文（`{タイトル} の要点を確認する` /
+/// `{ジャンル} 分野での意味を捉える` / `元記事の背景と影響範囲を整理する`）で保存していた。
+/// 画面に定型文を出さないよう、記事詳細へ渡すときにだけ除く（記事ファイルは書き換えない。
+/// 要約を作り直すと AI の注目ポイントで上書きされる）。
+fn is_legacy_template_focus_point(point: &str) -> bool {
+    point.ends_with(" の要点を確認する")
+        || point.ends_with(" 分野での意味を捉える")
+        || point == "元記事の背景と影響範囲を整理する"
 }
 
 fn normalize_text_block(lines: &[String]) -> Option<String> {
@@ -1968,6 +1997,11 @@ fn compose_article_body(article: &PersistedArticleRecord) -> String {
         &mut sections,
         ArticleBodySection::Explanation,
         article.yuuko_explanation.as_deref(),
+    );
+    push_list_section(
+        &mut sections,
+        ArticleBodySection::KeyPoints,
+        &article.key_points,
     );
     push_list_section(
         &mut sections,
@@ -2430,6 +2464,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "この記事では、生成AIそのものよりも、それをどう実務に組み込むかを支える企業に期待が集まっている点が大切です。".to_string(),
             ),
+            key_points: vec!["複数の生成AIスタートアップが大型の資金調達を発表した".to_string(), "法人向けの導入支援や運用最適化の分野に資金が集まっている".to_string()],
             focus_points: vec![
                 "投資対象がモデル開発だけでなく運用支援まで広がっている".to_string(),
                 "法人導入の具体策を持つ企業が評価されやすい".to_string(),
@@ -2481,6 +2516,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "単に安くするだけでなく、導入後にどう使い続けてもらうかまで含めて設計している点が重要です。".to_string(),
             ),
+            key_points: vec!["SaaS各社が中堅企業向けの新プランを発表した".to_string(), "価格の見直しと導入・運用支援をセットで提供する".to_string()],
             focus_points: vec![
                 "中堅企業向けに支援内容を明確化している".to_string(),
                 "価格だけでなく運用支援を合わせて提供している".to_string(),
@@ -2532,6 +2568,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "推論は学習より身近な場面でたくさん実行されるので、電力効率の改善は実用面でとても効いてきます。".to_string(),
             ),
+            key_points: vec!["新しい計算構成でAI推論の消費電力を抑える実験結果が報告された".to_string(), "省電力と処理効率の両立が期待できる".to_string()],
             focus_points: vec![
                 "推論処理での省電力性が主な評価軸になっている".to_string(),
                 "研究段階でも実運用を意識した測定が行われている".to_string(),
@@ -2560,8 +2597,8 @@ mod tests {
     use crate::error::AppError;
 
     use super::{
-        archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
-        PersistedArchiveState, PersistedArticleRecord,
+        archive_entry_name, month_bucket_from_text, parse_article_body, ArticleRepository,
+        ArticleSummaryUpdate, PersistedArchiveState, PersistedArticleRecord,
     };
 
     struct TestRepositoryContext {
@@ -2932,6 +2969,7 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "archive作成後の要約".to_string(),
                     yuuko_explanation: "更新後の説明".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "更新後のコメント".to_string(),
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
@@ -3024,6 +3062,7 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "計画作成後の変更".to_string(),
                     yuuko_explanation: "更新後".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "変更あり".to_string(),
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
@@ -4307,6 +4346,7 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "要約".to_string(),
                     yuuko_explanation: "説明".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["注目".to_string()],
                     yuuko_comment: "コメント".to_string(),
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
@@ -4475,6 +4515,7 @@ mod tests {
         let update = ArticleSummaryUpdate {
             summary: "新しいAI要約テキスト".to_string(),
             yuuko_explanation: "新しい再説明".to_string(),
+            key_points: vec!["要点A".to_string(), "要点B".to_string()],
             focus_points: vec!["観点A".to_string(), "観点B".to_string()],
             yuuko_comment: "新しい一言".to_string(),
             ai_provider: "gemini".to_string(),
@@ -4493,22 +4534,94 @@ mod tests {
         assert_eq!(detail.summary.as_deref(), Some("新しいAI要約テキスト"));
         assert_eq!(detail.yuuko_explanation.as_deref(), Some("新しい再説明"));
         assert_eq!(detail.yuuko_comment.as_deref(), Some("新しい一言"));
+        // 要点と注目ポイントは別の節として保存され、混ざらずに読み戻せる（D18）。
+        assert_eq!(
+            detail.key_points,
+            vec!["要点A".to_string(), "要点B".to_string()]
+        );
         assert_eq!(
             detail.focus_points,
             vec!["観点A".to_string(), "観点B".to_string()]
         );
-
         // front matter のメタ情報も永続化されていることを確認。
         let record = context
             .repository
             .find_article_record("article-002")
             .unwrap();
+        let raw = std::fs::read_to_string(context.repository.article_path(&record)).unwrap();
+        assert!(raw.contains("## 要点\n- 要点A\n- 要点B"), "{raw}");
+        assert!(raw.contains("## 注目ポイント\n- 観点A\n- 観点B"), "{raw}");
         assert!(record.status.summarized);
         assert_eq!(record.ai_provider.as_deref(), Some("gemini"));
         assert_eq!(
             record.summary_generated_at.as_deref(),
             Some("2026-06-08T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn article_body_without_key_points_section_loads_as_empty_key_points() {
+        // 要点の節が無い既存の記事ファイル（D18 以前）も読み込め、要点は空・注目ポイントは従来どおり。
+        let sections = parse_article_body(
+            "## AI要約\n要約です。\n\n## 注目ポイント\n- 観点A\n- 観点B\n\n## ゆうこの一言\n一言だよ。",
+        );
+        assert!(sections.key_points.is_empty());
+        assert_eq!(
+            sections.focus_points,
+            vec!["観点A".to_string(), "観点B".to_string()]
+        );
+        assert_eq!(sections.yuuko_comment.as_deref(), Some("一言だよ。"));
+
+        // 要点の節があるときは、注目ポイントと別々に読む。
+        let sections =
+            parse_article_body("## 要点\n- 起きたこと1\n- 起きたこと2\n\n## 注目ポイント\n- 観点A");
+        assert_eq!(
+            sections.key_points,
+            vec!["起きたこと1".to_string(), "起きたこと2".to_string()]
+        );
+        assert_eq!(sections.focus_points, vec!["観点A".to_string()]);
+    }
+
+    #[test]
+    fn legacy_template_focus_points_are_not_shown_in_the_detail() {
+        // D18 以前に定型文で保存された注目ポイントは、記事詳細には出さない（ファイルには残す）。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        context
+            .repository
+            .update_article_summary(
+                "article-002",
+                ArticleSummaryUpdate {
+                    summary: "要約".to_string(),
+                    yuuko_explanation: "再説明".to_string(),
+                    key_points: Vec::new(),
+                    focus_points: vec![
+                        "SaaS企業が中堅市場向け新プランを発表 の要点を確認する".to_string(),
+                        "ビジネス 分野での意味を捉える".to_string(),
+                        "元記事の背景と影響範囲を整理する".to_string(),
+                        "AIが書いた注目ポイント".to_string(),
+                    ],
+                    yuuko_comment: "一言".to_string(),
+                    ai_provider: "mock".to_string(),
+                    generated_at: "2026-06-08T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert!(detail.key_points.is_empty());
+        assert_eq!(
+            detail.focus_points,
+            vec!["AIが書いた注目ポイント".to_string()]
+        );
+        let record = context
+            .repository
+            .find_article_record("article-002")
+            .unwrap();
+        assert_eq!(record.focus_points.len(), 4);
     }
 
     #[test]

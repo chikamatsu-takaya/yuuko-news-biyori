@@ -13,10 +13,16 @@ use crate::domain::ai_connection::{
     LocalAiFailure,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
-use crate::domain::summary::{AiRequest, AiResponse, TERM_EXPLANATION_PROMPT_ID};
+use crate::domain::summary::{
+    AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, FOCUS_POINTS_MAX_ITEMS,
+    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    TERM_EXPLANATION_PROMPT_ID,
+};
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
-use crate::infra::local_llm_runtime::{term_explanation_response_format, ResponseFormat};
+use crate::infra::local_llm_runtime::{
+    article_points_response_format, term_explanation_response_format, ResponseFormat,
+};
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
 
@@ -194,6 +200,10 @@ impl AiProviderService {
             "summary_v1" => request.input_text,
             "yuuko_explanation_v1" => request.input_text,
             "yuuko_comment_v1" => request.input_text,
+            // 要点・注目ポイント: 種（無害化済みのタイトル＋本文抜粋）から決定的な JSON を組む（外部通信なし）。
+            id if id == ARTICLE_POINTS_PROMPT_ID => {
+                serde_json::to_string(&mock_article_points(&request.input_text)).unwrap_or_default()
+            }
             // 用語解説: 決定的で解析可能な JSON を返す（外部通信なし・APIキー未設定/失敗フォールバックでも
             // 用語解説を返せるようにする）。選択語＝input_text。記事本文・context の生値は載せない。
             id if id == TERM_EXPLANATION_PROMPT_ID => {
@@ -227,14 +237,67 @@ fn mock_term_explanation_detail(term: &str, explanation_level: ExplanationLevel)
     }
 }
 
+/// 要点・注目ポイントの Mock（決定的）。種は summary_service が無害化した「1行目=タイトル、2行目以降=本文抜粋」。
+/// 要点は本文抜粋（無ければタイトル）を「。」・改行で区切った先頭の文から作り、足りなければ定型文で2件にする。
+/// 種は無害化済み（`<` は全角・制御文字なし・行頭 `#` と区切り行なし）だが、「。」で区切った途中から
+/// `#` や `-` で始まる断片はできうるため、Mock でも出力検証に落ちないよう取り除く。
+/// 画面にそのまま出るため、mock などの内部ラベルは文面に含めない。
+fn mock_article_points(input_text: &str) -> AiArticlePoints {
+    fn sentences<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+        lines
+            .flat_map(|line| line.split('。'))
+            .map(str::trim)
+            .filter(|sentence| !sentence.is_empty() && !sentence.starts_with(['#', '-', '*']))
+            .take(3)
+            .map(|sentence| {
+                sentence
+                    .chars()
+                    .take(POINT_ITEM_MAX_CHARS)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    let mut lines = input_text.trim().lines().map(str::trim);
+    let title = lines.next().unwrap_or("");
+    let mut key_points = sentences(lines);
+    if key_points.is_empty() {
+        key_points = sentences(std::iter::once(title));
+    }
+    let short_title = title.chars().take(40).collect::<String>();
+    for filler in [
+        format!("「{short_title}」についてのニュース。"),
+        "詳しくは元記事で確かめられる。".to_string(),
+    ] {
+        if key_points.len() >= KEY_POINTS_MIN_ITEMS {
+            break;
+        }
+        key_points.push(filler);
+    }
+    key_points.truncate(KEY_POINTS_MAX_ITEMS);
+
+    AiArticlePoints {
+        key_points,
+        focus_points: vec!["この変化で、誰の何が便利になるのかを考えてみると面白いよ。".to_string()],
+    }
+}
+
 /// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
-/// 用語解説だけは JSON スキーマで出力を縛る（小さいモデルの前置き・コードフェンスで厳格解析が落ちないように）。
-/// 解析・無害化・文字数の検証は従来どおり dictionary_service 側で行う。Gemini の経路には関わらない。
+/// 用語解説と要点・注目ポイントは JSON スキーマで出力を縛る（小さいモデルの前置き・コードフェンスで
+/// 厳格解析が落ちないように）。解析・無害化・文字数の検証は従来どおり dictionary_service / summary_service
+/// 側で行う。Gemini の経路には関わらない。
 fn local_output_shape(prompt_id: &str) -> (u32, Option<ResponseFormat>) {
     if prompt_id == TERM_EXPLANATION_PROMPT_ID {
         (
             LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS,
             Some(term_explanation_response_format()),
+        )
+    } else if prompt_id == ARTICLE_POINTS_PROMPT_ID {
+        (
+            LOCAL_MAX_OUTPUT_TOKENS,
+            Some(article_points_response_format()),
         )
     } else {
         (LOCAL_MAX_OUTPUT_TOKENS, None)
@@ -385,6 +448,16 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
                 "次のニュースに対する、親しみやすい短い感想を日本語で一言書いてください。{YUUKO_TONE_INSTRUCTION}"
             )
         }
+        // 要点と注目ポイント（D18）。2つは別の観点で書かせ、要点に注目ポイントを混ぜない。
+        id if id == ARTICLE_POINTS_PROMPT_ID => format!(
+            "次のニュースについて、日本語で{level}2種類の箇条書きを作ってください。\n\
+             key_points: 何が起きたかを伝える要点を3つ程度（{KEY_POINTS_MIN_ITEMS}〜{KEY_POINTS_MAX_ITEMS}個）。\n\
+             focus_points: なぜ面白いのか、この記事から何を学べるのかという注目ポイントを{FOCUS_POINTS_MIN_ITEMS}〜{FOCUS_POINTS_MAX_ITEMS}個。要点の言い換えにしないでください。\n\
+             各項目は改行を含まない1文で、{POINT_ITEM_MAX_CHARS}文字以内にしてください。\
+             先頭に箇条書きの記号・番号・見出し記号を付けず、HTML や URL も書かないでください。\n\
+             出力は次の JSON オブジェクトだけにしてください（前後に文章・コードブロック・注釈を付けない）:\n\
+             {{\"key_points\": [\"要点1\", \"要点2\", \"要点3\"], \"focus_points\": [\"注目ポイント1\"]}}"
+        ),
         _ => format!("次のテキストを日本語で{level}整えてください。"),
     };
 
@@ -473,7 +546,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_output_shape_constrains_only_the_term_explanation() {
+    fn local_output_shape_constrains_article_points_with_array_schema() {
+        let (max_tokens, format) = local_output_shape(ARTICLE_POINTS_PROMPT_ID);
+        assert_eq!(max_tokens, LOCAL_MAX_OUTPUT_TOKENS);
+        let format = serde_json::to_value(format.expect("schema")).unwrap();
+        let schema = &format["json_schema"]["schema"];
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["key_points", "focus_points"])
+        );
+        assert_eq!(schema["properties"]["key_points"]["minItems"], 2);
+        assert_eq!(schema["properties"]["key_points"]["maxItems"], 4);
+        assert_eq!(schema["properties"]["focus_points"]["maxItems"], 3);
+        assert_eq!(
+            schema["properties"]["key_points"]["items"]["maxLength"],
+            POINT_ITEM_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn article_points_prompt_asks_for_separate_lists_and_keeps_external_data_last() {
+        let prompt = build_prompt(
+            &AiRequest {
+                prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
+                input_text: "工場のタイトル\n工場の抜粋".to_string(),
+                context: None,
+            },
+            ExplanationLevel::Normal,
+        );
+        let key = prompt.find("key_points:").unwrap();
+        let focus = prompt.find("focus_points:").unwrap();
+        let defense = prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap();
+        let input = prompt.find("工場のタイトル").unwrap();
+        assert!(
+            key < focus && focus < defense && defense < input,
+            "{prompt}"
+        );
+        assert!(prompt.contains("要点の言い換えにしないでください"));
+    }
+
+    #[test]
+    fn article_points_mock_is_deterministic_json_built_from_the_article() {
+        let request = || AiRequest {
+            prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
+            input_text: "工場のタイトル\n工場ができる。投資は1兆円。".to_string(),
+            context: None,
+        };
+        let service = service();
+        let first = service
+            .request_text(request(), AiProvider::Mock, ExplanationLevel::Normal)
+            .unwrap();
+        let second = service
+            .request_text(request(), AiProvider::Mock, ExplanationLevel::Normal)
+            .unwrap();
+        assert_eq!(first.text, second.text);
+        assert_eq!(first.provider, "mock");
+        let points: AiArticlePoints = serde_json::from_str(&first.text).unwrap();
+        assert_eq!(points.key_points, vec!["工場ができる", "投資は1兆円"]);
+        assert!(!points.focus_points.is_empty());
+
+        // 抜粋が無い（タイトルだけの）種でも、要点は下限の件数を満たす。
+        let title_only = mock_article_points("タイトルだけ");
+        assert!(title_only.key_points.len() >= KEY_POINTS_MIN_ITEMS);
+    }
+
+    #[test]
+    fn local_output_shape_constrains_term_explanation_but_not_free_text() {
         let (max_tokens, format) = local_output_shape(TERM_EXPLANATION_PROMPT_ID);
         assert_eq!(max_tokens, LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS);
         let format = serde_json::to_value(format.expect("schema")).unwrap();

@@ -2706,7 +2706,16 @@ test("reader summary: a summarized article shows its summary, key points and 要
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
     READER_SUMMARY_TEXT
   );
-  await expect(main.getByText("クリックできること")).toBeVisible();
+  // 要点と注目ポイントは別々の欄に出し、要点に注目ポイントを混ぜない（判断台帳 D18）。
+  const keyPoints = main.getByRole("list", { name: "要点" });
+  const focusPoints = main.getByRole("list", { name: "注目ポイント" });
+  await expect(keyPoints.getByRole("listitem")).toHaveText([
+    "クリックできること",
+    "表示が崩れないこと",
+  ]);
+  await expect(focusPoints.getByRole("listitem")).toHaveText([
+    "操作の気持ちよさに注目",
+  ]);
   await expect(main.getByText("UI確認中だよ。")).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
@@ -2747,7 +2756,12 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
     "E2Eで生成された要約です。"
   );
-  await expect(main.getByText("主要ボタン")).toBeVisible();
+  await expect(
+    main.getByRole("list", { name: "要点" }).getByRole("listitem")
+  ).toHaveText(["主要ボタン", "当たり判定"]);
+  await expect(
+    main.getByRole("list", { name: "注目ポイント" }).getByRole("listitem")
+  ).toHaveText(["押し心地の確認"]);
   await expect(main.getByText("確認できたよ。")).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
@@ -7568,6 +7582,7 @@ async function installTauriMocks(page: Page) {
               return {
                 ...articleSummary,
                 originalUrl: "https://example.com/e2e-article",
+                keyPoints: [],
                 focusPoints: [],
                 keywordCandidates: ["E2E用語", "Playwright"],
                 summaryState: detailWin.__E2E_ARTICLE_DETAIL_SUMMARY_STATE__,
@@ -7578,6 +7593,7 @@ async function installTauriMocks(page: Page) {
               return {
                 ...articleSummary,
                 originalUrl: "https://example.com/e2e-article",
+                keyPoints: [],
                 focusPoints: [],
                 keywordCandidates: ["E2E用語", "Playwright"],
                 summaryState: "none",
@@ -7594,7 +7610,9 @@ async function installTauriMocks(page: Page) {
               originalUrl: "https://example.com/e2e-article",
               summaryState: "done",
               yuukoExplanation: "E2E用の要約です。",
-              focusPoints: ["クリックできること", "表示が崩れないこと"],
+              // 要点と注目ポイントは別々に届く（判断台帳 D18）。
+              keyPoints: ["クリックできること", "表示が崩れないこと"],
+              focusPoints: ["操作の気持ちよさに注目"],
               yuukoComment: "UI確認中だよ。",
               // 同名・別IDの用語切替テスト用: フラグ時は表示文字列が同じ2候補（ID は別になる）。
               // 候補語なしテスト用: フラグ時は空（実記事で候補語が無い状態）。
@@ -7680,7 +7698,8 @@ async function installTauriMocks(page: Page) {
               articleId: "e2e-article-1",
               summary: "E2Eで生成された要約です。",
               yuukoExplanation: "画面確認用の説明です。",
-              focusPoints: ["主要ボタン", "当たり判定"],
+              keyPoints: ["主要ボタン", "当たり判定"],
+              focusPoints: ["押し心地の確認"],
               yuukoComment: "確認できたよ。",
             };
           case "refresh_news":

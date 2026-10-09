@@ -92,8 +92,9 @@ type ReaderArticleDetail = {
   summary: string;
   yuukoExplanation: string;
   highlightedTerms: SupportTerm[];
+  // 要点（何が起きたか）と注目ポイント（なぜ面白いか・何を学べるか）は別々にAIで作る（判断台帳 D18）。
   keyPoints: string[];
-  attentionPoint: string;
+  focusPoints: string[];
   yuukoThoughts: string;
   // 要約済みか。false のときだけ「要約はまだ準備中」表示と「要約を作成」を出す。
   // ブラウザプレビュー用のサンプル記事は省略（＝要約済み扱い）で従来表示を保つ。
@@ -165,8 +166,9 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "導入効果を定量化できるサービスが評価されやすい",
       "既存業務フローへ自然に組み込める点が差別化要因になっている",
     ],
-    attentionPoint:
+    focusPoints: [
       "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
+    ],
     yuukoThoughts:
       "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
   },
@@ -208,8 +210,9 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "中堅企業の現場定着を重視した設計になっている",
       "単発導入ではなく継続改善を前提にしている",
     ],
-    attentionPoint:
+    focusPoints: [
       "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが重要です。",
+    ],
     yuukoThoughts:
       "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうですね。",
   },
@@ -251,8 +254,9 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "安定運用への実用面で前進があった",
       "研究成果は今後の実装方式に影響する可能性がある",
     ],
-    attentionPoint:
+    focusPoints: [
       "速度の話題に見えても、実際には安定して正しく動かす工夫が中心です。",
+    ],
     yuukoThoughts:
       "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいですね。",
   },
@@ -379,8 +383,8 @@ const mapTauriArticleToUi = (
     summary: isSummarized ? (article.summary ?? "") : "",
     yuukoExplanation: article.yuukoExplanation ?? "",
     highlightedTerms,
-    keyPoints: article.focusPoints,
-    attentionPoint: article.focusPoints[1] ?? article.focusPoints[0] ?? "",
+    keyPoints: article.keyPoints,
+    focusPoints: article.focusPoints,
     yuukoThoughts: article.yuukoComment ?? "",
     isSummarized,
     summaryState: article.summaryState,
@@ -869,14 +873,9 @@ const applyGeneratedSummary = (
   ...currentArticle,
   summary: generatedSummary.summary,
   yuukoExplanation: generatedSummary.yuukoExplanation,
-  keyPoints:
-    generatedSummary.focusPoints.length > 0
-      ? generatedSummary.focusPoints
-      : currentArticle.keyPoints,
-  attentionPoint:
-    generatedSummary.focusPoints[1] ??
-    generatedSummary.focusPoints[0] ??
-    generatedSummary.summary,
+  // 生成結果をそのまま使う（要点に注目ポイントや要約文を流用しない）。
+  keyPoints: generatedSummary.keyPoints,
+  focusPoints: generatedSummary.focusPoints,
   yuukoThoughts: generatedSummary.yuukoComment,
   isSummarized: true,
   summaryState: "done",
@@ -1927,7 +1926,7 @@ export default function NewsReaderScreen({
                 {article.keyPoints.length === 0 ? (
                   <NotGeneratedText>要点はまだ作成されていないよ。</NotGeneratedText>
                 ) : (
-                <ul className="space-y-2">
+                <ul aria-label="要点" className="space-y-2">
                   {article.keyPoints.map((point, index) => (
                     <li
                       key={`${article.id}-point-${index}`}
@@ -1948,10 +1947,18 @@ export default function NewsReaderScreen({
                   <Gift className="h-5 w-5 text-red-500" />
                   <h2 className="font-semibold text-foreground">注目ポイント</h2>
                 </div>
-                {article.attentionPoint ? (
-                <p className="text-sm leading-relaxed text-foreground">
-                  {article.attentionPoint}
-                </p>
+                {article.focusPoints.length > 0 ? (
+                <ul aria-label="注目ポイント" className="space-y-2">
+                  {article.focusPoints.map((point, index) => (
+                    <li
+                      key={`${article.id}-focus-${index}`}
+                      className="flex items-start gap-2 text-sm leading-relaxed text-foreground"
+                    >
+                      <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-red-400" />
+                      <span>{point}</span>
+                    </li>
+                  ))}
+                </ul>
                 ) : (
                   <NotGeneratedText>注目ポイントはまだ作成されていないよ。</NotGeneratedText>
                 )}

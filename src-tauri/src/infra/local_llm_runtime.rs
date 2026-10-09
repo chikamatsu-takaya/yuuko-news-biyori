@@ -550,32 +550,72 @@ pub struct ResponseFormat {
 #[derive(Debug, Clone, Serialize)]
 struct NamedJsonSchema {
     name: &'static str,
-    schema: StringObjectSchema,
+    schema: ObjectSchema,
 }
 
-/// 「指定した名前の文字列フィールドだけを、この順に、全部必須で持つ object」の JSON スキーマ。
+/// object の1フィールドの型。
+#[derive(Debug, Clone, Copy)]
+enum FieldSchema {
+    /// 文字列。
+    String,
+    /// 文字列の配列（件数の下限・上限と、1件あたりの文字数上限つき）。
+    StringList {
+        min_items: usize,
+        max_items: usize,
+        max_length: usize,
+    },
+}
+
+/// 「指定したフィールドだけを、この順に、全部必須で持つ object」の JSON スキーマ。
 /// `properties` は手で順番どおりに書き出す（map 型を通すと順番が保証されないため）。
 #[derive(Debug, Clone)]
-struct StringObjectSchema {
-    fields: &'static [&'static str],
+struct ObjectSchema {
+    fields: &'static [(&'static str, FieldSchema)],
 }
 
-impl Serialize for StringObjectSchema {
+impl Serialize for ObjectSchema {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Properties(&'static [&'static str]);
+        struct Properties(&'static [(&'static str, FieldSchema)]);
         impl Serialize for Properties {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 let mut map = serializer.serialize_map(Some(self.0.len()))?;
-                for field in self.0 {
-                    map.serialize_entry(field, &StringProperty { kind: "string" })?;
+                for (name, field) in self.0 {
+                    match *field {
+                        FieldSchema::String => {
+                            map.serialize_entry(name, &StringProperty { kind: "string" })?
+                        }
+                        FieldSchema::StringList {
+                            min_items,
+                            max_items,
+                            max_length,
+                        } => map.serialize_entry(
+                            name,
+                            &StringListProperty {
+                                kind: "array",
+                                items: BoundedStringProperty {
+                                    kind: "string",
+                                    min_length: 1,
+                                    max_length,
+                                },
+                                min_items,
+                                max_items,
+                            },
+                        )?,
+                    }
                 }
                 map.end()
             }
         }
-        let mut schema = serializer.serialize_struct("StringObjectSchema", 4)?;
+        struct Required(&'static [(&'static str, FieldSchema)]);
+        impl Serialize for Required {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_seq(self.0.iter().map(|(name, _)| name))
+            }
+        }
+        let mut schema = serializer.serialize_struct("ObjectSchema", 4)?;
         schema.serialize_field("type", "object")?;
         schema.serialize_field("properties", &Properties(self.fields))?;
-        schema.serialize_field("required", self.fields)?;
+        schema.serialize_field("required", &Required(self.fields))?;
         schema.serialize_field("additionalProperties", &false)?;
         schema.end()
     }
@@ -587,6 +627,28 @@ struct StringProperty {
     kind: &'static str,
 }
 
+/// 文字数の下限・上限つきの文字列（配列の要素に使う）。
+#[derive(Serialize)]
+struct BoundedStringProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "minLength")]
+    min_length: usize,
+    #[serde(rename = "maxLength")]
+    max_length: usize,
+}
+
+#[derive(Serialize)]
+struct StringListProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    items: BoundedStringProperty,
+    #[serde(rename = "minItems")]
+    min_items: usize,
+    #[serde(rename = "maxItems")]
+    max_items: usize,
+}
+
 /// 用語解説（`term_explanation_v1`）の出力スキーマ: `{"short": string, "detail": string}`。
 /// 順番は short → detail（プロンプトの例と同じ）。検証（大きさ・無害化・文字数）は従来どおり辞書側で行う。
 pub fn term_explanation_response_format() -> ResponseFormat {
@@ -594,8 +656,48 @@ pub fn term_explanation_response_format() -> ResponseFormat {
         kind: "json_schema",
         json_schema: NamedJsonSchema {
             name: "term_explanation",
-            schema: StringObjectSchema {
-                fields: &["short", "detail"],
+            schema: ObjectSchema {
+                fields: &[
+                    ("short", FieldSchema::String),
+                    ("detail", FieldSchema::String),
+                ],
+            },
+        },
+    }
+}
+
+/// 要点・注目ポイント（`article_points_v1`・判断台帳 D18）の出力スキーマ:
+/// `{"key_points": [string; 2..=4], "focus_points": [string; 1..=3]}`（各要素は 1〜100 文字）。
+/// 順番は key_points → focus_points（プロンプトの例と同じ。何が起きたかを先に書かせる）。
+/// 件数・文字数は文法でも縛るが、保存前の検証（件数・文字数・文字種）は summary_service 側で必ず行う。
+pub fn article_points_response_format() -> ResponseFormat {
+    use crate::domain::summary::{
+        FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
+        POINT_ITEM_MAX_CHARS,
+    };
+    ResponseFormat {
+        kind: "json_schema",
+        json_schema: NamedJsonSchema {
+            name: "article_points",
+            schema: ObjectSchema {
+                fields: &[
+                    (
+                        "key_points",
+                        FieldSchema::StringList {
+                            min_items: KEY_POINTS_MIN_ITEMS,
+                            max_items: KEY_POINTS_MAX_ITEMS,
+                            max_length: POINT_ITEM_MAX_CHARS,
+                        },
+                    ),
+                    (
+                        "focus_points",
+                        FieldSchema::StringList {
+                            min_items: FOCUS_POINTS_MIN_ITEMS,
+                            max_items: FOCUS_POINTS_MAX_ITEMS,
+                            max_length: POINT_ITEM_MAX_CHARS,
+                        },
+                    ),
+                ],
             },
         },
     }
@@ -836,6 +938,16 @@ mod tests {
         assert_eq!(value["max_tokens"], 512);
         assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
         assert_eq!(value["temperature"], 0.2);
+    }
+
+    #[test]
+    fn article_points_schema_bounds_counts_and_lengths_in_key_order() {
+        let body = build_chat_body("prompt", 1024, Some(article_points_response_format()));
+        let text = serde_json::to_string(&body).unwrap();
+        // 要点 → 注目ポイントの順に、件数（2〜4 / 1〜3）と1件の文字数（1〜100）を縛る。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":4},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":3}},"required":["key_points","focus_points"],"additionalProperties":false}}}"#
+        ), "{text}");
     }
 
     #[test]

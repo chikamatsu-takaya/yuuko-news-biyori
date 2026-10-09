@@ -434,6 +434,7 @@ mod tests {
                 crate::domain::article::ArticleSummaryUpdate {
                     summary: "要約".to_string(),
                     yuuko_explanation: "再説明".to_string(),
+                    key_points: Vec::new(),
                     focus_points: Vec::new(),
                     yuuko_comment: "感想".to_string(),
                     ai_provider: "mock".to_string(),
