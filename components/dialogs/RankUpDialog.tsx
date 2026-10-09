@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Sparkles } from "lucide-react";
+import { Gift, Sparkles } from "lucide-react";
 
 import {
   Dialog,
@@ -12,6 +12,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { getRewardState, type RewardItem } from "@/lib/tauri/rewards";
+import { confirmRankUpReward } from "@/lib/tauri/yuuko";
 
 type RankUpDialogProps = {
   open: boolean;
@@ -20,12 +22,57 @@ type RankUpDialogProps = {
 };
 
 /**
- * 友情ランクが上がった時のお祝いモーダル（演出のみ）。
+ * 友情ランクが上がった時のお祝いモーダル。
  *
- * 現状は報酬カタログ未整備のため、ランク到達を祝うだけで報酬解放処理は持たない
- * （友情ランク簡易完成のスコープ。報酬カタログ連携は後続）。
+ * 開いた時に Rust の報酬状態（get_reward_state）を取得し、このランクまでで解放済みかつ未確認の報酬を
+ * 表示する（解放判定・保存は Rust 側。get_reward_state はランクから冪等に解放を導出するので取りこぼさない）。
+ * 「やったね！」で表示した報酬だけを確認済みにする（confirm_rank_up_reward）。Esc 等で閉じた場合は
+ * 未確認のまま残し、後でゆうこ側の報酬通知で知らせる（D08）。
+ * 報酬が無い・取得に失敗した場合は報酬欄を出さず、従来どおりランク到達を祝うだけにする。
  */
 export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
+  const [rewards, setRewards] = React.useState<RewardItem[]>([]);
+
+  React.useEffect(() => {
+    if (!open) {
+      setRewards([]);
+      return;
+    }
+
+    // 取得完了前に閉じた・ランクが変わった場合に古い結果で上書きしないためのフラグ。
+    let active = true;
+    void getRewardState()
+      .then((state) => {
+        if (!active || !state) {
+          return;
+        }
+        setRewards(
+          state.rewards.filter(
+            (reward) => reward.pending && reward.unlockRank <= newRank
+          )
+        );
+      })
+      .catch((error) => {
+        console.warn("Failed to load reward state:", error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [open, newRank]);
+
+  const handleConfirm = () => {
+    const rewardIds = rewards.map((reward) => reward.rewardId);
+    if (rewardIds.length > 0) {
+      // 確認済みへの更新失敗はお祝い表示を止める理由にならないため、閉じる操作は待たない
+      // （失敗時は未確認のまま残り、ゆうこ側の報酬通知で再度知らせる）。
+      void confirmRankUpReward({ rewardIds }).catch((error) => {
+        console.warn("Failed to confirm rank up reward:", error);
+      });
+    }
+    onClose();
+  };
+
   return (
     <Dialog
       open={open}
@@ -45,10 +92,31 @@ export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
             ゆうことの友情ランクが {newRank} になったよ！これからもよろしくね。
           </DialogDescription>
         </DialogHeader>
+        {rewards.length > 0 ? (
+          <section
+            aria-label="解放された報酬"
+            className="rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)] p-3 text-sm"
+          >
+            <p className="flex items-center gap-1.5 font-medium">
+              <Gift className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+              新しい報酬が解放されたよ！
+            </p>
+            <ul className="mt-2 space-y-1">
+              {rewards.map((reward) => (
+                <li key={reward.rewardId} className="font-medium">
+                  {reward.name}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-muted-foreground">
+              カスタマイズ画面で切り替えられるよ。
+            </p>
+          </section>
+        ) : null}
         <DialogFooter className="sm:justify-center">
           <Button
             className="bg-[var(--yuuko-green)] text-white hover:bg-[var(--yuuko-green)]/90"
-            onClick={onClose}
+            onClick={handleConfirm}
           >
             やったね！
           </Button>
