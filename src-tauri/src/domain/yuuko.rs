@@ -167,7 +167,7 @@ pub fn short_preview_summary(summary: &str) -> Option<String> {
 pub fn display_nickname(nickname: &str) -> Option<String> {
     let neutralized: String = neutralize_html_and_control(nickname)
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible_format_char(*c))
         .collect();
     let trimmed = neutralized.trim();
     if trimmed.is_empty() {
@@ -175,6 +175,15 @@ pub fn display_nickname(nickname: &str) -> Option<String> {
     }
     let limited: String = trimmed.chars().take(NICKNAME_MAX_CHARS).collect();
     Some(limited.trim_end().to_string())
+}
+
+/// 表示順を入れ替える双方向制御文字（U+202A〜U+202E, U+2066〜U+2069）と、
+/// 見えない幅ゼロ文字（U+200B〜U+200F, U+FEFF）か。後続の文言を見かけ上書き換えられないよう呼び名から除く。
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+    )
 }
 
 /// ゆうこの吹き出し文言の先頭に呼び名を付ける（仮: 「{呼び名}、{文言}」）。
@@ -1228,6 +1237,15 @@ mod tests {
         );
         let personalized = personalize_balloon_text("やあ", "<script>x</script>");
         assert!(!crate::util::text_safety::contains_html_tag(&personalized));
+    }
+
+    #[test]
+    fn display_nickname_strips_bidi_and_zero_width_chars() {
+        let nickname = "\u{202E}ゆ\u{2066}う\u{200B}\u{200F}\u{FEFF}さん\u{2069}\u{202A}";
+        assert_eq!(display_nickname(nickname).as_deref(), Some("ゆうさん"));
+        // それらだけの呼び名は未設定と同じ扱い（文言を変えない）。
+        assert_eq!(display_nickname("\u{200B}\u{FEFF}\u{202E}"), None);
+        assert_eq!(personalize_balloon_text("やあ", "\u{200B}\u{2067}"), "やあ");
     }
 
     #[test]
