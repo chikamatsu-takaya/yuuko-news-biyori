@@ -7,12 +7,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    is_archive_month_deletable, is_valid_archive_month, is_within_title_dedupe_window,
-    ArchiveMonthArticlesDto, ArchiveMonthDeletePreviewDto, ArchiveMonthDeleteResultDto,
-    ArchiveMonthDto, ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
-    ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter,
-    ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
-    FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult, SummaryState,
+    display_tags, is_archive_month_deletable, is_valid_archive_month,
+    is_within_title_dedupe_window, ArchiveMonthArticlesDto, ArchiveMonthDeletePreviewDto,
+    ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRestoreStatus,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDedupeKeys,
+    ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
+    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
+    RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -1522,6 +1523,7 @@ impl PersistedArticleRecord {
             is_archived: self.is_archived,
             recommendation_score: self.recommendation_score,
             summary_state: self.persisted_summary_state(),
+            tags: display_tags(&self.tags),
         }
     }
 
@@ -1547,6 +1549,7 @@ impl PersistedArticleRecord {
             is_favorite,
             keyword_candidates: self.keyword_candidates.clone(),
             summary_state: self.persisted_summary_state(),
+            tags: display_tags(&self.tags),
         }
     }
 
@@ -2257,6 +2260,9 @@ struct ArchiveArticleIndexEntry {
     summary: Option<String>,
     read_state: ArticleReadState,
     recommendation_score: f32,
+    /// 履歴のタグ表示・絞り込み用（整形済み）。タグ追加前に作られた索引には無いため既定値で読む。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
 }
 
 impl ArchiveArticleIndexEntry {
@@ -2272,6 +2278,7 @@ impl ArchiveArticleIndexEntry {
             summary: record.summary.clone().or_else(|| record.excerpt.clone()),
             read_state: record.read_state.clone(),
             recommendation_score: record.recommendation_score,
+            tags: display_tags(&record.tags),
         })
     }
 
@@ -2290,9 +2297,11 @@ impl ArchiveArticleIndexEntry {
             recommendation_score: self.recommendation_score,
             // アーカイブ索引は要約済みフラグを持たず、キューにも入らないため状態は出さない（タグ非表示）。
             summary_state: SummaryState::None,
+            tags: self.tags.clone(),
         }
     }
 
+    // tags は比較に含めない。タグ追加前の索引（tags なし）でも、記事ファイル退避の照合を通すため。
     fn matches_record(&self, record: &PersistedArticleRecord) -> Result<bool, AppError> {
         Ok(self.article_id == record.article_id
             && self.entry_name == archive_entry_name(&record.article_id)?
@@ -2701,6 +2710,48 @@ mod tests {
         assert_eq!(articles[0].article_id, "article-001");
         assert!(articles[0].fetched_at >= articles[1].fetched_at);
         assert!(articles[1].fetched_at >= articles[2].fetched_at);
+    }
+
+    #[test]
+    fn history_and_detail_expose_display_tags() {
+        let context = TestRepositoryContext::new();
+        let tagged = PersistedArticleRecord {
+            article_id: "article-tagged".to_string(),
+            tags: vec![
+                " AI ".to_string(),
+                "".to_string(),
+                "生成AI".to_string(),
+                "AI".to_string(),
+            ],
+            ..super::seed_articles().remove(0)
+        };
+        let untagged = PersistedArticleRecord {
+            article_id: "article-untagged".to_string(),
+            tags: Vec::new(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&tagged).unwrap();
+        context.repository.save_article_record(&untagged).unwrap();
+
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+        let tags_of = |id: &str| {
+            history
+                .iter()
+                .find(|item| item.article_id == id)
+                .map(|item| item.tags.clone())
+                .unwrap()
+        };
+        assert_eq!(tags_of("article-tagged"), vec!["AI", "生成AI"]);
+        assert!(tags_of("article-untagged").is_empty());
+
+        let detail = context
+            .repository
+            .get_article_detail("article-tagged")
+            .unwrap();
+        assert_eq!(detail.tags, vec!["AI", "生成AI"]);
     }
 
     #[test]
@@ -3763,6 +3814,8 @@ mod tests {
         assert_eq!(articles[0].article_id, "catalog-only");
         assert_eq!(articles[0].title, "ZIPにだけ残る記事");
         assert!(articles[0].is_archived);
+        // アーカイブ索引にもタグを残し、本文がZIPにだけある記事も履歴のタグで絞り込めるようにする。
+        assert_eq!(articles[0].tags, vec!["AI", "生成AI", "資金調達"]);
     }
 
     #[test]

@@ -2920,6 +2920,137 @@ test("summary state tags: news history shows 要約待ち / ゆうこ要約中 /
   await expectSummaryStateTags(page);
 });
 
+// 記事タグ（L6rfHG）: 一覧・履歴・記事詳細での表示と、履歴のタグ絞り込み。
+const enableHistoryTags = async (page: Page) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_TAGS__ = true;
+  });
+};
+
+const tagListOf = (card: ReturnType<Page["locator"]>) =>
+  card.getByRole("list", { name: "記事のタグ" });
+
+// タグあり／なし／壊れたタグ／過多の各カードの表示を確かめる（一覧・履歴で共通）。
+const expectArticleTagsOnCards = async (page: Page) => {
+  const main = page.locator("main");
+  const cardOf = (title: string) =>
+    main.locator('[data-slot="card"]').filter({ hasText: title });
+
+  await expect(tagListOf(cardOf("AIタグの記事")).getByRole("listitem")).toHaveText([
+    "#AI",
+    "#生成AI",
+    "#資金調達",
+  ]);
+  // 前後の空白は除き、空文字・空白だけのタグは出さない。HTML風の文字列はテキストのまま出す。
+  await expect(tagListOf(cardOf("半導体タグの記事")).getByRole("listitem")).toHaveText([
+    "#半導体",
+    "#AI",
+    "#<b>太字</b>",
+  ]);
+  await expect(main.locator("b", { hasText: "太字" })).toHaveCount(0);
+  // タグの無い記事（欄なし・空配列）には何も出さない。
+  await expect(tagListOf(cardOf("タグ欄のない記事"))).toHaveCount(0);
+  await expect(tagListOf(cardOf("タグが空の記事"))).toHaveCount(0);
+  // 多すぎるタグは最大5件まで。
+  await expect(tagListOf(cardOf("タグが多い記事")).getByRole("listitem")).toHaveCount(5);
+};
+
+test("article tags: today news list shows tags as text and nothing for untagged articles", async ({
+  page,
+}) => {
+  await enableHistoryTags(page);
+  await openHome(page);
+  await openTodayNewsList(page);
+  await expectArticleTagsOnCards(page);
+  // 当日一覧のタグは表示だけ（絞り込みボタンにしない）。
+  await expect(
+    page.locator("main").getByRole("button", { name: /^タグ「/ })
+  ).toHaveCount(0);
+});
+
+test("article tags: news history shows tags and filters by a selected tag, then clears", async ({
+  page,
+}, testInfo) => {
+  await enableHistoryTags(page);
+  await openNewsHistory(page);
+  await expectArticleTagsOnCards(page);
+
+  const main = page.locator("main");
+  const cards = main.locator('[data-slot="card"]');
+  await expect(cards).toHaveCount(5);
+  await expect(main.getByTestId("history-tag-filter")).toHaveCount(0);
+
+  // 「AI」タグ（2件の記事に付く）を押すと、そのタグの記事だけに絞り込む。
+  const aiTagButtons = main.getByRole("button", { name: "タグ「AI」で絞り込む" });
+  await expect(aiTagButtons).toHaveCount(2);
+  await expect(aiTagButtons.first()).toHaveAttribute("aria-pressed", "false");
+  await aiTagButtons.first().click();
+
+  await expect(cards).toHaveCount(2);
+  await expect(cards.filter({ hasText: "AIタグの記事" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "半導体タグの記事" })).toHaveCount(1);
+  for (const button of await aiTagButtons.all()) {
+    await expect(button).toHaveAttribute("aria-pressed", "true");
+  }
+  await expect(main.getByTestId("history-tag-filter")).toContainText("#AI");
+  await expect(page.getByText("2件を表示中 / 保存済み履歴5件")).toBeVisible();
+
+  await page.screenshot({
+    path: testInfo.outputPath("article-tags-history-filter.png"),
+    fullPage: true,
+  });
+
+  // 解除ボタンで絞り込みを外し、全件に戻る。
+  await main.getByRole("button", { name: "タグの絞り込みを解除" }).click();
+  await expect(cards).toHaveCount(5);
+  await expect(main.getByTestId("history-tag-filter")).toHaveCount(0);
+
+  // 右の詳細パネルのタグからも絞り込め、押下中のタグをもう一度押すと解除できる。
+  await cards.filter({ hasText: "半導体タグの記事" }).click();
+  const detailPanel = page.locator("aside").filter({ hasText: "もう一度見る" });
+  const detailSemiTag = detailPanel.getByRole("button", { name: "タグ「半導体」で絞り込む" });
+  await detailSemiTag.click();
+  await expect(cards).toHaveCount(1);
+  await expect(detailSemiTag).toHaveAttribute("aria-pressed", "true");
+  await detailSemiTag.click();
+  await expect(cards).toHaveCount(5);
+});
+
+test("article tags: the article screen shows trimmed tags as text only", async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARTICLE_DETAIL_TAGS__ = [
+      " AI ",
+      "",
+      "生成AI",
+      "<img src=x onerror=alert(1)>",
+    ];
+  });
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(main.getByRole("list", { name: "記事のタグ" }).getByRole("listitem")).toHaveText([
+    "#AI",
+    "#生成AI",
+    "#<img src=x onerror=alert(1)>",
+  ]);
+  await expect(main.locator('img[src="x"]')).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("article-tags-reader.png"),
+  });
+});
+
+test("article tags: the article screen shows nothing for an article without tags", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(
+    main.getByRole("heading", { level: 1, name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByRole("list", { name: "記事のタグ" })).toHaveCount(0);
+});
+
 test("reader summary: browser preview (outside Tauri) keeps the sample article display", async ({
   page,
 }) => {
@@ -7479,6 +7610,18 @@ async function installTauriMocks(page: Page) {
               ];
             }
 
+            // 記事タグ用: タグあり2件・タグなし（欠落／空配列）2件・タグ過多1件。
+            // 空白・空文字・HTML風の文字列など、壊れた外部由来データも混ぜる。
+            if (historyWin.__E2E_HISTORY_TAGS__) {
+              return [
+                { ...articleHistoryItem, articleId: "tag-ai", title: "AIタグの記事", tags: ["AI", "生成AI", "資金調達"] },
+                { ...articleHistoryItem, articleId: "tag-semi", title: "半導体タグの記事", tags: ["  半導体 ", "", "   ", "AI", "<b>太字</b>"] },
+                { ...articleHistoryItem, articleId: "tag-missing", title: "タグ欄のない記事" },
+                { ...articleHistoryItem, articleId: "tag-empty", title: "タグが空の記事", tags: [] },
+                { ...articleHistoryItem, articleId: "tag-many", title: "タグが多い記事", tags: ["t1", "t2", "t3", "t4", "t5", "t6", "t7"] },
+              ];
+            }
+
             // 空状態テスト用: 空配列を返す。
             if (historyWin.__E2E_HISTORY_EMPTY__) {
               return [];
@@ -7621,6 +7764,10 @@ async function installTauriMocks(page: Page) {
                 : detailWin.__E2E_SAME_NAME_TERMS__
                   ? ["同じ用語", "同じ用語"]
                   : ["E2E用語", "Playwright"],
+              // 記事タグ表示テスト用: フラグ時だけタグを返す（既定はタグ欄なし＝旧バックエンド相当）。
+              tags: Array.isArray(detailWin.__E2E_ARTICLE_DETAIL_TAGS__)
+                ? detailWin.__E2E_ARTICLE_DETAIL_TAGS__
+                : undefined,
             };
           }
           // お気に入り更新。失敗テストでは本番と同じ CommandError 形式で reject する

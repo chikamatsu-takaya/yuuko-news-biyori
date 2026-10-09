@@ -54,6 +54,10 @@ import {
 } from "@/lib/tauri/dictionary";
 import { recordFriendshipEvent } from "@/lib/tauri/yuuko";
 import { RankUpDialog } from "@/components/dialogs/RankUpDialog";
+import {
+  ArticleTagList,
+  normalizeArticleTags,
+} from "@/components/news/ArticleTagList";
 import { useToast } from "@/hooks/use-toast";
 // 範囲選択→「解説」ボタン表示の純粋ロジック（DOM非依存・node --test 済み）。
 import {
@@ -101,6 +105,8 @@ type ReaderArticleDetail = {
   isSummarized?: boolean;
   // 自動要約の状態（判断台帳 D17）。未要約時の表示（要約中／作り直し／作成）の出し分けに使う。
   summaryState?: ArticleSummaryState;
+  // 記事のタグ（表示のみ）。サンプル記事・タグの無い記事では省略または空で、何も表示しない。
+  tags?: string[];
 };
 
 // 記事詳細の取得状態。Tauri で実記事を読み込み中・失敗のときは、サンプル記事を見せずに状態表示へ切り替える。
@@ -388,6 +394,7 @@ const mapTauriArticleToUi = (
     yuukoThoughts: article.yuukoComment ?? "",
     isSummarized,
     summaryState: article.summaryState,
+    tags: normalizeArticleTags(article.tags),
   };
 };
 
@@ -1812,6 +1819,7 @@ export default function NewsReaderScreen({
                     <ExternalLink className="h-3.5 w-3.5" />
                   </Button>
                 </div>
+                <ArticleTagList tags={article.tags ?? []} className="mt-3" />
                 {favoriteNotice ? (
                   <p className="mt-2 text-xs text-amber-700">{favoriteNotice}</p>
                 ) : null}
