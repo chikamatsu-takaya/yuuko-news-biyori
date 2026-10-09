@@ -52,6 +52,7 @@ import {
   type ExplanationLevel,
 } from "@/lib/tauri/settings";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { uiThemeLabel } from "@/lib/ui-theme.mjs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -894,8 +895,9 @@ export default function SettingsScreen({
     }
   };
 
-  // テーマ現在値（読み取り専用表示）。未読込・空文字は安全な既定 "default" を表示する。
-  const currentThemeId = backendSettings?.selectedThemeId?.trim() || "default";
+  // テーマ現在値（読み取り専用表示）。生の ID ではなく表示名（そらいろ / さくら / クリーム）を出す。
+  // 未読込・空文字・未知の ID は既定テーマの表示名にする（保存値自体は buildDtoForSave が維持する）。
+  const currentThemeLabel = uiThemeLabel(backendSettings?.selectedThemeId);
 
   return (
     <div className="h-dvh bg-background flex flex-col overflow-hidden">
@@ -1123,7 +1125,7 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* テーマは selectedThemeId を読み取り専用で表示する。テーマ変更機能はMVP対象外（設計 §7:枠のみ）。 */}
+                  {/* テーマは selectedThemeId の表示名を読み取り専用で表示する。テーマ変更機能はMVP対象外（設計 §7:枠のみ）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
                   <SettingRow label="現在のテーマ">
                     <div className="flex flex-col items-end gap-0.5">
@@ -1131,7 +1133,7 @@ export default function SettingsScreen({
                         className="text-sm text-foreground"
                         data-testid="current-theme-id"
                       >
-                        {currentThemeId}
+                        {currentThemeLabel}
                       </span>
                       <span className="text-[10px] text-muted-foreground">
                         変更機能は準備中

@@ -58,7 +58,7 @@
  * 夜間（.dark）は報酬テーマではないため、ここには含めない。
  */
 [data-theme="theme_001"] {
-  /* そらいろ（仮称）: 明るい水色 */
+  /* そらいろ: 明るい水色 */
   --background: #F3F9FE;
   --foreground: #2F3B47;
   --card: #FFFFFF;
@@ -93,7 +93,7 @@
 }
 
 [data-theme="theme_002"] {
-  /* さくら（仮称）: 明るい桜色 */
+  /* さくら: 明るい桜色 */
   --background: #FFF7F9;
   --foreground: #44363B;
   --card: #FFFFFF;

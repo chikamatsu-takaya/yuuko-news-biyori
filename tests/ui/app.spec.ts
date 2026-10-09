@@ -4014,7 +4014,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
       notifyMaxPerDay: 5,
       explanationLevel: "detailed",
       aiProvider: "gemini",
-      selectedThemeId: "sakura",
+      selectedThemeId: "theme_002",
     };
   });
 
@@ -4039,7 +4039,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
 
   // ゆうこ表示メニュー: selectedThemeId が読み取り専用で表示される。
   await openSettingsMenu(page, "ゆうこ表示");
-  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  await expect(page.getByTestId("current-theme-id")).toHaveText("さくら");
   await expect(page.getByText("変更機能は準備中")).toBeVisible();
 
   // その他メニュー: genres が反映される。
@@ -4154,7 +4154,8 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
 
   // ゆうこ表示メニュー: selectedThemeId（読み取り専用表示）。
   await openSettingsMenu(page, "ゆうこ表示");
-  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  // 未知の ID（"sakura"）は既定テーマの表示名へ倒すが、保存値は書き換えずに維持する（上の saved 確認）。
+  await expect(page.getByTestId("current-theme-id")).toHaveText("クリーム");
   // 「変更機能は準備中」が表示され、テーマ値は編集不可のプレーン表示（span）であること。
   await expect(page.getByText("変更機能は準備中")).toBeVisible();
   await expect(page.getByTestId("current-theme-id")).toHaveJSProperty(
