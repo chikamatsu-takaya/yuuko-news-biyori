@@ -42,14 +42,17 @@ impl SettingsService {
         self.repository.save(&persisted)
     }
 
-    /// 起動時に設定ファイルが無ければ既定値で作成する。
-    /// ここで新規作成する場合だけが「初回起動」なので、案内（オンボーディング）を未完了で記録する。
+    /// 起動時に設定ファイルが無ければ初期値（`PersistedSettings::initial`）で作成する。
+    /// ここで新規作成する場合だけが「初回起動」なので、案内（オンボーディング）を未完了で記録し、
+    /// AI はローカル・自動要約は有効で始める（判断台帳 D103。案内の保存はこの値を引き継ぐ）。
     /// 既存ファイル（旧形式でフィールドが無いものを含む）は触らず、完了扱いのまま案内を出さない。
+    /// 既存ファイルの AI 設定も変えない（欄が無ければ従来どおり mock・自動要約無効として読む）。
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
         if !self.repository.exists() {
             let mut persisted = self.repository.load_or_default()?;
             // load_or_default は .bak から復元できた場合は既存設定を返す（その場合は既存ユーザー）。
             if !self.repository.exists() {
+                persisted = PersistedSettings::initial();
                 persisted.ui.onboarding_completed = false;
             }
             self.repository.save(&persisted)?;
@@ -57,9 +60,10 @@ impl SettingsService {
         Ok(())
     }
 
-    /// 設定を既定値へ初期化して保存し、初期化後のDTOを返す。
+    /// 設定を初期値へ戻して保存し、初期化後のDTOを返す。
     /// 破壊的操作のためUI側で確認ダイアログを挟む前提（画面詳細設計書 SCR-003 §7.6）。
-    /// 既定値は `PersistedSettings::default()` を唯一の源とする。
+    /// 初期値は新規インストールと同じ `PersistedSettings::initial()` を唯一の源とする
+    /// （AI はローカル・自動要約は有効。判断台帳 D103）。
     /// ただし自動起動は OS 登録が正で、リセットでは OS 登録を変えないため、写しの値は引き継ぐ
     /// （ここで OFF にすると OS 状態と設定値がずれる）。
     /// 設定ファイルが破損（JSON_ERROR）している場合は、上書きする前に別名で1世代だけ退避する。
@@ -77,7 +81,7 @@ impl SettingsService {
             }
             Err(_) => (false, true),
         };
-        let mut defaults = PersistedSettings::default();
+        let mut defaults = PersistedSettings::initial();
         defaults.ui.auto_start_on_pc_boot = current_auto_start;
         defaults.ui.onboarding_completed = onboarding_completed;
         self.repository.save(&defaults)?;
@@ -133,11 +137,12 @@ mod tests {
         };
         service.save_user_settings(changed).unwrap();
 
-        // リセットすると既定値が返り、永続化される。
+        // リセットすると初期値（新規インストールと同じ。AI はローカル・自動要約は有効）が返り、永続化される。
         let reset = service.reset_user_settings().unwrap();
         assert_eq!(reset.nickname, "");
         assert_eq!(reset.notify_max_per_day, 3);
-        assert_eq!(reset.ai_provider, AiProvider::Mock);
+        assert_eq!(reset.ai_provider, AiProvider::Local);
+        assert!(reset.auto_summary_enabled);
 
         let reloaded = service.get_user_settings().unwrap();
         assert_eq!(reloaded.nickname, "");
@@ -240,6 +245,10 @@ mod tests {
             service.get_user_settings().unwrap().onboarding_completed,
             Some(false)
         );
+        // 新規インストールは AI をローカル・自動要約を有効で始める（判断台帳 D103）。
+        let created = service.get_user_settings().unwrap();
+        assert_eq!(created.ai_provider, AiProvider::Local);
+        assert!(created.auto_summary_enabled);
 
         // 2回目以降の起動（ファイルあり）では作り直さず、未完了のまま変えない。
         service.initialize_default_if_missing().unwrap();
@@ -262,6 +271,9 @@ mod tests {
         let dto = service.get_user_settings().unwrap();
         assert_eq!(dto.onboarding_completed, Some(true));
         assert_eq!(dto.nickname, "old");
+        // 既存ユーザーの AI 設定は欄が無くても切り替えない（mock・自動要約無効のまま）。
+        assert_eq!(dto.ai_provider, AiProvider::Mock);
+        assert!(!dto.auto_summary_enabled);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
@@ -282,6 +294,9 @@ mod tests {
         service.save_user_settings(dto).unwrap();
         let saved = service.get_user_settings().unwrap();
         assert_eq!(saved.onboarding_completed, Some(true));
+        // 案内は読み込んだ設定を土台に保存するため、新規インストールの初期値（D103）が残る。
+        assert_eq!(saved.ai_provider, AiProvider::Local);
+        assert!(saved.auto_summary_enabled);
         assert_eq!(saved.genres, vec!["セキュリティ".to_string()]);
         assert_eq!(saved.nickname, "ゆう");
 

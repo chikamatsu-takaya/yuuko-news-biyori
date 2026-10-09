@@ -85,6 +85,9 @@ struct Inner {
     last_used: Option<Instant>,
     /// この回のアプリ起動中に、モデルの SHA-256 を確かめ済みか。
     verified: bool,
+    /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わないと分かったか。
+    /// 自動要約の安い確認（`is_bundle_present`）が、壊れた同梱物のために照合（1.3GB 読み）を繰り返させないため。
+    found_broken: bool,
     /// 走っている生成・接続テストの数（起動待ちを含む）。
     in_flight: u32,
 }
@@ -265,6 +268,25 @@ impl LocalLlmService {
             .map(|_| ())
     }
 
+    /// 同梱物がそろっていそうかの安い確認（自動要約の可否判定用・判断台帳 D103）。
+    /// 起動も SHA-256 の照合もせず、実行ファイルの有無とモデルの大きさだけを見る
+    /// （自動要約は取り出しのたびに確かめるため、1.3GB を読む照合を毎回させない）。
+    /// 照合で壊れていると分かった後・アプリ終了後は false。照合そのものは初めて生成するときに従来どおり行う。
+    pub fn is_bundle_present(&self) -> bool {
+        if self.shared.shut_down.load(Ordering::SeqCst) || self.shared.lock_state().found_broken {
+            return false;
+        }
+        let Some(dir) = self.shared.bundle_dir.as_deref() else {
+            return false;
+        };
+        let bundle = LocalLlmBundle::in_dir(dir);
+        bundle.exe.is_file()
+            && matches!(
+                check_model_size(&bundle.model, self.shared.config.model_size),
+                ModelCheck::Ok
+            )
+    }
+
     /// アプリ終了時に呼ぶ。動いていれば止め、以後は起動しない。
     pub fn shutdown(&self) {
         self.shared.shut_down.store(true, Ordering::SeqCst);
@@ -419,6 +441,7 @@ impl LocalLlmService {
                 }
                 ModelCheck::Broken => {
                     log::warn!("a local llm runtime file SHA-256 does not match");
+                    self.shared.lock_state().found_broken = true;
                     return Err(LocalAiFailure::Broken);
                 }
             }
@@ -433,6 +456,7 @@ impl LocalLlmService {
                 ModelCheck::Missing => return Err(LocalAiFailure::Missing),
                 ModelCheck::Broken => {
                     log::warn!("local llm model SHA-256 does not match");
+                    self.shared.lock_state().found_broken = true;
                     return Err(LocalAiFailure::Broken);
                 }
             }
@@ -853,6 +877,40 @@ mod tests {
         let service = service_with(&short, launcher.clone(), test_config());
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
 
+        assert_eq!(launcher.launches(), 0);
+    }
+
+    #[test]
+    fn bundle_presence_check_is_cheap_and_does_not_launch() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        // 部品がそろっていれば true。起動はしない。
+        let complete = temp_bundle("present", true, Some(MODEL_BYTES));
+        let service = service_with(&complete, launcher.clone(), test_config());
+        assert!(service.is_bundle_present());
+        assert!(!service.is_running());
+
+        // 場所が無い・実行ファイルが無い・モデルが無い・大きさが違う → false。
+        assert!(!LocalLlmService::unavailable().is_bundle_present());
+        for (name, with_exe, model) in [
+            ("absent-exe", false, Some(MODEL_BYTES)),
+            ("absent-model", true, None),
+            ("absent-size", true, Some(b"short".as_slice())),
+        ] {
+            let bundle = temp_bundle(name, with_exe, model);
+            assert!(!service_with(&bundle, launcher.clone(), test_config()).is_bundle_present());
+        }
+
+        // 大きさは合うが照合で壊れていると分かった後は、安い確認でも false（照合を繰り返させない）。
+        let tampered = temp_bundle("present-tampered", true, Some(b"fake-mode1"));
+        let service = service_with(&tampered, launcher.clone(), test_config());
+        assert!(service.is_bundle_present());
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
+        assert!(!service.is_bundle_present());
+
+        // アプリ終了後は false。
+        let service = service_with(&complete, launcher.clone(), test_config());
+        service.shutdown();
+        assert!(!service.is_bundle_present());
         assert_eq!(launcher.launches(), 0);
     }
 

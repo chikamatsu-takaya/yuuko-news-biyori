@@ -1595,14 +1595,22 @@ export default function NewsReaderScreen({
           console.warn("Failed to record friendship event:", eventError);
         });
     } catch (error) {
+      // AI_OUTPUT_REJECTED: 実AIの出力が検証に落ち、代わりの固定文（Mock）も保存しなかった（判断台帳 D104）。
+      // 記事は要約前のまま（保存済みの要約も上書きしない）なので、もう一度試すよう案内する。
+      const isOutputRejected =
+        readCommandErrorCode(error) === "AI_OUTPUT_REJECTED";
       if (isMountedRef.current) {
         setSummaryNotice(
-          "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+          isOutputRejected
+            ? "うまくまとめられなかったよ。もう一度試してね"
+            : "要約生成に失敗しました。時間をおいてもう一度お試しください。"
         );
         toast({
           variant: "destructive",
           title: "作成に失敗しちゃった",
-          description: "要約の作成ができなかったよ。もう一度試してみてね。",
+          description: isOutputRejected
+            ? "うまくまとめられなかったよ。もう一度試してね"
+            : "要約の作成ができなかったよ。もう一度試してみてね。",
         });
       }
       console.warn("Failed to generate article summary:", error);

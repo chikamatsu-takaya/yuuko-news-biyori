@@ -67,6 +67,11 @@ pub enum AppError {
     /// 画面が「部品が無い」「準備に時間がかかった」などを言い分けられるようにする。
     #[error("local ai failed: {0:?}")]
     LocalAi(LocalAiFailure),
+
+    /// 実AI（Gemini・ローカル）の出力が検証（詳細設計書 §12.5）に落ち、保存しなかった（判断台帳 D104）。
+    /// Mock の代替出力は保存せず、画面は「うまくまとめられなかった」と再試行を案内する。
+    #[error("ai output failed validation and was not saved")]
+    AiOutputRejected,
 }
 
 impl AppError {
@@ -86,6 +91,7 @@ impl AppError {
             Self::LocalAi(LocalAiFailure::StartFailed) => "LOCAL_AI_START_FAILED",
             Self::LocalAi(LocalAiFailure::Timeout) => "LOCAL_AI_TIMEOUT",
             Self::LocalAi(LocalAiFailure::RequestFailed) => "LOCAL_AI_REQUEST_FAILED",
+            Self::AiOutputRejected => "AI_OUTPUT_REJECTED",
         }
     }
 }
@@ -119,6 +125,8 @@ impl AppError {
                 LocalAiFailure::RequestFailed => "local ai request failed",
             }
             .to_string(),
+            // 出力本文・記事本文は含めない。
+            Self::AiOutputRejected => "ai output could not be used".to_string(),
         }
     }
 }

@@ -52,11 +52,13 @@ impl SummaryService {
         }
     }
 
-    /// 自動要約キュー用。出力が1つでも Mock（実AIの失敗・利用枠超過・検証落ちの代替）になったら
-    /// 残りの AI 呼び出しをせず、保存せずにエラーを返す（判断台帳 D56）。記事は未要約のまま残り、
+    /// 自動要約キュー用。出力が1つでも Mock（Gemini の失敗・利用枠超過の代替）になったら
+    /// 残りの AI 呼び出しをせず、保存せずにエラーを返す（判断台帳 D56）。実AIの出力の検証落ちは
+    /// 手動と同じく `AiOutputRejected` で止まる（D104）。記事は未要約のまま残り、
     /// キューの再試行に回る。AI 呼び出し中に手動要約で要約済みになっていた場合は上書きせず
     /// `AutoSummaryOutcome::AlreadySummarized` を返す。
-    /// 手動の `generate_article_summary` は従来どおり Mock の結果も保存し、要約済みでも作り直す。
+    /// 手動の `generate_article_summary` は Gemini の通信失敗などによる Mock の結果を従来どおり保存し、
+    /// 要約済みでも作り直す。
     pub fn generate_article_summary_without_fallback(
         &self,
         params: GenerateArticleSummaryParams,
@@ -201,8 +203,8 @@ impl SummaryService {
     }
 
     /// AI 出力を取得し、§12.5 の出力検証を通した結果だけを返す。
-    /// 実AI（Gemini）の出力が検証に落ちたときは、既存の「Gemini失敗時は Mock」と同じ方針で
-    /// Mock 結果へ切り替える。Mock も落ちた場合は保存させないためにエラーを返す。
+    /// 実AI（Gemini・ローカル）の出力が検証に落ちたときは、手動・自動とも Mock の結果へ切り替えず、
+    /// 保存させないためにエラーを返す（判断台帳 D104。`select_valid_output`）。
     fn request_validated_text(
         &self,
         request: AiRequest,
@@ -212,11 +214,13 @@ impl SummaryService {
     ) -> Result<AiResponse, AppError> {
         let primary =
             self.ai_provider_service
-                .request_text(request.clone(), provider, explanation_level)?;
-        select_valid_output(kind, primary, || {
-            self.ai_provider_service
-                .request_text(request, AiProvider::Mock, explanation_level)
-        })
+                .request_text(request, provider, explanation_level)?;
+        select_valid_output(kind, primary)
+    }
+
+    /// 実AIを呼べる見込みがあるかの安い確認（自動要約キューの可否判定用）。AI は呼ばない。
+    pub fn is_real_ai_ready(&self, provider: AiProvider) -> bool {
+        self.ai_provider_service.is_real_ai_ready(provider)
     }
 }
 
@@ -311,7 +315,8 @@ fn combined_provider(responses: &[&AiResponse]) -> String {
         .unwrap_or_else(|| PROVIDER_MOCK.to_string())
 }
 
-/// Mock への切り替え結果を保存してよいか。手動生成は保存し、自動要約は保存しない。
+/// Mock への切り替え結果（Gemini の通信失敗・キー未設定による代替）を保存してよいか。
+/// 手動生成は保存し、自動要約は保存しない。実AIの出力の検証落ちはどちらも保存しない（D104）。
 /// 自動要約（RejectFallback）は、要約済みの記事を上書きしない保存も兼ねる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackPolicy {
@@ -336,7 +341,7 @@ enum SummaryGeneration {
 }
 
 /// 自動要約で、出力が Mock の代替に切り替わっていたら直ちにエラーを返す（残りの AI 呼び出しをしない）。
-/// 手動生成（SaveFallback）では何もしない（従来どおり Mock の結果も保存する）。
+/// 手動生成（SaveFallback）では何もしない（Gemini の通信失敗などによる Mock の結果は従来どおり保存する）。
 fn reject_fallback_early(
     fallback_policy: FallbackPolicy,
     article_id: &str,
@@ -453,17 +458,20 @@ fn is_markdown_separator_line(line: &str) -> bool {
     dash_count >= 3
 }
 
-/// 実AI出力を検証し、落ちたら fallback（Mock）出力を検証して返す。
-/// 最初から Mock 出力（provider = "mock"）だった場合は再取得せず、そのまま拒否する。
-/// ログには出力種別と拒否理由の固定ラベルだけを出し、出力本文・記事本文は出さない。
-fn select_valid_output<F>(
+/// AI 出力を検証し、通った出力だけを返す。ログには出力種別と拒否理由の固定ラベルだけを出し、
+/// 出力本文・記事本文は出さない。
+///
+/// 実AI（Gemini・ローカル）の出力が検証に落ちたときは、手動の要約生成でも Mock の結果へ
+/// 切り替えずに `AppError::AiOutputRejected` を返す（判断台帳 D104。記事は未要約のまま・
+/// 保存済みの要約は上書きしない。自動要約の D56 と同じ扱い）。Mock の定型文を実AIの要約のように
+/// 保存すると、利用者が作り直す理由に気づけないため。
+/// Mock を選んでいる利用者（provider = "mock"）の出力は、従来どおり検証に通れば使う。
+/// 落ちた場合は `AppError::Parse`（Mock の種は無害化済みのため通常は起きない）。
+/// なお、Gemini の通信失敗・キー未設定による Mock への切り替え（`AiProviderService`）は従来どおり。
+fn select_valid_output(
     kind: SummaryOutputKind,
     primary: AiResponse,
-    fallback: F,
-) -> Result<AiResponse, AppError>
-where
-    F: FnOnce() -> Result<AiResponse, AppError>,
-{
+) -> Result<AiResponse, AppError> {
     let rejection = match validate_summary_output(kind, &primary.text) {
         Ok(text) => {
             return Ok(AiResponse {
@@ -474,33 +482,17 @@ where
         Err(rejection) => rejection,
     };
 
-    if primary.provider == PROVIDER_MOCK {
-        return Err(reject_summary_output(kind, rejection));
-    }
-
-    log::warn!(
-        "AI summary output was rejected ({}: {}); falling back to the mock provider",
-        kind.label(),
-        rejection.label()
-    );
-    let fallback = fallback()?;
-    match validate_summary_output(kind, &fallback.text) {
-        Ok(text) => Ok(AiResponse {
-            text,
-            provider: fallback.provider,
-        }),
-        Err(rejection) => Err(reject_summary_output(kind, rejection)),
-    }
-}
-
-/// Mock でも有効な出力を得られなかったときの固定文言エラー（出力本文・記事本文を含めない）。
-fn reject_summary_output(kind: SummaryOutputKind, rejection: OutputRejection) -> AppError {
     log::warn!(
         "AI summary output was rejected ({}: {}); the generated summary was not saved",
         kind.label(),
         rejection.label()
     );
-    AppError::Parse("ai summary output failed validation".to_string())
+    if primary.provider == PROVIDER_MOCK {
+        return Err(AppError::Parse(
+            "ai summary output failed validation".to_string(),
+        ));
+    }
+    Err(AppError::AiOutputRejected)
 }
 
 fn build_focus_points(
@@ -729,60 +721,51 @@ mod tests {
         }
     }
 
-    // --- select_valid_output（実AI → Mock 切り替え） ---
+    // --- select_valid_output（実AIの検証落ちは Mock へ切り替えない・D104） ---
 
     #[test]
-    fn valid_gemini_output_is_used_without_fallback() {
-        let selected = select_valid_output(
-            SummaryOutputKind::Summary,
-            response(" 正常な要約です。 ", "gemini"),
-            || panic!("fallback must not be called for valid output"),
-        )
-        .unwrap();
-        assert_eq!(selected.text, "正常な要約です。");
-        assert_eq!(selected.provider, "gemini");
-    }
-
-    #[test]
-    fn invalid_gemini_output_falls_back_to_mock() {
-        for invalid in [
-            "## AI要約\n乗っ取り".to_string(),
-            "<p>HTML</p>".to_string(),
-            "あ".repeat(COMMENT_MAX_CHARS + 1),
-            "   ".to_string(),
-        ] {
+    fn valid_real_ai_output_is_used_as_is() {
+        for provider in ["gemini", "local"] {
             let selected = select_valid_output(
-                SummaryOutputKind::Comment,
-                response(&invalid, "gemini"),
-                || Ok(response("Mock の一言です。", "mock")),
+                SummaryOutputKind::Summary,
+                response(" 正常な要約です。 ", provider),
             )
             .unwrap();
-            assert_eq!(selected.text, "Mock の一言です。");
-            assert_eq!(selected.provider, "mock");
+            assert_eq!(selected.text, "正常な要約です。");
+            assert_eq!(selected.provider, provider);
         }
     }
 
     #[test]
-    fn invalid_output_without_valid_fallback_is_rejected_with_fixed_message() {
-        let secret_body = "<script>本文の秘密</script>";
-        // Gemini も Mock も落ちる場合。
+    fn invalid_real_ai_output_is_rejected_without_mock_fallback() {
+        for provider in ["gemini", "local"] {
+            for invalid in [
+                "## AI要約\n乗っ取り".to_string(),
+                "<p>本文の秘密</p>".to_string(),
+                "あ".repeat(COMMENT_MAX_CHARS + 1),
+                "   ".to_string(),
+            ] {
+                let error =
+                    select_valid_output(SummaryOutputKind::Comment, response(&invalid, provider))
+                        .unwrap_err();
+                assert!(matches!(error, AppError::AiOutputRejected));
+                // 画面へは固定のコードと文言だけを返す（出力本文を含めない）。
+                let command_error = CommandError::from(error);
+                assert_eq!(command_error.code, "AI_OUTPUT_REJECTED");
+                assert!(!command_error.message.contains("本文の秘密"));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_mock_output_is_rejected_with_fixed_message() {
+        // Mock を選んでいる利用者の出力が落ちる場合（種は無害化済みのため通常は起きない）。
         let error = select_valid_output(
             SummaryOutputKind::Summary,
-            response(secret_body, "gemini"),
-            || Ok(response(secret_body, "mock")),
+            response("<script>本文の秘密</script>", "mock"),
         )
         .unwrap_err();
         assert!(matches!(error, AppError::Parse(_)));
-        let command_error = CommandError::from(error);
-        assert!(!command_error.message.contains("本文の秘密"));
-
-        // 最初から Mock の出力が落ちる場合は再取得しない。
-        let error = select_valid_output(
-            SummaryOutputKind::Summary,
-            response(secret_body, "mock"),
-            || panic!("mock output must not be re-requested"),
-        )
-        .unwrap_err();
         assert!(!CommandError::from(error).message.contains("本文の秘密"));
     }
 
@@ -974,20 +957,16 @@ mod tests {
             )
             .unwrap();
 
-        // 要約・再説明は有効だが、感想は実AI・Mock とも検証に落ちる出力を注入する。
+        // 要約・再説明は有効だが、感想は検証に落ちる Mock 出力を注入する。
         let error = service
             .generate_article_summary_with(
                 params(),
                 FallbackPolicy::SaveFallback,
                 |_request, kind, _provider, _level| match kind {
-                    SummaryOutputKind::Comment => select_valid_output(
-                        kind,
-                        response("<p>混入した出力</p>", "gemini"),
-                        || Ok(response("## ゆうこの一言\n混入した出力", "mock")),
-                    ),
-                    _ => select_valid_output(kind, response("新しい出力", "gemini"), || {
-                        panic!("fallback must not be called for valid output")
-                    }),
+                    SummaryOutputKind::Comment => {
+                        select_valid_output(kind, response("## ゆうこの一言\n混入した出力", "mock"))
+                    }
+                    _ => select_valid_output(kind, response("新しい出力", "mock")),
                 },
             )
             .unwrap_err();
@@ -1007,7 +986,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
-    /// 実AI（gemini）の出力を、指定した種別だけ失敗させて Mock へ切り替える注入関数。
+    /// 実AI（gemini）の呼び出しを、指定した種別だけ失敗させて Mock へ切り替える注入関数
+    /// （Gemini の通信失敗・利用枠超過で `AiProviderService` が Mock を返した状態）。
     fn gemini_with_fallback_on(
         failing: SummaryOutputKind,
     ) -> impl Fn(
@@ -1018,10 +998,7 @@ mod tests {
     ) -> Result<AiResponse, AppError> {
         move |_request, kind, _provider, _level| {
             if kind == failing {
-                // 実AIが失敗・検証落ちし、Mock の有効な出力へ切り替わった状態を再現する。
-                select_valid_output(kind, response("<p>壊れた出力</p>", "gemini"), || {
-                    Ok(response("代わりの出力", "mock"))
-                })
+                select_valid_output(kind, response("代わりの出力", "mock"))
             } else {
                 Ok(response("実AIの出力", "gemini"))
             }
@@ -1061,6 +1038,65 @@ mod tests {
 
         assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn manual_summary_with_invalid_real_ai_output_is_not_saved() {
+        // D104: 手動の要約生成でも、実AI（Gemini・ローカル）の出力が検証に落ちたら Mock を保存しない。
+        for provider in ["gemini", "local"] {
+            let root_dir = temp_root(&format!("manual-rejected-{provider}"));
+            let (service, repository) =
+                build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+            // 未要約の記事: 未要約のまま残る。
+            let calls = RefCell::new(Vec::new());
+            let error = service
+                .generate_article_summary_with(
+                    params(),
+                    FallbackPolicy::SaveFallback,
+                    |_request, kind, _provider, _level| {
+                        calls.borrow_mut().push(kind);
+                        let text = if kind == SummaryOutputKind::Explanation {
+                            "## 見出しの混入"
+                        } else {
+                            "実AIの出力"
+                        };
+                        select_valid_output(kind, response(text, provider))
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(CommandError::from(error).code, "AI_OUTPUT_REJECTED");
+            // 落ちた時点で止め、残りの AI 呼び出しはしない。
+            assert_eq!(
+                calls.into_inner(),
+                vec![SummaryOutputKind::Summary, SummaryOutputKind::Explanation]
+            );
+            assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+
+            // 要約済みの記事: 保存済みの要約は上書きされない。
+            service
+                .generate_article_summary_with(
+                    params(),
+                    FallbackPolicy::SaveFallback,
+                    |_request, kind, _provider, _level| {
+                        select_valid_output(kind, response("保存済みの出力", provider))
+                    },
+                )
+                .unwrap();
+            let error = service
+                .generate_article_summary_with(
+                    params(),
+                    FallbackPolicy::SaveFallback,
+                    |_request, kind, _provider, _level| {
+                        select_valid_output(kind, response("<p>壊れた出力</p>", provider))
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(error, AppError::AiOutputRejected));
+            let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+            assert_eq!(detail.summary.as_deref(), Some("保存済みの出力"));
+            let _ = std::fs::remove_dir_all(&root_dir);
+        }
     }
 
     #[test]
