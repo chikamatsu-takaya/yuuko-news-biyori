@@ -628,7 +628,14 @@ export default function CustomizeScreen({
               {/* Rank Rewards */}
               <Card className="w-72 shrink-0">
                 <CardHeader className="p-3 pb-2">
-                  <CardTitle className="text-sm font-medium">ランク報酬で解放</CardTitle>
+                  <CardTitle className="text-sm font-medium flex items-center gap-1">
+                    ランク報酬で解放
+                    {rewardStatus === "preview" && (
+                      <Badge variant="outline" className="ml-auto text-[10px] px-1.5 py-0">
+                        サンプル
+                      </Badge>
+                    )}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
                   {rewardStatus === "ready" ? (

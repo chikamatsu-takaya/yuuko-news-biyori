@@ -1559,7 +1559,7 @@ test("customize: max rank shows a fixed message instead of a 0-point goal", asyn
   await page.addInitScript(() => {
     /* eslint-disable @typescript-eslint/no-explicit-any */
     (window as any).__E2E_FRIENDSHIP_STATE__ = {
-      currentRank: 50,
+      currentRank: 20,
       currentPoint: 0,
       nextRequiredPoint: 0,
       dailyEarnedPoint: 0,
@@ -1569,7 +1569,7 @@ test("customize: max rank shows a fixed message instead of a 0-point goal", asyn
   });
   await openCustomize(page);
 
-  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("50");
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("20");
   await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
     "いちばん上のランクだよ！"
   );
@@ -1610,7 +1610,7 @@ test("customize: browser preview (outside Tauri) labels the sample rank values",
     .click();
   await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
 
-  await expect(page.getByText("サンプル", { exact: true })).toBeVisible();
+  await expect(page.getByText("サンプル", { exact: true })).toHaveCount(2); // ランクカードと報酬カードの両方
   await expect(page.getByTestId("customize-friendship-rank")).toHaveText("15");
   await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
     "つぎのランクまで 350 / 1000"
