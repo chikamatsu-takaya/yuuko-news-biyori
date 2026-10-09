@@ -625,8 +625,8 @@ test("the yuuko window applies the saved UI theme and falls back on unknown ids"
   await expect(page.getByRole("region", { name: REGION })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_001");
 
-  // 未知の ID（解放前のガチャテーマ名や不正値）は既定テーマのまま。
-  await installMocks(page, { state: activeState(), themeId: "gacha_theme_001" });
+  // 未知の ID（存在しないテーマ名や不正値）は既定テーマのまま。
+  await installMocks(page, { state: activeState(), themeId: "gacha_theme_999" });
   await openYuukoWindow(page);
   await expect(page.getByRole("region", { name: REGION })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");

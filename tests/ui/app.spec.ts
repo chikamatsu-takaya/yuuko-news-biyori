@@ -898,6 +898,8 @@ test("home limits by maxDailyRecommendations while the today-news list shows all
 for (const { themeId, expectedTheme, background } of [
   { themeId: "theme_001", expectedTheme: "theme_001", background: "rgb(243, 249, 254)" },
   { themeId: "theme_002", expectedTheme: "theme_002", background: "rgb(255, 247, 249)" },
+  // ガチャテーマ（色違いテーマ・D79）も同じ仕組みで反映される。
+  { themeId: "gacha_theme_001", expectedTheme: "gacha_theme_001", background: "rgb(241, 250, 247)" },
   { themeId: "theme_999", expectedTheme: "default", background: "rgb(255, 253, 245)" },
 ]) {
   test(`saved UI theme ${themeId} is applied app-wide as data-theme=${expectedTheme}`, async ({
