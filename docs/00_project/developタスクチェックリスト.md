@@ -178,16 +178,17 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 - [ ] Mockデータ依存箇所を段階的に置換
   - Priority: P2
   - MVP scope: Undecided
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Blocked
+  - Owner: 藤井
+  - Branch: `refactor/replace-mock-dependencies-b841ce`
+  - Issue/PR: #321
   - Done when:
     - 実データ取得済みの画面ではfallback mockに依存しない
     - Tauri未接続時のプレビュー用途と実データ用途が明確に分離されている
   - Notes:
     - MVP必須ニュース理解フローに必要な実ニュース用語解説は、Requiredの後続タスクとして分離する
     - ブラウザプレビューやその他のfallback Mockの全面置換は、このタスク側で引き続き範囲判断する
+    - [auto-dev 2026-10-09 要判断] #321 で MainScreen/Customize 以外を置換済み。MainScreen は小柳さんの改修後に対応
 - [ ] 失敗時UI（トースト / 再試行 / フォールバック）を統一
   - Priority: P2
   - MVP scope: Additional
@@ -440,12 +441,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - MVP scope: Required
 - [x] 生成要約のMarkdown保存方針の決定（B-4）→ **保存する**で確定（データ設計書 §4.5/§13.2 準拠：Article に summary/yuuko_explanation/focus_points/yuuko_comment ＋ summary_generated_at/ai_provider/content_hash）。再生成は明示操作
   - MVP scope: Required
-- [ ] AIプロバイダ接続テストの最小バックエンド基盤を追加する
+- [x] AIプロバイダ接続テストの最小バックエンド基盤を追加する
   - Priority: P1.5
   - MVP scope: Undecided
-  - Status: Next
+  - Status: Done
   - Owner: 未定
-  - Branch: 未作成
+  - Branch: `feature/ai-mdfa7b1f`
   - Issue/PR: 未定
   - Done when:
     - 接続確認専用の固定処理として、GeminiまたはMockProviderの利用可否を確認できる
@@ -539,11 +540,11 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
   - Notes:
     - 根拠: MVPスコープ定義書 §4.1 / §14、要件定義書 §16.1、基本設計書 §18.1、詳細設計書 §14.3。
     - 個別機能の実装済み判定ではなく、発表デモとして「ゆうこがニュースを届け、読みやすくし、用語が辞書へ蓄積される」体験が途切れないことを確認する。
-    - MVP必須機能を含む画面: ホーム画面 / 当日ニュース一覧画面（SCR-009・見出し「本日取得したニュース」） / ニュース履歴画面 / ゆうこ辞書画面 / 設定画面
+    - MVP必須機能を含む画面: ホーム画面 / ニュース履歴画面 / ゆうこ辞書画面 / 設定画面
     - 追加機能として扱う画面: ガチャ画面 / カスタマイズ画面
-    - ニュース閲覧・記事詳細（SCR-002）は、ホーム / 当日ニュース一覧（SCR-009） / ニュース履歴 / ゆうこ辞書の関連ニュース から開くMVP必須UI
-    - サイドバー「ニュースを見る」とホーム「すべて見る」は、当日ニュース一覧画面（SCR-009）へ遷移する
+    - ニュース閲覧・記事詳細は、ホームまたは履歴から開くMVP必須UI
     - ニューステーマは設定画面の機能
+    - 独立した新規ニュース一覧画面は作成しない
     - 友情ポイント、ランク進捗、ランクアップ表示は追加機能として扱い、MVP必須シナリオの完了条件には含めない
 - [x] MVP設定項目の保存・読み込みを設定画面で確認する
   - Priority: P1.5
@@ -722,12 +723,12 @@ HTMLビューで自動集計しやすくするため、未完了タスクは可�
 
 ### P2: 設計書由来の後続画面・データ管理バックログ
 MVPでは簡易または後回しでよいが、設計書に明記されているため追跡対象にする。今すぐ着手しないものは `Status: Todo` のまま維持する。P3相当の将来拡張は、現在のダッシュボード集計との互換のため `Priority: P2` のまま「MVP後候補」と明記する。
-- [ ] お気に入り記事の一覧・再閲覧・解除導線を用意する
+- [x] お気に入り記事の一覧・再閲覧・解除導線を用意する
   - Priority: P2
   - MVP scope: Additional
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Done
+  - Owner: 小柳
+  - Branch: `feature/favorite-articles`
   - Issue/PR: 未定
   - Done when:
     - お気に入り済み記事を一覧で確認できる
@@ -735,12 +736,12 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
     - お気に入り解除が `update_article_favorite` 経由で反映される
   - Notes:
     - 根拠: 要件定義書 §10.6。MVPではフラグ保存のみでも可だが、画面要件として追跡
-- [ ] 報酬カタログ・解放済み要素・カスタマイズ状態の最小データ化を決める
+- [x] 報酬カタログ・解放済み要素・カスタマイズ状態の最小データ化を決める
   - Priority: P2
   - MVP scope: Additional
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Done
+  - Owner: 藤井
+  - Branch: `docs/reward-data-decision-only-afc22b`
   - Issue/PR: 未定
   - Done when:
     - `rewards/` または同等の保存先を使うか、MVPでは文言のみで留めるかが決まっている
@@ -749,12 +750,12 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
   - Notes:
     - 根拠: データ設計書 §11 / 友情ランク実装コメント。現状ランクアップ演出は完了、報酬カタログは未整備
     - MVP後候補。MVPではランクアップ体験と進捗表示が伝わればよく、本格的な報酬カタログ永続化は必須にしない
-- [ ] ガチャ画面のMVPでの扱いを決める
+- [x] ガチャ画面のMVPでの扱いを決める
   - Priority: P2
   - MVP scope: Additional
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Done
+  - Owner: 藤井
+  - Branch: `docs/gacha-decision-only-ed68e2`
   - Issue/PR: 未定
   - Done when:
     - MVPデモでガチャ画面を見せる/見せないが決まっている
@@ -763,12 +764,12 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
   - Notes:
     - 根拠: MVPスコープ §6.4 / §7.4、データ設計書 §12。現状 `GachaScreen` はmock中心
     - MVP後候補。発表で見せる場合も簡易デモに留め、本格的な排出率・重複処理・履歴管理は今回の棚卸し対象外
-- [ ] データ移行（ローカルZIP / Google Drive）はMVP対象外としてバックログ化する
+- [x] データ移行（ローカルZIP / Google Drive）はMVP対象外としてバックログ化する
   - Priority: P2
   - MVP scope: Additional
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Done
+  - Owner: 藤井
+  - Branch: `docs/migration-scope-close-82652f`
   - Issue/PR: 未定
   - Done when:
     - 移行対象/対象外データ（APIキー・OAuthトークン等除外）がdocsに明記されている
@@ -839,13 +840,13 @@ MVPでは簡易または後回しでよいが、設計書に明記されてい�
   - Issue/PR: #50
   - Done when:
     - 画像の縦横比が崩れず、Next.js警告が出ない
-- [ ] 主要画面の余白・スクロール・文字はみ出しをPlaywrightスクリーンショットで確認
+- [x] 主要画面の余白・スクロール・文字はみ出しをPlaywrightスクリーンショットで確認
   - Priority: P2
   - MVP scope: Additional
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
-  - Issue/PR: 未定
+  - Status: Done
+  - Owner: 藤井
+  - Branch: `test/screen-layout-audit-e874fe`
+  - Issue/PR: #311
   - Done when:
     - Main / Reader / Dictionary / Settings など主要画面のスクリーンショットで大きな崩れがない
 
@@ -854,9 +855,9 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
 - [ ] **ホーム画面のレイアウト修正**：おすすめニュースが画面全体に縦羅列され、設計で必須の「ゆうこ本体（中央下寄り）」が見えない状態。
   - Priority: P1.5
   - MVP scope: Required
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: 小柳
+  - Branch: `ui/home-yuuko-layout-adjust`
   - Issue/PR: #46
   - Done when:
     - ホーム画面でおすすめニュースとゆうこ本体の両方が設計意図どおり視認できる
@@ -897,7 +898,7 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
   - Priority: P1.5
   - MVP scope: Required
   - Status: Todo
-  - Owner: 未定
+  - Owner: 近松
   - Branch: 未作成
   - Issue/PR: #46
   - Done when:
@@ -924,9 +925,9 @@ MVP必須体験に直結するホーム表示・用語選択はP1.5として扱�
 - [ ] 実ニュース記事の選択語を辞書再利用またはAIで解説する
   - Priority: P1.5
   - MVP scope: Required
-  - Status: Todo
-  - Owner: 未定
-  - Branch: 未作成
+  - Status: Doing
+  - Owner: 近松
+  - Branch: `feature/ai-explanation`
   - Issue/PR: 未定
   - Done when:
     - 固定サンプル以外の実ニュース記事IDでも用語解説を実行できる
