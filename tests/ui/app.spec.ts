@@ -2362,6 +2362,123 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
 });
 
+// --- 自動要約の状態表示（判断台帳 D17） ---
+
+const READER_SUMMARY_IN_PROGRESS_TEXT =
+  "ゆうこが要約中です。できあがったらここに表示するね。";
+
+const setReaderSummaryState = async (page: Page, state: string) => {
+  await page.addInitScript((value) => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY_STATE__ =
+      value;
+  }, state);
+};
+
+test("reader summary: an article being summarized shows ゆうこが要約中です and picks up the summary without reload", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "processing");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
+  // 要約中は手動作成ボタンを出さない（二重生成を避ける）。抜粋も要約として出さない。
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作り直す" })).toHaveCount(0);
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
+
+  // 自動要約が完了した状態にする → 再読み込みせずに、次の定期確認で要約が表示される。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__E2E_ARTICLE_DETAIL_SUMMARY_STATE__;
+  });
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    READER_SUMMARY_TEXT,
+    { timeout: 20_000 }
+  );
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+test("reader summary: a waiting article also shows ゆうこが要約中です", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+});
+
+test("reader summary: a failed article offers 要約を作り直す via the manual summary", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "failed");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(
+    main.getByText(
+      "要約の作成がうまくいかなかったよ。「要約を作り直す」でもう一度作れるよ。"
+    )
+  ).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+
+  // 既存の手動要約（generate_article_summary）で作り直し、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "要約を作り直す" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+test("reader summary: a not-queued article keeps the existing 要約を作成 display", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "none");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+});
+
+const expectSummaryStateTags = async (page: Page) => {
+  const main = page.locator("main");
+  const cardOf = (title: string) =>
+    main.locator('[data-slot="card"]').filter({ hasText: title });
+  await expect(cardOf("要約待ちの記事").getByText("要約待ち", { exact: true })).toBeVisible();
+  await expect(cardOf("要約処理中の記事").getByText("ゆうこ要約中", { exact: true })).toBeVisible();
+  await expect(cardOf("要約失敗の記事").getByText("要約失敗", { exact: true })).toBeVisible();
+  // 要約済みの記事にはタグを出さない。
+  await expect(cardOf("要約済みの記事").getByTestId("summary-state-tag")).toHaveCount(0);
+};
+
+test("summary state tags: today news list shows 要約待ち / ゆうこ要約中 / 要約失敗", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+  await expectSummaryStateTags(page);
+});
+
+test("summary state tags: news history shows 要約待ち / ゆうこ要約中 / 要約失敗", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openNewsHistory(page);
+  await expectSummaryStateTags(page);
+});
+
 test("reader summary: browser preview (outside Tauri) keeps the sample article display", async ({
   page,
 }) => {
@@ -6684,6 +6801,16 @@ async function installTauriMocks(page: Page) {
               ];
             }
 
+            // 自動要約タグ用（判断台帳 D17）: 待機中・処理中・失敗・完了の4件。
+            if (historyWin.__E2E_HISTORY_SUMMARY_STATES__) {
+              return [
+                { ...articleHistoryItem, articleId: "sum-waiting", title: "要約待ちの記事", summaryState: "waiting" },
+                { ...articleHistoryItem, articleId: "sum-processing", title: "要約処理中の記事", summaryState: "processing" },
+                { ...articleHistoryItem, articleId: "sum-failed", title: "要約失敗の記事", summaryState: "failed" },
+                { ...articleHistoryItem, articleId: "sum-done", title: "要約済みの記事", summaryState: "done" },
+              ];
+            }
+
             // 空状態テスト用: 空配列を返す。
             if (historyWin.__E2E_HISTORY_EMPTY__) {
               return [];
@@ -6779,6 +6906,17 @@ async function installTauriMocks(page: Page) {
               throw {
                 code: "STORAGE_ERROR",
                 message: "E2E raw detail failure /internal/secret/path",
+              };
+            }
+            // 自動要約の途中・失敗モード（判断台帳 D17）: 未要約と同じ形で、状態だけを差し替える。
+            // テスト中にフラグを消すと、次の読み直しで要約済みの記事として返る（完了の再現）。
+            if (typeof detailWin.__E2E_ARTICLE_DETAIL_SUMMARY_STATE__ === "string") {
+              return {
+                ...articleSummary,
+                originalUrl: "https://example.com/e2e-article",
+                focusPoints: [],
+                keywordCandidates: ["E2E用語", "Playwright"],
+                summaryState: detailWin.__E2E_ARTICLE_DETAIL_SUMMARY_STATE__,
               };
             }
             // 未要約モード: Rust と同じく summary には本文抜粋が入り、AI 生成項目は空で届く。

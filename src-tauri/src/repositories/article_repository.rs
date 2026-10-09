@@ -1516,6 +1516,7 @@ impl PersistedArticleRecord {
             read_state: self.read_state.clone(),
             is_archived: self.is_archived,
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
         }
     }
 
@@ -2231,6 +2232,8 @@ impl ArchiveArticleIndexEntry {
             read_state: self.read_state.clone(),
             is_archived: true,
             recommendation_score: self.recommendation_score,
+            // アーカイブ索引は要約済みフラグを持たず、キューにも入らないため状態は出さない（タグ非表示）。
+            summary_state: SummaryState::None,
         }
     }
 

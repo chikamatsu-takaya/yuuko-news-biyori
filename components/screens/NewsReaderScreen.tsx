@@ -43,6 +43,7 @@ import {
   type ArticleDetailDto as TauriArticleDetail,
   type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
   type ArticleSummaryDto as TauriArticleSummary,
+  type ArticleSummaryState,
 } from "@/lib/tauri/articles";
 import {
   explainSelectedTerm,
@@ -96,6 +97,8 @@ type ReaderArticleDetail = {
   // 要約済みか。false のときだけ「要約はまだ準備中」表示と「要約を作成」を出す。
   // ブラウザプレビュー用のサンプル記事は省略（＝要約済み扱い）で従来表示を保つ。
   isSummarized?: boolean;
+  // 自動要約の状態（判断台帳 D17）。未要約時の表示（要約中／作り直し／作成）の出し分けに使う。
+  summaryState?: ArticleSummaryState;
 };
 
 // 記事詳細の取得状態。Tauri で実記事を読み込み中・失敗のときは、サンプル記事を見せずに状態表示へ切り替える。
@@ -378,6 +381,7 @@ const mapTauriArticleToUi = (
     attentionPoint: article.focusPoints[1] ?? article.focusPoints[0] ?? "",
     yuukoThoughts: article.yuukoComment ?? "",
     isSummarized,
+    summaryState: article.summaryState,
   };
 };
 
@@ -871,7 +875,11 @@ const applyGeneratedSummary = (
     generatedSummary.summary,
   yuukoThoughts: generatedSummary.yuukoComment,
   isSummarized: true,
+  summaryState: "done",
 });
+
+// 自動要約の完了確認の間隔。要約中の記事を表示しているときだけ使う（常駐負荷を抑えるため短くしすぎない）。
+const SUMMARY_PROGRESS_POLL_INTERVAL_MS = 10_000;
 
 // 要約・再説明・要点・感想が未生成のときの固定表示（本文抜粋やサンプル記事で埋めない）。
 function NotGeneratedText({ children }: { children: React.ReactNode }) {
@@ -1073,6 +1081,13 @@ export default function NewsReaderScreen({
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   // 未要約の実記事（summaryState≠done）。要約欄を「準備中」表示にし、ボタンを「要約を作成」にする。
   const isUnsummarized = article.isSummarized === false;
+  // 自動要約キューで待機中・処理中の記事。「ゆうこが要約中です」を出し、手動作成ボタンは隠す（二重生成を避ける）。
+  const isSummaryInProgress =
+    isUnsummarized &&
+    (article.summaryState === "waiting" ||
+      article.summaryState === "processing");
+  // 自動要約が再試行上限まで失敗した記事。既存の手動要約を「要約を作り直す」として出す。
+  const isSummaryFailed = isUnsummarized && article.summaryState === "failed";
   // 候補語が無い実記事ではサンプル語で埋めず、候補語ボタンを出さない（範囲選択の案内に任せる）。
   // 同じ語のボタンを2つ並べないよう、先頭2件だけを表示する。
   const quickTerms = article.highlightedTerms.slice(0, 2);
@@ -1592,6 +1607,51 @@ export default function NewsReaderScreen({
     }
   }, [article.id, toast]);
 
+  // 要約中の記事を表示している間だけ、10秒ごとに記事詳細を読み直して完了を拾う（再読み込み不要にする）。
+  // 常駐アプリのため、画面が見えていないとき・要約中でないとき・アンマウント後は問い合わせない。
+  // ウィンドウ focus 時の再取得だけだと、開いたまま待つ利用者に完了が届かないためポーリングを選ぶ。
+  // 読み直しはローカルの記事ファイルとキューのメモリ参照のみで、外部通信や AI 呼び出しは発生しない。
+  React.useEffect(() => {
+    if (!isSummaryInProgress || articleLoadState !== "ready") {
+      return;
+    }
+    const pollArticleId = article.id;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight || document.visibilityState !== "visible") {
+        return;
+      }
+      inFlight = true;
+      const requestId = loadArticleRequestIdRef.current;
+      void getArticleDetail({ articleId: pollArticleId })
+        .then((detail) => {
+          if (
+            !detail ||
+            !isMountedRef.current ||
+            requestId !== loadArticleRequestIdRef.current
+          ) {
+            return;
+          }
+          // 状態が変わったときだけ差し替え、用語解説・選択などの画面状態には触れない。
+          setArticle((currentArticle) =>
+            currentArticle.id === detail.articleId &&
+            currentArticle.summaryState !== detail.summaryState
+              ? mapTauriArticleToUi(detail)
+              : currentArticle
+          );
+        })
+        .catch((error) => {
+          console.warn("Failed to refresh article summary state:", error);
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    }, SUMMARY_PROGRESS_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [article.id, isSummaryInProgress, articleLoadState]);
+
   const openTerm = (term: SupportTerm) => {
     setSelectedTerm(term);
     setShowTermPopup(true);
@@ -1759,6 +1819,7 @@ export default function NewsReaderScreen({
                     <Newspaper className="h-5 w-5 text-[var(--yuuko-green)]" />
                     <h2 className="font-semibold text-foreground">要約</h2>
                   </div>
+                  {isSummaryInProgress ? null : (
                   <Button
                     variant="outline"
                     size="sm"
@@ -1771,14 +1832,26 @@ export default function NewsReaderScreen({
                         <Spinner className="size-4" />
                         {isUnsummarized ? "作成中..." : "更新中..."}
                       </>
+                    ) : isSummaryFailed ? (
+                      "要約を作り直す"
                     ) : isUnsummarized ? (
                       "要約を作成"
                     ) : (
                       "要約を更新"
                     )}
                   </Button>
+                  )}
                 </div>
-                {isUnsummarized ? (
+                {isSummaryInProgress ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Spinner className="size-4" />
+                    <span>ゆうこが要約中です。できあがったらここに表示するね。</span>
+                  </div>
+                ) : isSummaryFailed ? (
+                  <NotGeneratedText>
+                    要約の作成がうまくいかなかったよ。「要約を作り直す」でもう一度作れるよ。
+                  </NotGeneratedText>
+                ) : isUnsummarized ? (
                   <NotGeneratedText>
                     要約はまだ準備中だよ。「要約を作成」で作れるよ。
                   </NotGeneratedText>

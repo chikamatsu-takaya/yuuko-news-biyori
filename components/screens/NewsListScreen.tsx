@@ -34,7 +34,9 @@ import {
 import {
   listArticleHistory,
   type ArticleHistoryItemDto,
+  type ArticleSummaryState,
 } from "@/lib/tauri/articles";
+import { SummaryStateTag } from "@/components/news/SummaryStateTag";
 
 // 当日ニュースカードの表示モデル（履歴とは別目的のため独自に持つ）。
 type TodayArticle = {
@@ -47,6 +49,7 @@ type TodayArticle = {
   isNew: boolean;
   isFavorite: boolean;
   thumbnailType: "ai" | "energy" | "mobile" | "business" | "space" | "lifestyle";
+  summaryState?: ArticleSummaryState;
 };
 
 type NavigationItem = {
@@ -121,6 +124,7 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   isNew: article.readState === "unread",
   isFavorite: article.isFavorite,
   thumbnailType: toThumbnailType(article.genre),
+  summaryState: article.summaryState,
 });
 
 // ブラウザ単体プレビュー（非Tauri）向けのサンプル。実データが取れないときだけ使う。
@@ -200,6 +204,7 @@ function TodayArticleCard({
               </Badge>
             )}
           </div>
+          <SummaryStateTag state={article.summaryState} />
           <Star
             className={`w-4 h-4 ${
               article.isFavorite
