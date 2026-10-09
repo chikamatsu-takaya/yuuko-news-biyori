@@ -37,7 +37,7 @@ const LEADING_GREETINGS: [&str; 18] = [
     "ゆうこです",
     "おはよう",
     "ハロー",
-    "元気？",
+    "元気",
     "うわあ",
     "やあ",
     "わあ",
@@ -47,15 +47,19 @@ const LEADING_GREETINGS: [&str; 18] = [
 
 /// ゆうこの様子を外から説明する地の文の目印。「ゆうこが」「ゆうこは」で始まる文が、これらを含むときだけ落とす
 /// （「ゆうこはこの制度がいいと思うな」のような、ゆうこ自身の意見は残す）。
-const NARRATION_MARKERS: [&str; 10] = [
-    "表情",
+/// 名詞だけ（「表情」「笑顔」）では「ゆうこは記事の表情豊かな写真が好きだな」のような意見まで消すため、
+/// 動作の形（「表情で」「笑顔で」「話していま」など）で照合する。
+const NARRATION_MARKERS: [&str; 12] = [
+    "表情で",
+    "表情を",
+    "笑顔で",
     "手を振",
-    "微笑",
-    "笑顔",
+    "微笑ん",
     "声をかけ",
-    "話して",
-    "伝えます",
-    "うなず",
+    "話していま",
+    "話しますね",
+    "伝えますね",
+    "うなずい",
     "興奮して",
     "にっこり",
 ];
@@ -74,11 +78,49 @@ const LEADING_LEFTOVERS: [char; 12] = [
     '、', '，', ',', '。', '！', '!', '？', '?', '～', '〜', ' ', '　',
 ];
 
-/// 文の終わりとみなす字（ト書きが「文頭」にあるかの判定と、締めの挨拶の切り出しに使う）。
+/// 締めの挨拶の切り出しで、文の終わりとみなす字。
 const SENTENCE_ENDS: [char; 7] = ['。', '！', '!', '？', '?', '…', '」'];
 
-/// 文中の括弧をト書きとみなす最大文字数。長い括弧は説明の補足である可能性が高いため残す。
+/// 括弧が「文頭」にあるかの判定で、直前の文の終わりとみなす字。
+/// 「」」は含めない（「「DX」（デジタル・トランスフォーメーション）」のような用語の補足を文頭扱いしないため）。
+const SENTENCE_START_BOUNDARIES: [char; 5] = ['。', '！', '!', '？', '?'];
+
+/// 括弧をト書きとみなす最大文字数。長い括弧は説明の補足である可能性が高いため残す。
 const STAGE_DIRECTION_MAX_CHARS: usize = 40;
+
+/// 括弧の中身がト書き（動作・表情・声の調子）であることの目印。位置に関わらず、これを含む括弧だけを消す。
+/// 「まで」「から」「除いて」のような事実の補足（「（上限100万円まで）」「（土日を除いて）」）は含まない。
+const STAGE_DIRECTION_MARKERS: [&str; 22] = [
+    "ゆうこ",
+    "笑",
+    "微笑",
+    "小声",
+    "手を振",
+    "興奮",
+    "にっこり",
+    "にこにこ",
+    "ニコニコ",
+    "うなず",
+    "誇張",
+    "照れ",
+    "ため息",
+    "ウインク",
+    "首をかし",
+    "声をひそめ",
+    "優しく",
+    "元気よく",
+    "嬉しそう",
+    "楽しそう",
+    "心配そう",
+    "得意げ",
+];
+
+/// 括弧の中身の書き出しが感嘆の声（実測の「（ふん～ん）」「（ふん～！）」など）なら、ト書きとみなす。
+const STAGE_DIRECTION_INTERJECTIONS: [&str; 4] = ["ふん～", "ふん〜", "えへ", "うふふ"];
+
+/// 文頭の括弧だけで使う、動作の言い方の語尾（「（少し笑って）」「（手を振りながら）」）。
+/// 文中では「（土日を除いて）」のような事実の補足と区別できないため使わない。
+const STAGE_DIRECTION_ACTION_ENDINGS: [&str; 5] = ["て", "ながら", "つつ", "そうに", "ように"];
 
 /// ゆうこの再説明・一言の AI 出力を整える。行ごとにト書きと中国語の助詞を除き、空になった行は落とし、
 /// 冒頭の挨拶と末尾の締めの挨拶を除いて返す。全部消えた場合は空文字を返す（呼び出し側の検証で拒否される）。
@@ -97,9 +139,8 @@ pub(crate) fn clean_yuuko_speech(text: &str) -> String {
 
 /// 括弧（全角 `（）`・半角 `()`）のト書きを取り除く。入れ子の括弧は扱わない（そのまま残す）。
 ///
-/// - 行頭・文頭（直前が「。」「！」など）の括弧: 中身が短ければ取り除く（ト書きは台詞の前に付くため）。
-/// - 文中の括弧: 中身が動作の言い方（「〜て」「〜で」「〜ながら」で終わる）か「ゆうこ」「笑」を含むときだけ取り除く。
-///   「中小企業（従業員300人以下）」のような説明の括弧は残す。
+/// 位置に関わらず、中身がト書きらしい（`is_stage_direction`）ときだけ取り除く。
+/// 「中小企業（従業員300人以下）」「（株）ABC」「（2027年4月から）」のような説明・事実の括弧は残す。
 fn strip_stage_directions(line: &str) -> String {
     let chars = line.chars().collect::<Vec<_>>();
     let mut out = String::with_capacity(line.len());
@@ -138,24 +179,31 @@ fn strip_stage_directions(line: &str) -> String {
 fn is_at_sentence_start(written: &str) -> bool {
     match written.trim_end().chars().last() {
         None => true,
-        Some(last) => SENTENCE_ENDS.contains(&last),
+        Some(last) => SENTENCE_START_BOUNDARIES.contains(&last),
     }
 }
 
-/// 括弧の中身がト書きか。文頭なら短いものはすべて、文中なら動作の言い方のものだけをト書きとみなす。
+/// 括弧の中身がト書きか。どの位置でも、目印（`STAGE_DIRECTION_MARKERS`）か感嘆の声の書き出しを要る。
+/// 文頭（出力の先頭を含む）では、動作の言い方の語尾（「〜て」「〜ながら」など）でもト書きとみなす。
+/// 中身の無い条件では消さない（「（株）」「（2027年4月から）」を残すため）。
 fn is_stage_direction(inner: &str, at_sentence_start: bool) -> bool {
     let inner = inner.trim();
-    if inner.chars().count() > STAGE_DIRECTION_MAX_CHARS {
+    if inner.is_empty() || inner.chars().count() > STAGE_DIRECTION_MAX_CHARS {
         return false;
     }
-    if at_sentence_start || inner.is_empty() {
+    if STAGE_DIRECTION_MARKERS
+        .iter()
+        .any(|marker| inner.contains(marker))
+        || STAGE_DIRECTION_INTERJECTIONS
+            .iter()
+            .any(|interjection| inner.starts_with(interjection))
+    {
         return true;
     }
-    inner.contains("ゆうこ")
-        || inner.contains('笑')
-        || ["て", "で", "ながら", "つつ"]
+    at_sentence_start
+        && STAGE_DIRECTION_ACTION_ENDINGS
             .iter()
-            .any(|suffix| inner.ends_with(suffix))
+            .any(|ending| inner.ends_with(ending))
 }
 
 /// 「ゆうこが」「ゆうこは」で始まり、様子の説明の目印（`NARRATION_MARKERS`）を含む文を落とす。
@@ -190,6 +238,7 @@ fn push_unless_narration(out: &mut String, sentence: &str) {
 }
 
 /// 中国語の助詞（`CHINESE_PARTICLES`）と、直後の伸ばし記号・中国語の読点を取り除く。
+/// 文末の形（直後が伸ばし記号・句読点・行末）のときだけ消す（「呢喃」のような語の一部は残す）。
 /// プロンプトで使わないよう頼んでいる絵文字（`is_emoji`）も、ここで一緒に取り除く。
 fn strip_chinese_particles(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -198,7 +247,12 @@ fn strip_chinese_particles(line: &str) -> String {
         if is_emoji(c) {
             continue;
         }
-        if CHINESE_PARTICLES.contains(&c) {
+        let at_sentence_end = chars.peek().is_none_or(|next| {
+            PARTICLE_TRAILERS.contains(next)
+                || LEADING_LEFTOVERS.contains(next)
+                || SENTENCE_ENDS.contains(next)
+        });
+        if CHINESE_PARTICLES.contains(&c) && at_sentence_end {
             while chars
                 .next_if(|next| PARTICLE_TRAILERS.contains(next))
                 .is_some()
@@ -211,22 +265,48 @@ fn strip_chinese_particles(line: &str) -> String {
     out.trim_start_matches(LEADING_LEFTOVERS).to_string()
 }
 
-/// 絵文字とみなす字（実測で混ざった ✨💖🌟 を含む Dingbats・絵文字の範囲と、異体字セレクタ・結合子）。
-/// 日本語の文でもよく使う記号（「♪」「★」「☆」など、U+2600〜26FF）は残す。
+/// 絵文字とみなす字。U+1F300〜1FAFF の絵文字（💖🌟 など）と異体字セレクタ・結合子のほかは、
+/// 実測で混ざった ✨ と、飾りとして付きやすい字（❤❗❓❕❔✅⭐✌✋✊❣✳✴❇）だけにする。
+/// Dingbats 全体（U+2700〜27BF）を消すと、丸数字（❶〜❿）・矢印（➡）・チェック（✓✔）といった
+/// 内容の記号まで消えるため。日本語の文でもよく使う記号（「♪」「★」「☆」など）も残す。
 fn is_emoji(c: char) -> bool {
     matches!(
         c,
-        '\u{2700}'..='\u{27BF}' | '\u{1F300}'..='\u{1FAFF}' | '\u{FE0F}' | '\u{200D}'
+        '\u{1F300}'
+            ..='\u{1FAFF}'
+                | '\u{FE0F}'
+                | '\u{200D}'
+                | '✨'
+                | '❤'
+                | '❗'
+                | '❓'
+                | '❕'
+                | '❔'
+                | '✅'
+                | '⭐'
+                | '✌'
+                | '✋'
+                | '✊'
+                | '❣'
+                | '✳'
+                | '✴'
+                | '❇'
     )
 }
 
+/// 挨拶の直後に来てよい字か（語の途中で切らないための境界。「ハローワーク」「えっと」は挨拶ではない）。
+fn is_greeting_boundary(next: Option<char>) -> bool {
+    next.is_none_or(|c| LEADING_LEFTOVERS.contains(&c) || matches!(c, 'ー' | '\n' | '…'))
+}
+
 /// 冒頭の挨拶・自己紹介を、続く区切り記号ごと繰り返し取り除く（「こんにちは、お元気ですか？」→ 両方消す）。
+/// 挨拶の直後が句読点・「！」・伸ばし記号・行末などのときだけ消す（`is_greeting_boundary`）。
 fn strip_leading_greetings(text: &str) -> String {
     let mut rest = text.trim_start();
-    while let Some(after) = LEADING_GREETINGS
-        .iter()
-        .find_map(|greeting| rest.strip_prefix(greeting))
-    {
+    while let Some(after) = LEADING_GREETINGS.iter().find_map(|greeting| {
+        rest.strip_prefix(greeting)
+            .filter(|after| is_greeting_boundary(after.chars().next()))
+    }) {
         rest = after.trim_start_matches(LEADING_LEFTOVERS).trim_start();
     }
     rest.to_string()
@@ -376,6 +456,58 @@ mod tests {
         );
         let clean = "国の新しい補助金で、クラウドの導入がしやすくなるよ。\n研修費も対象だね。";
         assert_eq!(clean_yuuko_speech(clean), clean);
+    }
+
+    #[test]
+    fn keeps_factual_parentheses_anywhere() {
+        // 事実の補足の括弧は、文中・「」」の直後・文頭・出力の先頭のどこでも残す（レビュー指摘の回帰テスト）。
+        for kept in [
+            "補助金（上限100万円まで）が出るよ。",
+            "申請は3月末まで（土日を除いて）受け付けるよ。",
+            "「DX」（デジタル・トランスフォーメーション）を進めるんだね。",
+            "新制度が始まるよ。（2027年4月から）準備しておこうね。",
+            "（株）ABCが参加するよ。",
+            "（2027年4月から）新制度が始まるよ。",
+        ] {
+            assert_eq!(clean_yuuko_speech(kept), kept);
+        }
+        // 文頭の括弧でも、動作の言い方・目印があるものは消す。
+        assert_eq!(
+            clean_yuuko_speech("新制度だよ。（優しく）準備しておこうね。"),
+            "新制度だよ。準備しておこうね。"
+        );
+        assert_eq!(
+            clean_yuuko_speech("（ふん～！ニュースが来たね！）\n新制度だよ。"),
+            "新制度だよ。"
+        );
+    }
+
+    #[test]
+    fn greetings_are_removed_only_at_a_word_boundary() {
+        // 挨拶・感嘆詞で始まる別の語は消さない（レビュー指摘の回帰テスト）。
+        for kept in [
+            "ハローワークで求人が増えているよ。",
+            "えっと、これは補助金の話だよ。",
+            "元気な会社が増えるといいね。",
+            "やあらゆる…ではなく、やり方が変わるよ。",
+        ] {
+            assert_eq!(clean_yuuko_speech(kept), kept);
+        }
+        assert_eq!(clean_yuuko_speech("ハロー！新制度だよ。"), "新制度だよ。");
+        assert_eq!(clean_yuuko_speech("えっ\n新制度だよ。"), "新制度だよ。");
+    }
+
+    #[test]
+    fn keeps_content_symbols_and_non_final_chinese_characters() {
+        // 丸数字・矢印・チェックは内容の記号なので残す。
+        let kept = "手順は❶申請➡❷審査✓✔の順だよ。";
+        assert_eq!(clean_yuuko_speech(kept), kept);
+        // 文末の形でない中国語の字（語の一部）は残す。
+        let kept = "呢喃のような小さな声だね。";
+        assert_eq!(clean_yuuko_speech(kept), kept);
+        // ゆうこの意見の中の名詞（表情）では消さない。
+        let kept = "ゆうこは記事の表情豊かな写真が好きだな。";
+        assert_eq!(clean_yuuko_speech(kept), kept);
     }
 
     #[test]
