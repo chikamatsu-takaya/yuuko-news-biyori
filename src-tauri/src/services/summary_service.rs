@@ -105,22 +105,26 @@ impl SummaryService {
 
         // 種（Mock 結果そのもの・実AIへの入力）は、外部由来の値を無害化した記事から作る。
         // これにより Mock 結果が出力検証に落ちないこと（＝AIキー未設定でも要約できること）を構造的に保証する。
-        // 種の中の注目ポイント（seed_focus_points）は要約・再説明の書き出しのための材料で、保存はしない。
+        // 種の中の注目ポイント（seed_focus_points）は要約の種・再説明の Mock 文のための材料で、保存はしない。
         // 保存する要点・注目ポイント・タグは、下の article_points_v2 の AI 出力から取る（D18 / D11）。
         let seed_article = neutralize_seed_article(&article);
         let seed_focus_points = build_focus_points(&seed_article, explanation_level);
         let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
-        let yuuko_explanation_seed =
+        // 再説明・一言の定型文の種は Mock の結果専用（context で渡し、実AIへは送らない）。
+        // 実AIへの入力は、下で同じ生成の要約・要点から組む（build_yuuko_speech_input）。
+        let yuuko_explanation_mock_text =
             build_yuuko_explanation_seed(&seed_article, explanation_level, &seed_focus_points);
-        let yuuko_comment_seed = build_yuuko_comment_seed(&seed_article, explanation_level);
+        let yuuko_comment_mock_text = build_yuuko_comment_seed(&seed_article, explanation_level);
         let points_seed = build_points_seed(&seed_article);
 
-        // 4出力（要約・再説明・感想・要点と注目ポイント）とも詳細設計書 §12.5 の出力検証を通ったものだけを
+        // 4出力（要約・要点と注目ポイント・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
         // 保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
         // 自動要約（RejectFallback）では、Mock に切り替わった時点で残りの AI 呼び出しをせずに止める
         // （キー未設定・利用枠超過のときに、保存しない出力のために外部AIを呼び続けないため）。
+        // 順序は 要約 → 要点 → 再説明 → 感想。再説明・感想の入力に前の2つの出力を使うため、先に作る。
+        // どの段で拒否・失敗しても `?` で止まるので、後の呼び出しはしない（D104 / D56）。
         let summary_response = request_validated(
             AiRequest {
                 prompt_id: "summary_v1".to_string(),
@@ -132,29 +136,6 @@ impl SummaryService {
             explanation_level,
         )?;
         reject_fallback_early(fallback_policy, &article_id, &summary_response)?;
-        let yuuko_explanation_response = request_validated(
-            AiRequest {
-                prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
-                input_text: yuuko_explanation_seed,
-                context: Some(article.genre.clone()),
-            },
-            SummaryOutputKind::Explanation,
-            provider,
-            explanation_level,
-        )?;
-        reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
-
-        let yuuko_comment_response = request_validated(
-            AiRequest {
-                prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
-                input_text: yuuko_comment_seed,
-                context: Some(article.source_name.clone()),
-            },
-            SummaryOutputKind::Comment,
-            provider,
-            explanation_level,
-        )?;
-        reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
 
         // 要点・注目ポイント・タグ（D18 / D11）。ローカルLLMの負荷を抑えるため、1回の呼び出しで受け取る
         // （タグのためだけに AI を呼ばない）。
@@ -174,6 +155,38 @@ impl SummaryService {
         reject_fallback_early(fallback_policy, &article_id, &points_response)?;
         // 取得手段に関わらず、保存前にもう一度ここで検証して構造化する（形の崩れた出力を保存しない）。
         let points = article_points_from_response(&points_response)?;
+
+        // 再説明・一言の実AI入力: 同じ生成で得た要約・要点（検証済み）。定型文の言い換えにさせないため、
+        // 記事の中身を渡す。AI 出力も外部データ由来なので、種と同じく無害化・切り詰めてから渡す
+        // （プロンプト側でも「記事情報（外部データ）」の見出しの下に置く）。
+        let yuuko_speech_input = build_yuuko_speech_input(
+            &seed_article.title,
+            &summary_response.text,
+            &points.key_points,
+        );
+        let yuuko_explanation_response = request_validated(
+            AiRequest {
+                prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
+                input_text: yuuko_speech_input.clone(),
+                context: Some(yuuko_explanation_mock_text),
+            },
+            SummaryOutputKind::Explanation,
+            provider,
+            explanation_level,
+        )?;
+        reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
+
+        let yuuko_comment_response = request_validated(
+            AiRequest {
+                prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
+                input_text: yuuko_speech_input,
+                context: Some(yuuko_comment_mock_text),
+            },
+            SummaryOutputKind::Comment,
+            provider,
+            explanation_level,
+        )?;
+        reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
 
         // 永続化メタ用のプロバイダ。1つでも Mock に切り替わっていれば "mock" と記録する。
         let effective_provider = combined_provider(&[
@@ -302,6 +315,9 @@ const SEED_TITLE_MAX_CHARS: usize = 200;
 const SEED_GENRE_MAX_CHARS: usize = 100;
 /// 種に使う注目ポイント1件の上限。
 const SEED_FOCUS_POINT_MAX_CHARS: usize = 200;
+/// 再説明・一言の実AI入力に使う要約の上限。実AIの要約は1〜2文（百数十文字）なので通常は切れない。
+/// Mock の要約（抜粋＋定型文）が混ざったときでも、入力が抜粋ほど長くならないように抑える。
+const SEED_SUMMARY_MAX_CHARS: usize = 400;
 
 /// 種へ入れる外部由来文字列（抜粋・タイトル・ジャンル・注目ポイント）を、出力検証に落ちない形へ無害化する。
 ///
@@ -831,6 +847,37 @@ fn build_focus_points(
     }
 }
 
+/// 再説明・一言の実AI入力。無害化済みタイトル・同じ生成の要約・要点を、ラベル付きの短い行で並べる。
+///
+/// 要約・要点は §12.5 の検証を通った AI 出力だが、記事（外部データ）から作られたものなので信頼せず、
+/// 種と同じ `neutralize_seed_text` で行頭 `#`・`<`・区切り行・制御文字を無害化し、長さを切り詰める。
+/// ローカルLLMでは入力の長さがそのままプロンプト処理時間になるため、本文抜粋（最大2300文字）ではなく
+/// 短い要約・要点（合計でおおむね数百文字）を渡す。注目ポイントは要点の言い換えになりやすいので入れない。
+pub(crate) fn build_yuuko_speech_input(
+    title: &str,
+    summary: &str,
+    key_points: &[String],
+) -> String {
+    let mut lines = vec![
+        format!(
+            "タイトル: {}",
+            neutralize_seed_text(title, SEED_TITLE_MAX_CHARS)
+        ),
+        format!(
+            "要約: {}",
+            neutralize_seed_text(summary.trim(), SEED_SUMMARY_MAX_CHARS)
+        ),
+        "要点:".to_string(),
+    ];
+    lines.extend(key_points.iter().take(KEY_POINTS_MAX_ITEMS).map(|point| {
+        format!(
+            "・{}",
+            neutralize_seed_text(point.trim(), POINT_ITEM_MAX_CHARS)
+        )
+    }));
+    lines.join("\n")
+}
+
 /// 要点・注目ポイントの種: 1行目に無害化済みタイトル、2行目以降に無害化済みの本文抜粋（無ければタイトルだけ）。
 /// 実AIへの入力であり、Mock はこの種の文から要点を組む（ai_provider_service の mock_article_points）。
 fn build_points_seed(article: &ArticleDetailDto) -> String {
@@ -934,10 +981,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        combined_provider, neutralize_seed_text, select_valid_output, validate_article_points,
-        validate_point_item, validate_summary_output, FallbackPolicy, OutputRejection,
-        SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
-        EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
+        build_yuuko_speech_input, combined_provider, neutralize_seed_text, select_valid_output,
+        validate_article_points, validate_point_item, validate_summary_output, FallbackPolicy,
+        OutputRejection, SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
+        EXPLANATION_MAX_CHARS, SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::summary::{
@@ -1262,6 +1309,99 @@ mod tests {
     }
 
     #[test]
+    fn mock_explanation_and_comment_keep_the_template_texts() {
+        // 実AIの入力を要約・要点に変えても、Mock の再説明・一言は従来の定型文のまま（決定的）。
+        let root_dir = temp_root("mock-template");
+        let (service, _) = build_service(&root_dir, "新しい半導体工場の建設計画が発表されました。");
+
+        let generated = service.generate_article_summary(params()).unwrap();
+
+        assert_eq!(
+            generated.yuuko_explanation,
+            "この記事は、テクノロジー を起点に読むと理解しやすいよ。特に 半導体工場の新設計画 の要点を確認する がどう現場や利用者に影響するかを見ると、話の流れが追いやすくなるね。"
+        );
+        assert_eq!(
+            generated.yuuko_comment,
+            "半導体工場の新設計画の話だけど、仕組みより『使った先で何が変わるか』に目を向けると面白そうだね。"
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn explanation_and_comment_get_the_summary_and_key_points_of_the_same_run() {
+        // 要約 → 要点 → 再説明 → 感想の順に呼び、再説明・感想の実AI入力は同じ生成の要約・要点にする。
+        // 定型文（Mock 用）は context にだけ入り、実AIの入力（input_text）には入らない。
+        let root_dir = temp_root("speech-input");
+        let excerpt = "新しい半導体工場の建設計画が発表されました。投資額は1兆円です。";
+        let (service, _) = build_service(&root_dir, excerpt);
+
+        let requests = RefCell::new(Vec::new());
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::RejectFallback,
+                |request, kind, _provider, _level| {
+                    requests.borrow_mut().push((kind, request));
+                    Ok(match kind {
+                        SummaryOutputKind::Summary => output(kind, "工場が新設される。", "gemini"),
+                        _ => output(kind, "工場", "gemini"),
+                    })
+                },
+            )
+            .unwrap();
+
+        let requests = requests.into_inner();
+        let kinds = requests.iter().map(|(kind, _)| *kind).collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                SummaryOutputKind::Summary,
+                SummaryOutputKind::Points,
+                SummaryOutputKind::Explanation,
+                SummaryOutputKind::Comment
+            ]
+        );
+        let expected_input =
+            "タイトル: 半導体工場の新設計画\n要約: 工場が新設される。\n要点:\n・工場（要点1）\n・工場（要点2）";
+        for (kind, request) in &requests[2..] {
+            assert_eq!(request.input_text, expected_input, "{kind:?}");
+            assert!(!request.input_text.contains(excerpt), "{kind:?}");
+            assert!(!request.input_text.contains("要点を確認する"), "{kind:?}");
+            assert!(!request.input_text.contains("面白そうだね"), "{kind:?}");
+            // Mock 用の定型文は context にだけ入る（build_prompt は送らない）。
+            assert!(request.context.as_deref().unwrap_or("").ends_with("ね。"));
+        }
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn yuuko_speech_input_neutralizes_and_caps_the_ai_outputs() {
+        // 要約・要点は AI 出力（外部データ由来）なので、種と同じく行頭 `#`・`<`・区切り行を無害化し、長さを抑える。
+        let summary = format!("#見出し\n<b>強調</b>\n---\n{}", "あ".repeat(1_000));
+        let long_point = "い".repeat(500);
+        let points = vec!["# 要点".to_string(), long_point];
+        let input = build_yuuko_speech_input("#タイトル<i>", &summary, &points);
+
+        assert!(input.starts_with("タイトル: ＃タイトル＜i>"));
+        assert!(!input.contains('<'));
+        assert!(input
+            .lines()
+            .all(|line| !line.trim_start().starts_with('#')));
+        assert!(input.lines().all(|line| line.trim() != "---"));
+        assert!(input.contains("\n・＃ 要点\n"));
+        assert!(input.contains(&format!("・{}", "い".repeat(POINT_ITEM_MAX_CHARS))));
+        assert!(!input.contains(&"い".repeat(POINT_ITEM_MAX_CHARS + 1)));
+        assert!(!input.contains(&"あ".repeat(SEED_SUMMARY_MAX_CHARS)));
+        // 要点は最大件数までに抑える。
+        let many = (0..10).map(|i| format!("要点{i}")).collect::<Vec<_>>();
+        let input = build_yuuko_speech_input("t", "s", &many);
+        assert_eq!(
+            input.lines().filter(|line| line.starts_with('・')).count(),
+            KEY_POINTS_MAX_ITEMS
+        );
+    }
+
+    #[test]
     fn mock_generation_succeeds_for_risky_external_text() {
         // 抜粋の HTML・型引数風の `<`・行頭ハッシュタグ・区切り行、5000文字の抜粋、
         // `<T>` を含み `#1` で始まるタイトルでも、Mock 結果は無害化された種から作られ検証を通る。
@@ -1443,20 +1583,25 @@ mod tests {
                     FallbackPolicy::SaveFallback,
                     |_request, kind, _provider, _level| {
                         calls.borrow_mut().push(kind);
-                        let text = if kind == SummaryOutputKind::Explanation {
-                            "## 見出しの混入"
-                        } else {
-                            "実AIの出力"
-                        };
-                        select_valid_output(kind, response(text, provider))
+                        if kind == SummaryOutputKind::Explanation {
+                            return select_valid_output(
+                                kind,
+                                response("## 見出しの混入", provider),
+                            );
+                        }
+                        select_valid_output(kind, output(kind, "実AIの出力", provider))
                     },
                 )
                 .unwrap_err();
             assert_eq!(CommandError::from(error).code, "AI_OUTPUT_REJECTED");
-            // 落ちた時点で止め、残りの AI 呼び出しはしない。
+            // 落ちた時点で止め、残りの AI 呼び出し（感想）はしない。
             assert_eq!(
                 calls.into_inner(),
-                vec![SummaryOutputKind::Summary, SummaryOutputKind::Explanation]
+                vec![
+                    SummaryOutputKind::Summary,
+                    SummaryOutputKind::Points,
+                    SummaryOutputKind::Explanation
+                ]
             );
             assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
 
@@ -1540,7 +1685,19 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(calls, vec![SummaryOutputKind::Summary]);
 
-        // 2つ目（再説明）で切り替わったら、感想は呼ばない。
+        // 2つ目（要点）で切り替わったら、再説明・感想は呼ばない。
+        let (result, calls) = generate_counting_calls(
+            &service,
+            FallbackPolicy::RejectFallback,
+            SummaryOutputKind::Points,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            vec![SummaryOutputKind::Summary, SummaryOutputKind::Points]
+        );
+
+        // 3つ目（再説明）で切り替わったら、感想は呼ばない。
         let (result, calls) = generate_counting_calls(
             &service,
             FallbackPolicy::RejectFallback,
@@ -1549,7 +1706,11 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             calls,
-            vec![SummaryOutputKind::Summary, SummaryOutputKind::Explanation]
+            vec![
+                SummaryOutputKind::Summary,
+                SummaryOutputKind::Points,
+                SummaryOutputKind::Explanation
+            ]
         );
         assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
 

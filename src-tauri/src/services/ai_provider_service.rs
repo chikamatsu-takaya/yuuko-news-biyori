@@ -225,12 +225,14 @@ impl AiProviderService {
     }
 
     /// Mock 応答。画面にそのまま表示されるため、mock / normal などの内部ラベルは文面に含めない。
-    /// 再説明・感想は summary_service がゆうこの口調で組んだ種をそのまま返す。
+    /// 再説明・感想は summary_service がゆうこの口調で組んだ定型文（context）をそのまま返す。
+    /// input_text（実AI向けの要約・要点）は使わず、Mock の結果を従来の決定的な文面のままにする。
+    /// context が無いときだけ input_text を返す（従来の呼び出し方との互換）。
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
             "summary_v1" => request.input_text,
             id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => {
-                request.input_text
+                request.context.unwrap_or(request.input_text)
             }
             // 要点・注目ポイント・タグ: 種（無害化済みのタイトル＋本文抜粋）と context の無害化済みジャンルから
             // 決定的な JSON を組む（外部通信なし）。
@@ -1140,6 +1142,27 @@ mod tests {
     }
 
     #[test]
+    fn yuuko_mock_returns_the_template_in_context_and_the_prompt_sends_only_input_text() {
+        // 再説明・一言: 実AIには input_text（同じ生成の要約・要点）だけを送り、context（Mock 用の定型文）は
+        // 送らない。Mock は context の定型文をそのまま返す（従来の決定的な文面のまま・要約は混ぜない）。
+        for prompt_id in [YUUKO_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID] {
+            let request = AiRequest {
+                prompt_id: prompt_id.to_string(),
+                input_text: "タイトル: 記事\n要約: 要約文\n要点:\n・要点1".to_string(),
+                context: Some("定型文だよ。".to_string()),
+            };
+            let prompt = build_prompt(&request, ExplanationLevel::Normal);
+            assert!(prompt.contains("要約: 要約文"), "{prompt_id}");
+            assert!(!prompt.contains("定型文だよ。"), "{prompt_id}");
+            let response = service()
+                .request_text(request, AiProvider::Mock, ExplanationLevel::Normal)
+                .unwrap();
+            assert_eq!(response.text, "定型文だよ。", "{prompt_id}");
+            assert_eq!(response.provider, "mock");
+        }
+    }
+
+    #[test]
     fn mock_responses_for_article_prompts_ignore_prompt_wrapping() {
         // Mock は組み立て後のプロンプトではなく input_text を使うため、防御指示・見出しは混入しない。
         for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
@@ -1311,20 +1334,41 @@ mod tests {
             対象は従業員300人以下の企業で、クラウドサービスの導入費用や社員研修の費用の一部を補助する。\
             担当者は「人手不足に悩む地域の企業が、少ない負担で業務を効率化できるようにしたい」と話している。"
             .repeat(6);
-        let input = format!("タイトル: 中小企業のデジタル化に新補助金\n抜粋: {excerpt}");
+        let title = "中小企業のデジタル化に新補助金";
+        let input = format!("タイトル: {title}\n抜粋: {excerpt}");
         eprintln!("input chars: {}", input.chars().count());
+        // アプリと同じ順（要約 → 要点 → 再説明 → 一言）で呼び、再説明・一言には前の2つの出力から
+        // summary_service と同じ組み立て（build_yuuko_speech_input）で作った入力を渡す。
+        let mut summary = String::new();
+        let mut key_points = Vec::new();
         for prompt_id in [
             "summary_v1",
+            ARTICLE_POINTS_PROMPT_ID,
             YUUKO_EXPLANATION_PROMPT_ID,
             YUUKO_COMMENT_PROMPT_ID,
-            ARTICLE_POINTS_PROMPT_ID,
         ] {
+            let input_text = if prompt_id == YUUKO_EXPLANATION_PROMPT_ID
+                || prompt_id == YUUKO_COMMENT_PROMPT_ID
+            {
+                let speech_input = crate::services::summary_service::build_yuuko_speech_input(
+                    title,
+                    &summary,
+                    &key_points,
+                );
+                eprintln!(
+                    "{prompt_id} input: {} chars\n{speech_input}\n",
+                    speech_input.chars().count()
+                );
+                speech_input
+            } else {
+                input.clone()
+            };
             let started = Instant::now();
             let response = service
                 .request_text(
                     AiRequest {
                         prompt_id: prompt_id.to_string(),
-                        input_text: input.clone(),
+                        input_text,
                         context: None,
                     },
                     AiProvider::Local,
@@ -1338,6 +1382,9 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
+            if prompt_id == "summary_v1" {
+                summary = response.text.trim().to_string();
+            }
             if prompt_id == YUUKO_EXPLANATION_PROMPT_ID || prompt_id == YUUKO_COMMENT_PROMPT_ID {
                 // 保存前に summary_service が行う後処理（ト書き・挨拶・中国語の助詞の除去）の結果も見る。
                 let cleaned = crate::util::speech_cleanup::clean_yuuko_speech(&response.text);
@@ -1358,6 +1405,7 @@ mod tests {
                     .tags
                     .iter()
                     .all(|tag| tag.chars().count() <= ARTICLE_TAG_MAX_CHARS));
+                key_points = points.key_points;
             }
         }
         local.shutdown();
