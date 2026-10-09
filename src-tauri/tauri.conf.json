@@ -7,7 +7,8 @@
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build",
+    "beforeBundleCommand": "node scripts/local-llm/check-bundle.mjs"
   },
   "app": {
     "windows": [
@@ -28,6 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "resources/local_llm": "local_llm"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

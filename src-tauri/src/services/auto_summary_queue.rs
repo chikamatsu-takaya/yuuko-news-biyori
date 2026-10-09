@@ -395,11 +395,12 @@ impl AutoSummaryQueue {
 
 /// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AIで、そのキーが
 /// 使えるときだけ true。
-/// openai / local は現在実AI呼び出しが未実装で常に Mock 応答になり、毎回失敗するだけなので
+/// openai は実AI呼び出しが未実装で常に Mock 応答になり、毎回失敗するだけなので
 /// Mock と同じく動かさない（判断台帳 D56）。未知の値は DTO 変換で Mock 扱いになる。
+/// local（同梱ローカルLLM・D99）は手動の要約・用語解説では使えるが、自動要約での利用と
+/// 既定値の見直しは別タスク（判断台帳 D103）で決めるため、ここではまだ動かさない。
 /// Gemini でもキーが未設定なら同じ理由で動かさない。`key_available` はキーの有無だけを返し、
 /// 設定で無効なときは呼ばない（不要な確認をしないため）。
-/// 同梱のローカルLLMプロバイダを実装したら、ここに追加する。
 fn is_auto_summary_allowed(
     settings: &PersistedSettings,
     key_available: impl FnOnce() -> bool,

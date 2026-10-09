@@ -30,6 +30,7 @@ use services::data_import_service::{DataImportService, MigrationWriteLocks};
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
+use services::local_llm_service::LocalLlmService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::{NewsService, NewsSourcesConfig};
 use services::recommendation_service::RecommendationService;
@@ -102,8 +103,14 @@ pub fn run() {
                 SettingsRepository::new(&paths),
                 RecommendationService::new(),
             );
+            // 同梱ローカルLLM（D99）。ここでは場所を決めるだけで起動しない（初めて使うときに起動する）。
+            // リソースフォルダを決められなくてもアプリは起動を続け、「ローカル」の利用時に Missing を返す。
+            let local_llm_service = LocalLlmService::new(
+                infra::local_llm_runtime::resolve_bundle_dir(app.path().resource_dir().ok()),
+            );
             // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
-            let ai_provider_service = AiProviderService::new(&paths);
+            let ai_provider_service =
+                AiProviderService::new(&paths).with_local_llm(local_llm_service.clone());
             let dictionary_repository = DictionaryRepository::new(&paths);
             let dictionary_service = DictionaryService::new(
                 dictionary_repository.clone(),
@@ -177,6 +184,7 @@ pub fn run() {
                 dictionary_service,
                 friendship_service,
                 gacha_service,
+                local_llm_service,
                 news_service,
                 reward_service,
                 settings_service,
@@ -249,8 +257,14 @@ pub fn run() {
             commands::gacha_commands::draw_gacha_once,
             commands::gacha_commands::mark_gacha_items_seen
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // どの経路で終わっても（トレイ・画面内ボタン・再起動・OS からの終了）同梱 llama-server を残さない。
+            if let tauri::RunEvent::Exit = event {
+                app_lifecycle::stop_side_processes(app);
+            }
+        });
 }
 
 /// ログプラグインを登録する（開発: Info 以上を従来どおり / 配布: 警告とエラーだけをファイルへ。D29）。

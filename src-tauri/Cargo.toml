@@ -47,6 +47,10 @@ tauri-plugin-autostart = "~2.5.1"
 # 常駐負荷は起動時の排他取得と、2つ目の起動時の通知受信のみ（ポーリングなし）。capability 不要。
 # 2.5 以降は MSRV 1.90 で CI の Rust 1.88 と合わないため 2.4 系に固定する。
 tauri-plugin-single-instance = "~2.4.1"
+# 同梱ローカルLLMのモデル照合（SHA-256。判断台帳 D99 / D100）。std に SHA-256 が無いため追加。
+# 0.10.9 は tauri 経由で既に依存ツリーにあり、新しい取得・ビルドは増えない。MIT / Apache-2.0。
+# 常駐負荷: 「ローカル」で初めて生成するときに1度だけ 1.3GB を読む（以後はアプリ終了まで再照合しない）。
+sha2 = "0.10"
 
 # 全画面アプリ・プレゼン中のゆうこ通知抑制（ゆうこ登場・通知挙動 詳細設計書 §5.2、2026-10-05 承認）。
 # SHQueryUserNotificationState を呼ぶためだけに Windows 限定で使う。tauri 経由で同じ 0.61 が
@@ -62,9 +66,18 @@ tauri-plugin-single-instance = "~2.4.1"
 #   読み取り専用で列挙する RegOpenKeyExW / RegEnumKeyExW / RegGetValueW / RegCloseKey。
 # - Win32_System_Diagnostics_ToolHelp: 既知の会議アプリのプロセス有無を調べる
 #   CreateToolhelp32Snapshot / Process32FirstW / Process32NextW（CloseHandle は既定の Win32_Foundation）。
+# 同梱ローカルLLM（判断台帳 D99）の llama-server をアプリの異常終了時にも残さないため、次の 3 feature を追加する
+# （新規クレート・取得物の追加なし。llama-server の起動時に 1 回だけ使い、常駐スレッド・フックなし）。
+# - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject / AssignProcessToJobObject と
+#   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
+# - Win32_Security: CreateJobObjectW の引数型（SECURITY_ATTRIBUTES）が、この feature の下にある。
+# - Win32_System_Threading: JOBOBJECT_EXTENDED_LIMIT_INFORMATION の項目型（IO_COUNTERS）が、この feature の下にある。
 windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Registry",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }

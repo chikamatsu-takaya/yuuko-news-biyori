@@ -3,10 +3,14 @@
 //! - provider が `Gemini` かつ環境変数 `GEMINI_API_KEY` が設定されている場合のみ実AI（GeminiClient）を呼ぶ。
 //! - APIキーは **Rust側でのみ** 読み、フロントへ渡さない・ログに出さない。
 //! - キー未設定／他プロバイダ／Gemini呼び出し失敗時は MockProvider へフォールバックする（安全側）。
+//! - provider が `Local` の場合は同梱ローカルLLM（llama-server・判断台帳 D99）で生成する。
+//!   失敗は固定分類（`AppError::LocalAi`）で返し、**黙って Gemini / Mock へ切り替えない**
+//!   （利用者が「ローカルで動いた」と誤解しないため）。出力検証（summary_service 等）は従来どおり。
 //! - 送信内容は要約・再説明に必要な最小限（指示＋入力本文のみ）に絞る。
 
 use crate::domain::ai_connection::{
     AiProviderConnectionErrorKind, AiProviderConnectionStatus, AiProviderConnectionTestResult,
+    LocalAiFailure,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{AiRequest, AiResponse, TERM_EXPLANATION_PROMPT_ID};
@@ -15,10 +19,16 @@ use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
 
+use super::local_llm_service::LocalLlmService;
+
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// 永続化メタ（ai_provider）用：実際に応答を生成したプロバイダ名。
 const PROVIDER_GEMINI: &str = "gemini";
+const PROVIDER_LOCAL: &str = "local";
 const PROVIDER_MOCK: &str = "mock";
+/// ローカルLLMの出力上限（トークン）。要約・再説明・感想・用語解説はいずれも短い出力のため
+/// 1024 に抑え、止まらずに書き続ける回で待ち時間が延びないようにする。
+const LOCAL_MAX_OUTPUT_TOKENS: u32 = 1024;
 
 /// ゆうこの口調の固定指示（用語解説・再説明・感想で共通）。プロンプト内では必ず固定指示側
 /// （外部データの区切り・入力本文より前）に置く。
@@ -32,13 +42,22 @@ const YUUKO_TONE_INSTRUCTION: &str = "文章はマスコットキャラクター
 #[derive(Debug, Clone)]
 pub struct AiProviderService {
     gemini_client: GeminiClient,
+    local_llm: LocalLlmService,
 }
 
 impl AiProviderService {
+    /// ローカルLLMは同梱物の場所を持たない状態で作る（`with_local_llm` で本番の窓口へ差し替える）。
     pub fn new(paths: &AppPaths) -> Self {
         Self {
             gemini_client: GeminiClient::new(paths),
+            local_llm: LocalLlmService::unavailable(),
         }
+    }
+
+    /// 同梱ローカルLLMの窓口を差し込む（lib.rs で、終了時に止める窓口と同じものを渡す）。
+    pub fn with_local_llm(mut self, local_llm: LocalLlmService) -> Self {
+        self.local_llm = local_llm;
+        self
     }
 
     pub fn request_text(
@@ -51,6 +70,23 @@ impl AiProviderService {
             return Err(AppError::Validation(
                 "ai request input_text must not be empty".to_string(),
             ));
+        }
+
+        // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
+        if provider == AiProvider::Local {
+            let prompt = build_prompt(&request, explanation_level);
+            return self
+                .local_llm
+                .generate(&prompt, LOCAL_MAX_OUTPUT_TOKENS)
+                .map(|text| AiResponse {
+                    text,
+                    provider: PROVIDER_LOCAL.to_string(),
+                })
+                .map_err(|failure| {
+                    // 本文・プロンプトは出さず、固定の分類だけを残す。
+                    log::warn!("local AI request failed ({failure:?})");
+                    AppError::LocalAi(failure)
+                });
         }
 
         // Gemini かつ APIキーが設定されている場合のみ実AIを呼ぶ。
@@ -92,7 +128,9 @@ impl AiProviderService {
     /// - Gemini: APIキー未設定→ApiKeyMissing。設定時は固定・無害な最小リクエストで到達確認する。
     ///   **通常処理の自動Mockフォールバックはしない**（「Gemini接続成功」に見えないようにする）。
     ///   Mockが使えることは `mock_available` で別途表す。
-    /// - OpenAI / Local: 未実装（NotImplemented / ProviderNotImplemented）。外部通信も仮実装も行わない。
+    /// - Local: 同梱の llama-server を（必要なら）起動し、固定・無害な最小プロンプトで1回生成できるかを確かめる。
+    ///   失敗は固定のエラー種別（部品が無い・壊れている・起動失敗・時間切れ・要求失敗）で返す。
+    /// - OpenAI: 未実装（NotImplemented / ProviderNotImplemented）。外部通信も仮実装も行わない。
     pub fn test_connection(&self, provider: AiProvider) -> AiProviderConnectionTestResult {
         match provider {
             AiProvider::Mock => {
@@ -114,7 +152,16 @@ impl AiProviderService {
                 }
                 result
             }
-            AiProvider::Openai | AiProvider::Local => {
+            AiProvider::Local => {
+                log::info!("test_ai_provider: checking the bundled local AI");
+                let result = local_check_result(self.local_llm.check_connection());
+                match result.error_kind {
+                    None => log::info!("test_ai_provider: local AI is available"),
+                    Some(kind) => log::warn!("test_ai_provider: local AI unavailable ({kind:?})"),
+                }
+                result
+            }
+            AiProvider::Openai => {
                 log::info!("test_ai_provider: provider is not implemented");
                 not_implemented_result(provider)
             }
@@ -189,7 +236,25 @@ fn mock_connection_result() -> AiProviderConnectionTestResult {
     }
 }
 
-/// 未実装Provider（OpenAI / Local）。外部通信せず、アプリを止めない固定結果。
+/// ローカルAIの接続確認結果を結果DTOへ変換する（固定分類のみ。パス・番号・合言葉は含まない）。
+fn local_check_result(outcome: Result<(), LocalAiFailure>) -> AiProviderConnectionTestResult {
+    let (status, error_kind) = match outcome {
+        Ok(()) => (AiProviderConnectionStatus::Available, None),
+        Err(failure) => (
+            AiProviderConnectionStatus::Unavailable,
+            Some(failure.connection_error_kind()),
+        ),
+    };
+    AiProviderConnectionTestResult {
+        provider: Some(AiProvider::Local),
+        checked_provider: Some(AiProvider::Local),
+        status,
+        error_kind,
+        mock_available: true,
+    }
+}
+
+/// 未実装Provider（OpenAI）。外部通信せず、アプリを止めない固定結果。
 fn not_implemented_result(provider: AiProvider) -> AiProviderConnectionTestResult {
     AiProviderConnectionTestResult {
         provider: Some(provider),
@@ -741,19 +806,134 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_openai_and_local_are_not_implemented() {
-        for provider in [AiProvider::Openai, AiProvider::Local] {
-            let result = service().test_connection(provider);
-            assert_eq!(result.provider, Some(provider));
-            assert_eq!(result.checked_provider, Some(provider));
-            assert_eq!(result.status, AiProviderConnectionStatus::NotImplemented);
-            assert_eq!(
-                result.error_kind,
-                Some(AiProviderConnectionErrorKind::ProviderNotImplemented)
-            );
-            // 未実装でもアプリを止めず、Mockは利用可能と示す。
-            assert!(result.mock_available);
+    fn test_connection_openai_is_not_implemented() {
+        let provider = AiProvider::Openai;
+        let result = service().test_connection(provider);
+        assert_eq!(result.provider, Some(provider));
+        assert_eq!(result.checked_provider, Some(provider));
+        assert_eq!(result.status, AiProviderConnectionStatus::NotImplemented);
+        assert_eq!(
+            result.error_kind,
+            Some(AiProviderConnectionErrorKind::ProviderNotImplemented)
+        );
+        // 未実装でもアプリを止めず、Mockは利用可能と示す。
+        assert!(result.mock_available);
+    }
+
+    #[test]
+    fn test_connection_local_without_bundle_reports_missing_without_mock() {
+        // 同梱物が無い窓口では、Mock の成功に見せず固定の LocalAiMissing を返す。
+        let result = service().test_connection(AiProvider::Local);
+        assert_eq!(result.provider, Some(AiProvider::Local));
+        assert_eq!(result.checked_provider, Some(AiProvider::Local));
+        assert_eq!(result.status, AiProviderConnectionStatus::Unavailable);
+        assert_eq!(
+            result.error_kind,
+            Some(AiProviderConnectionErrorKind::LocalAiMissing)
+        );
+        assert!(result.mock_available);
+    }
+
+    #[test]
+    fn local_check_results_map_failures_to_fixed_kinds() {
+        assert_eq!(
+            local_check_result(Ok(())).status,
+            AiProviderConnectionStatus::Available
+        );
+        let cases = [
+            (
+                LocalAiFailure::Missing,
+                AiProviderConnectionErrorKind::LocalAiMissing,
+            ),
+            (
+                LocalAiFailure::Broken,
+                AiProviderConnectionErrorKind::LocalAiBroken,
+            ),
+            (
+                LocalAiFailure::StartFailed,
+                AiProviderConnectionErrorKind::LocalAiStartFailed,
+            ),
+            (
+                LocalAiFailure::Timeout,
+                AiProviderConnectionErrorKind::Timeout,
+            ),
+            (
+                LocalAiFailure::RequestFailed,
+                AiProviderConnectionErrorKind::LocalAiRequestFailed,
+            ),
+        ];
+        for (failure, expected) in cases {
+            let result = local_check_result(Err(failure));
+            assert_eq!(result.status, AiProviderConnectionStatus::Unavailable);
+            assert_eq!(result.error_kind, Some(expected));
+            assert_eq!(result.checked_provider, Some(AiProvider::Local));
         }
+    }
+
+    #[test]
+    fn local_request_failure_is_returned_without_falling_back_to_mock() {
+        // 黙って Mock（や Gemini）へ切り替えず、固定分類のエラーで返す。
+        let request = AiRequest {
+            prompt_id: "summary_v1".to_string(),
+            input_text: "本文".to_string(),
+            context: None,
+        };
+        let error = service()
+            .request_text(request, AiProvider::Local, ExplanationLevel::Normal)
+            .expect_err("local without bundle must fail");
+        assert!(matches!(error, AppError::LocalAi(LocalAiFailure::Missing)));
+    }
+
+    /// 実物の llama-server とモデルでの手動確認（CI では動かさない）。
+    /// `node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ>` で置いてから
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_local_llm -- --ignored --nocapture` で動かす。
+    #[test]
+    #[ignore = "requires the real llama-server and model placed by scripts/local-llm/place-bundle.mjs"]
+    fn real_local_llm_generates_article_texts() {
+        use std::time::Instant;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("local_llm");
+        let local = LocalLlmService::new(Some(dir));
+        let service = service().with_local_llm(local.clone());
+
+        let started = Instant::now();
+        let result = service.test_connection(AiProvider::Local);
+        eprintln!(
+            "connection test (verify + start + tiny generation): {:.1}s {:?}",
+            started.elapsed().as_secs_f32(),
+            result.status
+        );
+        assert_eq!(result.status, AiProviderConnectionStatus::Available);
+
+        let excerpt = "政府は来年度から、中小企業のデジタル化を支援する新しい補助金制度を始めると発表した。\
+            対象は従業員300人以下の企業で、クラウドサービスの導入費用や社員研修の費用の一部を補助する。\
+            担当者は「人手不足に悩む地域の企業が、少ない負担で業務を効率化できるようにしたい」と話している。"
+            .repeat(6);
+        let input = format!("タイトル: 中小企業のデジタル化に新補助金\n抜粋: {excerpt}");
+        eprintln!("input chars: {}", input.chars().count());
+        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+            let started = Instant::now();
+            let response = service
+                .request_text(
+                    AiRequest {
+                        prompt_id: prompt_id.to_string(),
+                        input_text: input.clone(),
+                        context: None,
+                    },
+                    AiProvider::Local,
+                    ExplanationLevel::Normal,
+                )
+                .expect("local generation");
+            eprintln!(
+                "{prompt_id}: {:.1}s, {} chars\n{}\n",
+                started.elapsed().as_secs_f32(),
+                response.text.chars().count(),
+                response.text
+            );
+            assert_eq!(response.provider, "local");
+        }
+        local.shutdown();
     }
 
     #[test]

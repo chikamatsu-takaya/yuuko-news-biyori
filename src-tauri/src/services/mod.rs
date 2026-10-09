@@ -8,6 +8,7 @@ pub mod data_import_service;
 pub mod dictionary_service;
 pub mod friendship_service;
 pub mod gacha_service;
+pub mod local_llm_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod recommendation_service;

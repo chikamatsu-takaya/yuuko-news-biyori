@@ -411,6 +411,11 @@ const mapAiConnectionTestResult = (
       recommendMock: result.provider === "gemini",
     };
   }
+  // ローカル（同梱AI）の失敗は種別ごとの固定文言にする（パス・番号などは Rust 側で落としてある）。
+  const localMessage = localAiConnectionMessage(result);
+  if (localMessage) {
+    return { tone: "warning", message: localMessage, recommendMock: false };
+  }
   if (
     result.status === "not_implemented" ||
     result.errorKind === "provider_not_implemented"
@@ -426,6 +431,28 @@ const mapAiConnectionTestResult = (
     message: "接続に失敗しました",
     recommendMock: false,
   };
+};
+
+// ローカル（同梱AI・llama-server）の接続テスト失敗の固定文言。該当しなければ null。
+const localAiConnectionMessage = (
+  result: AiProviderConnectionTestResult
+): string | null => {
+  switch (result.errorKind) {
+    case "local_ai_missing":
+      return "ローカルAIの部品が見つかりません";
+    case "local_ai_broken":
+      return "ローカルAIの部品が壊れています";
+    case "local_ai_start_failed":
+      return "ローカルAIを起動できませんでした";
+    case "local_ai_request_failed":
+      return "ローカルAIから答えを受け取れませんでした";
+    case "timeout":
+      return result.provider === "local"
+        ? "ローカルAIの準備に時間がかかりすぎました"
+        : null;
+    default:
+      return null;
+  }
 };
 
 // command 自体が reject した場合（通常は起きない）も、生エラーを出さず接続失敗として表示する。
@@ -1215,10 +1242,9 @@ export default function SettingsScreen({
                       <SelectContent>
                         <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
                         <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* local は enum 上は保存できるが、実AI呼び出しは未実装（常に mock 動作）。 */}
-                        {/* MVP 未検証のため「準備中」と明示し、選んでも安全側で mock で動くことを案内する。 */}
+                        {/* local は同梱の llama-server（このパソコンの中で動くAI・判断台帳 D99）で生成する。 */}
                         {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
-                        <SelectItem value="local">ローカル（準備中）</SelectItem>
+                        <SelectItem value="local">ローカル</SelectItem>
                       </SelectContent>
                     </Select>
                   </SettingRow>
@@ -1229,6 +1255,15 @@ export default function SettingsScreen({
                       data-testid="mock-provider-note"
                     >
                       MockProvider は開発・デモ用です（外部AIは使いません）。
+                    </p>
+                  )}
+                  {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
+                  {settings.ai.provider === "local" && (
+                    <p
+                      className="text-xs text-muted-foreground py-2"
+                      data-testid="local-provider-note"
+                    >
+                      このパソコンの中で動くAIだよ。初めて使うときは準備に少し時間がかかるよ。
                     </p>
                   )}
                   <div className="py-3 border-b border-border/50">
@@ -1327,7 +1362,7 @@ export default function SettingsScreen({
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
                   {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。現在、実際の外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。ローカルは準備中のため、選んでも現在は MockProvider で動作します。
+                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。<strong>ローカル</strong>はこのパソコンの中だけで動くAIで、APIキーは要りません（記事の内容を外部へ送りません）。
                   </p>
                 </CardContent>
               </Card>

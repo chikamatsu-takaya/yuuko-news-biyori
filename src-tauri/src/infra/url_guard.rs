@@ -309,6 +309,55 @@ pub(crate) fn is_disallowed_ip_addr(ip: IpAddr) -> bool {
     }
 }
 
+// --- 同梱ローカルLLM専用の接続先（判断台帳 D102・セキュリティ詳細設計書 §6.3 の例外） ---
+//
+// ループバック拒否（上の validate_url / is_disallowed_ip_addr）は RSS・記事・外部AI すべてで維持する。
+// 例外は「アプリ自身が起動した llama-server の 127.0.0.1:<そのとき割り当てた番号>」だけで、
+// 文字列のURLは受け取らない（ホスト・スキームは固定、番号は起動処理が選んだものだけ、経路は固定の列挙）。
+// 許可リスト（network_allowlist.json）や UrlPurpose へは足さない＝利用者の設定で 127.0.0.1 を開けられない。
+
+/// 起動処理（infra の local_llm_runtime）が空き番号として選び、llama-server へ渡した番号。
+/// 生成できるのは infra の中だけ（画面・設定・外部データから番号を作る道を持たない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnedLocalLlmPort(u16);
+
+impl SpawnedLocalLlmPort {
+    /// 0番（OSに任せる番号）は接続先として使えないため拒否する。
+    pub(in crate::infra) fn new(port: u16) -> Option<Self> {
+        (port != 0).then_some(Self(port))
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// ローカルLLMで使う経路（固定）。任意パスは扱わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalLlmRoute {
+    Health,
+    ChatCompletions,
+}
+
+impl LocalLlmRoute {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Health => "/health",
+            Self::ChatCompletions => "/v1/chat/completions",
+        }
+    }
+}
+
+/// 同梱ローカルLLMの接続先URLを組み立てる。ホストは常に `127.0.0.1`、スキームは `http`。
+pub fn local_llm_url(port: SpawnedLocalLlmPort, route: LocalLlmRoute) -> Url {
+    let mut url = Url::parse("http://127.0.0.1/").expect("fixed loopback URL must parse");
+    // 固定の http URL なので番号の設定は失敗しない。
+    url.set_port(Some(port.get()))
+        .expect("http URL must accept a port");
+    url.set_path(route.path());
+    url
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_disallowed_ip_addr, validate_url, NetworkAllowlist, UrlPurpose};
@@ -715,5 +764,42 @@ mod tests {
         )
         .expect_err("RSS allowlist must not inherit AI entries");
         assert!(error.to_string().contains("not present in the allowlist"));
+    }
+
+    // --- D102: ローカルLLM専用の接続先を足しても、ほかのループバック宛ては拒否されたまま ---
+
+    #[test]
+    fn local_llm_url_is_fixed_to_loopback_with_the_spawned_port() {
+        use super::{local_llm_url, LocalLlmRoute, SpawnedLocalLlmPort};
+        let port = SpawnedLocalLlmPort::new(51234).expect("non-zero port");
+        let health = local_llm_url(port, LocalLlmRoute::Health);
+        assert_eq!(health.as_str(), "http://127.0.0.1:51234/health");
+        let chat = local_llm_url(port, LocalLlmRoute::ChatCompletions);
+        assert_eq!(chat.as_str(), "http://127.0.0.1:51234/v1/chat/completions");
+        assert!(SpawnedLocalLlmPort::new(0).is_none());
+    }
+
+    #[test]
+    fn loopback_targets_stay_rejected_for_every_purpose_even_if_allowlisted() {
+        // 許可リストに 127.0.0.1 / localhost / ::1 を書いても、RSS・記事・外部AI からは届かない。
+        let loopbacks = [
+            "http://127.0.0.1:51234/v1/chat/completions",
+            "http://127.0.0.1:8080/health",
+            "http://localhost:51234/health",
+            "http://[::1]:51234/health",
+            "http://[::ffff:127.0.0.1]:51234/health",
+            "http://127.1.2.3/",
+        ];
+        for purpose in [UrlPurpose::Rss, UrlPurpose::Article, UrlPurpose::AiEndpoint] {
+            let allowlist = allowlist_for(purpose, &["127.0.0.1", "localhost", "::1", "127.1.2.3"]);
+            for url in loopbacks {
+                let error = validate_url(url, purpose, &allowlist)
+                    .expect_err("loopback must stay rejected outside the local LLM path");
+                assert!(
+                    error.to_string().contains("is not allowed"),
+                    "{purpose:?} {url}: {error}"
+                );
+            }
+        }
     }
 }
