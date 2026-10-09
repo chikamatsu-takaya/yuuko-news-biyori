@@ -364,6 +364,14 @@ export default function PastNewsScreen({
         return;
       }
       setMonths(result);
+      // 記憶していた月が削除済み・開けない形式になっていたら（戻る以外の経路で入った場合など）、
+      // 存在しない月の一覧を開いたままにせず月一覧へ戻す。
+      setSelectedMonth((current) =>
+        current &&
+        !result.some((entry) => entry.month === current && entry.catalogComplete)
+          ? null
+          : current
+      );
     } catch (error) {
       if (requestId !== monthsRequestRef.current) return;
       setMonths([]);
@@ -594,7 +602,11 @@ export default function PastNewsScreen({
             <h1 className="text-xl font-bold text-foreground">
               {selectedMonth ? `${selectedMonthLabel}の過去ニュース` : "過去ニュース"}
             </h1>
-            {selectedMonth && !isArticlesLoading && articlesCatalogComplete && !articlesNotice && (
+            {selectedMonth &&
+              !isArticlesLoading &&
+              articlesCatalogComplete &&
+              // 取り出し失敗では一覧が残るため件数も出す。読み込み失敗・プレビュー案内では出さない。
+              (!articlesNotice || articlesNoticeKind === "restore-error") && (
               <Badge className="bg-[var(--yuuko-green)] text-white border-0 text-xs">
                 {articles.length}件
               </Badge>

@@ -732,6 +732,61 @@ test("past news: restore failure stays on the month list with a fixed notice", a
   await expect(main.getByText("9月のアーカイブ記事")).toBeVisible();
 });
 
+test("past news: a remembered month that was deleted falls back to the month list without an error", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+
+  // 記事詳細を開いている間に、記憶している月（2026-09）が削除された状態にする。
+  await page.evaluate(() => {
+    const win = window as unknown as Record<string, { month: string }[]>;
+    win.__E2E_ARCHIVE_MONTHS__ = win.__E2E_ARCHIVE_MONTHS__.filter(
+      (entry) => entry.month !== "2026-09"
+    );
+  });
+
+  // 戻る以外の経路（ホーム → サイドバー）で入り直すと、月一覧を表示する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ホーム", exact: true })
+    .click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-07")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-09")).toHaveCount(0);
+  await expect(page.locator("main").getByRole("alert")).toHaveCount(0);
+});
+
+test("past news: restore failure keeps the article count badge", async ({ page }) => {
+  await setPastNewsFlags(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  const main = page.locator("main");
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(main.getByRole("alert")).toBeVisible();
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+});
+
 test("past news: shows the empty state when there are no archives", async ({
   page,
 }) => {
