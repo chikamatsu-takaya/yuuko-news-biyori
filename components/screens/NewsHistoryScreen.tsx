@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   listArticleHistory,
   restoreArchivedArticle,
@@ -778,9 +779,7 @@ export default function NewsHistoryScreen({
           {/* Auto Start */}
           <div className="mt-4 space-y-2">
             <AutostartStatus />
-            <Button variant="outline" size="sm" className="w-full text-xs">
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 

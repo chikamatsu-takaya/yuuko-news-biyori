@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
@@ -351,6 +352,7 @@ const buildFallbackDictionaryEntry = (
   relatedArticleId: currentArticle.id,
   relatedArticleTitle: currentArticle.title,
   isStarred: false,
+  savedInDictionary: false,
 });
 
 const mapTauriArticleToUi = (
@@ -722,11 +724,13 @@ function TermPopup({
             {dictionaryEntry.detailExplanation}
           </p>
           <div className="pt-1">
+            {/* 保存状態は savedInDictionary で判定する（★ を外した保存済み項目も「辞書保存済み」）。
+                ★ の塗りは isStarred を反映するだけで、保存操作では ★ を付けない（要件定義書 §7.4.10）。 */}
             <Button
-              variant={dictionaryEntry.isStarred ? "secondary" : "outline"}
+              variant={dictionaryEntry.savedInDictionary ? "secondary" : "outline"}
               size="sm"
               className="h-8 gap-1.5 text-xs"
-              disabled={isLoading || isSaving || dictionaryEntry.isStarred}
+              disabled={isLoading || isSaving || dictionaryEntry.savedInDictionary}
               onClick={onSave}
             >
               <Star
@@ -736,7 +740,7 @@ function TermPopup({
                     : ""
                 }`}
               />
-              {dictionaryEntry.isStarred
+              {dictionaryEntry.savedInDictionary
                 ? "辞書保存済み"
                 : isSaving
                   ? "保存中..."
@@ -1507,7 +1511,7 @@ export default function NewsReaderScreen({
   }, [article.id, article.isFavorite, toast]);
 
   const handleSaveDictionaryEntry = React.useCallback(async () => {
-    if (!selectedDictionaryEntry || selectedDictionaryEntry.isStarred) {
+    if (!selectedDictionaryEntry || selectedDictionaryEntry.savedInDictionary) {
       return;
     }
 
@@ -1522,12 +1526,8 @@ export default function NewsReaderScreen({
     setTermNoticeKind("info");
 
     try {
-      const savedEntry = await saveDictionaryEntry({
-        entry: {
-          ...entryToSave,
-          isStarred: true,
-        },
-      });
+      // ★ は付けずに保存する（★ は辞書画面などの ★ 操作だけで変える）。
+      const savedEntry = await saveDictionaryEntry({ entry: entryToSave });
       // 最新 request（＝現在の記事の保存）だけが結果を反映する。
       if (
         isMountedRef.current &&
@@ -1718,14 +1718,7 @@ export default function NewsReaderScreen({
 
           <div className="border-t border-border/50 p-3">
             <AutostartStatus className="mb-2" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-full text-xs"
-              onClick={() => console.log("Exit resident mode")}
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="h-8 w-full text-xs" />
           </div>
         </aside>
 

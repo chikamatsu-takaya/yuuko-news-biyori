@@ -1317,9 +1317,20 @@ const saveDictionaryCallCount = (page: Page) =>
 const lastSavedDictionaryEntry = (page: Page) =>
   page.evaluate(
     () =>
-      (window as unknown as Record<string, { keyText?: string } | undefined>)
-        .__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
+      (
+        window as unknown as Record<
+          string,
+          { keyText?: string; isStarred?: boolean } | undefined
+        >
+      ).__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
   );
+
+// explain_selected_term のモックが「★ を外した保存済み項目」の命中を返すようにする。
+const enableSavedUnstarredExplainHit = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ =
+      true;
+  });
 
 // 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
 const saveDictionaryControllerCount = (page: Page) =>
@@ -1982,9 +1993,30 @@ test("reader: the dictionary save button is usable from a selection explanation"
   await expect.poll(() => saveDictionaryCallCount(page)).toBe(1);
   const savedEntry = await lastSavedDictionaryEntry(page);
   expect(savedEntry?.keyText).toBe(READER_SUMMARY_TEXT);
+  // 辞書保存では ★ を付けない（★ は辞書画面などの ★ 操作だけで変える）。
+  expect(savedEntry?.isStarred).toBe(false);
   await expect(
     page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
+});
+
+test("reader: a saved dictionary hit without ★ is shown as 辞書保存済み", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  await enableSavedUnstarredExplainHit(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  // ★ の有無ではなく保存状態（savedInDictionary）で判定するため、★ なしでも保存済み表示になる。
+  const saved = page.getByRole("button", { name: "辞書保存済み" });
+  await expect(saved).toBeVisible();
+  await expect(saved).toBeDisabled();
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
 });
 
 test("reader: current dictionary save failure is safe and can be retried", async ({
@@ -4359,6 +4391,91 @@ for (const screen of sidebarAutostartOpeners) {
     ).toBeVisible();
     await expect(sidebarAutostartStatus(page)).toHaveCount(0);
     await expect(page.getByText("自動起動", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("secret/path")).toHaveCount(0);
+  });
+}
+
+// サイドバーの「常駐を終了する」は確認ダイアログを挟んでから quit_resident_app を呼ぶ
+// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホーム（MainScreen）は別タスクのため対象外。
+const quitResidentOpeners = [
+  ...sidebarAutostartScreens.map((screen) => ({
+    id: screen.id,
+    open: (page: Page) =>
+      openScreenFromSidebar(page, screen.navName, screen.heading),
+  })),
+  { id: "reader", open: openReaderFromHome },
+] as const;
+
+const quitAppCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_QUIT_APP_CALLS__ as
+        | number
+        | undefined) ?? 0
+  );
+
+const quitResidentButton = (page: Page) =>
+  page.getByRole("button", { name: "常駐を終了する" }).first();
+
+for (const screen of quitResidentOpeners) {
+  test(`quit resident on ${screen.id} asks for confirmation before calling the command`, async ({
+    page,
+  }) => {
+    await screen.open(page);
+
+    // キャンセルでは終了しない（誤操作防止）。
+    await quitResidentButton(page).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("常駐を終了しますか？")).toBeVisible();
+    await dialog.getByRole("button", { name: "キャンセル" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(0);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+    await expect.poll(() => quitAppCalls(page)).toBe(1);
+  });
+}
+
+for (const failure of [
+  {
+    code: "MIGRATION_BUSY",
+    message: "データの書き出し・取り込みが終わってから、もう一度終了してね。",
+  },
+  {
+    code: "UNEXPECTED",
+    message:
+      "常駐を終了できなかったよ。もう一度試すか、トレイの「常駐を終了する」を使ってね。",
+  },
+]) {
+  test(`quit resident failure (${failure.code}) shows a fixed toast and keeps the screen`, async ({
+    page,
+  }) => {
+    await page.addInitScript((code) => {
+      (window as unknown as Record<string, unknown>).__E2E_QUIT_APP_FAIL_CODE__ =
+        code;
+    }, failure.code);
+    await openDictionary(page);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+
+    await expect(
+      page.getByText(failure.message, { exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(1);
+    // 画面は落ちず、生エラーも出さない。
+    await expect(
+      page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+    ).toBeVisible();
     await expect(page.getByText("secret/path")).toHaveCount(0);
   });
 }
@@ -7375,6 +7492,21 @@ async function installTauriMocks(page: Page) {
             return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
+          case "quit_resident_app": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const quitWin = window as any;
+            quitWin.__E2E_QUIT_APP_CALLS__ =
+              (quitWin.__E2E_QUIT_APP_CALLS__ || 0) + 1;
+            // 失敗時の表示確認用。生エラー（内部パス入り）が画面に出ないことも確かめる。
+            if (quitWin.__E2E_QUIT_APP_FAIL_CODE__) {
+              throw {
+                code: quitWin.__E2E_QUIT_APP_FAIL_CODE__,
+                message: "failed at C:/secret/path",
+              };
+            }
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "test_ai_provider": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const aiTestWin = window as any;
@@ -7468,10 +7600,15 @@ async function installTauriMocks(page: Page) {
                 message: "E2E explain term failure /internal/secret/path",
               };
             }
+            // 保存済み辞書の命中（★ は外した状態）を返すテスト用。
+            const savedUnstarred =
+              explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...dictionaryEntry,
               keyText: params.selectedText,
+              isStarred: false,
+              savedInDictionary: savedUnstarred,
             };
           }
           case "save_dictionary_entry": {
@@ -7486,7 +7623,11 @@ async function installTauriMocks(page: Page) {
                 saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ || []);
               return await new Promise((resolve, reject) => {
                 controllers.push({
-                  resolve: () => resolve(params.entry),
+                  resolve: () =>
+                    resolve({
+                      ...(params.entry as Record<string, unknown>),
+                      savedInDictionary: true,
+                    }),
                   // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める。
                   reject: () =>
                     reject(
@@ -7496,7 +7637,11 @@ async function installTauriMocks(page: Page) {
               });
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
-            return params.entry;
+            // Rust の保存結果と同じく「辞書保存済み」として返す（★ は保存で変えない）。
+            return {
+              ...(params.entry as Record<string, unknown>),
+              savedInDictionary: true,
+            };
           }
           case "confirm_rank_up_reward":
             return {
