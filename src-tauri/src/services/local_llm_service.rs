@@ -85,8 +85,9 @@ struct Inner {
     last_used: Option<Instant>,
     /// この回のアプリ起動中に、モデルの SHA-256 を確かめ済みか。
     verified: bool,
-    /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わないと分かったか。
-    /// 自動要約の安い確認（`is_bundle_present`）が、壊れた同梱物のために照合（1.3GB 読み）を繰り返させないため。
+    /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わない（または部品が欠けている）と分かったか。
+    /// 自動要約の安い確認（`is_bundle_present`）が、使えない同梱物のために照合（1.3GB 読み）や失敗を繰り返させないため。
+    /// 置き直して照合が通れば false に戻す。
     found_broken: bool,
     /// 走っている生成・接続テストの数（起動待ちを含む）。
     in_flight: u32,
@@ -437,6 +438,8 @@ impl LocalLlmService {
                 ModelCheck::Ok => {}
                 ModelCheck::Missing => {
                     log::warn!("a local llm runtime file is missing");
+                    // DLL の欠けは安い確認では見ないため、ここで覚えて自動要約を空振りさせない。
+                    self.shared.lock_state().found_broken = true;
                     return Err(LocalAiFailure::Missing);
                 }
                 ModelCheck::Broken => {
@@ -447,7 +450,10 @@ impl LocalLlmService {
             }
             match check_model_sha256(&bundle.model, &config.model_sha256) {
                 ModelCheck::Ok => {
-                    self.shared.lock_state().verified = true;
+                    let mut state = self.shared.lock_state();
+                    state.verified = true;
+                    state.found_broken = false;
+                    drop(state);
                     log::info!(
                         "local llm model verified in {:.1}s",
                         started.elapsed().as_secs_f32()
