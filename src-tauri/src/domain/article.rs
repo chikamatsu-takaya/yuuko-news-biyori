@@ -425,6 +425,18 @@ pub struct FetchedArticle {
     pub read_state: ArticleReadState,
 }
 
+/// 要約の保存時に、front matter の `tags` をどう反映するか（判断台帳 D11）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArticleTagsUpdate {
+    /// 既存のタグをそのまま残す（タグの生成・検証に失敗したとき）。
+    Keep,
+    /// 実AIの検証済みタグで置き換える。
+    Replace(Vec<String>),
+    /// 既存のタグが空のときだけ入れる（Mock の定型タグ。既存のタグを Mock で上書きしないため）。
+    /// 空かどうかの確認は保存と同じ書き込みロックの中で行う。
+    FillIfEmpty(Vec<String>),
+}
+
 /// 生成済み要約を記事Markdownへ永続化する際の入力（内部Rust API・Tauri commandでは公開しない）。
 /// B-4決定: 生成要約は記事Markdownへ保存し、再表示はキャッシュ／更新は明示再生成とする。
 #[derive(Debug, Clone)]
@@ -434,6 +446,8 @@ pub struct ArticleSummaryUpdate {
     /// 要点（AI生成・検証済み）。記事ファイルの「要点」節へ保存する。
     pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
+    /// 記事タグ（AI生成・検証済み・D11）の反映方法。タグの失敗では要約の保存を止めない。
+    pub tags: ArticleTagsUpdate,
     pub yuuko_comment: String,
     /// 実際に生成に使ったプロバイダ（"gemini" / "mock"）。
     pub ai_provider: String,

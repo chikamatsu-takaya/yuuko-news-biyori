@@ -666,12 +666,16 @@ pub fn term_explanation_response_format() -> ResponseFormat {
     }
 }
 
-/// 要点・注目ポイント（`article_points_v1`・判断台帳 D18）の出力スキーマ:
-/// `{"key_points": [string; 2..=4], "focus_points": [string; 1..=3]}`（各要素は 1〜100 文字）。
-/// 順番は key_points → focus_points（プロンプトの例と同じ。何が起きたかを先に書かせる）。
-/// 件数・文字数は文法でも縛るが、保存前の検証（件数・文字数・文字種）は summary_service 側で必ず行う。
+/// 要点・注目ポイント・タグ（`article_points_v2`・判断台帳 D18 / D11）の出力スキーマ:
+/// `{"key_points": [string; 2..=4], "focus_points": [string; 1..=3], "tags": [string; 3..=5]}`
+/// （要点・注目ポイントの各要素は 1〜100 文字、タグは 1〜20 文字）。
+/// 順番は key_points → focus_points → tags（プロンプトの例と同じ。何が起きたかを先に書かせる）。
+/// tags も required にして、ローカルLLMには必ず書かせる（任意にすると小さいモデルは省きやすい）。
+/// 件数・文字数は文法でも縛るが、保存前の検証（件数・文字数・文字種・タグの区切り文字や重複）は
+/// summary_service 側で必ず行う。タグだけが検証に落ちた場合は、タグだけを捨てて要点・要約は保存する。
 pub fn article_points_response_format() -> ResponseFormat {
     use crate::domain::summary::{
+        ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS,
         FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
         POINT_ITEM_MAX_CHARS,
     };
@@ -695,6 +699,14 @@ pub fn article_points_response_format() -> ResponseFormat {
                             min_items: FOCUS_POINTS_MIN_ITEMS,
                             max_items: FOCUS_POINTS_MAX_ITEMS,
                             max_length: POINT_ITEM_MAX_CHARS,
+                        },
+                    ),
+                    (
+                        "tags",
+                        FieldSchema::StringList {
+                            min_items: ARTICLE_TAGS_MIN_ITEMS,
+                            max_items: ARTICLE_TAGS_MAX_ITEMS,
+                            max_length: ARTICLE_TAG_MAX_CHARS,
                         },
                     ),
                 ],
@@ -944,9 +956,10 @@ mod tests {
     fn article_points_schema_bounds_counts_and_lengths_in_key_order() {
         let body = build_chat_body("prompt", 1024, Some(article_points_response_format()));
         let text = serde_json::to_string(&body).unwrap();
-        // 要点 → 注目ポイントの順に、件数（2〜4 / 1〜3）と1件の文字数（1〜100）を縛る。
+        // 要点 → 注目ポイント → タグの順に、件数（2〜4 / 1〜3 / 3〜5）と1件の文字数（1〜100 / 1〜20）を縛る。
+        // タグも required（ローカルLLMに必ず書かせる）。
         assert!(text.contains(
-            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":4},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":3}},"required":["key_points","focus_points"],"additionalProperties":false}}}"#
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":4},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":3},"tags":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20},"minItems":3,"maxItems":5}},"required":["key_points","focus_points","tags"],"additionalProperties":false}}}"#
         ), "{text}");
     }
 

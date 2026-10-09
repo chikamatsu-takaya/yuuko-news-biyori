@@ -1,9 +1,11 @@
-use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate};
+use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate, ArticleTagsUpdate};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{
     AiArticlePoints, AiRequest, AiResponse, GenerateArticleSummaryParams,
-    GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, FOCUS_POINTS_MAX_ITEMS,
-    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
+    ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
+    FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
+    POINT_ITEM_MAX_CHARS,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -103,7 +105,7 @@ impl SummaryService {
         // 種（Mock 結果そのもの・実AIへの入力）は、外部由来の値を無害化した記事から作る。
         // これにより Mock 結果が出力検証に落ちないこと（＝AIキー未設定でも要約できること）を構造的に保証する。
         // 種の中の注目ポイント（seed_focus_points）は要約・再説明の書き出しのための材料で、保存はしない。
-        // 保存する要点・注目ポイントは、下の article_points_v1 の AI 出力から取る（D18）。
+        // 保存する要点・注目ポイント・タグは、下の article_points_v2 の AI 出力から取る（D18 / D11）。
         let seed_article = neutralize_seed_article(&article);
         let seed_focus_points = build_focus_points(&seed_article, explanation_level);
         let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
@@ -153,13 +155,16 @@ impl SummaryService {
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
 
-        // 要点と注目ポイント（D18）。ローカルLLMの負荷を抑えるため、2つの配列を1回の呼び出しで受け取る。
+        // 要点・注目ポイント・タグ（D18 / D11）。ローカルLLMの負荷を抑えるため、1回の呼び出しで受け取る
+        // （タグのためだけに AI を呼ばない）。
         // 入力は無害化したタイトル＋本文抜粋だけにする（既存の注目ポイントや定型文を混ぜない）。
+        // context の無害化済みジャンルは Mock のタグを作るためだけに使い、実AIへは送らない
+        // （ai_provider_service の build_prompt は用語解説以外で context を使わない）。
         let points_response = request_validated(
             AiRequest {
                 prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
                 input_text: points_seed,
-                context: None,
+                context: Some(seed_article.genre.clone()),
             },
             SummaryOutputKind::Points,
             provider,
@@ -182,12 +187,25 @@ impl SummaryService {
         let AiArticlePoints {
             key_points,
             focus_points,
+            tags,
         } = points;
+        // タグは検証を通ったとき（3〜5件）だけ反映し、落ちたとき（空）は既存のタグを残す。
+        // タグの失敗では要約の保存を止めない（D11。要点・注目ポイントの検証落ちとは扱いが違う）。
+        // Mock（provider=Mock・Gemini 失敗時の代替）のタグはジャンルからの定型なので、既存のタグを
+        // 上書きせず、空のときだけ入れる（安全側。実AIの有効なタグは置き換える）。
+        let tags = if tags.is_empty() {
+            ArticleTagsUpdate::Keep
+        } else if points_response.provider == PROVIDER_MOCK {
+            ArticleTagsUpdate::FillIfEmpty(tags)
+        } else {
+            ArticleTagsUpdate::Replace(tags)
+        };
         let update = ArticleSummaryUpdate {
             summary: summary.clone(),
             yuuko_explanation: yuuko_explanation.clone(),
             key_points: key_points.clone(),
             focus_points: focus_points.clone(),
+            tags,
             yuuko_comment: yuuko_comment.clone(),
             ai_provider: effective_provider,
             generated_at: current_utc_timestamp(),
@@ -393,7 +411,7 @@ enum SummaryOutputKind {
     Summary,
     Explanation,
     Comment,
-    /// 要点と注目ポイント（JSON `{"key_points": [..], "focus_points": [..]}`）。
+    /// 要点・注目ポイント・タグ（JSON `{"key_points": [..], "focus_points": [..], "tags": [..]}`）。
     Points,
 }
 
@@ -433,6 +451,10 @@ enum OutputRejection {
     ItemCount,
     /// 要点・注目ポイント: 1件の中に改行がある（記事ファイルの箇条書き1行に収まらない）。
     MultiLine,
+    /// タグ: 出力に含まれていない（`tags` が無い・null）。
+    Missing,
+    /// タグ: カンマ・読点などの区切り文字を含む。
+    Separator,
 }
 
 impl OutputRejection {
@@ -447,6 +469,8 @@ impl OutputRejection {
             Self::InvalidJson => "invalid_json",
             Self::ItemCount => "item_count",
             Self::MultiLine => "multi_line",
+            Self::Missing => "missing",
+            Self::Separator => "separator",
         }
     }
 }
@@ -459,9 +483,11 @@ impl OutputRejection {
 /// 「---」は front matter 区切りと衝突しうるため、部分的に書き換えて残すより丸ごと捨てる方が確実に安全。
 fn validate_summary_output(kind: SummaryOutputKind, text: &str) -> Result<String, OutputRejection> {
     if kind == SummaryOutputKind::Points {
-        // 要点・注目ポイントは JSON。検証済みの値を、余分な空白・コードフェンスを除いた JSON として返す。
-        let points = validate_article_points(text)?;
-        return serde_json::to_string(&points).map_err(|_| OutputRejection::InvalidJson);
+        // 要点・注目ポイント・タグは JSON。要点・注目ポイントが検証を通れば、コードフェンスを除いた JSON を返す。
+        // 検証済みの値へ組み直さずに返すのは、保存直前の `article_points_from_response` で同じ検証を
+        // もう一度行い、タグを採用しなかった理由（固定ラベル）をそこで1回だけログに出すため。
+        validate_article_points(text)?;
+        return Ok(strip_enclosing_code_fence(text).to_string());
     }
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -495,18 +521,42 @@ fn validate_summary_output(kind: SummaryOutputKind, text: &str) -> Result<String
 /// 要点・注目ポイントの応答全体の上限（バイト）。用語解説の JSON 応答と同じく、解析前に大きさで拒否する。
 const ARTICLE_POINTS_RESPONSE_MAX_BYTES: usize = 16 * 1024;
 
-/// 要点・注目ポイントの AI 出力を検証し、trim 済みの各項目を返す（副作用なし）。
+/// 要点・注目ポイント・タグの AI の生の出力。
+/// 要点・注目ポイントは厳格に解析する（未知のキーは拒否）。タグは型を問わず受け取り（無い・null も可）、
+/// 別に検証する。タグの型崩れ（文字列・数値の配列など）で JSON 全体の解析が落ち、要点・要約まで
+/// 保存されなくなるのを防ぐため（D11: タグの失敗は要約の保存を止めない）。
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawArticlePoints {
+    key_points: Vec<String>,
+    focus_points: Vec<String>,
+    #[serde(default)]
+    tags: serde_json::Value,
+}
+
+/// 検証済みの要点・注目ポイント・タグと、タグを採用しなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedArticlePoints {
+    /// `tags` は検証を通ったときだけ値が入り、通らなかったときは空。
+    points: AiArticlePoints,
+    /// タグを採用しなかった理由（採用したときは None）。要点・要約の保存には影響しない。
+    tags_rejection: Option<OutputRejection>,
+}
+
+/// 要点・注目ポイント・タグの AI 出力を検証し、trim 済みの各項目を返す（副作用なし）。
 ///
 /// - 解析前に応答全体の大きさ（16KiB）を確認し、厳格な JSON（未知のキーは拒否）として解析する。
 ///   Gemini は JSON だけを頼んでも ```json のコードフェンスで囲むことがあるため、全体を囲む1組だけは外す。
 /// - 件数（要点 2〜4・注目ポイント 1〜3）と、各項目の文字数（100文字）・文字種を確認する。
 /// - 各項目は記事ファイルで `- 項目` の1行として保存するため、改行・行頭「#」・区切り行・HTML・制御文字は
 ///   無害化せず拒否する（要約などと同じく、部分的に書き換えて残すより丸ごと捨てる方が確実に安全）。
-fn validate_article_points(text: &str) -> Result<AiArticlePoints, OutputRejection> {
+/// - タグ（3〜5件）は `validate_article_tags` で別に検証する。タグが不正なら要点・注目ポイントは
+///   そのまま返し、タグだけを空にする（D11）。
+fn validate_article_points(text: &str) -> Result<ValidatedArticlePoints, OutputRejection> {
     if text.len() > ARTICLE_POINTS_RESPONSE_MAX_BYTES {
         return Err(OutputRejection::TooLong);
     }
-    let parsed = serde_json::from_str::<AiArticlePoints>(strip_enclosing_code_fence(text))
+    let parsed = serde_json::from_str::<RawArticlePoints>(strip_enclosing_code_fence(text))
         .map_err(|_| OutputRejection::InvalidJson)?;
     let key_points = validate_point_items(
         &parsed.key_points,
@@ -516,10 +566,84 @@ fn validate_article_points(text: &str) -> Result<AiArticlePoints, OutputRejectio
         &parsed.focus_points,
         FOCUS_POINTS_MIN_ITEMS..=FOCUS_POINTS_MAX_ITEMS,
     )?;
-    Ok(AiArticlePoints {
-        key_points,
-        focus_points,
+    let (tags, tags_rejection) = match validate_article_tags(&parsed.tags) {
+        Ok(tags) => (tags, None),
+        Err(rejection) => (Vec::new(), Some(rejection)),
+    };
+    Ok(ValidatedArticlePoints {
+        points: AiArticlePoints {
+            key_points,
+            focus_points,
+            tags,
+        },
+        tags_rejection,
     })
+}
+
+/// 記事タグの AI 出力を検証し、trim・重複除去済みのタグ（3〜5件）を返す（副作用なし）。
+///
+/// - 文字列の配列であること。1つでも不正な要素があれば、部分的に残さずタグ全体を採用しない
+///   （要点・注目ポイントと同じく、書き換えて残すより丸ごと捨てる方が確実に安全）。
+/// - 重複は大文字・小文字を区別せずに除き（先に出た方を残す）、除いた後の件数で 3〜5件を確かめる。
+fn validate_article_tags(value: &serde_json::Value) -> Result<Vec<String>, OutputRejection> {
+    let items = match value {
+        serde_json::Value::Null => return Err(OutputRejection::Missing),
+        serde_json::Value::Array(items) => items,
+        _ => return Err(OutputRejection::InvalidJson),
+    };
+    // 重複除去の前に、生の件数を上限の2倍で切る（極端に長い配列を1件ずつ検証しない）。
+    // 3〜5件の確認は重複を除いた後に行う（["AI", "ai", ...] のような重複で落とさないため）。
+    if items.len() > ARTICLE_TAGS_MAX_ITEMS * 2 {
+        return Err(OutputRejection::ItemCount);
+    }
+    let mut tags: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let tag = validate_article_tag(item.as_str().ok_or(OutputRejection::InvalidJson)?)?;
+        let folded = tag.to_lowercase();
+        if !tags
+            .iter()
+            .any(|existing| existing.to_lowercase() == folded)
+        {
+            tags.push(tag);
+        }
+    }
+    if !(ARTICLE_TAGS_MIN_ITEMS..=ARTICLE_TAGS_MAX_ITEMS).contains(&tags.len()) {
+        return Err(OutputRejection::ItemCount);
+    }
+    Ok(tags)
+}
+
+/// タグ1件を検証し、trim 済みの値を返す。
+/// タグは記事ファイルの front matter（YAML の配列 `tags`）へ保存する。YAML としては serde_yaml が
+/// 必要に応じて引用符を付けるため往復で壊れないが、画面・おすすめ判定でタグとして扱いやすいよう、
+/// 1行・短い・記号で始まらない・区切り文字を含まない値だけを受け付ける。
+fn validate_article_tag(item: &str) -> Result<String, OutputRejection> {
+    let trimmed = item.trim();
+    if trimmed.is_empty() {
+        return Err(OutputRejection::Empty);
+    }
+    if trimmed.chars().count() > ARTICLE_TAG_MAX_CHARS {
+        return Err(OutputRejection::TooLong);
+    }
+    if trimmed.contains(['\n', '\r']) {
+        return Err(OutputRejection::MultiLine);
+    }
+    // タブも含めて制御文字は拒否する（タグは1語の短い値なので、要約のように改行・タブを許す理由がない）。
+    if trimmed.contains('\t') || contains_disallowed_control_char(trimmed) {
+        return Err(OutputRejection::ControlCharacter);
+    }
+    // `#タグ` 形式（ハッシュタグ・Markdown 見出し）は受け付けない。全角の「＃」も同じ扱いにする。
+    if trimmed.starts_with(['#', '＃']) {
+        return Err(OutputRejection::MarkdownHeading);
+    }
+    // HTML の山括弧は、タグの形になっていなくても拒否する（短い値なので比較の `<` を許す必要がない）。
+    if trimmed.contains(['<', '>']) {
+        return Err(OutputRejection::HtmlTag);
+    }
+    if trimmed.contains(ARTICLE_TAG_FORBIDDEN_CHARS) {
+        return Err(OutputRejection::Separator);
+    }
+    Ok(trimmed.to_string())
 }
 
 /// 応答全体が1組のコードフェンス（```json … ``` / ``` … ```）で囲まれていれば中身を返す。
@@ -631,17 +755,26 @@ fn rejection_error(response: &AiResponse) -> AppError {
     AppError::AiOutputRejected
 }
 
-/// 要点・注目ポイントの応答を、保存できる形（検証済みの各項目）へ変換する。
+/// 要点・注目ポイント・タグの応答を、保存できる形（検証済みの各項目）へ変換する。
 /// 注入された取得手段が検証を通していなくても、形の崩れた出力を保存しないよう、ここで必ず検証する。
+/// タグだけが検証に落ちた場合はエラーにせず、タグを空にして返す（呼び出し側は既存のタグを残す・D11）。
 fn article_points_from_response(response: &AiResponse) -> Result<AiArticlePoints, AppError> {
-    validate_article_points(&response.text).map_err(|rejection| {
+    let validated = validate_article_points(&response.text).map_err(|rejection| {
         log::warn!(
             "AI summary output was rejected ({}: {}); the generated summary was not saved",
             SummaryOutputKind::Points.label(),
             rejection.label()
         );
         rejection_error(response)
-    })
+    })?;
+    if let Some(rejection) = validated.tags_rejection {
+        // 本文・タグの値は出さず、固定ラベルだけを残す。
+        log::warn!(
+            "AI article tags were rejected ({}); the summary is saved and the existing tags are kept",
+            rejection.label()
+        );
+    }
+    Ok(validated.points)
 }
 
 fn build_focus_points(
@@ -776,8 +909,8 @@ mod tests {
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::summary::{
-        AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, KEY_POINTS_MAX_ITEMS,
-        KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+        AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAG_MAX_CHARS,
+        KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
     };
     use crate::error::{AppError, CommandError};
     use crate::paths::AppPaths;
@@ -1130,6 +1263,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["観点A".to_string()],
                     yuuko_comment: "保存済みの一言".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     ai_provider: "mock".to_string(),
                     generated_at: "2026-10-01T00:00:00Z".to_string(),
                 },
@@ -1377,6 +1511,7 @@ mod tests {
                                     key_points: Vec::new(),
                                     focus_points: vec!["手動の観点".to_string()],
                                     yuuko_comment: "手動の一言".to_string(),
+                                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                                     ai_provider: "gemini".to_string(),
                                     generated_at: "2026-10-08T00:00:00Z".to_string(),
                                 },
@@ -1469,6 +1604,10 @@ mod tests {
             &["地域の雇用がどう変わるかに注目"],
         );
         let points = validate_article_points(&text).unwrap();
+        // tags の無い出力（旧形式・Gemini が省いた場合）も、要点・注目ポイントは受け付ける。
+        assert_eq!(points.tags_rejection, Some(OutputRejection::Missing));
+        let points = points.points;
+        assert!(points.tags.is_empty());
         assert_eq!(
             points.key_points,
             vec!["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"]
@@ -1477,7 +1616,7 @@ mod tests {
 
         // 全体を囲む1組のコードフェンス（Gemini で起きうる）だけは外して読む。
         let fenced = format!("```json\n{text}\n```");
-        assert_eq!(validate_article_points(&fenced).unwrap(), points);
+        assert_eq!(validate_article_points(&fenced).unwrap().points, points);
         // 比較の「<」や途中のハイフンは拒否しない。
         assert!(
             validate_article_points(&points_text(&["1 < 2 の話", "A-B 間の接続"], &["x"])).is_ok()
@@ -1723,5 +1862,394 @@ mod tests {
         assert!(result.is_err());
         assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    // --- 記事タグ（D11） ---
+
+    fn points_with_tags(tags: serde_json::Value) -> String {
+        serde_json::json!({
+            "key_points": ["工場の新設が発表された", "投資額は1兆円"],
+            "focus_points": ["地域の雇用がどう変わるかに注目"],
+            "tags": tags,
+        })
+        .to_string()
+    }
+
+    /// 要点の出力だけを差し替え、他の出力は検証を通る実AIの出力にする取得手段で生成する。
+    fn generate_with_points(
+        service: &SummaryService,
+        policy: FallbackPolicy,
+        points: &str,
+        provider: &str,
+    ) -> Result<SummaryGeneration, AppError> {
+        service.generate_article_summary_with(params(), policy, |_request, kind, _p, _l| {
+            if kind == SummaryOutputKind::Points {
+                return select_valid_output(kind, response(points, provider));
+            }
+            select_valid_output(kind, response(&format!("{provider}の出力"), provider))
+        })
+    }
+
+    #[test]
+    fn article_tags_are_trimmed_and_deduplicated() {
+        let validated = validate_article_points(&points_with_tags(serde_json::json!([
+            " 半導体 ",
+            "AI",
+            "ai",
+            "半導体",
+            "地域経済"
+        ])))
+        .unwrap();
+        assert_eq!(validated.tags_rejection, None);
+        assert_eq!(validated.points.tags, vec!["半導体", "AI", "地域経済"]);
+
+        // 件数は重複を除いた後で数える（生の6件でも、除いて5件なら受け付ける）。
+        let validated = validate_article_points(&points_with_tags(serde_json::json!([
+            "AI", "ai", "b", "c", "d", "e"
+        ])))
+        .unwrap();
+        assert_eq!(validated.tags_rejection, None);
+        assert_eq!(validated.points.tags, vec!["AI", "b", "c", "d", "e"]);
+
+        // 上限の文字数（20文字）と、YAML で特別な意味を持ちうる値もタグとしては受け付ける
+        // （保存時は serde_yaml が引用符を付ける）。
+        let at_limit = "あ".repeat(ARTICLE_TAG_MAX_CHARS);
+        let validated = validate_article_points(&points_with_tags(serde_json::json!([
+            at_limit, "C++", "R&D", "null", "a: b"
+        ])))
+        .unwrap();
+        assert_eq!(validated.tags_rejection, None);
+        assert_eq!(validated.points.tags.len(), 5);
+    }
+
+    #[test]
+    fn invalid_article_tags_drop_only_the_tags_and_keep_the_points() {
+        let too_long = "あ".repeat(ARTICLE_TAG_MAX_CHARS + 1);
+        for (tags, expected) in [
+            (serde_json::json!(["a", "b"]), OutputRejection::ItemCount),
+            // 重複を除いても6件。
+            (
+                serde_json::json!(["a", "b", "c", "d", "e", "f"]),
+                OutputRejection::ItemCount,
+            ),
+            // 生の件数が上限の2倍（10件）を超える。
+            (
+                serde_json::json!(["a", "a", "a", "a", "a", "a", "a", "a", "b", "c", "d"]),
+                OutputRejection::ItemCount,
+            ),
+            // 重複を除くと2件になる。
+            (
+                serde_json::json!(["AI", "ai", "半導体"]),
+                OutputRejection::ItemCount,
+            ),
+            (
+                serde_json::json!(["a", "b", too_long]),
+                OutputRejection::TooLong,
+            ),
+            (serde_json::json!(["a", "b", "  "]), OutputRejection::Empty),
+            (
+                serde_json::json!(["a", "b", "c\nd"]),
+                OutputRejection::MultiLine,
+            ),
+            (
+                serde_json::json!(["a", "b", "c\td"]),
+                OutputRejection::ControlCharacter,
+            ),
+            (
+                serde_json::json!(["a", "b", "c\u{7}"]),
+                OutputRejection::ControlCharacter,
+            ),
+            (
+                serde_json::json!(["a", "b", "#AI"]),
+                OutputRejection::MarkdownHeading,
+            ),
+            (
+                serde_json::json!(["a", "b", "＃AI"]),
+                OutputRejection::MarkdownHeading,
+            ),
+            (
+                serde_json::json!(["a", "b", "<b>AI</b>"]),
+                OutputRejection::HtmlTag,
+            ),
+            (
+                serde_json::json!(["a", "b", "1 < 2"]),
+                OutputRejection::HtmlTag,
+            ),
+            (
+                serde_json::json!(["a", "b", "AI,半導体"]),
+                OutputRejection::Separator,
+            ),
+            (
+                serde_json::json!(["a", "b", "AI、半導体"]),
+                OutputRejection::Separator,
+            ),
+            (
+                serde_json::json!(["a", "b", "AI|半導体"]),
+                OutputRejection::Separator,
+            ),
+            (
+                serde_json::json!(["a", "b", 3]),
+                OutputRejection::InvalidJson,
+            ),
+            (
+                serde_json::json!("AI, 半導体, 経済"),
+                OutputRejection::InvalidJson,
+            ),
+            (serde_json::Value::Null, OutputRejection::Missing),
+        ] {
+            let validated = validate_article_points(&points_with_tags(tags.clone()))
+                .unwrap_or_else(|rejection| panic!("{tags}: points rejected ({rejection:?})"));
+            assert_eq!(validated.tags_rejection, Some(expected), "{tags}");
+            assert!(validated.points.tags.is_empty(), "{tags}");
+            assert_eq!(validated.points.key_points.len(), 2, "{tags}");
+            // 要約などの出力検証（select_valid_output の経路）でも、要点は拒否されない。
+            assert!(validate_summary_output(
+                SummaryOutputKind::Points,
+                &points_with_tags(tags.clone())
+            )
+            .is_ok());
+        }
+        // 未知のキーは従来どおり、要点を含めて拒否する（tags 以外のキーは許さない）。
+        let unknown = serde_json::json!({
+            "key_points": ["a", "b"], "focus_points": ["c"], "tags": ["x", "y", "z"], "extra": 1
+        })
+        .to_string();
+        assert_eq!(
+            validate_article_points(&unknown),
+            Err(OutputRejection::InvalidJson)
+        );
+    }
+
+    #[test]
+    fn generated_tags_are_saved_to_the_article_file_and_reload() {
+        let root_dir = temp_root("tags-saved");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        let tags = ["半導体", "C++", "a: b", "null", "- 先頭ハイフン"];
+        let generated = generate_with_points(
+            &service,
+            FallbackPolicy::SaveFallback,
+            &points_with_tags(serde_json::json!(tags)),
+            "local",
+        )
+        .unwrap();
+        assert!(matches!(generated, SummaryGeneration::Generated(_)));
+        // front matter（YAML）を読み直しても、同じ値・順番で戻る。
+        assert_eq!(repository.get_article_tags(ARTICLE_ID).unwrap(), tags);
+        assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.summary.as_deref(), Some("localの出力"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn invalid_tags_do_not_block_saving_the_summary() {
+        for policy in [FallbackPolicy::SaveFallback, FallbackPolicy::RejectFallback] {
+            for provider in ["gemini", "local"] {
+                let root_dir = temp_root(&format!("tags-invalid-{provider}"));
+                let (service, repository) =
+                    build_service(&root_dir, "新しい半導体工場の建設計画です。");
+                let result = generate_with_points(
+                    &service,
+                    policy,
+                    &points_with_tags(serde_json::json!(["#AI", "半導体", "経済"])),
+                    provider,
+                )
+                .unwrap();
+                assert!(matches!(result, SummaryGeneration::Generated(_)));
+                // 要約・要点は保存され、タグだけが保存されない（既存のタグ＝空のまま）。
+                assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+                let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+                assert_eq!(
+                    detail.summary.as_deref(),
+                    Some(&*format!("{provider}の出力"))
+                );
+                assert_eq!(detail.key_points.len(), 2);
+                assert!(repository.get_article_tags(ARTICLE_ID).unwrap().is_empty());
+                let _ = std::fs::remove_dir_all(&root_dir);
+            }
+        }
+    }
+
+    #[test]
+    fn regeneration_replaces_tags_only_when_the_new_tags_are_valid() {
+        let root_dir = temp_root("tags-regenerate");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        let first = ["半導体", "工場", "投資"];
+        generate_with_points(
+            &service,
+            FallbackPolicy::SaveFallback,
+            &points_with_tags(serde_json::json!(first)),
+            "local",
+        )
+        .unwrap();
+        assert_eq!(repository.get_article_tags(ARTICLE_ID).unwrap(), first);
+
+        // 作り直しでタグが不正・欠けていれば、要約は新しくなるがタグは前のまま残る。
+        for invalid in [
+            points_with_tags(serde_json::json!(["a", "b"])),
+            points_text(&["要点A", "要点B"], &["注目A"]),
+        ] {
+            generate_with_points(&service, FallbackPolicy::SaveFallback, &invalid, "gemini")
+                .unwrap();
+            let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+            assert_eq!(detail.summary.as_deref(), Some("geminiの出力"));
+            assert_eq!(repository.get_article_tags(ARTICLE_ID).unwrap(), first);
+        }
+
+        // 新しいタグが有効なら置き換える。
+        let second = ["地域経済", "雇用", "製造業", "投資"];
+        generate_with_points(
+            &service,
+            FallbackPolicy::SaveFallback,
+            &points_with_tags(serde_json::json!(second)),
+            "local",
+        )
+        .unwrap();
+        assert_eq!(repository.get_article_tags(ARTICLE_ID).unwrap(), second);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    /// 初回起動時のサンプル記事（タグ付き）を置いた、既定（provider=Mock）のサービス。
+    fn build_service_with_sample_articles(root_dir: &Path) -> (SummaryService, ArticleRepository) {
+        let article_repository = ArticleRepository::with_paths(
+            root_dir.join("news"),
+            root_dir.join("article_favorites.json"),
+            root_dir.join("archive"),
+        );
+        article_repository.initialize_default_if_missing().unwrap();
+        let service = SummaryService::new(
+            AiProviderService::new(&AppPaths::new(root_dir.join("ai"))),
+            article_repository.clone(),
+            SettingsRepository::with_path(root_dir.join("settings.json")),
+        );
+        (service, article_repository)
+    }
+
+    #[test]
+    fn mock_summary_keeps_existing_tags_but_real_ai_tags_replace_them() {
+        let root_dir = temp_root("tags-sample-mock");
+        let (service, repository) = build_service_with_sample_articles(&root_dir);
+        let sample_id = "article-001";
+        let sample_params = || GenerateArticleSummaryParams {
+            article_id: sample_id.to_string(),
+        };
+        let sample_tags = repository.get_article_tags(sample_id).unwrap();
+        assert!(!sample_tags.is_empty());
+
+        // Mock の要約（provider=Mock）は保存されるが、既存のタグは定型タグで上書きしない。
+        service.generate_article_summary(sample_params()).unwrap();
+        assert!(repository.is_article_summarized(sample_id).unwrap());
+        assert_eq!(repository.get_article_tags(sample_id).unwrap(), sample_tags);
+
+        // Gemini の失敗で Mock に切り替わった要点（タグ付き）も、既存のタグを上書きしない。
+        service
+            .generate_article_summary_with(
+                sample_params(),
+                FallbackPolicy::SaveFallback,
+                |request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Points {
+                        let mock = service
+                            .ai_provider_service
+                            .request_text(
+                                request,
+                                crate::domain::settings::AiProvider::Mock,
+                                crate::domain::settings::ExplanationLevel::Normal,
+                            )
+                            .unwrap();
+                        return select_valid_output(kind, mock);
+                    }
+                    select_valid_output(kind, response("geminiの出力", "gemini"))
+                },
+            )
+            .unwrap();
+        assert_eq!(repository.get_article_tags(sample_id).unwrap(), sample_tags);
+
+        // 実AIの有効なタグは置き換える。
+        service
+            .generate_article_summary_with(
+                sample_params(),
+                FallbackPolicy::SaveFallback,
+                |_request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Points {
+                        return select_valid_output(
+                            kind,
+                            response(
+                                &points_with_tags(serde_json::json!([
+                                    "生成AI",
+                                    "投資",
+                                    "新興企業"
+                                ])),
+                                "local",
+                            ),
+                        );
+                    }
+                    select_valid_output(kind, response("localの出力", "local"))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            repository.get_article_tags(sample_id).unwrap(),
+            vec!["生成AI", "投資", "新興企業"]
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn mock_generation_saves_deterministic_tags_from_the_genre() {
+        let root_dir = temp_root("tags-mock");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        // 既定（provider=Mock）。タグの無い記事には、ジャンル「テクノロジー」を先頭にした3件が入る。
+        service.generate_article_summary(params()).unwrap();
+        assert_eq!(
+            repository.get_article_tags(ARTICLE_ID).unwrap(),
+            vec!["テクノロジー", "ニュース", "最新動向"]
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn article_file_without_tags_field_still_loads_and_gets_tags() {
+        let root_dir = temp_root("tags-legacy");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        // tags の行が無い（旧形式の）記事ファイルにする。
+        let path = find_article_file(&root_dir.join("news"));
+        let original = std::fs::read_to_string(&path).unwrap();
+        let legacy = original
+            .lines()
+            .filter(|line| !line.starts_with("tags:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(legacy, original.trim_end());
+        std::fs::write(&path, legacy).unwrap();
+
+        assert!(repository.get_article_tags(ARTICLE_ID).unwrap().is_empty());
+        assert!(repository.get_article_detail(ARTICLE_ID).is_ok());
+        generate_with_points(
+            &service,
+            FallbackPolicy::SaveFallback,
+            &points_with_tags(serde_json::json!(["半導体", "工場", "投資"])),
+            "local",
+        )
+        .unwrap();
+        assert_eq!(
+            repository.get_article_tags(ARTICLE_ID).unwrap(),
+            vec!["半導体", "工場", "投資"]
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    fn find_article_file(dir: &Path) -> PathBuf {
+        fn find(dir: &Path) -> Option<PathBuf> {
+            std::fs::read_dir(dir).ok()?.find_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.is_dir() {
+                    find(&path)
+                } else {
+                    (path.file_name()?.to_string_lossy() == format!("{ARTICLE_ID}.md"))
+                        .then_some(path)
+                }
+            })
+        }
+        find(dir).unwrap_or_else(|| panic!("article file not found under {}", dir.display()))
     }
 }
