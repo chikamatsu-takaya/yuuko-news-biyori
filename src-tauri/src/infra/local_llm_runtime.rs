@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
-use serde_json::{json, Value};
+use serde::ser::{SerializeMap, SerializeStruct};
+use serde::{Serialize, Serializer};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::http_body::declared_length_exceeds;
@@ -507,15 +509,117 @@ pub fn health_ok(client: &Client, port: SpawnedLocalLlmPort, api_key: &str) -> b
 /// `presence_penalty` は Qwen 公式が量子化モデルの繰り返し対策として勧める値（1.5）。
 /// 付けないと再説明（yuuko_explanation_v1）が止まらずに上限まで書き続けた（2026-10-09 の実測で 4 回中 3 回。
 /// 付けると 4 回中 0 回）。
-pub fn build_chat_body(prompt: &str, max_tokens: u32) -> Value {
-    json!({
-        "messages": [{ "role": "user", "content": prompt }],
-        "chat_template_kwargs": { "enable_thinking": false },
-        "temperature": 0.2,
-        "presence_penalty": PRESENCE_PENALTY,
-        "max_tokens": max_tokens,
-        "stream": false,
-    })
+///
+/// `json!` ではなく構造体にしているのは、キーの順番を固定するため。`serde_json::Value` の object は
+/// （`preserve_order` 機能なしでは）キーを辞書順へ並べ替える。llama-server は JSON スキーマの
+/// `properties` の順に出力の文法を組むので、並べ替わると `detail` を先に書かせることになり、
+/// 小さいモデルの出力が崩れやすい（参照アプリの知見）。構造体のフィールドは宣言順に書き出される。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatBody<'a> {
+    messages: [ChatMessage<'a>; 1],
+    chat_template_kwargs: ChatTemplateKwargs,
+    temperature: f64,
+    presence_penalty: f64,
+    max_tokens: u32,
+    stream: bool,
+    /// 出力の形を JSON スキーマで縛るとき（用語解説）だけ付ける。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
+}
+
+/// `response_format: {"type":"json_schema","json_schema":{"name":..,"schema":..}}`。
+/// llama-server はこのスキーマから文法を作って出力を縛るため、前置きの文章やコードフェンスは出せなくなる。
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    json_schema: NamedJsonSchema,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NamedJsonSchema {
+    name: &'static str,
+    schema: StringObjectSchema,
+}
+
+/// 「指定した名前の文字列フィールドだけを、この順に、全部必須で持つ object」の JSON スキーマ。
+/// `properties` は手で順番どおりに書き出す（map 型を通すと順番が保証されないため）。
+#[derive(Debug, Clone)]
+struct StringObjectSchema {
+    fields: &'static [&'static str],
+}
+
+impl Serialize for StringObjectSchema {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Properties(&'static [&'static str]);
+        impl Serialize for Properties {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut map = serializer.serialize_map(Some(self.0.len()))?;
+                for field in self.0 {
+                    map.serialize_entry(field, &StringProperty { kind: "string" })?;
+                }
+                map.end()
+            }
+        }
+        let mut schema = serializer.serialize_struct("StringObjectSchema", 4)?;
+        schema.serialize_field("type", "object")?;
+        schema.serialize_field("properties", &Properties(self.fields))?;
+        schema.serialize_field("required", self.fields)?;
+        schema.serialize_field("additionalProperties", &false)?;
+        schema.end()
+    }
+}
+
+#[derive(Serialize)]
+struct StringProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// 用語解説（`term_explanation_v1`）の出力スキーマ: `{"short": string, "detail": string}`。
+/// 順番は short → detail（プロンプトの例と同じ）。検証（大きさ・無害化・文字数）は従来どおり辞書側で行う。
+pub fn term_explanation_response_format() -> ResponseFormat {
+    ResponseFormat {
+        kind: "json_schema",
+        json_schema: NamedJsonSchema {
+            name: "term_explanation",
+            schema: StringObjectSchema {
+                fields: &["short", "detail"],
+            },
+        },
+    }
+}
+
+pub fn build_chat_body(
+    prompt: &str,
+    max_tokens: u32,
+    response_format: Option<ResponseFormat>,
+) -> ChatBody<'_> {
+    ChatBody {
+        messages: [ChatMessage {
+            role: "user",
+            content: prompt,
+        }],
+        chat_template_kwargs: ChatTemplateKwargs {
+            enable_thinking: false,
+        },
+        temperature: 0.2,
+        presence_penalty: PRESENCE_PENALTY,
+        max_tokens,
+        stream: false,
+        response_format,
+    }
 }
 
 /// 生成要求を1回送り、本文を返す。上限で途切れた出力（`finish_reason=length`）は返さない。
@@ -523,7 +627,7 @@ pub fn chat(
     client: &Client,
     port: SpawnedLocalLlmPort,
     api_key: &str,
-    body: &Value,
+    body: &ChatBody<'_>,
 ) -> Result<String, ChatError> {
     let response = client
         .post(local_llm_url(port, LocalLlmRoute::ChatCompletions))
@@ -592,6 +696,7 @@ fn strip_leading_think_block(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
@@ -691,7 +796,7 @@ mod tests {
 
     #[test]
     fn chat_body_turns_off_thinking_and_caps_output() {
-        let body = build_chat_body("prompt", 1024);
+        let body = serde_json::to_value(build_chat_body("prompt", 1024, None)).unwrap();
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "prompt");
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
@@ -699,6 +804,38 @@ mod tests {
         assert_eq!(body["presence_penalty"], 1.5);
         assert_eq!(body["max_tokens"], 1024);
         assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn chat_body_without_schema_has_no_response_format() {
+        let body = serde_json::to_value(build_chat_body("prompt", 1024, None)).unwrap();
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn term_explanation_schema_keeps_key_order_and_forbids_extra_keys() {
+        let body = build_chat_body("prompt", 512, Some(term_explanation_response_format()));
+        let text = serde_json::to_string(&body).unwrap();
+        // キーの順番まで含めて固定する（辞書順に並べ替わると detail が先になる）。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"term_explanation","schema":{"type":"object","properties":{"short":{"type":"string"},"detail":{"type":"string"}},"required":["short","detail"],"additionalProperties":false}}}"#
+        ));
+        // 本文の各キーも宣言順に出る。
+        let order = [
+            "messages",
+            "chat_template_kwargs",
+            "temperature",
+            "presence_penalty",
+            "max_tokens",
+            "stream",
+            "response_format",
+        ]
+        .map(|key| text.find(&format!("\"{key}\"")).expect(key));
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["max_tokens"], 512);
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(value["temperature"], 0.2);
     }
 
     #[test]
