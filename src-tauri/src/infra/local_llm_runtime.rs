@@ -32,6 +32,102 @@ pub const MODEL_FILE: &str = "stario-qwen3.5-2b-q4_k_m.gguf";
 pub const MODEL_SIZE: u64 = 1_312_164_800;
 pub const MODEL_SHA256: &str = "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35";
 
+/// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。
+/// `ggml-cpu-*.dll` は CPU の種類ごとの部品で、llama-server が起動時に合うものを選んで読む。
+/// ベンチマーク・量子化・CLI 用の DLL（`llama-cli-impl` / `llama-bench-impl` / `llama-quantize-impl` 等）と
+/// `ggml-rpc.dll`（別のパソコンへ計算を投げる部品）は同梱しない。
+/// 値の持ち主はここだけ。`scripts/local-llm/*.mjs` はこの表を読んで写す・確かめる。
+pub const RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "llama-server.exe",
+        "9d7ec1f038329210f6be353a89752ea4a762f9defa80560d37102ccce7b09a06",
+    ),
+    (
+        "llama-server-impl.dll",
+        "bd42db709e21d4ded9e4f3daee893c7f154d9372a50aba4b5c7d83926a751925",
+    ),
+    (
+        "llama-common.dll",
+        "6bb2ae768b8277fa83beeb1f4f565ddd65bb3db7cfd977254ee0735264c3d2ed",
+    ),
+    (
+        "llama.dll",
+        "d6a740f91d704897b57881cdfc2a867fbf59c0a172e025d830200c4252c4f878",
+    ),
+    (
+        "mtmd.dll",
+        "18badf1db28cd42cb4f3ffbda677bbbaa17df1769b45a17668e7a58477f581fe",
+    ),
+    (
+        "ggml.dll",
+        "ace1d47daf81a21439dad784ca6803b88b2a32629ec5bb192a5ed266c8c51e8c",
+    ),
+    (
+        "ggml-base.dll",
+        "28a14ca75b4383616c44fbfabb4000260845891905be3e243f6d48249f8f495b",
+    ),
+    (
+        "libomp.dll",
+        "a12116ba72d1d6820407cf30be23da04ce79d6bb8a71a5ee71759c5a1faa6f1c",
+    ),
+    (
+        "ggml-cpu-alderlake.dll",
+        "632e8dd4f10e6e11359574359c5c7e9a37b35f939dd99b2b5ae28cd502cc2a66",
+    ),
+    (
+        "ggml-cpu-cannonlake.dll",
+        "31acdb332de779dff7d8f5aad85fd653dc61dddde7df68ef832fa348cec0df71",
+    ),
+    (
+        "ggml-cpu-cascadelake.dll",
+        "6505c85092ae537a83943740e25314bbaf05343a0fc52931c2eddce4e8dd3663",
+    ),
+    (
+        "ggml-cpu-cooperlake.dll",
+        "36c6d387799cd30c83f0b668887e5ac6603443836359204f712a11acda9484b1",
+    ),
+    (
+        "ggml-cpu-haswell.dll",
+        "faa5d18d89bf5eb93e2bebd7cb727a1539922154fb5bec73418f7005cbad26b8",
+    ),
+    (
+        "ggml-cpu-icelake.dll",
+        "b71c0376be9515ade0eacdd83ab8163a592a165022b8934a9c0ececa596f6e2e",
+    ),
+    (
+        "ggml-cpu-ivybridge.dll",
+        "a770877528efb8d7d045a6e063ce5147e4e027c0ea8bf5294f5cb4c0c757726e",
+    ),
+    (
+        "ggml-cpu-piledriver.dll",
+        "631f72b106a93910da17987e1d61b072e2314a82ef9ba789e2e867c554c6d364",
+    ),
+    (
+        "ggml-cpu-sandybridge.dll",
+        "186756518a0337a1a1a0d53cb81e6e90d3bf1397c1adaf24d609350a25131023",
+    ),
+    (
+        "ggml-cpu-sapphirerapids.dll",
+        "2e34a276583e14580bd6c0a9852c0d0e544d1172729f891f558edf8655f4f663",
+    ),
+    (
+        "ggml-cpu-skylakex.dll",
+        "c421dec11a1cf84a617411149a99ac47d3388137c5da984fe14efeb97f3b8174",
+    ),
+    (
+        "ggml-cpu-sse42.dll",
+        "fe2480ed438f7ea26e081d67b865b3ce20b801cfe69b31a8b34fff7ad7ccef59",
+    ),
+    (
+        "ggml-cpu-x64.dll",
+        "3e7d3405834404b2cc491dcc488f877d7ff48b62c6f96ce7d0a68279f8c284d6",
+    ),
+    (
+        "ggml-cpu-zen4.dll",
+        "860ae0816ea9ae896e919282d827a7f596cbc307271d908dc01a4e7113075417",
+    ),
+];
+
 /// 同梱物の置き場（リソースフォルダからの相対）。
 pub const BUNDLE_DIR_NAME: &str = "local_llm";
 const RUNTIME_DIR_NAME: &str = "runtime";
@@ -71,9 +167,11 @@ impl LocalLlmBundle {
 
 /// 同梱物のフォルダを決める。
 ///
-/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm`）。開発中（debug ビルド）は、
-/// リソースフォルダに実行ファイルが無ければ `src-tauri/resources/local_llm` を使う
-/// （1.3GB のモデルをビルドの出力先へ写さずに試せるようにするため）。
+/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm`）。
+/// tauri-build はビルドし直すたびに `src-tauri/resources/local_llm` を `target/<profile>/local_llm` へ写すため、
+/// 開発中もふつうはリソースフォルダ側に揃っている。ただし同梱物を置いた後にまだビルドし直していない
+/// （写されていない）ことがあるので、開発中（debug ビルド）だけは、リソースフォルダに実行ファイルが
+/// 無ければ `src-tauri/resources/local_llm` を直接使う。配布版（release）ではこの代わりを使わない。
 /// 将来「初回にダウンロード」へ替える場合も、この関数の返す場所を差し替えるだけで済む（D101）。
 pub fn resolve_bundle_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     let bundled = resource_dir.map(|dir| dir.join(BUNDLE_DIR_NAME));
@@ -133,6 +231,26 @@ pub fn check_model_sha256(path: &Path, expected_hex: &str) -> ModelCheck {
     } else {
         ModelCheck::Broken
     }
+}
+
+/// 実行の部品が揃っていて、すべて SHA-256 が合うか（DLL を含めて約45MB。アプリの起動中に1度だけ）。
+/// 1つでも無ければ Missing、中身が違えば Broken。
+pub fn check_runtime_files(runtime_dir: &Path, files: &[(String, String)]) -> ModelCheck {
+    for (name, sha256) in files {
+        match check_model_sha256(&runtime_dir.join(name), sha256) {
+            ModelCheck::Ok => {}
+            other => return other,
+        }
+    }
+    ModelCheck::Ok
+}
+
+/// `RUNTIME_FILES` を照合用の表へ写す（テストで差し替えられるように所有型にする）。
+pub fn runtime_manifest() -> Vec<(String, String)> {
+    RUNTIME_FILES
+        .iter()
+        .map(|(name, sha256)| (name.to_string(), sha256.to_string()))
+        .collect()
 }
 
 /// 生成に使うスレッド数。論理コア数の半分（1〜4）。常駐中のほかの作業を重くしないため。
@@ -251,7 +369,96 @@ impl ServerLauncher for ChildProcessLauncher {
         if let Some(parent) = spec.bundle.exe.parent() {
             command.current_dir(parent);
         }
-        Ok(Box::new(command.spawn()?))
+        let child = command.spawn()?;
+        // アプリが異常終了しても llama-server（約2GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
+        // 入れられなくても生成はできる（通常の終了経路では shutdown が止める）ため、記録だけ残して続ける。
+        if !exit_job::attach(&child) {
+            log::warn!("could not attach llama-server to the kill-on-exit job");
+        }
+        Ok(Box::new(child))
+    }
+}
+
+/// アプリのプロセスが終わったら（異常終了・強制終了を含む）子プロセスも終わらせる仕組み。
+///
+/// Windows: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を付けたジョブを1つ作り、ハンドルはアプリが終わるまで
+/// 閉じずに持つ。プロセスが終わると OS がハンドルを閉じ、ジョブ内の llama-server も終了する。
+/// Windows 以外: 何もしない（このアプリの配布対象は Windows）。
+mod exit_job {
+    use std::process::Child;
+
+    #[cfg(windows)]
+    pub(super) mod windows {
+        use std::os::windows::io::AsRawHandle;
+        use std::process::Child;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        /// ジョブのハンドル（スレッド間で持ち回せるよう数値で持つ）。
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) struct JobHandle(usize);
+
+        /// 「閉じたら中のプロセスを終わらせる」ジョブを作る。
+        pub(crate) fn create_kill_on_close_job() -> Option<JobHandle> {
+            // SAFETY: 引数は null（既定のセキュリティ・名前なし）。戻り値は検査してから使う。
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            // SAFETY: zeroed は C の構造体として有効な初期値。
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: job は有効なハンドル、info はこの呼び出しの間生きている。
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                // SAFETY: 自分で作ったハンドルを1度だけ閉じる。
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(JobHandle(job as usize))
+        }
+
+        pub(crate) fn assign(job: JobHandle, child: &Child) -> bool {
+            // SAFETY: job は create_kill_on_close_job で作った有効なハンドル、child のハンドルは
+            // Child が生きている間有効。
+            unsafe {
+                AssignProcessToJobObject(job.0 as HANDLE, child.as_raw_handle() as HANDLE) != 0
+            }
+        }
+
+        /// テストでだけ使う（本番のジョブはアプリが終わるまで閉じない）。
+        #[cfg(test)]
+        pub(crate) fn close(job: JobHandle) {
+            // SAFETY: 自分で作ったハンドルを1度だけ閉じる。
+            unsafe { CloseHandle(job.0 as HANDLE) };
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn attach(child: &Child) -> bool {
+        use std::sync::OnceLock;
+        static JOB: OnceLock<Option<windows::JobHandle>> = OnceLock::new();
+        match JOB.get_or_init(windows::create_kill_on_close_job) {
+            Some(job) => windows::assign(*job, child),
+            None => false,
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(super) fn attach(_child: &Child) -> bool {
+        true
     }
 }
 
@@ -511,6 +718,72 @@ mod tests {
         let value =
             json!({"choices": [{"message": {"content": "<think>\n\n</think>\n\n本文だよ"}}]});
         assert_eq!(extract_content(&value).as_deref(), Some("本文だよ"));
+    }
+
+    #[test]
+    fn runtime_manifest_contains_the_server_and_excludes_tools() {
+        let names: Vec<&str> = RUNTIME_FILES.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"llama-server.exe"));
+        assert!(names.contains(&"llama-server-impl.dll"));
+        for excluded in [
+            "llama-cli-impl.dll",
+            "llama-bench-impl.dll",
+            "llama-quantize-impl.dll",
+            "ggml-rpc.dll",
+        ] {
+            assert!(!names.contains(&excluded), "{excluded}");
+        }
+        assert!(RUNTIME_FILES
+            .iter()
+            .all(|(_, sha)| sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    #[test]
+    fn runtime_check_reports_missing_and_tampered_files() {
+        let dir = std::env::temp_dir().join(format!("yuuko-llm-rtfiles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.dll"), b"abc").unwrap();
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string();
+        let ok = vec![("a.dll".to_string(), abc.clone())];
+        assert_eq!(check_runtime_files(&dir, &ok), ModelCheck::Ok);
+        let missing = vec![
+            ("a.dll".to_string(), abc),
+            ("b.dll".to_string(), "0".repeat(64)),
+        ];
+        assert_eq!(check_runtime_files(&dir, &missing), ModelCheck::Missing);
+        let tampered = vec![("a.dll".to_string(), "0".repeat(64))];
+        assert_eq!(check_runtime_files(&dir, &tampered), ModelCheck::Broken);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ジョブを閉じる（＝アプリのプロセスが終わったときと同じ）と、中の子プロセスが終わる。
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_exit_job_kills_the_child_process() {
+        use super::exit_job::windows::{assign, close, create_kill_on_close_job};
+        let job = create_kill_on_close_job().expect("job");
+        let mut child = no_window_command(Path::new("ping"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ping");
+        assert!(assign(job, &child));
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
+        close(job);
+        let started = std::time::Instant::now();
+        let mut exited = false;
+        while started.elapsed() < Duration::from_secs(5) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !exited {
+            let _ = child.kill();
+        }
+        assert!(exited, "child must be killed when the job closes");
     }
 
     #[test]

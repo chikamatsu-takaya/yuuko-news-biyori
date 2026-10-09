@@ -66,9 +66,18 @@ sha2 = "0.10"
 #   読み取り専用で列挙する RegOpenKeyExW / RegEnumKeyExW / RegGetValueW / RegCloseKey。
 # - Win32_System_Diagnostics_ToolHelp: 既知の会議アプリのプロセス有無を調べる
 #   CreateToolhelp32Snapshot / Process32FirstW / Process32NextW（CloseHandle は既定の Win32_Foundation）。
+# 同梱ローカルLLM（判断台帳 D99）の llama-server をアプリの異常終了時にも残さないため、次の 3 feature を追加する
+# （新規クレート・取得物の追加なし。llama-server の起動時に 1 回だけ使い、常駐スレッド・フックなし）。
+# - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject / AssignProcessToJobObject と
+#   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
+# - Win32_Security: CreateJobObjectW の引数型（SECURITY_ATTRIBUTES）が、この feature の下にある。
+# - Win32_System_Threading: JOBOBJECT_EXTENDED_LIMIT_INFORMATION の項目型（IO_COUNTERS）が、この feature の下にある。
 windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Registry",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }

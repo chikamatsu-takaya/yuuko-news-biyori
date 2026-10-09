@@ -18,9 +18,10 @@ use std::time::{Duration, Instant};
 
 use crate::domain::ai_connection::LocalAiFailure;
 use crate::infra::local_llm_runtime::{
-    build_chat_body, build_http_client, chat, check_model_sha256, check_model_size, health_ok,
-    new_api_key, pick_free_port, thread_count, ChatError, ChildProcessLauncher, LaunchSpec,
-    LocalLlmBundle, ModelCheck, ServerLauncher, ServerProcess, MODEL_SHA256, MODEL_SIZE,
+    build_chat_body, build_http_client, chat, check_model_sha256, check_model_size,
+    check_runtime_files, health_ok, new_api_key, pick_free_port, runtime_manifest, thread_count,
+    ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle, ModelCheck, ServerLauncher,
+    ServerProcess, MODEL_SHA256, MODEL_SIZE,
 };
 use crate::infra::url_guard::SpawnedLocalLlmPort;
 
@@ -43,6 +44,8 @@ pub struct LocalLlmConfig {
     pub health_interval: Duration,
     pub model_size: u64,
     pub model_sha256: String,
+    /// 実行の部品（ファイル名と SHA-256）。本番は `RUNTIME_FILES`。
+    pub runtime_files: Vec<(String, String)>,
 }
 
 impl Default for LocalLlmConfig {
@@ -55,6 +58,7 @@ impl Default for LocalLlmConfig {
             health_interval: Duration::from_millis(300),
             model_size: MODEL_SIZE,
             model_sha256: MODEL_SHA256.to_string(),
+            runtime_files: runtime_manifest(),
         }
     }
 }
@@ -380,7 +384,8 @@ impl LocalLlmService {
         Ok((port, api_key))
     }
 
-    /// 同梱物があり、モデルの大きさ（毎回）と SHA-256（初回だけ）が合うかを確かめる。
+    /// 同梱物があり、モデルの大きさ（毎回）と、モデル・実行の部品（exe と DLL）の SHA-256（初回だけ）が
+    /// 合うかを確かめる。差し替えられた実行ファイルを起動しないため、部品もモデルと同じく照合する。
     fn verified_bundle(&self) -> Result<LocalLlmBundle, LocalAiFailure> {
         let Some(dir) = self.shared.bundle_dir.as_deref() else {
             log::warn!("local llm bundle directory is not available");
@@ -405,6 +410,18 @@ impl LocalLlmService {
         }
         if !self.shared.lock_state().verified {
             let started = Instant::now();
+            let runtime_dir = bundle.exe.parent().unwrap_or(dir);
+            match check_runtime_files(runtime_dir, &config.runtime_files) {
+                ModelCheck::Ok => {}
+                ModelCheck::Missing => {
+                    log::warn!("a local llm runtime file is missing");
+                    return Err(LocalAiFailure::Missing);
+                }
+                ModelCheck::Broken => {
+                    log::warn!("a local llm runtime file SHA-256 does not match");
+                    return Err(LocalAiFailure::Broken);
+                }
+            }
             match check_model_sha256(&bundle.model, &config.model_sha256) {
                 ModelCheck::Ok => {
                     self.shared.lock_state().verified = true;
@@ -468,6 +485,7 @@ mod tests {
     use std::thread::JoinHandle;
 
     const MODEL_BYTES: &[u8] = b"fake-model";
+    const EXE_BYTES: &[u8] = b"not-a-real-exe";
 
     // --- 偽の llama-server（127.0.0.1 の小さな HTTP サーバー）---
 
@@ -593,8 +611,9 @@ mod tests {
             match listener.accept() {
                 Ok((stream, _)) => {
                     let (key, reply, bodies) = (key.clone(), reply.clone(), bodies.clone());
+                    let stop_flag = stop_flag.clone();
                     workers.push(std::thread::spawn(move || {
-                        handle(stream, mode, &key, &reply, delay, &bodies)
+                        handle(stream, mode, &key, &reply, delay, &bodies, &stop_flag)
                     }));
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -612,6 +631,7 @@ mod tests {
         reply: &str,
         delay: Duration,
         bodies: &Mutex<Vec<Value>>,
+        stop_flag: &AtomicBool,
     ) {
         let _ = stream.set_nonblocking(false);
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -657,7 +677,15 @@ mod tests {
             if let Ok(value) = serde_json::from_slice::<Value>(&body) {
                 bodies.lock().unwrap().push(value);
             }
-            std::thread::sleep(delay);
+            // 本物の llama-server と同じく、止められたら生成中の要求も答えずに切る
+            // （in-flight の数え方を外すと、しばらく使っていない判定で止められて要求が失敗する）。
+            let started = Instant::now();
+            while started.elapsed() < delay {
+                if stop_flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let payload = serde_json::json!({
                 "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]
             });
@@ -695,7 +723,7 @@ mod tests {
         std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
         std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
         if with_exe {
-            std::fs::write(&bundle.exe, b"not-a-real-exe").unwrap();
+            std::fs::write(&bundle.exe, EXE_BYTES).unwrap();
         }
         if let Some(bytes) = model {
             std::fs::write(&bundle.model, bytes).unwrap();
@@ -710,6 +738,15 @@ mod tests {
             .collect()
     }
 
+    fn exe_name() -> String {
+        LocalLlmBundle::in_dir(Path::new("x"))
+            .exe
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn test_config() -> LocalLlmConfig {
         LocalLlmConfig {
             start_timeout: Duration::from_secs(5),
@@ -719,6 +756,7 @@ mod tests {
             health_interval: Duration::from_millis(20),
             model_size: MODEL_BYTES.len() as u64,
             model_sha256: sha256_hex(MODEL_BYTES),
+            runtime_files: vec![(exe_name(), sha256_hex(EXE_BYTES))],
         }
     }
 
@@ -814,6 +852,30 @@ mod tests {
         let short = temp_bundle("size", true, Some(b"short"));
         let service = service_with(&short, launcher.clone(), test_config());
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
+
+        assert_eq!(launcher.launches(), 0);
+    }
+
+    #[test]
+    fn tampered_or_missing_runtime_files_are_rejected_without_launching() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("runtime", true, Some(MODEL_BYTES));
+
+        // 実行ファイルの中身が表と違う（差し替えられた）。
+        let tampered = LocalLlmConfig {
+            runtime_files: vec![(exe_name(), "0".repeat(64))],
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), tampered);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
+
+        // 表にある DLL が無い。
+        let mut missing_dll = test_config();
+        missing_dll
+            .runtime_files
+            .push(("ggml.dll".to_string(), "0".repeat(64)));
+        let service = service_with(&bundle, launcher.clone(), missing_dll);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
 
         assert_eq!(launcher.launches(), 0);
     }
