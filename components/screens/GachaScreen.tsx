@@ -23,6 +23,7 @@ import {
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   drawGachaOnce,
   getGachaState,
@@ -526,13 +527,7 @@ export default function GachaScreen({
           {/* Auto Start & Exit */}
           <div className="p-3 border-t border-border space-y-2">
             <AutostartStatus />
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full text-xs text-muted-foreground"
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="w-full text-xs text-muted-foreground" />
           </div>
         </aside>
 

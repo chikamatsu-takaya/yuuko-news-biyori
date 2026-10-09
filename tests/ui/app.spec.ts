@@ -4190,6 +4190,91 @@ for (const screen of sidebarAutostartOpeners) {
   });
 }
 
+// サイドバーの「常駐を終了する」は確認ダイアログを挟んでから quit_resident_app を呼ぶ
+// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホーム（MainScreen）は別タスクのため対象外。
+const quitResidentOpeners = [
+  ...sidebarAutostartScreens.map((screen) => ({
+    id: screen.id,
+    open: (page: Page) =>
+      openScreenFromSidebar(page, screen.navName, screen.heading),
+  })),
+  { id: "reader", open: openReaderFromHome },
+] as const;
+
+const quitAppCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_QUIT_APP_CALLS__ as
+        | number
+        | undefined) ?? 0
+  );
+
+const quitResidentButton = (page: Page) =>
+  page.getByRole("button", { name: "常駐を終了する" }).first();
+
+for (const screen of quitResidentOpeners) {
+  test(`quit resident on ${screen.id} asks for confirmation before calling the command`, async ({
+    page,
+  }) => {
+    await screen.open(page);
+
+    // キャンセルでは終了しない（誤操作防止）。
+    await quitResidentButton(page).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("常駐を終了しますか？")).toBeVisible();
+    await dialog.getByRole("button", { name: "キャンセル" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(0);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+    await expect.poll(() => quitAppCalls(page)).toBe(1);
+  });
+}
+
+for (const failure of [
+  {
+    code: "MIGRATION_BUSY",
+    message: "データの書き出し・取り込みが終わってから、もう一度終了してね。",
+  },
+  {
+    code: "UNEXPECTED",
+    message:
+      "常駐を終了できなかったよ。もう一度試すか、トレイの「常駐を終了する」を使ってね。",
+  },
+]) {
+  test(`quit resident failure (${failure.code}) shows a fixed toast and keeps the screen`, async ({
+    page,
+  }) => {
+    await page.addInitScript((code) => {
+      (window as unknown as Record<string, unknown>).__E2E_QUIT_APP_FAIL_CODE__ =
+        code;
+    }, failure.code);
+    await openDictionary(page);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+
+    await expect(
+      page.getByText(failure.message, { exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(1);
+    // 画面は落ちず、生エラーも出さない。
+    await expect(
+      page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+    ).toBeVisible();
+    await expect(page.getByText("secret/path")).toHaveCount(0);
+  });
+}
+
 test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
   page,
 }) => {
@@ -7178,6 +7263,21 @@ async function installTauriMocks(page: Page) {
             const migrationWin = window as any;
             migrationWin.__E2E_RESTART_APP_CALLS__ =
               (migrationWin.__E2E_RESTART_APP_CALLS__ || 0) + 1;
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "quit_resident_app": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const quitWin = window as any;
+            quitWin.__E2E_QUIT_APP_CALLS__ =
+              (quitWin.__E2E_QUIT_APP_CALLS__ || 0) + 1;
+            // 失敗時の表示確認用。生エラー（内部パス入り）が画面に出ないことも確かめる。
+            if (quitWin.__E2E_QUIT_APP_FAIL_CODE__) {
+              throw {
+                code: quitWin.__E2E_QUIT_APP_FAIL_CODE__,
+                message: "failed at C:/secret/path",
+              };
+            }
             return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
