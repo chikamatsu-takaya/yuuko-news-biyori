@@ -90,9 +90,10 @@ const STAGE_DIRECTION_MAX_CHARS: usize = 40;
 
 /// 括弧の中身がト書き（動作・表情・声の調子）であることの目印。位置に関わらず、これを含む括弧だけを消す。
 /// 「まで」「から」「除いて」のような事実の補足（「（上限100万円まで）」「（土日を除いて）」）は含まない。
-const STAGE_DIRECTION_MARKERS: [&str; 22] = [
+/// 「笑」「優しく」は説明の括弧（「（笑顔の店員）」「（優しく接する技術）」）にも出るため、ここには入れず、
+/// `STAGE_DIRECTION_LAUGH_FORMS` と `STAGE_DIRECTION_START_ONLY_MARKERS` で別に扱う。
+const STAGE_DIRECTION_MARKERS: [&str; 20] = [
     "ゆうこ",
-    "笑",
     "微笑",
     "小声",
     "手を振",
@@ -107,7 +108,6 @@ const STAGE_DIRECTION_MARKERS: [&str; 22] = [
     "ウインク",
     "首をかし",
     "声をひそめ",
-    "優しく",
     "元気よく",
     "嬉しそう",
     "楽しそう",
@@ -115,12 +115,39 @@ const STAGE_DIRECTION_MARKERS: [&str; 22] = [
     "得意げ",
 ];
 
+/// 「笑」をト書きとみなす形。中身がちょうど「笑」か、動作の形（「笑って」「笑いながら」「苦笑」）のときだけ。
+const STAGE_DIRECTION_LAUGH_FORMS: [&str; 3] = ["笑って", "笑いながら", "苦笑"];
+
+/// 文頭（出力の先頭を含む）の括弧でだけ使う目印（「（優しく）」）。文中の「介護（優しく接する技術）」は残す。
+const STAGE_DIRECTION_START_ONLY_MARKERS: [&str; 1] = ["優しく"];
+
 /// 括弧の中身の書き出しが感嘆の声（実測の「（ふん～ん）」「（ふん～！）」など）なら、ト書きとみなす。
 const STAGE_DIRECTION_INTERJECTIONS: [&str; 4] = ["ふん～", "ふん〜", "えへ", "うふふ"];
 
-/// 文頭の括弧だけで使う、動作の言い方の語尾（「（少し笑って）」「（手を振りながら）」）。
-/// 文中では「（土日を除いて）」のような事実の補足と区別できないため使わない。
-const STAGE_DIRECTION_ACTION_ENDINGS: [&str; 5] = ["て", "ながら", "つつ", "そうに", "ように"];
+/// 文頭の括弧だけで使う、動作の言い方の語尾（「（手を振りながら）」「（嬉しそうに）」）。
+/// 文中では事実の補足と区別できないため使わない。「〜ように」は「（前年と同じように）」と区別できないため使わない。
+const STAGE_DIRECTION_ACTION_ENDINGS: [&str; 2] = ["ながら", "そうに"];
+
+/// 文頭の括弧で「〜て」をト書きとみなす最大文字数（「（少しうつむいて）」程度の短い動作だけ）。
+/// 長いもの（「（詳しくは後述の資料を見て）」）は補足とみなして残す。
+const STAGE_DIRECTION_TE_MAX_CHARS: usize = 10;
+
+/// 「〜て」で終わっても、事実・条件を表す言い方（「（地域によって）」「（土日を除いて）」など）は消さない。
+const FACTUAL_TE_ENDINGS: [&str; 13] = [
+    "によって",
+    "に応じて",
+    "を除いて",
+    "について",
+    "において",
+    "に対して",
+    "に関して",
+    "を通じて",
+    "に比べて",
+    "にとって",
+    "をめぐって",
+    "に先立って",
+    "を見て",
+];
 
 /// ゆうこの再説明・一言の AI 出力を整える。行ごとにト書きと中国語の助詞を除き、空になった行は落とし、
 /// 冒頭の挨拶と末尾の締めの挨拶を除いて返す。全部消えた場合は空文字を返す（呼び出し側の検証で拒否される）。
@@ -156,7 +183,8 @@ fn strip_stage_directions(line: &str) -> String {
             if let Some(end) = close {
                 let inner = chars[index + 1..end].iter().collect::<String>();
                 let at_sentence_start = is_at_sentence_start(&out);
-                if is_stage_direction(&inner, at_sentence_start) {
+                // かぎかっこの中（引用）の括弧は消さない（「店長は「（笑）」と…」が空の「」にならないように）。
+                if !is_inside_quote(&out) && is_stage_direction(&inner, at_sentence_start) {
                     index = end + 1;
                     // 文頭のト書きを消したときは、前後の空白も詰める（「。 本文」の空白を残さない）。
                     if at_sentence_start {
@@ -183,8 +211,14 @@ fn is_at_sentence_start(written: &str) -> bool {
     }
 }
 
-/// 括弧の中身がト書きか。どの位置でも、目印（`STAGE_DIRECTION_MARKERS`）か感嘆の声の書き出しを要る。
-/// 文頭（出力の先頭を含む）では、動作の言い方の語尾（「〜て」「〜ながら」など）でもト書きとみなす。
+/// ここまでに書いた部分で、かぎかっこ「」が閉じていないか（次の括弧が引用の中にあるか）。
+fn is_inside_quote(written: &str) -> bool {
+    written.matches('「').count() > written.matches('」').count()
+}
+
+/// 括弧の中身がト書きか。どの位置でも、目印（`STAGE_DIRECTION_MARKERS`）・笑いの動作の形・感嘆の声の書き出しを要る。
+/// 文頭（出力の先頭を含む）では、文頭だけの目印（「優しく」）、語尾「〜ながら」「〜そうに」、
+/// 事実・条件の言い方でない10文字以内の「〜て」でもト書きとみなす。
 /// 中身の無い条件では消さない（「（株）」「（2027年4月から）」を残すため）。
 fn is_stage_direction(inner: &str, at_sentence_start: bool) -> bool {
     let inner = inner.trim();
@@ -194,14 +228,29 @@ fn is_stage_direction(inner: &str, at_sentence_start: bool) -> bool {
     if STAGE_DIRECTION_MARKERS
         .iter()
         .any(|marker| inner.contains(marker))
+        || inner == "笑"
+        || STAGE_DIRECTION_LAUGH_FORMS
+            .iter()
+            .any(|form| inner.contains(form))
         || STAGE_DIRECTION_INTERJECTIONS
             .iter()
             .any(|interjection| inner.starts_with(interjection))
     {
         return true;
     }
-    at_sentence_start
-        && STAGE_DIRECTION_ACTION_ENDINGS
+    if !at_sentence_start {
+        return false;
+    }
+    let short_action_te = inner.ends_with('て')
+        && inner.chars().count() <= STAGE_DIRECTION_TE_MAX_CHARS
+        && !FACTUAL_TE_ENDINGS
+            .iter()
+            .any(|ending| inner.ends_with(ending));
+    short_action_te
+        || STAGE_DIRECTION_START_ONLY_MARKERS
+            .iter()
+            .any(|marker| inner.contains(marker))
+        || STAGE_DIRECTION_ACTION_ENDINGS
             .iter()
             .any(|ending| inner.ends_with(ending))
 }
@@ -307,7 +356,10 @@ fn strip_leading_greetings(text: &str) -> String {
         rest.strip_prefix(greeting)
             .filter(|after| is_greeting_boundary(after.chars().next()))
     }) {
-        rest = after.trim_start_matches(LEADING_LEFTOVERS).trim_start();
+        // 挨拶の後ろの区切り記号・空白・「…」を詰める（「えっ…新制度なの？」→「新制度なの？」）。
+        rest = after
+            .trim_start_matches(|c: char| LEADING_LEFTOVERS.contains(&c) || c == '…')
+            .trim_start();
     }
     rest.to_string()
 }
@@ -508,6 +560,48 @@ mod tests {
         // ゆうこの意見の中の名詞（表情）では消さない。
         let kept = "ゆうこは記事の表情豊かな写真が好きだな。";
         assert_eq!(clean_yuuko_speech(kept), kept);
+    }
+
+    #[test]
+    fn laugh_and_kindness_words_in_explanations_are_kept() {
+        // 「笑」「優しく」を含む説明の括弧・引用の中の括弧は残す（再レビュー指摘の回帰テスト）。
+        for kept in [
+            "店の評判（笑顔の店員）が話題だよ。",
+            "笑いの研究（笑いと健康）が進んでいるよ。",
+            "介護（優しく接する技術）の研修だよ。",
+            "店長は「（笑）」と書いていたよ。",
+        ] {
+            assert_eq!(clean_yuuko_speech(kept), kept);
+        }
+        // ト書きの形の「笑」「優しく」は消す。
+        assert_eq!(clean_yuuko_speech("制度だね（苦笑）。"), "制度だね。");
+        assert_eq!(clean_yuuko_speech("（笑いながら）制度だね。"), "制度だね。");
+        assert_eq!(clean_yuuko_speech("（優しく）制度だね。"), "制度だね。");
+    }
+
+    #[test]
+    fn sentence_initial_endings_keep_factual_conditions() {
+        for kept in [
+            "（地域によって）料金が変わるよ。",
+            "（前年と同じように）今年も募集するよ。",
+            "新制度だよ。（詳しくは後述の資料を見て）",
+            "（土日を除いて）受け付けるよ。",
+        ] {
+            assert_eq!(clean_yuuko_speech(kept), kept);
+        }
+        // 短い動作の「〜て」「〜ながら」「〜そうに」は文頭で消す。
+        for (noisy, expected) in [
+            ("（少しうつむいて）制度だよ。", "制度だよ。"),
+            ("（手を振りながら）制度だよ。", "制度だよ。"),
+            ("（嬉しそうに）制度だよ。", "制度だよ。"),
+        ] {
+            assert_eq!(clean_yuuko_speech(noisy), expected);
+        }
+    }
+
+    #[test]
+    fn trims_ellipsis_after_a_greeting() {
+        assert_eq!(clean_yuuko_speech("えっ…新制度なの？"), "新制度なの？");
     }
 
     #[test]
