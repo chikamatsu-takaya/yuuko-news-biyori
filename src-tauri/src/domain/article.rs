@@ -33,6 +33,36 @@ pub fn is_archive_candidate(
 /// URL（article_id）側の判定には期間を設けない。
 pub const TITLE_DEDUPE_WINDOW_DAYS: i64 = 7;
 
+/// 画面へ渡す記事タグの最大件数。AI生成は3〜5件だが、手編集・旧データの多すぎるタグで一覧が崩れないよう上限を設ける。
+pub const MAX_DISPLAY_TAGS: usize = 5;
+/// 画面へ渡す記事タグ1件の最大文字数。AI生成は1〜20文字。長すぎる値は切り詰めて DTO を小さく保つ。
+pub const MAX_DISPLAY_TAG_CHARS: usize = 40;
+
+/// 記事ファイルのタグを画面表示・履歴の絞り込み用に整える（純粋関数・I/Oなし）。
+///
+/// タグは外部由来（AI生成・手編集）の文字列のため、前後の空白を除き、空文字と重複を捨て、
+/// 件数・文字数の上限で切る。履歴の絞り込みは整形後の値どうしを比べるため、一覧・記事詳細とも
+/// 必ずこの関数を通した値を返す（表示の安全性は画面側でテキストとして描画することで担保する）。
+pub fn display_tags(tags: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tag: String = trimmed.chars().take(MAX_DISPLAY_TAG_CHARS).collect();
+        let tag = tag.trim_end().to_string();
+        if result.contains(&tag) {
+            continue;
+        }
+        result.push(tag);
+        if result.len() >= MAX_DISPLAY_TAGS {
+            break;
+        }
+    }
+    result
+}
+
 /// 既存記事を「同一出典・同一タイトル」の比較対象に含めるか（純粋関数・I/Oなし）。
 ///
 /// 基準時刻は `fetched_at`、解釈できなければ `published_at` を使う。どちらもRFC3339として
@@ -192,6 +222,10 @@ pub struct ArticleHistoryItemDto {
     /// 自動要約の状態（ArticleSummaryDto と同じ意味）。履歴・一覧のタグ表示に使う読み取り専用の値。
     #[serde(default)]
     pub summary_state: SummaryState,
+    /// 記事のタグ（表示・履歴の絞り込み用）。空・重複を除き最大 MAX_DISPLAY_TAGS 件に整えた値。
+    /// タグの無い記事・旧データでは空。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +251,9 @@ pub struct ArticleDetailDto {
     /// 自動要約の状態（ArticleSummaryDto と同じ意味）。
     #[serde(default)]
     pub summary_state: SummaryState,
+    /// 記事のタグ（ArticleHistoryItemDto と同じ整形）。タグの無い記事では空。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,13 +627,39 @@ fn validate_archive_month_param(month: &str) -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_archive_candidate, is_archive_month_deletable, is_within_title_dedupe_window,
-        normalize_title_for_dedupe, ArchiveMonthDeleteParams, ArticleDedupeKeys,
-        ArticleHistoryFilter, GetArticleDetailParams, GetRecommendedArticlesParams,
-        ListArchiveMonthArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-        UpdateArticleFavoriteParams,
+        display_tags, is_archive_candidate, is_archive_month_deletable,
+        is_within_title_dedupe_window, normalize_title_for_dedupe, ArchiveMonthDeleteParams,
+        ArticleDedupeKeys, ArticleHistoryFilter, GetArticleDetailParams,
+        GetRecommendedArticlesParams, ListArchiveMonthArticlesParams, ListArticleHistoryParams,
+        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn display_tags_trims_and_skips_empty_and_duplicate_tags() {
+        let tags = strings(&["  AI ", "", "   ", "生成AI", "AI", "資金調達"]);
+        assert_eq!(display_tags(&tags), strings(&["AI", "生成AI", "資金調達"]));
+    }
+
+    #[test]
+    fn display_tags_caps_count_and_length() {
+        let tags = strings(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(display_tags(&tags), strings(&["a", "b", "c", "d", "e"]));
+
+        let long = "あ".repeat(super::MAX_DISPLAY_TAG_CHARS + 10);
+        let shown = display_tags(&[long]);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].chars().count(), super::MAX_DISPLAY_TAG_CHARS);
+    }
+
+    #[test]
+    fn display_tags_returns_empty_for_untagged_articles() {
+        assert!(display_tags(&[]).is_empty());
+    }
 
     #[test]
     fn normalize_title_absorbs_surrounding_repeated_and_fullwidth_spaces() {

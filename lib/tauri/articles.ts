@@ -47,6 +47,9 @@ export type ArticleHistoryItemDto = {
   recommendationScore: number;
   // 一覧・履歴の「要約待ち／ゆうこ要約中」タグ用。旧バックエンドでは欠けうるため省略可。
   summaryState?: ArticleSummaryState;
+  // 記事のタグ（Rust 側で空白除去・空/重複除外・最大5件に整形済み）。旧バックエンドでは欠けうるため省略可。
+  // 外部由来の文字列なので、画面ではテキストとしてだけ描画する（ArticleTagList）。
+  tags?: string[];
 };
 
 export type ArticleDetailDto = {
@@ -67,6 +70,8 @@ export type ArticleDetailDto = {
   isFavorite: boolean;
   keywordCandidates: string[];
   summaryState: ArticleSummaryState;
+  // 記事のタグ（ArticleHistoryItemDto と同じ整形）。旧バックエンドでは欠けうるため省略可。
+  tags?: string[];
 };
 
 export type GetRecommendedArticlesParams = {

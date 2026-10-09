@@ -20,6 +20,10 @@ import {
 } from "@/lib/tauri/articles";
 import { SummaryStateTag } from "@/components/news/SummaryStateTag";
 import {
+  ArticleTagList,
+  normalizeArticleTags,
+} from "@/components/news/ArticleTagList";
+import {
   Alert,
   AlertDescription,
   AlertTitle,
@@ -56,6 +60,8 @@ import {
   Share2,
   FolderOpen,
   Info,
+  Tag,
+  X,
 } from "lucide-react";
 
 // Types
@@ -75,6 +81,8 @@ interface HistoryItem {
   category: NewsCategory;
   thumbnailType: "ai" | "energy" | "mobile" | "business" | "robot" | "space" | "lifestyle";
   summaryState?: ArticleSummaryState;
+  // 記事のタグ（整形済み）。タグでの絞り込みに使う。タグの無い記事は空配列。
+  tags: string[];
 }
 
 interface NavigationItem {
@@ -105,6 +113,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "AI・テクノロジー",
     thumbnailType: "ai",
+    tags: ["AI", "開発ツール"],
   },
   {
     id: "2",
@@ -119,6 +128,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "環境・エネルギー",
     thumbnailType: "energy",
+    tags: ["再エネ"],
   },
   {
     id: "3",
@@ -133,6 +143,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "モバイル",
     thumbnailType: "mobile",
+    tags: [],
   },
   {
     id: "4",
@@ -147,6 +158,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: true,
     category: "ビジネス",
     thumbnailType: "business",
+    tags: ["半導体"],
   },
   {
     id: "5",
@@ -161,6 +173,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "AI・テクノロジー",
     thumbnailType: "robot",
+    tags: ["AI", "生成AI"],
   },
   {
     id: "6",
@@ -175,6 +188,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: true,
     category: "宇宙",
     thumbnailType: "space",
+    tags: [],
   },
   {
     id: "7",
@@ -189,6 +203,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "ライフスタイル",
     thumbnailType: "lifestyle",
+    tags: [],
   },
 ];
 
@@ -263,6 +278,7 @@ const mapTauriHistoryItemToUi = (
     category: article.genre || "未分類",
     thumbnailType: toThumbnailType(article.genre),
     summaryState: article.summaryState,
+    tags: normalizeArticleTags(article.tags),
   };
 };
 
@@ -391,10 +407,14 @@ function HistoryItemCard({
   item,
   isSelected,
   onClick,
+  selectedTag,
+  onSelectTag,
 }: {
   item: HistoryItem;
   isSelected: boolean;
   onClick: () => void;
+  selectedTag: string | null;
+  onSelectTag: (tag: string | null) => void;
 }) {
   return (
     <Card
@@ -417,6 +437,12 @@ function HistoryItemCard({
             <span>{item.datetime}</span>
           </div>
           <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
+          <ArticleTagList
+            tags={item.tags}
+            selectedTag={selectedTag}
+            onSelectTag={onSelectTag}
+            className="mt-1.5"
+          />
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
           <div className="flex items-center gap-1.5">
@@ -463,6 +489,9 @@ export default function NewsHistoryScreen({
   onOpenArticle?: (articleId: string) => void;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
+  // タグでの絞り込み（null = 絞り込みなし）。読み込み済みの履歴に対して画面側で絞り込む
+  // （履歴は既読/お気に入り等の条件ごとに最大200件を一括で受け取り、ページングしないため。キーワード検索と同じ扱い）。
+  const [selectedTag, setSelectedTag] = React.useState<string | null>(null);
   const [activeFilter, setActiveFilter] =
     React.useState<ArticleHistoryFilter>("all");
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
@@ -500,16 +529,19 @@ export default function NewsHistoryScreen({
 
   const visibleHistoryItems = React.useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
+    const taggedItems = selectedTag
+      ? historyItems.filter((item) => item.tags.includes(selectedTag))
+      : historyItems;
     if (!normalizedQuery) {
-      return historyItems;
+      return taggedItems;
     }
 
-    return historyItems.filter((item) =>
-      [item.title, item.source, item.description, item.category].some((value) =>
+    return taggedItems.filter((item) =>
+      [item.title, item.source, item.description, item.category, ...item.tags].some((value) =>
         value.toLowerCase().includes(normalizedQuery)
       )
     );
-  }, [historyItems, searchQuery]);
+  }, [historyItems, searchQuery, selectedTag]);
 
   const selectedItem =
     visibleHistoryItems.find((item) => item.id === selectedItemId) ??
@@ -842,6 +874,33 @@ export default function NewsHistoryScreen({
             ))}
           </div>
 
+          {/* タグでの絞り込み中の表示と解除。カードや詳細のタグを押すと絞り込み、ここでいつでも解除できる。 */}
+          {selectedTag && (
+            <div
+              className="flex items-center gap-2 mb-4 min-w-0 text-xs text-muted-foreground"
+              data-testid="history-tag-filter"
+            >
+              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <span role="status" className="min-w-0 flex items-center gap-1">
+                <span className="shrink-0">タグ</span>
+                <span className="max-w-[12rem] truncate font-semibold text-foreground" title={selectedTag}>
+                  #{selectedTag}
+                </span>
+                <span className="shrink-0">で絞り込み中</span>
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0 gap-1 px-2 text-[11px]"
+                onClick={() => setSelectedTag(null)}
+                aria-label="タグの絞り込みを解除"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+                解除
+              </Button>
+            </div>
+          )}
+
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
               <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
@@ -888,6 +947,8 @@ export default function NewsHistoryScreen({
                   item={item}
                   isSelected={selectedItem?.id === item.id}
                   onClick={() => setSelectedItemId(item.id)}
+                  selectedTag={selectedTag}
+                  onSelectTag={setSelectedTag}
                 />
               ))
             ) : loadNotice ? null : (
@@ -979,6 +1040,13 @@ export default function NewsHistoryScreen({
                   <span>・</span>
                   <span>{selectedItem.datetime}</span>
                 </div>
+
+                <ArticleTagList
+                  tags={selectedItem.tags}
+                  selectedTag={selectedTag}
+                  onSelectTag={setSelectedTag}
+                  className="mb-2"
+                />
 
                 {/* Description */}
                 <p className="text-xs text-muted-foreground leading-relaxed mb-4">

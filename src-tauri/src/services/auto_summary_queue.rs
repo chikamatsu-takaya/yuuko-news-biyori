@@ -1157,6 +1157,7 @@ mod tests {
             is_archived: false,
             recommendation_score: 0.5,
             summary_state: SummaryState::Waiting,
+            tags: Vec::new(),
         };
         let value = serde_json::to_value(&item).unwrap();
         assert_eq!(value["summaryState"], "waiting");
