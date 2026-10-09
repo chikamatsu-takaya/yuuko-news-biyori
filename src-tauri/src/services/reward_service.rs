@@ -7,8 +7,8 @@
 //! 状態取得時のどこで呼ばれても結果は同じなので、どれかで保存に失敗しても次の機会に追いつく。
 //!
 //! 新しく解放した報酬は未確認（pendingRewards）に積むだけで、ゆうこ通知状態（reward_notification）は
-//! 変更しない。通知状態に積むと request_yuuko_notification が "reward_pending" でニュース通知を
-//! 止め続けるが、報酬を確認する画面はまだ無いため（通知・確認 UI は別タスク）。
+//! ここでは変更しない。未確認の報酬は YuukoService::request_yuuko_notification が通知ゲートを通った後に
+//! 読み、ニュースより優先して報酬通知にする（§6.4。通知回数・クールタイムはニュースと共通）。
 
 use std::sync::{Arc, Mutex, MutexGuard};
 

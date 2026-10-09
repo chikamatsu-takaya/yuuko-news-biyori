@@ -5619,6 +5619,76 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
   await expect(notification).toHaveCount(0);
 });
 
+// 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
+const REWARD_NOTICE_TEXT =
+  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+
+async function enableRewardNotice(page: Page) {
+  await page.addInitScript((text: string) => {
+    (window as unknown as Record<string, unknown>).__E2E_BACKEND_ACTIVE__ = {
+      state: "RewardNotifying",
+      positionMode: "RightBottom",
+      balloonText: text,
+      hasNotification: true,
+      rewardNotification: {
+        pending: true,
+        rank: 3,
+        rewardIds: ["theme_001"],
+        message: text,
+      },
+    };
+  }, REWARD_NOTICE_TEXT);
+}
+
+test("pending reward notice shows a balloon with OK and confirms through handle_yuuko_clicked", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  // ニュースの2段階クリック（プレビュー・詳しく見る）は出ない。
+  await expect(
+    notification.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toHaveCount(0);
+
+  await notification.getByRole("button", { name: "OK", exact: true }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  // 記事詳細へは遷移しない。
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+});
+
+test("closing the pending reward notice uses dismiss (stays unconfirmed)", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(0);
+});
+
 test("does not show the in-app notification when there is no candidate", async ({
   page,
 }) => {
@@ -7912,7 +7982,13 @@ async function installTauriMocks(page: Page) {
             const current = (window as any).__E2E_BACKEND_ACTIVE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
             let result;
-            if (!current) {
+            if (!current || current.state === "RewardNotifying") {
+              // 報酬通知の OK は Rust 側で確認済みにして待機へ戻る（2段階クリックは無い）。
+              /* eslint-disable @typescript-eslint/no-explicit-any */
+              if (current) {
+                (window as any).__E2E_BACKEND_ACTIVE__ = null;
+              }
+              /* eslint-enable @typescript-eslint/no-explicit-any */
               result = {
                 state: "Waiting",
                 positionMode: "RightBottom",

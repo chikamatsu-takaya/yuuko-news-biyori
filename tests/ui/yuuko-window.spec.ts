@@ -81,6 +81,11 @@ async function installMocks(page: Page, options: MockOptions = {}) {
             if (!current) {
               return waiting;
             }
+            // 報酬通知の OK は Rust 側で確認済みにして待機へ戻る（2段階クリックは無い）。
+            if (current.state === "RewardNotifying") {
+              w.__E2E_STATE__ = null;
+              return waiting;
+            }
             const next =
               current.state === "PreviewVisible" ? "Leaving" : "PreviewVisible";
             w.__E2E_STATE__ = { ...current, state: next };
@@ -248,6 +253,66 @@ test("balloon → first click preview → 詳しく見る confirms through handl
   expect(await commandCalls(page, "dismiss_yuuko_notification")).toBe(0);
   expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
   await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+});
+
+const REWARD_TEXT =
+  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+
+const rewardState = () => ({
+  state: "RewardNotifying",
+  positionMode: "RightBottom",
+  balloonText: REWARD_TEXT,
+  hasNotification: true,
+  rewardNotification: {
+    pending: true,
+    rank: 3,
+    rewardIds: ["theme_001"],
+    message: REWARD_TEXT,
+  },
+});
+
+test("pending reward notice shows balloon + OK, fits, and OK confirms through handle_yuuko_clicked", async ({
+  page,
+}) => {
+  await installMocks(page, { state: rewardState() });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  await expect(
+    region.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+  await expectFitsInWindow(page, BALLOON_HEIGHT);
+
+  await region.getByRole("button", { name: "OK", exact: true }).click();
+  await expect.poll(() => commandCalls(page, "handle_yuuko_clicked")).toBe(1);
+  expect(await commandCalls(page, "dismiss_yuuko_notification")).toBe(0);
+  await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+});
+
+test("reward event payload shows the reward notice and close uses dismiss", async ({
+  page,
+}) => {
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page);
+
+  await emit(page, {
+    articleId: "",
+    title: "",
+    balloonText: REWARD_TEXT,
+    sourceName: "",
+    previewVisible: false,
+    reward: true,
+  });
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  await expect(region.getByRole("button", { name: "OK", exact: true })).toBeVisible();
+
+  await region.getByRole("button", { name: "通知を閉じる" }).click();
+  await expect
+    .poll(() => commandCalls(page, "dismiss_yuuko_notification"))
+    .toBe(1);
+  expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(0);
 });
 
 test("close button goes through dismiss_yuuko_notification", async ({ page }) => {

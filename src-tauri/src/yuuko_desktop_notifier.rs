@@ -67,11 +67,17 @@ pub struct YuukoDesktopNotification {
     pub summary: Option<String>,
     /// 既に軽量プレビュー段階か。ページの表示段階とウィンドウの大きさを Rust の状態に合わせるために使う。
     pub preview_visible: bool,
+    /// 報酬通知（未確認の報酬を知らせる吹き出し＋OK）か。ニュース通知では送らない（従来の形を保つ）。
+    /// 報酬通知では記事の欄（article_id / title / source_name）は空で、文言は balloon_text だけを使う。
+    /// OK は既存の handle_yuuko_clicked を通り、Rust 側で表示中の報酬を確認済みにする。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reward: bool,
 }
 
 impl YuukoDesktopNotification {
     fn stage(&self) -> YuukoWindowStage {
-        if self.preview_visible {
+        // 報酬通知は吹き出し段階だけ（軽量プレビューは無い）。
+        if self.preview_visible && !self.reward {
             YuukoWindowStage::Preview
         } else {
             YuukoWindowStage::Balloon
@@ -132,10 +138,30 @@ fn desktop_notification_from(
     desktop_notification_from_state(&result.state)
 }
 
-/// active なニュース通知状態だけを表示用データへ変換する。タイトルが無いものは出さない。
+/// active なニュース通知・報酬通知の状態だけを表示用データへ変換する。タイトルが無いニュースは出さない。
 fn desktop_notification_from_state(
     state: &YuukoNotificationState,
 ) -> Option<YuukoDesktopNotification> {
+    if state.state == YuukoResidentState::RewardNotifying {
+        let reward = state.reward_notification.as_ref()?;
+        if !reward.pending || reward.reward_ids.is_empty() {
+            return None;
+        }
+        // 文言は呼び名を反映済みの吹き出し（無ければ報酬通知の文言）を使う。
+        let balloon_text = state
+            .balloon_text
+            .clone()
+            .or_else(|| Some(reward.message.clone()).filter(|m| !m.is_empty()));
+        return Some(YuukoDesktopNotification {
+            article_id: String::new(),
+            title: String::new(),
+            balloon_text,
+            source_name: String::new(),
+            summary: None,
+            preview_visible: false,
+            reward: true,
+        });
+    }
     let is_active_news = matches!(
         state.state,
         YuukoResidentState::Appearing
@@ -157,6 +183,7 @@ fn desktop_notification_from_state(
         // preview_article.summary は要約が無いと本文抜粋で補われるため使わない。
         summary: state.preview_short_summary.clone(),
         preview_visible: state.state == YuukoResidentState::PreviewVisible,
+        reward: false,
     })
 }
 
@@ -615,8 +642,50 @@ mod tests {
                 source_name: "source".to_string(),
                 summary: Some("保存済みの要約".to_string()),
                 preview_visible: false,
+                reward: false,
             })
         );
+    }
+
+    fn reward_state() -> YuukoNotificationState {
+        let mut reward = state(YuukoResidentState::RewardNotifying, false);
+        reward.balloon_text = Some("ゆう、新しいテーマ「テーマ①」が届いたよ！".to_string());
+        reward.has_notification = true;
+        reward.reward_notification = Some(crate::domain::yuuko::RewardNotificationState {
+            pending: true,
+            rank: 3,
+            reward_ids: vec!["theme_001".to_string()],
+            message: "ゆう、新しいテーマ「テーマ①」が届いたよ！".to_string(),
+        });
+        reward
+    }
+
+    #[test]
+    fn reward_notice_becomes_balloon_only_payload_when_notified_or_already_active() {
+        for (notified, reason) in [(true, "notified"), (false, "already_active")] {
+            let payload = desktop_notification_from(&result(notified, reason, reward_state()))
+                .expect("reward notice should be shown");
+            assert!(payload.reward);
+            assert_eq!(
+                payload.balloon_text.as_deref(),
+                Some("ゆう、新しいテーマ「テーマ①」が届いたよ！")
+            );
+            // 記事の欄は空で、本文・要約も送らない。吹き出し段階のウィンドウで出す。
+            assert!(payload.article_id.is_empty() && payload.title.is_empty());
+            assert_eq!(payload.summary, None);
+            assert_eq!(payload.stage(), YuukoWindowStage::Balloon);
+            let json = serde_json::to_value(&payload).unwrap();
+            assert_eq!(json["reward"], serde_json::json!(true));
+        }
+        // 抑制理由（クールタイム等）では出さない。
+        assert_eq!(
+            desktop_notification_from(&result(false, "cooling_down", reward_state())),
+            None
+        );
+        // 確認済み（pending でない）報酬は出さない。
+        let mut confirmed = reward_state();
+        confirmed.reward_notification.as_mut().unwrap().pending = false;
+        assert_eq!(desktop_notification_from_state(&confirmed), None);
     }
 
     #[test]
@@ -697,6 +766,7 @@ mod tests {
             source_name: "s".to_string(),
             summary: None,
             preview_visible: false,
+            reward: false,
         })
         .unwrap();
         // 本文・URL などの欄は持たない。要約が無いときは summary 自体を送らない。

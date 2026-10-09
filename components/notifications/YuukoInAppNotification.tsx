@@ -15,6 +15,10 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
  *
  * 通知候補生成（request_yuuko_notification）・active解消（dismiss/ignore）は Page 側が担当。
  * OS通知・Tauri notification plugin は使用しない（アプリ内 React 表示のみ）。
+ *
+ * variant="reward" は報酬通知（ランクアップダイアログで確認しなかった報酬のお知らせ）。
+ * 2段階クリックは無く、吹き出し＋「OK」だけを出す。OK は onOpen（Page 側で handle_yuuko_clicked →
+ * Rust が確認済みにする）、閉じる/Esc/自動退場はニュースと同じ onClose / onIgnore を使う（§6.4・§11）。
  */
 
 // 自動退場（無操作）までの時間。設計書 §9.4：吹き出し20秒 / 軽量プレビュー30秒。
@@ -67,6 +71,8 @@ type YuukoInAppNotificationProps = {
   exiting?: boolean;
   /** 退場演出の終了（またはアンマウント）時に呼ばれる。親は表示を外す。 */
   onExited?: () => void;
+  /** 通知の種類（既定 "news"）。"reward" は吹き出し＋OK だけの報酬通知。 */
+  variant?: "news" | "reward";
 };
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
@@ -92,6 +98,7 @@ export default function YuukoInAppNotification({
   clampText = false,
   exiting = false,
   onExited,
+  variant = "news",
 }: YuukoInAppNotificationProps) {
   // 表示段階：吹き出し → 初回クリックで軽量プレビュー（§10.2）。
   // backend が既に PreviewVisible なら最初から preview で再開する。
@@ -235,7 +242,26 @@ export default function YuukoInAppNotification({
             <X className="h-4 w-4" />
           </button>
 
-          {view === "balloon" ? (
+          {variant === "reward" ? (
+            // 報酬通知: 短い吹き出し＋OK。OK で確認済みにする（Rust 側）。閉じる・放置では未確認のまま。
+            // デスクトップの吹き出し段階のウィンドウ（固定サイズ）に収まるよう、余白は小さめにする。
+            <div className="flex flex-col gap-1">
+              <p
+                className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
+                  clampText ? "line-clamp-3" : ""
+                }`}
+              >
+                {balloonText ?? "新しいテーマが届いたよ！"}
+              </p>
+              <button
+                type="button"
+                onClick={handleOpen}
+                className="self-start rounded-full bg-primary px-3 py-0.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                OK
+              </button>
+            </div>
+          ) : view === "balloon" ? (
             // 短い吹き出し（主役はゆうこ＋短文）。初回クリックでプレビューへ。
             <button
               type="button"

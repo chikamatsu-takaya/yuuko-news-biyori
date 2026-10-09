@@ -19,6 +19,7 @@ import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-
 import {
   dismissYuukoNotification,
   handleYuukoClicked,
+  isActiveRewardNotice,
   listenYuukoOpenArticle,
   markYuukoIgnored,
   type YuukoNotificationState,
@@ -52,15 +53,17 @@ const ACTIVE_NEWS_NOTIFICATION_STATES = [
 ];
 
 /**
- * アプリ内ニュース通知を表示すべきかの判定。
- * active 状態 かつ 紹介対象（previewArticle / currentArticleId）が存在する場合のみ true。
+ * アプリ内通知（ニュース・報酬）を表示すべきかの判定。
+ * ニュースは active 状態 かつ 紹介対象（previewArticle / currentArticleId）が存在する場合。
+ * 報酬通知（RewardNotifying・未確認の報酬あり）も同じ導線で表示し、閉じる/無視/OK を扱う。
  */
-const isActiveNewsNotification = (
+const isActiveYuukoNotification = (
   state: YuukoNotificationState | null
 ): boolean =>
-  !!state &&
-  ACTIVE_NEWS_NOTIFICATION_STATES.includes(state.state) &&
-  (Boolean(state.previewArticle) || Boolean(state.currentArticleId));
+  isActiveRewardNotice(state) ||
+  (!!state &&
+    ACTIVE_NEWS_NOTIFICATION_STATES.includes(state.state) &&
+    (Boolean(state.previewArticle) || Boolean(state.currentArticleId)));
 
 // 動きを抑える設定か。退場演出を出さずに即座に外すために使う。
 const prefersReducedMotion = () =>
@@ -123,7 +126,7 @@ export default function Page() {
   // 残って返っても、ホーム側で処理済みニュースを再表示しないよう保持しない。
   const applyYuukoNotificationState = React.useCallback(
     (next: YuukoNotificationState | null) => {
-      const active = isActiveNewsNotification(next);
+      const active = isActiveYuukoNotification(next);
       if (active) {
         // 新しい active 通知を表示するときは、退場演出中の古い表示を残さない。
         setExitingNotification(null);
@@ -141,7 +144,7 @@ export default function Page() {
       if (
         terminalActionInFlightRef.current &&
         next &&
-        isActiveNewsNotification(next)
+        isActiveYuukoNotification(next)
       ) {
         const nextArticleId =
           next.currentArticleId ?? next.previewArticle?.articleId ?? null;
@@ -306,7 +309,7 @@ export default function Page() {
     terminalActionInFlightRef.current = true;
     suppressActiveNotificationIdRef.current = articleId;
     setExitingNotification(
-      !prefersReducedMotion() && isActiveNewsNotification(yuukoNotificationState)
+      !prefersReducedMotion() && isActiveYuukoNotification(yuukoNotificationState)
         ? yuukoNotificationState
         : null
     );
@@ -359,7 +362,7 @@ export default function Page() {
         const next = await dismissYuukoNotification();
         // dismiss は Waiting（非active）を返す → null 化して保持しない。
         applyYuukoNotificationState(next);
-        if (!isActiveNewsNotification(next)) {
+        if (!isActiveYuukoNotification(next)) {
           endTerminalAction();
         }
       } catch (error) {
@@ -377,7 +380,7 @@ export default function Page() {
       try {
         const next = await markYuukoIgnored();
         applyYuukoNotificationState(next);
-        if (!isActiveNewsNotification(next)) {
+        if (!isActiveYuukoNotification(next)) {
           endTerminalAction();
         }
       } catch (error) {
@@ -479,7 +482,7 @@ export default function Page() {
   };
 
   // どの画面でも通知を重ねて表示する。表示判定は active 状態 + 紹介対象の有無。
-  const activeNotification = isActiveNewsNotification(yuukoNotificationState)
+  const activeNotification = isActiveYuukoNotification(yuukoNotificationState)
     ? yuukoNotificationState
     : null;
   // active が無い間だけ、退場演出中のコピーを同じ位置（同じ key）に描画する。
@@ -511,6 +514,10 @@ export default function Page() {
           sourceName={displayedNotification.previewArticle?.sourceName}
           summary={displayedNotification.previewArticle?.summary}
           positionMode={displayedNotification.positionMode}
+          // 報酬通知は吹き出し＋OK。OK は handleNotificationOpen → handle_yuuko_clicked（記事は開かない）。
+          variant={
+            isActiveRewardNotice(displayedNotification) ? "reward" : "news"
+          }
           onFirstClick={handleNotificationFirstClick}
           onOpen={handleNotificationOpen}
           onClose={handleNotificationClose}
