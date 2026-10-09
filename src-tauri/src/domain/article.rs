@@ -189,6 +189,9 @@ pub struct ArticleHistoryItemDto {
     pub read_state: ArticleReadState,
     pub is_archived: bool,
     pub recommendation_score: f32,
+    /// 自動要約の状態（ArticleSummaryDto と同じ意味）。履歴・一覧のタグ表示に使う読み取り専用の値。
+    #[serde(default)]
+    pub summary_state: SummaryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

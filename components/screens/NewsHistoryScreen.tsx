@@ -16,7 +16,9 @@ import {
   updateArticleFavorite,
   type ArticleHistoryFilter,
   type ArticleHistoryItemDto,
+  type ArticleSummaryState,
 } from "@/lib/tauri/articles";
+import { SummaryStateTag } from "@/components/news/SummaryStateTag";
 import {
   Alert,
   AlertDescription,
@@ -72,6 +74,7 @@ interface HistoryItem {
   isArchived: boolean;
   category: NewsCategory;
   thumbnailType: "ai" | "energy" | "mobile" | "business" | "robot" | "space" | "lifestyle";
+  summaryState?: ArticleSummaryState;
 }
 
 interface NavigationItem {
@@ -259,6 +262,7 @@ const mapTauriHistoryItemToUi = (
     isArchived: article.isArchived,
     category: article.genre || "未分類",
     thumbnailType: toThumbnailType(article.genre),
+    summaryState: article.summaryState,
   };
 };
 
@@ -438,6 +442,7 @@ function HistoryItemCard({
               }`}
             />
           </div>
+          <SummaryStateTag state={item.summaryState} />
           {item.isArchived && (
             <Badge className="bg-gray-200 text-gray-600 border-0 text-[10px] px-1.5 py-0">
               アーカイブ済み

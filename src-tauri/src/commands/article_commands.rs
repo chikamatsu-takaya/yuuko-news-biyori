@@ -37,9 +37,13 @@ pub async fn list_article_history(
     params: Option<ListArticleHistoryParams>,
 ) -> CommandResult<Vec<ArticleHistoryItemDto>> {
     let article_service = state.article_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     let normalized_params = params.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        article_service.list_article_history(normalized_params)
+        let mut items = article_service.list_article_history(normalized_params)?;
+        // 待機中・処理中・失敗はキューのメモリ上の状態のため、ここで重ねる（一覧と同じ）。
+        auto_summary_queue.apply_to_history_items(&mut items);
+        Ok::<_, crate::error::AppError>(items)
     })
     .await
     .map_err(|error| CommandError::join_error("article-history", error))?

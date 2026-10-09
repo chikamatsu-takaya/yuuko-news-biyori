@@ -45,6 +45,8 @@ export type ArticleHistoryItemDto = {
   readState: ArticleReadState;
   isArchived: boolean;
   recommendationScore: number;
+  // 一覧・履歴の「要約待ち／ゆうこ要約中」タグ用。旧バックエンドでは欠けうるため省略可。
+  summaryState?: ArticleSummaryState;
 };
 
 export type ArticleDetailDto = {
