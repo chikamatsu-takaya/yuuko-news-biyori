@@ -6,6 +6,7 @@ import NewsListScreen from "@/components/screens/NewsListScreen";
 import NewsReaderScreen from "@/components/screens/NewsReaderScreen";
 import DictionaryScreen from "@/components/screens/DictionaryScreen";
 import NewsHistoryScreen from "@/components/screens/NewsHistoryScreen";
+import PastNewsScreen from "@/components/screens/PastNewsScreen";
 import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
@@ -32,6 +33,7 @@ type ScreenType =
   | "reader"
   | "dictionary"
   | "history"
+  | "past-news"
   | "settings"
   | "customize"
   | "gacha"
@@ -39,7 +41,7 @@ type ScreenType =
 
 // 記事詳細を開いた遷移元。戻る先の画面をここで保持する（固定でホームへ戻さない）。
 // 「戻る」ボタンの表示文言は遷移元によらず「戻る」に統一し、戻り先のみこの値で制御する。
-type ReaderOrigin = "home" | "news" | "history" | "dictionary";
+type ReaderOrigin = "home" | "news" | "history" | "dictionary" | "past-news";
 
 // ニュース通知が「表示中（ユーザー操作待ち）」とみなせる active 状態。
 // reward 専用の hasNotification は使わず、Rust の has_active_notification と同基準で判定する。
@@ -187,6 +189,8 @@ export default function Page() {
       setCurrentScreen("dictionary");
     } else if (screen === "history") {
       setCurrentScreen("history");
+    } else if (screen === "past-news") {
+      setCurrentScreen("past-news");
     } else if (screen === "settings") {
       setCurrentScreen("settings");
     } else if (screen === "customize") {
@@ -432,6 +436,16 @@ export default function Page() {
         <NewsHistoryScreen
           onNavigate={handleNavigate}
           onOpenArticle={openArticleFrom("history")}
+        />
+      );
+    }
+
+    // 過去ニュース（月一覧→記事一覧）。記事詳細の「戻る」で同じ月の一覧へ戻る（月の記憶は画面側で持つ）。
+    if (currentScreen === "past-news") {
+      return (
+        <PastNewsScreen
+          onNavigate={handleNavigate}
+          onOpenArticle={openArticleFrom("past-news")}
         />
       );
     }
