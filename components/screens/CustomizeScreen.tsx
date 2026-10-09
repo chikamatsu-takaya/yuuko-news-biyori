@@ -40,6 +40,9 @@ import {
   Clover,
 } from "lucide-react";
 import Image from "next/image";
+import { isTauriRuntime } from "@/lib/tauri/settings";
+import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
+import { getRewardState, type RewardItem } from "@/lib/tauri/rewards";
 
 // Types
 type CustomizeTab = "deco" | "balloon" | "theme" | "tone" | "personality" | "name";
@@ -60,10 +63,16 @@ interface CustomizeState {
   tone: string;
   personality: string;
   displayName: string;
-  friendshipRank: number;
-  currentPoints: number;
-  nextRankPoints: number;
 }
+
+/**
+ * 友情ランク・報酬の読み込み状態。
+ * preview はブラウザ確認（Tauri 外）で実データが無いとき。サンプル値をプレビューとして明示して出す。
+ */
+type RankLoadStatus = "loading" | "ready" | "preview" | "error";
+
+/** ランク表示に使う値（get_friendship_state の DTO の一部）。 */
+type FriendshipView = Pick<FriendshipState, "currentRank" | "currentPoint" | "nextRequiredPoint">;
 
 interface NavigationItem {
   id: string;
@@ -90,9 +99,13 @@ const initialCustomizeState: CustomizeState = {
   tone: "やさしい",
   personality: "おしえてくれる",
   displayName: "ゆうこ",
-  friendshipRank: 15,
-  currentPoints: 350,
-  nextRankPoints: 1000,
+};
+
+// Tauri 外のプレビュー専用のサンプル値。実データと誤解されないよう「サンプル」表示と組で使う。
+const previewFriendship: FriendshipView = {
+  currentRank: 15,
+  currentPoint: 350,
+  nextRequiredPoint: 1000,
 };
 
 const mockDecoItems: DecoItem[] = [
@@ -251,6 +264,61 @@ export default function CustomizeScreen({
   const [customizeState, setCustomizeState] = React.useState<CustomizeState>(initialCustomizeState);
   const [selectedDecoId, setSelectedDecoId] = React.useState<string>("green_hood");
   const [displayName, setDisplayName] = React.useState(initialCustomizeState.displayName);
+  const [friendshipStatus, setFriendshipStatus] = React.useState<RankLoadStatus>("loading");
+  const [friendship, setFriendship] = React.useState<FriendshipView | null>(null);
+  const [rewardStatus, setRewardStatus] = React.useState<RankLoadStatus>("loading");
+  const [rewards, setRewards] = React.useState<RewardItem[]>([]);
+
+  // 友情ランク・報酬は Rust（get_friendship_state / get_reward_state）が正。ここでは表示するだけで、
+  // テーマ切り替えや selectedThemeId の保存はしない（テーマ切り替えは別タスク）。
+  // 片方の取得に失敗しても、もう片方と画面全体は表示を続ける。
+  React.useEffect(() => {
+    if (!isTauriRuntime()) {
+      setFriendship(previewFriendship);
+      setFriendshipStatus("preview");
+      setRewardStatus("preview");
+      return;
+    }
+
+    let cancelled = false;
+
+    getFriendshipState()
+      .then((state) => {
+        if (cancelled) return;
+        if (!state) {
+          setFriendshipStatus("error");
+          return;
+        }
+        setFriendship(state);
+        setFriendshipStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        // 生のエラー文は画面へ出さず、調査用に warn で残す。
+        console.warn("Failed to load friendship state:", error);
+        setFriendshipStatus("error");
+      });
+
+    getRewardState()
+      .then((state) => {
+        if (cancelled) return;
+        if (!state) {
+          setRewardStatus("error");
+          return;
+        }
+        setRewards(state.rewards);
+        setRewardStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn("Failed to load reward state:", error);
+        setRewardStatus("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -289,7 +357,14 @@ export default function CustomizeScreen({
     console.log("Check rank rewards");
   };
 
-  const progressPercent = (customizeState.currentPoints / customizeState.nextRankPoints) * 100;
+  // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける）。
+  const isMaxRank = friendship !== null && friendship.nextRequiredPoint <= 0;
+  const progressPercent =
+    friendship === null
+      ? 0
+      : isMaxRank
+        ? 100
+        : Math.min(100, Math.max(0, (friendship.currentPoint / friendship.nextRequiredPoint) * 100));
 
   return (
     <div className="h-dvh flex flex-col bg-[var(--yuuko-cream)] overflow-hidden">
@@ -556,7 +631,50 @@ export default function CustomizeScreen({
                   <CardTitle className="text-sm font-medium">ランク報酬で解放</CardTitle>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
-                  <div className="flex gap-2 mb-2">
+                  {rewardStatus === "ready" ? (
+                    // 実データ: 報酬マスタ全件の解放状態を読み取り専用で出す（ここでは適用・保存しない）。
+                    rewards.length > 0 ? (
+                      <ul className="space-y-1.5 mb-2">
+                        {rewards.map((reward) => (
+                          <li
+                            key={reward.rewardId}
+                            className="flex items-center gap-2 text-xs"
+                            data-testid="customize-rank-reward-item"
+                          >
+                            {reward.unlocked ? (
+                              <Check className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                            ) : (
+                              <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
+                            )}
+                            <span
+                              className={`flex-1 min-w-0 truncate ${
+                                reward.unlocked ? "text-foreground" : "text-muted-foreground"
+                              }`}
+                            >
+                              {reward.name}
+                            </span>
+                            {reward.unlocked ? (
+                              <Badge className="bg-[var(--yuuko-green)] text-white text-[10px] px-1.5 py-0 shrink-0">
+                                解放済み
+                              </Badge>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground shrink-0">
+                                ランク{reward.unlockRank}で解放
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-muted-foreground mb-2">まだ報酬はないよ。</p>
+                    )
+                  ) : rewardStatus === "loading" ? (
+                    <p className="text-xs text-muted-foreground mb-2">読み込み中…</p>
+                  ) : rewardStatus === "error" ? (
+                    <p className="text-xs text-muted-foreground mb-2">報酬の状態を読み込めなかったよ。</p>
+                  ) : (
+                  // Tauri 外のプレビュー: 従来のサンプル表示（すべて未解放）をそのまま出す。
+                  <div className="flex gap-2 mb-2" data-testid="customize-rank-reward-preview">
                     {mockRankRewardItems.map((item) => {
                       const Icon = item.icon;
                       return (
@@ -573,6 +691,7 @@ export default function CustomizeScreen({
                       );
                     })}
                   </div>
+                  )}
                   <p className="text-xs text-muted-foreground">
                     ランクごとに特別なアイテムが解放されるよ！
                   </p>
@@ -692,19 +811,45 @@ export default function CustomizeScreen({
                 <CardTitle className="text-sm font-medium flex items-center gap-1">
                   <Sparkles className="w-4 h-4 text-yellow-500" aria-hidden="true" />
                   なかよしランク
+                  {friendshipStatus === "preview" && (
+                    <Badge variant="outline" className="ml-auto text-[10px] px-1.5 py-0">
+                      サンプル
+                    </Badge>
+                  )}
                 </CardTitle>
               </CardHeader>
               <CardContent className="p-3 pt-0">
-                <div className="flex items-baseline gap-1 mb-1">
-                  <span className="text-xs text-muted-foreground">ランク</span>
-                  <span className="text-3xl font-bold text-[var(--yuuko-green)]">
-                    {customizeState.friendshipRank}
-                  </span>
-                </div>
-                <div className="text-[10px] text-muted-foreground mb-1">
-                  つぎのランクまで {customizeState.currentPoints} / {customizeState.nextRankPoints}
-                </div>
-                <Progress value={progressPercent} className="h-2 mb-3" aria-label="ランク進捗" />
+                {friendship !== null && (friendshipStatus === "ready" || friendshipStatus === "preview") ? (
+                  <>
+                    <div className="flex items-baseline gap-1 mb-1">
+                      <span className="text-xs text-muted-foreground">ランク</span>
+                      <span
+                        className="text-3xl font-bold text-[var(--yuuko-green)]"
+                        data-testid="customize-friendship-rank"
+                      >
+                        {friendship.currentRank}
+                      </span>
+                    </div>
+                    <div
+                      className="text-[10px] text-muted-foreground mb-1"
+                      data-testid="customize-friendship-progress-text"
+                    >
+                      {isMaxRank
+                        ? "いちばん上のランクだよ！"
+                        : `つぎのランクまで ${friendship.currentPoint} / ${friendship.nextRequiredPoint}`}
+                    </div>
+                    <Progress value={progressPercent} className="h-2 mb-3" aria-label="ランク進捗" />
+                    {friendshipStatus === "preview" && (
+                      <p className="text-[10px] text-muted-foreground mb-2">
+                        プレビュー用のサンプル値だよ。アプリでは今のランクが表示されるよ。
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground mb-3" data-testid="customize-friendship-status">
+                    {friendshipStatus === "error" ? "ランクを読み込めなかったよ。" : "読み込み中…"}
+                  </p>
+                )}
                 <Button
                   variant="outline"
                   size="sm"

@@ -1507,6 +1507,118 @@ const openReaderWithRelatedPool = async (page: Page) => {
   await expectReaderOpenedWithoutExplain(page);
 };
 
+// カスタマイズ画面の友情ランク・報酬表示（get_friendship_state / get_reward_state の実データ）。
+const openCustomize = (page: Page) =>
+  openScreenFromSidebar(page, "カスタマイズ", "ゆうこカスタマイズ");
+
+test("customize: friendship rank and reward unlock state come from real data", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 4,
+      currentPoint: 12,
+      nextRequiredPoint: 25,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    win.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: [],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("4");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "つぎのランクまで 12 / 25"
+  );
+  await expect(page.getByText("350 / 1000")).toHaveCount(0);
+  await expect(page.getByText("サンプル", { exact: true })).toHaveCount(0);
+
+  const rewardItems = page.getByTestId("customize-rank-reward-item");
+  await expect(rewardItems).toHaveCount(2);
+  await expect(rewardItems.nth(0)).toContainText("テーマ①");
+  await expect(rewardItems.nth(0)).toContainText("解放済み");
+  await expect(rewardItems.nth(1)).toContainText("テーマ②");
+  await expect(rewardItems.nth(1)).toContainText("ランク7で解放");
+  await expect(page.getByTestId("customize-rank-reward-preview")).toHaveCount(0);
+});
+
+test("customize: max rank shows a fixed message instead of a 0-point goal", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 50,
+      currentPoint: 0,
+      nextRequiredPoint: 0,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("50");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "いちばん上のランクだよ！"
+  );
+});
+
+test("customize: friendship load failure keeps the screen and rewards visible", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-status")).toHaveText(
+    "ランクを読み込めなかったよ。"
+  );
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveCount(0);
+  await expect(page.getByText("E2E friendship failure")).toHaveCount(0);
+  // 報酬側は独立して表示される（既定モック: どれも未解放）。
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "保存する" })).toBeVisible();
+});
+
+test("customize: browser preview (outside Tauri) labels the sample rank values", async ({
+  page,
+}) => {
+  await openHome(page);
+  // ホーム表示後に Tauri 外にする（カスタマイズのマウント時に isTauriRuntime が false になる）。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "カスタマイズ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
+
+  await expect(page.getByText("サンプル", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("15");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "つぎのランクまで 350 / 1000"
+  );
+  await expect(page.getByTestId("customize-rank-reward-preview")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(0);
+});
+
 // ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
 const setupRankUp = (page: Page, newRank: number, pendingRewardIds: string[]) =>
   page.addInitScript(
@@ -7824,6 +7936,24 @@ async function installTauriMocks(page: Page) {
               confirmedRewardIds: params.rewardIds ?? [],
               remainingPendingRewardIds: [],
             };
+          }
+          case "get_friendship_state": {
+            // 既定はランク 1・ポイント 0。テストで __E2E_FRIENDSHIP_STATE__ を差し替える（"fail" で失敗させる）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const friendshipState = (window as any).__E2E_FRIENDSHIP_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (friendshipState === "fail") {
+              throw new Error("E2E friendship failure");
+            }
+            return (
+              friendshipState ?? {
+                currentRank: 1,
+                currentPoint: 0,
+                nextRequiredPoint: 10,
+                dailyEarnedPoint: 0,
+                dailyPointLimit: 50,
+              }
+            );
           }
           case "get_reward_state": {
             // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える。
