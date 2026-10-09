@@ -141,7 +141,7 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
   );
 }
 
-// Mock Data
+// 設定画面の既定値（読み込み前・プレビュー時の初期表示）。Tauri では読み込んだ保存値で上書きする。
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
@@ -1578,10 +1578,14 @@ export default function SettingsScreen({
             onClick={handleSave}
             // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
             // 変更が無いときも押せない（§7.7「設定変更あり → 保存ボタンを有効化」）。
+            // 破損以外の読み込み失敗中も、画面の値は保存済み設定ではなく既定値なので、保存で上書きさせない（再試行で読み直す）。
             disabled={
               !hasUnsavedChanges ||
               isUpdatingAutostart ||
               isSettingsCorrupt ||
+              loadNoticeKind === "error" ||
+              // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
+              isLoading ||
               isMigrationImporting
             }
           >
