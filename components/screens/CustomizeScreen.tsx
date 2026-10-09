@@ -410,7 +410,7 @@ export default function CustomizeScreen({
               })}
             </div>
 
-            {/* Main Customize Area: 既定ウィンドウ（800×600）では3列が入らないため、プレビュー・ランク報酬は折り返して下に並べる */}
+            {/* Main Customize Area（デコ一覧＋プレビューの2列）: 既定ウィンドウ（800×600）では横に並ばないため、プレビューを下へ折り返す */}
             <div className="flex flex-wrap gap-4">
               {/* Deco Items List */}
               <Card className="w-64 shrink-0">

@@ -4,7 +4,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * 主要画面のレイアウト監査（余白・スクロール・文字はみ出し）。
  *
  * Tauri の既定ウィンドウ（tauri.conf.json の 800×600）と、既存 E2E の 1280×720 の2サイズで
- * 各画面を開き、次を確かめる。スクリーンショットは .auto-dev-shots/layout/ に保存する（コミットしない）。
+ * 各画面を開き、次を確かめる。スクリーンショットは testInfo.outputPath（git 管理外の test-results/ 配下）に保存する。
  * - ページ全体に横スクロールが出ないこと
  * - 見出し・主要ボタンが画面内にある、または縦スクロールで届き、前面に出ていること
  * - overflow で切られた文字・画面外へはみ出した文字がないこと（ellipsis / line-clamp は意図的な省略として除く）
@@ -40,14 +40,6 @@ const KNOWN_ISSUES: Record<string, Partial<Record<ViewportKey, KnownIssue>>> = {
       checks: ["reach:先頭の記事カード"],
     },
   },
-  reader: {
-    // NewsReaderScreen は近松さんの担当（別作業で編集中）のため直さない。対応タスクは未起票。
-    "800x600": {
-      owner: "近松（NewsReaderScreen。対応タスク未起票）",
-      note: "記事を開いたときの用語ポップアップが中央列からはみ出し、左端が main で切れる",
-      checks: ["clipped-text"],
-    },
-  },
 };
 
 const sidebarButton = (page: Page, name: string) =>
@@ -62,7 +54,9 @@ const openHome = async (page: Page) => {
 
 const openFromSidebar = (navName: string, heading: string) => async (page: Page) => {
   await openHome(page);
-  // dev サーバーの初回表示直後はクリックが取りこぼされることがあるため、遷移を確認できるまで押し直す。
+  // dev サーバーの初回表示直後（hydration 前）はクリックが取りこぼされることがあるため、遷移を確認できるまで押し直す。
+  // アプリに hydration 完了の目印が無く、目印を足すと本体の変更になるので、ここでは押し直しで吸収する。
+  // 押し直しは同じ画面への遷移を繰り返すだけで、状態を変える操作ではない。
   await expect(async () => {
     await sidebarButton(page, navName).click();
     await expect(page.getByRole("heading", { name: heading }).first()).toBeVisible({
@@ -205,7 +199,7 @@ for (const viewport of VIEWPORTS) {
   for (const screen of SCREENS) {
     test(`layout ${screen.id} @ ${viewportKey}: no horizontal scroll, key targets reachable, no clipped text`, async ({
       page,
-    }) => {
+    }, testInfo) => {
       await page.setViewportSize(viewport);
       await screen.open(page);
       // 画像読み込み・遷移アニメーションの後で測る。
@@ -213,7 +207,7 @@ for (const viewport of VIEWPORTS) {
       await page.waitForTimeout(300);
 
       await page.screenshot({
-        path: `.auto-dev-shots/layout/${screen.id}-${viewportKey}.png`,
+        path: testInfo.outputPath(`${screen.id}-${viewportKey}.png`),
       });
 
       const failures: { check: string; detail: string }[] = [];
