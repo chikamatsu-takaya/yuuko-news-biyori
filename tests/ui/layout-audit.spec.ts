@@ -516,8 +516,8 @@ async function installLayoutMocks(page: Page) {
       get_reward_state: () => ({
         currentRank: 4,
         rewards: [
-          { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
-          { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+          { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+          { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
         ],
         pendingRewardIds: [],
         activeThemeId: "default",

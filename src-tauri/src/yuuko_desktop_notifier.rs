@@ -649,13 +649,13 @@ mod tests {
 
     fn reward_state() -> YuukoNotificationState {
         let mut reward = state(YuukoResidentState::RewardNotifying, false);
-        reward.balloon_text = Some("ゆう、新しいテーマ「テーマ①」が届いたよ！".to_string());
+        reward.balloon_text = Some("ゆう、新しいテーマ「そらいろ」が届いたよ！".to_string());
         reward.has_notification = true;
         reward.reward_notification = Some(crate::domain::yuuko::RewardNotificationState {
             pending: true,
             rank: 3,
             reward_ids: vec!["theme_001".to_string()],
-            message: "ゆう、新しいテーマ「テーマ①」が届いたよ！".to_string(),
+            message: "ゆう、新しいテーマ「そらいろ」が届いたよ！".to_string(),
         });
         reward
     }
@@ -668,7 +668,7 @@ mod tests {
             assert!(payload.reward);
             assert_eq!(
                 payload.balloon_text.as_deref(),
-                Some("ゆう、新しいテーマ「テーマ①」が届いたよ！")
+                Some("ゆう、新しいテーマ「そらいろ」が届いたよ！")
             );
             // 記事の欄は空で、本文・要約も送らない。吹き出し段階のウィンドウで出す。
             assert!(payload.article_id.is_empty() && payload.title.is_empty());

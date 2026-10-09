@@ -263,7 +263,7 @@ test("balloon → first click preview → 詳しく見る confirms through handl
 });
 
 const REWARD_TEXT =
-  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
 
 const rewardState = () => ({
   state: "RewardNotifying",

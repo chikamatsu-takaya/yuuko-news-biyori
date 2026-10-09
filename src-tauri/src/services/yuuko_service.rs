@@ -1693,7 +1693,7 @@ mod tests {
             .confirm_rank_up_reward(reward_ids(&[" "]))
             .is_err());
 
-        // Rank7 相当（累計 160pt）→ テーマ①②が未確認で解放される。
+        // Rank7 相当（累計 160pt）→ theme_001・theme_002（そらいろ・さくら）が未確認で解放される。
         save_friendship_total(&ctx, 160);
         let result = ctx
             .service
@@ -1897,7 +1897,7 @@ mod tests {
         assert_eq!(reward.rank, 3);
         assert_eq!(
             result.state.balloon_text.as_deref(),
-            Some("新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
         );
         // ニュースは紹介していない（候補は残る）。通知回数は1回分消費する。
         let saved = load_state(&ctx);
@@ -2004,7 +2004,7 @@ mod tests {
         save_nickname(&ctx, "ゆう", true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
-        let expected = "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
         assert_eq!(result.state.balloon_text.as_deref(), Some(expected));
         assert_eq!(result.state.reward_notification.unwrap().message, expected);
         let state = ctx.service.get_yuuko_notification_state().unwrap();

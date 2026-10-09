@@ -1117,7 +1117,7 @@ mod tests {
     fn reward_notice_message_uses_master_name_or_count() {
         assert_eq!(
             reward_notice_message(&ids(&["theme_001"])),
-            "新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。"
+            "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。"
         );
         assert_eq!(
             reward_notice_message(&ids(&["theme_001", "theme_002"])),
@@ -1146,7 +1146,7 @@ mod tests {
         assert!(state.preview_article.is_none() && state.current_article_id.is_none());
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
         );
         let reward = state.reward_notification.clone().unwrap();
         assert!(reward.pending);
@@ -1201,7 +1201,7 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「テーマ②」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。")
         );
         // すべて確認済みなら通知自体を外す（二重に知らせない）。クールタイムは付けない。
         assert!(state.sync_reward_notice(&[]));
@@ -1230,7 +1230,7 @@ mod tests {
         state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
         state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
 
-        let expected = "新しいテーマ「テーマ②」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。";
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
         let reward = state.reward_notification.unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
         state.mark_reward_notified(now, 3, ids(&["theme_001"]));
         let mut dto = state.to_notification_state();
         dto.apply_nickname("ゆう");
-        let expected = "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
         assert_eq!(dto.balloon_text.as_deref(), Some(expected));
         assert_eq!(dto.reward_notification.unwrap().message, expected);
         // 保存状態には焼き込まない。

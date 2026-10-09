@@ -1561,8 +1561,8 @@ test("customize: friendship rank and reward unlock state come from real data", a
     win.__E2E_REWARD_STATE__ = {
       currentRank: 4,
       rewards: [
-        { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
-        { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
       ],
       pendingRewardIds: [],
       activeThemeId: "default",
@@ -1580,9 +1580,9 @@ test("customize: friendship rank and reward unlock state come from real data", a
 
   const rewardItems = page.getByTestId("customize-rank-reward-item");
   await expect(rewardItems).toHaveCount(2);
-  await expect(rewardItems.nth(0)).toContainText("テーマ①");
+  await expect(rewardItems.nth(0)).toContainText("そらいろ");
   await expect(rewardItems.nth(0)).toContainText("解放済み");
-  await expect(rewardItems.nth(1)).toContainText("テーマ②");
+  await expect(rewardItems.nth(1)).toContainText("さくら");
   await expect(rewardItems.nth(1)).toContainText("ランク7で解放");
   await expect(page.getByTestId("customize-rank-reward-preview")).toHaveCount(0);
 });
@@ -1661,8 +1661,8 @@ const setupRankUp = (page: Page, newRank: number, pendingRewardIds: string[]) =>
       const win = window as any;
       win.__E2E_FRIENDSHIP_RANK_UP_TO__ = rank;
       const master = [
-        { rewardId: "theme_001", name: "テーマ①", unlockRank: 3 },
-        { rewardId: "theme_002", name: "テーマ②", unlockRank: 7 },
+        { rewardId: "theme_001", name: "そらいろ", unlockRank: 3 },
+        { rewardId: "theme_002", name: "さくら", unlockRank: 7 },
       ];
       win.__E2E_REWARD_STATE__ = {
         currentRank: rank,
@@ -1703,8 +1703,8 @@ test("rank up: dialog shows the unlocked reward and OK confirms only that reward
   await expect(dialog.getByText("ランクアップ！")).toBeVisible();
   const rewardSection = dialog.getByRole("region", { name: "解放された報酬" });
   await expect(rewardSection).toBeVisible();
-  await expect(rewardSection.getByText("テーマ①")).toBeVisible();
-  await expect(rewardSection.getByText("テーマ②")).toHaveCount(0);
+  await expect(rewardSection.getByText("そらいろ")).toBeVisible();
+  await expect(rewardSection.getByText("さくら")).toHaveCount(0);
   await expect(
     rewardSection.getByText("カスタマイズ画面で切り替えられるよ。")
   ).toBeVisible();
@@ -5770,7 +5770,7 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
 
 // 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
 const REWARD_NOTICE_TEXT =
-  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
 
 async function enableRewardNotice(page: Page) {
   await page.addInitScript((text: string) => {
@@ -8004,8 +8004,8 @@ async function installTauriMocks(page: Page) {
               rewardState ?? {
                 currentRank: 1,
                 rewards: [
-                  { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: false, pending: false },
-                  { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+                  { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: false, pending: false },
+                  { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
                 ],
                 pendingRewardIds: [],
                 activeThemeId: "default",
