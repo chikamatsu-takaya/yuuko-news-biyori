@@ -5,11 +5,12 @@ use crate::domain::summary::{
     GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
     ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
     FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-    POINT_ITEM_MAX_CHARS,
+    POINT_ITEM_MAX_CHARS, YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::util::speech_cleanup::clean_yuuko_speech;
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
 };
@@ -133,7 +134,7 @@ impl SummaryService {
         reject_fallback_early(fallback_policy, &article_id, &summary_response)?;
         let yuuko_explanation_response = request_validated(
             AiRequest {
-                prompt_id: "yuuko_explanation_v1".to_string(),
+                prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
                 input_text: yuuko_explanation_seed,
                 context: Some(article.genre.clone()),
             },
@@ -145,7 +146,7 @@ impl SummaryService {
 
         let yuuko_comment_response = request_validated(
             AiRequest {
-                prompt_id: "yuuko_comment_v1".to_string(),
+                prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
                 input_text: yuuko_comment_seed,
                 context: Some(article.source_name.clone()),
             },
@@ -725,10 +726,13 @@ fn is_markdown_separator_line(line: &str) -> bool {
 /// Mock を選んでいる利用者（provider = "mock"）の出力は、従来どおり検証に通れば使う。
 /// 落ちた場合は `AppError::Parse`（Mock の種は無害化済みのため通常は起きない）。
 /// なお、Gemini の通信失敗・キー未設定による Mock への切り替え（`AiProviderService`）は従来どおり。
+///
+/// 実AIの再説明・一言は、検証の前にト書き・中国語の助詞・挨拶を取り除く（`clean_ai_speech`）。
 fn select_valid_output(
     kind: SummaryOutputKind,
     primary: AiResponse,
 ) -> Result<AiResponse, AppError> {
+    let primary = clean_ai_speech(kind, primary);
     let rejection = match validate_summary_output(kind, &primary.text) {
         Ok(text) => {
             return Ok(AiResponse {
@@ -745,6 +749,33 @@ fn select_valid_output(
         rejection.label()
     );
     Err(rejection_error(&primary))
+}
+
+/// 実AI（Gemini・ローカル）の再説明・一言から、話の中身ではない飾り（括弧のト書き・中国語の助詞・
+/// 冒頭の挨拶・締めの挨拶）を取り除く。拒否すると記事が未要約のまま残る（D104 / D56）ため、捨てずに削る。
+/// 除去は文字を消すだけなので、続く `validate_summary_output` の検証（HTML・制御文字・見出し・文字数）は
+/// そのまま効く。すべて消えたときは空になり、検証の Empty で拒否される。
+/// Mock の種（定型文）は手を加えず、決定的な結果のままにする。要約・要点は中立な文体なので対象外。
+fn clean_ai_speech(kind: SummaryOutputKind, response: AiResponse) -> AiResponse {
+    if !matches!(
+        kind,
+        SummaryOutputKind::Explanation | SummaryOutputKind::Comment
+    ) || response.provider == PROVIDER_MOCK
+    {
+        return response;
+    }
+    let cleaned = clean_yuuko_speech(&response.text);
+    if cleaned != response.text.trim() {
+        // 本文は出さず、取り除いたことと出力種別だけを残す。
+        log::info!(
+            "removed stage directions, greetings or non-Japanese particles from the AI output ({})",
+            kind.label()
+        );
+    }
+    AiResponse {
+        text: cleaned,
+        provider: response.provider,
+    }
 }
 
 /// 検証に落ちた出力のエラー。Mock の出力なら `Parse`、実AIの出力なら `AiOutputRejected`（D104）。
@@ -1045,6 +1076,48 @@ mod tests {
             assert_eq!(selected.text, "正常な要約です。");
             assert_eq!(selected.provider, provider);
         }
+    }
+
+    #[test]
+    fn real_ai_explanation_and_comment_are_cleaned_before_validation() {
+        let noisy = "（ゆうこが微笑んで手を振って）こんにちは、お元気ですか？哦～、新しい補助金が始まるよ。";
+        for provider in ["gemini", "local"] {
+            for kind in [SummaryOutputKind::Explanation, SummaryOutputKind::Comment] {
+                let selected = select_valid_output(kind, response(noisy, provider)).unwrap();
+                assert_eq!(
+                    selected.text, "新しい補助金が始まるよ。",
+                    "{provider} {kind:?}"
+                );
+                assert_eq!(selected.provider, provider);
+            }
+            // 要約は中立な文体なので手を加えない。
+            let summary =
+                select_valid_output(SummaryOutputKind::Summary, response(noisy, provider)).unwrap();
+            assert_eq!(summary.text, noisy);
+        }
+        // Mock の種（定型文）は決定的な結果のまま変えない。
+        let mock_seed = "（経済）って、結局どこが便利になるのかを見ると分かりやすそうだね。";
+        let selected =
+            select_valid_output(SummaryOutputKind::Comment, response(mock_seed, "mock")).unwrap();
+        assert_eq!(selected.text, mock_seed);
+    }
+
+    #[test]
+    fn real_ai_speech_that_is_only_decoration_is_rejected_as_empty() {
+        // 取り除いた後に中身が残らなければ、Mock へ切り替えず従来どおり拒否する（D104）。
+        let error = select_valid_output(
+            SummaryOutputKind::Explanation,
+            response("（手を振って）\nこんにちは！", "local"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::AiOutputRejected));
+        // 取り除いても検証は効く（見出しは残るので拒否）。
+        let error = select_valid_output(
+            SummaryOutputKind::Comment,
+            response("（小声で）\n## AI要約", "local"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::AiOutputRejected));
     }
 
     #[test]
