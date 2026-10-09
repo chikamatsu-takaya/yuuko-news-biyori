@@ -7,6 +7,7 @@ use crate::domain::fullscreen_suppression::{
     grace_from_seed, time_seed, FullscreenGate, FullscreenSuppressionTracker,
 };
 use crate::domain::resume_grace::{ResumeGate, ResumeGraceTracker};
+use crate::domain::reward::find_reward;
 use crate::domain::yuuko::{
     short_preview_summary, ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate,
     PersistedYuukoState, RequestYuukoNotificationResult, YuukoNotificationState,
@@ -211,6 +212,7 @@ impl YuukoService {
             response.state = YuukoResidentState::Suppressed;
             response.has_notification = false;
             response.balloon_text = Some("通知設定がOFFになっているよ。".to_string());
+            response.apply_nickname(&settings.user.nickname);
             response.preview_article = None;
             response.current_article_id = None;
             response.reward_notification = None;
@@ -219,11 +221,20 @@ impl YuukoService {
             return Ok(response);
         }
 
+        // 出し直し（初期表示・再表示の拾い直し）の前に、表示中の報酬通知を未確認の報酬へ合わせる。
+        // ランクアップダイアログで先に確認済みなら、ここで外して二重に知らせない。
+        if self.sync_reward_notice(&mut yuuko_state) {
+            self.yuuko_state_repository.save(&yuuko_state)?;
+            response = yuuko_state.to_notification_state();
+        }
+
         if response.balloon_text.is_none() {
             yuuko_state.balloon_text = Some("気になるニュースを見つけたら教えるね。".to_string());
             self.yuuko_state_repository.save(&yuuko_state)?;
             response.balloon_text = yuuko_state.balloon_text.clone();
         }
+        // 呼び名は保存済みの文言へ焼き込まず、返す直前に付ける（設定変更を次の表示から反映するため）。
+        response.apply_nickname(&settings.user.nickname);
 
         // ゆうこ用ウィンドウはマウント時にこの結果で初期表示するため、イベント経路と同じ短い要約を詰める。
         self.attach_preview_short_summary(&mut response);
@@ -268,8 +279,8 @@ impl YuukoService {
 
     /// ランク報酬を確認済みにする（確認 command は confirm_rank_up_reward に一本化・D35）。
     ///
-    /// 正は rewards.json の未確認一覧。ゆうこ通知状態の reward_notification（旧経路）に同じ ID が
-    /// 残っていれば併せて消し、"reward_pending" でニュース通知が止まり続けないようにする。
+    /// 正は rewards.json の未確認一覧。ゆうこ通知状態の reward_notification（表示中の報酬通知・旧データ）に同じ ID が
+    /// 残っていれば併せて消し、報酬通知を待機へ戻す（確認済みの報酬を知らせ続けない）。
     /// どちらにも未確認として無い ID しか無ければ、従来どおり Validation エラーを返す。
     pub fn confirm_rank_up_reward(
         &self,
@@ -292,7 +303,7 @@ impl YuukoService {
 
         let mut state = self.yuuko_state_repository.load_or_default()?;
         if state.reward_notification.is_some() {
-            // 旧経路で一致が無い場合のエラーは無視する（rewards.json 側で確認できていればよい）。
+            // 通知状態側で一致が無い場合のエラーは無視する（rewards.json 側で確認できていればよい）。
             if let Ok(legacy) = state.confirm_rank_up_reward(&params.reward_ids) {
                 self.yuuko_state_repository.save(&state)?;
                 for id in legacy.confirmed_reward_ids {
@@ -326,7 +337,7 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.dismiss_notification(Utc::now());
         self.yuuko_state_repository.save(&state)?;
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// 無操作タイムアウト（無視）を記録する。フロントの自動退場タイマーから呼ぶ想定
@@ -335,33 +346,40 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.mark_ignored(Utc::now());
         self.yuuko_state_repository.save(&state)?;
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// ゆうこにニュース通知を出させる。MVP抑制条件（enabled / 日次上限 / クールタイム / cooldown /
     /// 全画面・プレゼン中と解除後の猶予 / スリープ復帰後の猶予）と
     /// 候補選定（未紹介・未読・スコア順／お気に入り除外）を満たす場合のみ、おすすめから1件を
-    /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。報酬 pending 時は誤消し防止のため何もしない。
+    /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。未確認の報酬があればニュースより優先して報酬通知にする（§6.4）。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
         let settings = self.settings_repository.load_or_default()?;
         let mut state = self.yuuko_state_repository.load_or_default()?;
 
         if !settings.notification.enabled {
-            return Ok(notification_result(false, "disabled", &state));
+            return Ok(notification_result(
+                false,
+                "disabled",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
-        // 報酬通知が出ている間はニュース通知で上書きしない（報酬を誤って消さない・§6.4 報酬優先）。
-        if state
-            .reward_notification
-            .as_ref()
-            .is_some_and(|reward| reward.pending)
-        {
-            return Ok(notification_result(false, "reward_pending", &state));
+        // 表示中の報酬通知は、先にランクアップダイアログ等で確認済みになっていれば外す（二重に知らせない）。
+        if self.sync_reward_notice(&mut state) {
+            self.yuuko_state_repository.save(&state)?;
         }
 
-        // 既にアクティブな通知（ユーザー未対応）が出ている場合は上書きしない（再起動後も潰さない）。
-        if state.has_active_notification() {
-            return Ok(notification_result(false, "already_active", &state));
+        // 既にアクティブな通知（ユーザー未対応のニュース・報酬通知）が出ている場合は上書きしない
+        // （再起動後も潰さない）。報酬通知も already_active で返し、表示先が切り替わっても出し直せるようにする。
+        if state.has_active_notification() || state.has_active_reward_notice() {
+            return Ok(notification_result(
+                false,
+                "already_active",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         let now = Utc::now();
@@ -375,13 +393,28 @@ impl YuukoService {
                 .map(|range| (range.start.as_str(), range.end.as_str())),
         ) {
             NotificationGate::DailyLimitReached => {
-                return Ok(notification_result(false, "daily_limit", &state));
+                return Ok(notification_result(
+                    false,
+                    "daily_limit",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::CoolingDown => {
-                return Ok(notification_result(false, "cooling_down", &state));
+                return Ok(notification_result(
+                    false,
+                    "cooling_down",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::OutsideTimeRange => {
-                return Ok(notification_result(false, "outside_time_range", &state));
+                return Ok(notification_result(
+                    false,
+                    "outside_time_range",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::Allowed => {}
         }
@@ -393,10 +426,20 @@ impl YuukoService {
         let resume_gate = self.check_resume(now);
         match self.check_fullscreen(now, settings.notification.suppress_in_fullscreen) {
             FullscreenGate::Suppressed => {
-                return Ok(notification_result(false, "fullscreen", &state));
+                return Ok(notification_result(
+                    false,
+                    "fullscreen",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             FullscreenGate::GracePeriod { .. } => {
-                return Ok(notification_result(false, "fullscreen_grace", &state));
+                return Ok(notification_result(
+                    false,
+                    "fullscreen_grace",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             FullscreenGate::Allowed => {}
         }
@@ -406,10 +449,34 @@ impl YuukoService {
             settings.notification.suppress_during_meeting,
             settings.notification.suppress_when_mic_in_use,
         ) {
-            return Ok(notification_result(false, reason, &state));
+            return Ok(notification_result(
+                false,
+                reason,
+                &state,
+                &settings.user.nickname,
+            ));
         }
         if let ResumeGate::GracePeriod { .. } = resume_gate {
-            return Ok(notification_result(false, "resume_grace", &state));
+            return Ok(notification_result(
+                false,
+                "resume_grace",
+                &state,
+                &settings.user.nickname,
+            ));
+        }
+
+        // 未確認の報酬（ランクアップダイアログで確認しなかったもの）はニュースより優先して知らせる（§6.4）。
+        // ゲート（日次上限・クールタイム・全画面等）を通った後なので、報酬通知もニュースと同じ上限・間隔に従う。
+        // 1つの報酬は1回だけ知らせる（D93）。知らせ済みの報酬はニュース候補の判定へ進む。
+        if let Some((rank, reward_ids)) = self.pending_rewards_for_notice(&mut state) {
+            state.mark_reward_notified(now, rank, reward_ids);
+            self.yuuko_state_repository.save(&state)?;
+            return Ok(notification_result(
+                true,
+                "notified",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         // おすすめ候補（スコア順）から未紹介・未読を優先して1件選ぶ。選定はRust側責務（§2.3）。
@@ -417,20 +484,43 @@ impl YuukoService {
             .article_service
             .get_recommended_articles(GetRecommendedArticlesParams::default())?;
         let Some(article) = state.pick_introducible(&candidates) else {
-            return Ok(notification_result(false, "no_candidate", &state));
+            return Ok(notification_result(
+                false,
+                "no_candidate",
+                &state,
+                &settings.user.nickname,
+            ));
         };
 
         state.mark_notified(now, article);
         self.yuuko_state_repository.save(&state)?;
-        Ok(notification_result(true, "notified", &state))
+        Ok(notification_result(
+            true,
+            "notified",
+            &state,
+            &settings.user.nickname,
+        ))
     }
 
     /// ゆうこクリックの2段階遷移（最小実装）。遷移が起きた場合のみ保存する。
     ///
     /// デスクトップのゆうこ用ウィンドウ・アプリ内通知のどちらの「詳しく見る」もこの関数を通るため、
     /// 友情ポイント（yuuko_to_main）の加算はここで1か所だけ行う（詳細設計書 §10.4 / §13.2）。
+    ///
+    /// 報酬通知（RewardNotifying）のクリック（OK）は、表示中の報酬を確認済みにする。確認処理は
+    /// confirm_rank_up_reward と同じ関数を通す（確認の実装は一本・D35）。2段階クリックは無い。
     pub fn handle_yuuko_clicked(&self) -> Result<YuukoNotificationState, AppError> {
         let mut state = self.yuuko_state_repository.load_or_default()?;
+        if state.has_active_reward_notice() {
+            let reward_ids = state
+                .reward_notification
+                .as_ref()
+                .map(|reward| reward.reward_ids.clone())
+                .unwrap_or_default();
+            self.confirm_rank_up_reward(ConfirmRankUpRewardParams { reward_ids })?;
+            let state = self.yuuko_state_repository.load_or_default()?;
+            return Ok(self.display_state(&state));
+        }
         let was_preview_visible = state.state == YuukoResidentState::PreviewVisible;
         if state.handle_click() {
             self.yuuko_state_repository.save(&state)?;
@@ -456,7 +546,7 @@ impl YuukoService {
                 }
             }
         }
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// 「詳しく見る」確定の友情ポイントを記録する。失敗してもクリック確定は取り消さない。
@@ -466,6 +556,63 @@ impl YuukoService {
             .record_friendship_event(YUUKO_TO_MAIN_EVENT)
         {
             log::warn!("ゆうこ経由の友情ポイントを記録できませんでした: {error}");
+        }
+    }
+
+    /// 保存状態を表示用の状態へ変換し、吹き出し文言へ設定の呼び名を反映する。
+    /// 設定を読めなくても操作結果は返したいので、その場合は呼び名なし（従来の文言）に倒す。
+    fn display_state(&self, state: &PersistedYuukoState) -> YuukoNotificationState {
+        let mut response = state.to_notification_state();
+        match self.settings_repository.load_or_default() {
+            Ok(settings) => response.apply_nickname(&settings.user.nickname),
+            Err(error) => {
+                log::warn!("設定を読めなかったため、呼び名なしでゆうこの文言を返します: {error}");
+            }
+        }
+        response
+    }
+
+    /// 報酬通知に使う未確認の報酬（現ランクと、マスタにある未確認でまだ知らせていない ID）。無ければ None。
+    /// 知らせ済みの記録から未確認でなくなった ID を取り除く（保存は呼び出し側の通知・ニュース保存に任せる）。
+    ///
+    /// 正は rewards.json の pendingRewards（RewardService）。RewardService は friendship → reward の順に
+    /// ロックを取るが、YuukoService は自前のロックを持たないため順序の逆転は起きない。
+    /// 読み込みに失敗しても通知全体は止めず、報酬通知だけを見送る（ニュース通知は続ける）。
+    fn pending_rewards_for_notice(
+        &self,
+        state: &mut PersistedYuukoState,
+    ) -> Option<(u32, Vec<String>)> {
+        let reward_state = match self.reward_service.get_reward_state() {
+            Ok(reward_state) => reward_state,
+            Err(error) => {
+                log::warn!("未確認の報酬を読めなかったため、報酬通知を見送ります: {error}");
+                return None;
+            }
+        };
+        let pending: Vec<String> = reward_state
+            .pending_reward_ids
+            .into_iter()
+            .filter(|id| find_reward(id).is_some())
+            .collect();
+        let reward_ids = state.unannounced_rewards(&pending);
+        (!reward_ids.is_empty()).then_some((reward_state.current_rank, reward_ids))
+    }
+
+    /// 表示中の報酬通知を未確認の報酬に合わせる。変更があれば true（呼び出し側が保存する）。
+    /// 報酬通知が無ければ rewards.json を読まない（常駐時の負荷を増やさない）。
+    /// 未確認の報酬を読めない場合は表示を変えない（確認できない報酬を誤って消さない）。
+    fn sync_reward_notice(&self, state: &mut PersistedYuukoState) -> bool {
+        if state.reward_notification.is_none() {
+            return false;
+        }
+        match self.reward_service.get_reward_state() {
+            Ok(reward_state) => state.sync_reward_notice(&reward_state.pending_reward_ids),
+            Err(error) => {
+                log::warn!(
+                    "未確認の報酬を読めなかったため、報酬通知の表示をそのままにします: {error}"
+                );
+                false
+            }
         }
     }
 
@@ -479,15 +626,19 @@ impl YuukoService {
 }
 
 /// request_yuuko_notification の結果を組み立てる（最新状態を通知DTOへ変換）。
+/// 吹き出し文言には設定の呼び名を反映する（保存状態は変えない）。
 fn notification_result(
     notified: bool,
     reason: &str,
     state: &PersistedYuukoState,
+    nickname: &str,
 ) -> RequestYuukoNotificationResult {
+    let mut state = state.to_notification_state();
+    state.apply_nickname(nickname);
     RequestYuukoNotificationResult {
         notified,
         reason: reason.to_string(),
-        state: state.to_notification_state(),
+        state,
     }
 }
 
@@ -1587,5 +1738,340 @@ mod tests {
         assert_eq!(result.confirmed_reward_ids, vec!["legacy-1".to_string()]);
         let saved = ctx.yuuko_state_repository.load_or_default().unwrap();
         assert!(saved.reward_notification.is_none());
+    }
+
+    /// 呼び名を設定に保存する（通知は終日・上限3件で可にしておく）。
+    fn save_nickname(ctx: &ServiceContext, nickname: &str, notification_enabled: bool) {
+        let mut settings = PersistedSettings::default();
+        settings.notification.enabled = notification_enabled;
+        settings.notification.max_per_day = 3;
+        settings.notification.work_time_ranges = all_day_ranges();
+        settings.user.nickname = nickname.to_string();
+        ctx.settings_repository
+            .save(&settings)
+            .expect("save settings");
+    }
+
+    #[test]
+    fn notified_balloon_text_uses_nickname_but_saved_text_does_not() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "ゆうさん", true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        let balloon = result.state.balloon_text.unwrap();
+        assert!(balloon.starts_with("ゆうさん、気になるニュースを見つけたよ。「"));
+        // 保存済みの文言には焼き込まない（設定変更を次の表示から反映するため）。
+        let saved = load_state(&ctx).balloon_text.unwrap();
+        assert!(saved.starts_with("気になるニュースを見つけたよ。「"));
+        assert_eq!(balloon, format!("ゆうさん、{saved}"));
+    }
+
+    #[test]
+    fn balloon_text_is_unchanged_when_nickname_is_empty() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "", true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(result.state.balloon_text, load_state(&ctx).balloon_text);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text,
+            load_state(&ctx).balloon_text
+        );
+    }
+
+    #[test]
+    fn nickname_change_is_reflected_in_the_next_state_read() {
+        let ctx = make_context();
+        save_nickname(&ctx, "ゆう", true);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("ゆう、今日もニュースを見つけたら声をかけるね。")
+        );
+
+        save_nickname(&ctx, "", true);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("今日もニュースを見つけたら声をかけるね。")
+        );
+
+        // 通知OFF時の固定文言にも同じ規則で付ける。
+        save_nickname(&ctx, "ゆう", false);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("ゆう、通知設定がOFFになっているよ。")
+        );
+    }
+
+    #[test]
+    fn legacy_unsafe_nickname_is_neutralized_in_balloon_text() {
+        let ctx = make_context();
+        // 保存時検証より前の旧データを想定し、検証を通さずに書き込む。
+        save_nickname(&ctx, "<b>ゆう</b>\n", true);
+
+        let balloon = ctx
+            .service
+            .get_yuuko_notification_state()
+            .unwrap()
+            .balloon_text
+            .unwrap();
+
+        assert_eq!(
+            balloon,
+            "＜b>ゆう＜/b>、今日もニュースを見つけたら声をかけるね。"
+        );
+        assert!(!crate::util::text_safety::contains_html_tag(&balloon));
+    }
+
+    #[test]
+    fn click_result_also_carries_nickname() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "ゆう", true);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert!(clicked.balloon_text.unwrap().starts_with("ゆう、"));
+    }
+    // --- 未確認の報酬の通知（§6.4 / §11・D08） ---
+
+    /// 未確認の報酬（Rank3 → theme_001）と候補記事があり、通知は終日・上限 `max_per_day`。
+    fn reward_pending_context(max_per_day: u32) -> ServiceContext {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, max_per_day, all_day_ranges());
+        save_friendship_total(&ctx, 25);
+        ctx
+    }
+
+    fn pending_reward_ids(ctx: &ServiceContext) -> Vec<String> {
+        RewardRepository::new(&AppPaths::new(ctx.root.clone()))
+            .load()
+            .unwrap()
+            .map(|state| state.pending_reward_ids())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn pending_reward_is_notified_before_news_and_counts_as_a_notification() {
+        let ctx = reward_pending_context(3);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(result.reason, "notified");
+        assert_eq!(result.state.state, YuukoResidentState::RewardNotifying);
+        assert!(result.state.has_notification);
+        assert!(result.state.preview_article.is_none());
+        let reward = result.state.reward_notification.clone().unwrap();
+        assert_eq!(reward.reward_ids, vec!["theme_001".to_string()]);
+        assert_eq!(reward.rank, 3);
+        assert_eq!(
+            result.state.balloon_text.as_deref(),
+            Some("新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。")
+        );
+        // ニュースは紹介していない（候補は残る）。通知回数は1回分消費する。
+        let saved = load_state(&ctx);
+        assert!(saved.introduced_article_ids.is_empty());
+        assert_eq!(saved.daily_notification.count, 1);
+        // 通知しただけでは確認済みにしない。
+        assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
+
+        // 表示中は上書きせず、同じ報酬通知を already_active で返す（出し直し用）。
+        let again = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!again.notified);
+        assert_eq!(again.reason, "already_active");
+        assert_eq!(again.state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(load_state(&ctx).daily_notification.count, 1);
+    }
+
+    #[test]
+    fn reward_notice_is_subject_to_cooldown_and_daily_limit() {
+        // 前回通知から最短クールタイム内なら、未確認の報酬があっても知らせない。
+        let ctx = reward_pending_context(3);
+        let mut state = load_state(&ctx);
+        state.last_notified_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        ctx.yuuko_state_repository.save(&state).unwrap();
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!result.notified);
+        assert_eq!(result.reason, "cooling_down");
+        assert!(!load_state(&ctx).has_active_reward_notice());
+
+        // 日次上限（1回）を報酬通知で使った後は、閉じても同日は知らせない。
+        let ctx = reward_pending_context(1);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        let second = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!second.notified);
+        assert_eq!(second.reason, "daily_limit");
+    }
+
+    #[test]
+    fn dismissing_reward_notice_keeps_it_pending_with_cooldown() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        let dismissed = ctx.service.dismiss_yuuko_notification().unwrap();
+
+        assert_eq!(dismissed.state, YuukoResidentState::Waiting);
+        assert!(dismissed.reward_notification.is_none());
+        // 未確認のまま残り、クールタイム中は出さない（明けても同じ報酬は再通知しない・D93）。
+        assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(next.reason, "cooling_down");
+        assert!(load_state(&ctx).cooldown_until.is_some());
+    }
+
+    #[test]
+    fn clicking_reward_notice_confirms_it_through_the_shared_confirm_path() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert_eq!(clicked.state, YuukoResidentState::Waiting);
+        assert!(clicked.reward_notification.is_none());
+        assert!(!clicked.has_notification);
+        // rewards.json の未確認から外れる（ランクアップダイアログにも出なくなる）。
+        assert!(pending_reward_ids(&ctx).is_empty());
+        assert!(!load_state(&ctx).has_active_reward_notice());
+        // 報酬の確認では「詳しく見る」の友情ポイントは加算しない。
+        assert!(!ctx.service.handle_yuuko_clicked().unwrap().has_notification);
+    }
+
+    #[test]
+    fn reward_confirmed_in_rank_up_dialog_is_no_longer_shown() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        // 先にランクアップダイアログで確認された（confirm_rank_up_reward）。
+        ctx.service
+            .confirm_rank_up_reward(reward_ids(&["theme_001"]))
+            .unwrap();
+        let shown = ctx.service.get_yuuko_notification_state().unwrap();
+        assert_ne!(shown.state, YuukoResidentState::RewardNotifying);
+        assert!(shown.reward_notification.is_none());
+
+        // 通知状態側に残っていても、出し直しの前に未確認と照合して外す。
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service
+            .reward_service
+            .confirm_rewards(&["theme_001".to_string()])
+            .unwrap();
+        assert!(load_state(&ctx).has_active_reward_notice());
+        let shown = ctx.service.get_yuuko_notification_state().unwrap();
+        assert!(shown.reward_notification.is_none());
+        assert!(!load_state(&ctx).has_active_reward_notice());
+        // 再判定でも報酬通知は出さない（最短クールタイム中）。
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(next.reason, "cooling_down");
+        assert!(next.state.reward_notification.is_none());
+    }
+
+    #[test]
+    fn reward_notice_balloon_carries_nickname() {
+        let ctx = reward_pending_context(3);
+        save_nickname(&ctx, "ゆう", true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        let expected = "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(result.state.balloon_text.as_deref(), Some(expected));
+        assert_eq!(result.state.reward_notification.unwrap().message, expected);
+        let state = ctx.service.get_yuuko_notification_state().unwrap();
+        assert_eq!(state.balloon_text.as_deref(), Some(expected));
+    }
+
+    /// 閉じた後のクールタイム・最短クールタイムを過去にして、次の判定を通せるようにする。
+    fn clear_cooldowns(ctx: &ServiceContext) {
+        let mut state = load_state(ctx);
+        state.cooldown_until = None;
+        state.last_notified_at = None;
+        ctx.yuuko_state_repository.save(&state).unwrap();
+    }
+
+    #[test]
+    fn dismissed_reward_is_not_announced_again_and_news_follows() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        clear_cooldowns(&ctx);
+
+        // D93: 同じ報酬は1回だけ知らせる。次の通知はニュースになる（報酬は未確認のまま）。
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert!(next.notified);
+        assert_eq!(next.state.state, YuukoResidentState::BalloonVisible);
+        assert!(next.state.reward_notification.is_none());
+        assert!(next.state.preview_article.is_some());
+        assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
+        assert_eq!(
+            load_state(&ctx).announced_reward_ids,
+            vec!["theme_001".to_string()]
+        );
+    }
+
+    #[test]
+    fn newly_unlocked_reward_is_still_announced_after_an_earlier_one() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.mark_yuuko_ignored().unwrap();
+        clear_cooldowns(&ctx);
+
+        // 後で Rank7 に上がり theme_002 が解放された。知らせ済みの theme_001 は含めない。
+        save_friendship_total(&ctx, 160);
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert!(next.notified);
+        assert_eq!(next.state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(
+            next.state.reward_notification.unwrap().reward_ids,
+            vec!["theme_002".to_string()]
+        );
+
+        // 確認済みになった ID は知らせ済みの記録から取り除かれる（記録を小さく保つ）。
+        ctx.service.handle_yuuko_clicked().unwrap();
+        ctx.service
+            .confirm_rank_up_reward(reward_ids(&["theme_001"]))
+            .unwrap();
+        clear_cooldowns(&ctx);
+        ctx.service.request_yuuko_notification().unwrap();
+        assert!(load_state(&ctx).announced_reward_ids.is_empty());
+    }
+
+    #[test]
+    fn notifications_off_do_not_show_pending_reward() {
+        let ctx = reward_pending_context(3);
+        save_notification_settings(&ctx, false, 3, all_day_ranges());
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        assert_eq!(result.reason, "disabled");
+        assert!(!load_state(&ctx).has_active_reward_notice());
     }
 }

@@ -1,5 +1,6 @@
 use crate::domain::article::{
-    ArchiveMonthArticlesDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArchiveMonthArticlesDto, ArchiveMonthDeleteParams, ArchiveMonthDeletePreviewDto,
+    ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
     ArticleDetailDto, ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto,
     FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
     ListArchiveMonthArticlesParams, ListArticleHistoryParams, OpenOriginalArticleParams,
@@ -238,7 +239,7 @@ impl ArticleService {
 
     /// 過去ニュース画面の月別アーカイブ一覧（新しい月から）を返す。
     pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
-        self.repository.list_archive_months()
+        self.repository.list_archive_months(chrono::Utc::now())
     }
 
     /// 指定月のアーカイブ記事一覧を記事カタログから返す。年月はここで形式を検証する。
@@ -248,6 +249,26 @@ impl ArticleService {
     ) -> Result<ArchiveMonthArticlesDto, AppError> {
         let month = params.validated_month()?;
         self.repository.list_archive_month_articles(&month)
+    }
+
+    /// 古い月のアーカイブ削除の事前確認（件数・ZIPサイズ）。年月はここで形式を検証する。
+    pub fn get_archive_month_delete_preview(
+        &self,
+        params: ArchiveMonthDeleteParams,
+    ) -> Result<ArchiveMonthDeletePreviewDto, AppError> {
+        let month = params.validated_month()?;
+        self.repository
+            .get_archive_month_delete_preview(&month, chrono::Utc::now())
+    }
+
+    /// 古い月の月次ZIPと index の月エントリを削除する（判断台帳 D26）。ローカルのMarkdownは消さない。
+    pub fn delete_archive_month(
+        &self,
+        params: ArchiveMonthDeleteParams,
+    ) -> Result<ArchiveMonthDeleteResultDto, AppError> {
+        let month = params.validated_month()?;
+        self.repository
+            .delete_archive_month(&month, chrono::Utc::now())
     }
 
     /// 完全な月次ZIPと記事カタログで検証できたarchived Markdownだけを退避付きで削除する。

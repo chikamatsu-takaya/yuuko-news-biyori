@@ -55,6 +55,18 @@ export type YuukoNotificationState = {
   previewShortSummary?: string;
 };
 
+/**
+ * 報酬通知（ランクアップダイアログで確認しなかった報酬を、ゆうこが知らせる吹き出し）を表示中か。
+ * Rust の has_active_reward_notice と同基準。OK は handleYuukoClicked を通り、Rust 側で確認済みにする。
+ */
+export const isActiveRewardNotice = (
+  state: YuukoNotificationState | null | undefined
+): boolean =>
+  !!state &&
+  state.state === "RewardNotifying" &&
+  !!state.rewardNotification?.pending &&
+  state.rewardNotification.rewardIds.length > 0;
+
 export type ConfirmRankUpRewardParams = {
   rewardIds: string[];
 };
@@ -88,7 +100,6 @@ export const confirmRankUpReward = async (
 export type NotificationReason =
   | "notified"
   | "disabled"
-  | "reward_pending"
   | "already_active"
   | "daily_limit"
   | "cooling_down"
@@ -168,6 +179,11 @@ export type YuukoDesktopNotification = {
    * 次のクリックが Rust 側で「確定（記事を開く）」扱いになりずれるため、段階を合わせる。
    */
   previewVisible: boolean;
+  /**
+   * 報酬通知（吹き出し＋OK）か。ニュース通知では省略される。
+   * 報酬通知では記事の欄（articleId / title / sourceName）は空で、文言は balloonText だけを使う。
+   */
+  reward?: boolean;
 };
 
 /**
@@ -203,11 +219,23 @@ export const toShortPreviewSummary = (
  *
  * ウィンドウ初回生成時はページの購読開始より先にイベントが送られ得るため、
  * ゆうこ用ウィンドウはマウント時に getYuukoNotificationState の結果をこれで変換して初期表示に使う。
- * active なニュース通知でない、またはタイトルが無い場合は null（表示しない）。
+ * active なニュース通知・報酬通知でない、またはタイトルが無いニュースの場合は null（表示しない）。
  */
 export const toYuukoDesktopNotification = (
   state: YuukoNotificationState | null
 ): YuukoDesktopNotification | null => {
+  if (state && isActiveRewardNotice(state)) {
+    const balloonText =
+      state.balloonText ?? state.rewardNotification?.message ?? undefined;
+    return {
+      articleId: "",
+      title: "",
+      ...(balloonText ? { balloonText } : {}),
+      sourceName: "",
+      previewVisible: false,
+      reward: true,
+    };
+  }
   if (
     !state ||
     !["Appearing", "BalloonVisible", "PreviewVisible"].includes(state.state) ||

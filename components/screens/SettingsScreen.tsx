@@ -65,6 +65,8 @@ import {
 
 import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
+import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
+import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
 import {
   GENRE_OPTIONS,
   NICKNAME_MAX_LENGTH,
@@ -140,7 +142,7 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
   );
 }
 
-// Mock Data
+// 設定画面の既定値（読み込み前・プレビュー時の初期表示）。Tauri では読み込んだ保存値で上書きする。
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
@@ -443,7 +445,8 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between py-3 border-b border-border/50 last:border-b-0">
+    // 既定ウィンドウ（800×600）では本文列が狭く、見出しが1文字ずつ折り返すため、入力欄は次の行へ折り返す。
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 border-b border-border/50 last:border-b-0">
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
         {helpText && (
@@ -467,6 +470,22 @@ export default function SettingsScreen({
   // 判定は Rust 側（取得元ファイルとの照合）で行い、設定読み込み時の DTO から受け取るだけにする。
   const [genreFilterFallback, setGenreFilterFallback] = React.useState(false);
   const [activeMenu, setActiveMenu] = React.useState("notification");
+  // 右サイドバーの「アーカイブを管理」から来たときだけ、データ管理タブの描画後にアーカイブ管理へスクロールする。
+  const [scrollToArchiveManage, setScrollToArchiveManage] =
+    React.useState(false);
+  const handleOpenArchiveManage = React.useCallback(() => {
+    setActiveMenu("data");
+    setScrollToArchiveManage(true);
+  }, []);
+  React.useEffect(() => {
+    if (!scrollToArchiveManage || activeMenu !== "data") {
+      return;
+    }
+    setScrollToArchiveManage(false);
+    document
+      .getElementById("archive-manage")
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [scrollToArchiveManage, activeMenu]);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -490,6 +509,17 @@ export default function SettingsScreen({
   const isTestingAiRef = React.useRef(false);
   const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
+  // データ取り込み（全置き換え）の実行中か。settings.json には書き込みロックが無いため、
+  // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
+  const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
+  const isMigrationImportingRef = React.useRef(false);
+  const handleMigrationImportingChange = React.useCallback(
+    (importing: boolean) => {
+      isMigrationImportingRef.current = importing;
+      setIsMigrationImporting(importing);
+    },
+    []
+  );
 
   const { toast } = useToast();
 
@@ -689,7 +719,7 @@ export default function SettingsScreen({
   // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
   // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
   const handleToggleAutostart = async (enabled: boolean) => {
-    if (isUpdatingAutostartRef.current) {
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     isUpdatingAutostartRef.current = true;
@@ -740,7 +770,8 @@ export default function SettingsScreen({
 
   const handleSave = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current) {
+    // データ取り込み中も、置き換え中の設定ファイルへ書き込まないよう止める。
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     try {
@@ -784,7 +815,7 @@ export default function SettingsScreen({
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current) {
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
       return;
     }
     try {
@@ -947,7 +978,7 @@ export default function SettingsScreen({
           {/* Page Title */}
           <div className="flex items-center gap-3 mb-6">
             <Settings className="w-6 h-6 text-foreground" />
-            <h1 className="text-xl font-bold text-foreground">設定</h1>
+            <h1 className="text-xl font-bold text-foreground whitespace-nowrap shrink-0">設定</h1>
             <span className="text-sm text-muted-foreground">
               ゆうことの過ごし方を、あなた好みにカスタマイズできます。
             </span>
@@ -1387,27 +1418,15 @@ export default function SettingsScreen({
               </Card>
             )}
 
-            {/* Placeholder categories */}
+            {/* データ管理: データ移行（ZIPの書き出し・読み込み）とアーカイブ管理（古い月の削除。判断台帳 D26）。
+                ストレージ状況は右サイドバーで準備中のまま。 */}
             {activeMenu === "data" && (
-              <Card className="border-0 shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                    <Database className="w-5 h-5" />
-                    データ管理
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="py-8 flex flex-col items-center justify-center text-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                    <Settings className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                  <h3 className="text-sm font-medium text-foreground mb-1">
-                    データ管理は準備中だよ
-                  </h3>
-                  <p className="text-xs text-muted-foreground max-w-[280px]">
-                    データ管理機能は今後のアップデートで追加される予定です。ストレージの使用状況の表示も準備中だよ。
-                  </p>
-                </CardContent>
-              </Card>
+              <>
+                <DataMigrationPanel
+                  onImportingChange={handleMigrationImportingChange}
+                />
+                <ArchiveManagePanel />
+              </>
             )}
 
             {/* Integration Settings */}
@@ -1510,16 +1529,15 @@ export default function SettingsScreen({
                 保存データの使用状況の表示は準備中です。
               </p>
               <div className="space-y-2">
-                {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
                 {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
+                {/* アーカイブ管理の本体は「データ管理」タブに置き、ここからはそこへ移動するだけにする（判断台帳 D26） */}
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
+                  onClick={handleOpenArchiveManage}
                 >
                   <Archive className="w-4 h-4" />
-                  アーカイブを管理（準備中）
+                  アーカイブを管理
                 </Button>
                 <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
                   「準備中」の機能は今後のアップデートで対応予定です。
@@ -1563,8 +1581,15 @@ export default function SettingsScreen({
             onClick={handleSave}
             // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
             // 変更が無いときも押せない（§7.7「設定変更あり → 保存ボタンを有効化」）。
+            // 破損以外の読み込み失敗中も、画面の値は保存済み設定ではなく既定値なので、保存で上書きさせない（再試行で読み直す）。
             disabled={
-              !hasUnsavedChanges || isUpdatingAutostart || isSettingsCorrupt
+              !hasUnsavedChanges ||
+              isUpdatingAutostart ||
+              isSettingsCorrupt ||
+              loadNoticeKind === "error" ||
+              // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
+              isLoading ||
+              isMigrationImporting
             }
           >
             <Check className="w-4 h-4" />

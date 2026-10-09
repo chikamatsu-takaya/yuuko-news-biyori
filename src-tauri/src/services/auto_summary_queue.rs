@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crate::domain::article::{ArticleDetailDto, ArticleSummaryDto, SummaryState};
+use crate::domain::article::{
+    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, SummaryState,
+};
 use crate::domain::settings::{AiProvider, PersistedSettings};
 use crate::domain::summary::GenerateArticleSummaryParams;
 use crate::error::AppError;
@@ -342,6 +344,13 @@ impl AutoSummaryQueue {
 
     /// 記事一覧の DTO にキューの状態を反映する（保存済み＝Done はそのまま）。
     pub fn apply_to_summaries(&self, items: &mut [ArticleSummaryDto]) {
+        for item in items {
+            item.summary_state = self.resolve_state(&item.article_id, item.summary_state);
+        }
+    }
+
+    /// 履歴の DTO にキューの状態を反映する（一覧と同じ規則）。
+    pub fn apply_to_history_items(&self, items: &mut [ArticleHistoryItemDto]) {
         for item in items {
             item.summary_state = self.resolve_state(&item.article_id, item.summary_state);
         }
@@ -916,5 +925,25 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("summaryState");
         let parsed: ArticleSummaryDto = serde_json::from_value(legacy).unwrap();
         assert_eq!(parsed.summary_state, SummaryState::None);
+    }
+
+    #[test]
+    fn history_item_exposes_summary_state_for_list_tags() {
+        let item = ArticleHistoryItemDto {
+            article_id: "a".to_string(),
+            title: "title".to_string(),
+            source_name: "source".to_string(),
+            published_at_text: "today".to_string(),
+            fetched_at: "2026-10-09T00:00:00+09:00".to_string(),
+            genre: "AI".to_string(),
+            summary: None,
+            is_favorite: false,
+            read_state: ArticleReadState::Unread,
+            is_archived: false,
+            recommendation_score: 0.5,
+            summary_state: SummaryState::Waiting,
+        };
+        let value = serde_json::to_value(&item).unwrap();
+        assert_eq!(value["summaryState"], "waiting");
     }
 }

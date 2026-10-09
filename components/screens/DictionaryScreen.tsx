@@ -45,6 +45,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Select,
   SelectContent,
@@ -860,14 +861,7 @@ export default function DictionaryScreen({
 
           <div className="border-t border-border/50 p-3">
             <AutostartStatus className="mb-2" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full text-xs"
-              onClick={() => console.log("Exit app")}
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 
@@ -1292,8 +1286,13 @@ export default function DictionaryScreen({
           <span className="text-xs text-muted-foreground">|</span>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
+            {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、この画面の表示件数を出す。 */}
             <span className="text-xs text-foreground">
-              新しいニュースが3件届いてるよ！
+              {isLoading
+                ? "読み込み中..."
+                : loadNoticeKind === "error"
+                  ? "辞書"
+                  : `辞書項目 ${sortedEntries.length}件を表示中`}
             </span>
           </div>
         </div>

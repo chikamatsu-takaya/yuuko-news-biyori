@@ -264,15 +264,25 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
             </span>
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-foreground">
-              PC起動時に自動で起動する
-            </span>
-            <Switch
-              aria-label="PC起動時の自動起動"
-              checked={autoStart}
-              onCheckedChange={setAutoStart}
-            />
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium text-foreground">
+                PC起動時に自動で起動する
+              </span>
+              <Switch
+                aria-label="PC起動時の自動起動"
+                aria-describedby="onboarding-autostart-hint"
+                checked={autoStart}
+                onCheckedChange={setAutoStart}
+              />
+            </div>
+            {/* D31: 既定値は OFF のまま、案内では ON を勧める一言だけ添える。 */}
+            <p
+              id="onboarding-autostart-hint"
+              className="mt-1 text-xs text-muted-foreground"
+            >
+              ONにしておくと、PCを起動したときにゆうこがすぐ来てくれるよ
+            </p>
           </div>
         </div>
 

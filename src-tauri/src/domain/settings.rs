@@ -5,7 +5,7 @@ use crate::error::AppError;
 // 入力値の上限（セキュリティ詳細設計書 §15.2 / §15.3）。
 // 既存の保存データを読めなくしないよう、これらの検証は保存時（validate）だけで行い、読み込み時には行わない。
 /// 呼び名の最大文字数（lib/settings-options.ts の NICKNAME_MAX_LENGTH と一致）。
-const NICKNAME_MAX_CHARS: usize = 32;
+pub(crate) const NICKNAME_MAX_CHARS: usize = 32;
 /// 関心ジャンルの最大件数。画面の選択肢は7件だが、将来の追加に余裕を持たせた従来値を維持する。
 const GENRES_MAX_ITEMS: usize = 20;
 /// 関心ジャンル1件の最大文字数。選択肢は短いラベル（最長「セキュリティ」6文字）なので、呼び名と同じ32に揃える。

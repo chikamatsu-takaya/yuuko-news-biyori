@@ -88,6 +88,11 @@ async function installMocks(page: Page, options: MockOptions = {}) {
             if (!current) {
               return waiting;
             }
+            // 報酬通知の OK は Rust 側で確認済みにして待機へ戻る（2段階クリックは無い）。
+            if (current.state === "RewardNotifying") {
+              w.__E2E_STATE__ = null;
+              return waiting;
+            }
             const next =
               current.state === "PreviewVisible" ? "Leaving" : "PreviewVisible";
             w.__E2E_STATE__ = { ...current, state: next };
@@ -257,6 +262,82 @@ test("balloon → first click preview → 詳しく見る confirms through handl
   await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
 });
 
+const REWARD_TEXT =
+  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+
+const rewardState = () => ({
+  state: "RewardNotifying",
+  positionMode: "RightBottom",
+  balloonText: REWARD_TEXT,
+  hasNotification: true,
+  rewardNotification: {
+    pending: true,
+    rank: 3,
+    rewardIds: ["theme_001"],
+    message: REWARD_TEXT,
+  },
+});
+
+test("pending reward notice shows balloon + OK, fits, and OK confirms through handle_yuuko_clicked", async ({
+  page,
+}) => {
+  await installMocks(page, { state: rewardState() });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  await expect(
+    region.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+  await expectFitsInWindow(page, BALLOON_HEIGHT);
+
+  await region.getByRole("button", { name: "OK", exact: true }).click();
+  await expect.poll(() => commandCalls(page, "handle_yuuko_clicked")).toBe(1);
+  expect(await commandCalls(page, "dismiss_yuuko_notification")).toBe(0);
+  await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+});
+
+test("reward notice in the desktop window does not auto-exit", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installMocks(page, { state: rewardState() });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+
+  await page.clock.fastForward(40_000);
+  await page.clock.fastForward(1_000);
+
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
+});
+
+test("reward event payload shows the reward notice and close uses dismiss", async ({
+  page,
+}) => {
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page);
+
+  await emit(page, {
+    articleId: "",
+    title: "",
+    balloonText: REWARD_TEXT,
+    sourceName: "",
+    previewVisible: false,
+    reward: true,
+  });
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  await expect(region.getByRole("button", { name: "OK", exact: true })).toBeVisible();
+
+  await region.getByRole("button", { name: "通知を閉じる" }).click();
+  await expect
+    .poll(() => commandCalls(page, "dismiss_yuuko_notification"))
+    .toBe(1);
+  expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(0);
+});
+
 test("close button goes through dismiss_yuuko_notification", async ({ page }) => {
   await installMocks(page, { state: activeState() });
   await openYuukoWindow(page);
@@ -357,6 +438,38 @@ test("long title and balloon text are clamped and rendered as plain text", async
   await expectFitsInWindow(page, PREVIEW_HEIGHT);
 
   // HTML として解釈しない（img 要素が作られず、スクリプトも動かない）。
+  await expect(region.locator("img[src='x']")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as unknown as { __XSS__?: number }).__XSS__)
+  ).toBeUndefined();
+});
+
+test("balloon text with the user's nickname is shown as plain text and fits", async ({
+  page,
+}) => {
+  // 呼び名は Rust 側で「{呼び名}、{文言}」として吹き出し文言に付く（最大32文字・`<` は全角化済み）。
+  // ここでは上限ちょうどの呼び名と、全角化前の HTML らしき文字列が来ても文字として出ることを確かめる。
+  const longNickname = "ゆ".repeat(32);
+  await installMocks(page, {
+    state: activeState({
+      balloonText: `${longNickname}、気になるニュースを見つけたよ。「デスクトップのE2Eニュース」`,
+    }),
+  });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(`${longNickname}、気になるニュースを見つけたよ。`)).toBeVisible();
+  await expectFitsInWindow(page, BALLOON_HEIGHT);
+
+  await emit(page, {
+    articleId: "desk-article-2",
+    title: "イベントで届いたニュース",
+    balloonText: `<img src=x onerror="window.__XSS__=1">ゆう、気になるニュースを見つけたよ。`,
+    sourceName: "E2E News",
+    previewVisible: false,
+  });
+  await expect(
+    region.getByText(`<img src=x onerror="window.__XSS__=1">ゆう、気になるニュースを見つけたよ。`)
+  ).toBeVisible();
   await expect(region.locator("img[src='x']")).toHaveCount(0);
   expect(
     await page.evaluate(() => (window as unknown as { __XSS__?: number }).__XSS__)

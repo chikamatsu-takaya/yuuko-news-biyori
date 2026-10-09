@@ -1,7 +1,7 @@
 //! メインウィンドウを非表示待機へ移し、トレイから再表示・終了する。
 //!
 //! OSの閉じる操作ではプロセスを終了させず、既存の低頻度スケジューラを継続する。
-//! アプリ終了は固定トレイメニューからの明示操作だけに限定する。
+//! アプリ終了は固定トレイメニューと、画面内「常駐を終了する」（`quit_resident_app`）の明示操作だけに限定する。
 
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +19,13 @@ const QUIT_MENU_ID: &str = "resident-quit-application";
 
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RESIDENT_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 明示終了の要求元。ログで経路を区別するためだけに使い、終了手順は共通にする。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExitSource {
+    TrayMenu,
+    InAppButton,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResidentMenuAction {
@@ -45,7 +52,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
             Some(ResidentMenuAction::ShowMainWindow) => show_main_window(app),
-            Some(ResidentMenuAction::QuitApplication) => request_exit(app),
+            Some(ResidentMenuAction::QuitApplication) => request_exit(app, ExitSource::TrayMenu),
             None => {}
         })
         .build(app)?;
@@ -167,9 +174,16 @@ fn hide_yuuko_window_for_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn request_exit<R: Runtime>(app: &AppHandle<R>) {
-    EXIT_REQUESTED.store(true, Ordering::SeqCst);
-    log::info!("トレイメニューからアプリ終了が要求されました");
+/// 明示終了。トレイの「常駐を終了する」と画面内の同名ボタン（`quit_resident_app`）で同じ手順を使う。
+///
+/// 先に終了要求フラグを立てるため、終了処理中にメインウィンドウの CloseRequested が来ても
+/// close-to-hide で非表示待機へ戻らない。
+pub(crate) fn request_exit<R: Runtime>(app: &AppHandle<R>, source: ExitSource) {
+    mark_exit_requested();
+    match source {
+        ExitSource::TrayMenu => log::info!("トレイメニューからアプリ終了が要求されました"),
+        ExitSource::InAppButton => log::info!("画面内のボタンからアプリ終了が要求されました"),
+    }
     // 自動要約は新しい記事を取り出さないようにする。処理中の1件は待たない
     // （記事の保存は tmp→bak→本体 の差し替えのため書きかけの .md は残らない。ただし2回の rename の
     // 間で強制終了されると .bak だけが残る短い隙間がある。既存の全保存処理に共通の制約）。
@@ -177,6 +191,10 @@ fn request_exit<R: Runtime>(app: &AppHandle<R>) {
         state.auto_summary_queue.request_stop();
     }
     app.exit(0);
+}
+
+fn mark_exit_requested() {
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn menu_action(menu_id: &str) -> Option<ResidentMenuAction> {
@@ -285,6 +303,20 @@ mod tests {
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, false, true, false));
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, true, false, false));
         assert!(!should_hide_on_close(MAIN_WINDOW_LABEL, true, true, true));
+    }
+
+    #[test]
+    fn explicit_exit_sets_flag_that_disables_close_to_hide() {
+        // トレイ・画面内ボタンの明示終了は同じフラグを立て、以降の閉じる操作を非表示待機へ戻さない。
+        // 他テストは純関数に値を直接渡すため、静的フラグを立てても影響しない。
+        mark_exit_requested();
+        assert!(EXIT_REQUESTED.load(Ordering::SeqCst));
+        assert!(!should_hide_on_close(
+            MAIN_WINDOW_LABEL,
+            true,
+            true,
+            EXIT_REQUESTED.load(Ordering::SeqCst)
+        ));
     }
 
     #[test]

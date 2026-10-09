@@ -45,6 +45,8 @@ export type ArticleHistoryItemDto = {
   readState: ArticleReadState;
   isArchived: boolean;
   recommendationScore: number;
+  // 一覧・履歴の「要約待ち／ゆうこ要約中」タグ用。旧バックエンドでは欠けうるため省略可。
+  summaryState?: ArticleSummaryState;
 };
 
 export type ArticleDetailDto = {
@@ -114,13 +116,16 @@ export type ArchiveRetirementSummaryDto = {
   cleanupPending: boolean;
 };
 
-// 過去ニュース画面の月別アーカイブ一覧の1行（Rust の ArchiveMonthDto と一致させる）。
+// 過去ニュース画面・設定画面「アーカイブ管理」の月別アーカイブ一覧の1行（Rust の ArchiveMonthDto と一致させる）。
 // month は "YYYY-MM"。「2026年9月」などの表示整形は画面側で行う。
 // catalogComplete が false の月は記事カタログ未移行のため、件数だけ表示できる。
+// sizeBytes は月次ZIPのサイズ。deletable は削除できる時期（古い月）か。判定は Rust 側で行い、画面では持たない。
 export type ArchiveMonthDto = {
   month: string;
   articleCount: number;
   catalogComplete: boolean;
+  sizeBytes: number;
+  deletable: boolean;
 };
 
 export type ListArchiveMonthArticlesParams = {
@@ -131,6 +136,28 @@ export type ArchiveMonthArticlesDto = {
   month: string;
   catalogComplete: boolean;
   articles: ArticleHistoryItemDto[];
+};
+
+// 古い月のアーカイブ削除（判断台帳 D26）の引数。年月（YYYY-MM）だけを渡し、パスやファイル名は渡さない。
+export type ArchiveMonthDeleteParams = {
+  month: string;
+};
+
+// 削除前の確認用。articleCount はアーカイブから消える件数、keptArticleCount は
+// 通常のニュースとして残る件数（復元済み・お気に入り等）。sizeBytes は月次ZIPのサイズ。
+export type ArchiveMonthDeletePreviewDto = {
+  month: string;
+  articleCount: number;
+  sizeBytes: number;
+  keptArticleCount: number;
+};
+
+// cleanupPending が true のときは一覧からは消えたが、ZIP ファイル自体を消せなかった。
+export type ArchiveMonthDeleteResultDto = {
+  month: string;
+  deletedArticleCount: number;
+  keptArticleCount: number;
+  cleanupPending: boolean;
 };
 
 export const getRecommendedArticles = async (
@@ -242,4 +269,28 @@ export const listArchiveMonthArticles = async (
   return invoke<ArchiveMonthArticlesDto>("list_archive_month_articles", {
     params,
   });
+};
+
+// 古い月のアーカイブ削除の事前確認（件数・サイズ）。削除できない月は削除時と同じエラーになる。
+export const getArchiveMonthDeletePreview = async (
+  params: ArchiveMonthDeleteParams
+): Promise<ArchiveMonthDeletePreviewDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthDeletePreviewDto>("get_archive_month_delete_preview", {
+    params,
+  });
+};
+
+// 古い月の月次ZIPと一覧（archive_index.json）の月を削除する。通常のニュースのMarkdownは消さない。
+export const deleteArchiveMonth = async (
+  params: ArchiveMonthDeleteParams
+): Promise<ArchiveMonthDeleteResultDto | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<ArchiveMonthDeleteResultDto>("delete_archive_month", { params });
 };

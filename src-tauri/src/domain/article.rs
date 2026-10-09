@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -189,6 +189,9 @@ pub struct ArticleHistoryItemDto {
     pub read_state: ArticleReadState,
     pub is_archived: bool,
     pub recommendation_score: f32,
+    /// 自動要約の状態（ArticleSummaryDto と同じ意味）。履歴・一覧のタグ表示に使う読み取り専用の値。
+    #[serde(default)]
+    pub summary_state: SummaryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,8 +241,9 @@ pub struct ArchiveZipInfoDto {
     pub size_bytes: u64,
 }
 
-/// 過去ニュース画面の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
-/// ZIPファイル名・サイズなどの保存場所の情報は画面に不要なため返さない。
+/// 過去ニュース画面・設定画面「アーカイブ管理」の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
+/// 設定画面のアーカイブ管理で月ごとの容量と削除可否を示すため（判断台帳 D26）、サイズと削除可否も返す。
+/// どちらも index の値と現在時刻だけで決まり、ZIPは開かない。ZIPファイル名・保存場所は画面に不要なため返さない。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveMonthDto {
@@ -248,6 +252,11 @@ pub struct ArchiveMonthDto {
     pub article_count: usize,
     /// false は記事カタログ未移行（v1）の月。記事一覧は返せないが件数は表示できる。
     pub catalog_complete: bool,
+    /// 月次ZIPのサイズ（index の `sizeBytes`）。設定画面のアーカイブ管理で容量表示に使う。
+    pub size_bytes: u64,
+    /// 古い月として削除できる時期か（`is_archive_month_deletable`）。true でも、アーカイブにしか
+    /// 本文が無いお気に入りを含む月は削除の事前確認で検証エラーになる。
+    pub deletable: bool,
 }
 
 /// 指定月のアーカイブ記事一覧。ZIPは開かず、記事カタログのスナップショットを返す。
@@ -271,6 +280,65 @@ pub fn is_valid_archive_month(month: &str) -> bool {
             .get(5..7)
             .and_then(|value| value.parse::<u8>().ok())
             .is_some_and(|value| (1..=12).contains(&value))
+}
+
+/// 月単位アーカイブ削除（判断台帳 D26）の対象にできる「通常は追記されなくなった月」かを判定する
+/// （純粋関数・I/Oなし）。
+///
+/// 記事の月は公開日時（無ければ取得日時）で決まり、取得から `ARCHIVE_AGE_DAYS` 日経つと
+/// その月のZIPへ追記される。翌月1日（UTC）から `ARCHIVE_AGE_DAYS` 日＋時差吸収の1日が過ぎるまでは
+/// 通常の取得でも追記され得る月として扱い、削除させない。
+/// ただし公開日時の古い記事を後から取得した場合は、この期間後でも同じ月のZIPが作り直されることがある
+/// （新しく取得した記事だけのZIPになるだけで、既存データは失われない）。
+/// 形式が不正な年月は false（安全側）。
+pub fn is_archive_month_deletable(month: &str, now: DateTime<Utc>) -> bool {
+    if !is_valid_archive_month(month) {
+        return false;
+    }
+    let (Some(year), Some(month_number)) = (
+        month.get(0..4).and_then(|value| value.parse::<i32>().ok()),
+        month.get(5..7).and_then(|value| value.parse::<u32>().ok()),
+    ) else {
+        return false;
+    };
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+    match Utc
+        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+        .single()
+    {
+        Some(next_month_start) => next_month_start + Duration::days(ARCHIVE_AGE_DAYS + 1) <= now,
+        None => false,
+    }
+}
+
+/// 月単位アーカイブ削除の事前確認。削除前に件数・ZIPサイズを画面へ示すために返す。
+/// ZIPのファイル名・パスは返さない。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeletePreviewDto {
+    pub month: String,
+    /// 削除でアーカイブから消える記事数（index の件数）。
+    pub article_count: usize,
+    /// 月次ZIPのサイズ（index に記録したZIP作成時の値）。
+    pub size_bytes: u64,
+    /// 通常のニュース領域にMarkdownが残っていて、削除後も残る記事数（復元済み・お気に入り等）。
+    pub kept_article_count: usize,
+}
+
+/// 月単位アーカイブ削除の結果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeleteResultDto {
+    pub month: String,
+    pub deleted_article_count: usize,
+    pub kept_article_count: usize,
+    /// index からは削除済みだが、ZIPファイル自体を消せなかった場合だけ true。
+    /// 参照されないZIPが残るだけで、履歴・復元・取得済み判定には影響しない。
+    pub cleanup_pending: bool,
 }
 
 /// ZIPとindexの整合確認後に、通常ニュース領域から退避したMarkdownの結果。
@@ -473,23 +541,41 @@ pub struct ListArchiveMonthArticlesParams {
 
 impl ListArchiveMonthArticlesParams {
     pub fn validated_month(&self) -> Result<String, AppError> {
-        let month = self.month.trim();
-        if !is_valid_archive_month(month) {
-            return Err(AppError::Validation(
-                "month must be in YYYY-MM format".to_string(),
-            ));
-        }
-        Ok(month.to_string())
+        validate_archive_month_param(&self.month)
     }
+}
+
+/// 月単位アーカイブ削除（事前確認・削除）の引数。年月だけを受け取り、パスやファイル名は受け取らない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeleteParams {
+    pub month: String,
+}
+
+impl ArchiveMonthDeleteParams {
+    pub fn validated_month(&self) -> Result<String, AppError> {
+        validate_archive_month_param(&self.month)
+    }
+}
+
+fn validate_archive_month_param(month: &str) -> Result<String, AppError> {
+    let month = month.trim();
+    if !is_valid_archive_month(month) {
+        return Err(AppError::Validation(
+            "month must be in YYYY-MM format".to_string(),
+        ));
+    }
+    Ok(month.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_archive_candidate, is_within_title_dedupe_window, normalize_title_for_dedupe,
-        ArticleDedupeKeys, ArticleHistoryFilter, GetArticleDetailParams,
-        GetRecommendedArticlesParams, ListArchiveMonthArticlesParams, ListArticleHistoryParams,
-        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
+        is_archive_candidate, is_archive_month_deletable, is_within_title_dedupe_window,
+        normalize_title_for_dedupe, ArchiveMonthDeleteParams, ArticleDedupeKeys,
+        ArticleHistoryFilter, GetArticleDetailParams, GetRecommendedArticlesParams,
+        ListArchiveMonthArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
+        UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
 
@@ -792,5 +878,55 @@ mod tests {
     fn is_archive_candidate_false_for_unparseable_fetched_at() {
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
         assert!(!is_archive_candidate("not-a-date", false, false, now));
+    }
+    #[test]
+    fn archive_month_deletable_only_after_month_can_no_longer_grow() {
+        // 2026-05 は 6/1 + 31日 = 7/2 00:00 UTC から削除可能。
+        let before = Utc.with_ymd_and_hms(2026, 7, 1, 23, 59, 59).unwrap();
+        let boundary = Utc.with_ymd_and_hms(2026, 7, 2, 0, 0, 0).unwrap();
+        assert!(!is_archive_month_deletable("2026-05", before));
+        assert!(is_archive_month_deletable("2026-05", boundary));
+        // 当月・前月（まだ追記され得る月）は削除できない。
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 0, 0, 0).unwrap();
+        assert!(!is_archive_month_deletable("2026-10", now));
+        assert!(!is_archive_month_deletable("2026-09", now));
+        assert!(is_archive_month_deletable("2026-08", now));
+        // 12月は翌年1月1日起点（+31日 = 2/1）。
+        assert!(!is_archive_month_deletable(
+            "2025-12",
+            Utc.with_ymd_and_hms(2026, 1, 31, 23, 59, 59).unwrap()
+        ));
+        assert!(is_archive_month_deletable(
+            "2025-12",
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()
+        ));
+        // 不正な年月は常に false。
+        for invalid in ["", "2026-13", "../2026-05", "2026-05.zip"] {
+            assert!(!is_archive_month_deletable(invalid, now));
+        }
+    }
+
+    #[test]
+    fn archive_month_delete_params_accept_only_year_month() {
+        let params = ArchiveMonthDeleteParams {
+            month: " 2026-05 ".to_string(),
+        };
+        assert_eq!(params.validated_month().unwrap(), "2026-05");
+        for invalid in [
+            "",
+            "2026-5",
+            "2026-00",
+            "../2026-05",
+            "2026-05.zip",
+            "archive_index",
+        ] {
+            let params = ArchiveMonthDeleteParams {
+                month: invalid.to_string(),
+            };
+            assert!(matches!(
+                params.validated_month(),
+                Err(crate::error::AppError::Validation(_))
+            ));
+        }
     }
 }

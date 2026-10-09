@@ -23,6 +23,7 @@ import {
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   drawGachaOnce,
   getGachaState,
@@ -526,13 +527,7 @@ export default function GachaScreen({
           {/* Auto Start & Exit */}
           <div className="p-3 border-t border-border space-y-2">
             <AutostartStatus />
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full text-xs text-muted-foreground"
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="w-full text-xs text-muted-foreground" />
           </div>
         </aside>
 
@@ -779,7 +774,12 @@ export default function GachaScreen({
           <span className="text-xs text-muted-foreground">お知らせ</span>
           <span className="text-xs text-[var(--yuuko-green)]">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" aria-hidden="true" />
-            新しいニュースが3件届いてるよ！
+            {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みのコレクション状況を出す。 */}
+            {loadStatus === "loading"
+              ? "読み込み中..."
+              : gacha
+                ? `コレクション ${gacha.ownedCount} / ${gacha.totalCount}`
+                : "ガチャ"}
           </span>
         </div>
         <div className="flex items-center gap-3">

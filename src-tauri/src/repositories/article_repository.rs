@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    is_valid_archive_month, is_within_title_dedupe_window, ArchiveMonthArticlesDto,
+    is_archive_month_deletable, is_valid_archive_month, is_within_title_dedupe_window,
+    ArchiveMonthArticlesDto, ArchiveMonthDeletePreviewDto, ArchiveMonthDeleteResultDto,
     ArchiveMonthDto, ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
     ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter,
     ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
@@ -886,7 +887,11 @@ impl ArticleRepository {
 
     /// 過去ニュース画面向けに、`archive_index.json` の月別エントリを新しい月から順に返す。
     /// ZIPは開かない。年月・ファイル名が安全な形式でないエントリは表示対象から外す。
-    pub fn list_archive_months(&self) -> Result<Vec<ArchiveMonthDto>, AppError> {
+    /// 削除可否は `now` を基準に、削除処理と同じ月の判定（`is_archive_month_deletable`）で決める。
+    pub fn list_archive_months(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArchiveMonthDto>, AppError> {
         let index = self.load_archive_index_or_default()?;
         let mut months = index
             .archives
@@ -902,6 +907,8 @@ impl ArticleRepository {
                 month: archive.month.clone(),
                 article_count: archive.article_count,
                 catalog_complete: archive.catalog_complete,
+                size_bytes: archive.size_bytes,
+                deletable: is_archive_month_deletable(&archive.month, now),
             })
             .collect::<Vec<_>>();
         months.sort_by(|left, right| right.month.cmp(&left.month));
@@ -997,6 +1004,163 @@ impl ArticleRepository {
         Ok(RestoreArchivedArticleResult {
             article_id: article_id.to_string(),
             status: ArchiveRestoreStatus::Restored,
+        })
+    }
+
+    /// 月単位アーカイブ削除（判断台帳 D26）の事前確認。削除と同じ検証を通し、件数・サイズを返す。
+    /// 削除できない月（形式不正・新しすぎる・index にない・アーカイブにしか無いお気に入りを含む）は
+    /// 削除時と同じエラーを返すため、画面は確認ダイアログを出す前に削除可否を知れる。
+    pub fn get_archive_month_delete_preview(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeletePreviewDto, AppError> {
+        let _write_guard = self.lock_writes()?;
+        // 中断した退避がrollback領域に残っていると、ローカルに残る記事を数え損ねるため先に戻す。
+        self.recover_retirement_staging()?;
+        let plan = self.plan_archive_month_delete(month, now)?;
+        Ok(ArchiveMonthDeletePreviewDto {
+            month: plan.entry.month.clone(),
+            article_count: plan.entry.article_count,
+            size_bytes: plan.entry.size_bytes,
+            kept_article_count: plan.kept_article_count,
+        })
+    }
+
+    /// 古い月の月次ZIPと `archive_index.json` の月エントリを削除する（データ設計書 §14.8）。
+    ///
+    /// 年月は index 内の一致検索と、検証済みの `YYYY-MM.zip` の組み立てにだけ使い、他のファイルは消さない。
+    /// 通常のニュース領域に残るMarkdown（復元済み・お気に入り・退避待ち）は削除しない。
+    /// 整合性のため「記事の状態更新 → index 更新 → ZIP削除」の順で行う:
+    /// - index 更新までに失敗したら記事の状態を戻し、ZIPも index も元のまま（何も消えない）。
+    /// - index 更新後のZIP削除に失敗しても index がZIPを参照しないため不整合にはならず、
+    ///   参照されないZIPが残るだけ（`cleanup_pending: true`。同じ月が再アーカイブされると置き換わる）。
+    pub fn delete_archive_month(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeleteResultDto, AppError> {
+        let _write_guard = self.lock_writes()?;
+        // 中断した退避のMarkdownは、ZIPを消す前に通常領域へ戻す（戻さないとZIP削除で唯一の本文を失う）。
+        self.recover_retirement_staging()?;
+        let plan = self.plan_archive_month_delete(month, now)?;
+
+        // index から月が消えた後も archived のまま残ると、退避処理が「index にない月」として
+        // 失敗し続けるため、ローカルに残る archived 記事は復元済みとして扱う（Markdownは消さない）。
+        let mut saved_originals = Vec::new();
+        for record in &plan.records_to_release {
+            let mut released = record.clone();
+            released.archive_state = PersistedArchiveState::Restored;
+            released.is_archived = false;
+            released.status.archived = false;
+            if let Err(error) = self.save_article_record(&released) {
+                self.rollback_archived_records(&saved_originals);
+                return Err(error);
+            }
+            saved_originals.push(record.clone());
+        }
+
+        let mut index = plan.index;
+        index.version = ARCHIVE_INDEX_VERSION;
+        index
+            .archives
+            .retain(|entry| entry.month != plan.entry.month);
+        let payload = match serde_json::to_vec_pretty(&index) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.rollback_archived_records(&saved_originals);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = atomic_write(&self.archive_index_path, &payload, "archive index") {
+            self.rollback_archived_records(&saved_originals);
+            return Err(error);
+        }
+
+        // ファイル名は検証済みの年月からだけ作る（validate_archive_location 済み）。
+        let zip_path = self.archive_dir.join(&plan.entry.file);
+        let cleanup_pending = match std::fs::remove_file(&zip_path) {
+            Ok(()) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                log::warn!("Failed to remove deleted archive month zip: {error}");
+                true
+            }
+        };
+
+        Ok(ArchiveMonthDeleteResultDto {
+            month: plan.entry.month,
+            deleted_article_count: plan.entry.article_count,
+            kept_article_count: plan.kept_article_count,
+            cleanup_pending,
+        })
+    }
+
+    /// 月単位アーカイブ削除の検証と対象の洗い出し（書き込みはしない）。
+    fn plan_archive_month_delete(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeletePlan, AppError> {
+        if !is_valid_archive_month(month) {
+            return Err(AppError::Validation(
+                "month must be in YYYY-MM format".to_string(),
+            ));
+        }
+        if !is_archive_month_deletable(month, now) {
+            return Err(AppError::Validation(
+                "this archive month is too recent to delete".to_string(),
+            ));
+        }
+        let index = self.load_archive_index_or_default()?;
+        let entry = index
+            .archives
+            .iter()
+            .find(|archive| archive.month == month)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("archive month not found: {month}")))?;
+        validate_archive_location(&entry)?;
+
+        // 状態を書き換える可能性があるため、破損Markdownを見落とさない厳格ローダーを使う。
+        let records = self.load_article_records()?;
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let catalog_ids = entry
+            .articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut local_ids = HashSet::new();
+        let mut kept_article_count = 0usize;
+        let mut records_to_release = Vec::new();
+        for record in records {
+            let in_month = format_month_label(&record.month_bucket()) == entry.month;
+            let is_archived_here =
+                in_month && record.archive_state == PersistedArchiveState::Archived;
+            if !catalog_ids.contains(record.article_id.as_str()) && !is_archived_here {
+                continue;
+            }
+            local_ids.insert(record.article_id.clone());
+            kept_article_count += 1;
+            if record.archive_state == PersistedArchiveState::Archived {
+                records_to_release.push(record);
+            }
+        }
+
+        // お気に入りはアーカイブ対象外のため通常は起きないが、ZIPにしか本文が無いお気に入りがあれば
+        // 削除で失われるので安全側で中止する。
+        if entry.articles.iter().any(|article| {
+            favorite_store.contains(&article.article_id) && !local_ids.contains(&article.article_id)
+        }) {
+            return Err(AppError::Validation(
+                "this archive month contains favorite articles".to_string(),
+            ));
+        }
+
+        Ok(ArchiveMonthDeletePlan {
+            index,
+            entry,
+            kept_article_count,
+            records_to_release,
         })
     }
 
@@ -1352,6 +1516,7 @@ impl PersistedArticleRecord {
             read_state: self.read_state.clone(),
             is_archived: self.is_archived,
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
         }
     }
 
@@ -1911,6 +2076,16 @@ pub(crate) fn validate_imported_archive_index_json(raw: &str) -> Result<(), AppE
     serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(raw))?.validate()
 }
 
+/// 月単位アーカイブ削除の計画。index は計画時に読んだものを書き戻しに使う（ロック保持中のため変化しない）。
+struct ArchiveMonthDeletePlan {
+    index: ArchiveIndex,
+    entry: ArchiveIndexEntry,
+    /// 通常のニュース領域に残る、この月の記事数。
+    kept_article_count: usize,
+    /// index から月が消えるため、archived から restored へ切り替えるローカル記事。
+    records_to_release: Vec<PersistedArticleRecord>,
+}
+
 /// `archive/archive_index.json` の構造（データ設計書 §14.4）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2057,6 +2232,8 @@ impl ArchiveArticleIndexEntry {
             read_state: self.read_state.clone(),
             is_archived: true,
             recommendation_score: self.recommendation_score,
+            // アーカイブ索引は要約済みフラグを持たず、キューにも入らないため状態は出さない（タグ非表示）。
+            summary_state: SummaryState::None,
         }
     }
 
@@ -3187,14 +3364,32 @@ mod tests {
     #[test]
     fn list_archive_months_returns_newest_month_first_with_counts() {
         let context = TestRepositoryContext::new();
-        assert!(context.repository.list_archive_months().unwrap().is_empty());
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
 
         archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
         archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
         archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
 
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
 
+        // サイズは index の sizeBytes（実際のZIPサイズ）をそのまま返す。
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let size_of = |month: &str| {
+            index
+                .archives
+                .iter()
+                .find(|entry| entry.month == month)
+                .unwrap()
+                .size_bytes
+        };
+        assert!(size_of("2026-05") > 0);
         assert_eq!(
             months,
             vec![
@@ -3202,14 +3397,37 @@ mod tests {
                     month: "2026-05".to_string(),
                     article_count: 2,
                     catalog_complete: true,
+                    size_bytes: size_of("2026-05"),
+                    deletable: true,
                 },
                 ArchiveMonthDto {
                     month: "2026-04".to_string(),
                     article_count: 1,
                     catalog_complete: true,
+                    size_bytes: size_of("2026-04"),
+                    deletable: true,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn list_archive_months_marks_recent_months_as_not_deletable() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+
+        // 削除処理と同じ判定: 翌月1日から30日＋1日が過ぎるまでは削除できない。
+        let too_early = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let months = context.repository.list_archive_months(too_early).unwrap();
+        assert_eq!(months.len(), 1);
+        assert!(!months[0].deletable);
+
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert!(months[0].deletable);
     }
 
     #[test]
@@ -3295,13 +3513,18 @@ mod tests {
         )
         .unwrap();
 
-        let months = context.repository.list_archive_months().unwrap();
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
         assert_eq!(
             months,
             vec![ArchiveMonthDto {
                 month: "2026-05".to_string(),
                 article_count: 2,
                 catalog_complete: false,
+                size_bytes: 1024,
+                deletable: true,
             }]
         );
 
@@ -4336,5 +4559,430 @@ mod tests {
             Some("202606")
         );
         assert_eq!(month_bucket_from_text("5分前"), None);
+    }
+
+    fn archive_delete_now() -> chrono::DateTime<chrono::Utc> {
+        use chrono::{TimeZone, Utc};
+        // 2026-05 / 2026-04 は削除可能、2026-07 はまだ削除できない基準時刻。
+        Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()
+    }
+
+    fn read_archive_state(
+        context: &TestRepositoryContext,
+        article_id: &str,
+    ) -> PersistedArchiveState {
+        context
+            .repository
+            .find_article_record_optional(article_id)
+            .unwrap()
+            .unwrap()
+            .archive_state
+    }
+
+    #[test]
+    fn archive_month_delete_preview_returns_count_size_and_kept_articles() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let expected_size = index.archives[0].size_bytes;
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(preview.month, "2026-05");
+        assert_eq!(preview.article_count, 2);
+        assert_eq!(preview.size_bytes, expected_size);
+        assert!(preview.size_bytes > 0);
+        // 復元済みの may-a だけがローカルに残る。
+        assert_eq!(preview.kept_article_count, 1);
+        // 事前確認では何も変更しない。
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+        assert_eq!(
+            context
+                .repository
+                .list_archive_months(archive_delete_now())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn archive_month_delete_rejects_invalid_recent_or_unknown_month() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let index_path = context.root_dir.join("archive").join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+
+        for invalid in ["../2026-05", "2026-05.zip", "2026-13", "archive_index", ""] {
+            assert!(matches!(
+                context
+                    .repository
+                    .delete_archive_month(invalid, archive_delete_now()),
+                Err(AppError::Validation(_))
+            ));
+        }
+        // まだ追記され得る月（6/1 + 31日 = 7/2 より前）は削除できない。
+        let too_early = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-05", too_early),
+            Err(AppError::Validation(_))
+        ));
+        assert!(matches!(
+            context
+                .repository
+                .get_archive_month_delete_preview("2026-05", too_early),
+            Err(AppError::Validation(_))
+        ));
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-04", archive_delete_now()),
+            Err(AppError::NotFound(_))
+        ));
+
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+    }
+
+    #[test]
+    fn delete_archive_month_removes_only_target_zip_and_index_entry() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        // 復元済みMarkdownはアーカイブ削除で消さない。
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        let unrelated_file = archive_dir.join("keep.txt");
+        std::fs::write(&unrelated_file, "keep").unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.month, "2026-05");
+        assert_eq!(result.deleted_article_count, 2);
+        assert_eq!(result.kept_article_count, 1);
+        assert!(!result.cleanup_pending);
+        assert!(!archive_dir.join("2026-05.zip").exists());
+        assert!(archive_dir.join("2026-04.zip").exists());
+        assert!(unrelated_file.exists());
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].month, "2026-04");
+
+        // 復元済みは残り、ZIPにしか無かった記事は履歴から消える。
+        let ids = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 100)
+            .unwrap()
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"may-a".to_string()));
+        assert!(!ids.contains(&"may-b".to_string()));
+        assert!(ids.contains(&"april-a".to_string()));
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Restored
+        );
+
+        // 2回目は index にないため NotFound（他の月や任意ファイルは消さない）。
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-05", archive_delete_now()),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(archive_dir.join("2026-04.zip").exists());
+    }
+
+    #[test]
+    fn delete_archive_month_releases_unretired_markdown_so_retirement_keeps_working() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        // 退避前（archived のままローカルに残る）の記事。
+        assert_eq!(
+            read_archive_state(&context, "may-b"),
+            PersistedArchiveState::Archived
+        );
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 2);
+        for article_id in ["may-a", "may-b"] {
+            let record = context
+                .repository
+                .find_article_record_optional(article_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.archive_state, PersistedArchiveState::Restored);
+            assert!(!record.is_archived);
+            assert!(!record.status.archived);
+        }
+        // index にない月の archived 記事が残らないため、退避処理は失敗しない。
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 0);
+        // 復元済み扱いなので再アーカイブ候補にもならない。
+        assert!(context
+            .repository
+            .list_archive_candidates(archive_delete_now())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn favorites_are_never_archived_and_survive_archive_month_delete() {
+        let context = TestRepositoryContext::new();
+        // 既存の仕組み: 古いお気に入り記事は月次ZIPにも記事カタログにも入らない。
+        let old_favorite = PersistedArticleRecord {
+            article_id: "may-favorite".to_string(),
+            fetched_at: "2026-05-03T00:00:00Z".to_string(),
+            published_at_text: "2026-05-03T00:00:00Z".to_string(),
+            favorite: true,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_favorite)
+            .unwrap();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert!(index.find_article("may-favorite").is_err());
+        let zip_records = context
+            .repository
+            .load_verified_archive_records(&index.archives[0])
+            .unwrap();
+        assert!(!zip_records.contains_key("may-favorite"));
+        // アーカイブ後にお気に入りへ切り替えた記事（ローカルに残る）。
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context
+            .repository
+            .update_article_favorite("may-b", true)
+            .unwrap();
+        context.repository.retire_archived_markdown().unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 1);
+        let favorites = context
+            .repository
+            .list_history(ArticleHistoryFilter::Favorite, 100)
+            .unwrap()
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect::<Vec<_>>();
+        assert!(favorites.contains(&"may-favorite".to_string()));
+        assert!(favorites.contains(&"may-b".to_string()));
+        assert_eq!(
+            read_archive_state(&context, "may-favorite"),
+            PersistedArchiveState::Active
+        );
+        // 後から外しても、index にない月の archived として残らない（退避・再アーカイブとも安全）。
+        context
+            .repository
+            .update_article_favorite("may-b", false)
+            .unwrap();
+        context.repository.retire_archived_markdown().unwrap();
+        context
+            .repository
+            .archive_candidates(archive_delete_now())
+            .unwrap();
+        assert!(context
+            .repository
+            .find_article_record_optional("may-b")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn delete_archive_month_refuses_when_favorite_exists_only_in_archive() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        // 取り込み等でお気に入りJSONだけに残った、ZIPにしか本文が無い記事。
+        let favorites_path = context
+            .root_dir
+            .join("favorites")
+            .join("article_favorites.json");
+        std::fs::create_dir_all(favorites_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &favorites_path,
+            r#"{"version":1,"favorite_article_ids":["may-a"]}"#,
+        )
+        .unwrap();
+        let index_path = context.root_dir.join("archive").join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now());
+        assert!(matches!(preview, Err(AppError::Validation(_))));
+        let deleted = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now());
+        assert!(matches!(deleted, Err(AppError::Validation(_))));
+
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+    }
+
+    #[test]
+    fn delete_archive_month_keeps_zip_index_and_markdown_when_index_write_fails() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        let index_path = archive_dir.join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+        // 一時ファイルの位置をディレクトリで塞ぎ、index の書き込みを失敗させる。
+        let blocker = archive_dir.join("archive_index.json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now());
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(archive_dir.join("2026-05.zip").exists());
+        // 先に restored へ切り替えた記事は archived へ戻る。
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Archived
+        );
+        // 失敗後も既存の退避・復元はそのまま動く（ZIPと index が一致している）。
+        std::fs::remove_dir_all(&blocker).unwrap();
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 1);
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+    }
+
+    #[test]
+    fn delete_archive_month_reports_cleanup_pending_when_zip_cannot_be_removed() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "april-a", "2026-04-01T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        // ZIPの位置を消せない形（中身のあるディレクトリ）に置き換えて削除失敗を再現する。
+        std::fs::remove_file(archive_dir.join("2026-05.zip")).unwrap();
+        std::fs::create_dir_all(archive_dir.join("2026-05.zip").join("blocker")).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert!(result.cleanup_pending);
+        // index は月を参照しないため、残ったものは参照されない残骸にすぎない。
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].month, "2026-04");
+        assert!(context.repository.load_archive_index_or_default().is_ok());
+        assert!(context.repository.retire_archived_markdown().is_ok());
+    }
+
+    #[test]
+    fn delete_archive_month_recovers_interrupted_retirement_before_planning() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        // 退避の途中で停止した状態（Markdownがrollback領域にだけある）を再現する。
+        let source = context.news_dir.join("202605").join("may-a.md");
+        let rollback_root = context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR);
+        let staged = rollback_root.join("202605").join("may-a.md");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now())
+            .unwrap();
+        // 先に通常領域へ戻すため、ローカルに残る記事として数えられる。
+        assert_eq!(preview.kept_article_count, 1);
+        assert!(source.exists());
+        assert!(!rollback_root.exists());
+
+        // 削除前にも同じ状態にしておき、削除でも復旧してから処理することを確認する。
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 1);
+        assert!(!rollback_root.exists());
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Restored
+        );
+        assert!(context.repository.retire_archived_markdown().is_ok());
+    }
+
+    #[test]
+    fn delete_archive_month_succeeds_when_zip_is_already_missing() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        std::fs::remove_file(context.root_dir.join("archive").join("2026-05.zip")).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert!(!result.cleanup_pending);
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
     }
 }

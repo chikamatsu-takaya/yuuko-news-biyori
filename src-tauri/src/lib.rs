@@ -16,6 +16,7 @@ use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
+use repositories::friendship_event_repository::FriendshipEventRepository;
 use repositories::friendship_repository::FriendshipRepository;
 use repositories::gacha_repository::GachaRepository;
 use repositories::reward_repository::RewardRepository;
@@ -117,7 +118,8 @@ pub fn run() {
             );
             let friendship_service =
                 FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone())
-                    .with_gacha_service(gacha_service.clone());
+                    .with_gacha_service(gacha_service.clone())
+                    .with_event_repository(FriendshipEventRepository::new(&paths));
             friendship_service.initialize_default_if_missing()?;
             // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
             // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
@@ -210,9 +212,14 @@ pub fn run() {
             commands::article_commands::retire_archived_markdown,
             commands::article_commands::list_archive_months,
             commands::article_commands::list_archive_month_articles,
+            commands::article_commands::get_archive_month_delete_preview,
+            commands::article_commands::delete_archive_month,
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
+            commands::app_commands::restart_app,
+            commands::app_commands::quit_resident_app,
             commands::data_export_commands::export_migration_data,
+            commands::data_export_commands::open_migration_folder,
             commands::data_import_commands::list_migration_imports,
             commands::data_import_commands::import_migration_data,
             commands::news_commands::refresh_news,

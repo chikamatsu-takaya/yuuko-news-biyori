@@ -356,6 +356,7 @@ fn build_ai_entry(
         related_article_id: Some(article_id.to_string()),
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
+        saved_in_dictionary: false,
     }
 }
 
@@ -409,6 +410,7 @@ impl SampleDictionaryEntry {
             related_article_id: Some(self.article_id.to_string()),
             related_article_title: Some(self.article_title.to_string()),
             is_starred: false,
+            saved_in_dictionary: false,
         }
     }
 }
@@ -438,6 +440,7 @@ fn build_generic_entry(
         related_article_id: Some(article_id.to_string()),
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
+        saved_in_dictionary: false,
     }
 }
 
@@ -528,7 +531,7 @@ mod tests {
     use crate::domain::article::{ArticleReadState, FetchedArticle};
     use crate::domain::dictionary::{
         DictionaryEntryDto, DictionaryEntryType, ExplainSelectedTermParams,
-        ListDictionaryEntriesParams, SaveDictionaryEntryParams,
+        ListDictionaryEntriesParams, SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams,
     };
     use crate::domain::settings::{AiProvider, ExplanationLevel};
     use crate::domain::summary::{AiRequest, AiResponse, AiTermExplanation};
@@ -645,6 +648,7 @@ mod tests {
             related_article_id: Some(REAL_ARTICLE_ID.to_string()),
             related_article_title: Some(REAL_ARTICLE_TITLE.to_string()),
             is_starred: true,
+            saved_in_dictionary: false,
         }
     }
 
@@ -746,7 +750,8 @@ mod tests {
             entry.related_article_title.as_deref(),
             Some(REAL_ARTICLE_TITLE)
         );
-        // AI生成直後は未保存扱い（既存の未保存解説と同じ）。
+        // AI生成直後は未保存扱い（既存の未保存解説と同じ）。★ も付かない。
+        assert!(!entry.saved_in_dictionary);
         assert!(!entry.is_starred);
         // entryId は固定/汎用文と同じ生成方法（記事ID＋正規化語のハッシュ）。
         assert_eq!(
@@ -948,14 +953,40 @@ mod tests {
         // 保存元と同じ記事で再利用（前後空白も正規化方針どおり一致）。
         let same = explain(&context, REAL_ARTICLE_ID, "  生成AI  ");
         assert_eq!(same.short_explanation, "保存済みの短い説明");
-        assert!(same.is_starred);
+        assert!(same.saved_in_dictionary);
 
         // 別の実ニュース記事でも同じ正規化用語なら再利用（記事横断）。
         let other = explain(&context, OTHER_ARTICLE_ID, "生成ai");
         assert_eq!(other.short_explanation, "保存済みの短い説明");
-        assert!(other.is_starred);
+        assert!(other.saved_in_dictionary);
 
         // 保存済み辞書命中時（同一記事・記事横断とも）は AI を一度も呼ばない。
+        assert_eq!(context.ai.call_count(), 0);
+    }
+
+    #[test]
+    fn explain_saved_hit_reports_saved_even_after_star_removed() {
+        // ★ を外した保存済み項目でも、再解説は「辞書保存済み」として返す（★ と保存状態は独立）。
+        let context = build_service();
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: saved_entry(),
+            })
+            .unwrap();
+        for is_starred in [true, false] {
+            context
+                .service
+                .update_dictionary_favorite(UpdateDictionaryFavoriteParams {
+                    entry_id: saved_entry().entry_id,
+                    is_starred,
+                })
+                .unwrap();
+        }
+
+        let entry = explain(&context, REAL_ARTICLE_ID, "生成AI");
+        assert!(entry.saved_in_dictionary);
+        assert!(!entry.is_starred);
         assert_eq!(context.ai.call_count(), 0);
     }
 
@@ -1016,7 +1047,7 @@ mod tests {
         // article-001 の Markdown は無いが、保存済み辞書を固定サンプル解説より優先して返す。
         let entry = explain(&context, "article-001", "生成AI");
         assert_eq!(entry.short_explanation, "保存済みの短い説明");
-        assert!(entry.is_starred);
+        assert!(entry.saved_in_dictionary);
         // 固定サンプル記事でも保存済み辞書命中時は AI を呼ばない。
         assert_eq!(context.ai.call_count(), 0);
     }
@@ -1120,7 +1151,7 @@ mod tests {
 
         assert_eq!(ai.call_count(), 0);
         assert_eq!(entry.short_explanation, "保存済みの短い説明");
-        assert!(entry.is_starred);
+        assert!(entry.saved_in_dictionary);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
@@ -1766,6 +1797,13 @@ mod tests {
             .update_dictionary_memo(crate::domain::dictionary::UpdateDictionaryMemoParams {
                 entry_id: saved_entry().entry_id,
                 memo: "自分のメモ".to_string(),
+            })
+            .unwrap();
+        context
+            .service
+            .update_dictionary_favorite(UpdateDictionaryFavoriteParams {
+                entry_id: saved_entry().entry_id,
+                is_starred: true,
             })
             .unwrap();
         set_saved_reference(&context, "1000", 1);

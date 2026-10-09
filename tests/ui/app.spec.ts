@@ -492,6 +492,359 @@ test("news history favorite failure keeps the previous state and shows a fixed n
   await expectHistoryStars(page, registered);
 });
 
+// アーカイブ済み記事の再閲覧（確認後にZIPから1記事を取り出して記事詳細を開く）。
+const setArchivedHistory = (page: Page, flags: Record<string, unknown> = {}) =>
+  page.addInitScript((initFlags) => {
+    Object.assign(window as unknown as Record<string, unknown>, {
+      __E2E_HISTORY_ARCHIVED__: true,
+      ...initFlags,
+    });
+  }, flags);
+
+const readRestoreArchivedArgs = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, unknown[] | undefined>)
+        .__E2E_RESTORE_ARCHIVED_ARGS__ ?? []
+  );
+
+test("news history archived article asks before restoring and cancel keeps the history", async ({
+  page,
+}) => {
+  await setArchivedHistory(page);
+  await openNewsHistory(page);
+
+  const main = page.locator("main");
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+
+  // 確認ダイアログを出し、この時点では復元しない。
+  const dialog = page.getByRole("alertdialog");
+  await expect(
+    dialog.getByRole("heading", { name: "アーカイブから取り出して開く" })
+  ).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+
+  // キャンセルでは復元も記事詳細への遷移もしない。
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+});
+
+test("news history archived article restores by id (button disabled while restoring), opens the same article and clears the badge", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_GATE__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 復元中はボタンが「取り出し中...」の無効状態になる（ここで確認するのは disabled 表示まで。
+  // 無効ボタンへの force クリックはイベントが発火しないため、ref ガード自体の検証にはならない）。
+  const restoringButton = page.getByRole("button", { name: "取り出し中..." });
+  await expect(restoringButton).toBeDisabled();
+  await restoringButton.click({ force: true });
+  // 記事IDだけを渡し、呼び出しは1回のまま。
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+
+  await page.evaluate(() => {
+    (
+      window as unknown as Record<string, () => void>
+    ).__E2E_RESTORE_ARCHIVED_RELEASE__();
+  });
+
+  // 復元後は同じ記事IDで記事詳細を開く。
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRequestedArticleId(page)).toBe("arch-1");
+  expect(await readRestoreArchivedArgs(page)).toHaveLength(1);
+
+  // 戻ると履歴を読み直し、アーカイブ済みバッジが外れる。
+  await readerBackButton(page).first().click();
+  const main = page.locator("main");
+  await expect(main.getByText("アーカイブ済みの記事").first()).toBeVisible();
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toHaveCount(0);
+});
+
+test("news history archived restore failure stays on history with a fixed notice", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 固定文言だけを出し、生エラー・パスは出さない。一覧の「再試行」も出さない。
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+
+  // 記事詳細へは進まない。もう一度試せる状態に戻る。
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "もう一度見る" })).toBeEnabled();
+  await expect(main.getByText("アーカイブ済み", { exact: true })).toBeVisible();
+});
+
+test("news history archived restore with a mismatched article id does not navigate", async ({
+  page,
+}) => {
+  await setArchivedHistory(page, { __E2E_RESTORE_ARCHIVED_MISMATCH__: true });
+  await openNewsHistory(page);
+
+  await page.getByRole("button", { name: "もう一度見る" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  // 別IDの応答は失敗扱い: 固定文言を出し、別記事・対象記事どちらの詳細も開かない。
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(
+    page.getByRole("heading", { name: "ニュース履歴" })
+  ).toBeVisible();
+});
+
+// 過去ニュース画面（月一覧 → 記事一覧 → 記事詳細。判断台帳 D14 / D90）。
+const openPastNews = async (page: Page) => {
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+};
+
+const setPastNewsFlags = (page: Page, flags: Record<string, unknown>) =>
+  page.addInitScript((initFlags) => {
+    Object.assign(window as unknown as Record<string, unknown>, initFlags);
+  }, flags);
+
+test("past news: sidebar opens the month list and a month opens its article list", async ({
+  page,
+}) => {
+  await openPastNews(page);
+
+  const nav = page.getByRole("navigation").first();
+  await expect(
+    nav.getByRole("button", { name: "過去ニュース", exact: true })
+  ).toHaveClass(/font-medium/);
+  await expect(page.getByTestId("past-news-month-2026-09")).toContainText("2026年9月");
+  await expect(page.getByTestId("past-news-month-2026-09")).toContainText("12件");
+
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__")).toEqual([
+    "2026-09",
+  ]);
+  const list = page.getByTestId("past-news-article-list");
+  await expect(list.getByText("9月のアーカイブ記事")).toBeVisible();
+  await expect(list.getByText("アーカイブ済み", { exact: true }).first()).toBeVisible();
+
+  // 「月の一覧へ戻る」で月一覧へ戻る。
+  await page.getByRole("button", { name: "月の一覧へ戻る" }).click();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+});
+
+test("past news: opening an article asks first, restores by id, and back returns to the same month", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+
+  // 確認ダイアログを出し、この時点では復元しない。キャンセルでは何もしない。
+  const dialog = page.getByRole("alertdialog");
+  await expect(
+    dialog.getByRole("heading", { name: "アーカイブから取り出して開く" })
+  ).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "past-1" }]);
+  expect(await readRequestedArticleId(page)).toBe("past-1");
+
+  // 戻ると月一覧ではなく、同じ月の記事一覧へ戻る（読み直しでバッジも外れる）。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+  const list = page.getByTestId("past-news-article-list");
+  await expect(list.getByText("9月のアーカイブ記事")).toBeVisible();
+  await expect(list.getByText("アーカイブ済み", { exact: true })).toHaveCount(1);
+});
+
+test("past news: restore failure stays on the month list with a fixed notice", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(main.getByText("9月のアーカイブ記事")).toBeVisible();
+});
+
+test("past news: a remembered month that was deleted falls back to the month list without an error", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+
+  // 記事詳細を開いている間に、記憶している月（2026-09）が削除された状態にする。
+  await page.evaluate(() => {
+    const win = window as unknown as Record<string, { month: string }[]>;
+    win.__E2E_ARCHIVE_MONTHS__ = win.__E2E_ARCHIVE_MONTHS__.filter(
+      (entry) => entry.month !== "2026-09"
+    );
+  });
+
+  // 戻る以外の経路（ホーム → サイドバー）で入り直すと、月一覧を表示する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ホーム", exact: true })
+    .click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-07")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-09")).toHaveCount(0);
+  await expect(page.locator("main").getByRole("alert")).toHaveCount(0);
+});
+
+test("past news: restore failure keeps the article count badge", async ({ page }) => {
+  await setPastNewsFlags(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  const main = page.locator("main");
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(main.getByRole("alert")).toBeVisible();
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+});
+
+test("past news: shows the empty state when there are no archives", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_MONTHS__: [] });
+  await openPastNews(page);
+  await expect(page.getByTestId("past-news-empty")).toContainText(
+    "まだアーカイブされた過去ニュースはないみたい。"
+  );
+});
+
+test("past news: month list load failure shows fixed wording and retry", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_LIST_FAIL__: true });
+  await openPastNews(page);
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "過去ニュースの読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret|archive_index/)).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+});
+
+test("past news: article list load failure shows fixed wording", async ({ page }) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_MONTH_ARTICLES_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "この月の記事一覧の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret|archive_index/)).toHaveCount(0);
+});
+
+test("past news: old-format months explain that the article list is unavailable", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, {
+    __E2E_ARCHIVE_MONTHS__: [
+      {
+        month: "2025-12",
+        articleCount: 5,
+        catalogComplete: false,
+        sizeBytes: 1024,
+        deletable: true,
+      },
+    ],
+  });
+  await openPastNews(page);
+  const month = page.getByTestId("past-news-month-2025-12");
+  await expect(month).toContainText("2025年12月");
+  await expect(month).toContainText(
+    "この月は古い形式で保存されているため、記事一覧を表示できません。"
+  );
+  // 一覧を開くボタンは出さない。
+  await expect(month.getByRole("button")).toHaveCount(0);
+});
+
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
   await openHome(page);
 
@@ -825,6 +1178,11 @@ test("dictionary detail shows the created-at date and reference count", async ({
   await expect(
     page.getByTestId("dictionary-detail-reference-count")
   ).toHaveText("3回");
+  // フッターは固定の「3件届いてるよ」ではなく、表示中の辞書件数を出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(
+    page.locator("footer").getByText(/辞書項目 \d+件を表示中/)
+  ).toBeVisible();
 });
 
 test("dictionary detail falls back to a dash when created-at and reference count are missing", async ({
@@ -993,9 +1351,20 @@ const saveDictionaryCallCount = (page: Page) =>
 const lastSavedDictionaryEntry = (page: Page) =>
   page.evaluate(
     () =>
-      (window as unknown as Record<string, { keyText?: string } | undefined>)
-        .__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
+      (
+        window as unknown as Record<
+          string,
+          { keyText?: string; isStarred?: boolean } | undefined
+        >
+      ).__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
   );
+
+// explain_selected_term のモックが「★ を外した保存済み項目」の命中を返すようにする。
+const enableSavedUnstarredExplainHit = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ =
+      true;
+  });
 
 // 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
 const saveDictionaryControllerCount = (page: Page) =>
@@ -1065,10 +1434,10 @@ const expectPopupCentered = async (page: Page, tol = 6) => {
   expect(Math.abs(center.y - mainCenterY)).toBeLessThanOrEqual(tol);
 };
 
-// 記事を開くと候補語の TermPopup が中央に自動表示される。
-// TermPopup 表示中は背面選択がブロックされるため、背面選択を使うテストでは先に閉じる。
-const closeInitialTermPopup = async (page: Page) => {
-  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+// 記事を開いただけでは用語解説ポップアップは開かない（範囲選択＋「解説」か候補語の明示クリックでだけ開く）。
+// 記事本文（h1）の表示を待ってから、ポップアップが無いことを確認する。
+const expectNoInitialTermPopup = async (page: Page) => {
+  await expect(page.locator("main h1")).toBeVisible();
   await expect(termPopup(page)).toHaveCount(0);
 };
 
@@ -1121,31 +1490,253 @@ const READER_EXPLANATION_TEXT = "E2E用の要約です。";
 const READER_TERM_DETAIL_TEXT =
   "E2Eテストで辞書画面を安定表示するためのモックです。";
 
-// 初期の用語解説ポップアップ（既定の候補語）が安定表示されるまで待ち、呼び出し回数を0へ揃える。
-// 初期ロードでも explain_selected_term が1回呼ばれるため、以降の検証前にリセットする。
-const settleInitialPopupAndResetCount = async (page: Page) => {
-  await expect(
-    page.getByRole("heading", { name: "E2E用語" })
-  ).toBeVisible();
-  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
-  await page.evaluate(() => {
-    (window as unknown as Record<string, number>).__E2E_EXPLAIN_TERM_CALL_COUNT__ = 0;
-  });
+// 記録された友情イベント種別（record_friendship_event のモックが積む）。
+const recordedFriendshipEvents = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, string[] | undefined>)
+        .__E2E_FRIENDSHIP_EVENTS__ ?? []
+  );
+
+// 記事を開いた時点で explain_selected_term が呼ばれていない（自動解説しない）ことを確認する。
+// 解説 command が呼ばれなければ、かけら付与（Rust 側）と term_explained の友情ポイントも発生しない。
+const expectReaderOpenedWithoutExplain = async (page: Page) => {
+  await expectNoInitialTermPopup(page);
+  // 旧実装では記事表示直後に自動解説が走っていたため、少し待ってから回数を確認する。
+  await page.waitForTimeout(300);
+  expect(await explainTermCallCount(page)).toBe(0);
+  expect(await recordedFriendshipEvents(page)).not.toContain("term_explained");
+  await expect(termPopup(page)).toHaveCount(0);
 };
 
-// 記事詳細をホームのニュースカードから開き、初期ポップアップを整えてから閉じる。
-// 背面選択→「解説」ボタン経由でポップアップを開くテスト用（表示中は背面選択がブロックされるため）。
-const openReaderAndSettleInitialPopup = async (page: Page) => {
+// 記事詳細をホームのニュースカードから開き、自動解説が走っていないことを確認する。
+// 背面選択→「解説」ボタン経由でポップアップを開くテスト用。
+const openReaderWithoutExplain = async (page: Page) => {
   await openReaderFromHome(page);
-  await settleInitialPopupAndResetCount(page);
-  await closeInitialTermPopup(page);
+  await expectReaderOpenedWithoutExplain(page);
 };
+
+// 記事詳細を開き、候補語（E2E用語）を明示的に押して用語解説ポップアップを開く（ドラッグ等の検証用）。
+const openReaderWithCandidatePopup = async (page: Page) => {
+  await openReaderFromHome(page);
+  await expectNoInitialTermPopup(page);
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
+  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
+};
+
+// 関連記事（get_recommended_articles）をサンプル記事以外の rec-1 / rec-2 にして記事Aを開く。
+// 「次の記事」は rec-1 になる。プール2件だとホームのカード名が「件数記事N」になるため当日ニュース一覧から開く。
+const openReaderWithRelatedPool = async (page: Page) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_RECOMMENDED_POOL__ = 2;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+  await expect.poll(() => readRequestedArticleId(page)).toBe("e2e-article-1");
+  await expectReaderOpenedWithoutExplain(page);
+};
+
+// カスタマイズ画面の友情ランク・報酬表示（get_friendship_state / get_reward_state の実データ）。
+const openCustomize = (page: Page) =>
+  openScreenFromSidebar(page, "カスタマイズ", "ゆうこカスタマイズ");
+
+test("customize: friendship rank and reward unlock state come from real data", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 4,
+      currentPoint: 12,
+      nextRequiredPoint: 25,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    win.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: [],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("4");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "つぎのランクまで 12 / 25"
+  );
+  await expect(page.getByText("350 / 1000")).toHaveCount(0);
+  await expect(page.getByText("サンプル", { exact: true })).toHaveCount(0);
+
+  const rewardItems = page.getByTestId("customize-rank-reward-item");
+  await expect(rewardItems).toHaveCount(2);
+  await expect(rewardItems.nth(0)).toContainText("テーマ①");
+  await expect(rewardItems.nth(0)).toContainText("解放済み");
+  await expect(rewardItems.nth(1)).toContainText("テーマ②");
+  await expect(rewardItems.nth(1)).toContainText("ランク7で解放");
+  await expect(page.getByTestId("customize-rank-reward-preview")).toHaveCount(0);
+});
+
+test("customize: max rank shows a fixed message instead of a 0-point goal", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 20,
+      currentPoint: 0,
+      nextRequiredPoint: 0,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("20");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "いちばん上のランクだよ！"
+  );
+});
+
+test("customize: friendship load failure keeps the screen and rewards visible", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-friendship-status")).toHaveText(
+    "ランクを読み込めなかったよ。"
+  );
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveCount(0);
+  await expect(page.getByText("E2E friendship failure")).toHaveCount(0);
+  // 報酬側は独立して表示される（既定モック: どれも未解放）。
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "保存する" })).toBeVisible();
+});
+
+test("customize: browser preview (outside Tauri) labels the sample rank values", async ({
+  page,
+}) => {
+  await openHome(page);
+  // ホーム表示後に Tauri 外にする（カスタマイズのマウント時に isTauriRuntime が false になる）。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "カスタマイズ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
+
+  await expect(page.getByText("サンプル", { exact: true })).toHaveCount(2); // ランクカードと報酬カードの両方
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("15");
+  await expect(page.getByTestId("customize-friendship-progress-text")).toHaveText(
+    "つぎのランクまで 350 / 1000"
+  );
+  await expect(page.getByTestId("customize-rank-reward-preview")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(0);
+});
+
+// ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
+const setupRankUp = (page: Page, newRank: number, pendingRewardIds: string[]) =>
+  page.addInitScript(
+    ({ rank, pendingIds }) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const win = window as any;
+      win.__E2E_FRIENDSHIP_RANK_UP_TO__ = rank;
+      const master = [
+        { rewardId: "theme_001", name: "テーマ①", unlockRank: 3 },
+        { rewardId: "theme_002", name: "テーマ②", unlockRank: 7 },
+      ];
+      win.__E2E_REWARD_STATE__ = {
+        currentRank: rank,
+        rewards: master.map((reward) => ({
+          ...reward,
+          type: "theme",
+          unlocked: reward.unlockRank <= rank,
+          pending: pendingIds.includes(reward.rewardId),
+        })),
+        pendingRewardIds: pendingIds,
+        activeThemeId: "default",
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    },
+    { rank: newRank, pendingIds: pendingRewardIds }
+  );
+
+const confirmedRewardCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, string[][] | undefined>)
+        .__E2E_CONFIRMED_REWARD_CALLS__ ?? []
+  );
+
+// ランクアップのモーダルが背面を隠すため、「戻る」の到達確認はせずカードを押すだけにする。
+const openReaderUnderRankUp = async (page: Page) => {
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+};
+
+test("rank up: dialog shows the unlocked reward and OK confirms only that reward", async ({
+  page,
+}) => {
+  await setupRankUp(page, 3, ["theme_001"]);
+  await openReaderUnderRankUp(page);
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("ランクアップ！")).toBeVisible();
+  const rewardSection = dialog.getByRole("region", { name: "解放された報酬" });
+  await expect(rewardSection).toBeVisible();
+  await expect(rewardSection.getByText("テーマ①")).toBeVisible();
+  await expect(rewardSection.getByText("テーマ②")).toHaveCount(0);
+  await expect(
+    rewardSection.getByText("カスタマイズ画面で切り替えられるよ。")
+  ).toBeVisible();
+
+  await dialog.getByRole("button", { name: "やったね！" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(() => confirmedRewardCalls(page)).toEqual([["theme_001"]]);
+});
+
+test("rank up without a reward hides the reward section and confirms nothing", async ({
+  page,
+}) => {
+  await setupRankUp(page, 2, []);
+  await openReaderUnderRankUp(page);
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("ランクアップ！")).toBeVisible();
+  await expect(dialog.getByText("友情ランクが 2 になったよ", { exact: false })).toBeVisible();
+  // 報酬状態の取得を待ってから、報酬欄が出ていないことを確認する。
+  await page.waitForTimeout(300);
+  await expect(dialog.getByRole("region", { name: "解放された報酬" })).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "やったね！" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await confirmedRewardCalls(page)).toEqual([]);
+});
 
 test("reader: selecting summary text shows the 解説 button within the viewport", async ({
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page); // 背面選択を使うため既定ポップアップを閉じる
+  await expectNoInitialTermPopup(page); // 開いただけではポップアップは出ない（背面選択できる）
   await expect(explainButton(page)).toHaveCount(0);
 
   const selected = await selectContentsWithin(
@@ -1169,7 +1760,7 @@ test("reader: selecting the re-explanation text shows the 解説 button", async 
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
   await expect(explainButton(page)).toBeVisible();
 });
@@ -1187,7 +1778,7 @@ test("reader: collapsing the selection hides the 解説 button", async ({
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -1199,7 +1790,7 @@ test("reader: selecting a different region updates the 解説 button position", 
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
 
   // 1) ニュース要約を選択し、ボタン位置を取得。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1231,7 +1822,7 @@ test("reader: a selection spanning two selectable regions hides the 解説 butto
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
 
   // 先に有効な単一領域選択でボタンを出しておく（またぎ選択で消えることも確認する）。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1273,7 +1864,7 @@ test("reader: resizing the viewport recalculates the 解説 button position", as
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -1361,7 +1952,7 @@ test("reader: scrolling the selection out of the viewport hides the 解説 butto
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
 
@@ -1395,7 +1986,7 @@ test("reader: existing 用語サポート candidate click still opens the term p
 test("reader: pressing 解説 on a summary selection opens the term popup for the selection", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   // ニュース要約を選択 → 「解説」ボタンが出る。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1422,7 +2013,7 @@ test("reader: pressing 解説 on a summary selection opens the term popup for th
 test("reader: pressing 解説 on the re-explanation selection also opens the popup", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   // ゆうこの再説明を選択 → 「解説」ボタン → ポップアップが選択文字列で開く。
   await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
@@ -1439,7 +2030,7 @@ test("reader: pressing 解説 on the re-explanation selection also opens the pop
 test("reader: 解説 shows the loading state then the explanation on success", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   // explain_selected_term を保留させるゲートを仕込む（取得中表示を安定して観測するため）。
   await page.evaluate(() => {
@@ -1463,10 +2054,16 @@ test("reader: 解説 shows the loading state then the explanation on success", a
   await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
 });
 
-test("reader: 解説 command failure shows a safe helper text and 再試行, and reading continues", async ({
+// 用語解説失敗時の固定文言（lib/explain-selection.mjs の termExplainFailureMessage と同じ）。
+const TERM_EXPLAIN_FAILURE_GENERIC =
+  "うまく説明できなかったよ。別のところを選び直すか、再試行してみてね。";
+const TERM_EXPLAIN_FAILURE_VALIDATION =
+  "この選び方だとうまく解説できなかったよ。もう少し短く選び直してみてね。";
+
+test("reader: 解説 command failure shows a reselect hint and 再試行 without a savable provisional entry", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
   expect(await saveDictionaryCallCount(page)).toBe(0);
 
   // 用語解説 command を失敗させる。
@@ -1477,13 +2074,14 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await explainButton(page).click();
 
-  // 安全な補助説明（失敗の通知）が表示される。
-  await expect(
-    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
-  ).toBeVisible();
+  // 再選択の案内（固定文言）が表示される。
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toBeVisible();
   // 生エラー文言・内部パスはUIへ出ない。
   await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // フロント生成の仮解説は出さず、辞書へ保存できない（保存ボタン自体が無い）。
+  await expect(page.getByText("はこの記事を理解するためのキーワードです。")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   expect(await saveDictionaryCallCount(page)).toBe(0);
   // 再試行ボタンが出る。
   const retry = page.getByRole("button", { name: "再試行" });
@@ -1491,21 +2089,55 @@ test("reader: 解説 command failure shows a safe helper text and 再試行, and
   // 失敗してもニュース閲覧は継続できる（記事本文が表示され続ける）。
   await expect(page.getByText(READER_SUMMARY_TEXT).first()).toBeVisible();
 
-  // 失敗フラグを解除して再試行 → 解説が表示され、失敗表示が消える。
+  // 失敗フラグを解除して再試行 → 解説が表示され、失敗表示が消え、保存できるようになる。
   await page.evaluate(() => {
     (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = false;
   });
   await retry.click();
   await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
-  await expect(
-    page.getByText("用語解説の取得に失敗したため、補助説明を表示しています。")
-  ).toHaveCount(0);
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+});
+
+test("reader: 解説 failure message is chosen by error code and the selected text is not logged", async ({
+  page,
+}) => {
+  const consoleTexts: string[] = [];
+  page.on("console", (message) => consoleTexts.push(message.text()));
+  await openReaderWithoutExplain(page);
+
+  // AI 応答の解析失敗（PARSE_ERROR）→ 汎用の再選択案内。保存不可。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_EXPLAIN_TERM_FAIL_CODE__ =
+      "PARSE_ERROR";
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toBeVisible();
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "再試行" })).toBeVisible();
+
+  // 検証エラー（VALIDATION_ERROR）→ 短く選び直す案内。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_EXPLAIN_TERM_FAIL_CODE__ =
+      "VALIDATION_ERROR";
+  });
+  await page.getByRole("button", { name: "再試行" }).click();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_VALIDATION)).toBeVisible();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+
+  // console へは選択文字列もエラー本文も出さない（コードだけ）。
+  expect(consoleTexts.some((text) => text.includes(READER_SUMMARY_TEXT))).toBe(false);
+  expect(consoleTexts.some((text) => text.includes("/internal/secret/path"))).toBe(false);
 });
 
 test("reader: spamming the 解説 button calls explain_selected_term only once", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
@@ -1536,7 +2168,7 @@ test("reader: spamming the 解説 button calls explain_selected_term only once",
 test("reader: closing the popup then selecting another text opens it again", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   // 1つ目の選択で解説を開く。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1565,7 +2197,7 @@ test("reader: closing the popup then selecting another text opens it again", asy
 test("reader: the dictionary save button is usable from a selection explanation", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
@@ -1586,15 +2218,36 @@ test("reader: the dictionary save button is usable from a selection explanation"
   await expect.poll(() => saveDictionaryCallCount(page)).toBe(1);
   const savedEntry = await lastSavedDictionaryEntry(page);
   expect(savedEntry?.keyText).toBe(READER_SUMMARY_TEXT);
+  // 辞書保存では ★ を付けない（★ は辞書画面などの ★ 操作だけで変える）。
+  expect(savedEntry?.isStarred).toBe(false);
   await expect(
     page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
 });
 
+test("reader: a saved dictionary hit without ★ is shown as 辞書保存済み", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  await enableSavedUnstarredExplainHit(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  // ★ の有無ではなく保存状態（savedInDictionary）で判定するため、★ なしでも保存済み表示になる。
+  const saved = page.getByRole("button", { name: "辞書保存済み" });
+  await expect(saved).toBeVisible();
+  await expect(saved).toBeDisabled();
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+});
+
 test("reader: current dictionary save failure is safe and can be retried", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
   await enableSaveDictionaryGate(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1636,20 +2289,8 @@ test("reader: current dictionary save failure is safe and can be retried", async
 test("reader: switching articles clears the previous selection and its explanation", async ({
   page,
 }) => {
-  // 記事詳細内の関連記事（rec-1）へ切り替えるためプールを2件用意する。
-  // プール2件だとホーム一覧のカード名が「件数記事N」になるため、当日ニュース一覧から記事Aを開く。
-  await page.addInitScript(() => {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    (window as any).__E2E_RECOMMENDED_POOL__ = 2;
-    /* eslint-enable @typescript-eslint/no-explicit-any */
-  });
-  await openHome(page);
-  await openTodayNewsList(page);
-  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
-  await expect(readerBackButton(page).first()).toBeVisible();
-  await expect.poll(() => readRequestedArticleId(page)).toBe("e2e-article-1");
-  await settleInitialPopupAndResetCount(page);
-  await closeInitialTermPopup(page); // 背面選択のため既定ポップアップを閉じる
+  // 記事詳細内の関連記事（rec-1）へ切り替えるためプールを2件用意して記事Aを開く。
+  await openReaderWithRelatedPool(page);
 
   // 記事Aで要約を選択して解説を開く。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -1667,16 +2308,17 @@ test("reader: switching articles clears the previous selection and its explanati
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toHaveCount(0);
   await expect(explainButton(page)).toHaveCount(0);
-  // 新しい記事のニュース閲覧は継続できる（既定の候補語ポップアップに戻る）。
-  await expect(
-    page.getByRole("heading", { name: "E2E用語" })
-  ).toBeVisible();
+  // 新しい記事を開いても用語解説は自動で開かず、解説 command も追加で呼ばれない。
+  await expect(page.locator("main h1")).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(termPopup(page)).toHaveCount(0);
+  expect(await explainTermCallCount(page)).toBe(1);
 });
 
 test("reader: a stale explanation request must not release the guard of an in-flight newer one", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithoutExplain(page);
   // 以降の explain_selected_term を到着順に個別保留する。
   await enableManualExplainGate(page);
 
@@ -1734,7 +2376,7 @@ test("reader: a stale explanation request must not release the guard of an in-fl
 test("reader: switching articles mid-request invalidates the old explanation and never resurfaces it", async ({
   page,
 }) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithRelatedPool(page);
   await enableManualExplainGate(page);
 
   // A: 記事Aの要約を選択して解説を開始（保留）。
@@ -1748,9 +2390,9 @@ test("reader: switching articles mid-request invalidates the old explanation and
   // 記事Bの getArticleDetail を保留する（B の内容がまだ返らない状態を維持）。
   await enableArticleDetailGate(page);
 
-  // 関連記事から記事B（article-001）へ切り替える。
+  // 関連記事から記事B（rec-1）へ切り替える。
   await page.getByRole("button", { name: "次の記事" }).click();
-  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect.poll(() => readRequestedArticleId(page)).toBe("rec-1");
 
   // 記事IDがBへ変わった直後（Bの詳細はまだ保留）: 旧記事Aの状態が即時に消えている。
   await expect
@@ -1780,17 +2422,16 @@ test("reader: switching articles mid-request invalidates the old explanation and
   // 以降の用語解説は通常どおり即時解決させる（記事Bのフローを正常化）。
   await disableManualExplainGate(page);
 
-  // 記事Bの getArticleDetail を完了 → 記事Bの内容と既存候補語ポップアップが正常表示される。
+  // 記事Bの getArticleDetail を完了 → 記事Bの内容が表示され、用語解説は自動では開かない。
+  // 開発時の StrictMode で取得が2回走ることがあるため、保留中の呼び出しをすべて解放する。
   await releaseArticleDetail(page, 0);
-  await expect(
-    page.getByRole("heading", { name: "E2E用語" })
-  ).toBeVisible();
-  await expect.poll(() => explainTermCallCount(page)).toBe(2); // 記事Bの候補語解説
-
-  // 記事Bで新しく文字列を選択して解説を実行できる。
-  // 表示中は背面選択がブロックされるため候補語ポップアップを閉じ、要約を可視位置へ戻してから選択する。
-  await page.getByRole("button", { name: "閉じる", exact: true }).click();
+  await releaseArticleDetail(page, 1);
+  await expect(page.locator("main h1")).toBeVisible();
+  await page.waitForTimeout(300);
   await expect(termPopup(page)).toHaveCount(0);
+  expect(await explainTermCallCount(page)).toBe(1); // 記事Aの1回だけ（記事Bで自動解説しない）
+
+  // 記事Bで新しく文字列を選択して解説を実行できる（要約を可視位置へ戻してから選択する）。
   await scrollSelectableContainer(page, "top");
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
@@ -1798,7 +2439,7 @@ test("reader: switching articles mid-request invalidates the old explanation and
   await expect(
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toBeVisible();
-  await expect.poll(() => explainTermCallCount(page)).toBe(3);
+  await expect.poll(() => explainTermCallCount(page)).toBe(2);
   const bArgs = await lastExplainTermArgs(page);
   expect(bArgs.selectedText).toBe(READER_SUMMARY_TEXT);
 });
@@ -1806,10 +2447,10 @@ test("reader: switching articles mid-request invalidates the old explanation and
 // 記事Aの辞書保存を保留し、記事Bへ切り替えてBの保存も開始・保留する共通セットアップ。
 // 戻り時点で「保存A=controller[0] 保留」「保存B=controller[1] 保留」「Bボタン=保存中...」。
 const setupCrossArticleSaveConflict = async (page: Page) => {
-  await openReaderAndSettleInitialPopup(page);
+  await openReaderWithRelatedPool(page);
   await enableSaveDictionaryGate(page);
 
-  // 記事Aの候補語ポップアップを開き直す（openReaderAndSettleInitialPopup で閉じているため）。
+  // 記事Aの候補語ポップアップを明示的に開く（記事を開いただけでは開かないため）。
   await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
 
@@ -1820,9 +2461,12 @@ const setupCrossArticleSaveConflict = async (page: Page) => {
   await expect.poll(() => saveDictionaryControllerCount(page)).toBe(1);
   expect(await saveDictionaryCallCount(page)).toBe(1);
 
-  // 記事B（article-001）へ切り替える。切替で旧A保存は stale 化される。
+  // 記事B（rec-1）へ切り替える。切替で旧A保存は stale 化される。
   await page.getByRole("button", { name: "次の記事" }).click();
-  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect.poll(() => readRequestedArticleId(page)).toBe("rec-1");
+  // 記事Bでも候補語を明示的に押して用語解説を開く。
+  await expect(termPopup(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
 
   // 記事Bで「辞書に保存」→ 保存B を保留（B が最新 request）。
@@ -1885,8 +2529,386 @@ test("reader: a stale dictionary save failure must not surface on the new articl
 
 // --- 用語解説ダイアログのドラッグ移動 ---
 
-test("term popup: dragging the background moves the dialog", async ({ page }) => {
+// ブラウザプレビュー用サンプル記事（article-001）の要点・注目ポイント。実記事では出てはいけない。
+const READER_SAMPLE_KEY_POINT = "投資対象が研究寄りから業務課題の解決寄りへ移っている";
+const READER_SAMPLE_TITLE = "生成AIスタートアップの資金調達が再加速";
+const READER_UNSUMMARIZED_TEXT = "要約はまだ準備中だよ。「要約を作成」で作れるよ。";
+// ブラウザプレビュー用サンプル記事の候補語・関連記事タイトル。Tauri の実記事画面では出てはいけない。
+const READER_SAMPLE_TERMS = [
+  "生成AI",
+  "資金調達",
+  "業務自動化",
+  "SaaS",
+  "導入支援",
+  "業務改善",
+  "量子コンピュータ",
+  "誤り訂正",
+  "研究成果",
+];
+const READER_SAMPLE_RELATED_TITLES = [
+  "国内SaaS企業、業務改善支援の新施策を発表",
+  "量子コンピュータ研究で新たな誤り訂正手法",
+];
+const READER_EMPTY_TERMS_HINT = "本文を選ぶと、ゆうこが解説するよ";
+
+// サンプル記事のタイトル・候補語・関連記事が画面（本文・右サイド）のどこにも出ていないことを確認する。
+const expectNoReaderSampleContent = async (page: Page) => {
+  await expect(page.getByText(READER_SAMPLE_TITLE)).toHaveCount(0);
+  await expect(page.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  for (const term of READER_SAMPLE_TERMS) {
+    await expect(page.getByText(term, { exact: true })).toHaveCount(0);
+  }
+  for (const title of READER_SAMPLE_RELATED_TITLES) {
+    await expect(page.getByText(title)).toHaveCount(0);
+  }
+};
+
+test("reader summary: a summarized article shows its summary, key points and 要約を更新", async ({
+  page,
+}) => {
   await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    READER_SUMMARY_TEXT
+  );
+  await expect(main.getByText("クリックできること")).toBeVisible();
+  await expect(main.getByText("UI確認中だよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
+test("reader summary: an unsummarized article shows the not-ready state without sample or excerpt text", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ =
+      true;
+  });
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toHaveCount(0);
+  await expect(
+    main.getByText("ゆうこの解説はまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(main.getByText("要点はまだ作成されていないよ。")).toBeVisible();
+  await expect(
+    main.getByText("注目ポイントはまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(
+    main.getByText("ゆうこの感想はまだ作成されていないよ。")
+  ).toBeVisible();
+  // サンプル記事の要点や、本文抜粋の流用が出ていない。
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  await expect(main.getByText(READER_SUMMARY_TEXT)).toHaveCount(0);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
+
+  // 「要約を作成」で既存の要約生成を呼び、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "要約を作成" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(main.getByText("主要ボタン")).toBeVisible();
+  await expect(main.getByText("確認できたよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+});
+
+// --- 自動要約の状態表示（判断台帳 D17） ---
+
+const READER_SUMMARY_IN_PROGRESS_TEXT =
+  "ゆうこが要約中です。できあがったらここに表示するね。";
+
+const setReaderSummaryState = async (page: Page, state: string) => {
+  await page.addInitScript((value) => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY_STATE__ =
+      value;
+  }, state);
+};
+
+test("reader summary: an article being summarized shows ゆうこが要約中です and picks up the summary without reload", async ({
+  page,
+}) => {
+  // 10秒間隔の完了確認を実時間で待たないよう、時計を差し替えて進める。
+  await page.clock.install();
+  await setReaderSummaryState(page, "processing");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
+  // 処理中は手動作成ボタンを出さない。抜粋も要約として出さない。
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作り直す" })).toHaveCount(0);
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
+
+  // 自動要約が完了した状態にする → 再読み込みせずに、次の定期確認で要約が表示される。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__E2E_ARTICLE_DETAIL_SUMMARY_STATE__;
+  });
+  await page.clock.runFor(11_000);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    READER_SUMMARY_TEXT
+  );
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+test("reader summary: a waiting article offers 今すぐ要約 via the manual summary", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(
+    main.getByText(
+      "要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。"
+    )
+  ).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+
+  // 既存の手動要約（generate_article_summary）で先に作り、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "今すぐ要約" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+test("reader summary: a failed article offers 要約を作り直す via the manual summary", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "failed");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(
+    main.getByText(
+      "要約の作成がうまくいかなかったよ。「要約を作り直す」でもう一度作れるよ。"
+    )
+  ).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+
+  // 既存の手動要約（generate_article_summary）で作り直し、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "要約を作り直す" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+test("reader summary: a not-queued article keeps the existing 要約を作成 display", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "none");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
+});
+
+const expectSummaryStateTags = async (page: Page) => {
+  const main = page.locator("main");
+  const cardOf = (title: string) =>
+    main.locator('[data-slot="card"]').filter({ hasText: title });
+  await expect(cardOf("要約待ちの記事").getByText("要約待ち", { exact: true })).toBeVisible();
+  await expect(cardOf("要約処理中の記事").getByText("ゆうこ要約中", { exact: true })).toBeVisible();
+  await expect(cardOf("要約失敗の記事").getByText("要約失敗", { exact: true })).toBeVisible();
+  // 要約済みの記事にはタグを出さない。
+  await expect(cardOf("要約済みの記事").getByTestId("summary-state-tag")).toHaveCount(0);
+};
+
+test("summary state tags: today news list shows 要約待ち / ゆうこ要約中 / 要約失敗", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+  await expectSummaryStateTags(page);
+});
+
+test("summary state tags: news history shows 要約待ち / ゆうこ要約中 / 要約失敗", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openNewsHistory(page);
+  await expectSummaryStateTags(page);
+});
+
+test("reader summary: browser preview (outside Tauri) keeps the sample article display", async ({
+  page,
+}) => {
+  await openHome(page);
+  // ホームのモック記事カードが出てから Tauri 外にする（記事詳細のマウント時に isTauriRuntime が false になる）。
+  await expect(
+    page.locator("main").getByText("E2Eテスト用ニュース").first()
+  ).toBeVisible();
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(
+    main.getByRole("heading", { name: READER_SAMPLE_TITLE })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  // サンプルの候補語・関連記事はブラウザプレビューでは従来どおり出る（用語解説は自動で開かない）。
+  await expect(page.getByText("生成AI", { exact: true }).first()).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_RELATED_TITLES[0])).toBeVisible();
+  await expect(termPopup(page)).toHaveCount(0);
+});
+
+test("reader summary: while the real article loads, a loading state is shown instead of the sample", async ({
+  page,
+}) => {
+  await openHome(page);
+  await enableArticleDetailGate(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByText("記事を読み込んでいるよ…")).toBeVisible();
+  // 読み込み中は本文・右サイド「用語サポート」・関連記事のどこにもサンプルを出さず、用語解説も開かない。
+  await expectNoReaderSampleContent(page);
+  await expect(termPopup(page)).toHaveCount(0);
+  expect(await explainTermCallCount(page)).toBe(0);
+
+  // 開発時の StrictMode で取得が2回走ることがあるため、保留中の呼び出しをすべて解放する。
+  await releaseArticleDetail(page, 0);
+  await releaseArticleDetail(page, 1);
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText("記事を読み込んでいるよ…")).toHaveCount(0);
+  await expectReaderOpenedWithoutExplain(page);
+});
+
+test("reader summary: a failed article load shows an error state with 再試行 instead of the sample", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = true;
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByRole("alert")).toHaveText(
+    "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
+  );
+  await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+  // 失敗時も本文・右サイド「用語サポート」・関連記事のどこにもサンプルを出さず、用語解説も開かない。
+  await expectNoReaderSampleContent(page);
+  await expect(termPopup(page)).toHaveCount(0);
+  expect(await explainTermCallCount(page)).toBe(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 再試行で取得できれば記事を表示する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = false;
+  });
+  await main.getByRole("button", { name: "再試行" }).click();
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
+test("reader: a real article with no keyword candidates shows the selection hint instead of sample terms or related articles", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EMPTY_KEYWORDS__ = true;
+  });
+  // 既定の関連記事モックは開いた記事と同じIDだけを返す（＝除外後は関連記事0件）。
+  await openReaderWithoutExplain(page);
+  const main = page.locator("main");
+
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(page.getByText(READER_EMPTY_TERMS_HINT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "E2E用語", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "すべての関連ワードを見る" })).toHaveCount(0);
+  // 関連記事・前後ナビもサンプル記事で埋めず、サンプル記事IDへ遷移できない。
+  await expect(main.getByText("関連記事はまだないよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "次の記事" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "前の記事" })).toBeDisabled();
+  await expectNoReaderSampleContent(page);
+
+  // 範囲選択＋「解説」を押したときだけ explain_selected_term が呼ばれる。
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  expect(await explainTermCallCount(page)).toBe(0);
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  expect((await lastExplainTermArgs(page)).articleId).toBe("e2e-article-1");
+});
+
+test("reader: a selection longer than 200 characters shows a hint and is not sent", async ({
+  page,
+}) => {
+  // Rust 側の上限（D21: trim 後 200 文字）を1文字だけ超える要約を用意する。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "あ".repeat(201);
+  });
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(page.getByText("もう少し短く選んでみてね")).toBeVisible();
+  await expect(explainButton(page)).toHaveCount(0);
+  await page.waitForTimeout(200);
+  expect(await explainTermCallCount(page)).toBe(0);
+  await expect(termPopup(page)).toHaveCount(0);
+
+  // 上限以内（ゆうこの再説明）を選び直すと案内が消えて「解説」ボタンが出る。
+  await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
+  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await expect(explainButton(page)).toBeVisible();
+});
+
+test("reader: a selection of exactly 200 characters can still be explained", async ({
+  page,
+}) => {
+  const text = "い".repeat(200);
+  await page.addInitScript((summary) => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      summary;
+  }, text);
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  expect((await lastExplainTermArgs(page)).selectedText).toBe(text);
+});
+
+test("term popup: dragging the background moves the dialog", async ({ page }) => {
+  await openReaderWithCandidatePopup(page);
   await expect(termPopup(page)).toBeVisible();
   await expectPopupCentered(page); // 初期は中央
 
@@ -1901,7 +2923,7 @@ test("term popup: dragging the background moves the dialog", async ({ page }) =>
 test("term popup: dragging from the term heading does not move the dialog", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
   await dragFromLocator(
     page,
@@ -1917,7 +2939,7 @@ test("term popup: dragging from the term heading does not move the dialog", asyn
 test("term popup: dragging from the short/detail explanation does not move the dialog", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
 
   const before = await popupBox(page);
   await dragFromLocator(
@@ -1937,7 +2959,7 @@ test("term popup: dragging from the short/detail explanation does not move the d
 });
 
 test("term popup: explanation text stays range-selectable", async ({ page }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
 
   // 詳細解説をダブルクリックで語選択（ドラッグは開始されない）。
@@ -1956,7 +2978,7 @@ test("term popup: explanation text stays range-selectable", async ({ page }) => 
 test("term popup: clicking 辞書に保存 does not drag and saves once", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
 
   await page.getByRole("button", { name: "辞書に保存" }).click();
@@ -1977,7 +2999,7 @@ test("term popup: clicking 再試行 does not drag and retries once", async ({
   await page.addInitScript(() => {
     (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_FAIL__ = true;
   });
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   // 失敗表示（再試行ボタン）が出る。
   const retry = page.getByRole("button", { name: "再試行" });
   await expect(retry).toBeVisible();
@@ -1995,14 +3017,14 @@ test("term popup: clicking 再試行 does not drag and retries once", async ({
 test("term popup: clicking 閉じる closes and does not start a drag", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await expect(termPopup(page)).toBeVisible();
   await page.getByRole("button", { name: "閉じる", exact: true }).click();
   await expect(termPopup(page)).toHaveCount(0);
 });
 
 test("term popup: right button does not start a drag", async ({ page }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
   const startX = before.x + before.width / 2;
   const startY = before.y + 6;
@@ -2016,7 +3038,7 @@ test("term popup: right button does not start a drag", async ({ page }) => {
 });
 
 test("term popup: pointercancel stops the drag", async ({ page }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
   const startX = before.x + before.width / 2;
   const startY = before.y + 6;
@@ -2046,7 +3068,7 @@ test("term popup: pointercancel stops the drag", async ({ page }) => {
 test("term popup: cannot be dragged completely outside the main area", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const mainBox = (await page.locator("main").boundingBox())!;
 
   // 左上へ大きくドラッグ → 左上端が main + 余白の内側に残る。
@@ -2069,7 +3091,7 @@ test("term popup: cannot be dragged completely outside the main area", async ({
 test("term popup: shrinking to a Tauri-like width keeps the close button reachable and clickable", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
   // Tauri 初期幅相当の 800px へ縮小。左右固定領域を除くと main は約304px（<固定幅320px）。
@@ -2120,7 +3142,7 @@ test("term popup: shrinking to a Tauri-like width keeps the close button reachab
 test("term popup: closing then reopening returns to the center", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 150, 100);
   await page.getByRole("button", { name: "閉じる", exact: true }).click();
   await expect(termPopup(page)).toHaveCount(0);
@@ -2134,7 +3156,7 @@ test("term popup: closing then reopening returns to the center", async ({
 test("term popup: switching to another term resets to the center", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 150, 100);
 
   // 別用語（Playwright）を開くと中央へ戻る。
@@ -2146,11 +3168,16 @@ test("term popup: switching to another term resets to the center", async ({
 test("term popup: switching articles leaves no stale drag position", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithRelatedPool(page);
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
   await dragPopupFromBackground(page, -150, -100); // 上部へ寄せて「次の記事」を隠さない
 
   await page.getByRole("button", { name: "次の記事" }).click();
-  await expect.poll(() => readRequestedArticleId(page)).toBe("article-001");
+  await expect.poll(() => readRequestedArticleId(page)).toBe("rec-1");
+  // 記事Bでは自動で開かない。候補語を押して開き直すと中央から始まる。
+  await expect(termPopup(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
   await expectPopupCentered(page);
 });
@@ -2159,7 +3186,7 @@ test("term popup: a popup opened from a range selection can be dragged", async (
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await explainButton(page).click();
   await expect(
@@ -2195,8 +3222,10 @@ test("term popup: switching to a same-text but different-id term resets to the c
     (window as unknown as Record<string, boolean>).__E2E_SAME_NAME_TERMS__ = true;
   });
   await openReaderFromHome(page);
+  await expectNoInitialTermPopup(page);
 
-  // 既定ポップアップは同名用語A（term-0）。中央から移動する。
+  // 同名用語A（term-0・候補ボタンの1つ目）を開き、中央から移動する。
+  await page.getByRole("button", { name: "同じ用語", exact: true }).nth(0).click();
   await expect(page.getByRole("heading", { name: "同じ用語" })).toBeVisible();
   await dragPopupFromBackground(page, 160, 110);
   const mainBox = (await page.locator("main").boundingBox())!;
@@ -2216,7 +3245,7 @@ test("term popup: switching to a same-text but different-id term resets to the c
 test("term popup: while open, the background article cannot be text-selected", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await expect(termPopup(page)).toBeVisible();
 
   // 背面のニュース要約を実マウスでドラッグしても選択されず、「解説」ボタンも出ない。
@@ -2237,7 +3266,7 @@ test("term popup: while open, the background article cannot be text-selected", a
 test("term popup: while open, a programmatic background selection does not show the 解説 button", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   await expect(termPopup(page)).toBeVisible();
 
   // CSS の user-select:none を無視して背面へ Range を作成し selectionchange を発火。
@@ -2261,7 +3290,7 @@ test("term popup: while open, a programmatic background selection does not show 
 test("term popup: text inside the popup stays selectable without showing the 解説 button", async ({
   page,
 }) => {
-  await openReaderFromHome(page);
+  await openReaderWithCandidatePopup(page);
   const before = await popupBox(page);
 
   // ポップアップ内の詳細解説はダブルクリックで語選択できる。
@@ -2282,7 +3311,7 @@ test("term popup: closing it restores background selection and the 解説 button
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
 
   // 閉じた後は背面の要約を範囲選択でき、選択文字列を取得できる。
   const selected = await selectContentsWithin(
@@ -2307,7 +3336,7 @@ test("term popup: opening it clears a pre-existing background selection and 解�
   page,
 }) => {
   await openReaderFromHome(page);
-  await closeInitialTermPopup(page);
+  await expectNoInitialTermPopup(page);
 
   // 閉じた状態で背面を選択 →「解説」ボタン表示。
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
@@ -2551,16 +3580,423 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
-// 「キャッシュを削除」も外した。残す「準備中」項目（アーカイブを管理）は残ることも確かめる。
+// 「キャッシュを削除」も外した。「アーカイブを管理」は準備中をやめ、データ管理タブのアーカイブ管理へ移動する（判断台帳 D26）。
 test("settings data panel has no dictionary export or cache delete item", async ({ page }) => {
   await openSettings(page);
 
   await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
   await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
   await expect(page.getByText(/キャッシュを削除/)).toHaveCount(0);
+  await expect(page.getByText("アーカイブを管理（準備中）")).toHaveCount(0);
+  await page.getByRole("button", { name: "アーカイブを管理", exact: true }).click();
+  // データ管理タブへ切り替わり、アーカイブ管理の見出しまでスクロールされる。
+  await expect(page.getByTestId("archive-manage-card")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "アーカイブを管理（準備中）" })
+    page.getByTestId("archive-manage-card").getByText("アーカイブ管理", { exact: true })
+  ).toBeInViewport();
+});
+
+// データ移行（設定画面「データ管理」。画面詳細設計書 SCR-003 §7 / データ設計書 §15.6・§15.7）。
+const readWindowValue = (page: Page, key: string) =>
+  page.evaluate(
+    (name) => (window as unknown as Record<string, unknown>)[name],
+    key
+  );
+
+const openDataManagement = async (page: Page) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "データ管理");
+};
+
+test("settings data management exports and opens only the exports folder", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await expect(
+    page.getByRole("button", { name: "書き出し先フォルダを開く" })
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "データを書き出す" }).click();
+
+  const result = page.getByTestId("migration-export-result");
+  await expect(page.getByTestId("migration-export-status")).toContainText(
+    "書き出しが終わったよ！"
+  );
+  await expect(result).toContainText("yuuko_transfer_tr_20261008140000.zip");
+  await expect(result).toContainText("12件");
+  await expect(result).toContainText("ニュース9件");
+  // フルパスは表示しない（Rust もファイル名しか返さない）。
+  await expect(page.getByText(/exports[\\/]/)).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_MIGRATION_EXPORT_CALLS__")).toBe(1);
+
+  await page.getByRole("button", { name: "書き出し先フォルダを開く" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_MIGRATION_OPEN_FOLDER_CALLS__"))
+    .toEqual(["exports"]);
+  await expect(page.getByTestId("migration-folder-error")).toHaveCount(0);
+});
+
+test("settings data management export failure shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_EXPORT_FAIL__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "データを書き出す" }).click();
+  await expect(page.getByTestId("migration-export-status")).toHaveText(
+    "書き出しに失敗しちゃった。少し時間を置いて、もう一度試してみてね。"
+  );
+  await expect(page.getByTestId("migration-export-result")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "書き出し先フォルダを開く" })
+  ).toHaveCount(0);
+  await expect(page.getByText(/secret/)).toHaveCount(0);
+});
+
+test("settings data management lists import candidates with name, date and size", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  const list = page.getByTestId("migration-import-list");
+  await expect(list).toContainText("yuuko_transfer_tr_20261001090000.zip");
+  await expect(list).toContainText(/作成日時 2026\/(09\/30|10\/01) \d{2}:\d{2}/);
+  await expect(list).toContainText("5.0 MB");
+  await expect(page.getByTestId("migration-import-empty")).toHaveCount(0);
+});
+
+test("settings data management shows the empty state and opens the imports folder", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORTS__ = [];
+  });
+  await openDataManagement(page);
+
+  await expect(page.getByTestId("migration-import-empty")).toContainText(
+    "imports フォルダに移行用ZIPを置いてね"
+  );
+  await page.getByRole("button", { name: "imports フォルダを開く" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_MIGRATION_OPEN_FOLDER_CALLS__"))
+    .toEqual(["imports"]);
+
+  // 置いた後に「一覧を更新」で候補が出る。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORTS__ = [
+      {
+        fileName: "yuuko_transfer_tr_new.zip",
+        sizeBytes: 10,
+        createdAt: null,
+      },
+    ];
+  });
+  await page.getByRole("button", { name: "一覧を更新" }).click();
+  await expect(page.getByTestId("migration-import-list")).toContainText(
+    "yuuko_transfer_tr_new.zip"
+  );
+  await expect(page.getByTestId("migration-import-list")).toContainText(
+    "作成日時 不明"
+  );
+});
+
+test("settings data management folder open failure shows fixed wording", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_MIGRATION_OPEN_FOLDER_FAIL__ = true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "imports フォルダを開く" }).click();
+  await expect(page.getByTestId("migration-folder-error")).toHaveText(
+    "フォルダを開けなかったよ。もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret/)).toHaveCount(0);
+});
+
+test("settings data management imports only after confirmation, blocks other actions, then restarts", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (
+      window as unknown as Record<string, unknown>
+    ).__E2E_MIGRATION_IMPORT_DELAY_MS__ = 800;
+  });
+  await openDataManagement(page);
+
+  const importButton = page.getByRole("button", {
+    name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+  });
+
+  // キャンセルでは取り込まない。
+  await importButton.click();
+  const confirm = page.getByRole("alertdialog", {
+    name: "データを読み込みますか？",
+  });
+  await expect(confirm).toContainText("すべて置き換わります");
+  await expect(confirm).toContainText("自動でバックアップ");
+  await expect(confirm).toContainText("再起動します");
+  await confirm.getByRole("button", { name: "キャンセル" }).click();
+  await expect(confirm).toHaveCount(0);
+  expect(
+    await readWindowValue(page, "__E2E_MIGRATION_IMPORT_CALLS__")
+  ).toBeUndefined();
+
+  await importButton.click();
+  await confirm.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  // 取り込み中は閉じられないダイアログで覆い、保存ボタンも無効にする。
+  const importing = page.getByTestId("migration-importing-dialog");
+  await expect(importing).toBeVisible();
+  // モーダル表示中は背景が支援技術から隠れるため includeHidden で探す。
+  await expect(
+    page.getByRole("button", { name: "保存する", includeHidden: true })
   ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(importing).toBeVisible();
+
+  const done = page.getByTestId("migration-import-done-dialog");
+  await expect(done).toBeVisible();
+  await expect(importing).toHaveCount(0);
+  await expect(done).toContainText("20件のファイル");
+  expect(await readWindowValue(page, "__E2E_MIGRATION_IMPORT_CALLS__")).toEqual([
+    "yuuko_transfer_tr_20261001090000.zip",
+  ]);
+  // 取り込み中に設定の保存は呼ばれていない。
+  expect(await readSavedSettings(page)).toBeUndefined();
+
+  await done.getByRole("button", { name: "再起動する" }).click();
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_RESTART_APP_CALLS__"))
+    .toBe(1);
+});
+
+test("settings data management later-button after import reloads the screen", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+  const done = page.getByTestId("migration-import-done-dialog");
+  await expect(done).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_BEFORE_RELOAD__ = true;
+  });
+  await done
+    .getByRole("button", { name: "あとで（画面だけ読み込み直す）" })
+    .click();
+  // 読み込み直すと window の値が消え、ホームから表示し直される。
+  await expect
+    .poll(() => readWindowValue(page, "__E2E_BEFORE_RELOAD__"))
+    .toBeUndefined();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  expect(await readWindowValue(page, "__E2E_RESTART_APP_CALLS__")).toBeUndefined();
+});
+
+test("settings data management import failure shows fixed wording and keeps the screen", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORT_FAIL__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  await expect(page.getByTestId("migration-import-status")).toHaveText(
+    "このZIPは取り込めなかったよ。ゆうこで書き出した移行用ZIPか、壊れていないか確かめてね。今のデータはそのままだよ。"
+  );
+  await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("migration-importing-dialog")).toHaveCount(0);
+  await expect(page.getByText(/import zip was rejected/)).toHaveCount(0);
+});
+
+test("settings data management unfinished previous import shows the restore guidance", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_MIGRATION_IMPORT_FAIL__ =
+      "incomplete";
+  });
+  await openDataManagement(page);
+
+  await page
+    .getByRole("button", {
+      name: "yuuko_transfer_tr_20261001090000.zip を読み込む",
+    })
+    .click();
+  await page.getByRole("button", { name: "置き換えて読み込む" }).click();
+
+  await expect(page.getByTestId("migration-import-status")).toHaveText(
+    "前回の取り込みが途中で止まっているため、取り込めなかったよ。バックアップからデータを戻してから、もう一度試してね。"
+  );
+  await expect(page.getByTestId("migration-import-done-dialog")).toHaveCount(0);
+});
+
+// アーカイブ管理（設定画面「データ管理」。判断台帳 D26 / データ設計書 §14.8）。
+test("settings archive management lists months newest first with count, size and delete state", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  const list = page.getByTestId("archive-manage-list");
+  await expect(list.getByRole("listitem")).toHaveCount(3);
+  await expect(list.getByRole("listitem").nth(0)).toContainText("2026年9月");
+  await expect(list.getByRole("listitem").nth(1)).toContainText("2026年7月");
+  await expect(list.getByRole("listitem").nth(2)).toContainText("2026年6月");
+
+  const september = page.getByTestId("archive-month-2026-09");
+  await expect(september).toContainText("12件・1.5 MB");
+  await expect(september).toContainText("最近の月はまだ削除できないよ");
+  await expect(
+    page.getByRole("button", { name: "2026年9月のアーカイブを削除" })
+  ).toBeDisabled();
+
+  const july = page.getByTestId("archive-month-2026-07");
+  await expect(july).toContainText("30件・3.3 MB");
+  await expect(july).not.toContainText("まだ削除できない");
+  await expect(
+    page.getByRole("button", { name: "2026年7月のアーカイブを削除" })
+  ).toBeEnabled();
+  await expect(page.getByTestId("archive-month-2026-06")).toContainText("8件・0.8 MB");
+});
+
+test("settings archive management deletes a month after confirming and refreshes the list", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  const dialog = page.getByTestId("archive-delete-confirm-dialog");
+  await expect(dialog).toContainText("2026年7月のアーカイブを削除しますか？");
+  await expect(page.getByTestId("archive-delete-confirm-summary")).toHaveText(
+    "30件 / 3.3 MBのアーカイブが削除され、元に戻せません。"
+  );
+  await expect(dialog).toContainText("2件は、通常のニュースとして残ります。");
+
+  // キャンセルでは何も消さない。
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toBeUndefined();
+  await expect(page.getByTestId("archive-month-2026-07")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_DELETE_DELAY_MS__ = 400;
+  });
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  // 削除中は他の月の削除・一覧更新を押せない。
+  await expect(
+    page.getByRole("button", { name: "2026年6月のアーカイブを削除" })
+  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "アーカイブを読み直す" })).toBeDisabled();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年7月のアーカイブ（30件）を削除したよ。"
+  );
+  await expect(page.getByTestId("archive-month-2026-07")).toHaveCount(0);
+  await expect(page.getByTestId("archive-manage-list").getByRole("listitem")).toHaveCount(2);
+  await expect(
+    page.getByRole("button", { name: "2026年6月のアーカイブを削除" })
+  ).toBeEnabled();
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toEqual([
+    "2026-07",
+  ]);
+});
+
+test("settings archive management still reports success when zip cleanup is pending", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_DELETE_CLEANUP_PENDING__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年6月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年6月のアーカイブ（8件）を削除したよ。ファイルの片付けが一部終わらなかったけど、表示や動作には影響ないよ。"
+  );
+  await expect(page.getByTestId("archive-month-2026-06")).toHaveCount(0);
+});
+
+test("settings archive management shows fixed wording when a month cannot be deleted", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_PREVIEW_FAIL__ =
+      "2026-07";
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "この月はまだ削除できないよ。お気に入りの記事がアーカイブにだけ残っている月は、消えないように削除を止めているよ。"
+  );
+  await expect(page.getByTestId("archive-manage-status")).toHaveAttribute("role", "alert");
+  await expect(page.getByTestId("archive-delete-confirm-dialog")).toHaveCount(0);
+  await expect(page.getByText(/secret|validation error/)).toHaveCount(0);
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toBeUndefined();
+  await expect(page.getByTestId("archive-month-2026-07")).toBeVisible();
+});
+
+test("settings archive management hides stale months when the reload after delete fails", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ =
+      true;
+  });
+  await openDataManagement(page);
+
+  await page.getByRole("button", { name: "2026年6月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年6月のアーカイブ（8件）を削除したよ。"
+  );
+  await expect(page.getByTestId("archive-manage-status")).toHaveAttribute("role", "status");
+  await expect(page.getByTestId("archive-manage-list-error")).toBeVisible();
+  await expect(page.getByTestId("archive-manage-list")).toHaveCount(0);
+  await expect(page.getByText(/secret/)).toHaveCount(0);
+});
+
+test("settings archive management shows an empty state without archives", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARCHIVE_MONTHS__ = [];
+  });
+  await openDataManagement(page);
+
+  await expect(page.getByTestId("archive-manage-empty")).toContainText(
+    "アーカイブはまだないよ"
+  );
+  await expect(page.getByTestId("archive-manage-list")).toHaveCount(0);
 });
 
 // MVP対象設定の読込 → 画面反映（selectedThemeId の読み取り専用表示を含む）。
@@ -3184,6 +4620,91 @@ for (const screen of sidebarAutostartOpeners) {
   });
 }
 
+// サイドバーの「常駐を終了する」は確認ダイアログを挟んでから quit_resident_app を呼ぶ
+// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホーム（MainScreen）は別タスクのため対象外。
+const quitResidentOpeners = [
+  ...sidebarAutostartScreens.map((screen) => ({
+    id: screen.id,
+    open: (page: Page) =>
+      openScreenFromSidebar(page, screen.navName, screen.heading),
+  })),
+  { id: "reader", open: openReaderFromHome },
+] as const;
+
+const quitAppCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_QUIT_APP_CALLS__ as
+        | number
+        | undefined) ?? 0
+  );
+
+const quitResidentButton = (page: Page) =>
+  page.getByRole("button", { name: "常駐を終了する" }).first();
+
+for (const screen of quitResidentOpeners) {
+  test(`quit resident on ${screen.id} asks for confirmation before calling the command`, async ({
+    page,
+  }) => {
+    await screen.open(page);
+
+    // キャンセルでは終了しない（誤操作防止）。
+    await quitResidentButton(page).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("常駐を終了しますか？")).toBeVisible();
+    await dialog.getByRole("button", { name: "キャンセル" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(0);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+    await expect.poll(() => quitAppCalls(page)).toBe(1);
+  });
+}
+
+for (const failure of [
+  {
+    code: "MIGRATION_BUSY",
+    message: "データの書き出し・取り込みが終わってから、もう一度終了してね。",
+  },
+  {
+    code: "UNEXPECTED",
+    message:
+      "常駐を終了できなかったよ。もう一度試すか、トレイの「常駐を終了する」を使ってね。",
+  },
+]) {
+  test(`quit resident failure (${failure.code}) shows a fixed toast and keeps the screen`, async ({
+    page,
+  }) => {
+    await page.addInitScript((code) => {
+      (window as unknown as Record<string, unknown>).__E2E_QUIT_APP_FAIL_CODE__ =
+        code;
+    }, failure.code);
+    await openDictionary(page);
+
+    await quitResidentButton(page).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "終了する", exact: true })
+      .click();
+
+    await expect(
+      page.getByText(failure.message, { exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    expect(await quitAppCalls(page)).toBe(1);
+    // 画面は落ちず、生エラーも出さない。
+    await expect(
+      page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+    ).toBeVisible();
+    await expect(page.getByText("secret/path")).toHaveCount(0);
+  });
+}
+
 test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
   page,
 }) => {
@@ -3305,6 +4826,9 @@ test("settings non-corrupt load failure keeps the generic message without the re
   ).toHaveCount(0);
   await expect(page.getByText("設定ファイルが壊れていて")).toHaveCount(0);
   await expect(page.getByText("secret/path")).toHaveCount(0);
+  // 画面の値は既定値なので、変更しても保存で実ファイルを上書きできない。
+  await page.getByRole("switch").first().click();
+  await expect(page.getByRole("button", { name: "保存する", exact: true })).toBeDisabled();
 });
 
 // 抑制条件: 未実装の抑制は「準備中」で操作不可。会議中・マイク使用中・フルスクリーン抑制は
@@ -4244,6 +5768,94 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
   await expect(notification).toHaveCount(0);
 });
 
+// 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
+const REWARD_NOTICE_TEXT =
+  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+
+async function enableRewardNotice(page: Page) {
+  await page.addInitScript((text: string) => {
+    (window as unknown as Record<string, unknown>).__E2E_BACKEND_ACTIVE__ = {
+      state: "RewardNotifying",
+      positionMode: "RightBottom",
+      balloonText: text,
+      hasNotification: true,
+      rewardNotification: {
+        pending: true,
+        rank: 3,
+        rewardIds: ["theme_001"],
+        message: text,
+      },
+    };
+  }, REWARD_NOTICE_TEXT);
+}
+
+test("pending reward notice shows a balloon with OK and confirms through handle_yuuko_clicked", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  // ニュースの2段階クリック（プレビュー・詳しく見る）は出ない。
+  await expect(
+    notification.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+  await expect(
+    notification.getByRole("button", { name: "詳しく見る" })
+  ).toHaveCount(0);
+
+  await notification.getByRole("button", { name: "OK", exact: true }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(
+    0
+  );
+  // 記事詳細へは遷移しない。
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+});
+
+test("pending reward notice is not auto-dismissed after the balloon timeout", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+
+  // ニュースの吹き出し（20秒）・軽量プレビュー（30秒）より長く放置しても退場しない（§9.4）。
+  await page.clock.fastForward(40000);
+  await page.clock.fastForward(1000);
+
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+});
+
+test("closing the pending reward notice uses dismiss (stays unconfirmed)", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  await notification.getByRole("button", { name: "通知を閉じる" }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  expect(await readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__")).toBe(0);
+});
+
 test("does not show the in-app notification when there is no candidate", async ({
   page,
 }) => {
@@ -5105,6 +6717,27 @@ test("onboarding overlay is not shown for completed or legacy settings", async (
   expect(await readSavedSettingsRecord(page)).toBeUndefined();
 });
 
+// D31 / D84: 自動起動は初期値 OFF のまま、ON を勧める一言をスイッチの説明として出す。
+test("onboarding overlay recommends autostart while keeping it off by default", async ({
+  page,
+}) => {
+  await setOnboardingPending(page);
+  await page.goto("/");
+  const dialog = onboardingDialog(page);
+  await expect(dialog).toBeVisible();
+
+  const autostartSwitch = dialog.getByRole("switch", {
+    name: "PC起動時の自動起動",
+  });
+  await expect(autostartSwitch).toHaveAttribute("aria-checked", "false");
+  await expect(
+    dialog.getByText("ONにしておくと、PCを起動したときにゆうこがすぐ来てくれるよ")
+  ).toBeVisible();
+  await expect(autostartSwitch).toHaveAccessibleDescription(
+    "ONにしておくと、PCを起動したときにゆうこがすぐ来てくれるよ"
+  );
+});
+
 test("onboarding overlay autostart opt-in calls set_autostart_enabled", async ({
   page,
 }) => {
@@ -5241,6 +6874,9 @@ test("gacha screen shows real fragments, collection with ？ and remaining count
   await expect(page.getByTestId("gacha-star-fragments")).toHaveText("30");
   await expect(page.getByTestId("gacha-collection-count")).toHaveText("2 / 4");
   await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("のこり 2");
+  // フッターは固定の「3件届いてるよ」ではなく、取得済みのコレクション状況を出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.locator("footer").getByText("コレクション 2 / 4")).toBeVisible();
   await expect(page.getByTestId("gacha-collection-owned")).toHaveCount(2);
   await expect(page.getByTestId("gacha-collection-unowned")).toHaveCount(2);
   await expect(page.getByTestId("gacha-collection-unowned").first()).toContainText("？");
@@ -5604,6 +7240,28 @@ async function installTauriMocks(page: Page) {
                 : items;
             }
 
+            // アーカイブ復元テスト用: アーカイブ済み1件。復元に成功した後の読み直しでは未アーカイブとして返す。
+            if (historyWin.__E2E_HISTORY_ARCHIVED__) {
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "arch-1",
+                  title: "アーカイブ済みの記事",
+                  isArchived: !historyWin.__E2E_ARCHIVE_RESTORED__,
+                },
+              ];
+            }
+
+            // 自動要約タグ用（判断台帳 D17）: 待機中・処理中・失敗・完了の4件。
+            if (historyWin.__E2E_HISTORY_SUMMARY_STATES__) {
+              return [
+                { ...articleHistoryItem, articleId: "sum-waiting", title: "要約待ちの記事", summaryState: "waiting" },
+                { ...articleHistoryItem, articleId: "sum-processing", title: "要約処理中の記事", summaryState: "processing" },
+                { ...articleHistoryItem, articleId: "sum-failed", title: "要約失敗の記事", summaryState: "failed" },
+                { ...articleHistoryItem, articleId: "sum-done", title: "要約済みの記事", summaryState: "done" },
+              ];
+            }
+
             // 空状態テスト用: 空配列を返す。
             if (historyWin.__E2E_HISTORY_EMPTY__) {
               return [];
@@ -5694,17 +7352,54 @@ async function installTauriMocks(page: Page) {
                 resolvers.push(resolve);
               });
             }
+            // 取得失敗モード: 本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+            if (detailWin.__E2E_ARTICLE_DETAIL_FAIL__) {
+              throw {
+                code: "STORAGE_ERROR",
+                message: "E2E raw detail failure /internal/secret/path",
+              };
+            }
+            // 自動要約の途中・失敗モード（判断台帳 D17）: 未要約と同じ形で、状態だけを差し替える。
+            // テスト中にフラグを消すと、次の読み直しで要約済みの記事として返る（完了の再現）。
+            if (typeof detailWin.__E2E_ARTICLE_DETAIL_SUMMARY_STATE__ === "string") {
+              return {
+                ...articleSummary,
+                originalUrl: "https://example.com/e2e-article",
+                focusPoints: [],
+                keywordCandidates: ["E2E用語", "Playwright"],
+                summaryState: detailWin.__E2E_ARTICLE_DETAIL_SUMMARY_STATE__,
+              };
+            }
+            // 未要約モード: Rust と同じく summary には本文抜粋が入り、AI 生成項目は空で届く。
+            if (detailWin.__E2E_ARTICLE_DETAIL_UNSUMMARIZED__) {
+              return {
+                ...articleSummary,
+                originalUrl: "https://example.com/e2e-article",
+                focusPoints: [],
+                keywordCandidates: ["E2E用語", "Playwright"],
+                summaryState: "none",
+              };
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
+              // 長い選択の検証用: フラグ時は要約本文を差し替える（選択上限 200 文字の前後を作る）。
+              summary:
+                typeof detailWin.__E2E_ARTICLE_DETAIL_SUMMARY__ === "string"
+                  ? detailWin.__E2E_ARTICLE_DETAIL_SUMMARY__
+                  : articleSummary.summary,
               originalUrl: "https://example.com/e2e-article",
+              summaryState: "done",
               yuukoExplanation: "E2E用の要約です。",
               focusPoints: ["クリックできること", "表示が崩れないこと"],
               yuukoComment: "UI確認中だよ。",
               // 同名・別IDの用語切替テスト用: フラグ時は表示文字列が同じ2候補（ID は別になる）。
-              keywordCandidates: detailWin.__E2E_SAME_NAME_TERMS__
-                ? ["同じ用語", "同じ用語"]
-                : ["E2E用語", "Playwright"],
+              // 候補語なしテスト用: フラグ時は空（実記事で候補語が無い状態）。
+              keywordCandidates: detailWin.__E2E_EMPTY_KEYWORDS__
+                ? []
+                : detailWin.__E2E_SAME_NAME_TERMS__
+                  ? ["同じ用語", "同じ用語"]
+                  : ["E2E用語", "Playwright"],
             };
           }
           // お気に入り更新。失敗テストでは本番と同じ CommandError 形式で reject する
@@ -5720,6 +7415,35 @@ async function installTauriMocks(page: Page) {
               };
             }
             return params;
+          // アーカイブ済み1記事の復元。渡された params を記録する。
+          // 保留モードでは解放されるまで待ち（実行中の二重起動防止の検証用）、
+          // 失敗モードでは本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+          case "restore_archived_article": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const restoreWin = window as any;
+            restoreWin.__E2E_RESTORE_ARCHIVED_ARGS__ = [
+              ...(restoreWin.__E2E_RESTORE_ARCHIVED_ARGS__ || []),
+              args?.params ?? null,
+            ];
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_GATE__) {
+              await new Promise((resolve) => {
+                restoreWin.__E2E_RESTORE_ARCHIVED_RELEASE__ = resolve;
+              });
+            }
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_FAIL__) {
+              throw {
+                code: "ARCHIVE_ERROR",
+                message: "E2E raw restore failure /internal/secret/archive.zip",
+              };
+            }
+            // 応答の記事ID不一致を再現するモード（遷移せず失敗扱いになることの検証用）。
+            if (restoreWin.__E2E_RESTORE_ARCHIVED_MISMATCH__) {
+              return { articleId: "other-article", status: "restored" };
+            }
+            restoreWin.__E2E_ARCHIVE_RESTORED__ = true;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return { articleId: params.articleId, status: "restored" };
+          }
           // 「元記事を開く」。渡された記事IDを記録する。失敗テストでは本番と同じ CommandError 形式で reject する
           // （生エラー文言・内部パスが UI へ出ないことを検証するための識別子を含める）。
           case "open_original_article": {
@@ -5861,6 +7585,247 @@ async function installTauriMocks(page: Page) {
             return params.enabled;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
+          // データ移行（設定画面「データ管理」）。呼び出しを記録し、失敗・遅延はフラグで切り替える。
+          // 失敗時のエラー文には内部パス風の識別子を含め、画面へ出ないことを確かめる。
+          case "export_migration_data": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_EXPORT_CALLS__ =
+              (migrationWin.__E2E_MIGRATION_EXPORT_CALLS__ || 0) + 1;
+            if (migrationWin.__E2E_MIGRATION_EXPORT_FAIL__) {
+              throw {
+                code: "IO_ERROR",
+                message: "E2E export failure C:/secret/path/exports",
+              };
+            }
+            return {
+              fileName: "yuuko_transfer_tr_20261008140000.zip",
+              fileCount: 12,
+              articleCount: 9,
+              archiveCount: 1,
+              totalBytes: 2048,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "list_migration_imports": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            return (
+              migrationWin.__E2E_MIGRATION_IMPORTS__ ?? [
+                {
+                  fileName: "yuuko_transfer_tr_20261001090000.zip",
+                  sizeBytes: 5 * 1024 * 1024,
+                  createdAt: "2026-10-01T09:00:00+09:00",
+                },
+              ]
+            );
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "import_migration_data": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_IMPORT_CALLS__ = [
+              ...(migrationWin.__E2E_MIGRATION_IMPORT_CALLS__ || []),
+              (args as any)?.fileName,
+            ];
+            if (migrationWin.__E2E_MIGRATION_IMPORT_DELAY_MS__) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, migrationWin.__E2E_MIGRATION_IMPORT_DELAY_MS__)
+              );
+            }
+            // 本番の CommandError と同じ形（専用コード＋固定文言）で返す。
+            if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__ === "incomplete") {
+              throw {
+                code: "IMPORT_INCOMPLETE_PREVIOUS",
+                message:
+                  "a previous import did not finish; restore from the backup first",
+              };
+            }
+            if (migrationWin.__E2E_MIGRATION_IMPORT_FAIL__) {
+              throw {
+                code: "IMPORT_ZIP_REJECTED",
+                message: "import zip was rejected",
+              };
+            }
+            return {
+              fileName: (args as any)?.fileName,
+              fileCount: 20,
+              articleCount: 15,
+              archiveCount: 2,
+              totalBytes: 4096,
+              restartRequired: true,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // アーカイブ管理（設定画面「データ管理」。判断台帳 D26）。月の一覧は window に持ち、削除で減らす。
+          // 失敗時のエラー文には内部向けの英語・パス風の文字列を含め、画面へ出ないことを確かめる。
+          case "list_archive_months": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            if (
+              archiveWin.__E2E_ARCHIVE_LIST_FAIL__ ||
+              (archiveWin.__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ &&
+                archiveWin.__E2E_ARCHIVE_DELETE_CALLS__)
+            ) {
+              throw { code: "IO_ERROR", message: "failed to read C:/secret/archive_index.json" };
+            }
+            if (!archiveWin.__E2E_ARCHIVE_MONTHS__) {
+              archiveWin.__E2E_ARCHIVE_MONTHS__ = [
+                {
+                  month: "2026-09",
+                  articleCount: 12,
+                  catalogComplete: true,
+                  sizeBytes: 1.5 * 1024 * 1024,
+                  deletable: false,
+                },
+                {
+                  month: "2026-07",
+                  articleCount: 30,
+                  catalogComplete: true,
+                  sizeBytes: 3.25 * 1024 * 1024,
+                  deletable: true,
+                },
+                {
+                  month: "2026-06",
+                  articleCount: 8,
+                  catalogComplete: true,
+                  sizeBytes: 800 * 1024,
+                  deletable: true,
+                },
+              ];
+            }
+            return archiveWin.__E2E_ARCHIVE_MONTHS__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // 過去ニュース画面（判断台帳 D14 / D90）。月を記録し、window で指定された記事一覧を返す。
+          // 失敗モードではパス風の文字列を含めて reject し、画面へ出ないことを確かめる。
+          case "list_archive_month_articles": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const pastWin = window as any;
+            const month = params.month as string;
+            pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__ = [
+              ...(pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__ || []),
+              month,
+            ];
+            if (pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_FAIL__) {
+              throw { code: "IO_ERROR", message: "failed to read C:/secret/archive_index.json" };
+            }
+            const restored = Boolean(pastWin.__E2E_ARCHIVE_RESTORED__);
+            const articles =
+              month === "2026-09"
+                ? [
+                    {
+                      ...articleHistoryItem,
+                      articleId: "past-1",
+                      title: "9月のアーカイブ記事",
+                      isArchived: !restored,
+                    },
+                    {
+                      ...articleHistoryItem,
+                      articleId: "past-2",
+                      title: "9月のもうひとつの記事",
+                      isArchived: true,
+                    },
+                  ]
+                : [];
+            return { month, catalogComplete: true, articles };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_archive_month_delete_preview": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            const month = params.month as string;
+            archiveWin.__E2E_ARCHIVE_PREVIEW_CALLS__ = [
+              ...(archiveWin.__E2E_ARCHIVE_PREVIEW_CALLS__ || []),
+              month,
+            ];
+            if (archiveWin.__E2E_ARCHIVE_PREVIEW_FAIL__ === month) {
+              throw {
+                code: "VALIDATION_ERROR",
+                message:
+                  "validation error: a favorite article exists only in this archive C:/secret/archive",
+              };
+            }
+            const entry = (archiveWin.__E2E_ARCHIVE_MONTHS__ || []).find(
+              (item: any) => item.month === month
+            );
+            if (!entry) {
+              throw { code: "NOT_FOUND_ERROR", message: "archive month not found" };
+            }
+            return {
+              month,
+              articleCount: entry.articleCount,
+              sizeBytes: entry.sizeBytes,
+              keptArticleCount: 2,
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "delete_archive_month": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const archiveWin = window as any;
+            const month = params.month as string;
+            archiveWin.__E2E_ARCHIVE_DELETE_CALLS__ = [
+              ...(archiveWin.__E2E_ARCHIVE_DELETE_CALLS__ || []),
+              month,
+            ];
+            if (archiveWin.__E2E_ARCHIVE_DELETE_DELAY_MS__) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, archiveWin.__E2E_ARCHIVE_DELETE_DELAY_MS__)
+              );
+            }
+            const entry = (archiveWin.__E2E_ARCHIVE_MONTHS__ || []).find(
+              (item: any) => item.month === month
+            );
+            archiveWin.__E2E_ARCHIVE_MONTHS__ = (
+              archiveWin.__E2E_ARCHIVE_MONTHS__ || []
+            ).filter((item: any) => item.month !== month);
+            return {
+              month,
+              deletedArticleCount: entry?.articleCount ?? 0,
+              keptArticleCount: 2,
+              cleanupPending: Boolean(archiveWin.__E2E_ARCHIVE_DELETE_CLEANUP_PENDING__),
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "open_migration_folder": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_MIGRATION_OPEN_FOLDER_CALLS__ = [
+              ...(migrationWin.__E2E_MIGRATION_OPEN_FOLDER_CALLS__ || []),
+              (args as any)?.kind,
+            ];
+            if (migrationWin.__E2E_MIGRATION_OPEN_FOLDER_FAIL__) {
+              throw {
+                code: "OPEN_FOLDER_FAILED",
+                message: "failed to open C:/secret/path",
+              };
+            }
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "restart_app": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const migrationWin = window as any;
+            migrationWin.__E2E_RESTART_APP_CALLS__ =
+              (migrationWin.__E2E_RESTART_APP_CALLS__ || 0) + 1;
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "quit_resident_app": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const quitWin = window as any;
+            quitWin.__E2E_QUIT_APP_CALLS__ =
+              (quitWin.__E2E_QUIT_APP_CALLS__ || 0) + 1;
+            // 失敗時の表示確認用。生エラー（内部パス入り）が画面に出ないことも確かめる。
+            if (quitWin.__E2E_QUIT_APP_FAIL_CODE__) {
+              throw {
+                code: quitWin.__E2E_QUIT_APP_FAIL_CODE__,
+                message: "failed at C:/secret/path",
+              };
+            }
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "test_ai_provider": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const aiTestWin = window as any;
@@ -5947,10 +7912,22 @@ async function installTauriMocks(page: Page) {
             if (explainWin.__E2E_EXPLAIN_TERM_FAIL__) {
               throw new Error("E2E explain term failure /internal/secret/path");
             }
+            // コード別失敗テスト用: 実 Tauri と同じ CommandError 形（code/message）で失敗させる。
+            if (explainWin.__E2E_EXPLAIN_TERM_FAIL_CODE__) {
+              throw {
+                code: explainWin.__E2E_EXPLAIN_TERM_FAIL_CODE__,
+                message: "E2E explain term failure /internal/secret/path",
+              };
+            }
+            // 保存済み辞書の命中（★ は外した状態）を返すテスト用。
+            const savedUnstarred =
+              explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...dictionaryEntry,
               keyText: params.selectedText,
+              isStarred: false,
+              savedInDictionary: savedUnstarred,
             };
           }
           case "save_dictionary_entry": {
@@ -5965,7 +7942,11 @@ async function installTauriMocks(page: Page) {
                 saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ || []);
               return await new Promise((resolve, reject) => {
                 controllers.push({
-                  resolve: () => resolve(params.entry),
+                  resolve: () =>
+                    resolve({
+                      ...(params.entry as Record<string, unknown>),
+                      savedInDictionary: true,
+                    }),
                   // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める。
                   reject: () =>
                     reject(
@@ -5975,21 +7956,89 @@ async function installTauriMocks(page: Page) {
               });
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
-            return params.entry;
+            // Rust の保存結果と同じく「辞書保存済み」として返す（★ は保存で変えない）。
+            return {
+              ...(params.entry as Record<string, unknown>),
+              savedInDictionary: true,
+            };
           }
-          case "confirm_rank_up_reward":
+          case "confirm_rank_up_reward": {
+            // 確認済みにした報酬 ID を積む（ランクアップ報酬の確認テスト用）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const confirmWin = window as any;
+            confirmWin.__E2E_CONFIRMED_REWARD_CALLS__ = [
+              ...(confirmWin.__E2E_CONFIRMED_REWARD_CALLS__ || []),
+              params.rewardIds ?? [],
+            ];
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ok: true,
               confirmedRewardIds: params.rewardIds ?? [],
               remainingPendingRewardIds: [],
             };
-          case "record_friendship_event":
+          }
+          case "get_friendship_state": {
+            // 既定はランク 1・ポイント 0。テストで __E2E_FRIENDSHIP_STATE__ を差し替える（"fail" で失敗させる）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const friendshipState = (window as any).__E2E_FRIENDSHIP_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (friendshipState === "fail") {
+              throw new Error("E2E friendship failure");
+            }
+            return (
+              friendshipState ?? {
+                currentRank: 1,
+                currentPoint: 0,
+                nextRequiredPoint: 10,
+                dailyEarnedPoint: 0,
+                dailyPointLimit: 50,
+              }
+            );
+          }
+          case "get_reward_state": {
+            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const rewardState = (window as any).__E2E_REWARD_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return (
+              rewardState ?? {
+                currentRank: 1,
+                rewards: [
+                  { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: false, pending: false },
+                  { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+                ],
+                pendingRewardIds: [],
+                activeThemeId: "default",
+              }
+            );
+          }
+          case "record_friendship_event": {
+            // 記事を開いただけで term_explained が記録されないことの検証用に種別を積む。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const friendshipWin = window as any;
+            friendshipWin.__E2E_FRIENDSHIP_EVENTS__ = [
+              ...(friendshipWin.__E2E_FRIENDSHIP_EVENTS__ || []),
+              params.eventType,
+            ];
+            // ランクアップ演出テスト用: 指定時は最初の 1 回だけランクアップを返す。
+            const rankUpTo = friendshipWin.__E2E_FRIENDSHIP_RANK_UP_TO__;
+            if (typeof rankUpTo === "number") {
+              friendshipWin.__E2E_FRIENDSHIP_RANK_UP_TO__ = null;
+              return {
+                eventType: params.eventType,
+                earnedPoint: 5,
+                rankedUp: true,
+                newRank: rankUpTo,
+              };
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               eventType: params.eventType,
               earnedPoint: 0,
               rankedUp: false,
               newRank: null,
             };
+          }
           case "request_yuuko_notification": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             (window as any).__E2E_REQUEST_NOTIFICATION_CALL_COUNT__ =
@@ -6121,7 +8170,13 @@ async function installTauriMocks(page: Page) {
             const current = (window as any).__E2E_BACKEND_ACTIVE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
             let result;
-            if (!current) {
+            if (!current || current.state === "RewardNotifying") {
+              // 報酬通知の OK は Rust 側で確認済みにして待機へ戻る（2段階クリックは無い）。
+              /* eslint-disable @typescript-eslint/no-explicit-any */
+              if (current) {
+                (window as any).__E2E_BACKEND_ACTIVE__ = null;
+              }
+              /* eslint-enable @typescript-eslint/no-explicit-any */
               result = {
                 state: "Waiting",
                 positionMode: "RightBottom",
