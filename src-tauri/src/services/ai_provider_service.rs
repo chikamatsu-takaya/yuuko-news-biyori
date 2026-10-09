@@ -32,7 +32,7 @@ const PROVIDER_MOCK: &str = "mock";
 const LOCAL_MAX_OUTPUT_TOKENS: u32 = 1024;
 /// ローカルLLMで用語解説（JSON `{short, detail}`）を作るときの出力上限（トークン）。
 /// 短い解説＋2〜4文の解説で足りるため、ほかより小さくして待ち時間の上振れを抑える。
-const LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 512;
+const LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 768;
 
 /// ゆうこの口調の固定指示（用語解説・再説明・感想で共通）。プロンプト内では必ず固定指示側
 /// （外部データの区切り・入力本文より前）に置く。
