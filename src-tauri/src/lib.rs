@@ -16,6 +16,7 @@ use infra::allowlist::NetworkAllowlist;
 use paths::AppPaths;
 use repositories::article_repository::ArticleRepository;
 use repositories::dictionary_repository::DictionaryRepository;
+use repositories::friendship_event_repository::FriendshipEventRepository;
 use repositories::friendship_repository::FriendshipRepository;
 use repositories::gacha_repository::GachaRepository;
 use repositories::reward_repository::RewardRepository;
@@ -117,7 +118,8 @@ pub fn run() {
             );
             let friendship_service =
                 FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone())
-                    .with_gacha_service(gacha_service.clone());
+                    .with_gacha_service(gacha_service.clone())
+                    .with_event_repository(FriendshipEventRepository::new(&paths));
             friendship_service.initialize_default_if_missing()?;
             // 既に高ランクの利用者（#230 のランク再計算を含む）にも途中の報酬を解放しておく。
             // 失敗しても起動は続ける（報酬状態の取得・次のランクアップで追いつく）。
