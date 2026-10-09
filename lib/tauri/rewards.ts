@@ -27,7 +27,7 @@ export type RewardState = {
   rewards: RewardItem[];
   /** 未確認の報酬 ID（confirmRankUpReward に渡す値）。 */
   pendingRewardIds: string[];
-  /** 適用中のテーマ ID（設定 selectedThemeId が正。未解放なら "default"）。 */
+  /** 適用中のテーマ ID（設定 selectedThemeId が正。未解放・未所持なら "default"）。 */
   activeThemeId: string;
 };
 
@@ -37,4 +37,17 @@ export const getRewardState = async (): Promise<RewardState | null> => {
   }
 
   return invoke<RewardState>("get_reward_state");
+};
+
+/**
+ * 適用中テーマを切り替える（Rust の set_active_theme）。
+ * 選べるか（既定・解放済みの報酬テーマ・所持済みのガチャテーマ）は Rust が判定し、選べない ID は reject される。
+ * 戻り値は更新後の報酬状態で、activeThemeId をそのまま画面へ適用する。Tauri 外では null。
+ */
+export const setActiveTheme = async (themeId: string): Promise<RewardState | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<RewardState>("set_active_theme", { params: { themeId } });
 };
