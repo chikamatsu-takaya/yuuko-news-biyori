@@ -353,6 +353,38 @@ test("long title and balloon text are clamped and rendered as plain text", async
   ).toBeUndefined();
 });
 
+test("balloon text with the user's nickname is shown as plain text and fits", async ({
+  page,
+}) => {
+  // 呼び名は Rust 側で「{呼び名}、{文言}」として吹き出し文言に付く（最大32文字・`<` は全角化済み）。
+  // ここでは上限ちょうどの呼び名と、全角化前の HTML らしき文字列が来ても文字として出ることを確かめる。
+  const longNickname = "ゆ".repeat(32);
+  await installMocks(page, {
+    state: activeState({
+      balloonText: `${longNickname}、気になるニュースを見つけたよ。「デスクトップのE2Eニュース」`,
+    }),
+  });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(`${longNickname}、気になるニュースを見つけたよ。`)).toBeVisible();
+  await expectFitsInWindow(page, BALLOON_HEIGHT);
+
+  await emit(page, {
+    articleId: "desk-article-2",
+    title: "イベントで届いたニュース",
+    balloonText: `<img src=x onerror="window.__XSS__=1">ゆう、気になるニュースを見つけたよ。`,
+    sourceName: "E2E News",
+    previewVisible: false,
+  });
+  await expect(
+    region.getByText(`<img src=x onerror="window.__XSS__=1">ゆう、気になるニュースを見つけたよ。`)
+  ).toBeVisible();
+  await expect(region.locator("img[src='x']")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as unknown as { __XSS__?: number }).__XSS__)
+  ).toBeUndefined();
+});
+
 test("first click preview shows the source and short summary", async ({
   page,
 }) => {

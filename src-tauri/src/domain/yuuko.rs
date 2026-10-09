@@ -2,7 +2,9 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
+use crate::domain::settings::NICKNAME_MAX_CHARS;
 use crate::error::AppError;
+use crate::util::text_safety::neutralize_html_and_control;
 
 /// 通知ゲートの時間しきい値（分）。設計書 §6.2「通知頻度制御」。将来は設定化可能とする。
 const MIN_COOLTIME_MINUTES: i64 = 60; // 前回通知からの最短間隔
@@ -154,6 +156,55 @@ pub fn short_preview_summary(summary: &str) -> Option<String> {
     short.truncate(short.trim_end().len());
     short.push('…');
     Some(short)
+}
+
+/// 設定の呼び名を、吹き出しへ差し込める形に整える（要件定義書 §7.6.5）。
+///
+/// 呼び名はユーザー入力で、保存時の検証（32文字・制御文字なし）より前に保存された値も読み込み時は
+/// そのまま通るため、表示直前にもう一度安全側へ倒す: 制御文字（改行・タブを含む）は除き、`<` は全角へ
+/// 置換し、前後空白を除いてから 32 文字（char 数）で切る。空になれば None（呼び名なし＝従来の文言）。
+/// UI はテキストとして描画するが、表示経路（OS 通知等）が増えても HTML として解釈されないようにしておく。
+pub fn display_nickname(nickname: &str) -> Option<String> {
+    let neutralized: String = neutralize_html_and_control(nickname)
+        .chars()
+        .filter(|c| !c.is_control() && !is_invisible_format_char(*c))
+        .collect();
+    let trimmed = neutralized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let limited: String = trimmed.chars().take(NICKNAME_MAX_CHARS).collect();
+    Some(limited.trim_end().to_string())
+}
+
+/// 表示順を入れ替える双方向制御文字（U+202A〜U+202E, U+2066〜U+2069）と、
+/// 見えない幅ゼロ文字（U+200B〜U+200F, U+FEFF）か。後続の文言を見かけ上書き換えられないよう呼び名から除く。
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+    )
+}
+
+/// ゆうこの吹き出し文言の先頭に呼び名を付ける（仮: 「{呼び名}、{文言}」）。
+///
+/// 「さん」等の敬称は付けない（ユーザーが「ゆうさん」のように敬称込みで入力する場合があるため、入力どおりに使う）。
+/// 呼び名が未設定・空なら文言を一切変えない。保存済みの文言（yuuko_state.json）には適用せず、
+/// 表示用の状態を返す直前だけで使うため、設定の変更は次の表示から反映される。
+pub fn personalize_balloon_text(text: &str, nickname: &str) -> String {
+    match display_nickname(nickname) {
+        Some(name) => format!("{name}、{text}"),
+        None => text.to_string(),
+    }
+}
+
+impl YuukoNotificationState {
+    /// 表示用の吹き出し文言へ呼び名を反映する。文言が無い場合（UI 側の既定文言を使う場合）は何もしない。
+    pub fn apply_nickname(&mut self, nickname: &str) {
+        if let Some(text) = self.balloon_text.as_deref() {
+            self.balloon_text = Some(personalize_balloon_text(text, nickname));
+        }
+    }
 }
 
 impl PersistedYuukoState {
@@ -1147,6 +1198,78 @@ mod tests {
                 .to_notification_state()
                 .preview_short_summary,
             None
+        );
+    }
+
+    #[test]
+    fn balloon_text_is_unchanged_without_nickname() {
+        for nickname in ["", "   ", "\n\t", "\u{1b}"] {
+            assert_eq!(
+                personalize_balloon_text("気になるニュースを見つけたよ。", nickname),
+                "気になるニュースを見つけたよ。"
+            );
+        }
+    }
+
+    #[test]
+    fn balloon_text_is_prefixed_with_nickname_as_entered() {
+        // 敬称は付けず、入力どおりに使う（「さん」込みの入力もそのまま）。
+        assert_eq!(
+            personalize_balloon_text("気になるニュースを見つけたよ。", "ゆう"),
+            "ゆう、気になるニュースを見つけたよ。"
+        );
+        assert_eq!(
+            personalize_balloon_text("気になるニュースを見つけたよ。", "  ゆうさん "),
+            "ゆうさん、気になるニュースを見つけたよ。"
+        );
+    }
+
+    #[test]
+    fn display_nickname_neutralizes_html_and_control_chars() {
+        assert_eq!(
+            display_nickname("<b>ゆう</b>").as_deref(),
+            Some("＜b>ゆう＜/b>")
+        );
+        // 旧データに残り得る改行・ESC などの制御文字は除く。
+        assert_eq!(
+            display_nickname("ゆう\nこ\u{1b}").as_deref(),
+            Some("ゆうこ")
+        );
+        let personalized = personalize_balloon_text("やあ", "<script>x</script>");
+        assert!(!crate::util::text_safety::contains_html_tag(&personalized));
+    }
+
+    #[test]
+    fn display_nickname_strips_bidi_and_zero_width_chars() {
+        let nickname = "\u{202E}ゆ\u{2066}う\u{200B}\u{200F}\u{FEFF}さん\u{2069}\u{202A}";
+        assert_eq!(display_nickname(nickname).as_deref(), Some("ゆうさん"));
+        // それらだけの呼び名は未設定と同じ扱い（文言を変えない）。
+        assert_eq!(display_nickname("\u{200B}\u{FEFF}\u{202E}"), None);
+        assert_eq!(personalize_balloon_text("やあ", "\u{200B}\u{2067}"), "やあ");
+    }
+
+    #[test]
+    fn display_nickname_is_limited_to_32_chars() {
+        let long = "あ".repeat(NICKNAME_MAX_CHARS + 5);
+        let name = display_nickname(&long).unwrap();
+        assert_eq!(name.chars().count(), NICKNAME_MAX_CHARS);
+    }
+
+    #[test]
+    fn apply_nickname_leaves_missing_balloon_text_alone() {
+        let mut state = PersistedYuukoState {
+            balloon_text: None,
+            ..PersistedYuukoState::default()
+        }
+        .to_notification_state();
+        state.apply_nickname("ゆう");
+        assert_eq!(state.balloon_text, None);
+
+        let mut state = PersistedYuukoState::default().to_notification_state();
+        state.apply_nickname("ゆう");
+        assert_eq!(
+            state.balloon_text.as_deref(),
+            Some("ゆう、今日もニュースを見つけたら声をかけるね。")
         );
     }
 }
