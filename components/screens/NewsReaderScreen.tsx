@@ -1081,7 +1081,13 @@ export default function NewsReaderScreen({
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   // 未要約の実記事（summaryState≠done）。要約欄を「準備中」表示にし、ボタンを「要約を作成」にする。
   const isUnsummarized = article.isSummarized === false;
-  // 自動要約キューで待機中・処理中の記事。「ゆうこが要約中です」を出し、手動作成ボタンは隠す（二重生成を避ける）。
+  // 自動要約キューで処理中の記事。「ゆうこが要約中です」を出し、手動作成ボタンは隠す（生成中の重複操作を避ける）。
+  const isSummaryProcessing =
+    isUnsummarized && article.summaryState === "processing";
+  // 順番待ちの記事。すぐ読みたい人向けに既存の手動要約を「今すぐ要約」として出す。
+  // キューは要約済み記事を飛ばし、AlreadySummarized も吸収するため二重生成にはならない。
+  const isSummaryWaiting = isUnsummarized && article.summaryState === "waiting";
+  // 待機中・処理中は完了確認のポーリング対象。
   const isSummaryInProgress =
     isUnsummarized &&
     (article.summaryState === "waiting" ||
@@ -1819,7 +1825,7 @@ export default function NewsReaderScreen({
                     <Newspaper className="h-5 w-5 text-[var(--yuuko-green)]" />
                     <h2 className="font-semibold text-foreground">要約</h2>
                   </div>
-                  {isSummaryInProgress ? null : (
+                  {isSummaryProcessing ? null : (
                   <Button
                     variant="outline"
                     size="sm"
@@ -1832,6 +1838,8 @@ export default function NewsReaderScreen({
                         <Spinner className="size-4" />
                         {isUnsummarized ? "作成中..." : "更新中..."}
                       </>
+                    ) : isSummaryWaiting ? (
+                      "今すぐ要約"
                     ) : isSummaryFailed ? (
                       "要約を作り直す"
                     ) : isUnsummarized ? (
@@ -1842,7 +1850,11 @@ export default function NewsReaderScreen({
                   </Button>
                   )}
                 </div>
-                {isSummaryInProgress ? (
+                {isSummaryWaiting ? (
+                  <NotGeneratedText>
+                    要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。
+                  </NotGeneratedText>
+                ) : isSummaryProcessing ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Spinner className="size-4" />
                     <span>ゆうこが要約中です。できあがったらここに表示するね。</span>

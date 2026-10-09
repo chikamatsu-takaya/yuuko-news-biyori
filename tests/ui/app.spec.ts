@@ -2377,13 +2377,16 @@ const setReaderSummaryState = async (page: Page, state: string) => {
 test("reader summary: an article being summarized shows ゆうこが要約中です and picks up the summary without reload", async ({
   page,
 }) => {
+  // 10秒間隔の完了確認を実時間で待たないよう、時計を差し替えて進める。
+  await page.clock.install();
   await setReaderSummaryState(page, "processing");
   await openReaderFromHome(page);
   const main = page.locator("main");
 
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
-  // 要約中は手動作成ボタンを出さない（二重生成を避ける）。抜粋も要約として出さない。
+  // 処理中は手動作成ボタンを出さない。抜粋も要約として出さない。
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を作り直す" })).toHaveCount(0);
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
@@ -2393,23 +2396,35 @@ test("reader summary: an article being summarized shows ゆうこが要約中で
     delete (window as unknown as Record<string, unknown>)
       .__E2E_ARTICLE_DETAIL_SUMMARY_STATE__;
   });
+  await page.clock.runFor(11_000);
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
-    READER_SUMMARY_TEXT,
-    { timeout: 20_000 }
+    READER_SUMMARY_TEXT
   );
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
 });
 
-test("reader summary: a waiting article also shows ゆうこが要約中です", async ({
+test("reader summary: a waiting article offers 今すぐ要約 via the manual summary", async ({
   page,
 }) => {
   await setReaderSummaryState(page, "waiting");
   await openReaderFromHome(page);
   const main = page.locator("main");
 
-  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
+  await expect(
+    main.getByText(
+      "要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。"
+    )
+  ).toBeVisible();
+  await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+
+  // 既存の手動要約（generate_article_summary）で先に作り、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "今すぐ要約" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
 });
 
 test("reader summary: a failed article offers 要約を作り直す via the manual summary", async ({
