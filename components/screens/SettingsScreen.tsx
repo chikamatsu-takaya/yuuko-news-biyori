@@ -1584,6 +1584,8 @@ export default function SettingsScreen({
               isUpdatingAutostart ||
               isSettingsCorrupt ||
               loadNoticeKind === "error" ||
+              // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
+              isLoading ||
               isMigrationImporting
             }
           >

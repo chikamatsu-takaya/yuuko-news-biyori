@@ -1290,7 +1290,9 @@ export default function DictionaryScreen({
             <span className="text-xs text-foreground">
               {isLoading
                 ? "読み込み中..."
-                : `辞書項目 ${sortedEntries.length}件を表示中`}
+                : loadNoticeKind === "error"
+                  ? "辞書"
+                  : `辞書項目 ${sortedEntries.length}件を表示中`}
             </span>
           </div>
         </div>
