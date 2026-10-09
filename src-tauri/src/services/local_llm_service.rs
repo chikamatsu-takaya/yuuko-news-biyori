@@ -20,8 +20,8 @@ use crate::domain::ai_connection::LocalAiFailure;
 use crate::infra::local_llm_runtime::{
     build_chat_body, build_http_client, chat, check_model_sha256, check_model_size,
     check_runtime_files, health_ok, new_api_key, pick_free_port, runtime_manifest, thread_count,
-    ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle, ModelCheck, ServerLauncher,
-    ServerProcess, MODEL_SHA256, MODEL_SIZE,
+    ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle, ModelCheck, ResponseFormat,
+    ServerLauncher, ServerProcess, MODEL_SHA256, MODEL_SIZE,
 };
 use crate::infra::url_guard::SpawnedLocalLlmPort;
 
@@ -228,6 +228,26 @@ impl LocalLlmService {
 
     /// プロンプトを送り、生成された本文を返す（必要なら起動してから）。
     pub fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, LocalAiFailure> {
+        self.generate_inner(prompt, max_tokens, None)
+    }
+
+    /// 出力の形を JSON スキーマで縛って生成する（用語解説）。llama-server が文法で縛るため、
+    /// 小さいモデルが付けがちな前置きの文章やコードフェンスが出ず、厳格な JSON 解析に通る。
+    pub fn generate_with_format(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        response_format: ResponseFormat,
+    ) -> Result<String, LocalAiFailure> {
+        self.generate_inner(prompt, max_tokens, Some(response_format))
+    }
+
+    fn generate_inner(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        response_format: Option<ResponseFormat>,
+    ) -> Result<String, LocalAiFailure> {
         // 起動の前から「走っている」と数える＝起動し終えてから数え始めるまでの間に、見張りが止める道を作らない。
         let _in_flight = InFlight::begin(&self.shared);
         let (port, api_key) = self.ensure_started()?;
@@ -238,7 +258,7 @@ impl LocalLlmService {
             &client,
             port,
             &api_key,
-            &build_chat_body(prompt, max_tokens),
+            &build_chat_body(prompt, max_tokens, response_format),
         );
         match result {
             Ok(text) => {
@@ -506,7 +526,7 @@ mod tests {
         generate_delay: Duration,
         launches: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
-        bodies: Arc<Mutex<Vec<Value>>>,
+        bodies: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeLauncher {
@@ -523,6 +543,16 @@ mod tests {
                 stops: Arc::new(AtomicUsize::new(0)),
                 bodies: Arc::new(Mutex::new(Vec::new())),
             })
+        }
+
+        /// 受け取った生成要求の本文（JSON として読んだもの）。
+        fn bodies(&self) -> Vec<Value> {
+            self.bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|text| serde_json::from_str(text).expect("request body is JSON"))
+                .collect()
         }
 
         fn launches(&self) -> usize {
@@ -604,7 +634,7 @@ mod tests {
         key: String,
         reply: String,
         delay: Duration,
-        bodies: Arc<Mutex<Vec<Value>>>,
+        bodies: Arc<Mutex<Vec<String>>>,
     ) {
         let mut workers = Vec::new();
         while !stop_flag.load(Ordering::SeqCst) {
@@ -630,7 +660,7 @@ mod tests {
         key: &str,
         reply: &str,
         delay: Duration,
-        bodies: &Mutex<Vec<Value>>,
+        bodies: &Mutex<Vec<String>>,
         stop_flag: &AtomicBool,
     ) {
         let _ = stream.set_nonblocking(false);
@@ -674,9 +704,11 @@ mod tests {
                 ("200 OK", r#"{"status":"ok"}"#.to_string())
             }
         } else if request_line.starts_with("POST /v1/chat/completions ") {
-            if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-                bodies.lock().unwrap().push(value);
-            }
+            // キーの順番も確かめられるよう、受け取った本文をそのまま残す。
+            bodies
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&body).into_owned());
             // 本物の llama-server と同じく、止められたら生成中の要求も答えずに切る
             // （in-flight の数え方を外すと、しばらく使っていない判定で止められて要求が失敗する）。
             let started = Instant::now();
@@ -799,11 +831,37 @@ mod tests {
         service.generate("もう一度", 1024).expect("generated again");
         assert_eq!(launcher.launches(), 1);
 
-        let bodies = launcher.bodies.lock().unwrap();
+        let bodies = launcher.bodies();
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0]["max_tokens"], 1024);
         assert_eq!(bodies[0]["chat_template_kwargs"]["enable_thinking"], false);
         assert_eq!(bodies[0]["messages"][0]["content"], "プロンプト");
+    }
+
+    #[test]
+    fn generate_with_format_sends_the_json_schema_in_order() {
+        let bundle = temp_bundle("schema", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        service
+            .generate_with_format(
+                "用語",
+                512,
+                crate::infra::local_llm_runtime::term_explanation_response_format(),
+            )
+            .expect("generated");
+        let raw = launcher.bodies.lock().unwrap()[0].clone();
+        // 偽サーバーが受け取った生の本文で、スキーマのキー順（short → detail）まで確かめる。
+        assert!(raw.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"term_explanation","schema":{"type":"object","properties":{"short":{"type":"string"},"detail":{"type":"string"}},"required":["short","detail"],"additionalProperties":false}}}"#
+        ), "{raw}");
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(body["max_tokens"], 512);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+
+        // 通常の生成には付けない。
+        service.generate("要約", 1024).expect("generated");
+        assert!(launcher.bodies()[1].get("response_format").is_none());
     }
 
     #[test]
@@ -812,7 +870,7 @@ mod tests {
         let launcher = FakeLauncher::new(FakeMode::Healthy);
         let service = service_with(&bundle, launcher.clone(), test_config());
         service.check_connection().expect("available");
-        let bodies = launcher.bodies.lock().unwrap();
+        let bodies = launcher.bodies();
         assert_eq!(bodies[0]["max_tokens"], CONNECTION_CHECK_MAX_TOKENS);
         assert_eq!(bodies[0]["messages"][0]["content"], CONNECTION_CHECK_PROMPT);
     }

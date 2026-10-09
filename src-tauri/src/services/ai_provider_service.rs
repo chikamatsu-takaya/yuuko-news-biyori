@@ -16,6 +16,7 @@ use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{AiRequest, AiResponse, TERM_EXPLANATION_PROMPT_ID};
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
+use crate::infra::local_llm_runtime::{term_explanation_response_format, ResponseFormat};
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
 
@@ -29,6 +30,9 @@ const PROVIDER_MOCK: &str = "mock";
 /// ローカルLLMの出力上限（トークン）。要約・再説明・感想・用語解説はいずれも短い出力のため
 /// 1024 に抑え、止まらずに書き続ける回で待ち時間が延びないようにする。
 const LOCAL_MAX_OUTPUT_TOKENS: u32 = 1024;
+/// ローカルLLMで用語解説（JSON `{short, detail}`）を作るときの出力上限（トークン）。
+/// 短い解説＋2〜4文の解説で足りるため、ほかより小さくして待ち時間の上振れを抑える。
+const LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS: u32 = 768;
 
 /// ゆうこの口調の固定指示（用語解説・再説明・感想で共通）。プロンプト内では必ず固定指示側
 /// （外部データの区切り・入力本文より前）に置く。
@@ -75,9 +79,13 @@ impl AiProviderService {
         // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
         if provider == AiProvider::Local {
             let prompt = build_prompt(&request, explanation_level);
-            return self
-                .local_llm
-                .generate(&prompt, LOCAL_MAX_OUTPUT_TOKENS)
+            let result = match local_output_shape(&request.prompt_id) {
+                (max_tokens, Some(format)) => self
+                    .local_llm
+                    .generate_with_format(&prompt, max_tokens, format),
+                (max_tokens, None) => self.local_llm.generate(&prompt, max_tokens),
+            };
+            return result
                 .map(|text| AiResponse {
                     text,
                     provider: PROVIDER_LOCAL.to_string(),
@@ -205,6 +213,20 @@ fn mock_term_explanation_detail(term: &str, explanation_level: ExplanationLevel)
         ExplanationLevel::Detailed => format!(
             "「{term}」は、この記事の背景や位置づけにも関わる言葉だよ。前後の文脈や関連する話題とあわせて読むと、記事全体がもっと分かりやすくなるよ。"
         ),
+    }
+}
+
+/// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
+/// 用語解説だけは JSON スキーマで出力を縛る（小さいモデルの前置き・コードフェンスで厳格解析が落ちないように）。
+/// 解析・無害化・文字数の検証は従来どおり dictionary_service 側で行う。Gemini の経路には関わらない。
+fn local_output_shape(prompt_id: &str) -> (u32, Option<ResponseFormat>) {
+    if prompt_id == TERM_EXPLANATION_PROMPT_ID {
+        (
+            LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS,
+            Some(term_explanation_response_format()),
+        )
+    } else {
+        (LOCAL_MAX_OUTPUT_TOKENS, None)
     }
 }
 
@@ -438,6 +460,23 @@ fn term_explanation_level_instruction(explanation_level: ExplanationLevel) -> &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_output_shape_constrains_only_the_term_explanation() {
+        let (max_tokens, format) = local_output_shape(TERM_EXPLANATION_PROMPT_ID);
+        assert_eq!(max_tokens, LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS);
+        let format = serde_json::to_value(format.expect("schema")).unwrap();
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(
+            format["json_schema"]["schema"]["required"],
+            serde_json::json!(["short", "detail"])
+        );
+        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+            let (max_tokens, format) = local_output_shape(prompt_id);
+            assert_eq!(max_tokens, LOCAL_MAX_OUTPUT_TOKENS, "{prompt_id}");
+            assert!(format.is_none(), "{prompt_id}");
+        }
+    }
 
     #[test]
     fn build_prompt_includes_instruction_and_input_only() {
@@ -932,6 +971,56 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
+        }
+        local.shutdown();
+    }
+
+    /// 実モデルで用語解説が厳格な JSON（`AiTermExplanation`）として読めるかを確かめる（手動実行のみ）。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_local_llm_term -- --ignored --nocapture` で動かす。
+    #[test]
+    #[ignore = "requires the real llama-server and model placed by scripts/local-llm/place-bundle.mjs"]
+    fn real_local_llm_term_explanation_is_strict_json() {
+        use crate::domain::summary::AiTermExplanation;
+        use std::time::Instant;
+        // 同梱物を別の場所（共有の target など）に置いているときは YUUKO_LOCAL_LLM_DIR で指す。
+        let dir = std::env::var_os("YUUKO_LOCAL_LLM_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources")
+                    .join("local_llm")
+            });
+        let local = LocalLlmService::new(Some(dir));
+        let service = service().with_local_llm(local.clone());
+        let context = "タイトル: 中小企業のデジタル化に新補助金
+            抜粋: 政府は来年度から、中小企業のデジタル化を支援する新しい補助金制度を始めると発表した。";
+        for (term, level) in [
+            ("補助金", ExplanationLevel::Simple),
+            ("クラウドサービス", ExplanationLevel::Normal),
+            ("デジタル化", ExplanationLevel::Detailed),
+            ("Vec<String>", ExplanationLevel::Normal),
+        ] {
+            let started = Instant::now();
+            let response = service
+                .request_text(
+                    AiRequest {
+                        prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
+                        input_text: term.to_string(),
+                        context: Some(context.to_string()),
+                    },
+                    AiProvider::Local,
+                    level,
+                )
+                .expect("local generation");
+            eprintln!(
+                "{term} ({level:?}): {:.1}s
+{}
+",
+                started.elapsed().as_secs_f32(),
+                response.text
+            );
+            serde_json::from_str::<AiTermExplanation>(response.text.trim())
+                .expect("strict term explanation JSON");
         }
         local.shutdown();
     }
