@@ -627,6 +627,224 @@ test("news history archived restore with a mismatched article id does not naviga
   ).toBeVisible();
 });
 
+// 過去ニュース画面（月一覧 → 記事一覧 → 記事詳細。判断台帳 D14 / D90）。
+const openPastNews = async (page: Page) => {
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+};
+
+const setPastNewsFlags = (page: Page, flags: Record<string, unknown>) =>
+  page.addInitScript((initFlags) => {
+    Object.assign(window as unknown as Record<string, unknown>, initFlags);
+  }, flags);
+
+test("past news: sidebar opens the month list and a month opens its article list", async ({
+  page,
+}) => {
+  await openPastNews(page);
+
+  const nav = page.getByRole("navigation").first();
+  await expect(
+    nav.getByRole("button", { name: "過去ニュース", exact: true })
+  ).toHaveClass(/font-medium/);
+  await expect(page.getByTestId("past-news-month-2026-09")).toContainText("2026年9月");
+  await expect(page.getByTestId("past-news-month-2026-09")).toContainText("12件");
+
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+  expect(await readWindowValue(page, "__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__")).toEqual([
+    "2026-09",
+  ]);
+  const list = page.getByTestId("past-news-article-list");
+  await expect(list.getByText("9月のアーカイブ記事")).toBeVisible();
+  await expect(list.getByText("アーカイブ済み", { exact: true }).first()).toBeVisible();
+
+  // 「月の一覧へ戻る」で月一覧へ戻る。
+  await page.getByRole("button", { name: "月の一覧へ戻る" }).click();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+});
+
+test("past news: opening an article asks first, restores by id, and back returns to the same month", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+
+  // 確認ダイアログを出し、この時点では復元しない。キャンセルでは何もしない。
+  const dialog = page.getByRole("alertdialog");
+  await expect(
+    dialog.getByRole("heading", { name: "アーカイブから取り出して開く" })
+  ).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+  expect(await readRequestedArticleId(page)).toBeNull();
+
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "past-1" }]);
+  expect(await readRequestedArticleId(page)).toBe("past-1");
+
+  // 戻ると月一覧ではなく、同じ月の記事一覧へ戻る（読み直しでバッジも外れる）。
+  await readerBackButton(page).first().click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+  const list = page.getByTestId("past-news-article-list");
+  await expect(list.getByText("9月のアーカイブ記事")).toBeVisible();
+  await expect(list.getByText("アーカイブ済み", { exact: true })).toHaveCount(1);
+});
+
+test("past news: restore failure stays on the month list with a fixed notice", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+  );
+  await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
+  expect(await readRequestedArticleId(page)).toBeNull();
+  await expect(main.getByText("9月のアーカイブ記事")).toBeVisible();
+});
+
+test("past news: a remembered month that was deleted falls back to the month list without an error", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(readerBackButton(page).first()).toBeVisible();
+
+  // 記事詳細を開いている間に、記憶している月（2026-09）が削除された状態にする。
+  await page.evaluate(() => {
+    const win = window as unknown as Record<string, { month: string }[]>;
+    win.__E2E_ARCHIVE_MONTHS__ = win.__E2E_ARCHIVE_MONTHS__.filter(
+      (entry) => entry.month !== "2026-09"
+    );
+  });
+
+  // 戻る以外の経路（ホーム → サイドバー）で入り直すと、月一覧を表示する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ホーム", exact: true })
+    .click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-07")).toBeVisible();
+  await expect(page.getByTestId("past-news-month-2026-09")).toHaveCount(0);
+  await expect(page.locator("main").getByRole("alert")).toHaveCount(0);
+});
+
+test("past news: restore failure keeps the article count badge", async ({ page }) => {
+  await setPastNewsFlags(page, { __E2E_RESTORE_ARCHIVED_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  const main = page.locator("main");
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /9月のアーカイブ記事/ }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "取り出して開く" })
+    .click();
+  await expect(main.getByRole("alert")).toBeVisible();
+  await expect(main.getByText("2件", { exact: true })).toBeVisible();
+});
+
+test("past news: shows the empty state when there are no archives", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_MONTHS__: [] });
+  await openPastNews(page);
+  await expect(page.getByTestId("past-news-empty")).toContainText(
+    "まだアーカイブされた過去ニュースはないみたい。"
+  );
+});
+
+test("past news: month list load failure shows fixed wording and retry", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_LIST_FAIL__: true });
+  await openPastNews(page);
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "過去ニュースの読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret|archive_index/)).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+});
+
+test("past news: article list load failure shows fixed wording", async ({ page }) => {
+  await setPastNewsFlags(page, { __E2E_ARCHIVE_MONTH_ARTICLES_FAIL__: true });
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  const main = page.locator("main");
+  await expect(main.getByRole("alert")).toHaveText(
+    "この月の記事一覧の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+  );
+  await expect(page.getByText(/secret|archive_index/)).toHaveCount(0);
+});
+
+test("past news: old-format months explain that the article list is unavailable", async ({
+  page,
+}) => {
+  await setPastNewsFlags(page, {
+    __E2E_ARCHIVE_MONTHS__: [
+      {
+        month: "2025-12",
+        articleCount: 5,
+        catalogComplete: false,
+        sizeBytes: 1024,
+        deletable: true,
+      },
+    ],
+  });
+  await openPastNews(page);
+  const month = page.getByTestId("past-news-month-2025-12");
+  await expect(month).toContainText("2025年12月");
+  await expect(month).toContainText(
+    "この月は古い形式で保存されているため、記事一覧を表示できません。"
+  );
+  // 一覧を開くボタンは出さない。
+  await expect(month.getByRole("button")).toHaveCount(0);
+});
+
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
   await openHome(page);
 
@@ -1990,6 +2208,139 @@ test("reader: a stale dictionary save failure must not surface on the new articl
 });
 
 // --- 用語解説ダイアログのドラッグ移動 ---
+
+// ブラウザプレビュー用サンプル記事（article-001）の要点・注目ポイント。実記事では出てはいけない。
+const READER_SAMPLE_KEY_POINT = "投資対象が研究寄りから業務課題の解決寄りへ移っている";
+const READER_SAMPLE_TITLE = "生成AIスタートアップの資金調達が再加速";
+const READER_UNSUMMARIZED_TEXT = "要約はまだ準備中だよ。「要約を作成」で作れるよ。";
+
+test("reader summary: a summarized article shows its summary, key points and 要約を更新", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    READER_SUMMARY_TEXT
+  );
+  await expect(main.getByText("クリックできること")).toBeVisible();
+  await expect(main.getByText("UI確認中だよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
+test("reader summary: an unsummarized article shows the not-ready state without sample or excerpt text", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ =
+      true;
+  });
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toHaveCount(0);
+  await expect(
+    main.getByText("ゆうこの解説はまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(main.getByText("要点はまだ作成されていないよ。")).toBeVisible();
+  await expect(
+    main.getByText("注目ポイントはまだ作成されていないよ。")
+  ).toBeVisible();
+  await expect(
+    main.getByText("ゆうこの感想はまだ作成されていないよ。")
+  ).toBeVisible();
+  // サンプル記事の要点や、本文抜粋の流用が出ていない。
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  await expect(main.getByText(READER_SUMMARY_TEXT)).toHaveCount(0);
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveCount(0);
+
+  // 「要約を作成」で既存の要約生成を呼び、生成結果へ切り替わる。
+  await page.getByRole("button", { name: "要約を作成" }).click();
+  await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
+    "E2Eで生成された要約です。"
+  );
+  await expect(main.getByText("主要ボタン")).toBeVisible();
+  await expect(main.getByText("確認できたよ。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+});
+
+test("reader summary: browser preview (outside Tauri) keeps the sample article display", async ({
+  page,
+}) => {
+  await openHome(page);
+  // ホームのモック記事カードが出てから Tauri 外にする（記事詳細のマウント時に isTauriRuntime が false になる）。
+  await expect(
+    page.locator("main").getByText("E2Eテスト用ニュース").first()
+  ).toBeVisible();
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(
+    main.getByRole("heading", { name: READER_SAMPLE_TITLE })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+});
+
+test("reader summary: while the real article loads, a loading state is shown instead of the sample", async ({
+  page,
+}) => {
+  await openHome(page);
+  await enableArticleDetailGate(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByText("記事を読み込んでいるよ…")).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_TITLE)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+
+  // 開発時の StrictMode で取得が2回走ることがあるため、保留中の呼び出しをすべて解放する。
+  await releaseArticleDetail(page, 0);
+  await releaseArticleDetail(page, 1);
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText("記事を読み込んでいるよ…")).toHaveCount(0);
+});
+
+test("reader summary: a failed article load shows an error state with 再試行 instead of the sample", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = true;
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByRole("alert")).toHaveText(
+    "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
+  );
+  await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_TITLE)).toHaveCount(0);
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 再試行で取得できれば記事を表示する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_FAIL__ = false;
+  });
+  await main.getByRole("button", { name: "再試行" }).click();
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
 
 test("term popup: dragging the background moves the dialog", async ({ page }) => {
   await openReaderFromHome(page);
@@ -6240,10 +6591,28 @@ async function installTauriMocks(page: Page) {
                 resolvers.push(resolve);
               });
             }
+            // 取得失敗モード: 本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+            if (detailWin.__E2E_ARTICLE_DETAIL_FAIL__) {
+              throw {
+                code: "STORAGE_ERROR",
+                message: "E2E raw detail failure /internal/secret/path",
+              };
+            }
+            // 未要約モード: Rust と同じく summary には本文抜粋が入り、AI 生成項目は空で届く。
+            if (detailWin.__E2E_ARTICLE_DETAIL_UNSUMMARIZED__) {
+              return {
+                ...articleSummary,
+                originalUrl: "https://example.com/e2e-article",
+                focusPoints: [],
+                keywordCandidates: ["E2E用語", "Playwright"],
+                summaryState: "none",
+              };
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...articleSummary,
               originalUrl: "https://example.com/e2e-article",
+              summaryState: "done",
               yuukoExplanation: "E2E用の要約です。",
               focusPoints: ["クリックできること", "表示が崩れないこと"],
               yuukoComment: "UI確認中だよ。",
@@ -6514,8 +6883,9 @@ async function installTauriMocks(page: Page) {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const archiveWin = window as any;
             if (
-              archiveWin.__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ &&
-              archiveWin.__E2E_ARCHIVE_DELETE_CALLS__
+              archiveWin.__E2E_ARCHIVE_LIST_FAIL__ ||
+              (archiveWin.__E2E_ARCHIVE_LIST_FAIL_AFTER_DELETE__ &&
+                archiveWin.__E2E_ARCHIVE_DELETE_CALLS__)
             ) {
               throw { code: "IO_ERROR", message: "failed to read C:/secret/archive_index.json" };
             }
@@ -6545,6 +6915,40 @@ async function installTauriMocks(page: Page) {
               ];
             }
             return archiveWin.__E2E_ARCHIVE_MONTHS__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          // 過去ニュース画面（判断台帳 D14 / D90）。月を記録し、window で指定された記事一覧を返す。
+          // 失敗モードではパス風の文字列を含めて reject し、画面へ出ないことを確かめる。
+          case "list_archive_month_articles": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const pastWin = window as any;
+            const month = params.month as string;
+            pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__ = [
+              ...(pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_CALLS__ || []),
+              month,
+            ];
+            if (pastWin.__E2E_ARCHIVE_MONTH_ARTICLES_FAIL__) {
+              throw { code: "IO_ERROR", message: "failed to read C:/secret/archive_index.json" };
+            }
+            const restored = Boolean(pastWin.__E2E_ARCHIVE_RESTORED__);
+            const articles =
+              month === "2026-09"
+                ? [
+                    {
+                      ...articleHistoryItem,
+                      articleId: "past-1",
+                      title: "9月のアーカイブ記事",
+                      isArchived: !restored,
+                    },
+                    {
+                      ...articleHistoryItem,
+                      articleId: "past-2",
+                      title: "9月のもうひとつの記事",
+                      isArchived: true,
+                    },
+                  ]
+                : [];
+            return { month, catalogComplete: true, articles };
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "get_archive_month_delete_preview": {
