@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { listenNewsRefreshed } from "@/lib/tauri/news";
 import {
   getYuukoNotificationState,
+  isActiveRewardNotice,
   requestYuukoNotification,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
@@ -36,13 +37,14 @@ type UseNotificationSchedulerOptions = {
   canGenerateCandidates?: boolean;
 };
 
-// ニュース通知が「表示中（active）」とみなせる状態（Rust has_active_notification と同基準）。
-// reward 専用の hasNotification は使わない。
+// 通知が「表示中（active）」とみなせる状態（Rust has_active_notification / has_active_reward_notice と同基準）。
+// ニュースは紹介対象あり、報酬通知は未確認の報酬あり。reward 専用の hasNotification は使わない。
 const ACTIVE_NEWS_STATES = ["Appearing", "BalloonVisible", "PreviewVisible"];
-const isActiveNewsState = (state: YuukoNotificationState | null): boolean =>
-  !!state &&
-  ACTIVE_NEWS_STATES.includes(state.state) &&
-  (Boolean(state.previewArticle) || Boolean(state.currentArticleId));
+const isActiveYuukoState = (state: YuukoNotificationState | null): boolean =>
+  isActiveRewardNotice(state) ||
+  (!!state &&
+    ACTIVE_NEWS_STATES.includes(state.state) &&
+    (Boolean(state.previewArticle) || Boolean(state.currentArticleId)));
 
 /**
  * ゆうこの通知状態をアプリ起動中に一定間隔でチェックするフック。
@@ -149,7 +151,7 @@ export const useNotificationScheduler = ({
               if (
                 canGenerateCandidatesRef.current &&
                 mountedRef.current &&
-                isActiveNewsState(state)
+                isActiveYuukoState(state)
               ) {
                 onStateChangeRef.current?.(state);
               }
@@ -179,7 +181,7 @@ export const useNotificationScheduler = ({
         let resurfaced = false;
         try {
           const state = await getPromise;
-          if (canAdopt(generationAtStart) && isActiveNewsState(state)) {
+          if (canAdopt(generationAtStart) && isActiveYuukoState(state)) {
             onStateChangeRef.current?.(state);
             resurfaced = true;
           }
