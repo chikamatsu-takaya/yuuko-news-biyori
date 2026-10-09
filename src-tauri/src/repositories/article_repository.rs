@@ -12,7 +12,8 @@ use crate::domain::article::{
     ArchiveMonthDto, ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
     ArchiveZipInfoDto, ArticleDedupeKeys, ArticleDetailDto, ArticleHistoryFilter,
     ArticleHistoryItemDto, ArticleReadState, ArticleSummaryDto, ArticleSummaryUpdate,
-    FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult, SummaryState,
+    ArticleTagsUpdate, FavoriteUpdateResult, FetchedArticle, RestoreArchivedArticleResult,
+    SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -198,6 +199,13 @@ impl ArticleRepository {
     /// 記事ファイルに保存済みの元記事 URL を返す（検証は呼び出し側）。既読状態は進めない（読み取りのみ）。
     pub fn get_original_url(&self, article_id: &str) -> Result<String, AppError> {
         Ok(self.find_article_record(article_id)?.original_url)
+    }
+
+    /// 記事ファイル（front matter の `tags`）に保存済みのタグを返す。タグの無い既存記事は空。読み取りのみ。
+    /// 現状は要約生成のテストでの確認用（タグの画面表示は別タスク）。
+    #[cfg(test)]
+    pub fn get_article_tags(&self, article_id: &str) -> Result<Vec<String>, AppError> {
+        Ok(self.find_article_record(article_id)?.tags)
     }
 
     /// 記事が要約済み（status.summarized）かを返す。自動要約の上書き防止用で、書き込みはしない。
@@ -795,6 +803,17 @@ impl ArticleRepository {
         article.yuuko_explanation = Some(update.yuuko_explanation);
         article.key_points = update.key_points;
         article.focus_points = update.focus_points;
+        // タグは検証を通ったときだけ反映する（失敗時は既存のタグを残す・D11）。
+        // Mock の定型タグは、既存のタグが空のときだけ入れる（実在のタグを上書きしない）。
+        match update.tags {
+            ArticleTagsUpdate::Keep => {}
+            ArticleTagsUpdate::Replace(tags) => article.tags = tags,
+            ArticleTagsUpdate::FillIfEmpty(tags) => {
+                if article.tags.is_empty() {
+                    article.tags = tags;
+                }
+            }
+        }
         article.yuuko_comment = Some(update.yuuko_comment);
         article.status.summarized = true;
         article.summary_generated_at = Some(update.generated_at);
@@ -2994,6 +3013,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "更新後のコメント".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -3087,6 +3107,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "変更あり".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -4371,6 +4392,7 @@ mod tests {
                     key_points: Vec::new(),
                     focus_points: vec!["注目".to_string()],
                     yuuko_comment: "コメント".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -4540,6 +4562,7 @@ mod tests {
             key_points: vec!["要点A".to_string(), "要点B".to_string()],
             focus_points: vec!["観点A".to_string(), "観点B".to_string()],
             yuuko_comment: "新しい一言".to_string(),
+            tags: crate::domain::article::ArticleTagsUpdate::Keep,
             ai_provider: "gemini".to_string(),
             generated_at: "2026-06-08T00:00:00Z".to_string(),
         };
@@ -4624,6 +4647,7 @@ mod tests {
                         "AIが書いた注目ポイント".to_string(),
                     ],
                     yuuko_comment: "一言".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     ai_provider: "mock".to_string(),
                     generated_at: "2026-06-08T00:00:00Z".to_string(),
                 },

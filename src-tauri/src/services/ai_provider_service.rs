@@ -14,9 +14,10 @@ use crate::domain::ai_connection::{
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{
-    AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, FOCUS_POINTS_MAX_ITEMS,
-    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
-    TERM_EXPLANATION_PROMPT_ID,
+    AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
+    ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
+    FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
+    POINT_ITEM_MAX_CHARS, TERM_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
@@ -200,10 +201,13 @@ impl AiProviderService {
             "summary_v1" => request.input_text,
             "yuuko_explanation_v1" => request.input_text,
             "yuuko_comment_v1" => request.input_text,
-            // 要点・注目ポイント: 種（無害化済みのタイトル＋本文抜粋）から決定的な JSON を組む（外部通信なし）。
-            id if id == ARTICLE_POINTS_PROMPT_ID => {
-                serde_json::to_string(&mock_article_points(&request.input_text)).unwrap_or_default()
-            }
+            // 要点・注目ポイント・タグ: 種（無害化済みのタイトル＋本文抜粋）と context の無害化済みジャンルから
+            // 決定的な JSON を組む（外部通信なし）。
+            id if id == ARTICLE_POINTS_PROMPT_ID => serde_json::to_string(&mock_article_points(
+                &request.input_text,
+                request.context.as_deref().unwrap_or(""),
+            ))
+            .unwrap_or_default(),
             // 用語解説: 決定的で解析可能な JSON を返す（外部通信なし・APIキー未設定/失敗フォールバックでも
             // 用語解説を返せるようにする）。選択語＝input_text。記事本文・context の生値は載せない。
             id if id == TERM_EXPLANATION_PROMPT_ID => {
@@ -242,7 +246,8 @@ fn mock_term_explanation_detail(term: &str, explanation_level: ExplanationLevel)
 /// 種は無害化済み（`<` は全角・制御文字なし・行頭 `#` と区切り行なし）だが、「。」で区切った途中から
 /// `#` や `-` で始まる断片はできうるため、Mock でも出力検証に落ちないよう取り除く。
 /// 画面にそのまま出るため、mock などの内部ラベルは文面に含めない。
-fn mock_article_points(input_text: &str) -> AiArticlePoints {
+/// タグはジャンル（summary_service が無害化した値）と固定の語から3件作る（`mock_article_tags`）。
+fn mock_article_points(input_text: &str, genre: &str) -> AiArticlePoints {
     fn sentences<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
         lines
             .flat_map(|line| line.split('。'))
@@ -281,7 +286,37 @@ fn mock_article_points(input_text: &str) -> AiArticlePoints {
     AiArticlePoints {
         key_points,
         focus_points: vec!["この変化で、誰の何が便利になるのかを考えてみると面白いよ。".to_string()],
+        tags: mock_article_tags(genre),
     }
+}
+
+/// 記事タグの Mock（決定的）。ジャンルを先頭にし、固定の語で下限の3件にそろえる。
+/// ジャンルは外部由来のため、タグの検証（区切り文字・山括弧・制御文字・行頭 `#`・20文字）に落ちないよう
+/// 該当する文字を除いてから使い、空になれば使わない。
+fn mock_article_tags(genre: &str) -> Vec<String> {
+    let cleaned = genre
+        .chars()
+        .filter(|c| !c.is_control() && !ARTICLE_TAG_FORBIDDEN_CHARS.contains(c))
+        .collect::<String>();
+    let genre_tag = cleaned
+        .trim()
+        .trim_start_matches(['#', '＃'])
+        .trim()
+        .chars()
+        .take(ARTICLE_TAG_MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let mut tags: Vec<String> = Vec::with_capacity(ARTICLE_TAGS_MIN_ITEMS);
+    for candidate in [genre_tag.as_str(), "ニュース", "最新動向", "話題"] {
+        if tags.len() >= ARTICLE_TAGS_MIN_ITEMS {
+            break;
+        }
+        if !candidate.is_empty() && !tags.iter().any(|tag| tag == candidate) {
+            tags.push(candidate.to_string());
+        }
+    }
+    tags
 }
 
 /// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
@@ -448,15 +483,18 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
                 "次のニュースに対する、親しみやすい短い感想を日本語で一言書いてください。{YUUKO_TONE_INSTRUCTION}"
             )
         }
-        // 要点と注目ポイント（D18）。2つは別の観点で書かせ、要点に注目ポイントを混ぜない。
+        // 要点・注目ポイント・タグ（D18 / D11）。要点と注目ポイントは別の観点で書かせ、要点に注目ポイントを混ぜない。
+        // タグは同じ呼び出しで受け取る（ローカルLLMの負荷を抑えるため、タグだけの呼び出しはしない）。
         id if id == ARTICLE_POINTS_PROMPT_ID => format!(
-            "次のニュースについて、日本語で{level}2種類の箇条書きを作ってください。\n\
+            "次のニュースについて、日本語で{level}2種類の箇条書きとタグを作ってください。\n\
              key_points: 何が起きたかを伝える要点を3つ程度（{KEY_POINTS_MIN_ITEMS}〜{KEY_POINTS_MAX_ITEMS}個）。\n\
              focus_points: なぜ面白いのか、この記事から何を学べるのかという注目ポイントを{FOCUS_POINTS_MIN_ITEMS}〜{FOCUS_POINTS_MAX_ITEMS}個。要点の言い換えにしないでください。\n\
-             各項目は改行を含まない1文で、{POINT_ITEM_MAX_CHARS}文字以内にしてください。\
+             tags: 記事の話題を表す短い名詞のタグを{ARTICLE_TAGS_MIN_ITEMS}〜{ARTICLE_TAGS_MAX_ITEMS}個。各{ARTICLE_TAG_MAX_CHARS}文字以内で重複させず、\
+             先頭に # を付けず、カンマ・読点などの区切り文字を含めないでください。\n\
+             要点と注目ポイントの各項目は改行を含まない1文で、{POINT_ITEM_MAX_CHARS}文字以内にしてください。\
              先頭に箇条書きの記号・番号・見出し記号を付けず、HTML や URL も書かないでください。\n\
              出力は次の JSON オブジェクトだけにしてください（前後に文章・コードブロック・注釈を付けない）:\n\
-             {{\"key_points\": [\"要点1\", \"要点2\", \"要点3\"], \"focus_points\": [\"注目ポイント1\"]}}"
+             {{\"key_points\": [\"要点1\", \"要点2\", \"要点3\"], \"focus_points\": [\"注目ポイント1\"], \"tags\": [\"タグ1\", \"タグ2\", \"タグ3\"]}}"
         ),
         _ => format!("次のテキストを日本語で{level}整えてください。"),
     };
@@ -553,11 +591,23 @@ mod tests {
         let schema = &format["json_schema"]["schema"];
         assert_eq!(
             schema["required"],
-            serde_json::json!(["key_points", "focus_points"])
+            serde_json::json!(["key_points", "focus_points", "tags"])
         );
         assert_eq!(schema["properties"]["key_points"]["minItems"], 2);
         assert_eq!(schema["properties"]["key_points"]["maxItems"], 4);
         assert_eq!(schema["properties"]["focus_points"]["maxItems"], 3);
+        assert_eq!(
+            schema["properties"]["tags"]["minItems"],
+            ARTICLE_TAGS_MIN_ITEMS
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["maxItems"],
+            ARTICLE_TAGS_MAX_ITEMS
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["items"]["maxLength"],
+            ARTICLE_TAG_MAX_CHARS
+        );
         assert_eq!(
             schema["properties"]["key_points"]["items"]["maxLength"],
             POINT_ITEM_MAX_CHARS
@@ -576,12 +626,16 @@ mod tests {
         );
         let key = prompt.find("key_points:").unwrap();
         let focus = prompt.find("focus_points:").unwrap();
+        let tags = prompt.find("tags:").unwrap();
         let defense = prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap();
         let input = prompt.find("工場のタイトル").unwrap();
         assert!(
-            key < focus && focus < defense && defense < input,
+            key < focus && focus < tags && tags < defense && defense < input,
             "{prompt}"
         );
+        // タグは件数・文字数・区切り文字の制約を指示し、出力例の JSON にも含める。
+        assert!(prompt.contains("3〜5個"), "{prompt}");
+        assert!(prompt.contains(r#""tags": ["#), "{prompt}");
         assert!(prompt.contains("要点の言い換えにしないでください"));
     }
 
@@ -590,7 +644,7 @@ mod tests {
         let request = || AiRequest {
             prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
             input_text: "工場のタイトル\n工場ができる。投資は1兆円。".to_string(),
-            context: None,
+            context: Some("テクノロジー".to_string()),
         };
         let service = service();
         let first = service
@@ -604,10 +658,37 @@ mod tests {
         let points: AiArticlePoints = serde_json::from_str(&first.text).unwrap();
         assert_eq!(points.key_points, vec!["工場ができる", "投資は1兆円"]);
         assert!(!points.focus_points.is_empty());
+        // タグはジャンルを先頭に、固定の語で下限の3件にそろえる。
+        assert_eq!(points.tags, vec!["テクノロジー", "ニュース", "最新動向"]);
 
         // 抜粋が無い（タイトルだけの）種でも、要点は下限の件数を満たす。
-        let title_only = mock_article_points("タイトルだけ");
+        let title_only = mock_article_points("タイトルだけ", "");
         assert!(title_only.key_points.len() >= KEY_POINTS_MIN_ITEMS);
+        // ジャンルが空でもタグは3件そろう。
+        assert_eq!(title_only.tags, vec!["ニュース", "最新動向", "話題"]);
+    }
+
+    #[test]
+    fn article_tags_mock_strips_characters_the_tag_validation_rejects() {
+        // 外部由来のジャンルから、区切り文字・山括弧・制御文字・行頭の # を除き、20文字に切り詰める。
+        assert_eq!(
+            mock_article_tags("#IT,ビジネス<b>\u{7}"),
+            vec!["ITビジネスb", "ニュース", "最新動向"]
+        );
+        assert_eq!(
+            mock_article_tags(&"あ".repeat(50))[0].chars().count(),
+            ARTICLE_TAG_MAX_CHARS
+        );
+        // ジャンルが固定の語と同じなら重複させない。
+        assert_eq!(
+            mock_article_tags("ニュース"),
+            vec!["ニュース", "最新動向", "話題"]
+        );
+        // 区切り文字だけのジャンルは使わない。
+        assert_eq!(
+            mock_article_tags("、、"),
+            vec!["ニュース", "最新動向", "話題"]
+        );
     }
 
     #[test]
@@ -1125,6 +1206,19 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
+            if prompt_id == ARTICLE_POINTS_PROMPT_ID {
+                // 要点・注目ポイントと一緒に、タグ（3〜5件・各20文字以内）も JSON スキーマどおりに出る。
+                let points: AiArticlePoints =
+                    serde_json::from_str(response.text.trim()).expect("article points JSON");
+                eprintln!("tags: {:?}", points.tags);
+                assert!(
+                    (ARTICLE_TAGS_MIN_ITEMS..=ARTICLE_TAGS_MAX_ITEMS).contains(&points.tags.len())
+                );
+                assert!(points
+                    .tags
+                    .iter()
+                    .all(|tag| tag.chars().count() <= ARTICLE_TAG_MAX_CHARS));
+            }
         }
         local.shutdown();
     }
