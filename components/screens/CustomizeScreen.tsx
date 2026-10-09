@@ -410,8 +410,8 @@ export default function CustomizeScreen({
               })}
             </div>
 
-            {/* Main Customize Area */}
-            <div className="flex gap-4">
+            {/* Main Customize Area（デコ一覧＋プレビューの2列）: 既定ウィンドウ（800×600）では横に並ばないため、プレビューを下へ折り返す */}
+            <div className="flex flex-wrap gap-4">
               {/* Deco Items List */}
               <Card className="w-64 shrink-0">
                 <CardHeader className="p-3 pb-2">
@@ -449,7 +449,7 @@ export default function CustomizeScreen({
               </Card>
 
               {/* Yuuko Preview */}
-              <Card className="flex-1 overflow-hidden">
+              <Card className="flex-1 min-w-[280px] overflow-hidden">
                 <div className="relative h-80 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Room Background Elements */}
                   <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
@@ -499,7 +499,7 @@ export default function CustomizeScreen({
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex items-center justify-center gap-3 p-4 bg-white border-t border-border">
+                <div className="flex flex-wrap items-center justify-center gap-3 p-4 bg-white border-t border-border">
                   <Button variant="outline" onClick={handleReset}>
                     <RotateCcw className="w-4 h-4 mr-2" />
                     元に戻す
@@ -519,10 +519,10 @@ export default function CustomizeScreen({
               </Card>
             </div>
 
-            {/* Bottom Section */}
-            <div className="flex gap-4 mt-4">
+            {/* Bottom Section: 上段と同じく、幅が足りないときはランク報酬を下へ折り返す */}
+            <div className="flex flex-wrap gap-4 mt-4">
               {/* Unlocked Items */}
-              <Card className="flex-1">
+              <Card className="flex-1 min-w-[280px]">
                 <CardHeader className="p-3 pb-2">
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-sm font-medium flex items-center gap-2">
