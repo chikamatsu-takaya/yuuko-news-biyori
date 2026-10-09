@@ -59,6 +59,9 @@ export type ArticleDetailDto = {
   summary?: string;
   excerpt?: string;
   yuukoExplanation?: string;
+  // 要点（何が起きたか）。注目ポイントとは別にAIで作る（判断台帳 D18）。要点の節が無い旧記事は空配列。
+  keyPoints: string[];
+  // 注目ポイント（なぜ面白いか・何を学べるか）。
   focusPoints: string[];
   yuukoComment?: string;
   isFavorite: boolean;
@@ -97,6 +100,7 @@ export type GeneratedArticleSummaryDto = {
   articleId: string;
   summary: string;
   yuukoExplanation: string;
+  keyPoints: string[];
   focusPoints: string[];
   yuukoComment: string;
 };

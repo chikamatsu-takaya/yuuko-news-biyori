@@ -207,6 +207,9 @@ pub struct ArticleDetailDto {
     /// 元の本文抜粋。AI要約の種・再生成の基にする（表示は summary を優先）。
     pub excerpt: Option<String>,
     pub yuuko_explanation: Option<String>,
+    /// 要点（何が起きたか）。D18 で注目ポイントと別に作る。要点の節が無い既存の記事ファイルでは空。
+    #[serde(default)]
+    pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
     pub yuuko_comment: Option<String>,
     pub is_favorite: bool,
@@ -391,6 +394,8 @@ pub struct FetchedArticle {
 pub struct ArticleSummaryUpdate {
     pub summary: String,
     pub yuuko_explanation: String,
+    /// 要点（AI生成・検証済み）。記事ファイルの「要点」節へ保存する。
+    pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
     pub yuuko_comment: String,
     /// 実際に生成に使ったプロバイダ（"gemini" / "mock"）。

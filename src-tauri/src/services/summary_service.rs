@@ -1,7 +1,9 @@
 use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{
-    AiRequest, AiResponse, GenerateArticleSummaryParams, GeneratedArticleSummaryDto,
+    AiArticlePoints, AiRequest, AiResponse, GenerateArticleSummaryParams,
+    GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, FOCUS_POINTS_MAX_ITEMS,
+    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
@@ -98,18 +100,20 @@ impl SummaryService {
         let provider = settings.to_dto().ai_provider;
         let explanation_level = ExplanationLevel::from_storage(&settings.explanation.level);
 
-        // 保存する注目ポイントは従来どおり元の記事から作る。
-        let focus_points = build_focus_points(&article, explanation_level);
         // 種（Mock 結果そのもの・実AIへの入力）は、外部由来の値を無害化した記事から作る。
         // これにより Mock 結果が出力検証に落ちないこと（＝AIキー未設定でも要約できること）を構造的に保証する。
+        // 種の中の注目ポイント（seed_focus_points）は要約・再説明の書き出しのための材料で、保存はしない。
+        // 保存する要点・注目ポイントは、下の article_points_v1 の AI 出力から取る（D18）。
         let seed_article = neutralize_seed_article(&article);
         let seed_focus_points = build_focus_points(&seed_article, explanation_level);
         let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
         let yuuko_explanation_seed =
             build_yuuko_explanation_seed(&seed_article, explanation_level, &seed_focus_points);
         let yuuko_comment_seed = build_yuuko_comment_seed(&seed_article, explanation_level);
+        let points_seed = build_points_seed(&seed_article);
 
-        // 3出力とも詳細設計書 §12.5 の出力検証を通ったものだけを保存・返却する。
+        // 4出力（要約・再説明・感想・要点と注目ポイント）とも詳細設計書 §12.5 の出力検証を通ったものだけを
+        // 保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
         // 自動要約（RejectFallback）では、Mock に切り替わった時点で残りの AI 呼び出しをせずに止める
@@ -149,18 +153,40 @@ impl SummaryService {
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
 
+        // 要点と注目ポイント（D18）。ローカルLLMの負荷を抑えるため、2つの配列を1回の呼び出しで受け取る。
+        // 入力は無害化したタイトル＋本文抜粋だけにする（既存の注目ポイントや定型文を混ぜない）。
+        let points_response = request_validated(
+            AiRequest {
+                prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
+                input_text: points_seed,
+                context: None,
+            },
+            SummaryOutputKind::Points,
+            provider,
+            explanation_level,
+        )?;
+        reject_fallback_early(fallback_policy, &article_id, &points_response)?;
+        // 取得手段に関わらず、保存前にもう一度ここで検証して構造化する（形の崩れた出力を保存しない）。
+        let points = article_points_from_response(&points_response)?;
+
         // 永続化メタ用のプロバイダ。1つでも Mock に切り替わっていれば "mock" と記録する。
         let effective_provider = combined_provider(&[
             &summary_response,
             &yuuko_explanation_response,
             &yuuko_comment_response,
+            &points_response,
         ]);
         let summary = summary_response.text;
         let yuuko_explanation = yuuko_explanation_response.text;
         let yuuko_comment = yuuko_comment_response.text;
+        let AiArticlePoints {
+            key_points,
+            focus_points,
+        } = points;
         let update = ArticleSummaryUpdate {
             summary: summary.clone(),
             yuuko_explanation: yuuko_explanation.clone(),
+            key_points: key_points.clone(),
             focus_points: focus_points.clone(),
             yuuko_comment: yuuko_comment.clone(),
             ai_provider: effective_provider,
@@ -197,6 +223,7 @@ impl SummaryService {
             article_id,
             summary,
             yuuko_explanation,
+            key_points,
             focus_points,
             yuuko_comment,
         }))
@@ -246,6 +273,7 @@ const PROVIDER_MOCK: &str = "mock";
 // Mock 結果は種そのものなので、種の各部品をここで切り詰めておけば各出力上限に必ず収まる。
 // 要約の種 = 抜粋(2300) + 注目ポイント2件(各 タイトル200＋定型文 程度) + 定型文(約70) ≦ 3000。
 // 感想の種 = タイトル(200) または ジャンル(100) + 定型文(約60) ≦ 300。
+// 要点・注目ポイントの種 = タイトル(200) + 改行 + 抜粋(2300)。Mock は種の文から各件 100 文字以内で組む。
 // 再説明の種 = ジャンル(100) + 注目ポイント2件(各 300 以下) + 定型文(約110) ≦ 2000。
 /// 種に使う本文抜粋の上限。RSS description 経由の抜粋は取得側で切り詰められないため、ここで抑える。
 const SEED_EXCERPT_MAX_CHARS: usize = 2_300;
@@ -365,6 +393,8 @@ enum SummaryOutputKind {
     Summary,
     Explanation,
     Comment,
+    /// 要点と注目ポイント（JSON `{"key_points": [..], "focus_points": [..]}`）。
+    Points,
 }
 
 impl SummaryOutputKind {
@@ -373,6 +403,8 @@ impl SummaryOutputKind {
             Self::Summary => SUMMARY_MAX_CHARS,
             Self::Explanation => EXPLANATION_MAX_CHARS,
             Self::Comment => COMMENT_MAX_CHARS,
+            // 要点・注目ポイントは1件あたりの上限（件数と応答全体の大きさは別に検証する）。
+            Self::Points => POINT_ITEM_MAX_CHARS,
         }
     }
 
@@ -381,6 +413,7 @@ impl SummaryOutputKind {
             Self::Summary => "summary",
             Self::Explanation => "yuuko_explanation",
             Self::Comment => "yuuko_comment",
+            Self::Points => "article_points",
         }
     }
 }
@@ -394,6 +427,12 @@ enum OutputRejection {
     MarkdownSeparator,
     HtmlTag,
     ControlCharacter,
+    /// 要点・注目ポイント: 期待した JSON として解析できない。
+    InvalidJson,
+    /// 要点・注目ポイント: 件数が範囲外。
+    ItemCount,
+    /// 要点・注目ポイント: 1件の中に改行がある（記事ファイルの箇条書き1行に収まらない）。
+    MultiLine,
 }
 
 impl OutputRejection {
@@ -405,6 +444,9 @@ impl OutputRejection {
             Self::MarkdownSeparator => "markdown_separator",
             Self::HtmlTag => "html_tag",
             Self::ControlCharacter => "control_character",
+            Self::InvalidJson => "invalid_json",
+            Self::ItemCount => "item_count",
+            Self::MultiLine => "multi_line",
         }
     }
 }
@@ -416,6 +458,11 @@ impl OutputRejection {
 /// 不正出力は加工せず拒否している。また行頭「#」は記事Markdownのセクション見出し（`## AI要約` など）と、
 /// 「---」は front matter 区切りと衝突しうるため、部分的に書き換えて残すより丸ごと捨てる方が確実に安全。
 fn validate_summary_output(kind: SummaryOutputKind, text: &str) -> Result<String, OutputRejection> {
+    if kind == SummaryOutputKind::Points {
+        // 要点・注目ポイントは JSON。検証済みの値を、余分な空白・コードフェンスを除いた JSON として返す。
+        let points = validate_article_points(text)?;
+        return serde_json::to_string(&points).map_err(|_| OutputRejection::InvalidJson);
+    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(OutputRejection::Empty);
@@ -438,6 +485,92 @@ fn validate_summary_output(kind: SummaryOutputKind, text: &str) -> Result<String
         if is_markdown_separator_line(line) {
             return Err(OutputRejection::MarkdownSeparator);
         }
+    }
+    if contains_html_tag(trimmed) {
+        return Err(OutputRejection::HtmlTag);
+    }
+    Ok(trimmed.to_string())
+}
+
+/// 要点・注目ポイントの応答全体の上限（バイト）。用語解説の JSON 応答と同じく、解析前に大きさで拒否する。
+const ARTICLE_POINTS_RESPONSE_MAX_BYTES: usize = 16 * 1024;
+
+/// 要点・注目ポイントの AI 出力を検証し、trim 済みの各項目を返す（副作用なし）。
+///
+/// - 解析前に応答全体の大きさ（16KiB）を確認し、厳格な JSON（未知のキーは拒否）として解析する。
+///   Gemini は JSON だけを頼んでも ```json のコードフェンスで囲むことがあるため、全体を囲む1組だけは外す。
+/// - 件数（要点 2〜4・注目ポイント 1〜3）と、各項目の文字数（100文字）・文字種を確認する。
+/// - 各項目は記事ファイルで `- 項目` の1行として保存するため、改行・行頭「#」・区切り行・HTML・制御文字は
+///   無害化せず拒否する（要約などと同じく、部分的に書き換えて残すより丸ごと捨てる方が確実に安全）。
+fn validate_article_points(text: &str) -> Result<AiArticlePoints, OutputRejection> {
+    if text.len() > ARTICLE_POINTS_RESPONSE_MAX_BYTES {
+        return Err(OutputRejection::TooLong);
+    }
+    let parsed = serde_json::from_str::<AiArticlePoints>(strip_enclosing_code_fence(text))
+        .map_err(|_| OutputRejection::InvalidJson)?;
+    let key_points = validate_point_items(
+        &parsed.key_points,
+        KEY_POINTS_MIN_ITEMS..=KEY_POINTS_MAX_ITEMS,
+    )?;
+    let focus_points = validate_point_items(
+        &parsed.focus_points,
+        FOCUS_POINTS_MIN_ITEMS..=FOCUS_POINTS_MAX_ITEMS,
+    )?;
+    Ok(AiArticlePoints {
+        key_points,
+        focus_points,
+    })
+}
+
+/// 応答全体が1組のコードフェンス（```json … ``` / ``` … ```）で囲まれていれば中身を返す。
+/// それ以外（前後に文章がある等）はそのまま返し、JSON 解析で落とす。
+fn strip_enclosing_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(body) = rest.strip_suffix("```") else {
+        return trimmed;
+    };
+    // 開きフェンスの行（```json など）を飛ばす。
+    match body.split_once('\n') {
+        Some((info, inner)) if info.trim().chars().all(|c| c.is_ascii_alphanumeric()) => {
+            inner.trim()
+        }
+        _ => trimmed,
+    }
+}
+
+fn validate_point_items(
+    items: &[String],
+    allowed_count: std::ops::RangeInclusive<usize>,
+) -> Result<Vec<String>, OutputRejection> {
+    if !allowed_count.contains(&items.len()) {
+        return Err(OutputRejection::ItemCount);
+    }
+    items.iter().map(|item| validate_point_item(item)).collect()
+}
+
+fn validate_point_item(item: &str) -> Result<String, OutputRejection> {
+    let trimmed = item.trim();
+    if trimmed.is_empty() {
+        return Err(OutputRejection::Empty);
+    }
+    if trimmed.chars().count() > POINT_ITEM_MAX_CHARS {
+        return Err(OutputRejection::TooLong);
+    }
+    if trimmed.contains(['\n', '\r']) {
+        return Err(OutputRejection::MultiLine);
+    }
+    if contains_disallowed_control_char(trimmed) {
+        return Err(OutputRejection::ControlCharacter);
+    }
+    if trimmed.starts_with('#') {
+        return Err(OutputRejection::MarkdownHeading);
+    }
+    // 保存形（`- 項目`）でも区切り行にならないことを確かめる（例: 項目 `--` → `- --`）。
+    if is_markdown_separator_line(trimmed) || is_markdown_separator_line(&format!("- {trimmed}")) {
+        return Err(OutputRejection::MarkdownSeparator);
     }
     if contains_html_tag(trimmed) {
         return Err(OutputRejection::HtmlTag);
@@ -487,12 +620,28 @@ fn select_valid_output(
         kind.label(),
         rejection.label()
     );
-    if primary.provider == PROVIDER_MOCK {
-        return Err(AppError::Parse(
-            "ai summary output failed validation".to_string(),
-        ));
+    Err(rejection_error(&primary))
+}
+
+/// 検証に落ちた出力のエラー。Mock の出力なら `Parse`、実AIの出力なら `AiOutputRejected`（D104）。
+fn rejection_error(response: &AiResponse) -> AppError {
+    if response.provider == PROVIDER_MOCK {
+        return AppError::Parse("ai summary output failed validation".to_string());
     }
-    Err(AppError::AiOutputRejected)
+    AppError::AiOutputRejected
+}
+
+/// 要点・注目ポイントの応答を、保存できる形（検証済みの各項目）へ変換する。
+/// 注入された取得手段が検証を通していなくても、形の崩れた出力を保存しないよう、ここで必ず検証する。
+fn article_points_from_response(response: &AiResponse) -> Result<AiArticlePoints, AppError> {
+    validate_article_points(&response.text).map_err(|rejection| {
+        log::warn!(
+            "AI summary output was rejected ({}: {}); the generated summary was not saved",
+            SummaryOutputKind::Points.label(),
+            rejection.label()
+        );
+        rejection_error(response)
+    })
 }
 
 fn build_focus_points(
@@ -514,6 +663,15 @@ fn build_focus_points(
     match explanation_level {
         ExplanationLevel::Simple => source_points.into_iter().take(2).collect(),
         ExplanationLevel::Normal | ExplanationLevel::Detailed => source_points,
+    }
+}
+
+/// 要点・注目ポイントの種: 1行目に無害化済みタイトル、2行目以降に無害化済みの本文抜粋（無ければタイトルだけ）。
+/// 実AIへの入力であり、Mock はこの種の文から要点を組む（ai_provider_service の mock_article_points）。
+fn build_points_seed(article: &ArticleDetailDto) -> String {
+    match article.excerpt.as_deref() {
+        Some(excerpt) => format!("{}\n{excerpt}", article.title),
+        None => article.title.clone(),
     }
 }
 
@@ -611,12 +769,16 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        combined_provider, neutralize_seed_text, select_valid_output, validate_summary_output,
-        FallbackPolicy, OutputRejection, SummaryGeneration, SummaryOutputKind, SummaryService,
-        COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
+        combined_provider, neutralize_seed_text, select_valid_output, validate_article_points,
+        validate_point_item, validate_summary_output, FallbackPolicy, OutputRejection,
+        SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
+        EXPLANATION_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
-    use crate::domain::summary::{AiResponse, GenerateArticleSummaryParams};
+    use crate::domain::summary::{
+        AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, KEY_POINTS_MAX_ITEMS,
+        KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    };
     use crate::error::{AppError, CommandError};
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
@@ -631,6 +793,22 @@ mod tests {
             text: text.to_string(),
             provider: provider.to_string(),
         }
+    }
+
+    /// 出力種別に合った形の応答を作る。要点・注目ポイントは text を元にした有効な JSON にする。
+    fn output(kind: SummaryOutputKind, text: &str, provider: &str) -> AiResponse {
+        if kind == SummaryOutputKind::Points {
+            return response(&points_json(text), provider);
+        }
+        response(text, provider)
+    }
+
+    fn points_json(text: &str) -> String {
+        serde_json::json!({
+            "key_points": [format!("{text}（要点1）"), format!("{text}（要点2）")],
+            "focus_points": [format!("{text}（注目）")],
+        })
+        .to_string()
     }
 
     // --- validate_summary_output ---
@@ -949,6 +1127,7 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "保存済みの要約".to_string(),
                     yuuko_explanation: "保存済みの再説明".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["観点A".to_string()],
                     yuuko_comment: "保存済みの一言".to_string(),
                     ai_provider: "mock".to_string(),
@@ -998,9 +1177,9 @@ mod tests {
     ) -> Result<AiResponse, AppError> {
         move |_request, kind, _provider, _level| {
             if kind == failing {
-                select_valid_output(kind, response("代わりの出力", "mock"))
+                select_valid_output(kind, output(kind, "代わりの出力", "mock"))
             } else {
-                Ok(response("実AIの出力", "gemini"))
+                Ok(output(kind, "実AIの出力", "gemini"))
             }
         }
     }
@@ -1032,7 +1211,7 @@ mod tests {
             .generate_article_summary_with(
                 params(),
                 FallbackPolicy::RejectFallback,
-                |_request, _kind, _provider, _level| Ok(response("実AIの出力", "gemini")),
+                |_request, kind, _provider, _level| Ok(output(kind, "実AIの出力", "gemini")),
             )
             .unwrap();
 
@@ -1079,7 +1258,7 @@ mod tests {
                     params(),
                     FallbackPolicy::SaveFallback,
                     |_request, kind, _provider, _level| {
-                        select_valid_output(kind, response("保存済みの出力", provider))
+                        select_valid_output(kind, output(kind, "保存済みの出力", provider))
                     },
                 )
                 .unwrap();
@@ -1173,7 +1352,7 @@ mod tests {
             SummaryOutputKind::Summary,
         );
         assert!(result.is_ok());
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
@@ -1195,6 +1374,7 @@ mod tests {
                                 ArticleSummaryUpdate {
                                     summary: "手動の要約".to_string(),
                                     yuuko_explanation: "手動の再説明".to_string(),
+                                    key_points: Vec::new(),
                                     focus_points: vec!["手動の観点".to_string()],
                                     yuuko_comment: "手動の一言".to_string(),
                                     ai_provider: "gemini".to_string(),
@@ -1203,7 +1383,7 @@ mod tests {
                             )
                             .unwrap();
                     }
-                    Ok(response("自動の出力", "gemini"))
+                    Ok(output(kind, "自動の出力", "gemini"))
                 },
             )
             .unwrap();
@@ -1225,7 +1405,7 @@ mod tests {
             .generate_article_summary_with(
                 params(),
                 FallbackPolicy::SaveFallback,
-                |_request, _kind, _provider, _level| Ok(response("1回目の出力", "gemini")),
+                |_request, kind, _provider, _level| Ok(output(kind, "1回目の出力", "gemini")),
             )
             .unwrap();
 
@@ -1234,7 +1414,7 @@ mod tests {
             .generate_article_summary_with(
                 params(),
                 FallbackPolicy::SaveFallback,
-                |_request, _kind, _provider, _level| Ok(response("2回目の出力", "gemini")),
+                |_request, kind, _provider, _level| Ok(output(kind, "2回目の出力", "gemini")),
             )
             .unwrap();
         assert!(matches!(regenerated, SummaryGeneration::Generated(_)));
@@ -1260,19 +1440,288 @@ mod tests {
             .generate_article_summary_with(
                 params(),
                 FallbackPolicy::SaveFallback,
-                |request, _kind, _provider, _level| {
+                |request, kind, _provider, _level| {
                     requests.borrow_mut().push(request);
-                    Ok(response("実AIの出力", "gemini"))
+                    Ok(output(kind, "実AIの出力", "gemini"))
                 },
             )
             .unwrap();
 
         let requests = requests.into_inner();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         for request in requests {
             assert!(!request.input_text.contains(nickname));
             assert!(!request.context.unwrap_or_default().contains(nickname));
         }
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    // --- 要点・注目ポイント（判断台帳 D18） ---
+
+    fn points_text(key_points: &[&str], focus_points: &[&str]) -> String {
+        serde_json::json!({ "key_points": key_points, "focus_points": focus_points }).to_string()
+    }
+
+    #[test]
+    fn article_points_are_parsed_trimmed_and_kept_separate() {
+        let text = points_text(
+            &["  工場の新設が発表された ", "投資額は1兆円", "稼働は2028年"],
+            &["地域の雇用がどう変わるかに注目"],
+        );
+        let points = validate_article_points(&text).unwrap();
+        assert_eq!(
+            points.key_points,
+            vec!["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"]
+        );
+        assert_eq!(points.focus_points, vec!["地域の雇用がどう変わるかに注目"]);
+
+        // 全体を囲む1組のコードフェンス（Gemini で起きうる）だけは外して読む。
+        let fenced = format!("```json\n{text}\n```");
+        assert_eq!(validate_article_points(&fenced).unwrap(), points);
+        // 比較の「<」や途中のハイフンは拒否しない。
+        assert!(
+            validate_article_points(&points_text(&["1 < 2 の話", "A-B 間の接続"], &["x"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn article_points_with_unexpected_shape_are_rejected() {
+        for text in [
+            "要点は次のとおりです".to_string(),
+            format!("要点です: {}", points_text(&["a", "b"], &["c"])),
+            r#"{"key_points": ["a", "b"]}"#.to_string(),
+            r#"{"key_points": ["a", "b"], "focus_points": ["c"], "extra": 1}"#.to_string(),
+            r#"{"key_points": "a", "focus_points": ["c"]}"#.to_string(),
+            r#"["a", "b"]"#.to_string(),
+        ] {
+            assert_eq!(
+                validate_article_points(&text),
+                Err(OutputRejection::InvalidJson),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn article_points_out_of_count_range_are_rejected() {
+        for (key_points, focus_points) in [
+            (vec!["a"], vec!["c"]),
+            (vec!["a", "b", "c", "d", "e"], vec!["c"]),
+            (vec!["a", "b"], vec![]),
+            (vec!["a", "b"], vec!["c", "d", "e", "f"]),
+        ] {
+            assert_eq!(
+                validate_article_points(&points_text(&key_points, &focus_points)),
+                Err(OutputRejection::ItemCount)
+            );
+        }
+        // 下限・上限ちょうどは受け付ける。
+        assert!(validate_article_points(&points_text(&["a", "b"], &["c"])).is_ok());
+        assert!(
+            validate_article_points(&points_text(&["a", "b", "c", "d"], &["e", "f", "g"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn article_point_items_with_unsafe_content_are_rejected() {
+        let at_limit = "あ".repeat(POINT_ITEM_MAX_CHARS);
+        let over_limit = "あ".repeat(POINT_ITEM_MAX_CHARS + 1);
+        assert!(validate_article_points(&points_text(&[&at_limit, "b"], &["c"])).is_ok());
+        for (item, expected) in [
+            (over_limit.as_str(), OutputRejection::TooLong),
+            ("   ", OutputRejection::Empty),
+            ("1行目\n## ゆうこの一言", OutputRejection::MultiLine),
+            ("改行\r混入", OutputRejection::MultiLine),
+            ("## 要点", OutputRejection::MarkdownHeading),
+            ("---", OutputRejection::MarkdownSeparator),
+            ("--", OutputRejection::MarkdownSeparator),
+            ("<script>x</script>", OutputRejection::HtmlTag),
+            ("制御\u{0007}文字", OutputRejection::ControlCharacter),
+        ] {
+            // 要点側・注目ポイント側のどちらに混ざっても拒否する。
+            assert_eq!(
+                validate_article_points(&points_text(&[item, "b"], &["c"])),
+                Err(expected),
+                "{item:?}"
+            );
+            assert_eq!(
+                validate_article_points(&points_text(&["a", "b"], &[item])),
+                Err(expected),
+                "{item:?}"
+            );
+        }
+        // 応答全体が 16KiB を超えるものは解析せずに拒否する。
+        let huge = format!(
+            "{}{}",
+            " ".repeat(16 * 1024),
+            points_text(&["a", "b"], &["c"])
+        );
+        assert_eq!(
+            validate_article_points(&huge),
+            Err(OutputRejection::TooLong)
+        );
+    }
+
+    #[test]
+    fn generated_key_points_and_focus_points_are_saved_separately_and_reload() {
+        let root_dir = temp_root("points-saved");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let generated = service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |request, kind, _provider, _level| {
+                    if kind == SummaryOutputKind::Points {
+                        // 要点は記事の情報（タイトル・抜粋）だけから作り、プロンプトIDも専用のものを使う。
+                        assert_eq!(request.prompt_id, ARTICLE_POINTS_PROMPT_ID);
+                        assert!(request.input_text.contains("半導体工場の新設計画"));
+                        assert!(request
+                            .input_text
+                            .contains("新しい半導体工場の建設計画です。"));
+                        return select_valid_output(
+                            kind,
+                            response(
+                                &points_text(
+                                    &["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"],
+                                    &["地域の雇用がどう変わるかに注目"],
+                                ),
+                                "local",
+                            ),
+                        );
+                    }
+                    select_valid_output(kind, response("ローカルの出力", "local"))
+                },
+            )
+            .unwrap();
+        let SummaryGeneration::Generated(generated) = generated else {
+            panic!("manual generation must save");
+        };
+        assert_eq!(
+            generated.key_points,
+            vec!["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"]
+        );
+        assert_eq!(
+            generated.focus_points,
+            vec!["地域の雇用がどう変わるかに注目"]
+        );
+
+        // 記事ファイルを読み直しても、要点と注目ポイントが混ざらずに戻る。
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.key_points, generated.key_points);
+        assert_eq!(detail.focus_points, generated.focus_points);
+        assert_eq!(detail.summary.as_deref(), Some("ローカルの出力"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn mock_key_points_come_from_the_article_and_differ_from_focus_points() {
+        let root_dir = temp_root("points-mock");
+        let (service, repository) = build_service(
+            &root_dir,
+            "新しい半導体工場の建設計画が発表されました。投資額は1兆円です。稼働は2028年の予定です。",
+        );
+
+        // 既定（provider=Mock）でも決定的な要点・注目ポイントが作られ、検証を通って保存される。
+        let generated = service.generate_article_summary(params()).unwrap();
+        assert_eq!(
+            generated.key_points,
+            vec![
+                "新しい半導体工場の建設計画が発表されました",
+                "投資額は1兆円です",
+                "稼働は2028年の予定です"
+            ]
+        );
+        assert!(!generated.focus_points.is_empty());
+        for point in &generated.focus_points {
+            assert!(!generated.key_points.contains(point));
+            assert!(!point.contains("mock"));
+        }
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.key_points, generated.key_points);
+        assert_eq!(detail.focus_points, generated.focus_points);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn mock_key_points_pass_validation_for_risky_or_short_text() {
+        for (name, title, excerpt) in [
+            (
+                "points-risky",
+                "#1 LazyCell<T> の使い方",
+                "前半。---。#見出し風。- 箇条書き風。<b>太字</b>",
+            ),
+            ("points-short", "短いタイトル", "一文だけ"),
+            ("points-long", "長い記事", &"あ".repeat(5_000)),
+        ] {
+            let root_dir = temp_root(name);
+            let (service, repository) = build_service_with_title(&root_dir, title, excerpt);
+            let generated = service.generate_article_summary(params()).unwrap();
+            assert!(
+                (KEY_POINTS_MIN_ITEMS..=KEY_POINTS_MAX_ITEMS).contains(&generated.key_points.len()),
+                "{name}"
+            );
+            for point in generated.key_points.iter().chain(&generated.focus_points) {
+                assert!(validate_point_item(point).is_ok(), "{name}: {point}");
+            }
+            assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+            let _ = std::fs::remove_dir_all(&root_dir);
+        }
+    }
+
+    #[test]
+    fn malformed_points_output_is_not_saved_and_keeps_the_article_file_intact() {
+        for policy in [FallbackPolicy::SaveFallback, FallbackPolicy::RejectFallback] {
+            for provider in ["gemini", "local"] {
+                let root_dir = temp_root(&format!("points-malformed-{provider}"));
+                let (service, repository) =
+                    build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+                // 検証を通さずに崩れた出力を返す取得手段でも、保存前の検証で止まる。
+                for malformed in [
+                    "要点: 工場ができる".to_string(),
+                    points_text(&["1件だけ"], &["注目"]),
+                    points_text(&["a\n## ゆうこの一言", "b"], &["注目"]),
+                ] {
+                    let error = service
+                        .generate_article_summary_with(
+                            params(),
+                            policy,
+                            |_request, kind, _provider, _level| {
+                                if kind == SummaryOutputKind::Points {
+                                    Ok(response(&malformed, provider))
+                                } else {
+                                    Ok(response("実AIの出力", provider))
+                                }
+                            },
+                        )
+                        .unwrap_err();
+                    assert!(matches!(error, AppError::AiOutputRejected));
+                    assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+                }
+
+                // 記事ファイルは壊れず、未要約のまま読み込める。
+                let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+                assert!(detail.key_points.is_empty());
+                assert!(detail.focus_points.is_empty());
+                assert!(detail.yuuko_comment.is_none());
+                let _ = std::fs::remove_dir_all(&root_dir);
+            }
+        }
+    }
+
+    #[test]
+    fn auto_summary_does_not_save_mock_points() {
+        // D56: 自動要約は、要点・注目ポイントだけが Mock に切り替わった場合も保存しない。
+        let root_dir = temp_root("points-auto-fallback");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+        let result = service.generate_article_summary_with(
+            params(),
+            FallbackPolicy::RejectFallback,
+            gemini_with_fallback_on(SummaryOutputKind::Points),
+        );
+        assert!(result.is_err());
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 }
