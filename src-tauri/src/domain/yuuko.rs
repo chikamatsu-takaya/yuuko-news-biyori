@@ -407,14 +407,22 @@ impl PersistedYuukoState {
             }
             return true;
         }
-        if reward.reward_ids.len() == before {
-            return false;
+        // 件数が変わらなくても文言は毎回マスタから作り直す。保存済みの文言に古い表示名
+        // （例: 仮名「テーマ①」）が残っていても、次の同期で現在の名前へ揃えるため。
+        // 保存は実際に変化したときだけにする（呼び出し側の無駄な書き込みを避ける）。
+        let mut changed = reward.reward_ids.len() != before;
+        let message = reward_notice_message(&reward.reward_ids);
+        if reward.message != message {
+            reward.message = message;
+            changed = true;
         }
-        reward.message = reward_notice_message(&reward.reward_ids);
-        if self.state == YuukoResidentState::RewardNotifying {
+        if self.state == YuukoResidentState::RewardNotifying
+            && self.balloon_text.as_deref() != Some(reward.message.as_str())
+        {
             self.balloon_text = Some(reward.message.clone());
+            changed = true;
         }
-        true
+        changed
     }
 
     /// 未確認の報酬を「ゆうこが報酬を知らせ中」にし、ニュース通知と同じく通知回数・クールタイム基点を記録する
@@ -1117,7 +1125,7 @@ mod tests {
     fn reward_notice_message_uses_master_name_or_count() {
         assert_eq!(
             reward_notice_message(&ids(&["theme_001"])),
-            "新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。"
+            "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。"
         );
         assert_eq!(
             reward_notice_message(&ids(&["theme_001", "theme_002"])),
@@ -1146,7 +1154,7 @@ mod tests {
         assert!(state.preview_article.is_none() && state.current_article_id.is_none());
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
         );
         let reward = state.reward_notification.clone().unwrap();
         assert!(reward.pending);
@@ -1201,7 +1209,7 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「テーマ②」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。")
         );
         // すべて確認済みなら通知自体を外す（二重に知らせない）。クールタイムは付けない。
         assert!(state.sync_reward_notice(&[]));
@@ -1210,6 +1218,29 @@ mod tests {
         assert!(state.balloon_text.is_none());
         assert!(state.cooldown_until.is_none());
         assert!(!state.sync_reward_notice(&[]));
+    }
+
+    #[test]
+    fn sync_reward_notice_refreshes_stale_reward_names_in_saved_text() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 3, ids(&["theme_001"]));
+        // 仮名時代に保存された文言が残っている状態を再現する。
+        let stale = "新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        state.reward_notification.as_mut().unwrap().message = stale.to_string();
+        state.balloon_text = Some(stale.to_string());
+
+        // 件数は同じでも、文言を現在の表示名で作り直して保存対象にする。
+        assert!(state.sync_reward_notice(&ids(&["theme_001"])));
+        let expected = "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(
+            state.reward_notification.as_ref().unwrap().message,
+            expected
+        );
+        assert_eq!(state.balloon_text.as_deref(), Some(expected));
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        // 揃った後は変化なし（保存不要）。
+        assert!(!state.sync_reward_notice(&ids(&["theme_001"])));
     }
 
     #[test]
@@ -1230,7 +1261,7 @@ mod tests {
         state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
         state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
 
-        let expected = "新しいテーマ「テーマ②」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。";
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
         let reward = state.reward_notification.unwrap();
@@ -1245,7 +1276,7 @@ mod tests {
         state.mark_reward_notified(now, 3, ids(&["theme_001"]));
         let mut dto = state.to_notification_state();
         dto.apply_nickname("ゆう");
-        let expected = "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
         assert_eq!(dto.balloon_text.as_deref(), Some(expected));
         assert_eq!(dto.reward_notification.unwrap().message, expected);
         // 保存状態には焼き込まない。

@@ -38,20 +38,20 @@ pub struct RewardDefinition {
 /// 報酬マスタ（アプリ同梱）。
 ///
 /// リソース同梱設定（tauri.conf.json）を変えずに済み、外部から書き換えられない値を正にできるため、
-/// 同梱 JSON ではなくバイナリに埋め込む（データ設計書 §11.3）。表示名は仮の名前で、実際の配色はテーマ設計タスクで決める。
+/// 同梱 JSON ではなくバイナリに埋め込む（データ設計書 §11.3）。表示名はフロントの UI テーマ名（lib/ui-theme.mjs）と揃える。配色は 2026-10-09 承認済み（D96）。
 /// 呼び名は解放条件なし（2026-10-05 決定）のため報酬に含めない。
 /// ランク 10 の報酬枠は空けておく（中身は後で決める）。他のランクは当面ランクだけ上がる。
 pub const REWARD_MASTER: &[RewardDefinition] = &[
     RewardDefinition {
         reward_id: "theme_001",
         reward_type: RewardType::Theme,
-        name: "テーマ①",
+        name: "そらいろ",
         unlock_rank: 3,
     },
     RewardDefinition {
         reward_id: "theme_002",
         reward_type: RewardType::Theme,
-        name: "テーマ②",
+        name: "さくら",
         unlock_rank: 7,
     },
 ];

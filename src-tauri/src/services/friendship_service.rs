@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn rank_up_by_event_unlocks_rewards_into_rewards_json() {
         let (service, root) = temp_service();
-        // 累計 24pt（Rank2・あと1pt で Rank3）から 1pt で Rank3 → テーマ①を解放。
+        // 累計 24pt（Rank2・あと1pt で Rank3）から 1pt で Rank3 → theme_001（そらいろ）を解放。
         save_legacy_daily(&service, "2026-06-01", 24);
         let result = service
             .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")

@@ -893,6 +893,35 @@ test("home limits by maxDailyRecommendations while the today-news list shows all
   await expect(countCards(page.locator("main"))).toHaveCount(5);
 });
 
+// 報酬テーマ: 保存済みの selectedThemeId（設定 ui.themeId）を <html data-theme> へ反映し、
+// CSS 変数経由で画面の配色が切り替わる。未知の ID は既定（クリーム）へ倒す。
+for (const { themeId, expectedTheme, background } of [
+  { themeId: "theme_001", expectedTheme: "theme_001", background: "rgb(243, 249, 254)" },
+  { themeId: "theme_002", expectedTheme: "theme_002", background: "rgb(255, 247, 249)" },
+  { themeId: "theme_999", expectedTheme: "default", background: "rgb(255, 253, 245)" },
+]) {
+  test(`saved UI theme ${themeId} is applied app-wide as data-theme=${expectedTheme}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((id: string) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_USER_SETTINGS_OVERRIDE__ = { selectedThemeId: id };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, themeId);
+
+    await openHome(page);
+
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-theme",
+      expectedTheme
+    );
+    await expect(page.locator("body")).toHaveCSS(
+      "background-color",
+      background
+    );
+  });
+}
+
 // サイドバー「ニュースを見る」で当日ニュース一覧を開く共通操作。
 const openTodayNewsList = async (page: Page) => {
   await page
@@ -1532,8 +1561,8 @@ test("customize: friendship rank and reward unlock state come from real data", a
     win.__E2E_REWARD_STATE__ = {
       currentRank: 4,
       rewards: [
-        { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
-        { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
       ],
       pendingRewardIds: [],
       activeThemeId: "default",
@@ -1551,9 +1580,9 @@ test("customize: friendship rank and reward unlock state come from real data", a
 
   const rewardItems = page.getByTestId("customize-rank-reward-item");
   await expect(rewardItems).toHaveCount(2);
-  await expect(rewardItems.nth(0)).toContainText("テーマ①");
+  await expect(rewardItems.nth(0)).toContainText("そらいろ");
   await expect(rewardItems.nth(0)).toContainText("解放済み");
-  await expect(rewardItems.nth(1)).toContainText("テーマ②");
+  await expect(rewardItems.nth(1)).toContainText("さくら");
   await expect(rewardItems.nth(1)).toContainText("ランク7で解放");
   await expect(page.getByTestId("customize-rank-reward-preview")).toHaveCount(0);
 });
@@ -1632,8 +1661,8 @@ const setupRankUp = (page: Page, newRank: number, pendingRewardIds: string[]) =>
       const win = window as any;
       win.__E2E_FRIENDSHIP_RANK_UP_TO__ = rank;
       const master = [
-        { rewardId: "theme_001", name: "テーマ①", unlockRank: 3 },
-        { rewardId: "theme_002", name: "テーマ②", unlockRank: 7 },
+        { rewardId: "theme_001", name: "そらいろ", unlockRank: 3 },
+        { rewardId: "theme_002", name: "さくら", unlockRank: 7 },
       ];
       win.__E2E_REWARD_STATE__ = {
         currentRank: rank,
@@ -1674,8 +1703,8 @@ test("rank up: dialog shows the unlocked reward and OK confirms only that reward
   await expect(dialog.getByText("ランクアップ！")).toBeVisible();
   const rewardSection = dialog.getByRole("region", { name: "解放された報酬" });
   await expect(rewardSection).toBeVisible();
-  await expect(rewardSection.getByText("テーマ①")).toBeVisible();
-  await expect(rewardSection.getByText("テーマ②")).toHaveCount(0);
+  await expect(rewardSection.getByText("そらいろ")).toBeVisible();
+  await expect(rewardSection.getByText("さくら")).toHaveCount(0);
   await expect(
     rewardSection.getByText("カスタマイズ画面で切り替えられるよ。")
   ).toBeVisible();
@@ -3985,7 +4014,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
       notifyMaxPerDay: 5,
       explanationLevel: "detailed",
       aiProvider: "gemini",
-      selectedThemeId: "sakura",
+      selectedThemeId: "theme_002",
     };
   });
 
@@ -4010,7 +4039,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
 
   // ゆうこ表示メニュー: selectedThemeId が読み取り専用で表示される。
   await openSettingsMenu(page, "ゆうこ表示");
-  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  await expect(page.getByTestId("current-theme-id")).toHaveText("さくら");
   await expect(page.getByText("変更機能は準備中")).toBeVisible();
 
   // その他メニュー: genres が反映される。
@@ -4125,7 +4154,8 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
 
   // ゆうこ表示メニュー: selectedThemeId（読み取り専用表示）。
   await openSettingsMenu(page, "ゆうこ表示");
-  await expect(page.getByTestId("current-theme-id")).toHaveText("sakura");
+  // 未知の ID（"sakura"）は既定テーマの表示名へ倒すが、保存値は書き換えずに維持する（上の saved 確認）。
+  await expect(page.getByTestId("current-theme-id")).toHaveText("クリーム");
   // 「変更機能は準備中」が表示され、テーマ値は編集不可のプレーン表示（span）であること。
   await expect(page.getByText("変更機能は準備中")).toBeVisible();
   await expect(page.getByTestId("current-theme-id")).toHaveJSProperty(
@@ -5741,7 +5771,7 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
 
 // 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
 const REWARD_NOTICE_TEXT =
-  "ゆう、新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
 
 async function enableRewardNotice(page: Page) {
   await page.addInitScript((text: string) => {
@@ -7975,8 +8005,8 @@ async function installTauriMocks(page: Page) {
               rewardState ?? {
                 currentRank: 1,
                 rewards: [
-                  { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: false, pending: false },
-                  { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+                  { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: false, pending: false },
+                  { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
                 ],
                 pendingRewardIds: [],
                 activeThemeId: "default",
