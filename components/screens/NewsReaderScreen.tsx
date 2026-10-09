@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
@@ -1651,14 +1652,7 @@ export default function NewsReaderScreen({
 
           <div className="border-t border-border/50 p-3">
             <AutostartStatus className="mb-2" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-full text-xs"
-              onClick={() => console.log("Exit resident mode")}
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="h-8 w-full text-xs" />
           </div>
         </aside>
 

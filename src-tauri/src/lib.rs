@@ -215,6 +215,7 @@ pub fn run() {
             commands::autostart_commands::get_autostart_enabled,
             commands::autostart_commands::set_autostart_enabled,
             commands::app_commands::restart_app,
+            commands::app_commands::quit_resident_app,
             commands::data_export_commands::export_migration_data,
             commands::data_export_commands::open_migration_folder,
             commands::data_import_commands::list_migration_imports,
