@@ -1540,7 +1540,7 @@ impl PersistedArticleRecord {
             focus_points: self
                 .focus_points
                 .iter()
-                .filter(|point| !is_legacy_template_focus_point(point))
+                .filter(|point| !is_legacy_template_focus_point(point, &self.title, &self.genre))
                 .cloned()
                 .collect(),
             yuuko_comment: self.yuuko_comment.clone(),
@@ -1932,10 +1932,27 @@ fn flush_body_section(
 /// `{ジャンル} 分野での意味を捉える` / `元記事の背景と影響範囲を整理する`）で保存していた。
 /// 画面に定型文を出さないよう、記事詳細へ渡すときにだけ除く（記事ファイルは書き換えない。
 /// 要約を作り直すと AI の注目ポイントで上書きされる）。
-fn is_legacy_template_focus_point(point: &str) -> bool {
-    point.ends_with(" の要点を確認する")
-        || point.ends_with(" 分野での意味を捉える")
+/// AI が書いた注目ポイントを誤って消さないよう、その記事のタイトル・ジャンルから作った定型文と完全一致するものだけを除く。
+fn is_legacy_template_focus_point(point: &str, title: &str, genre: &str) -> bool {
+    point == format!("{title} の要点を確認する")
+        || point == format!("{genre} 分野での意味を捉える")
         || point == "元記事の背景と影響範囲を整理する"
+}
+
+/// 本文抜粋の中に、節の見出しと同じ行（例: `## 要点`）があると、読み込み時にそこで節が切り替わり抜粋が分断される。
+/// 書き込み時だけ、その行の先頭の `#` を全角 `＃` へ置き換えて、ただの抜粋の文として読み戻されるようにする
+/// （既存ファイルは書き換えない）。
+fn neutralize_section_heading_lines(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if ArticleBodySection::from_heading(line).is_some() {
+                line.replacen('#', "＃", 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_text_block(lines: &[String]) -> Option<String> {
@@ -1983,10 +2000,15 @@ fn serialize_article_markdown(article: &PersistedArticleRecord) -> Result<String
 fn compose_article_body(article: &PersistedArticleRecord) -> String {
     let mut sections = Vec::new();
 
+    // 抜粋は外部由来の文なので、節の見出しと同じ行だけ無害化してから書く。
+    let excerpt = article
+        .excerpt
+        .as_deref()
+        .map(neutralize_section_heading_lines);
     push_text_section(
         &mut sections,
         ArticleBodySection::Excerpt,
-        article.excerpt.as_deref(),
+        excerpt.as_deref(),
     );
     push_text_section(
         &mut sections,
@@ -4622,6 +4644,72 @@ mod tests {
             .find_article_record("article-002")
             .unwrap();
         assert_eq!(record.focus_points.len(), 4);
+    }
+
+    #[test]
+    fn only_exact_legacy_template_focus_points_are_hidden() {
+        let title = "SaaS企業が中堅市場向け新プランを発表";
+        let genre = "ビジネス";
+        assert!(super::is_legacy_template_focus_point(
+            &format!("{title} の要点を確認する"),
+            title,
+            genre
+        ));
+        assert!(super::is_legacy_template_focus_point(
+            &format!("{genre} 分野での意味を捉える"),
+            title,
+            genre
+        ));
+        assert!(super::is_legacy_template_focus_point(
+            "元記事の背景と影響範囲を整理する",
+            title,
+            genre
+        ));
+        // AI の文がたまたま同じ語尾で終わっても、その記事の定型文と一致しなければ残す。
+        for point in [
+            "まず導入事例 の要点を確認する",
+            "教育 分野での意味を捉える",
+            "元記事の背景と影響範囲を整理する。",
+        ] {
+            assert!(
+                !super::is_legacy_template_focus_point(point, title, genre),
+                "{point}"
+            );
+        }
+    }
+
+    #[test]
+    fn excerpt_lines_equal_to_section_headings_round_trip_as_excerpt_text() {
+        let context = TestRepositoryContext::new();
+        let excerpt = "前半の本文。\n## 要点\n  ## AI要約\n## 要点の話は続く\n後半の本文。";
+        context
+            .repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: "heading-excerpt".to_string(),
+                title: "見出し混入の記事".to_string(),
+                source_name: "Example News".to_string(),
+                original_url: "https://example.com/news/heading-excerpt".to_string(),
+                fetched_at: "2026-10-07T00:00:00Z".to_string(),
+                published_at_text: "2026-10-07T00:00:00Z".to_string(),
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some(excerpt.to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            }])
+            .unwrap();
+
+        // 見出しと同じ行は全角＃に置き換わり、抜粋は分断されずに読み戻される。要点の節も生まれない。
+        let detail = context
+            .repository
+            .get_article_detail("heading-excerpt")
+            .unwrap();
+        assert_eq!(
+            detail.excerpt.as_deref(),
+            Some("前半の本文。\n＃# 要点\n  ＃# AI要約\n## 要点の話は続く\n後半の本文。")
+        );
+        assert!(detail.key_points.is_empty());
+        assert!(detail.summary.is_some());
     }
 
     #[test]

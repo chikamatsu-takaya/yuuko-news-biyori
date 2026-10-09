@@ -1100,7 +1100,12 @@ mod tests {
             .repeat(6);
         let input = format!("タイトル: 中小企業のデジタル化に新補助金\n抜粋: {excerpt}");
         eprintln!("input chars: {}", input.chars().count());
-        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+        for prompt_id in [
+            "summary_v1",
+            "yuuko_explanation_v1",
+            "yuuko_comment_v1",
+            ARTICLE_POINTS_PROMPT_ID,
+        ] {
             let started = Instant::now();
             let response = service
                 .request_text(
