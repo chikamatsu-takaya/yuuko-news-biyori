@@ -5672,6 +5672,24 @@ test("pending reward notice shows a balloon with OK and confirms through handle_
   ).toBeVisible();
 });
 
+test("pending reward notice is not auto-dismissed after the balloon timeout", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enableRewardNotice(page);
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+
+  // ニュースの吹き出し（20秒）・軽量プレビュー（30秒）より長く放置しても退場しない（§9.4）。
+  await page.clock.fastForward(40000);
+  await page.clock.fastForward(1000);
+
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  expect(await readCount(page, "__E2E_MARK_IGNORED_CALL_COUNT__")).toBe(0);
+});
+
 test("closing the pending reward notice uses dismiss (stays unconfirmed)", async ({
   page,
 }) => {

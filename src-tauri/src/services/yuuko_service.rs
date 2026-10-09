@@ -467,7 +467,8 @@ impl YuukoService {
 
         // 未確認の報酬（ランクアップダイアログで確認しなかったもの）はニュースより優先して知らせる（§6.4）。
         // ゲート（日次上限・クールタイム・全画面等）を通った後なので、報酬通知もニュースと同じ上限・間隔に従う。
-        if let Some((rank, reward_ids)) = self.pending_rewards_for_notice() {
+        // 1つの報酬は1回だけ知らせる（D93）。知らせ済みの報酬はニュース候補の判定へ進む。
+        if let Some((rank, reward_ids)) = self.pending_rewards_for_notice(&mut state) {
             state.mark_reward_notified(now, rank, reward_ids);
             self.yuuko_state_repository.save(&state)?;
             return Ok(notification_result(
@@ -571,12 +572,16 @@ impl YuukoService {
         response
     }
 
-    /// 報酬通知に使う未確認の報酬（現ランクと、マスタにある未確認 ID）。無ければ None。
+    /// 報酬通知に使う未確認の報酬（現ランクと、マスタにある未確認でまだ知らせていない ID）。無ければ None。
+    /// 知らせ済みの記録から未確認でなくなった ID を取り除く（保存は呼び出し側の通知・ニュース保存に任せる）。
     ///
     /// 正は rewards.json の pendingRewards（RewardService）。RewardService は friendship → reward の順に
     /// ロックを取るが、YuukoService は自前のロックを持たないため順序の逆転は起きない。
     /// 読み込みに失敗しても通知全体は止めず、報酬通知だけを見送る（ニュース通知は続ける）。
-    fn pending_rewards_for_notice(&self) -> Option<(u32, Vec<String>)> {
+    fn pending_rewards_for_notice(
+        &self,
+        state: &mut PersistedYuukoState,
+    ) -> Option<(u32, Vec<String>)> {
         let reward_state = match self.reward_service.get_reward_state() {
             Ok(reward_state) => reward_state,
             Err(error) => {
@@ -584,11 +589,12 @@ impl YuukoService {
                 return None;
             }
         };
-        let reward_ids: Vec<String> = reward_state
+        let pending: Vec<String> = reward_state
             .pending_reward_ids
             .into_iter()
             .filter(|id| find_reward(id).is_some())
             .collect();
+        let reward_ids = state.unannounced_rewards(&pending);
         (!reward_ids.is_empty()).then_some((reward_state.current_rank, reward_ids))
     }
 
@@ -1938,7 +1944,7 @@ mod tests {
 
         assert_eq!(dismissed.state, YuukoResidentState::Waiting);
         assert!(dismissed.reward_notification.is_none());
-        // 未確認のまま残り、クールタイム中は出さない（明けたら再び報酬が優先される）。
+        // 未確認のまま残り、クールタイム中は出さない（明けても同じ報酬は再通知しない・D93）。
         assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
         let next = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(next.reason, "cooling_down");
@@ -2003,6 +2009,61 @@ mod tests {
         assert_eq!(result.state.reward_notification.unwrap().message, expected);
         let state = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
+    }
+
+    /// 閉じた後のクールタイム・最短クールタイムを過去にして、次の判定を通せるようにする。
+    fn clear_cooldowns(ctx: &ServiceContext) {
+        let mut state = load_state(ctx);
+        state.cooldown_until = None;
+        state.last_notified_at = None;
+        ctx.yuuko_state_repository.save(&state).unwrap();
+    }
+
+    #[test]
+    fn dismissed_reward_is_not_announced_again_and_news_follows() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        clear_cooldowns(&ctx);
+
+        // D93: 同じ報酬は1回だけ知らせる。次の通知はニュースになる（報酬は未確認のまま）。
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert!(next.notified);
+        assert_eq!(next.state.state, YuukoResidentState::BalloonVisible);
+        assert!(next.state.reward_notification.is_none());
+        assert!(next.state.preview_article.is_some());
+        assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
+        assert_eq!(
+            load_state(&ctx).announced_reward_ids,
+            vec!["theme_001".to_string()]
+        );
+    }
+
+    #[test]
+    fn newly_unlocked_reward_is_still_announced_after_an_earlier_one() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.mark_yuuko_ignored().unwrap();
+        clear_cooldowns(&ctx);
+
+        // 後で Rank7 に上がり theme_002 が解放された。知らせ済みの theme_001 は含めない。
+        save_friendship_total(&ctx, 160);
+        let next = ctx.service.request_yuuko_notification().unwrap();
+        assert!(next.notified);
+        assert_eq!(next.state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(
+            next.state.reward_notification.unwrap().reward_ids,
+            vec!["theme_002".to_string()]
+        );
+
+        // 確認済みになった ID は知らせ済みの記録から取り除かれる（記録を小さく保つ）。
+        ctx.service.handle_yuuko_clicked().unwrap();
+        ctx.service
+            .confirm_rank_up_reward(reward_ids(&["theme_001"]))
+            .unwrap();
+        clear_cooldowns(&ctx);
+        ctx.service.request_yuuko_notification().unwrap();
+        assert!(load_state(&ctx).announced_reward_ids.is_empty());
     }
 
     #[test]

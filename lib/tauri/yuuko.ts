@@ -100,7 +100,6 @@ export const confirmRankUpReward = async (
 export type NotificationReason =
   | "notified"
   | "disabled"
-  | "reward_pending"
   | "already_active"
   | "daily_limit"
   | "cooling_down"

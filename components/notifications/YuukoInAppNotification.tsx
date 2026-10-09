@@ -18,7 +18,8 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
  *
  * variant="reward" は報酬通知（ランクアップダイアログで確認しなかった報酬のお知らせ）。
  * 2段階クリックは無く、吹き出し＋「OK」だけを出す。OK は onOpen（Page 側で handle_yuuko_clicked →
- * Rust が確認済みにする）、閉じる/Esc/自動退場はニュースと同じ onClose / onIgnore を使う（§6.4・§11）。
+ * Rust が確認済みにする）、閉じる/Esc はニュースと同じ onClose（未確認のままクールタイム）を使う。
+ * 報酬通知は自動退場しない（§9.4。OK か閉じるまで表示を続ける）。
  */
 
 // 自動退場（無操作）までの時間。設計書 §9.4：吹き出し20秒 / 軽量プレビュー30秒。
@@ -164,9 +165,9 @@ export default function YuukoInAppNotification({
   // 自動退場（無操作）。段階に応じた時間で無視扱いにする（§9.4）。
   // タイマーはアンマウント時にクリアされる（ウィンドウ非表示中は進まない）。
   // 発火時は即座に onIgnore を呼ぶ（確定は Page 側キューが直列実行する）。
-  // 退場中は確定済みのため動かさない。
+  // 退場中は確定済みのため動かさない。報酬通知は自動退場しない（§9.4。OK か閉じるまで出し続ける）。
   useEffect(() => {
-    if (exiting) {
+    if (exiting || variant === "reward") {
       return;
     }
     const timeoutMs =
@@ -175,7 +176,7 @@ export default function YuukoInAppNotification({
       fireTerminal(() => onIgnoreRef.current());
     }, timeoutMs);
     return () => clearTimeout(timer);
-  }, [view, exiting, fireTerminal]);
+  }, [view, exiting, variant, fireTerminal]);
 
   // Esc は閉じると同等（§10.6）。退場中は確定済みのため購読しない。
   useEffect(() => {

@@ -290,6 +290,22 @@ test("pending reward notice shows balloon + OK, fits, and OK confirms through ha
   await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
 });
 
+test("reward notice in the desktop window does not auto-exit", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installMocks(page, { state: rewardState() });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+
+  await page.clock.fastForward(40_000);
+  await page.clock.fastForward(1_000);
+
+  await expect(region.getByText(REWARD_TEXT)).toBeVisible();
+  expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
+});
+
 test("reward event payload shows the reward notice and close uses dismiss", async ({
   page,
 }) => {

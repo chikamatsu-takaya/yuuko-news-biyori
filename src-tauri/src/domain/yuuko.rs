@@ -91,6 +91,10 @@ pub struct PersistedYuukoState {
     pub daily_notification: DailyNotificationCount,
     /// ゆうこが紹介済みの記事ID（FIFO・上限キャップ）。再紹介の抑止に使う。
     pub introduced_article_ids: Vec<String>,
+    /// ゆうこが報酬通知で知らせ済みの報酬 ID（判断台帳 D93: 1つの報酬は1回だけ知らせる）。
+    /// OK せずに閉じた・放置した報酬も再通知しない（ランクアップダイアログ・カスタマイズ画面で気づける）。
+    /// 未確認でなくなった ID は通知判定時に取り除き、肥大化させない。旧データには無いため既定は空。
+    pub announced_reward_ids: Vec<String>,
 }
 
 impl Default for PersistedYuukoState {
@@ -107,6 +111,7 @@ impl Default for PersistedYuukoState {
             cooldown_until: None,
             daily_notification: DailyNotificationCount::default(),
             introduced_article_ids: Vec::new(),
+            announced_reward_ids: Vec::new(),
         }
     }
 }
@@ -285,6 +290,13 @@ impl PersistedYuukoState {
 
         reward_notification.pending = !reward_notification.reward_ids.is_empty();
         let remaining_pending_reward_ids = reward_notification.reward_ids.clone();
+        // 一部だけ確認した場合は、残った報酬で文言を作り直す（確認済みの報酬名を出し続けない）。
+        if reward_notification.pending {
+            reward_notification.message = reward_notice_message(&reward_notification.reward_ids);
+            if self.state == YuukoResidentState::RewardNotifying {
+                self.balloon_text = Some(reward_notification.message.clone());
+            }
+        }
 
         if !reward_notification.pending {
             self.reward_notification = None;
@@ -308,7 +320,7 @@ impl PersistedYuukoState {
     /// （報酬確認は confirm_rank_up_reward が担当するため、ここでは消さない）。
     ///
     /// 表示中の報酬通知（RewardNotifying）を閉じた場合は表示だけを外す。未確認の正は rewards.json の
-    /// pendingRewards で、閉じても確認済みにはしないため、クールタイム明けの通知で再び知らせる（§6.4）。
+    /// pendingRewards で、閉じても確認済みにはしない（ただし同じ報酬はゆうこから再通知しない・D93）。
     pub fn dismiss_notification(&mut self, now: DateTime<Utc>) {
         // アクティブな通知が無い状態（Waiting等）での誤呼び出しは no-op。
         // 不要なクールダウンで通知が長時間ブロックされるのを防ぐ。
@@ -421,6 +433,11 @@ impl PersistedYuukoState {
         reward_ids: Vec<String>,
     ) {
         self.record_notification_slot_in(tz, now);
+        for id in &reward_ids {
+            if !self.announced_reward_ids.contains(id) {
+                self.announced_reward_ids.push(id.clone());
+            }
+        }
         let message = reward_notice_message(&reward_ids);
         self.balloon_text = Some(message.clone());
         self.preview_article = None;
@@ -432,6 +449,19 @@ impl PersistedYuukoState {
             message,
         });
         self.state = YuukoResidentState::RewardNotifying;
+    }
+
+    /// 未確認の報酬のうち、まだ知らせていないものを返す（D93: 報酬通知は1報酬につき1回）。
+    /// あわせて、未確認でなくなった（確認済みになった）ID を知らせ済みの記録から取り除く。
+    /// 取り除いた結果は、呼び出し側が次に状態を保存するときに一緒に保存される。
+    pub fn unannounced_rewards(&mut self, pending_reward_ids: &[String]) -> Vec<String> {
+        self.announced_reward_ids
+            .retain(|id| pending_reward_ids.contains(id));
+        pending_reward_ids
+            .iter()
+            .filter(|id| !self.announced_reward_ids.contains(id))
+            .cloned()
+            .collect()
     }
 
     /// 通知1回分として、当日の通知回数と前回通知時刻（最短クールタイムの基点）を記録する。
@@ -1191,6 +1221,21 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::Waiting);
         assert!(state.reward_notification.is_none());
         assert!(state.balloon_text.is_none());
+    }
+
+    #[test]
+    fn partially_confirming_reward_notice_rebuilds_the_message() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
+        state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
+
+        let expected = "新しいテーマ「テーマ②」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(state.balloon_text.as_deref(), Some(expected));
+        let reward = state.reward_notification.unwrap();
+        assert_eq!(reward.reward_ids, ids(&["theme_002"]));
+        assert_eq!(reward.message, expected);
     }
 
     #[test]
