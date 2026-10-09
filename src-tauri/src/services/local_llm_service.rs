@@ -1031,13 +1031,15 @@ mod tests {
 
     #[test]
     fn should_stop_idle_waits_for_running_requests() {
-        let now = Instant::now();
+        // 起動直後の CI 機では Instant を過去へ戻せない（checked_sub が None）ため、基準から未来へ進めて作る。
+        let base = Instant::now();
+        let now = base + Duration::from_secs(301);
         let idle = Duration::from_secs(300);
-        let old = now.checked_sub(Duration::from_secs(301));
+        let old = Some(base);
         assert!(should_stop_idle(old, 0, now, idle));
         assert!(!should_stop_idle(old, 1, now, idle));
         assert!(!should_stop_idle(
-            now.checked_sub(Duration::from_secs(299)),
+            Some(base + Duration::from_secs(2)),
             0,
             now,
             idle
