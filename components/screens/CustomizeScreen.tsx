@@ -1,11 +1,18 @@
 "use client";
 
+/**
+ * カスタマイズ画面（画面詳細設計書 §13.1・判断台帳 D83）。
+ * - テーマ: 既定・ランク報酬テーマ・ガチャの色違いテーマを並べ、選べるものだけ切り替える。
+ *   選べるかの判定と保存は Rust の set_active_theme が行い、ここは結果（activeThemeId）を表示・適用するだけ。
+ * - 呼び名: 現在の値を読み取り専用で出し、変更は設定画面へ案内する。
+ * - 飾り・吹き出し: 「準備中」と表示する（素材ができてから追加。D75）。口調・性格は扱わない（D83）。
+ */
+
 import * as React from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
@@ -24,15 +31,10 @@ import {
   ChevronRight,
   MessageCircle,
   Palette,
-  AudioWaveform,
   Heart,
   Tag,
   Lock,
   Check,
-  RotateCcw,
-  Shuffle,
-  Eye,
-  Pencil,
   Gift,
   Star,
   Moon,
@@ -40,39 +42,30 @@ import {
   Clover,
 } from "lucide-react";
 import Image from "next/image";
-import { isTauriRuntime } from "@/lib/tauri/settings";
+import { getUserSettings, isTauriRuntime } from "@/lib/tauri/settings";
 import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
-import { getRewardState, type RewardItem } from "@/lib/tauri/rewards";
+import { getRewardState, setActiveTheme, type RewardItem } from "@/lib/tauri/rewards";
+import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
+import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { buildThemeOptions } from "@/lib/customize-themes.mjs";
 
 // Types
-type CustomizeTab = "deco" | "balloon" | "theme" | "tone" | "personality" | "name";
-
-interface DecoItem {
-  id: string;
-  name: string;
-  unlocked: boolean;
-  equipped: boolean;
-  unlockCondition: string | null;
-  icon: React.ReactNode;
-}
-
-interface CustomizeState {
-  activeTab: CustomizeTab;
-  theme: string;
-  balloonStyle: string;
-  tone: string;
-  personality: string;
-  displayName: string;
-}
+type CustomizeTab = "theme" | "name" | "deco" | "balloon";
 
 /**
- * 友情ランク・報酬の読み込み状態。
+ * 友情ランク・報酬などの読み込み状態。
  * preview はブラウザ確認（Tauri 外）で実データが無いとき。サンプル値をプレビューとして明示して出す。
  */
 type RankLoadStatus = "loading" | "ready" | "preview" | "error";
 
 /** ランク表示に使う値（get_friendship_state の DTO の一部）。 */
 type FriendshipView = Pick<FriendshipState, "currentRank" | "currentPoint" | "nextRequiredPoint">;
+
+/** テーマ一覧の 1 件（lib/customize-themes.mjs の buildThemeOptions の戻り値）。 */
+type ThemeOption = ReturnType<typeof buildThemeOptions>[number];
+
+/** テーマ切り替えの結果表示（固定文言のみ。生のエラー文は出さない）。 */
+type ThemeMessage = { kind: "success" | "error"; text: string } | null;
 
 interface NavigationItem {
   id: string;
@@ -92,106 +85,12 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings, isActive: false },
 ];
 
-const initialCustomizeState: CustomizeState = {
-  activeTab: "deco",
-  theme: "ナチュラルルーム",
-  balloonStyle: "ふんわり",
-  tone: "やさしい",
-  personality: "おしえてくれる",
-  displayName: "ゆうこ",
-};
-
 // Tauri 外のプレビュー専用のサンプル値。実データと誤解されないよう「サンプル」表示と組で使う。
 const previewFriendship: FriendshipView = {
   currentRank: 15,
   currentPoint: 350,
   nextRequiredPoint: 1000,
 };
-
-const mockDecoItems: DecoItem[] = [
-  {
-    id: "green_hood",
-    name: "緑のずきん",
-    unlocked: true,
-    equipped: true,
-    unlockCondition: null,
-    icon: (
-      <div className="w-10 h-10 rounded-lg bg-[var(--yuuko-green)] flex items-center justify-center">
-        <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
-          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
-        </svg>
-      </div>
-    ),
-  },
-  {
-    id: "red_collar",
-    name: "赤い首輪",
-    unlocked: true,
-    equipped: true,
-    unlockCondition: null,
-    icon: (
-      <div className="w-10 h-10 rounded-lg bg-red-500 flex items-center justify-center">
-        <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
-          <circle cx="12" cy="12" r="8" />
-        </svg>
-      </div>
-    ),
-  },
-  {
-    id: "sunflower_badge",
-    name: "ひまわりバッジ",
-    unlocked: false,
-    equipped: false,
-    unlockCondition: "ランク20で解放",
-    icon: (
-      <div className="w-10 h-10 rounded-lg bg-yellow-400 flex items-center justify-center opacity-50">
-        <svg viewBox="0 0 24 24" className="w-6 h-6 text-yellow-700" fill="currentColor">
-          <circle cx="12" cy="12" r="4" />
-          <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke="currentColor" strokeWidth="2" fill="none" />
-        </svg>
-      </div>
-    ),
-  },
-  {
-    id: "blue_muffler",
-    name: "青いマフラー",
-    unlocked: false,
-    equipped: false,
-    unlockCondition: "ランク30で解放",
-    icon: (
-      <div className="w-10 h-10 rounded-lg bg-blue-400 flex items-center justify-center opacity-50">
-        <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
-          <rect x="4" y="8" width="16" height="8" rx="2" />
-        </svg>
-      </div>
-    ),
-  },
-  {
-    id: "sparkle_crown",
-    name: "きらきら王冠",
-    unlocked: false,
-    equipped: false,
-    unlockCondition: "ランク20で解放",
-    icon: (
-      <div className="w-10 h-10 rounded-lg bg-yellow-500 flex items-center justify-center opacity-50">
-        <svg viewBox="0 0 24 24" className="w-6 h-6 text-yellow-200" fill="currentColor">
-          <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5z" />
-        </svg>
-      </div>
-    ),
-  },
-];
-
-const mockUnlockedItems = [
-  { id: "green_hood", name: "緑のずきん", color: "bg-[var(--yuuko-green)]" },
-  { id: "red_collar", name: "赤い首輪", color: "bg-red-500" },
-  { id: "green_rug", name: "緑のラグ", color: "bg-emerald-400" },
-  { id: "plant", name: "観葉植物", color: "bg-green-600" },
-  { id: "frame", name: "額縁", color: "bg-amber-600" },
-  { id: "balloon", name: "ふんわり吹き出し", color: "bg-sky-300" },
-  { id: "note", name: "音符", color: "bg-pink-400" },
-  { id: "heart", name: "ハート", color: "bg-rose-400" },
-];
 
 const mockRankRewardItems = [
   { id: "clover", name: "クローバー", icon: Clover, color: "bg-emerald-100" },
@@ -200,59 +99,120 @@ const mockRankRewardItems = [
   { id: "moon", name: "月", icon: Moon, color: "bg-indigo-100" },
 ];
 
+// カテゴリ（D83）: テーマ・呼び名は使える。飾り・吹き出しは「準備中」。口調・性格は置かない。
 const tabItems = [
-  { id: "deco" as CustomizeTab, label: "デコ", icon: Sparkles },
-  { id: "balloon" as CustomizeTab, label: "吹き出し", icon: MessageCircle },
   { id: "theme" as CustomizeTab, label: "テーマ", icon: Palette },
-  { id: "tone" as CustomizeTab, label: "口調", icon: AudioWaveform },
-  { id: "personality" as CustomizeTab, label: "性格", icon: Heart },
   { id: "name" as CustomizeTab, label: "呼び名", icon: Tag },
+  { id: "deco" as CustomizeTab, label: "飾り", icon: Sparkles },
+  { id: "balloon" as CustomizeTab, label: "吹き出し", icon: MessageCircle },
 ];
 
 // Sub-components
-function DecoItemCard({
-  item,
-  isSelected,
+
+/**
+ * テーマの色見本。配色を持つテーマは `data-theme` 付きの要素の中で CSS 変数を読み、そのテーマの色を出す
+ * （app/globals.css の `[data-theme="<id>"]`）。配色が未登録のテーマは、適用中の色と誤解されないよう点線の枠だけ出す。
+ */
+function ThemeSwatch({ option }: { option: ThemeOption }) {
+  if (!option.hasPalette) {
+    return (
+      <span
+        className="w-10 h-10 rounded-lg border border-dashed border-border bg-muted/50 flex items-center justify-center shrink-0"
+        aria-hidden="true"
+      >
+        <Palette className="w-4 h-4 text-muted-foreground" />
+      </span>
+    );
+  }
+  return (
+    <span
+      data-theme={option.id}
+      className={`w-10 h-10 rounded-lg border border-border overflow-hidden flex shrink-0 ${
+        option.selectable ? "" : "opacity-50"
+      }`}
+      aria-hidden="true"
+    >
+      <span className="flex-1 bg-[var(--yuuko-cream)]" />
+      <span className="flex-1 bg-[var(--yuuko-green-light)]" />
+      <span className="flex-1 bg-[var(--yuuko-green)]" />
+    </span>
+  );
+}
+
+/** テーマ 1 件の選択ボタン。ロック中は押せず、解放条件を出す。 */
+function ThemeOptionButton({
+  option,
+  showSelected,
+  isSaving,
+  disabled,
   onSelect,
 }: {
-  item: DecoItem;
-  isSelected: boolean;
-  onSelect: (id: string) => void;
+  option: ThemeOption;
+  showSelected: boolean;
+  isSaving: boolean;
+  disabled: boolean;
+  onSelect: (option: ThemeOption) => void;
 }) {
+  const isSelected = showSelected && option.selected;
   return (
     <button
-      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${
+      type="button"
+      className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
         isSelected
           ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green)]"
-          : item.unlocked
+          : option.selectable
             ? "bg-white border border-border hover:border-[var(--yuuko-green)]/50"
             : "bg-muted/50 border border-border/50 opacity-70"
       }`}
-      onClick={() => item.unlocked && onSelect(item.id)}
-      disabled={!item.unlocked}
+      onClick={() => onSelect(option)}
+      disabled={!option.selectable || disabled}
       aria-pressed={isSelected}
+      data-testid="customize-theme-option"
     >
-      {item.icon}
-      <div className="flex-1 text-left">
+      <ThemeSwatch option={option} />
+      <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className={`font-medium text-sm ${!item.unlocked ? "text-muted-foreground" : ""}`}>
-            {item.name}
+          <span
+            className={`font-medium text-sm truncate ${option.selectable ? "" : "text-muted-foreground"}`}
+          >
+            {option.label}
           </span>
-          {item.equipped && (
-            <Badge className="bg-[var(--yuuko-green)] text-white text-[10px] px-1.5 py-0">
-              装着中
+          {isSelected && (
+            <Badge className="bg-[var(--yuuko-green)] text-white text-[10px] px-1.5 py-0 shrink-0">
+              使用中
             </Badge>
           )}
         </div>
-        {item.unlockCondition && (
+        {option.lockText !== null && (
           <div className="flex items-center gap-1 text-xs text-muted-foreground mt-0.5">
-            <Lock className="w-3 h-3" aria-hidden="true" />
-            <span>{item.unlockCondition}</span>
+            <Lock className="w-3 h-3 shrink-0" aria-hidden="true" />
+            <span>{option.lockText}</span>
           </div>
         )}
+        {option.selectable && !option.hasPalette && (
+          <div className="text-[10px] text-muted-foreground mt-0.5">配色はじゅんび中だよ</div>
+        )}
+        {isSaving && <div className="text-[10px] text-muted-foreground mt-0.5">保存中…</div>}
       </div>
-      {!item.unlocked && <Lock className="w-4 h-4 text-muted-foreground" aria-hidden="true" />}
+      {!option.selectable && <Lock className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />}
     </button>
+  );
+}
+
+/** 飾り・吹き出しの「準備中」表示（D83 / D75）。 */
+function ComingSoonPanel({ title }: { title: string }) {
+  return (
+    <div className="space-y-2" data-testid="customize-coming-soon">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{title}</span>
+        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+          準備中
+        </Badge>
+      </div>
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        いま準備中だよ。できあがったら、ここで選べるようになるよ。
+      </p>
+    </div>
   );
 }
 
@@ -261,22 +221,29 @@ export default function CustomizeScreen({
 }: {
   onNavigate?: (screen: string) => void;
 }) {
-  const [customizeState, setCustomizeState] = React.useState<CustomizeState>(initialCustomizeState);
-  const [selectedDecoId, setSelectedDecoId] = React.useState<string>("green_hood");
-  const [displayName, setDisplayName] = React.useState(initialCustomizeState.displayName);
+  const [activeTab, setActiveTab] = React.useState<CustomizeTab>("theme");
   const [friendshipStatus, setFriendshipStatus] = React.useState<RankLoadStatus>("loading");
   const [friendship, setFriendship] = React.useState<FriendshipView | null>(null);
   const [rewardStatus, setRewardStatus] = React.useState<RankLoadStatus>("loading");
   const [rewards, setRewards] = React.useState<RewardItem[]>([]);
+  const [activeThemeId, setActiveThemeId] = React.useState<string | null>(null);
+  const [gachaStatus, setGachaStatus] = React.useState<RankLoadStatus>("loading");
+  const [gachaItems, setGachaItems] = React.useState<GachaCollectionItem[]>([]);
+  const [nicknameStatus, setNicknameStatus] = React.useState<RankLoadStatus>("loading");
+  const [nickname, setNickname] = React.useState("");
+  const [savingThemeId, setSavingThemeId] = React.useState<string | null>(null);
+  const [themeMessage, setThemeMessage] = React.useState<ThemeMessage>(null);
 
-  // 友情ランク・報酬は Rust（get_friendship_state / get_reward_state）が正。ここでは表示するだけで、
-  // テーマ切り替えや selectedThemeId の保存はしない（テーマ切り替えは別タスク）。
-  // 片方の取得に失敗しても、もう片方と画面全体は表示を続ける。
+  // 友情ランク・報酬・ガチャ所持・呼び名は Rust（get_friendship_state / get_reward_state /
+  // get_gacha_state / get_user_settings）が正。ここでは表示するだけ。
+  // どれかの取得に失敗しても、ほかの表示と画面全体は続ける。
   React.useEffect(() => {
     if (!isTauriRuntime()) {
       setFriendship(previewFriendship);
       setFriendshipStatus("preview");
       setRewardStatus("preview");
+      setGachaStatus("preview");
+      setNicknameStatus("preview");
       return;
     }
 
@@ -307,6 +274,7 @@ export default function CustomizeScreen({
           return;
         }
         setRewards(state.rewards);
+        setActiveThemeId(state.activeThemeId);
         setRewardStatus("ready");
       })
       .catch((error: unknown) => {
@@ -315,10 +283,60 @@ export default function CustomizeScreen({
         setRewardStatus("error");
       });
 
+    getGachaState()
+      .then((state) => {
+        if (cancelled) return;
+        if (!state) {
+          setGachaStatus("error");
+          return;
+        }
+        setGachaItems(state.items);
+        setGachaStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn("Failed to load gacha state:", error);
+        setGachaStatus("error");
+      });
+
+    getUserSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        if (!settings) {
+          setNicknameStatus("error");
+          return;
+        }
+        setNickname(settings.nickname);
+        setNicknameStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn("Failed to load user settings:", error);
+        setNicknameStatus("error");
+      });
+
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const themeOptions = React.useMemo(
+    () =>
+      buildThemeOptions({
+        rewards: rewardStatus === "ready" ? rewards : [],
+        gachaItems: gachaStatus === "ready" ? gachaItems : [],
+        activeThemeId,
+      }),
+    [rewardStatus, rewards, gachaStatus, gachaItems, activeThemeId]
+  );
+  // 適用中の表示は、Rust の判定済み activeThemeId が読めたときだけ出す（読めないのに既定を「使用中」と見せない）。
+  const canShowActiveTheme = rewardStatus === "ready";
+  const activeThemeOption = canShowActiveTheme
+    ? themeOptions.find((option) => option.selected) ?? null
+    : null;
+  const unlockedThemeOptions = themeOptions.filter(
+    (option) => option.source !== "default" && option.selectable
+  );
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -327,34 +345,34 @@ export default function CustomizeScreen({
   };
 
   const handleTabChange = (tab: CustomizeTab) => {
-    setCustomizeState((prev) => ({ ...prev, activeTab: tab }));
+    setActiveTab(tab);
   };
 
-  const handleSave = () => {
-    console.log("Save customization:", { ...customizeState, displayName });
-  };
-
-  const handleReset = () => {
-    console.log("Reset to default");
-    setCustomizeState(initialCustomizeState);
-    setDisplayName(initialCustomizeState.displayName);
-    setSelectedDecoId("green_hood");
-  };
-
-  const handleRandomize = () => {
-    console.log("Randomize outfit");
-  };
-
-  const handlePreview = () => {
-    console.log("Preview changes");
-  };
-
-  const handleViewAllDeco = () => {
-    console.log("View all deco items");
-  };
-
-  const handleCheckRankRewards = () => {
-    console.log("Check rank rewards");
+  // テーマは選んだ時点で保存する。選べるかは Rust が判定し、選べない ID は reject される（表示側のロックは補助）。
+  // 保存できたら Rust が返した activeThemeId をすぐ画面へ適用する（再起動後は useUiTheme が設定から適用する）。
+  const handleSelectTheme = (option: ThemeOption) => {
+    if (!option.selectable || savingThemeId !== null || !canShowActiveTheme) return;
+    if (option.selected) return;
+    setSavingThemeId(option.id);
+    setThemeMessage(null);
+    setActiveTheme(option.id)
+      .then((state) => {
+        if (!state) {
+          setThemeMessage({ kind: "error", text: "テーマを保存できなかったよ。もう一度ためしてね。" });
+          return;
+        }
+        setRewards(state.rewards);
+        setActiveThemeId(state.activeThemeId);
+        applyUiTheme(state.activeThemeId);
+        setThemeMessage({ kind: "success", text: `テーマを「${option.label}」にしたよ。` });
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to save active theme:", error);
+        setThemeMessage({ kind: "error", text: "テーマを保存できなかったよ。もう一度ためしてね。" });
+      })
+      .finally(() => {
+        setSavingThemeId(null);
+      });
   };
 
   // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける）。
@@ -453,14 +471,14 @@ export default function CustomizeScreen({
               <h1 className="text-xl font-bold text-foreground">ゆうこカスタマイズ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-4">
-              ゆうこの見た目や話し方、テーマを設定して、もっと仲良くなろう！
+              テーマや呼び名を設定して、もっと仲良くなろう！
             </p>
 
             {/* Tabs */}
             <div className="flex gap-1 mb-4 overflow-x-auto pb-1" role="tablist">
               {tabItems.map((tab) => {
                 const Icon = tab.icon;
-                const isActive = customizeState.activeTab === tab.id;
+                const isActive = activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
@@ -480,41 +498,85 @@ export default function CustomizeScreen({
               })}
             </div>
 
-            {/* Main Customize Area（デコ一覧＋プレビューの2列）: 既定ウィンドウ（800×600）では横に並ばないため、プレビューを下へ折り返す */}
+            {/* Main Customize Area（カテゴリの中身＋プレビューの2列）: 既定ウィンドウ（800×600）では横に並ばないため、プレビューを下へ折り返す */}
             <div className="flex flex-wrap gap-4">
-              {/* Deco Items List */}
-              <Card className="w-64 shrink-0">
+              {/* Category Panel */}
+              <Card className="w-64 shrink-0" role="tabpanel" aria-label={tabItems.find((tab) => tab.id === activeTab)?.label}>
                 <CardHeader className="p-3 pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm font-medium">デコアイテム</CardTitle>
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <span>並び替え：</span>
-                      <select
-                        className="bg-transparent border-none text-xs focus:outline-none cursor-pointer"
-                        aria-label="デコアイテムの並び替え"
-                      >
-                        <option>新しい順</option>
-                      </select>
-                    </div>
-                  </div>
+                  <CardTitle className="text-sm font-medium">
+                    {tabItems.find((tab) => tab.id === activeTab)?.label}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="p-3 pt-0 space-y-2">
-                  {mockDecoItems.map((item) => (
-                    <DecoItemCard
-                      key={item.id}
-                      item={item}
-                      isSelected={selectedDecoId === item.id}
-                      onSelect={setSelectedDecoId}
-                    />
-                  ))}
-                  <Button
-                    variant="outline"
-                    className="w-full text-sm mt-2"
-                    onClick={handleViewAllDeco}
-                  >
-                    すべてのデコを見る
-                    <ChevronRight className="w-4 h-4 ml-1" aria-hidden="true" />
-                  </Button>
+                  {activeTab === "theme" && (
+                    <>
+                      {themeOptions.map((option) => (
+                        <ThemeOptionButton
+                          key={option.id}
+                          option={option}
+                          showSelected={canShowActiveTheme}
+                          isSaving={savingThemeId === option.id}
+                          disabled={savingThemeId !== null || !canShowActiveTheme}
+                          onSelect={handleSelectTheme}
+                        />
+                      ))}
+                      {rewardStatus === "loading" && (
+                        <p className="text-xs text-muted-foreground">読み込み中…</p>
+                      )}
+                      {rewardStatus === "error" && (
+                        <p className="text-xs text-muted-foreground" data-testid="customize-theme-load-error">
+                          テーマの状態を読み込めなかったよ。
+                        </p>
+                      )}
+                      {gachaStatus === "error" && (
+                        <p className="text-xs text-muted-foreground" data-testid="customize-gacha-theme-load-error">
+                          ガチャのテーマを読み込めなかったよ。
+                        </p>
+                      )}
+                      {rewardStatus === "preview" && (
+                        <p className="text-xs text-muted-foreground">
+                          プレビューではテーマを切り替えられないよ。アプリで選んでね。
+                        </p>
+                      )}
+                      {themeMessage !== null && (
+                        <p
+                          role="status"
+                          className={`text-xs ${
+                            themeMessage.kind === "error" ? "text-destructive" : "text-[var(--yuuko-green)]"
+                          }`}
+                          data-testid="customize-theme-message"
+                        >
+                          {themeMessage.text}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {activeTab === "name" && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">ゆうこがあなたを呼ぶときの名前だよ。</p>
+                      <div className="rounded-lg border border-border bg-white px-3 py-2 text-sm break-all" data-testid="customize-nickname">
+                        {nicknameStatus === "ready"
+                          ? nickname.trim() !== ""
+                            ? nickname
+                            : "まだ決めていないよ"
+                          : nicknameStatus === "error"
+                            ? "呼び名を読み込めなかったよ。"
+                            : nicknameStatus === "preview"
+                              ? "アプリで設定した呼び名が表示されるよ。"
+                              : "読み込み中…"}
+                      </div>
+                      <Button
+                        variant="outline"
+                        className="w-full text-sm"
+                        onClick={() => handleNavigate("settings")}
+                      >
+                        設定で変える
+                        <ChevronRight className="w-4 h-4 ml-1" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  )}
+                  {activeTab === "deco" && <ComingSoonPanel title="飾り" />}
+                  {activeTab === "balloon" && <ComingSoonPanel title="吹き出し" />}
                 </CardContent>
               </Card>
 
@@ -542,17 +604,6 @@ export default function CustomizeScreen({
                     <div className="absolute bottom-20 right-16 text-[var(--yuuko-green)]/10 text-xl">🐾</div>
                   </div>
 
-                  {/* Preview Button */}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="absolute top-3 right-3 text-xs bg-white/80 hover:bg-white"
-                    onClick={handlePreview}
-                  >
-                    <Eye className="w-3 h-3 mr-1" aria-hidden="true" />
-                    プレビュー
-                  </Button>
-
                   {/* Yuuko Character */}
                   <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
                     <Image
@@ -568,60 +619,47 @@ export default function CustomizeScreen({
                   </div>
                 </div>
 
-                {/* Action Buttons */}
-                <div className="flex flex-wrap items-center justify-center gap-3 p-4 bg-white border-t border-border">
-                  <Button variant="outline" onClick={handleReset}>
-                    <RotateCcw className="w-4 h-4 mr-2" />
-                    元に戻す
-                  </Button>
-                  <Button
-                    className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white px-8"
-                    onClick={handleSave}
-                  >
-                    <Check className="w-4 h-4 mr-2" />
-                    保存する
-                  </Button>
-                  <Button variant="outline" onClick={handleRandomize}>
-                    <Shuffle className="w-4 h-4 mr-2" />
-                    ランダムに着せる
-                  </Button>
+                {/* Save Note: テーマは選んだ時点で保存するため、別の保存ボタンは置かない */}
+                <div className="flex flex-wrap items-center justify-center gap-2 p-4 bg-white border-t border-border text-xs text-muted-foreground">
+                  <Check className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                  <span>テーマは選ぶとすぐに保存されるよ。</span>
                 </div>
               </Card>
             </div>
 
             {/* Bottom Section: 上段と同じく、幅が足りないときはランク報酬を下へ折り返す */}
             <div className="flex flex-wrap gap-4 mt-4">
-              {/* Unlocked Items */}
+              {/* Unlocked Items: 解放済みの報酬テーマと所持済みのガチャテーマ（実データ） */}
               <Card className="flex-1 min-w-[280px]">
                 <CardHeader className="p-3 pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm font-medium flex items-center gap-2">
-                      <Gift className="w-4 h-4 text-[var(--yuuko-green)]" />
-                      解放済みアイテム
-                    </CardTitle>
-                    <Button variant="link" size="sm" className="text-xs text-[var(--yuuko-green)] p-0 h-auto">
-                      すべて見る
-                      <ChevronRight className="w-3 h-3 ml-0.5" />
-                    </Button>
-                  </div>
+                  <CardTitle className="text-sm font-medium flex items-center gap-2">
+                    <Gift className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    解放済みアイテム
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="p-3 pt-0">
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {mockUnlockedItems.map((item) => (
-                      <div key={item.id} className="relative shrink-0">
-                        <div
-                          className={`w-12 h-12 rounded-lg ${item.color} flex items-center justify-center`}
+                  {unlockedThemeOptions.length > 0 ? (
+                    <ul className="flex gap-3 overflow-x-auto pb-1">
+                      {unlockedThemeOptions.map((option) => (
+                        <li
+                          key={option.id}
+                          className="flex flex-col items-center gap-1 shrink-0 w-14"
+                          data-testid="customize-unlocked-item"
                         >
-                          <span className="text-white text-xs font-medium">
-                            {item.name.slice(0, 1)}
+                          <ThemeSwatch option={option} />
+                          <span className="text-[10px] text-foreground w-full text-center truncate">
+                            {option.label}
                           </span>
-                        </div>
-                        <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-[var(--yuuko-green)] rounded-full flex items-center justify-center">
-                          <Check className="w-2.5 h-2.5 text-white" />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {rewardStatus === "loading" || gachaStatus === "loading"
+                        ? "読み込み中…"
+                        : "まだ解放したアイテムはないよ。"}
+                    </p>
+                  )}
                 </CardContent>
               </Card>
 
@@ -733,60 +771,39 @@ export default function CustomizeScreen({
         {/* Right Sidebar */}
         <aside className="w-64 bg-white border-l border-border flex flex-col shrink-0 overflow-y-auto">
           <div className="p-3 space-y-3">
-            {/* Current Settings */}
+            {/* Current Settings（実データ。口調・性格は扱わないため出さない。D83） */}
             <Card className="border-border">
               <CardHeader className="p-3 pb-2">
                 <CardTitle className="text-sm font-medium">現在の設定</CardTitle>
               </CardHeader>
               <CardContent className="p-3 pt-0 space-y-2">
                 <div className="flex items-center gap-2 text-xs">
-                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green)]" />
-                  <span className="text-muted-foreground w-12">テーマ</span>
-                  <span className="text-foreground">{customizeState.theme}</span>
+                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">テーマ</span>
+                  <span className="text-foreground min-w-0 truncate" data-testid="customize-current-theme">
+                    {activeThemeOption !== null
+                      ? activeThemeOption.label
+                      : rewardStatus === "loading"
+                        ? "読み込み中…"
+                        : "—"}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green)]" />
-                  <span className="text-muted-foreground w-12">吹き出し</span>
-                  <span className="text-foreground">{customizeState.balloonStyle}</span>
+                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">吹き出し</span>
+                  <span className="text-muted-foreground">準備中</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <AudioWaveform className="w-3.5 h-3.5 text-[var(--yuuko-green)]" />
-                  <span className="text-muted-foreground w-12">口調</span>
-                  <span className="text-foreground">{customizeState.tone}</span>
+                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">呼び名</span>
+                  <span className="text-foreground min-w-0 truncate">
+                    {nicknameStatus === "ready"
+                      ? nickname.trim() !== ""
+                        ? nickname
+                        : "未設定"
+                      : "—"}
+                  </span>
                 </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <Heart className="w-3.5 h-3.5 text-[var(--yuuko-green)]" />
-                  <span className="text-muted-foreground w-12">性格</span>
-                  <span className="text-foreground">{customizeState.personality}</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green)]" />
-                  <span className="text-muted-foreground w-12">呼び名</span>
-                  <span className="text-foreground">{customizeState.displayName}</span>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Name Setting */}
-            <Card className="border-border">
-              <CardHeader className="p-3 pb-2">
-                <CardTitle className="text-sm font-medium">呼び名の設定</CardTitle>
-              </CardHeader>
-              <CardContent className="p-3 pt-0">
-                <p className="text-xs text-muted-foreground mb-2">
-                  あなたがゆうこを呼ぶときの名前だよ。
-                </p>
-                <div className="relative">
-                  <Input
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value.slice(0, 10))}
-                    className="pr-8 text-sm"
-                    maxLength={10}
-                    aria-label="呼び名の設定"
-                  />
-                  <Pencil className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
-                </div>
-                <p className="text-[10px] text-muted-foreground mt-1">最大10文字まで</p>
               </CardContent>
             </Card>
 
@@ -857,15 +874,6 @@ export default function CustomizeScreen({
                     {friendshipStatus === "error" ? "ランクを読み込めなかったよ。" : "読み込み中…"}
                   </p>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full text-xs"
-                  onClick={handleCheckRankRewards}
-                >
-                  <Gift className="w-3 h-3 mr-1" aria-hidden="true" />
-                  ランク報酬を確認する
-                </Button>
               </CardContent>
             </Card>
           </div>

@@ -45,7 +45,7 @@ const majorScreens = [
     navName: "カスタマイズ",
     expectedHeading: "ゆうこカスタマイズ",
     expectedText: "カスタマイズ",
-    criticalButtons: ["ホームへ戻る", "保存する", "ランダムに着せる"],
+    criticalButtons: ["ホームへ戻る"],
   },
   {
     id: "gacha",
@@ -1628,7 +1628,7 @@ test("customize: friendship load failure keeps the screen and rewards visible", 
   await expect(page.getByText("E2E friendship failure")).toHaveCount(0);
   // 報酬側は独立して表示される（既定モック: どれも未解放）。
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
-  await expect(page.getByRole("button", { name: "保存する" })).toBeVisible();
+  await expect(page.getByTestId("customize-theme-option").first()).toBeVisible();
 });
 
 test("customize: browser preview (outside Tauri) labels the sample rank values", async ({
@@ -1653,6 +1653,138 @@ test("customize: browser preview (outside Tauri) labels the sample rank values",
   );
   await expect(page.getByTestId("customize-rank-reward-preview")).toBeVisible();
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(0);
+});
+
+// カスタマイズ画面のテーマ切り替え（set_active_theme）。報酬テーマは解放済みだけ、ガチャテーマは所持済みだけ選べる。
+const setupThemeState = (page: Page) =>
+  page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: [],
+      activeThemeId: "default",
+    };
+    // ガチャのモックは theme-001（所持）/ theme-002（未所持）の 2 種のテーマを持つ。
+    win.__E2E_GACHA_OVERRIDE__ = { ownedIds: ["card-001", "theme-001"], newIds: [] };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+const readThemeCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_SET_ACTIVE_THEME_CALLS__ as
+        | string[]
+        | undefined) ?? []
+  );
+
+test("customize: theme list locks unreleased themes and saves an unlocked theme", async ({
+  page,
+}) => {
+  await setupThemeState(page);
+  await openCustomize(page);
+
+  const options = page.getByTestId("customize-theme-option");
+  // 既定 + 報酬 2 種 + ガチャテーマ 2 種（カードは含めない）。
+  await expect(options).toHaveCount(5);
+  const cream = options.filter({ hasText: "クリーム" });
+  const sky = options.filter({ hasText: "そらいろ" });
+  const sakura = options.filter({ hasText: "ランク7で解放" });
+  const gachaOwned = options.filter({ hasText: "さくら色テーマ" });
+  const gachaLocked = options.filter({ hasText: "？？？" });
+
+  await expect(cream).toHaveAttribute("aria-pressed", "true");
+  await expect(cream).toContainText("使用中");
+  await expect(sakura).toBeDisabled();
+  await expect(sakura).toContainText("さくら");
+  await expect(gachaLocked).toBeDisabled();
+  await expect(gachaLocked).toContainText("ガチャで手に入るよ");
+  await expect(sky).toBeEnabled();
+  await expect(gachaOwned).toBeEnabled();
+
+  // ロック中は押しても保存しない。
+  await sakura.click({ force: true });
+  expect(await readThemeCalls(page)).toEqual([]);
+
+  await sky.click();
+  await expect(page.getByTestId("customize-theme-message")).toHaveText("テーマを「そらいろ」にしたよ。");
+  expect(await readThemeCalls(page)).toEqual(["theme_001"]);
+  await expect(sky).toHaveAttribute("aria-pressed", "true");
+  await expect(cream).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_001");
+  await expect(page.getByTestId("customize-current-theme")).toHaveText("そらいろ");
+
+  // 開き直しても保存済みのテーマが適用中のまま（ページは再読み込みせず、画面だけ切り替える）。
+  await page.getByRole("button", { name: "ホームへ戻る", exact: true }).click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "カスタマイズ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "そらいろ" })
+  ).toHaveAttribute("aria-pressed", "true");
+
+  // 所持済みのガチャテーマも選べる。配色が未登録なら既定の配色のまま案内を出す。
+  const ownedAgain = page.getByTestId("customize-theme-option").filter({ hasText: "さくら色テーマ" });
+  await ownedAgain.click();
+  await expect(page.getByTestId("customize-theme-message")).toHaveText("テーマを「さくら色テーマ」にしたよ。");
+  expect(await readThemeCalls(page)).toEqual(["theme_001", "theme-001"]);
+  await expect(ownedAgain).toContainText("配色はじゅんび中だよ");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
+});
+
+test("customize: theme save failure shows a fixed message and keeps the current theme", async ({
+  page,
+}) => {
+  await setupThemeState(page);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SET_ACTIVE_THEME_FAIL__ = true;
+  });
+  await openCustomize(page);
+
+  const sky = page.getByTestId("customize-theme-option").filter({ hasText: "そらいろ" });
+  await sky.click();
+  await expect(page.getByTestId("customize-theme-message")).toHaveText(
+    "テーマを保存できなかったよ。もう一度ためしてね。"
+  );
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(sky).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "クリーム" })
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("customize: categories follow D83 (deco and balloon are coming soon, nickname is read-only)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await openCustomize(page);
+
+  const tabs = page.getByRole("tab");
+  await expect(tabs).toHaveText(["テーマ", "呼び名", "飾り", "吹き出し"]);
+  await expect(page.getByRole("tab", { name: "口調" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "性格" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "テーマ" })).toHaveAttribute("aria-selected", "true");
+
+  await page.getByRole("tab", { name: "飾り" }).click();
+  await expect(page.getByTestId("customize-coming-soon")).toContainText("準備中");
+  await expect(page.getByTestId("customize-theme-option")).toHaveCount(0);
+  await page.getByRole("tab", { name: "吹き出し" }).click();
+  await expect(page.getByTestId("customize-coming-soon")).toContainText("吹き出し");
+
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
+  await expect(page.locator("main").getByRole("textbox")).toHaveCount(0);
+  await page.getByRole("button", { name: "設定で変える" }).click();
+  await expect(page.getByRole("heading", { name: "設定" }).first()).toBeVisible();
 });
 
 // ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
@@ -8014,6 +8146,32 @@ async function installTauriMocks(page: Page) {
                 activeThemeId: "default",
               }
             );
+          }
+          case "set_active_theme": {
+            // カスタマイズ画面のテーマ切り替え。呼ばれた themeId を記録し、以降の get_reward_state にも反映する
+            // （画面を開き直しても保存済みのテーマが適用中になることの確認用）。
+            // __E2E_SET_ACTIVE_THEME_FAIL__ で本番と同じ CommandError 形式の失敗にする。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const themeWin = window as any;
+            themeWin.__E2E_SET_ACTIVE_THEME_CALLS__ = [
+              ...(themeWin.__E2E_SET_ACTIVE_THEME_CALLS__ || []),
+              params.themeId,
+            ];
+            if (themeWin.__E2E_SET_ACTIVE_THEME_FAIL__) {
+              throw { code: "VALIDATION_ERROR", message: "E2E raw theme failure /internal/secret/path" };
+            }
+            const base = themeWin.__E2E_REWARD_STATE__ ?? {
+              currentRank: 1,
+              rewards: [
+                { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: false, pending: false },
+                { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+              ],
+              pendingRewardIds: [],
+              activeThemeId: "default",
+            };
+            themeWin.__E2E_REWARD_STATE__ = { ...base, activeThemeId: params.themeId };
+            return themeWin.__E2E_REWARD_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "record_friendship_event": {
             // 記事を開いただけで term_explained が記録されないことの検証用に種別を積む。

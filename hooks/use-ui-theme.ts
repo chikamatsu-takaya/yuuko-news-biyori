@@ -28,9 +28,11 @@ export const refreshUiThemeFromSettings = async (): Promise<void> => {
   try {
     const settings = await getUserSettings();
     if (settings) {
-      // ここでは「既知の ID か」だけを見る。解放済みかの制限は、カスタマイズ画面が themeId を
-      // 書き込む時点で行う（タスク qQsEaWBW）。読み元は将来、報酬状態の activeThemeId
-      // （Rust effective_theme_id で解放判定済み）へ揃える可能性がある。
+      // ここでは「既知の ID か」だけを見る。解放・所持の判定は書き込み時に Rust の set_active_theme が行い、
+      // 設定画面の保存（save_user_settings）では themeId を変えない（タスク qQsEaWBW）。
+      // そのため未解放の ID が入るのは設定ファイルの手編集など例外時だけで、影響も配色に限られる。
+      // 読み込み時にも判定したい場合は報酬状態の activeThemeId（Rust で判定済み）へ揃えるが、
+      // 常駐ゆうこウィンドウで通知のたびに報酬・ガチャ状態を読むことになるため、現時点では行わない。
       applyUiTheme(settings.selectedThemeId);
     }
   } catch {

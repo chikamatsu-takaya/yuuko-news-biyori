@@ -16,6 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::gacha::{find_gacha_item, GachaItemKind};
+
 /// 報酬を何も適用していない既定テーマの ID（設定 `ui.themeId` の既定値と一致させる）。
 pub const DEFAULT_THEME_ID: &str = "default";
 
@@ -74,7 +76,7 @@ pub struct PendingReward {
 /// 永続化する報酬状態（`rewards/rewards.json`・§11.2）。
 ///
 /// 適用中のテーマは持たない（§11.2・判断台帳 D51）。適用中テーマは既存の設定 `ui.themeId` が
-/// 保存・変更（save_user_settings）の正であり、ここにも持つと食い違いが起こり得るため。
+/// 保存の正であり（変更は set_active_theme）、ここにも持つと食い違いが起こり得るため。
 /// 未知のフィールドは読み込み時に無視する（将来 `active` 等が書かれていても読み込める）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -205,15 +207,30 @@ impl RewardsState {
             .collect()
     }
 
+    /// 利用者が選んでよいテーマか（カスタマイズ画面のテーマ切り替え・適用中テーマの判定に使う）。
+    /// 既定テーマ・解放済みの報酬テーマ・所持済みのガチャ色違いテーマだけを許す。
+    /// 未解放・未所持・未知の ID は拒否する（React から任意の ID を書き込ませないため、判定は Rust に置く）。
+    /// `owned_gacha_theme_ids` はガチャ状態の所持 ID。マスタにあるテーマ種別の ID だけを有効とみなす。
+    pub fn is_selectable_theme(&self, theme_id: &str, owned_gacha_theme_ids: &[String]) -> bool {
+        if theme_id == DEFAULT_THEME_ID {
+            return true;
+        }
+        if find_reward(theme_id).is_some_and(|def| def.reward_type == RewardType::Theme) {
+            return self.is_unlocked(theme_id);
+        }
+        find_gacha_item(theme_id).is_some_and(|def| def.kind == GachaItemKind::Theme)
+            && owned_gacha_theme_ids.iter().any(|id| id == theme_id)
+    }
+
     /// 適用中として扱ってよいテーマ ID を返す。
-    /// 設定の themeId が既定テーマか解放済みのテーマならそのまま、そうでなければ既定へ倒す
+    /// 設定の themeId が選べるテーマ（`is_selectable_theme`）ならそのまま、そうでなければ既定へ倒す
     /// （未解放・未知のテーマを適用中として UI に出さない）。
-    pub fn effective_theme_id(&self, selected_theme_id: &str) -> String {
-        let usable = selected_theme_id == DEFAULT_THEME_ID
-            || (find_reward(selected_theme_id)
-                .is_some_and(|def| def.reward_type == RewardType::Theme)
-                && self.is_unlocked(selected_theme_id));
-        if usable {
+    pub fn effective_theme_id(
+        &self,
+        selected_theme_id: &str,
+        owned_gacha_theme_ids: &[String],
+    ) -> String {
+        if self.is_selectable_theme(selected_theme_id, owned_gacha_theme_ids) {
             selected_theme_id.to_string()
         } else {
             DEFAULT_THEME_ID.to_string()
@@ -221,7 +238,12 @@ impl RewardsState {
     }
 
     /// 読み取り用 DTO へ変換する。UI へはマスタにある報酬だけを渡す。
-    pub fn to_dto(&self, current_rank: u32, selected_theme_id: &str) -> RewardStateDto {
+    pub fn to_dto(
+        &self,
+        current_rank: u32,
+        selected_theme_id: &str,
+        owned_gacha_theme_ids: &[String],
+    ) -> RewardStateDto {
         let rewards = REWARD_MASTER
             .iter()
             .map(|def| RewardItemDto {
@@ -243,7 +265,7 @@ impl RewardsState {
             current_rank,
             rewards,
             pending_reward_ids,
-            active_theme_id: self.effective_theme_id(selected_theme_id),
+            active_theme_id: self.effective_theme_id(selected_theme_id, owned_gacha_theme_ids),
         }
     }
 }
@@ -272,7 +294,7 @@ pub struct RewardStateDto {
     pub rewards: Vec<RewardItemDto>,
     /// 未確認の報酬 ID（`confirm_rank_up_reward` に渡す値）。
     pub pending_reward_ids: Vec<String>,
-    /// 適用中のテーマ ID（設定 `ui.themeId` が正。未解放なら "default"）。
+    /// 適用中のテーマ ID（設定 `ui.themeId` が正。未解放・未所持なら "default"）。
     pub active_theme_id: String,
 }
 
@@ -382,12 +404,37 @@ mod tests {
     #[test]
     fn active_theme_falls_back_to_default_unless_unlocked() {
         let mut state = RewardsState::default();
-        assert_eq!(state.effective_theme_id("default"), "default");
-        assert_eq!(state.effective_theme_id("theme_001"), "default");
-        assert_eq!(state.effective_theme_id("<script>"), "default");
+        assert_eq!(state.effective_theme_id("default", &[]), "default");
+        assert_eq!(state.effective_theme_id("theme_001", &[]), "default");
+        assert_eq!(state.effective_theme_id("<script>", &[]), "default");
         state.unlock_up_to_rank(3, "t");
-        assert_eq!(state.effective_theme_id("theme_001"), "theme_001");
-        assert_eq!(state.effective_theme_id("theme_002"), "default");
+        assert_eq!(state.effective_theme_id("theme_001", &[]), "theme_001");
+        assert_eq!(state.effective_theme_id("theme_002", &[]), "default");
+    }
+
+    #[test]
+    fn selectable_themes_are_default_unlocked_rewards_and_owned_gacha_themes() {
+        let mut state = RewardsState::default();
+        let owned = ids(&["gacha_theme_002", "card_001", "theme_002"]);
+        assert!(state.is_selectable_theme("default", &owned));
+        // 未解放の報酬テーマは、ガチャ所持一覧に紛れ込んでいても選べない。
+        assert!(!state.is_selectable_theme("theme_002", &owned));
+        state.unlock_up_to_rank(3, "t");
+        assert!(state.is_selectable_theme("theme_001", &owned));
+        // ガチャテーマは所持済みのものだけ。カード等のテーマ以外・未知の ID は選べない。
+        assert!(state.is_selectable_theme("gacha_theme_002", &owned));
+        assert!(!state.is_selectable_theme("gacha_theme_001", &owned));
+        assert!(!state.is_selectable_theme("card_001", &owned));
+        assert!(!state.is_selectable_theme("unknown", &ids(&["unknown"])));
+        assert!(!state.is_selectable_theme("", &owned));
+        assert_eq!(
+            state.effective_theme_id("gacha_theme_002", &owned),
+            "gacha_theme_002"
+        );
+        assert_eq!(
+            state.effective_theme_id("gacha_theme_001", &owned),
+            "default"
+        );
     }
 
     #[test]
@@ -401,7 +448,7 @@ mod tests {
             ..RewardsState::default()
         };
         state.unlock_up_to_rank(3, "t");
-        let dto = state.to_dto(3, "theme_001");
+        let dto = state.to_dto(3, "theme_001", &[]);
         assert_eq!(dto.current_rank, 3);
         assert_eq!(dto.rewards.len(), REWARD_MASTER.len());
         assert!(dto.rewards[0].unlocked && dto.rewards[0].pending);

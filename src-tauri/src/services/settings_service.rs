@@ -17,13 +17,29 @@ impl SettingsService {
         Ok(persisted.to_dto())
     }
 
+    /// 設定画面からの保存。適用中テーマ（`ui.themeId`）は保存済みの値を保ち、DTO の selectedThemeId では変えない。
+    /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
+    /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
         dto.validate()?;
 
         let mut persisted = self.repository.load_or_default()?;
+        let current_theme_id = persisted.ui.theme_id.clone();
         persisted.apply_from_dto(dto);
+        persisted.ui.theme_id = current_theme_id;
         self.repository.save(&persisted)?;
         Ok(())
+    }
+
+    /// 適用中テーマ（`ui.themeId`）だけを更新して保存する。
+    /// 選んでよいテーマかの判定は呼び出し側（RewardService::set_active_theme）で済ませてから呼ぶ。
+    pub fn set_theme_id(&self, theme_id: &str) -> Result<(), AppError> {
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.ui.theme_id == theme_id && self.repository.exists() {
+            return Ok(());
+        }
+        persisted.ui.theme_id = theme_id.to_string();
+        self.repository.save(&persisted)
     }
 
     /// 起動時に設定ファイルが無ければ既定値で作成する。
@@ -334,6 +350,32 @@ mod tests {
         };
         service.save_user_settings(dto).unwrap();
         assert!(service.get_user_settings().unwrap().auto_start_on_pc_boot);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn save_user_settings_keeps_theme_and_set_theme_id_changes_it() {
+        // テーマは判定付きの set_active_theme からだけ変える。設定画面の保存 DTO の値では変えない。
+        let (service, path) = temp_service();
+        service.set_theme_id("theme_001").unwrap();
+
+        let dto = UserSettingsDto {
+            selected_theme_id: "theme_002".to_string(),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        assert_eq!(
+            service.get_user_settings().unwrap().selected_theme_id,
+            "theme_001"
+        );
+
+        service.set_theme_id("default").unwrap();
+        assert_eq!(
+            service.get_user_settings().unwrap().selected_theme_id,
+            "default"
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));

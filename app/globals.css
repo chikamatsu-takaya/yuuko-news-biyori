@@ -48,6 +48,16 @@
 }
 
 /*
+ * 既定テーマ（クリーム）の見本用。カスタマイズ画面のテーマ見本は `data-theme` 付きの要素の中で
+ * CSS 変数を読むため、別テーマ適用中でも既定の見本が既定の色で見えるよう、見本に使う変数だけ :root と同じ値を置く。
+ */
+[data-theme="default"] {
+  --yuuko-green: #5DBB72;
+  --yuuko-green-light: #EAF7EA;
+  --yuuko-cream: #FFFDF5;
+}
+
+/*
  * 報酬テーマ（ランク報酬 theme_001 / theme_002）。<html data-theme="<id>"> で切り替える。
  * 既定（クリーム）は上の :root のまま変えない。適用する ID の検証は lib/ui-theme.mjs、反映は hooks/use-ui-theme.ts。
  * テーマを足すときは同じ変数一式を持つブロックを追加し、lib/ui-theme.mjs の UI_THEMES に ID を足す。

@@ -15,11 +15,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::Utc;
 
 use crate::domain::friendship::FriendshipState;
+use crate::domain::gacha::{find_gacha_item, GachaItemKind};
 use crate::domain::reward::{find_reward, RewardStateDto, RewardsState, DEFAULT_THEME_ID};
 use crate::error::AppError;
 use crate::repositories::friendship_repository::FriendshipRepository;
 use crate::repositories::reward_repository::RewardRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::gacha_service::GachaService;
+use crate::services::settings_service::SettingsService;
 
 #[derive(Debug, Clone)]
 pub struct RewardService {
@@ -32,6 +35,9 @@ pub struct RewardService {
     /// friendship.json を古い bak で上書きしてポイントが巻き戻り得るため、読むときも必ず取る。
     /// 取る順序は常に friendship → reward（デッドロック防止）。
     friendship_lock: Arc<Mutex<()>>,
+    /// ガチャで獲得した色違いテーマの所持確認に使う（未設定ならガチャテーマは選べない扱い）。
+    /// ガチャ状態はロックの外で先に読み、friendship / reward のロックと入れ子にしない。
+    gacha_service: Option<GachaService>,
 }
 
 /// 確認処理の結果（確認済みにした ID と、まだ未確認の ID）。
@@ -53,7 +59,14 @@ impl RewardService {
             settings_repository,
             store_lock: Arc::new(Mutex::new(())),
             friendship_lock: Arc::new(Mutex::new(())),
+            gacha_service: None,
         }
+    }
+
+    /// ガチャの色違いテーマも適用中テーマとして選べるようにする。
+    pub fn with_gacha_service(mut self, gacha_service: GachaService) -> Self {
+        self.gacha_service = Some(gacha_service);
+        self
     }
 
     /// friendship.json 用の共有ロック。FriendshipService はこれを自分の store_lock として使う。
@@ -70,6 +83,17 @@ impl RewardService {
     /// （既に高ランクの既存利用者への移行もこの経路で冪等に行う）。
     /// 保存に失敗しても表示は止めない（次回の取得・ランクアップで再度追いつく）。
     pub fn get_reward_state(&self) -> Result<RewardStateDto, AppError> {
+        let selected_theme_id = self.selected_theme_id();
+        // ガチャ状態は選択中がガチャテーマのときだけ読む（通知判定などで毎回読まないため）。
+        // 読めなければ所持なし扱い＝既定テーマ表示に倒す（表示は止めない）。
+        let owned_gacha_theme_ids = if is_gacha_theme(&selected_theme_id) {
+            self.owned_gacha_theme_ids().unwrap_or_else(|error| {
+                log::warn!("ガチャ状態を読めなかったため既定テーマとして扱います: {error}");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
         let _friendship_guard = self.lock_friendship()?;
         let _guard = self.lock_store()?;
         let friendship = self.friendship_repository.load_or_default()?;
@@ -79,7 +103,54 @@ impl RewardService {
                 log::warn!("報酬状態を保存できませんでした（次回に再試行します）: {error}");
             }
         }
-        Ok(state.to_dto(friendship.current_rank, &self.selected_theme_id()))
+        Ok(state.to_dto(
+            friendship.current_rank,
+            &selected_theme_id,
+            &owned_gacha_theme_ids,
+        ))
+    }
+
+    /// 適用中テーマを切り替えて設定 `ui.themeId` に保存し、更新後の報酬状態を返す（カスタマイズ画面）。
+    ///
+    /// 選べるのは既定テーマ・解放済みの報酬テーマ・所持済みのガチャテーマだけ（`is_selectable_theme`）。
+    /// それ以外は検証エラーにして何も保存しない（React 側の表示に頼らず、未解放のテーマを書き込ませない）。
+    /// 解放・所持は増えるだけなので、判定後にロックを外してから設定を保存しても判定が覆ることはない。
+    pub fn set_active_theme(
+        &self,
+        theme_id: &str,
+        settings_service: &SettingsService,
+    ) -> Result<RewardStateDto, AppError> {
+        // ガチャテーマの所持を読めないときは、未所持扱いで拒否せずエラーとして返す（誤った案内を避ける）。
+        let owned_gacha_theme_ids = if is_gacha_theme(theme_id) {
+            self.owned_gacha_theme_ids()?
+        } else {
+            Vec::new()
+        };
+        {
+            let _friendship_guard = self.lock_friendship()?;
+            let _guard = self.lock_store()?;
+            let friendship = self.friendship_repository.load_or_default()?;
+            let (state, _, changed) = self.load_synced(&friendship, &now_timestamp())?;
+            if changed {
+                if let Err(error) = self.reward_repository.save(&state) {
+                    log::warn!("報酬状態を保存できませんでした（次回に再試行します）: {error}");
+                }
+            }
+            if !state.is_selectable_theme(theme_id, &owned_gacha_theme_ids) {
+                // ID そのものは外部由来の文字列のため、エラー文・ログに含めない。
+                return Err(AppError::Validation("theme is not unlocked".to_string()));
+            }
+        }
+        settings_service.set_theme_id(theme_id)?;
+        self.get_reward_state()
+    }
+
+    /// 所持済みのガチャテーマ ID。ガチャサービス未設定なら空（＝ガチャテーマは選べない）。
+    fn owned_gacha_theme_ids(&self) -> Result<Vec<String>, AppError> {
+        match &self.gacha_service {
+            Some(gacha_service) => gacha_service.owned_theme_ids(),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// 友情ランクに合わせて報酬を解放し、変更があれば保存する。新たに解放した ID を返す。
@@ -191,6 +262,11 @@ impl RewardService {
     }
 }
 
+/// ガチャマスタにある色違いテーマの ID か（所持状態を読む必要があるかの判定）。
+fn is_gacha_theme(theme_id: &str) -> bool {
+    find_gacha_item(theme_id).is_some_and(|def| def.kind == GachaItemKind::Theme)
+}
+
 /// 解放時刻（UTC・"YYYY-MM-DDThh:mm:ssZ"）。friendship の lastRankUpAt と同じ形式。
 fn now_timestamp() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -199,8 +275,10 @@ fn now_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::gacha::GachaState;
     use crate::domain::settings::PersistedSettings;
     use crate::paths::AppPaths;
+    use crate::repositories::gacha_repository::GachaRepository;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -209,6 +287,8 @@ mod tests {
         service: RewardService,
         friendship_repository: FriendshipRepository,
         settings_repository: SettingsRepository,
+        settings_service: SettingsService,
+        gacha_repository: GachaRepository,
         paths: AppPaths,
     }
 
@@ -227,15 +307,19 @@ mod tests {
         let paths = AppPaths::new(root);
         let friendship_repository = FriendshipRepository::new(&paths);
         let settings_repository = SettingsRepository::new(&paths);
+        let gacha_repository = GachaRepository::new(&paths);
         let service = RewardService::new(
             RewardRepository::new(&paths),
             friendship_repository.clone(),
             settings_repository.clone(),
-        );
+        )
+        .with_gacha_service(GachaService::new(gacha_repository.clone()));
         Ctx {
             service,
             friendship_repository,
+            settings_service: SettingsService::new(settings_repository.clone()),
             settings_repository,
+            gacha_repository,
             paths,
         }
     }
@@ -369,6 +453,105 @@ mod tests {
         assert_eq!(
             ctx.service.get_reward_state().unwrap().active_theme_id,
             "theme_001"
+        );
+    }
+
+    fn saved_theme_id(ctx: &Ctx) -> String {
+        ctx.settings_repository
+            .load_or_default()
+            .unwrap()
+            .ui
+            .theme_id
+    }
+
+    #[test]
+    fn set_active_theme_rejects_locked_reward_theme_and_keeps_settings() {
+        let ctx = ctx();
+        let error = ctx
+            .service
+            .set_active_theme("theme_001", &ctx.settings_service)
+            .unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+        assert_eq!(saved_theme_id(&ctx), "default");
+        // 未知の ID・空文字も同じく拒否する。
+        for theme_id in ["", "<script>", "theme_999"] {
+            assert!(ctx
+                .service
+                .set_active_theme(theme_id, &ctx.settings_service)
+                .is_err());
+        }
+        assert_eq!(saved_theme_id(&ctx), "default");
+    }
+
+    #[test]
+    fn set_active_theme_saves_unlocked_reward_theme_and_survives_restart() {
+        let ctx = ctx();
+        save_friendship_total(&ctx, 25); // Rank3 で theme_001 解放
+        let dto = ctx
+            .service
+            .set_active_theme("theme_001", &ctx.settings_service)
+            .unwrap();
+        assert_eq!(dto.active_theme_id, "theme_001");
+        assert_eq!(saved_theme_id(&ctx), "theme_001");
+        // Rank3 では theme_002 は未解放のまま選べない。
+        assert!(ctx
+            .service
+            .set_active_theme("theme_002", &ctx.settings_service)
+            .is_err());
+
+        // 新しいサービス（＝再起動）でも保存したテーマが適用中のまま。
+        let reloaded = RewardService::new(
+            RewardRepository::new(&ctx.paths),
+            ctx.friendship_repository.clone(),
+            ctx.settings_repository.clone(),
+        );
+        assert_eq!(
+            reloaded.get_reward_state().unwrap().active_theme_id,
+            "theme_001"
+        );
+
+        // 既定テーマへはいつでも戻せる。
+        let dto = ctx
+            .service
+            .set_active_theme("default", &ctx.settings_service)
+            .unwrap();
+        assert_eq!(dto.active_theme_id, "default");
+        assert_eq!(saved_theme_id(&ctx), "default");
+    }
+
+    #[test]
+    fn set_active_theme_accepts_only_owned_gacha_themes() {
+        let ctx = ctx();
+        assert!(ctx
+            .service
+            .set_active_theme("gacha_theme_002", &ctx.settings_service)
+            .is_err());
+
+        let gacha = GachaState {
+            owned_item_ids: ids(&["gacha_theme_002"]),
+            ..GachaState::default()
+        };
+        ctx.gacha_repository.save(&gacha).unwrap();
+        let dto = ctx
+            .service
+            .set_active_theme("gacha_theme_002", &ctx.settings_service)
+            .unwrap();
+        assert_eq!(dto.active_theme_id, "gacha_theme_002");
+        assert_eq!(saved_theme_id(&ctx), "gacha_theme_002");
+        assert!(ctx
+            .service
+            .set_active_theme("gacha_theme_001", &ctx.settings_service)
+            .is_err());
+
+        // ガチャサービスを持たない構成では、保存済みのガチャテーマも既定扱いにする。
+        let without_gacha = RewardService::new(
+            RewardRepository::new(&ctx.paths),
+            ctx.friendship_repository.clone(),
+            ctx.settings_repository.clone(),
+        );
+        assert_eq!(
+            without_gacha.get_reward_state().unwrap().active_theme_id,
+            "default"
         );
     }
 }

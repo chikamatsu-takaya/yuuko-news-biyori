@@ -20,7 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Utc;
 
 use crate::domain::gacha::{
-    find_gacha_item, DrawOutcome, GachaDrawResultDto, GachaState, GachaStateDto, GACHA_MASTER,
+    find_gacha_item, DrawOutcome, GachaDrawResultDto, GachaItemKind, GachaState, GachaStateDto,
+    GACHA_MASTER,
 };
 use crate::domain::yuuko::local_date_key;
 use crate::error::AppError;
@@ -80,6 +81,22 @@ impl GachaService {
     /// ガチャ画面用の状態を返す（読み取り）。未保存なら初期値（初期かけら・所持なし）を返す。
     pub fn get_gacha_state(&self) -> Result<GachaStateDto, AppError> {
         self.update(|state| (state.to_dto(), false))
+    }
+
+    /// 所持済みの色違いテーマの ID（ガチャマスタにあるテーマ種別だけ）。
+    /// カスタマイズ画面のテーマ切り替えで「選んでよいか」を Rust 側で判定するために使う（読み取りのみ）。
+    pub fn owned_theme_ids(&self) -> Result<Vec<String>, AppError> {
+        self.update(|state| {
+            let ids = state
+                .owned_item_ids
+                .iter()
+                .filter(|id| {
+                    find_gacha_item(id).is_some_and(|def| def.kind == GachaItemKind::Theme)
+                })
+                .cloned()
+                .collect();
+            (ids, false)
+        })
     }
 
     /// 1回引く（§12.5）。コンプリート・かけら不足のときは何も消費せず、その理由を結果で返す。
@@ -267,6 +284,21 @@ mod tests {
         assert_eq!(dto.cost, GACHA_COST);
         assert!(dto.can_draw && !dto.is_complete);
         assert_eq!((dto.owned_count, dto.total_count), (0, 43));
+    }
+
+    #[test]
+    fn owned_theme_ids_lists_only_owned_master_themes() {
+        let ctx = ctx();
+        assert!(ctx.service.owned_theme_ids().unwrap().is_empty());
+        let state = GachaState {
+            owned_item_ids: ids(&["card_001", "gacha_theme_003", "mystery", "gacha_theme_001"]),
+            ..GachaState::default()
+        };
+        ctx.repository.save(&state).unwrap();
+        assert_eq!(
+            ctx.service.owned_theme_ids().unwrap(),
+            ids(&["gacha_theme_003", "gacha_theme_001"])
+        );
     }
 
     #[test]
