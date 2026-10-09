@@ -90,7 +90,13 @@ type ReaderArticleDetail = {
   keyPoints: string[];
   attentionPoint: string;
   yuukoThoughts: string;
+  // 要約済みか。false のときだけ「要約はまだ準備中」表示と「要約を作成」を出す。
+  // ブラウザプレビュー用のサンプル記事は省略（＝要約済み扱い）で従来表示を保つ。
+  isSummarized?: boolean;
 };
+
+// 記事詳細の取得状態。Tauri で実記事を読み込み中・失敗のときは、サンプル記事を見せずに状態表示へ切り替える。
+type ArticleLoadState = "loading" | "ready" | "error";
 
 type RelatedArticle = {
   id: string;
@@ -352,6 +358,10 @@ const mapTauriArticleToUi = (
     article.articleId,
     article.keywordCandidates
   );
+  // 要約済みフラグ（status.summarized）は summaryState=done で届く。
+  // 未要約の記事では summary に本文抜粋が入るため要約として出さず、
+  // 未生成の項目はサンプル記事や抜粋で埋めずに空のまま渡して「まだ作成されていない」表示にする。
+  const isSummarized = article.summaryState === "done";
 
   return {
     id: article.articleId,
@@ -362,22 +372,13 @@ const mapTauriArticleToUi = (
     categoryColor: toCategoryColor(article.genre),
     isFavorite: article.isFavorite,
     externalUrl: article.originalUrl,
-    summary: article.summary ?? fallbackArticle.summary,
-    yuukoExplanation:
-      article.yuukoExplanation ??
-      article.summary ??
-      fallbackArticle.yuukoExplanation,
+    summary: isSummarized ? (article.summary ?? "") : "",
+    yuukoExplanation: article.yuukoExplanation ?? "",
     highlightedTerms,
-    keyPoints:
-      article.focusPoints.length > 0
-        ? article.focusPoints
-        : fallbackArticle.keyPoints,
-    attentionPoint:
-      article.focusPoints[1] ??
-      article.summary ??
-      fallbackArticle.attentionPoint,
-    yuukoThoughts:
-      article.yuukoComment ?? article.summary ?? fallbackArticle.yuukoThoughts,
+    keyPoints: article.focusPoints,
+    attentionPoint: article.focusPoints[1] ?? article.focusPoints[0] ?? "",
+    yuukoThoughts: article.yuukoComment ?? "",
+    isSummarized,
   };
 };
 
@@ -870,7 +871,13 @@ const applyGeneratedSummary = (
     generatedSummary.focusPoints[0] ??
     generatedSummary.summary,
   yuukoThoughts: generatedSummary.yuukoComment,
+  isSummarized: true,
 });
+
+// 要約・再説明・要点・感想が未生成のときの固定表示（本文抜粋やサンプル記事で埋めない）。
+function NotGeneratedText({ children }: { children: React.ReactNode }) {
+  return <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>;
+}
 
 // 範囲選択の対象領域（ニュース要約・ゆうこの再説明）に付与するマーカー属性。
 // closest() でこの属性を持つ要素内に選択が収まっているかを判定する。
@@ -1020,6 +1027,10 @@ export default function NewsReaderScreen({
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
   const [isLoadingArticle, setIsLoadingArticle] = React.useState(true);
+  // 初期値を loading にして、Tauri の実記事が届く前にサンプル記事が一瞬出ないようにする
+  // （ブラウザプレビューでは取得結果が null になり、すぐ ready でサンプル表示へ移る）。
+  const [articleLoadState, setArticleLoadState] =
+    React.useState<ArticleLoadState>("loading");
   const [isLoadingRelatedArticles, setIsLoadingRelatedArticles] =
     React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
@@ -1062,6 +1073,8 @@ export default function NewsReaderScreen({
   const explainSelectionSeqRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
+  // 未要約の実記事（summaryState≠done）。要約欄を「準備中」表示にし、ボタンを「要約を作成」にする。
+  const isUnsummarized = article.isSummarized === false;
   const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
   const secondaryTerm =
     article.highlightedTerms[1] ?? article.highlightedTerms[0] ?? primaryTerm;
@@ -1193,6 +1206,7 @@ export default function NewsReaderScreen({
     const requestId = loadArticleRequestIdRef.current;
     const requestArticleId = resolvedArticleId;
     setIsLoadingArticle(true);
+    setArticleLoadState("loading");
     setLoadNotice(null);
     setLoadNoticeKind("info");
 
@@ -1208,6 +1222,7 @@ export default function NewsReaderScreen({
         setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
         setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
         setLoadNotice(null);
+        setArticleLoadState("ready");
         return;
       }
 
@@ -1216,6 +1231,7 @@ export default function NewsReaderScreen({
       setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
       setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
       setLoadNotice(null);
+      setArticleLoadState("ready");
 
       // 実データの記事を開いたら友情ポイントを加算（同一記事はセッション内で1回だけ）。
       if (!recordedOpensRef.current.has(requestArticleId)) {
@@ -1238,11 +1254,13 @@ export default function NewsReaderScreen({
       const fallbackDetail = getFallbackArticleById(requestArticleId);
       setArticle(fallbackDetail);
       setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
-      setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+      // 失敗時は本文をエラー表示に置き換えるため、サンプル記事の用語解説も開かない。
+      setShowTermPopup(false);
       setLoadNotice(
         "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
       );
       setLoadNoticeKind("error");
+      setArticleLoadState("error");
       console.warn("Failed to load article detail:", error);
     } finally {
       if (isMountedRef.current && requestId === loadArticleRequestIdRef.current) {
@@ -1648,6 +1666,39 @@ export default function NewsReaderScreen({
           >
             <Breadcrumb onNavigate={onNavigate} />
 
+            {/* 読み込み中・取得失敗のときは記事カード群（サンプル記事を含む）を出さず状態表示にする。
+                既存カードの差分を小さく保つため、内側のインデントは変えていない。 */}
+            {articleLoadState !== "ready" ? (
+              <Card className="mb-4 border-0 py-4 shadow-sm">
+                <CardContent className="p-5">
+                  {articleLoadState === "loading" ? (
+                    <div
+                      role="status"
+                      className="flex items-center gap-2 text-sm text-muted-foreground"
+                    >
+                      <Spinner className="size-4" />
+                      記事を読み込んでいるよ…
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <p role="alert" className="text-sm text-foreground">
+                        {loadNotice}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 shrink-0 self-start text-xs sm:self-auto"
+                        onClick={() => void loadArticle()}
+                        disabled={isLoadingArticle}
+                      >
+                        再試行
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ) : (
+            <>
             <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
                 <h1 className="mb-3 text-xl font-bold text-foreground">
@@ -1733,20 +1784,28 @@ export default function NewsReaderScreen({
                     {isGeneratingSummary ? (
                       <>
                         <Spinner className="size-4" />
-                        更新中...
+                        {isUnsummarized ? "作成中..." : "更新中..."}
                       </>
+                    ) : isUnsummarized ? (
+                      "要約を作成"
                     ) : (
                       "要約を更新"
                     )}
                   </Button>
                 </div>
-                {/* 範囲選択の対象領域（ニュース要約）。この要素内の選択のみ「解説」ボタン対象。 */}
+                {isUnsummarized ? (
+                  <NotGeneratedText>
+                    要約はまだ準備中だよ。「要約を作成」で作れるよ。
+                  </NotGeneratedText>
+                ) : (
+                /* 範囲選択の対象領域（ニュース要約）。この要素内の選択のみ「解説」ボタン対象。 */
                 <p
                   data-explain-selectable="summary"
                   className="text-sm leading-relaxed text-foreground"
                 >
                   {article.summary}
                 </p>
+                )}
                 {summaryNotice ? (
                   <p className="mt-3 text-xs text-amber-700">{summaryNotice}</p>
                 ) : null}
@@ -1761,13 +1820,17 @@ export default function NewsReaderScreen({
                     ゆうこの解説
                   </h2>
                 </div>
-                {/* 範囲選択の対象領域（ゆうこの再説明）。この要素内の選択のみ「解説」ボタン対象。 */}
+                {article.yuukoExplanation ? (
+                /* 範囲選択の対象領域（ゆうこの再説明）。この要素内の選択のみ「解説」ボタン対象。 */
                 <p
                   data-explain-selectable="explanation"
                   className="text-sm leading-relaxed text-foreground"
                 >
                   {article.yuukoExplanation}
                 </p>
+                ) : (
+                  <NotGeneratedText>ゆうこの解説はまだ作成されていないよ。</NotGeneratedText>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {[primaryTerm, secondaryTerm].map((term) => (
                     <button
@@ -1788,6 +1851,9 @@ export default function NewsReaderScreen({
                   <Star className="h-5 w-5 fill-yellow-500 text-yellow-500" />
                   <h2 className="font-semibold text-foreground">要点</h2>
                 </div>
+                {article.keyPoints.length === 0 ? (
+                  <NotGeneratedText>要点はまだ作成されていないよ。</NotGeneratedText>
+                ) : (
                 <ul className="space-y-2">
                   {article.keyPoints.map((point, index) => (
                     <li
@@ -1799,6 +1865,7 @@ export default function NewsReaderScreen({
                     </li>
                   ))}
                 </ul>
+                )}
               </CardContent>
             </Card>
 
@@ -1808,9 +1875,13 @@ export default function NewsReaderScreen({
                   <Gift className="h-5 w-5 text-red-500" />
                   <h2 className="font-semibold text-foreground">注目ポイント</h2>
                 </div>
+                {article.attentionPoint ? (
                 <p className="text-sm leading-relaxed text-foreground">
                   {article.attentionPoint}
                 </p>
+                ) : (
+                  <NotGeneratedText>注目ポイントはまだ作成されていないよ。</NotGeneratedText>
+                )}
               </CardContent>
             </Card>
 
@@ -1820,11 +1891,17 @@ export default function NewsReaderScreen({
                   <Heart className="h-5 w-5 fill-pink-500 text-pink-500" />
                   <h2 className="font-semibold text-foreground">ゆうこの感想</h2>
                 </div>
+                {article.yuukoThoughts ? (
                 <p className="text-sm leading-relaxed text-foreground">
                   {article.yuukoThoughts}
                 </p>
+                ) : (
+                  <NotGeneratedText>ゆうこの感想はまだ作成されていないよ。</NotGeneratedText>
+                )}
               </CardContent>
             </Card>
+            </>
+            )}
 
             <Card className="mb-4 border-0 py-3 shadow-sm">
               <CardContent className="p-4">
@@ -1926,7 +2003,11 @@ export default function NewsReaderScreen({
         <aside className="flex w-72 shrink-0 flex-col overflow-y-auto p-4">
           <div className="mb-2">
             <YuukoSpeechBubbleRight
-              message={article.yuukoThoughts || fallbackSpeechBubble}
+              message={
+                articleLoadState === "ready" && article.yuukoThoughts
+                  ? article.yuukoThoughts
+                  : fallbackSpeechBubble
+              }
             />
           </div>
 
