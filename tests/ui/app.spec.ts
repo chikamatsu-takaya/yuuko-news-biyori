@@ -4359,19 +4359,35 @@ test("settings postponed controls without a DTO field are disabled or removed", 
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeEnabled();
 
-  // AIプロバイダーの選択肢: OpenAI は無く、ローカルは「準備中」で残る。
+  // AIプロバイダーの選択肢: OpenAI は無く、ローカルは「準備中」を外して選べる（判断台帳 D99）。
   await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
   await expect(page.getByRole("option")).toHaveText([
     "MockProvider（APIキー不要）",
     "Gemini",
-    "ローカル（準備中）",
+    "ローカル",
   ]);
   await page.keyboard.press("Escape");
-  // 案内文も OpenAI に触れず、ローカルだけを準備中として案内する。
+  // 案内文も OpenAI に触れず、ローカルを「準備中」と案内しない。
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
+  await expect(page.getByText(/ローカルは準備中/)).toHaveCount(0);
   await expect(
-    page.getByText(/ローカルは準備中のため、選んでも現在は MockProvider で動作します。/)
+    page.getByText(/ローカル.*はこのパソコンの中だけで動くAIで/)
   ).toBeVisible();
+});
+
+// ローカルを選ぶと、初回の準備に時間がかかることを短く案内する（Mock の注記は消える）。
+test("settings shows the local AI note when ローカル is selected", async ({
+  page,
+}) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByTestId("local-provider-note")).toHaveCount(0);
+  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("option", { name: "ローカル" }).click();
+  await expect(page.getByTestId("local-provider-note")).toHaveText(
+    "このパソコンの中で動くAIだよ。初めて使うときは準備に少し時間がかかるよ。"
+  );
+  await expect(page.getByTestId("mock-provider-note")).toHaveCount(0);
 });
 
 // 未保存の変更表示と保存ボタンの活性（画面詳細設計書 SCR-003 §7.7）。
@@ -5135,6 +5151,37 @@ test("settings AI connection test shows 接続失敗 without raw error text", as
   await expect(region).not.toContainText("unauthorized");
   await expect(region).not.toContainText("APIキー");
 });
+
+// ローカル（同梱AI）の接続テスト失敗は、種別ごとの固定文言だけを出す（生エラー・種別名は出さない）。
+for (const [errorKind, message] of [
+  ["local_ai_missing", "ローカルAIの部品が見つかりません"],
+  ["local_ai_broken", "ローカルAIの部品が壊れています"],
+  ["local_ai_start_failed", "ローカルAIを起動できませんでした"],
+  ["timeout", "ローカルAIの準備に時間がかかりすぎました"],
+  ["local_ai_request_failed", "ローカルAIから答えを受け取れませんでした"],
+] as const) {
+  test(`settings AI connection test shows a fixed message for local ${errorKind}`, async ({
+    page,
+  }) => {
+    await setAiTestResult(page, {
+      provider: "local",
+      checkedProvider: "local",
+      status: "unavailable",
+      errorKind,
+      mockAvailable: true,
+    });
+    await openSettings(page);
+    await openSettingsMenu(page, "解説・AI設定");
+
+    await page.getByRole("button", { name: "接続テスト" }).click();
+
+    const region = aiTestResultRegion(page);
+    await expect(region).toContainText(message);
+    await expect(region).not.toContainText(errorKind);
+    // ローカルの失敗で MockProvider を勧めない（黙って切り替えない）。
+    await expect(region).not.toContainText("MockProvider");
+  });
+}
 
 // 通知ありモック（request_yuuko_notification → notified:true）を有効化する。
 async function enableNotificationCandidate(page: Page) {

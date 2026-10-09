@@ -190,7 +190,16 @@ pub(crate) fn request_exit<R: Runtime>(app: &AppHandle<R>, source: ExitSource) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         state.auto_summary_queue.request_stop();
     }
+    stop_side_processes(app);
     app.exit(0);
+}
+
+/// 同梱ローカルLLM（llama-server）を止める。明示終了と、終了イベント（再起動を含む全経路）の両方から呼ぶ。
+/// 何度呼んでもよい（止めた後は起動しない）。
+pub(crate) fn stop_side_processes<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state.local_llm_service.shutdown();
+    }
 }
 
 fn mark_exit_requested() {

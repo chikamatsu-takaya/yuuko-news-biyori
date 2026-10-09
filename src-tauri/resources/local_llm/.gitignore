@@ -1,0 +1,9 @@
+# 同梱ローカルLLM（判断台帳 D99〜D101）の実行ファイル・モデルは大容量のためコミットしない。
+# scripts/local-llm/place-bundle.mjs で置く。フォルダと .gitignore・ライセンス本文だけを追跡する
+# （tauri-build のリソースパス検証を CI でも通すため）。
+*
+!.gitignore
+!runtime/
+!models/
+!LICENSES/
+!LICENSES/**

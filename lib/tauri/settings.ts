@@ -95,6 +95,10 @@ export type AiProviderConnectionErrorKind =
   | "failed_precondition"
   | "invalid_response"
   | "provider_not_implemented"
+  | "local_ai_missing"
+  | "local_ai_broken"
+  | "local_ai_start_failed"
+  | "local_ai_request_failed"
   | "internal";
 
 export type AiProviderConnectionTestResult = {

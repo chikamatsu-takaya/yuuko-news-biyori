@@ -2,6 +2,8 @@ use serde::Serialize;
 use std::io;
 use thiserror::Error;
 
+use crate::domain::ai_connection::LocalAiFailure;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
@@ -60,6 +62,11 @@ pub enum AppError {
     /// 前回の取り込みが途中で止まり、退避フォルダに印が残っている（手動で戻すまで取り込まない）。
     #[error("a previous import did not finish")]
     ImportIncompletePrevious,
+
+    /// 同梱ローカルAI（llama-server）の失敗（判断台帳 D99）。種別ごとの固定コードで返し、
+    /// 画面が「部品が無い」「準備に時間がかかった」などを言い分けられるようにする。
+    #[error("local ai failed: {0:?}")]
+    LocalAi(LocalAiFailure),
 }
 
 impl AppError {
@@ -74,6 +81,11 @@ impl AppError {
             Self::Json(_) => "JSON_ERROR",
             Self::ImportRejected(_) => "IMPORT_ZIP_REJECTED",
             Self::ImportIncompletePrevious => "IMPORT_INCOMPLETE_PREVIOUS",
+            Self::LocalAi(LocalAiFailure::Missing) => "LOCAL_AI_MISSING",
+            Self::LocalAi(LocalAiFailure::Broken) => "LOCAL_AI_BROKEN",
+            Self::LocalAi(LocalAiFailure::StartFailed) => "LOCAL_AI_START_FAILED",
+            Self::LocalAi(LocalAiFailure::Timeout) => "LOCAL_AI_TIMEOUT",
+            Self::LocalAi(LocalAiFailure::RequestFailed) => "LOCAL_AI_REQUEST_FAILED",
         }
     }
 }
@@ -98,6 +110,15 @@ impl AppError {
             Self::ImportIncompletePrevious => {
                 "a previous import did not finish; restore from the backup first".to_string()
             }
+            // パス・番号・合言葉・llama-server の出力は含めない。
+            Self::LocalAi(failure) => match failure {
+                LocalAiFailure::Missing => "local ai files are missing",
+                LocalAiFailure::Broken => "local ai model is broken",
+                LocalAiFailure::StartFailed => "local ai could not be started",
+                LocalAiFailure::Timeout => "local ai did not respond in time",
+                LocalAiFailure::RequestFailed => "local ai request failed",
+            }
+            .to_string(),
         }
     }
 }
@@ -274,6 +295,23 @@ mod tests {
         let incomplete = command_error(AppError::ImportIncompletePrevious);
         assert_eq!(incomplete.code, "IMPORT_INCOMPLETE_PREVIOUS");
         assert!(!incomplete.message.contains("secret"));
+    }
+
+    #[test]
+    fn local_ai_errors_use_fixed_codes_and_messages() {
+        let cases = [
+            (LocalAiFailure::Missing, "LOCAL_AI_MISSING"),
+            (LocalAiFailure::Broken, "LOCAL_AI_BROKEN"),
+            (LocalAiFailure::StartFailed, "LOCAL_AI_START_FAILED"),
+            (LocalAiFailure::Timeout, "LOCAL_AI_TIMEOUT"),
+            (LocalAiFailure::RequestFailed, "LOCAL_AI_REQUEST_FAILED"),
+        ];
+        for (failure, code) in cases {
+            let error = command_error(AppError::LocalAi(failure));
+            assert_eq!(error.code, code);
+            assert!(error.message.starts_with("local ai"));
+            assert!(!error.message.contains("127.0.0.1"));
+        }
     }
 
     #[test]
