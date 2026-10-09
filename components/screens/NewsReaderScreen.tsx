@@ -59,6 +59,8 @@ import {
   resolveAnchorRect,
   clampExplainButtonPosition,
   isSelectedTextTooLong,
+  readCommandErrorCode,
+  termExplainFailureMessage,
 } from "@/lib/explain-selection.mjs";
 // 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
 import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
@@ -738,14 +740,14 @@ function TermPopup({
             </Button>
           </div>
         </div>
-      ) : (
+      ) : !isLoading && !notice ? (
         <p
           data-term-popup-no-drag="true"
           className="cursor-text text-xs leading-relaxed text-muted-foreground"
         >
           用語解説を表示できませんでした。
         </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1181,7 +1183,7 @@ export default function NewsReaderScreen({
 
     // 選択文字列を既存 selectedTerm 形式へ変換する。
     // id は内部用の連番のみ（選択文字列全文は id にも data 属性にも入れない）。
-    // explanation には既存の簡易 fallback 説明を持たせ、取得失敗時の補助説明に使えるようにする。
+    // explanation の簡易説明は Tauri 外（ブラウザプレビュー）の補助説明にだけ使う（失敗時には出さない）。
     explainSelectionSeqRef.current += 1;
     const selectionTerm: SupportTerm = {
       id: `selection-${explainSelectionSeqRef.current}`,
@@ -1343,7 +1345,9 @@ export default function NewsReaderScreen({
       },
       selectedTerm
     );
-    setSelectedDictionaryEntry(fallbackEntry);
+    // 取得中・失敗時は仮解説（fallbackEntry）を出さない。出すと「辞書に保存」で
+    // フロント生成の仮解説が辞書へ保存され得るため（要件定義書 §7.4.8）。
+    setSelectedDictionaryEntry(null);
     setIsLoadingTermExplanation(true);
     setTermNotice(null);
     setTermNoticeKind("info");
@@ -1358,6 +1362,7 @@ export default function NewsReaderScreen({
         return;
       }
 
+      // entry=null は Tauri 外（ブラウザプレビュー）だけ。その場合に限り補助説明を表示する。
       setSelectedDictionaryEntry(entry ?? fallbackEntry);
 
       // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
@@ -1383,10 +1388,14 @@ export default function NewsReaderScreen({
         return;
       }
 
-      setSelectedDictionaryEntry(fallbackEntry);
-      setTermNotice("用語解説の取得に失敗したため、補助説明を表示しています。");
+      // 失敗時は仮解説を出さず（＝辞書保存ボタンも出さず）、再選択の案内と再試行だけを出す
+      // （画面詳細設計書 §11.6 / §11.7）。文言はエラーコードで選ぶ固定文言で、生エラーは出さない。
+      // ログにも選択文字列・エラー本文を残さないよう、コードだけを出す。
+      const errorCode = readCommandErrorCode(error);
+      setSelectedDictionaryEntry(null);
+      setTermNotice(termExplainFailureMessage(errorCode));
       setTermNoticeKind("error");
-      console.warn("Failed to explain selected term:", error);
+      console.warn("Failed to explain selected term:", errorCode ?? "unknown");
     } finally {
       // 最新requestのみローディング状態と連打ガードを解除する。
       // 古いrequest（例: 閉じて古くなったAの遅延完了）が、実行中の新しいB/Cのガードを
