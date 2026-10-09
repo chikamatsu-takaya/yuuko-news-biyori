@@ -211,6 +211,7 @@ impl YuukoService {
             response.state = YuukoResidentState::Suppressed;
             response.has_notification = false;
             response.balloon_text = Some("通知設定がOFFになっているよ。".to_string());
+            response.apply_nickname(&settings.user.nickname);
             response.preview_article = None;
             response.current_article_id = None;
             response.reward_notification = None;
@@ -224,6 +225,8 @@ impl YuukoService {
             self.yuuko_state_repository.save(&yuuko_state)?;
             response.balloon_text = yuuko_state.balloon_text.clone();
         }
+        // 呼び名は保存済みの文言へ焼き込まず、返す直前に付ける（設定変更を次の表示から反映するため）。
+        response.apply_nickname(&settings.user.nickname);
 
         // ゆうこ用ウィンドウはマウント時にこの結果で初期表示するため、イベント経路と同じ短い要約を詰める。
         self.attach_preview_short_summary(&mut response);
@@ -326,7 +329,7 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.dismiss_notification(Utc::now());
         self.yuuko_state_repository.save(&state)?;
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// 無操作タイムアウト（無視）を記録する。フロントの自動退場タイマーから呼ぶ想定
@@ -335,7 +338,7 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.mark_ignored(Utc::now());
         self.yuuko_state_repository.save(&state)?;
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// ゆうこにニュース通知を出させる。MVP抑制条件（enabled / 日次上限 / クールタイム / cooldown /
@@ -347,7 +350,12 @@ impl YuukoService {
         let mut state = self.yuuko_state_repository.load_or_default()?;
 
         if !settings.notification.enabled {
-            return Ok(notification_result(false, "disabled", &state));
+            return Ok(notification_result(
+                false,
+                "disabled",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         // 報酬通知が出ている間はニュース通知で上書きしない（報酬を誤って消さない・§6.4 報酬優先）。
@@ -356,12 +364,22 @@ impl YuukoService {
             .as_ref()
             .is_some_and(|reward| reward.pending)
         {
-            return Ok(notification_result(false, "reward_pending", &state));
+            return Ok(notification_result(
+                false,
+                "reward_pending",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         // 既にアクティブな通知（ユーザー未対応）が出ている場合は上書きしない（再起動後も潰さない）。
         if state.has_active_notification() {
-            return Ok(notification_result(false, "already_active", &state));
+            return Ok(notification_result(
+                false,
+                "already_active",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         let now = Utc::now();
@@ -375,13 +393,28 @@ impl YuukoService {
                 .map(|range| (range.start.as_str(), range.end.as_str())),
         ) {
             NotificationGate::DailyLimitReached => {
-                return Ok(notification_result(false, "daily_limit", &state));
+                return Ok(notification_result(
+                    false,
+                    "daily_limit",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::CoolingDown => {
-                return Ok(notification_result(false, "cooling_down", &state));
+                return Ok(notification_result(
+                    false,
+                    "cooling_down",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::OutsideTimeRange => {
-                return Ok(notification_result(false, "outside_time_range", &state));
+                return Ok(notification_result(
+                    false,
+                    "outside_time_range",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             NotificationGate::Allowed => {}
         }
@@ -393,10 +426,20 @@ impl YuukoService {
         let resume_gate = self.check_resume(now);
         match self.check_fullscreen(now, settings.notification.suppress_in_fullscreen) {
             FullscreenGate::Suppressed => {
-                return Ok(notification_result(false, "fullscreen", &state));
+                return Ok(notification_result(
+                    false,
+                    "fullscreen",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             FullscreenGate::GracePeriod { .. } => {
-                return Ok(notification_result(false, "fullscreen_grace", &state));
+                return Ok(notification_result(
+                    false,
+                    "fullscreen_grace",
+                    &state,
+                    &settings.user.nickname,
+                ));
             }
             FullscreenGate::Allowed => {}
         }
@@ -406,10 +449,20 @@ impl YuukoService {
             settings.notification.suppress_during_meeting,
             settings.notification.suppress_when_mic_in_use,
         ) {
-            return Ok(notification_result(false, reason, &state));
+            return Ok(notification_result(
+                false,
+                reason,
+                &state,
+                &settings.user.nickname,
+            ));
         }
         if let ResumeGate::GracePeriod { .. } = resume_gate {
-            return Ok(notification_result(false, "resume_grace", &state));
+            return Ok(notification_result(
+                false,
+                "resume_grace",
+                &state,
+                &settings.user.nickname,
+            ));
         }
 
         // おすすめ候補（スコア順）から未紹介・未読を優先して1件選ぶ。選定はRust側責務（§2.3）。
@@ -417,12 +470,22 @@ impl YuukoService {
             .article_service
             .get_recommended_articles(GetRecommendedArticlesParams::default())?;
         let Some(article) = state.pick_introducible(&candidates) else {
-            return Ok(notification_result(false, "no_candidate", &state));
+            return Ok(notification_result(
+                false,
+                "no_candidate",
+                &state,
+                &settings.user.nickname,
+            ));
         };
 
         state.mark_notified(now, article);
         self.yuuko_state_repository.save(&state)?;
-        Ok(notification_result(true, "notified", &state))
+        Ok(notification_result(
+            true,
+            "notified",
+            &state,
+            &settings.user.nickname,
+        ))
     }
 
     /// ゆうこクリックの2段階遷移（最小実装）。遷移が起きた場合のみ保存する。
@@ -456,7 +519,7 @@ impl YuukoService {
                 }
             }
         }
-        Ok(state.to_notification_state())
+        Ok(self.display_state(&state))
     }
 
     /// 「詳しく見る」確定の友情ポイントを記録する。失敗してもクリック確定は取り消さない。
@@ -469,6 +532,19 @@ impl YuukoService {
         }
     }
 
+    /// 保存状態を表示用の状態へ変換し、吹き出し文言へ設定の呼び名を反映する。
+    /// 設定を読めなくても操作結果は返したいので、その場合は呼び名なし（従来の文言）に倒す。
+    fn display_state(&self, state: &PersistedYuukoState) -> YuukoNotificationState {
+        let mut response = state.to_notification_state();
+        match self.settings_repository.load_or_default() {
+            Ok(settings) => response.apply_nickname(&settings.user.nickname),
+            Err(error) => {
+                log::warn!("設定を読めなかったため、呼び名なしでゆうこの文言を返します: {error}");
+            }
+        }
+        response
+    }
+
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
         if !self.yuuko_state_repository.exists() {
             let state = self.yuuko_state_repository.load_or_default()?;
@@ -479,15 +555,19 @@ impl YuukoService {
 }
 
 /// request_yuuko_notification の結果を組み立てる（最新状態を通知DTOへ変換）。
+/// 吹き出し文言には設定の呼び名を反映する（保存状態は変えない）。
 fn notification_result(
     notified: bool,
     reason: &str,
     state: &PersistedYuukoState,
+    nickname: &str,
 ) -> RequestYuukoNotificationResult {
+    let mut state = state.to_notification_state();
+    state.apply_nickname(nickname);
     RequestYuukoNotificationResult {
         notified,
         reason: reason.to_string(),
-        state: state.to_notification_state(),
+        state,
     }
 }
 
@@ -1587,5 +1667,126 @@ mod tests {
         assert_eq!(result.confirmed_reward_ids, vec!["legacy-1".to_string()]);
         let saved = ctx.yuuko_state_repository.load_or_default().unwrap();
         assert!(saved.reward_notification.is_none());
+    }
+
+    /// 呼び名を設定に保存する（通知は終日・上限3件で可にしておく）。
+    fn save_nickname(ctx: &ServiceContext, nickname: &str, notification_enabled: bool) {
+        let mut settings = PersistedSettings::default();
+        settings.notification.enabled = notification_enabled;
+        settings.notification.max_per_day = 3;
+        settings.notification.work_time_ranges = all_day_ranges();
+        settings.user.nickname = nickname.to_string();
+        ctx.settings_repository
+            .save(&settings)
+            .expect("save settings");
+    }
+
+    #[test]
+    fn notified_balloon_text_uses_nickname_but_saved_text_does_not() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "ゆうさん", true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        let balloon = result.state.balloon_text.unwrap();
+        assert!(balloon.starts_with("ゆうさん、気になるニュースを見つけたよ。「"));
+        // 保存済みの文言には焼き込まない（設定変更を次の表示から反映するため）。
+        let saved = load_state(&ctx).balloon_text.unwrap();
+        assert!(saved.starts_with("気になるニュースを見つけたよ。「"));
+        assert_eq!(balloon, format!("ゆうさん、{saved}"));
+    }
+
+    #[test]
+    fn balloon_text_is_unchanged_when_nickname_is_empty() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "", true);
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified);
+        assert_eq!(result.state.balloon_text, load_state(&ctx).balloon_text);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text,
+            load_state(&ctx).balloon_text
+        );
+    }
+
+    #[test]
+    fn nickname_change_is_reflected_in_the_next_state_read() {
+        let ctx = make_context();
+        save_nickname(&ctx, "ゆう", true);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("ゆう、今日もニュースを見つけたら声をかけるね。")
+        );
+
+        save_nickname(&ctx, "", true);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("今日もニュースを見つけたら声をかけるね。")
+        );
+
+        // 通知OFF時の固定文言にも同じ規則で付ける。
+        save_nickname(&ctx, "ゆう", false);
+        assert_eq!(
+            ctx.service
+                .get_yuuko_notification_state()
+                .unwrap()
+                .balloon_text
+                .as_deref(),
+            Some("ゆう、通知設定がOFFになっているよ。")
+        );
+    }
+
+    #[test]
+    fn legacy_unsafe_nickname_is_neutralized_in_balloon_text() {
+        let ctx = make_context();
+        // 保存時検証より前の旧データを想定し、検証を通さずに書き込む。
+        save_nickname(&ctx, "<b>ゆう</b>\n", true);
+
+        let balloon = ctx
+            .service
+            .get_yuuko_notification_state()
+            .unwrap()
+            .balloon_text
+            .unwrap();
+
+        assert_eq!(
+            balloon,
+            "＜b>ゆう＜/b>、今日もニュースを見つけたら声をかけるね。"
+        );
+        assert!(!crate::util::text_safety::contains_html_tag(&balloon));
+    }
+
+    #[test]
+    fn click_result_also_carries_nickname() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_nickname(&ctx, "ゆう", true);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        let clicked = ctx.service.handle_yuuko_clicked().unwrap();
+
+        assert!(clicked.balloon_text.unwrap().starts_with("ゆう、"));
     }
 }
