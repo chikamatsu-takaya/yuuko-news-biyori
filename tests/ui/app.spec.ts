@@ -1317,9 +1317,20 @@ const saveDictionaryCallCount = (page: Page) =>
 const lastSavedDictionaryEntry = (page: Page) =>
   page.evaluate(
     () =>
-      (window as unknown as Record<string, { keyText?: string } | undefined>)
-        .__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
+      (
+        window as unknown as Record<
+          string,
+          { keyText?: string; isStarred?: boolean } | undefined
+        >
+      ).__E2E_SAVE_DICTIONARY_LAST_ENTRY__ ?? null
   );
+
+// explain_selected_term のモックが「★ を外した保存済み項目」の命中を返すようにする。
+const enableSavedUnstarredExplainHit = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ =
+      true;
+  });
 
 // 個別保留モードで到着した保存呼び出し数（保留中 controller の数）。
 const saveDictionaryControllerCount = (page: Page) =>
@@ -1982,9 +1993,30 @@ test("reader: the dictionary save button is usable from a selection explanation"
   await expect.poll(() => saveDictionaryCallCount(page)).toBe(1);
   const savedEntry = await lastSavedDictionaryEntry(page);
   expect(savedEntry?.keyText).toBe(READER_SUMMARY_TEXT);
+  // 辞書保存では ★ を付けない（★ は辞書画面などの ★ 操作だけで変える）。
+  expect(savedEntry?.isStarred).toBe(false);
   await expect(
     page.getByRole("button", { name: "辞書保存済み" })
   ).toBeVisible();
+});
+
+test("reader: a saved dictionary hit without ★ is shown as 辞書保存済み", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  await enableSavedUnstarredExplainHit(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    page.getByRole("heading", { name: READER_SUMMARY_TEXT })
+  ).toBeVisible();
+  // ★ の有無ではなく保存状態（savedInDictionary）で判定するため、★ なしでも保存済み表示になる。
+  const saved = page.getByRole("button", { name: "辞書保存済み" });
+  await expect(saved).toBeVisible();
+  await expect(saved).toBeDisabled();
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
 });
 
 test("reader: current dictionary save failure is safe and can be retried", async ({
@@ -7315,10 +7347,15 @@ async function installTauriMocks(page: Page) {
                 message: "E2E explain term failure /internal/secret/path",
               };
             }
+            // 保存済み辞書の命中（★ は外した状態）を返すテスト用。
+            const savedUnstarred =
+              explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ...dictionaryEntry,
               keyText: params.selectedText,
+              isStarred: false,
+              savedInDictionary: savedUnstarred,
             };
           }
           case "save_dictionary_entry": {
@@ -7333,7 +7370,11 @@ async function installTauriMocks(page: Page) {
                 saveWin.__E2E_SAVE_DICTIONARY_CONTROLLERS__ || []);
               return await new Promise((resolve, reject) => {
                 controllers.push({
-                  resolve: () => resolve(params.entry),
+                  resolve: () =>
+                    resolve({
+                      ...(params.entry as Record<string, unknown>),
+                      savedInDictionary: true,
+                    }),
                   // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める。
                   reject: () =>
                     reject(
@@ -7343,7 +7384,11 @@ async function installTauriMocks(page: Page) {
               });
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
-            return params.entry;
+            // Rust の保存結果と同じく「辞書保存済み」として返す（★ は保存で変えない）。
+            return {
+              ...(params.entry as Record<string, unknown>),
+              savedInDictionary: true,
+            };
           }
           case "confirm_rank_up_reward":
             return {

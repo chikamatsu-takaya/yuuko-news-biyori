@@ -13,6 +13,10 @@ export type DictionaryEntryDto = {
   relatedArticleId?: string;
   relatedArticleTitle?: string;
   isStarred: boolean;
+  // 辞書へ保存済みか（保存済み辞書の命中・保存結果なら true、未保存の生成結果なら false）。
+  // 「辞書保存済み」表示は ★（isStarred）ではなくこれで判定する（画面詳細設計書 §11.4）。
+  // 保存時の入力としては Rust 側で参照しない。
+  savedInDictionary: boolean;
 };
 
 export type DictionaryEntryListItemDto = {
@@ -87,7 +91,8 @@ export const saveDictionaryEntry = async (
   params: SaveDictionaryEntryParams
 ): Promise<DictionaryEntryDto> => {
   if (!isTauriRuntime()) {
-    return params.entry;
+    // ブラウザプレビューでは保存できないが、Rust 側の保存結果と同じく「保存済み」として返す。
+    return { ...params.entry, savedInDictionary: true };
   }
 
   return invoke<DictionaryEntryDto>("save_dictionary_entry", { params });

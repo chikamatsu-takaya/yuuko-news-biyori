@@ -460,6 +460,7 @@ mod tests {
             related_article_id: Some("article-001".to_string()),
             related_article_title: Some("生成AIスタートアップの資金調達が再加速".to_string()),
             is_starred: true,
+            saved_in_dictionary: false,
         }
     }
 
@@ -495,7 +496,9 @@ mod tests {
 
         assert_eq!(hit.short_explanation, "保存済みの短い説明");
         assert_eq!(hit.detail_explanation, "保存済みの詳しい説明");
-        assert!(hit.is_starred);
+        // 命中は「辞書保存済み」。保存しただけでは ★ は付かない（保存パラメータの isStarred は無視）。
+        assert!(hit.saved_in_dictionary);
+        assert!(!hit.is_starred);
     }
 
     #[test]
@@ -514,7 +517,7 @@ mod tests {
             .expect("記事横断でも命中するはず");
 
         assert_eq!(hit.short_explanation, "保存済みの短い説明");
-        assert!(hit.is_starred);
+        assert!(hit.saved_in_dictionary);
     }
 
     #[test]
@@ -687,7 +690,32 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key_text, "生成AI");
-        assert!(entries[0].is_starred);
+        assert!(!entries[0].is_starred);
+    }
+
+    #[test]
+    fn save_dictionary_entry_does_not_change_star() {
+        // 辞書保存は ★ を付けも外しもしない（★ は update_dictionary_favorite だけで変える）。
+        let context = TestRepositoryContext::new();
+        let saved = context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+        assert!(saved.saved_in_dictionary);
+        assert!(!saved.is_starred);
+
+        context
+            .repository
+            .update_dictionary_favorite(&saved_entry().entry_id, true)
+            .unwrap();
+        let resaved = context
+            .repository
+            .save_dictionary_entry(DictionaryEntryDto {
+                is_starred: false,
+                ..saved_entry()
+            })
+            .unwrap();
+        assert!(resaved.is_starred);
     }
 
     #[test]
@@ -707,10 +735,16 @@ mod tests {
             related_article_id: Some("article-002".to_string()),
             related_article_title: Some("国内SaaS企業、業務改善支援の新施策を発表".to_string()),
             is_starred: false,
+            saved_in_dictionary: false,
         };
         context
             .repository
             .save_dictionary_entry(non_starred)
+            .unwrap();
+        // ★ は保存では付かないため、★ 操作で付ける。
+        context
+            .repository
+            .update_dictionary_favorite(&saved_entry().entry_id, true)
             .unwrap();
 
         let entries = context

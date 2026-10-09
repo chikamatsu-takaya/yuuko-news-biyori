@@ -23,6 +23,11 @@ pub struct DictionaryEntryDto {
     pub related_article_id: Option<String>,
     pub related_article_title: Option<String>,
     pub is_starred: bool,
+    /// 辞書へ保存済みの項目か（保存済み辞書の命中・保存結果なら true、未保存の生成結果なら false）。
+    /// ポップアップの「辞書保存済み」表示は ★（`is_starred`）ではなくこれで判定する（画面詳細設計書 §11.4）。
+    /// 保存パラメータとして受け取るときは参照しない（保存側で決まる値のため、欠けていても既定 false で受ける）。
+    #[serde(default)]
+    pub saved_in_dictionary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,7 +339,9 @@ impl PersistedDictionaryEntry {
             last_referenced_at: Some(now_text),
             reference_count: 1,
             source_article_ids,
-            favorite: entry.is_starred,
+            // 辞書保存は ★ を付けない。★ は辞書画面などの ★ 操作（update_dictionary_favorite）だけで変える
+            // （要件定義書 §7.4.10）。保存パラメータの isStarred は参照しない。
+            favorite: false,
             memo: None,
             related_article_title: entry.related_article_title,
             related_article_id: entry.related_article_id,
@@ -347,7 +354,7 @@ impl PersistedDictionaryEntry {
         self.entry_type = entry.entry_type;
         self.short_explanation = entry.short_explanation;
         self.detail_explanation = entry.detail_explanation;
-        self.favorite = entry.is_starred;
+        // 再保存でも ★ は変えない（★ 操作は update_dictionary_favorite だけ・要件定義書 §7.4.10）。
         self.related_article_title = entry.related_article_title;
         self.related_article_id = entry.related_article_id.clone();
         self.last_referenced_at = Some(now_text);
@@ -374,6 +381,8 @@ impl PersistedDictionaryEntry {
             related_article_id: self.related_article_id.clone(),
             related_article_title: self.related_article_title.clone(),
             is_starred: self.favorite,
+            // 永続化済みの項目から作る DTO なので常に「辞書保存済み」。
+            saved_in_dictionary: true,
         }
     }
 
@@ -523,6 +532,7 @@ mod tests {
                 related_article_id: Some(" article-001 ".to_string()),
                 related_article_title: Some(" 記事タイトル ".to_string()),
                 is_starred: true,
+                saved_in_dictionary: false,
             },
         };
 
@@ -547,6 +557,7 @@ mod tests {
                 related_article_id: None,
                 related_article_title: None,
                 is_starred: false,
+                saved_in_dictionary: false,
             },
         };
 
