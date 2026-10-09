@@ -178,6 +178,8 @@ export default function YuukoWindowPage() {
             sourceName={notification.sourceName}
             summary={notification.summary}
             positionMode="RightBottom"
+            // 報酬通知は吹き出し＋OK。OK も handle_yuuko_clicked を通り、Rust が確認済みにしてウィンドウを隠す。
+            variant={notification.reward ? "reward" : "news"}
             // ウィンドウは段階ごとの固定サイズ（Rust 側）なので、長文で上へはみ出さないよう行数を抑える。
             clampText
             onFirstClick={() => {
