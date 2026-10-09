@@ -3,12 +3,14 @@
 //! サーバ(Rust)を正とし、**デイリー上限・有効イベント検証・ランクアップ判定をここで強制**する。
 //! フロントはイベント発生を `record_friendship_event` で伝えるだけで、加算量や上限は決められない。
 //! ランクアップ時はランク報酬の解放（rewards.json）と、流れ星のかけらの付与（gacha_state.json）も併せて行う。
+//! 実際に加算できたときは、直近の加算イベント履歴（friendship_events.json・データ設計書 §10.3）にも追記する。
 
 use crate::domain::friendship::{
-    FriendshipEventType, FriendshipStateDto, RecordFriendshipEventResult,
+    FriendshipEventRecord, FriendshipEventType, FriendshipStateDto, RecordFriendshipEventResult,
 };
 use crate::domain::yuuko::local_date_key;
 use crate::error::AppError;
+use crate::repositories::friendship_event_repository::FriendshipEventRepository;
 use crate::repositories::friendship_repository::FriendshipRepository;
 use crate::services::gacha_service::{log_grant_failure, GachaService};
 use crate::services::reward_service::RewardService;
@@ -22,6 +24,8 @@ pub struct FriendshipService {
     store_lock: Arc<Mutex<()>>,
     /// ランクアップ時の流れ星のかけら付与先（データ設計書 §12.4）。未設定なら付与しない。
     gacha_service: Option<GachaService>,
+    /// 加算イベント履歴の保存先（データ設計書 §10.3）。未設定なら履歴を残さない。
+    event_repository: Option<FriendshipEventRepository>,
 }
 
 impl FriendshipService {
@@ -32,12 +36,19 @@ impl FriendshipService {
             store_lock: reward_service.friendship_store_lock(),
             reward_service,
             gacha_service: None,
+            event_repository: None,
         }
     }
 
     /// ランクアップ時にかけらを付与するガチャサービスを設定する（アプリ起動時の組み立て用）。
     pub fn with_gacha_service(mut self, gacha_service: GachaService) -> Self {
         self.gacha_service = Some(gacha_service);
+        self
+    }
+
+    /// 加算イベント履歴の保存先を設定する（アプリ起動時の組み立て用）。
+    pub fn with_event_repository(mut self, event_repository: FriendshipEventRepository) -> Self {
+        self.event_repository = Some(event_repository);
         self
     }
 
@@ -93,8 +104,25 @@ impl FriendshipService {
         // 読み込み時に累計からランクを導出し直しているので、加算前のランクとしてそのまま使える。
         let rank_before = state.current_rank;
         let today = local_date_key(now, tz);
-        let outcome = state.earn(event, &today, &format_utc_timestamp(now));
+        let created_at = format_utc_timestamp(now);
+        let outcome = state.earn(event, &today, &created_at);
         self.friendship_repository.save(&state)?;
+
+        // 状態の保存に成功し、実際に加算できた（上限で 0pt ではない）ときだけ履歴へ追記する。
+        // 同じ友情ロック下で書くので、追記の読み込み〜保存が並行加算と入れ違わない（別ロックを増やさない）。
+        // 履歴は補助的な記録なので、失敗してもポイント加算（保存済み）は成功として返す。
+        if outcome.earned_points > 0 {
+            if let Some(event_repository) = &self.event_repository {
+                let record = FriendshipEventRecord {
+                    event_type: event.as_storage().to_string(),
+                    points: outcome.earned_points,
+                    created_at,
+                };
+                if let Err(error) = event_repository.append(record) {
+                    log::warn!("友情ポイント加算イベント履歴の保存に失敗しました: {error}");
+                }
+            }
+        }
 
         // ランクアップしたら、飛び越えたランクの分も含めて報酬を解放する。
         // 失敗してもポイント加算（保存済み）は取り消さない。解放はランクから冪等に導出するため、
@@ -162,7 +190,8 @@ mod tests {
             FriendshipRepository::new(&paths),
             SettingsRepository::new(&paths),
         );
-        let service = FriendshipService::new(FriendshipRepository::new(&paths), reward_service);
+        let service = FriendshipService::new(FriendshipRepository::new(&paths), reward_service)
+            .with_event_repository(FriendshipEventRepository::new(&paths));
         (service, root)
     }
 
@@ -428,6 +457,103 @@ mod tests {
             .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "term_explained")
             .unwrap();
         assert!(result.ranked_up);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn load_events(root: &std::path::Path) -> crate::domain::friendship::FriendshipEventLog {
+        FriendshipEventRepository::new(&AppPaths::new(root.to_path_buf()))
+            .load()
+            .unwrap()
+    }
+
+    #[test]
+    fn successful_addition_appends_event_history_and_capped_addition_does_not() {
+        let (service, root) = temp_service();
+        let now = jst_at(2026, 6, 9, 12, 0);
+        // 5pt × 5 で上限 25pt → 6回目は 0pt（履歴に残さない）。
+        fill_daily_limit(&service, now);
+
+        let log = load_events(&root);
+        assert_eq!(log.events.len(), 5);
+        let first = &log.events[0];
+        assert_eq!(first.event_type, "yuuko_to_main");
+        assert_eq!(first.points, 5);
+        assert_eq!(first.created_at, "2026-06-09T03:00:00Z");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn event_history_is_truncated_to_most_recent_limit() {
+        use crate::domain::friendship::FRIENDSHIP_EVENT_HISTORY_LIMIT;
+
+        let (service, root) = temp_service();
+        // term_explained(1pt) は1日25回まで加算できるので、日を変えながら上限を超える件数を記録する。
+        let total = FRIENDSHIP_EVENT_HISTORY_LIMIT + 10;
+        for i in 0..total {
+            let day = 1 + (i / 25) as u32;
+            let minute = (i % 25) as u32;
+            let result = service
+                .record_friendship_event_in(
+                    &jst(),
+                    jst_at(2026, 7, day, 12, minute),
+                    "term_explained",
+                )
+                .unwrap();
+            assert_eq!(result.earned_point, 1);
+        }
+
+        let log = load_events(&root);
+        assert_eq!(log.events.len(), FRIENDSHIP_EVENT_HISTORY_LIMIT);
+        // 最古の10件（7/1 12:00〜12:09 JST）が捨てられ、最新が末尾に残る。
+        assert_eq!(log.events[0].created_at, "2026-07-01T03:10:00Z");
+        assert_eq!(
+            log.events.last().unwrap().created_at,
+            "2026-07-09T03:09:00Z"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn event_history_save_failure_does_not_fail_point_addition() {
+        let (service, root) = temp_service();
+        // 履歴ファイルの位置をフォルダにして、読み込み・保存とも失敗させる。
+        std::fs::create_dir_all(root.join("user").join("friendship_events.json")).unwrap();
+
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "news_detail_opened")
+            .unwrap();
+        assert_eq!(result.earned_point, 3);
+        // ポイント加算そのものは保存されている。
+        assert_eq!(
+            service.get_friendship_state().unwrap().daily_earned_point,
+            3
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_event_history_is_reset_without_failing_addition() {
+        let (service, root) = temp_service();
+        let path = root.join("user").join("friendship_events.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not json").unwrap();
+
+        let result = service
+            .record_friendship_event_in(&jst(), jst_at(2026, 6, 9, 12, 0), "explanation_viewed")
+            .unwrap();
+        assert_eq!(result.earned_point, 4);
+
+        let log = load_events(&root);
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(log.events[0].event_type, "explanation_viewed");
+        assert_eq!(
+            std::fs::read(root.join("user").join("friendship_events.corrupt.json")).unwrap(),
+            b"not json"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

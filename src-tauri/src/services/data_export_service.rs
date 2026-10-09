@@ -608,6 +608,12 @@ mod tests {
         write(root, "cache/page.html", "cache");
         write(root, "state/yuuko_notification_state.json", "{}");
         write(root, "user/friendship.corrupt.json", "CORRUPT");
+        // 加算イベント履歴は補助的な記録なので移行しない（データ設計書 §10.3）。
+        write(
+            root,
+            "user/friendship_events.json",
+            r#"{"version":1,"events":[]}"#,
+        );
         write(root, "gacha/gacha_state.corrupt.json", "CORRUPT");
         write(root, "gacha/gacha_state.json.bak", "BAK");
         write(root, "gacha/gacha_state.json.tmp", "TMP");
@@ -986,6 +992,7 @@ mod tests {
             "gacha/gacha_state.json.bak",
             "gacha/gacha_state.json.tmp",
             "gacha/other.json",
+            "user/friendship_events.json",
             "news/../x.md",
             "news/a/b/c.md",
             "news//x.md",
