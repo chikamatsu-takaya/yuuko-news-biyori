@@ -38,6 +38,8 @@ pub struct GeneratedArticleSummaryDto {
 pub struct AiRequest {
     pub prompt_id: String,
     pub input_text: String,
+    /// 実AIへは用語解説（参考文脈）でだけ送る補助情報。ほかの prompt_id では Mock の材料にだけ使う
+    /// （要点: Mock のタグ用ジャンル / 再説明・一言: Mock がそのまま返す定型文）。
     pub context: Option<String>,
 }
 
