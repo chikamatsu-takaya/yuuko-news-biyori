@@ -444,7 +444,8 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between py-3 border-b border-border/50 last:border-b-0">
+    // 既定ウィンドウ（800×600）では本文列が狭く、見出しが1文字ずつ折り返すため、入力欄は次の行へ折り返す。
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 border-b border-border/50 last:border-b-0">
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
         {helpText && (
@@ -974,7 +975,7 @@ export default function SettingsScreen({
           {/* Page Title */}
           <div className="flex items-center gap-3 mb-6">
             <Settings className="w-6 h-6 text-foreground" />
-            <h1 className="text-xl font-bold text-foreground">設定</h1>
+            <h1 className="text-xl font-bold text-foreground whitespace-nowrap shrink-0">設定</h1>
             <span className="text-sm text-muted-foreground">
               ゆうことの過ごし方を、あなた好みにカスタマイズできます。
             </span>
