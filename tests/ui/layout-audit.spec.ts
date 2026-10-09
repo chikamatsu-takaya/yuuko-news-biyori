@@ -506,6 +506,22 @@ async function installLayoutMocks(page: Page) {
       get_gacha_state: () => gachaState,
       mark_gacha_items_seen: () => gachaState,
       record_friendship_event: () => null,
+      get_friendship_state: () => ({
+        currentRank: 4,
+        currentPoint: 12,
+        nextRequiredPoint: 25,
+        dailyEarnedPoint: 0,
+        dailyPointLimit: 50,
+      }),
+      get_reward_state: () => ({
+        currentRank: 4,
+        rewards: [
+          { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: true, pending: false },
+          { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+        ],
+        pendingRewardIds: [],
+        activeThemeId: "default",
+      }),
       "plugin:event|listen": () => 1,
       "plugin:event|unlisten": () => null,
     };
