@@ -249,6 +249,20 @@ impl Default for PersistedSettings {
 }
 
 impl PersistedSettings {
+    /// 新しく設定ファイルを作るとき（初回起動）と、設定の「初期化」で使う初期値（判断台帳 D103）。
+    /// AI はこのパソコンの中で動く同梱ローカルLLM（`local`）にし、ニュース取得後の自動要約を有効にする。
+    ///
+    /// `Default` とは分けている。`Default` は既存の settings.json に欄が無いときの読み込み値
+    /// （serde の `#[serde(default)]`）でもあるため、そこを変えると、欄の無い旧ファイルの利用者まで
+    /// 黙って Mock → ローカル・自動要約 OFF → ON に切り替わってしまう。既存ファイルの値（欄が無い場合を含む）は
+    /// 従来どおり `mock` / 無効として読み、新しく作る設定だけをこの初期値にする。
+    pub fn initial() -> Self {
+        let mut settings = Self::default();
+        settings.ai.provider = AiProvider::Local.as_storage().to_string();
+        settings.ai.auto_summary_enabled = true;
+        settings
+    }
+
     pub fn normalize_after_load(&mut self) {
         self.notification.normalize_after_load();
     }
@@ -475,10 +489,13 @@ pub struct AiSettings {
     pub provider: String,
     pub allow_free_tier: bool,
     pub send_minimized_text_only: bool,
-    /// ニュース取得後に未要約記事を1件ずつ自動要約するか（既定は無効。ローカルLLM導入時に既定を見直す）。
+    /// ニュース取得後に未要約記事を1件ずつ自動要約するか。新しく作る設定は有効
+    /// （`PersistedSettings::initial`・判断台帳 D103）。既存ファイルで欄が無いときは従来どおり無効として読む。
     pub auto_summary_enabled: bool,
 }
 
+/// 既存の settings.json に欄が無いときの読み込み値（旧既定のまま）。新規作成の初期値は
+/// `PersistedSettings::initial`（ローカル・自動要約有効）。
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
@@ -596,6 +613,44 @@ mod tests {
             .remove("autoSummaryEnabled");
         let dto: UserSettingsDto = serde_json::from_value(dto_json).unwrap();
         assert!(!dto.auto_summary_enabled);
+    }
+
+    #[test]
+    fn initial_settings_use_local_ai_with_auto_summary_on() {
+        // 新しく作る設定（初回起動・初期化）は、ローカル・自動要約有効（判断台帳 D103）。
+        let initial = PersistedSettings::initial();
+        assert_eq!(initial.ai.provider, "local");
+        assert!(initial.ai.auto_summary_enabled);
+        assert_eq!(initial.to_dto().ai_provider, AiProvider::Local);
+        assert!(initial.to_dto().auto_summary_enabled);
+        // AI 以外は従来の既定と同じ。
+        let default = PersistedSettings::default();
+        assert_eq!(initial.news.categories, default.news.categories);
+        assert_eq!(
+            initial.ui.onboarding_completed,
+            default.ui.onboarding_completed
+        );
+    }
+
+    #[test]
+    fn existing_files_keep_their_ai_values_even_when_fields_are_missing() {
+        // 既存ファイルで欄が無いときは旧既定（mock・自動要約無効）として読み、黙って切り替えない。
+        for legacy in [
+            r#"{ "version": 1 }"#,
+            r#"{ "version": 1, "ai": {} }"#,
+            r#"{ "version": 1, "ai": { "allowFreeTier": true } }"#,
+        ] {
+            let parsed: PersistedSettings = serde_json::from_str(legacy).unwrap();
+            assert_eq!(parsed.ai.provider, "mock", "{legacy}");
+            assert!(!parsed.ai.auto_summary_enabled, "{legacy}");
+        }
+        // 保存済みの値はそのまま読む。
+        let saved: PersistedSettings = serde_json::from_str(
+            r#"{ "version": 1, "ai": { "provider": "gemini", "autoSummaryEnabled": false } }"#,
+        )
+        .unwrap();
+        assert_eq!(saved.ai.provider, "gemini");
+        assert!(!saved.ai.auto_summary_enabled);
     }
 
     #[test]

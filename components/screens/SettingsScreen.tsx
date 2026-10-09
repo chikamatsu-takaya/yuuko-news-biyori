@@ -1324,8 +1324,8 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* 取得後の自動要約。外部AIの利用枠を使い切らないよう既定は無効。保存ボタンで他のAI設定と一緒に保存する。 */}
-                  {/* 実際に動くかは Rust 側が判定する（実AI＝現在は Gemini のときだけ）。ここでは案内だけ出す。 */}
+                  {/* 取得後の自動要約。新規インストールの初期値は有効（AIはローカル。判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
+                  {/* 実際に動くかは Rust 側が判定する（実AI＝Gemini・ローカルのときだけ）。ここでは案内だけ出す。 */}
                   <div className="py-3 border-b border-border/50">
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-0.5">

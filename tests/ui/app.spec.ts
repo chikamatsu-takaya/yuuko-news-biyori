@@ -2841,6 +2841,27 @@ test("reader summary: a failed article offers 要約を作り直す via the manu
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
 });
 
+test("reader summary: rejected AI output leaves the article unsummarized and asks to try again", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_GENERATE_SUMMARY_REJECTED__ =
+      true;
+  });
+  await setReaderSummaryState(page, "none");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await page.getByRole("button", { name: "要約を作成" }).click();
+  // D104: 代わりの固定文は保存されず、未要約のまま「もう一度」を案内する。
+  await expect(
+    main.getByText("うまくまとめられなかったよ。もう一度試してね").first()
+  ).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeEnabled();
+  await expect(main.getByText("E2Eで生成された要約です。")).toHaveCount(0);
+});
+
 test("reader summary: a not-queued article keeps the existing 要約を作成 display", async ({
   page,
 }) => {
@@ -7645,6 +7666,16 @@ async function installTauriMocks(page: Page) {
             return null;
           }
           case "generate_article_summary":
+            // 失敗モード: 実AIの出力が検証に落ちた（D104）ときと同じ CommandError 形式で reject する。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_GENERATE_SUMMARY_REJECTED__
+            ) {
+              throw {
+                code: "AI_OUTPUT_REJECTED",
+                message: "ai output could not be used",
+              };
+            }
             return {
               articleId: "e2e-article-1",
               summary: "E2Eで生成された要約です。",

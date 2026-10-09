@@ -64,6 +64,17 @@ impl AiProviderService {
         self
     }
 
+    /// 実AIを呼べる見込みがあるかの安い確認（自動要約の可否判定用・判断台帳 D56 / D103）。
+    /// AI を呼ばず、ローカルLLMも起動しない。Gemini はキーの有無（値は扱わない）、
+    /// ローカルは同梱物の有無と大きさだけを見る。Mock・未実装の openai は実AIではないので false。
+    pub fn is_real_ai_ready(&self, provider: AiProvider) -> bool {
+        match provider {
+            AiProvider::Gemini => is_gemini_key_configured(),
+            AiProvider::Local => self.local_llm.is_bundle_present(),
+            AiProvider::Mock | AiProvider::Openai => false,
+        }
+    }
+
     pub fn request_text(
         &self,
         request: AiRequest,

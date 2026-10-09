@@ -9,15 +9,23 @@
 //!   起動時に残っている未要約記事をもう一度並べ直す。
 //! - 失敗した記事は他の記事の後ろへ回して再試行し、合計 `MAX_ATTEMPTS` 回失敗したら
 //!   再起動まで `Failed` のままにする（他の記事の処理は止めない）。
-//! - 外部AIの利用枠を使い切らないよう、設定 `ai.autoSummaryEnabled` が有効なときだけ動く（既定は無効）。
-//! - 設定の AI プロバイダが実装済みの実AI（現在は Gemini）以外のときは動かない（判断台帳 D56）。固定応答で記事を「要約済み」に
-//!   してしまうと、後で実AIを使えるようになっても自動では作り直されないため。
-//! - Gemini のキーが未設定のときも動かさない（投入・取り出しの両方で確かめる）。キー未設定では
-//!   必ず Mock 出力になり、保存されない出力のために失敗と再試行を繰り返すだけになるため。
-//!   確かめるのはキーの有無（bool）だけで、キーの値は読まない・ログに出さない。
-//! - 実AIの失敗・利用枠超過・検証落ちで Mock の代替出力になった場合は保存せず失敗として扱い、
-//!   再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56）。
-//! - 1回の投入はおすすめ順の上位 `maxDailyRecommendations` 件まで（常駐負荷を抑えるため、D56）。
+//! - 設定 `ai.autoSummaryEnabled` が有効なときだけ動く（新規インストールの既定は有効・判断台帳 D103。
+//!   既存の設定ファイルで欄が無いときは従来どおり無効として読む）。
+//! - 設定の AI プロバイダが実装済みの実AI（Gemini・同梱ローカルLLM）以外のときは動かない（判断台帳 D56 / D103）。
+//!   固定応答で記事を「要約済み」にしてしまうと、後で実AIを使えるようになっても自動では作り直されないため。
+//! - 実AIを呼べる見込みが無いときも動かさない（投入・取り出しの両方で確かめる）。Gemini はキーの有無
+//!   （値は読まない・ログに出さない）、ローカルは同梱物の有無と大きさだけを見る（起動も SHA-256 の照合もしない）。
+//!   呼べないまま動かすと、保存されない出力のために失敗と再試行を繰り返すだけになるため。
+//! - 実AIの失敗・利用枠超過で Mock の代替出力になった場合、および実AIの出力が検証に落ちた場合は保存せず
+//!   失敗として扱い、再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56 / D104）。
+//! - 1回の投入はおすすめ順の上位 `maxDailyRecommendations` 件まで（常駐負荷を抑えるため、D56。ローカルでも同じ）。
+//! - ローカルLLMはこのパソコンの CPU とメモリを使うため、全画面（プレゼン・ゲーム）中とマイク使用中
+//!   （会議中を含む）は取り出しを止めて待つ（D103）。止めた記事は失敗にも試行回数にも数えず、待機列の先頭に残す。
+//!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使い、通知の抑制設定には
+//!   左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
+//! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から5分で止まる（`local_llm_service`）。
+//!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使い、
+//!   待機列が空になれば5分後に止まる。要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
 //!   一時ファイルへ書き切ってから tmp→bak→本体 の順に差し替える方式（article_repository の
 //!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
@@ -42,8 +50,11 @@ use crate::domain::article::{
 use crate::domain::settings::{AiProvider, PersistedSettings};
 use crate::domain::summary::GenerateArticleSummaryParams;
 use crate::error::AppError;
+use crate::infra::fullscreen_detector::{
+    FullscreenDetector, FullscreenStatus, SystemFullscreenDetector,
+};
+use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::services::ai_provider_service::is_gemini_key_configured;
 use crate::services::article_service::ArticleService;
 use crate::services::summary_service::{AutoSummaryOutcome, SummaryService};
 
@@ -54,9 +65,17 @@ const MAX_ATTEMPTS: u32 = 3;
 /// OS 自動起動の直後でネットワークがまだ使えない時間帯に AI を呼ばないため 60 秒待つ。
 const STARTUP_DELAY: Duration = Duration::from_secs(60);
 
-/// 1件処理するごとに空ける間隔。1件で AI を3回呼ぶため、Gemini の無料枠の毎分上限に
+/// Gemini で1件処理するごとに空ける間隔。1件で AI を3回呼ぶため、Gemini の無料枠の毎分上限に
 /// 近づかないよう、30秒空けて「1分あたり最大2件（AI呼び出し6回）」程度に抑える。
-const ITEM_INTERVAL: Duration = Duration::from_secs(30);
+const GEMINI_ITEM_INTERVAL: Duration = Duration::from_secs(30);
+
+/// ローカルLLMで1件処理するごとに空ける間隔。利用枠は無いが、1件の生成中は CPU を使い続けるため、
+/// 10秒だけ空けて他の操作に CPU を返す。ローカルLLMの「5分使わなければ止める」より十分短いので、
+/// まとめて要約する間にモデルを読み込み直すことはない。
+const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 全画面・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
+const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 1回の処理ステップの結果。ログとテストで使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +86,8 @@ enum StepOutcome {
     Stopped,
     /// 自動要約が無効のため、待機中の記事を捨てて何もしなかった。
     Disabled,
+    /// 全画面・マイク使用中のため取り出さなかった（記事は待機列に残し、失敗に数えない）。
+    Paused,
     Succeeded(String),
     /// 取り出した時点で既に要約済みだったため、AI を呼ばずに外した。
     Skipped(String),
@@ -137,11 +158,31 @@ impl QueueCore {
         }
     }
 
-    /// 次の1件を処理する。`summarize` の実行中はロックを持たない。
-    /// `is_done` は記事ファイルで要約済みかを副作用なしに確かめる（既読状態は進めない）。
+    /// 止める判定なしで次の1件を処理する（テスト用）。
+    #[cfg(test)]
     fn process_next<E, D, S>(&self, is_enabled: E, is_done: D, summarize: S) -> StepOutcome
     where
         E: FnOnce() -> bool,
+        D: FnOnce(&str) -> bool,
+        S: FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
+    {
+        self.process_next_unless_paused(is_enabled, || false, is_done, summarize)
+    }
+
+    /// 次の1件を処理する。`summarize` の実行中はロックを持たない。
+    /// `is_paused` が true なら取り出さずに `Paused` を返す（記事は待機列の先頭に残り、失敗に数えない）。
+    /// `is_paused` は待機中の記事があるときだけ呼ぶ（取り出すものが無いのに OS へ問い合わせないため）。
+    /// `is_done` は記事ファイルで要約済みかを副作用なしに確かめる（既読状態は進めない）。
+    fn process_next_unless_paused<E, P, D, S>(
+        &self,
+        is_enabled: E,
+        is_paused: P,
+        is_done: D,
+        summarize: S,
+    ) -> StepOutcome
+    where
+        E: FnOnce() -> bool,
+        P: FnOnce() -> bool,
         D: FnOnce(&str) -> bool,
         S: FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
     {
@@ -151,6 +192,15 @@ impl QueueCore {
         if !is_enabled() {
             self.clear_pending();
             return StepOutcome::Disabled;
+        }
+        {
+            let state = self.lock();
+            if state.processing.is_some() || state.pending.is_empty() {
+                return StepOutcome::Idle;
+            }
+        }
+        if is_paused() {
+            return StepOutcome::Paused;
         }
 
         let article_id = {
@@ -239,8 +289,19 @@ impl QueueCore {
     }
 }
 
-/// Gemini のキーが使えるかを返す判定。キーの値ではなく有無だけを扱う。
-type KeyAvailableCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+/// 実AIを呼べる見込みがあるかの判定（Gemini はキーの有無、ローカルは同梱物の有無）。AI は呼ばない。
+type AiReadyCheck = Arc<dyn Fn(AiProvider) -> bool + Send + Sync>;
+
+/// 全画面・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
+type UserBusyCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// 全画面（プレゼン・ゲームなど）またはマイク使用中か。会議中は「会議アプリ起動中 かつ マイク使用中」
+/// なので、マイク使用中を見れば含まれる。OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
+/// どのアプリかは扱わず、真偽値だけを使う。
+fn is_user_busy_on_this_pc() -> bool {
+    matches!(SystemFullscreenDetector.detect(), FullscreenStatus::Busy)
+        || SystemMeetingDetector.is_mic_in_use()
+}
 
 /// 自動要約キュー。AppState と NewsScheduler で共有する（clone しても同じキューを指す）。
 #[derive(Clone)]
@@ -249,9 +310,11 @@ pub struct AutoSummaryQueue {
     article_service: ArticleService,
     summary_service: SummaryService,
     settings_repository: SettingsRepository,
-    /// 本番は `is_gemini_key_configured`。テストでは環境変数を書き換えずに差し替える
+    /// 本番は `SummaryService::is_real_ai_ready`。テストでは環境変数・同梱物を用意せずに差し替える
     /// （並列テストで環境変数を書き換えると互いに干渉するため）。
-    key_available: KeyAvailableCheck,
+    ai_ready: AiReadyCheck,
+    /// 本番は `is_user_busy_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
+    user_busy: UserBusyCheck,
 }
 
 impl AutoSummaryQueue {
@@ -260,19 +323,31 @@ impl AutoSummaryQueue {
         summary_service: SummaryService,
         settings_repository: SettingsRepository,
     ) -> Self {
+        let readiness = summary_service.clone();
         Self {
             core: Arc::new(QueueCore::default()),
             article_service,
             summary_service,
             settings_repository,
-            key_available: Arc::new(is_gemini_key_configured),
+            ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
+            user_busy: Arc::new(is_user_busy_on_this_pc),
         }
     }
 
-    /// キーの有無の判定を差し替える（テスト用）。
+    /// 実AIを呼べる見込みの判定を差し替える（テスト用）。
     #[cfg(test)]
-    fn with_key_check(mut self, key_available: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        self.key_available = Arc::new(key_available);
+    fn with_ai_check(
+        mut self,
+        ai_ready: impl Fn(AiProvider) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.ai_ready = Arc::new(ai_ready);
+        self
+    }
+
+    /// 全画面・マイク使用中の判定を差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_busy_check(mut self, user_busy: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.user_busy = Arc::new(user_busy);
         self
     }
 
@@ -283,7 +358,7 @@ impl AutoSummaryQueue {
             self.core.clear_pending();
             return;
         };
-        if !is_auto_summary_allowed(&settings, || (self.key_available)()) {
+        if !is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider)) {
             self.core.clear_pending();
             return;
         }
@@ -310,8 +385,9 @@ impl AutoSummaryQueue {
 
     fn run_worker(&self) {
         while self.core.wait_for_work() {
-            let outcome = self.core.process_next(
+            let outcome = self.core.process_next_unless_paused(
                 || self.is_enabled(),
+                || self.is_paused(),
                 |article_id| self.is_summarized(article_id),
                 |article_id| {
                     self.summary_service
@@ -321,13 +397,18 @@ impl AutoSummaryQueue {
                 },
             );
             match outcome {
-                // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける（外部AIの毎分上限を守る）。
+                // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける
+                // （Gemini は毎分上限を守るため、ローカルは CPU を他の操作へ返すため）。
                 StepOutcome::Succeeded(_)
                 | StepOutcome::AlreadySummarized(_)
-                | StepOutcome::Retrying(_) => self.core.wait_interval(ITEM_INTERVAL),
+                | StepOutcome::Retrying(_) => self.core.wait_interval(self.item_interval()),
                 StepOutcome::Failed(article_id) => {
                     log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
-                    self.core.wait_interval(ITEM_INTERVAL)
+                    self.core.wait_interval(self.item_interval())
+                }
+                StepOutcome::Paused => {
+                    log::debug!("auto summary paused while the pc is busy");
+                    self.core.wait_interval(PAUSE_RECHECK_INTERVAL)
                 }
                 StepOutcome::Skipped(_)
                 | StepOutcome::Idle
@@ -335,6 +416,23 @@ impl AutoSummaryQueue {
                 | StepOutcome::Disabled => {}
             }
         }
+    }
+
+    /// 次の1件までの間隔。設定のプロバイダで決める（読めないときは長い方＝Gemini 用の安全側）。
+    fn item_interval(&self) -> Duration {
+        let provider = self
+            .load_settings()
+            .map(|settings| settings.to_dto().ai_provider);
+        item_interval_for(provider)
+    }
+
+    /// ローカルLLMで要約する設定のときだけ、全画面・マイク使用中なら止める。
+    /// Gemini は このパソコンの CPU をほとんど使わないため止めない。
+    fn is_paused(&self) -> bool {
+        let is_local = self
+            .load_settings()
+            .is_some_and(|settings| settings.to_dto().ai_provider == AiProvider::Local);
+        is_local && (self.user_busy)()
     }
 
     /// 終了要求。以後は新しい記事を取り出さない（処理中の1件は待たない）。
@@ -378,8 +476,9 @@ impl AutoSummaryQueue {
 
     /// 設定が読めないときは自動要約しない（外部AIの利用枠を守る安全側）。
     fn is_enabled(&self) -> bool {
-        self.load_settings()
-            .is_some_and(|settings| is_auto_summary_allowed(&settings, || (self.key_available)()))
+        self.load_settings().is_some_and(|settings| {
+            is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider))
+        })
     }
 
     fn load_settings(&self) -> Option<PersistedSettings> {
@@ -393,35 +492,43 @@ impl AutoSummaryQueue {
     }
 }
 
-/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AIで、そのキーが
-/// 使えるときだけ true。
+/// 自動要約を動かしてよいか。設定が有効で、AI プロバイダが実装済みの実AI（Gemini・ローカル）で、
+/// それを呼べる見込みがあるときだけ true（判断台帳 D56 / D103）。
 /// openai は実AI呼び出しが未実装で常に Mock 応答になり、毎回失敗するだけなので
-/// Mock と同じく動かさない（判断台帳 D56）。未知の値は DTO 変換で Mock 扱いになる。
-/// local（同梱ローカルLLM・D99）は手動の要約・用語解説では使えるが、自動要約での利用と
-/// 既定値の見直しは別タスク（判断台帳 D103）で決めるため、ここではまだ動かさない。
-/// Gemini でもキーが未設定なら同じ理由で動かさない。`key_available` はキーの有無だけを返し、
-/// 設定で無効なときは呼ばない（不要な確認をしないため）。
+/// Mock と同じく動かさない。未知の値は DTO 変換で Mock 扱いになる。
+/// `ai_ready` は Gemini ならキーの有無、ローカルなら同梱物の有無だけを返す安い確認で、
+/// 設定で無効なとき・実AI以外のときは呼ばない（不要な確認をしないため）。
 fn is_auto_summary_allowed(
     settings: &PersistedSettings,
-    key_available: impl FnOnce() -> bool,
+    ai_ready: impl FnOnce(AiProvider) -> bool,
 ) -> bool {
-    if !settings.ai.auto_summary_enabled
-        || !matches!(settings.to_dto().ai_provider, AiProvider::Gemini)
-    {
+    if !settings.ai.auto_summary_enabled {
         return false;
     }
-    if !key_available() {
-        // キーの値は扱わず、固定文言だけを残す。
-        log::debug!("auto summary skipped: gemini key not configured");
+    let provider = settings.to_dto().ai_provider;
+    if !matches!(provider, AiProvider::Gemini | AiProvider::Local) {
+        return false;
+    }
+    if !ai_ready(provider) {
+        // キーの値・同梱物の場所は扱わず、固定文言だけを残す。
+        log::debug!("auto summary skipped: {provider:?} is not ready");
         return false;
     }
     true
 }
 
+/// 1件処理するごとに空ける間隔。ローカルは短く、それ以外（Gemini・設定を読めないとき）は長く空ける。
+fn item_interval_for(provider: Option<AiProvider>) -> Duration {
+    match provider {
+        Some(AiProvider::Local) => LOCAL_ITEM_INTERVAL,
+        _ => GEMINI_ITEM_INTERVAL,
+    }
+}
+
 /// 1回の投入件数を、おすすめ順の上位 `maxDailyRecommendations` 件に絞る（常駐負荷を抑えるため）。
 /// 上限まで失敗した記事（`failed`）は再起動まで並ばないため、先に除いてから数える
 /// （除かないと失敗した記事が枠を埋め、その分ほかの記事が自動要約されなくなる）。
-/// 件数と処理間隔は、ローカルLLM導入時に見直す。
+/// ローカルLLMでも同じ上限にする（判断台帳 D56 / D103。1件ずつ処理し、CPU を使い続けないため）。
 fn cap_for_enqueue(
     ordered_ids: Vec<String>,
     settings: &PersistedSettings,
@@ -521,24 +628,26 @@ mod tests {
         settings
     }
 
-    fn with_key() -> bool {
+    fn with_key(_: AiProvider) -> bool {
         true
     }
 
-    fn without_key() -> bool {
+    fn without_key(_: AiProvider) -> bool {
         false
     }
 
     #[test]
     fn auto_summary_runs_only_when_enabled_with_a_real_ai_provider() {
-        assert!(is_auto_summary_allowed(
-            &settings_with(true, "gemini", 10),
-            with_key
-        ));
-        assert!(!is_auto_summary_allowed(
-            &settings_with(false, "gemini", 10),
-            with_key
-        ));
+        for provider in ["gemini", "local"] {
+            assert!(is_auto_summary_allowed(
+                &settings_with(true, provider, 10),
+                with_key
+            ));
+            assert!(!is_auto_summary_allowed(
+                &settings_with(false, provider, 10),
+                with_key
+            ));
+        }
         // Mock（未知の値も Mock 扱い）では有効でも動かない。
         assert!(!is_auto_summary_allowed(
             &settings_with(true, "mock", 10),
@@ -548,33 +657,89 @@ mod tests {
             &settings_with(true, "unknown", 10),
             with_key
         ));
-        // 実AI呼び出しが未実装の openai / local も動かさない。
+        // 実AI呼び出しが未実装の openai も動かさない。
         assert!(!is_auto_summary_allowed(
             &settings_with(true, "openai", 10),
-            with_key
-        ));
-        assert!(!is_auto_summary_allowed(
-            &settings_with(true, "local", 10),
             with_key
         ));
     }
 
     #[test]
-    fn auto_summary_does_not_run_without_a_gemini_key() {
-        // 有効・Gemini でも、キーが未設定なら動かさない。
-        assert!(!is_auto_summary_allowed(
-            &settings_with(true, "gemini", 10),
-            without_key
-        ));
-        // 無効・他プロバイダのときはキーの有無を確かめない。
+    fn auto_summary_does_not_run_when_the_real_ai_is_not_ready() {
+        // 有効・Gemini でキーが未設定、有効・ローカルで同梱物が無いときは動かさない。
+        for provider in ["gemini", "local"] {
+            assert!(!is_auto_summary_allowed(
+                &settings_with(true, provider, 10),
+                without_key
+            ));
+        }
+        // 確かめるのは設定中のプロバイダについてだけ。
+        let checked = std::cell::Cell::new(None);
+        is_auto_summary_allowed(&settings_with(true, "local", 10), |provider| {
+            checked.set(Some(provider));
+            true
+        });
+        assert_eq!(checked.get(), Some(AiProvider::Local));
+        // 無効・他プロバイダのときは確かめない。
         for settings in [
             settings_with(false, "gemini", 10),
+            settings_with(false, "local", 10),
             settings_with(true, "mock", 10),
         ] {
-            assert!(!is_auto_summary_allowed(&settings, || panic!(
-                "key check must not run when auto summary is off"
+            assert!(!is_auto_summary_allowed(&settings, |_| panic!(
+                "readiness check must not run when auto summary is off"
             )));
         }
+    }
+
+    #[test]
+    fn local_uses_a_shorter_interval_than_gemini() {
+        assert_eq!(
+            item_interval_for(Some(AiProvider::Local)),
+            LOCAL_ITEM_INTERVAL
+        );
+        assert_eq!(
+            item_interval_for(Some(AiProvider::Gemini)),
+            GEMINI_ITEM_INTERVAL
+        );
+        // 設定を読めないときは長い方（安全側）。
+        assert_eq!(item_interval_for(None), GEMINI_ITEM_INTERVAL);
+        assert!(LOCAL_ITEM_INTERVAL < GEMINI_ITEM_INTERVAL);
+    }
+
+    #[test]
+    fn paused_queue_keeps_the_article_waiting_without_counting_an_attempt() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a", "b"]));
+
+        // 全画面・マイク使用中は取り出さない。記事は先頭に残り、失敗にも試行回数にも数えない。
+        let outcome = core.process_next_unless_paused(
+            || true,
+            || true,
+            not_done,
+            |_| panic!("must not summarize while paused"),
+        );
+        assert_eq!(outcome, StepOutcome::Paused);
+        assert_eq!(core.state_of("a"), SummaryState::Waiting);
+        assert!(core.lock().failure_counts.is_empty());
+        assert!(core.failed_ids().is_empty());
+
+        // 解除されたら、止めた記事から順に処理する。
+        let outcome = core.process_next_unless_paused(|| true, || false, not_done, |_| Ok(SAVED));
+        assert_eq!(outcome, StepOutcome::Succeeded("a".to_string()));
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["b"]));
+    }
+
+    #[test]
+    fn pause_check_is_not_queried_when_nothing_is_waiting() {
+        let core = QueueCore::default();
+        let outcome = core.process_next_unless_paused(
+            || true,
+            || panic!("must not query the os when the queue is empty"),
+            not_done,
+            |_| panic!("nothing to summarize"),
+        );
+        assert_eq!(outcome, StepOutcome::Idle);
     }
 
     /// 一時ディレクトリに記事（シード）と設定を置いた実キュー。終了時に片付ける。
@@ -590,6 +755,10 @@ mod tests {
     }
 
     fn queue_context(name: &str, key_available: bool) -> QueueContext {
+        queue_context_with(name, "gemini", key_available)
+    }
+
+    fn queue_context_with(name: &str, provider: &str, ai_ready: bool) -> QueueContext {
         use crate::paths::AppPaths;
         use crate::repositories::article_repository::ArticleRepository;
         use crate::services::ai_provider_service::AiProviderService;
@@ -624,7 +793,7 @@ mod tests {
             .expect("save fetched article");
         let settings_repository = SettingsRepository::new(&paths);
         settings_repository
-            .save(&settings_with(true, "gemini", 10))
+            .save(&settings_with(true, provider, 10))
             .expect("save settings");
         let queue = AutoSummaryQueue::new(
             ArticleService::new(ArticleRepository::new(&paths)),
@@ -635,8 +804,53 @@ mod tests {
             ),
             settings_repository,
         )
-        .with_key_check(move || key_available);
+        .with_ai_check(move |_| ai_ready)
+        .with_busy_check(|| false);
         QueueContext { queue, root }
+    }
+
+    #[test]
+    fn local_queue_enqueues_only_when_the_bundle_is_present() {
+        // 同梱物がそろっていれば並べて処理する。
+        let ctx = queue_context_with("local-present", "local", true);
+        let queue = &ctx.queue;
+        queue.enqueue_unsummarized();
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+        let first = queue.core.lock().pending.front().cloned().unwrap();
+        let outcome = queue.core.process_next_unless_paused(
+            || queue.is_enabled(),
+            || queue.is_paused(),
+            not_done,
+            |_| Ok(SAVED),
+        );
+        assert_eq!(outcome, StepOutcome::Succeeded(first));
+        assert_eq!(queue.item_interval(), LOCAL_ITEM_INTERVAL);
+
+        // 同梱物が無ければ並べない（LLM を起動しようとして失敗を繰り返さない）。
+        let ctx = queue_context_with("local-missing", "local", false);
+        ctx.queue.enqueue_unsummarized();
+        assert!(ctx.queue.core.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn local_queue_pauses_while_busy_but_gemini_does_not() {
+        let ctx = queue_context_with("local-busy", "local", true);
+        let queue = ctx.queue.clone().with_busy_check(|| true);
+        queue.enqueue_unsummarized();
+        let outcome = queue.core.process_next_unless_paused(
+            || queue.is_enabled(),
+            || queue.is_paused(),
+            not_done,
+            |_| panic!("must not run the local llm while the pc is busy"),
+        );
+        assert_eq!(outcome, StepOutcome::Paused);
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+
+        // Gemini は CPU を使わないため、全画面・マイク使用中でも止めない。
+        let ctx = queue_context_with("gemini-busy", "gemini", true);
+        let queue = ctx.queue.clone().with_busy_check(|| true);
+        assert!(!queue.is_paused());
+        assert_eq!(queue.item_interval(), GEMINI_ITEM_INTERVAL);
     }
 
     #[test]
