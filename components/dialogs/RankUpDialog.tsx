@@ -27,17 +27,18 @@ type RankUpDialogProps = {
  * 開いた時に Rust の報酬状態（get_reward_state）を取得し、このランクまでで解放済みかつ未確認の報酬を
  * 表示する（解放判定・保存は Rust 側。get_reward_state はランクから冪等に解放を導出するので取りこぼさない）。
  * 「やったね！」で表示した報酬だけを確認済みにする（confirm_rank_up_reward）。Esc 等で閉じた場合は
- * 未確認のまま残し、後でゆうこ側の報酬通知で知らせる（D08）。
+ * 未確認のまま残し、次回のランクアップ演出や報酬通知タスク（UBITb）で再度知らせる（D08）。
  * 報酬が無い・取得に失敗した場合は報酬欄を出さず、従来どおりランク到達を祝うだけにする。
  */
 export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
   const [rewards, setRewards] = React.useState<RewardItem[]>([]);
 
   React.useEffect(() => {
+    // 閉じる時に消すとフェードアウト中に報酬欄がちらつくため、開いた時（取得前）に前回分を消す。
     if (!open) {
-      setRewards([]);
       return;
     }
+    setRewards([]);
 
     // 取得完了前に閉じた・ランクが変わった場合に古い結果で上書きしないためのフラグ。
     let active = true;
@@ -65,7 +66,7 @@ export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
     const rewardIds = rewards.map((reward) => reward.rewardId);
     if (rewardIds.length > 0) {
       // 確認済みへの更新失敗はお祝い表示を止める理由にならないため、閉じる操作は待たない
-      // （失敗時は未確認のまま残り、ゆうこ側の報酬通知で再度知らせる）。
+      // （失敗時は未確認のまま残り、次回のランクアップ演出や報酬通知タスク（UBITb）で再度知らせる）。
       void confirmRankUpReward({ rewardIds }).catch((error) => {
         console.warn("Failed to confirm rank up reward:", error);
       });
