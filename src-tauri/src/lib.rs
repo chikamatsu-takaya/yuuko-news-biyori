@@ -115,7 +115,8 @@ pub fn run() {
                 RewardRepository::new(&paths),
                 FriendshipRepository::new(&paths),
                 SettingsRepository::new(&paths),
-            );
+            )
+            .with_gacha_service(gacha_service.clone());
             let friendship_service =
                 FriendshipService::new(FriendshipRepository::new(&paths), reward_service.clone())
                     .with_gacha_service(gacha_service.clone())
@@ -243,6 +244,7 @@ pub fn run() {
             commands::friendship_commands::get_friendship_state,
             commands::friendship_commands::record_friendship_event,
             commands::reward_commands::get_reward_state,
+            commands::reward_commands::set_active_theme,
             commands::gacha_commands::get_gacha_state,
             commands::gacha_commands::draw_gacha_once,
             commands::gacha_commands::mark_gacha_items_seen
