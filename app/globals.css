@@ -137,6 +137,116 @@
   --yuuko-text-muted: #6E5A61;
 }
 
+/*
+ * ガチャテーマ（色違いテーマ gacha_theme_001〜003・D79）。ID は Rust GACHA_MASTER の item_id と一致させる。
+ * 変数一式・WCAG AA の基準は上の報酬テーマと同じ。既定（クリーム・草色）/ そらいろ / さくら と色相が重ならないようにする。
+ * 各ブロックのコントラスト比は、白背景のカード上ではさらに高くなる（背景色の方が白より暗いため、背景基準の値を下限として記す）。
+ */
+[data-theme="gacha_theme_001"] {
+  /* ミント: 明るいミントグリーン（既定の草色より青みの強い緑）。fg/bg 10.5:1、muted-foreground/背景 5.8:1・/muted 5.5:1、白文字/primary 5.6:1、サイドバー選択中 4.8:1 */
+  --background: #F1FAF7;
+  --foreground: #2D3F3A;
+  --card: #FFFFFF;
+  --card-foreground: #2D3F3A;
+  --popover: #FFFFFF;
+  --popover-foreground: #2D3F3A;
+  --primary: #1B7565;
+  --primary-foreground: #FFFFFF;
+  --secondary: #DFF3EC;
+  --secondary-foreground: #2D3F3A;
+  --muted: #E7F4EF;
+  --muted-foreground: #53655F;
+  --accent: #DFF3EC;
+  --accent-foreground: #2D3F3A;
+  --border: #CDE8DF;
+  --input: #CDE8DF;
+  --ring: #1B7565;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #2D3F3A;
+  --sidebar-primary: #1B7565;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #DFF3EC;
+  --sidebar-accent-foreground: #2D3F3A;
+  --sidebar-border: #CDE8DF;
+  --sidebar-ring: #1B7565;
+  --yuuko-green: #1B7565;
+  --yuuko-green-light: #DFF3EC;
+  --yuuko-cream: #F1FAF7;
+  --yuuko-cream-dark: #E7F4EF;
+  --yuuko-text: #2D3F3A;
+  --yuuko-text-muted: #53655F;
+}
+
+[data-theme="gacha_theme_002"] {
+  /* ひだまり: 明るいレモン色（アクセントは日だまりのオレンジ）。fg/bg 9.9:1、muted-foreground/背景 6.2:1・/muted 5.8:1、白文字/primary 5.2:1、サイドバー選択中 4.55:1 */
+  --background: #FFFAE6;
+  --foreground: #45402F;
+  --card: #FFFFFF;
+  --card-foreground: #45402F;
+  --popover: #FFFFFF;
+  --popover-foreground: #45402F;
+  --primary: #B25000;
+  --primary-foreground: #FFFFFF;
+  --secondary: #FFEFC2;
+  --secondary-foreground: #45402F;
+  --muted: #FBF2D6;
+  --muted-foreground: #675D45;
+  --accent: #FFEFC2;
+  --accent-foreground: #45402F;
+  --border: #F0E1B0;
+  --input: #F0E1B0;
+  --ring: #B25000;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #45402F;
+  --sidebar-primary: #B25000;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #FFEFC2;
+  --sidebar-accent-foreground: #45402F;
+  --sidebar-border: #F0E1B0;
+  --sidebar-ring: #B25000;
+  --yuuko-green: #B25000;
+  --yuuko-green-light: #FFEFC2;
+  --yuuko-cream: #FFFAE6;
+  --yuuko-cream-dark: #FBF2D6;
+  --yuuko-text: #45402F;
+  --yuuko-text-muted: #675D45;
+}
+
+[data-theme="gacha_theme_003"] {
+  /* ラベンダー: 明るい薄紫。fg/bg 10.9:1、muted-foreground/背景 6.1:1・/muted 5.7:1、白文字/primary 6.2:1、サイドバー選択中 5.2:1 */
+  --background: #F8F5FE;
+  --foreground: #3A3548;
+  --card: #FFFFFF;
+  --card-foreground: #3A3548;
+  --popover: #FFFFFF;
+  --popover-foreground: #3A3548;
+  --primary: #6B4FB3;
+  --primary-foreground: #FFFFFF;
+  --secondary: #EEE8FB;
+  --secondary-foreground: #3A3548;
+  --muted: #F0ECF9;
+  --muted-foreground: #605A70;
+  --accent: #EEE8FB;
+  --accent-foreground: #3A3548;
+  --border: #DED6F2;
+  --input: #DED6F2;
+  --ring: #6B4FB3;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #3A3548;
+  --sidebar-primary: #6B4FB3;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #EEE8FB;
+  --sidebar-accent-foreground: #3A3548;
+  --sidebar-border: #DED6F2;
+  --sidebar-ring: #6B4FB3;
+  --yuuko-green: #6B4FB3;
+  --yuuko-green-light: #EEE8FB;
+  --yuuko-cream: #F8F5FE;
+  --yuuko-cream-dark: #F0ECF9;
+  --yuuko-text: #3A3548;
+  --yuuko-text-muted: #605A70;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
