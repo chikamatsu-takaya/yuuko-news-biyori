@@ -45,7 +45,7 @@ const majorScreens = [
     navName: "カスタマイズ",
     expectedHeading: "ゆうこカスタマイズ",
     expectedText: "カスタマイズ",
-    criticalButtons: ["ホームへ戻る", "プレビュー", "ランク報酬を確認する"],
+    criticalButtons: ["ホームへ戻る"],
   },
   {
     id: "gacha",

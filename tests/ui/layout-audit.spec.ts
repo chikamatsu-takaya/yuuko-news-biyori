@@ -162,7 +162,7 @@ const SCREENS: ScreenCase[] = [
       { name: "見出し", locator: page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first() },
       { name: "ホームへ戻る", locator: page.getByRole("button", { name: "ホームへ戻る", exact: true }) },
       { name: "テーマ選択", locator: page.getByTestId("customize-theme-option").first() },
-      { name: "ランク報酬を確認する", locator: page.getByRole("button", { name: "ランク報酬を確認する", exact: true }) },
+      { name: "呼び名タブ", locator: page.getByRole("tab", { name: "呼び名", exact: true }) },
     ],
   },
   {

@@ -35,7 +35,6 @@ import {
   Tag,
   Lock,
   Check,
-  Eye,
   Gift,
   Star,
   Moon,
@@ -376,14 +375,6 @@ export default function CustomizeScreen({
       });
   };
 
-  const handlePreview = () => {
-    console.log("Preview changes");
-  };
-
-  const handleCheckRankRewards = () => {
-    console.log("Check rank rewards");
-  };
-
   // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける）。
   const isMaxRank = friendship !== null && friendship.nextRequiredPoint <= 0;
   const progressPercent =
@@ -612,17 +603,6 @@ export default function CustomizeScreen({
                     <div className="absolute top-12 left-12 text-[var(--yuuko-green)]/10 text-2xl">🐾</div>
                     <div className="absolute bottom-20 right-16 text-[var(--yuuko-green)]/10 text-xl">🐾</div>
                   </div>
-
-                  {/* Preview Button */}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="absolute top-3 right-3 text-xs bg-white/80 hover:bg-white"
-                    onClick={handlePreview}
-                  >
-                    <Eye className="w-3 h-3 mr-1" aria-hidden="true" />
-                    プレビュー
-                  </Button>
 
                   {/* Yuuko Character */}
                   <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
@@ -894,15 +874,6 @@ export default function CustomizeScreen({
                     {friendshipStatus === "error" ? "ランクを読み込めなかったよ。" : "読み込み中…"}
                   </p>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full text-xs"
-                  onClick={handleCheckRankRewards}
-                >
-                  <Gift className="w-3 h-3 mr-1" aria-hidden="true" />
-                  ランク報酬を確認する
-                </Button>
               </CardContent>
             </Card>
           </div>
