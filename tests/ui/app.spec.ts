@@ -1507,6 +1507,85 @@ const openReaderWithRelatedPool = async (page: Page) => {
   await expectReaderOpenedWithoutExplain(page);
 };
 
+// ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
+const setupRankUp = (page: Page, newRank: number, pendingRewardIds: string[]) =>
+  page.addInitScript(
+    ({ rank, pendingIds }) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const win = window as any;
+      win.__E2E_FRIENDSHIP_RANK_UP_TO__ = rank;
+      const master = [
+        { rewardId: "theme_001", name: "テーマ①", unlockRank: 3 },
+        { rewardId: "theme_002", name: "テーマ②", unlockRank: 7 },
+      ];
+      win.__E2E_REWARD_STATE__ = {
+        currentRank: rank,
+        rewards: master.map((reward) => ({
+          ...reward,
+          type: "theme",
+          unlocked: reward.unlockRank <= rank,
+          pending: pendingIds.includes(reward.rewardId),
+        })),
+        pendingRewardIds: pendingIds,
+        activeThemeId: "default",
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    },
+    { rank: newRank, pendingIds: pendingRewardIds }
+  );
+
+const confirmedRewardCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as Record<string, string[][] | undefined>)
+        .__E2E_CONFIRMED_REWARD_CALLS__ ?? []
+  );
+
+// ランクアップのモーダルが背面を隠すため、「戻る」の到達確認はせずカードを押すだけにする。
+const openReaderUnderRankUp = async (page: Page) => {
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+};
+
+test("rank up: dialog shows the unlocked reward and OK confirms only that reward", async ({
+  page,
+}) => {
+  await setupRankUp(page, 3, ["theme_001"]);
+  await openReaderUnderRankUp(page);
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("ランクアップ！")).toBeVisible();
+  const rewardSection = dialog.getByRole("region", { name: "解放された報酬" });
+  await expect(rewardSection).toBeVisible();
+  await expect(rewardSection.getByText("テーマ①")).toBeVisible();
+  await expect(rewardSection.getByText("テーマ②")).toHaveCount(0);
+  await expect(
+    rewardSection.getByText("カスタマイズ画面で切り替えられるよ。")
+  ).toBeVisible();
+
+  await dialog.getByRole("button", { name: "やったね！" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(() => confirmedRewardCalls(page)).toEqual([["theme_001"]]);
+});
+
+test("rank up without a reward hides the reward section and confirms nothing", async ({
+  page,
+}) => {
+  await setupRankUp(page, 2, []);
+  await openReaderUnderRankUp(page);
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("ランクアップ！")).toBeVisible();
+  await expect(dialog.getByText("友情ランクが 2 になったよ", { exact: false })).toBeVisible();
+  // 報酬状態の取得を待ってから、報酬欄が出ていないことを確認する。
+  await page.waitForTimeout(300);
+  await expect(dialog.getByRole("region", { name: "解放された報酬" })).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "やったね！" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await confirmedRewardCalls(page)).toEqual([]);
+});
+
 test("reader: selecting summary text shows the 解説 button within the viewport", async ({
   page,
 }) => {
@@ -7643,12 +7722,38 @@ async function installTauriMocks(page: Page) {
               savedInDictionary: true,
             };
           }
-          case "confirm_rank_up_reward":
+          case "confirm_rank_up_reward": {
+            // 確認済みにした報酬 ID を積む（ランクアップ報酬の確認テスト用）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const confirmWin = window as any;
+            confirmWin.__E2E_CONFIRMED_REWARD_CALLS__ = [
+              ...(confirmWin.__E2E_CONFIRMED_REWARD_CALLS__ || []),
+              params.rewardIds ?? [],
+            ];
+            /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               ok: true,
               confirmedRewardIds: params.rewardIds ?? [],
               remainingPendingRewardIds: [],
             };
+          }
+          case "get_reward_state": {
+            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const rewardState = (window as any).__E2E_REWARD_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return (
+              rewardState ?? {
+                currentRank: 1,
+                rewards: [
+                  { rewardId: "theme_001", type: "theme", name: "テーマ①", unlockRank: 3, unlocked: false, pending: false },
+                  { rewardId: "theme_002", type: "theme", name: "テーマ②", unlockRank: 7, unlocked: false, pending: false },
+                ],
+                pendingRewardIds: [],
+                activeThemeId: "default",
+              }
+            );
+          }
           case "record_friendship_event": {
             // 記事を開いただけで term_explained が記録されないことの検証用に種別を積む。
             /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -7657,6 +7762,17 @@ async function installTauriMocks(page: Page) {
               ...(friendshipWin.__E2E_FRIENDSHIP_EVENTS__ || []),
               params.eventType,
             ];
+            // ランクアップ演出テスト用: 指定時は最初の 1 回だけランクアップを返す。
+            const rankUpTo = friendshipWin.__E2E_FRIENDSHIP_RANK_UP_TO__;
+            if (typeof rankUpTo === "number") {
+              friendshipWin.__E2E_FRIENDSHIP_RANK_UP_TO__ = null;
+              return {
+                eventType: params.eventType,
+                earnedPoint: 5,
+                rankedUp: true,
+                newRank: rankUpTo,
+              };
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return {
               eventType: params.eventType,
