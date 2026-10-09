@@ -63,10 +63,12 @@ pub struct AiTermExplanation {
     pub detail: String,
 }
 
-/// 記事の「要点」と「注目ポイント」をAIへ依頼するときの prompt_id（v1・判断台帳 D18）。
+/// 記事の「要点」「注目ポイント」「タグ」をAIへ依頼するときの prompt_id（v2・判断台帳 D18 / D11）。
 /// 要点（何が起きたか）と注目ポイント（なぜ面白いか・何を学べるか）は別々の項目として作らせるが、
-/// ローカルLLMの負荷を抑えるため、AI 呼び出しは1回にまとめて JSON の2つの配列で受け取る。
-pub const ARTICLE_POINTS_PROMPT_ID: &str = "article_points_v1";
+/// ローカルLLMの負荷を抑えるため、AI 呼び出しは1回にまとめて JSON の配列で受け取る。
+/// v2 では同じ呼び出しで記事のタグ（3〜5個・D11）も受け取る（タグのためだけに AI を呼ばない）。
+/// タグは要点・注目ポイントとは別に検証し、タグだけが不正でも要点・要約の保存は止めない。
+pub const ARTICLE_POINTS_PROMPT_ID: &str = "article_points_v2";
 
 /// 要点の件数（下限・上限）。AI へは「3つ程度」で依頼し、2〜4件を受け付ける。
 pub const KEY_POINTS_MIN_ITEMS: usize = 2;
@@ -77,15 +79,28 @@ pub const FOCUS_POINTS_MAX_ITEMS: usize = 3;
 /// 要点・注目ポイント1件の文字数上限（Unicode 文字数）。1文の箇条書きなので短めにする。
 /// ローカルLLMの JSON スキーマ（maxLength）と保存前の検証で同じ値を使う。
 pub const POINT_ITEM_MAX_CHARS: usize = 100;
+/// 記事タグの件数（下限・上限）。データ設計書 §4.4 の front matter `tags` に保存する（D11）。
+pub const ARTICLE_TAGS_MIN_ITEMS: usize = 3;
+pub const ARTICLE_TAGS_MAX_ITEMS: usize = 5;
+/// 記事タグ1件の文字数上限（Unicode 文字数・trim 後）。ローカルLLMの JSON スキーマと保存前の検証で共有する。
+pub const ARTICLE_TAG_MAX_CHARS: usize = 20;
+/// 記事タグに含めない文字。カンマ・読点などの区切り文字（タグを並べて扱う側で1件が分かれて見えるのを防ぐ）と、
+/// HTML の山括弧。保存前の検証で拒否し、Mock のタグからは取り除く。
+pub const ARTICLE_TAG_FORBIDDEN_CHARS: &[char] =
+    &[',', '、', '，', '､', ';', '；', '|', '｜', '<', '>'];
 
-/// 要点・注目ポイントのAI出力（`ARTICLE_POINTS_PROMPT_ID`）の構造化契約（v1）。
-/// AI の単一文字列出力を、この JSON として **厳格に** 解析する（未知フィールドは解析失敗）。
+/// 要点・注目ポイント・タグのAI出力（`ARTICLE_POINTS_PROMPT_ID`）の構造化契約（v2）。
+/// Mock の出力と、summary_service で検証した後の値に使う。
+/// AI の生の出力は summary_service 側で、タグの型崩れが要点の解析を巻き込まないよう別の形で解析する。
 /// 件数・文字数・文字種の検証は summary_service 側で行う。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiArticlePoints {
     pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
+    /// 記事タグ（D11）。検証に落ちた・出力に無かった場合は空（保存時は既存のタグを残す）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[cfg(test)]

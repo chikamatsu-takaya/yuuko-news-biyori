@@ -397,6 +397,9 @@ pub struct ArticleSummaryUpdate {
     /// 要点（AI生成・検証済み）。記事ファイルの「要点」節へ保存する。
     pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
+    /// 記事タグ（AI生成・検証済み・D11）。`Some` なら front matter の `tags` を置き換え、
+    /// `None`（タグの生成・検証に失敗）なら既存のタグをそのまま残す（要約の保存は止めない）。
+    pub tags: Option<Vec<String>>,
     pub yuuko_comment: String,
     /// 実際に生成に使ったプロバイダ（"gemini" / "mock"）。
     pub ai_provider: String,
