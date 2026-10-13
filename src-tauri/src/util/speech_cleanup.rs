@@ -349,6 +349,58 @@ pub(crate) fn count_unlisted_latin_words(text: &str, input: &str) -> usize {
         .count()
 }
 
+/// 指示文の写しとみなす最小の文字数（文末の記号・丁寧な語尾を除いた本体）。短い文（「便利だね」など）は
+/// 指示文の一部と偶然一致しうるため、これより短い文は消さない。
+const PROMPT_ECHO_MIN_CHARS: usize = 10;
+
+/// 写しの照合の前に、文の終わりから取り除く語尾（指示文の「〜案内役で、」が「〜案内役です。」として出るため）。
+const PROMPT_ECHO_TRAILING_ENDINGS: [&str; 6] = ["です", "ます", "だよ", "だね", "よ", "ね"];
+
+/// プロンプトの固定指示の写し（実機確認の「ゆうこは読者の横で教えてくれる親しみやすい案内役です。」）の文を取り除く。
+/// 文の本体（前後の空白・文末の記号・丁寧な語尾を除いたもの）が `PROMPT_ECHO_MIN_CHARS` 文字以上で、
+/// 固定指示（`fixed_texts`。利用者の入力・記事を含まない）のどれかにそのまま含まれるときだけ消す。
+/// 記事の内容の文が固定指示と10文字以上そのまま一致することはまず無いため、部分一致の照合でも誤って消しにくい。
+/// 全部消えた場合は空になり、呼び出し側の検証（Empty）で拒否される（指示文の写しだけの出力は見せる価値が無い）。
+/// 戻り値の2つ目は、取り除いた文の数（ログ用）。
+pub(crate) fn strip_prompt_echo_sentences(text: &str, fixed_texts: &[&str]) -> (String, usize) {
+    let mut removed = 0;
+    let kept = text
+        .lines()
+        .map(|line| {
+            split_sentences(line)
+                .into_iter()
+                .filter(|sentence| {
+                    let echo = is_prompt_echo(sentence, fixed_texts);
+                    if echo {
+                        removed += 1;
+                    }
+                    !echo
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (kept, removed)
+}
+
+fn is_prompt_echo(sentence: &str, fixed_texts: &[&str]) -> bool {
+    let mut core = sentence
+        .trim()
+        .trim_end_matches(|c: char| SENTENCE_ENDS.contains(&c) || matches!(c, '～' | '〜' | '♪'));
+    for ending in PROMPT_ECHO_TRAILING_ENDINGS {
+        if let Some(stripped) = core.strip_suffix(ending) {
+            core = stripped;
+            break;
+        }
+    }
+    let core = core.trim_end_matches(['、', '，']);
+    core.chars().count() >= PROMPT_ECHO_MIN_CHARS
+        && fixed_texts.iter().any(|fixed| fixed.contains(core))
+}
+
 /// 行を文に分ける（区切り記号は前の文に含める）。かぎかっこ（「」）の中の区切りでは切らない。
 fn split_sentences(line: &str) -> Vec<&str> {
     let mut sentences = Vec::new();
@@ -1308,6 +1360,42 @@ mod tests {
         {
             assert!(!SIMPLIFIED_ONLY_HANZI.contains(japanese), "{japanese}");
         }
+    }
+
+    #[test]
+    fn strips_sentences_that_copy_fixed_prompt_text() {
+        let fixed = [
+            "ゆうこは読者の横で教えてくれる親しみやすい案内役で、やわらかい常体の語尾で話します。",
+        ];
+        // 実機確認で漏れた形（指示文の「〜案内役で、」を「〜案内役です。」として写した）。
+        assert_eq!(
+            strip_prompt_echo_sentences(
+                "契約は9月末で終わるよ。ゆうこは読者の横で教えてくれる親しみやすい案内役です。",
+                &fixed
+            ),
+            ("契約は9月末で終わるよ。".to_string(), 1)
+        );
+        // 短い文・指示文と一部だけ重なる記事の文は残す。
+        for kept in [
+            "やわらかいね。",
+            "読者の横で教えてくれる先生が増えたよ。",
+            "新しい案内役のロボットが駅に来たよ。",
+        ] {
+            assert_eq!(
+                strip_prompt_echo_sentences(kept, &fixed),
+                (kept.to_string(), 0),
+                "{kept}"
+            );
+        }
+        // 写しだけなら空になる（呼び出し側の検証で拒否される）。
+        assert_eq!(
+            strip_prompt_echo_sentences(
+                "ゆうこは読者の横で教えてくれる親しみやすい案内役です。",
+                &fixed
+            )
+            .0,
+            ""
+        );
     }
 
     #[test]

@@ -609,20 +609,37 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     prompt
 }
 
+/// 再説明・一言のプロンプトに入る固定指示の文（利用者の入力・記事を含まない）。出力にこれらの写しが
+/// 混ざったときに取り除くため（`util::speech_cleanup::strip_prompt_echo_sentences`）、summary_service が使う。
+pub(crate) fn yuuko_speech_fixed_prompt_texts() -> [&'static str; 7] {
+    [
+        YUUKO_TONE_INSTRUCTION,
+        YUUKO_SPEECH_RULES,
+        YUUKO_CALM_TONE_INSTRUCTION,
+        YUUKO_CALM_TONE_REMINDER,
+        ARTICLE_DATA_DEFENSE_INSTRUCTION,
+        YUUKO_EXPLANATION_REMINDER,
+        YUUKO_COMMENT_REMINDER,
+    ]
+}
+
+/// 再説明の末尾の念押し（固定文）。
+const YUUKO_EXPLANATION_REMINDER: &str = "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
+記事情報にない事実・数値・日付は足さないでください。\
+1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
+
+/// 一言の末尾の念押し（固定文）。
+const YUUKO_COMMENT_REMINDER: &str =
+    "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
+記事情報にない事実・数値・日付は足さないでください。\
+括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
+
 /// 再説明・一言の末尾の念押し（固定文）。ほかの prompt_id では付けない。
 fn yuuko_speech_reminder(prompt_id: &str) -> Option<&'static str> {
     if prompt_id == YUUKO_EXPLANATION_PROMPT_ID {
-        Some(
-            "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
-             記事情報にない事実・数値・日付は足さないでください。\
-             1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
-        )
+        Some(YUUKO_EXPLANATION_REMINDER)
     } else if prompt_id == YUUKO_COMMENT_PROMPT_ID {
-        Some(
-            "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
-             記事情報にない事実・数値・日付は足さないでください。\
-             括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
-        )
+        Some(YUUKO_COMMENT_REMINDER)
     } else {
         None
     }

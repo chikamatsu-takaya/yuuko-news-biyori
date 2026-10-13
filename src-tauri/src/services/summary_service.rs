@@ -13,13 +13,13 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::util::speech_cleanup::{
     calm_yuuko_speech, clean_yuuko_speech, count_unlisted_latin_words,
-    strip_foreign_script_sentences, ForeignScriptOutcome,
+    strip_foreign_script_sentences, strip_prompt_echo_sentences, ForeignScriptOutcome,
 };
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
 };
 
-use super::ai_provider_service::AiProviderService;
+use super::ai_provider_service::{yuuko_speech_fixed_prompt_texts, AiProviderService};
 
 #[derive(Debug, Clone)]
 pub struct SummaryService {
@@ -814,6 +814,16 @@ fn clean_ai_speech(
         // 本文は出さず、取り除いたことと出力種別だけを残す。
         log::info!(
             "removed stage directions, greetings or non-Japanese particles from the AI output ({})",
+            kind.label()
+        );
+    }
+    // プロンプトの固定指示の写し（「ゆうこは読者の横で…案内役です。」）の文を取り除く。
+    let (cleaned, prompt_echoes) =
+        strip_prompt_echo_sentences(&cleaned, &yuuko_speech_fixed_prompt_texts());
+    if prompt_echoes > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed {prompt_echoes} sentence(s) copying the fixed prompt from the AI output ({})",
             kind.label()
         );
     }
