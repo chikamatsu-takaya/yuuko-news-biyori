@@ -23,7 +23,8 @@
 //!
 //! 段階:
 //! - `fetch`: 取得元ごとに RSS を取り、先頭から上限件数まで本文を取得・抽出して保存し、`<RUN>/articles.json`
-//!   （本文の出どころ `excerptSource` = `html` / `rss_summary` / `none` 付き）と `<RUN>/fetch_report.json` を書く。
+//!   （本文の出どころ `excerptSource` = `html` / `rss_summary` / `none` と、`html` のときの抽出元
+//!   `htmlExtraction` = `body` / `meta_description` 付き）と `<RUN>/fetch_report.json` を書く。
 //!   1件ごとの扱い（記事URLの検証 → 本文取得 → 失敗・抽出なしなら RSS 概要）は `NewsService` の取得本体と同じ。
 //!   取得元ごとに件数を絞るため、`NewsService::refresh`（1フィード最大30件の本文を取る）は使わない。
 //! - `summary`: 各記事に `generate_article_summary` と同じ処理（手動生成の経路）を provider = local で走らせ、
@@ -68,7 +69,7 @@ use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::{AiRequest, AiResponse, GenerateArticleSummaryParams};
 use crate::error::AppError;
 use crate::infra::allowlist::NetworkAllowlist;
-use crate::infra::html_fetcher::HtmlFetcher;
+use crate::infra::html_fetcher::{ExcerptSource, HtmlFetcher};
 use crate::infra::rss_client::RssClient;
 use crate::infra::url_guard::{validate_url, UrlPurpose};
 use crate::paths::{AppPaths, NETWORK_ALLOWLIST_RELATIVE_PATH, NEWS_SOURCES_RELATIVE_PATH};
@@ -279,6 +280,8 @@ fn run_fetch(run_dir: &Path, paths: &AppPaths) {
             "cap": cap,
             "taken": 0,
             "html": 0,
+            "htmlBody": 0,
+            "htmlMeta": 0,
             "rssSummary": 0,
             "none": 0,
             "articleUrlRejected": 0,
@@ -311,8 +314,8 @@ fn run_fetch(run_dir: &Path, paths: &AppPaths) {
             // NewsService の取得本体と同じく、本文の取得・抽出に失敗したら RSS の概要を使う。
             let fetch_result =
                 tauri::async_runtime::block_on(html_fetcher.fetch_and_extract(&item.article_url));
-            let html_excerpt = match fetch_result {
-                Ok(result) => result.excerpt,
+            let (html_excerpt, html_extraction) = match fetch_result {
+                Ok(result) => (result.excerpt, Some(result.excerpt_source)),
                 Err(error) => {
                     bump(&mut stats, "articleFetchFailed");
                     // 失敗の種類だけを残す（同じ種類は1回）。
@@ -322,9 +325,20 @@ fn run_fetch(run_dir: &Path, paths: &AppPaths) {
                         stats["fetchErrors"] =
                             json!(errors.into_iter().chain([json!(label)]).collect::<Vec<_>>());
                     }
-                    None
+                    (None, None)
                 }
             };
+            // 本文から取れたのか、meta description で代用したのかを分けて数える（抽出の成否を見るため）。
+            let html_extraction = html_extraction.map(|source| match source {
+                ExcerptSource::Body => "body",
+                ExcerptSource::MetaDescription => "meta_description",
+                ExcerptSource::None => "none",
+            });
+            match html_extraction {
+                Some("body") => bump(&mut stats, "htmlBody"),
+                Some("meta_description") => bump(&mut stats, "htmlMeta"),
+                _ => {}
+            }
             let (excerpt_source, stats_key) = match (&html_excerpt, &item.summary) {
                 (Some(_), _) => ("html", "html"),
                 (None, Some(_)) => ("rss_summary", "rssSummary"),
@@ -335,7 +349,7 @@ fn run_fetch(run_dir: &Path, paths: &AppPaths) {
             let published_at_text =
                 normalize_published_at(item.published_at.as_deref(), &fetched_at);
             fetched.push((
-                excerpt_source,
+                (excerpt_source, html_extraction),
                 FetchedArticle {
                     article_id,
                     title: item.title,
@@ -369,7 +383,9 @@ fn run_fetch(run_dir: &Path, paths: &AppPaths) {
     });
     let records = fetched
         .iter()
-        .map(|(excerpt_source, article)| article_record(article, excerpt_source))
+        .map(|((excerpt_source, html_extraction), article)| {
+            article_record(article, excerpt_source, *html_extraction)
+        })
         .collect::<Vec<_>>();
     ArticleRepository::new(paths)
         .save_fetched_articles(fetched.into_iter().map(|(_, article)| article).collect())
@@ -387,7 +403,13 @@ fn published_timestamp(text: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(text.trim()).map_or(i64::MIN, |time| time.timestamp())
 }
 
-fn article_record(article: &FetchedArticle, excerpt_source: &str) -> Value {
+/// `html_extraction` は本文取得に成功したときの抽出元（`body` / `meta_description` / `none`）。
+/// 取得に失敗した・保存済みの記事を取り込んだときは `None`（JSON では null）。
+fn article_record(
+    article: &FetchedArticle,
+    excerpt_source: &str,
+    html_extraction: Option<&str>,
+) -> Value {
     json!({
         "articleId": article.article_id,
         "title": article.title,
@@ -397,6 +419,7 @@ fn article_record(article: &FetchedArticle, excerpt_source: &str) -> Value {
         "publishedAt": article.published_at_text,
         "genre": article.genre,
         "excerptSource": excerpt_source,
+        "htmlExtraction": html_extraction,
         "excerptChars": article.excerpt.as_deref().map_or(0, |text| text.chars().count()),
         "excerpt": article.excerpt,
     })
@@ -554,6 +577,7 @@ fn record_stage(
     level: ExplanationLevel,
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
+    let input_text = request.input_text.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
     let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
     // 再説明・一言の入力は同じ生成の AI 出力（要約・要点）だけなので、確認用に残す。
@@ -593,13 +617,13 @@ fn record_stage(
             Err(rejection) => stage["rejection"] = json!(rejection.label()),
         }
     } else {
-        let cleaned = clean_ai_speech(kind, tone, raw.clone());
+        let cleaned = clean_ai_speech(kind, tone, &input_text, raw.clone());
         stage["cleaned"] = json!(cleaned.text);
         if let Err(rejection) = validate_summary_output(kind, &cleaned.text) {
             stage["rejection"] = json!(rejection.label());
         }
     }
-    let selected = select_valid_output_in_tone(kind, tone, raw);
+    let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
     }

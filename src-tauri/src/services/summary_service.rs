@@ -11,12 +11,15 @@ use crate::domain::summary::{
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::util::speech_cleanup::{calm_yuuko_speech, clean_yuuko_speech};
+use crate::util::speech_cleanup::{
+    calm_yuuko_speech, clean_yuuko_speech, count_unlisted_latin_words,
+    strip_foreign_script_sentences, strip_prompt_echo_sentences, ForeignScriptOutcome,
+};
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
 };
 
-use super::ai_provider_service::AiProviderService;
+use super::ai_provider_service::{yuuko_speech_fixed_prompt_texts, AiProviderService};
 
 #[derive(Debug, Clone)]
 pub struct SummaryService {
@@ -281,10 +284,12 @@ impl SummaryService {
     ) -> Result<AiResponse, AppError> {
         // 口調はプロンプト（ai_provider_service の build_prompt）と同じ入力から判定する（D122）。
         let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
+        // 再説明・一言の後処理（中国語の字・英単語の混入の判定）で、入力にある字・語を除くために使う。
+        let input_text = request.input_text.clone();
         let primary =
             self.ai_provider_service
                 .request_text(request, provider, explanation_level)?;
-        select_valid_output_in_tone(kind, tone, primary)
+        select_valid_output_in_tone(kind, tone, &input_text, primary)
     }
 
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約キューの可否判定用）。AI は呼ばない。
@@ -756,12 +761,14 @@ fn is_markdown_separator_line(line: &str) -> bool {
 ///
 /// 実AIの再説明・一言は、検証の前にト書き・中国語の助詞・挨拶を取り除く（`clean_ai_speech`）。
 /// 重いニュース（`SpeechTone::Calm`・D122）では、絵文字・「！」なども取り除く。
+/// `input_text` はその出力を作った AI 入力（中国語の字・英単語の混入を、入力にあるものと区別するため）。
 fn select_valid_output_in_tone(
     kind: SummaryOutputKind,
     tone: SpeechTone,
+    input_text: &str,
     primary: AiResponse,
 ) -> Result<AiResponse, AppError> {
-    let primary = clean_ai_speech(kind, tone, primary);
+    let primary = clean_ai_speech(kind, tone, input_text, primary);
     let rejection = match validate_summary_output(kind, &primary.text) {
         Ok(text) => {
             return Ok(AiResponse {
@@ -787,7 +794,14 @@ fn select_valid_output_in_tone(
 /// Mock の種（定型文）は手を加えず、決定的な結果のままにする。要約・要点は中立な文体なので対象外。
 /// 重いニュース（`SpeechTone::Calm`・D122）では、続けて `calm_yuuko_speech` で明るさの飾り
 /// （「♪」「★」を含む絵文字・記号、「！」、語尾の「～」）を取り除く。
-fn clean_ai_speech(kind: SummaryOutputKind, tone: SpeechTone, response: AiResponse) -> AiResponse {
+/// 日本語に無い簡体字を含む文は、ほかの文が残るときだけ取り除く（`strip_foreign_script_sentences`）。
+/// 入力に無い英単語は、固有名詞の表記ゆれと区別できないため消さず、数だけをログに残す。
+fn clean_ai_speech(
+    kind: SummaryOutputKind,
+    tone: SpeechTone,
+    input_text: &str,
+    response: AiResponse,
+) -> AiResponse {
     if !matches!(
         kind,
         SummaryOutputKind::Explanation | SummaryOutputKind::Comment
@@ -800,6 +814,33 @@ fn clean_ai_speech(kind: SummaryOutputKind, tone: SpeechTone, response: AiRespon
         // 本文は出さず、取り除いたことと出力種別だけを残す。
         log::info!(
             "removed stage directions, greetings or non-Japanese particles from the AI output ({})",
+            kind.label()
+        );
+    }
+    // プロンプトの固定指示の写し（「ゆうこは読者の横で…案内役です。」）の文を取り除く。
+    let (cleaned, prompt_echoes) =
+        strip_prompt_echo_sentences(&cleaned, &yuuko_speech_fixed_prompt_texts());
+    if prompt_echoes > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed {prompt_echoes} sentence(s) copying the fixed prompt from the AI output ({})",
+            kind.label()
+        );
+    }
+    let (cleaned, foreign_script) = strip_foreign_script_sentences(&cleaned, input_text);
+    if foreign_script != ForeignScriptOutcome::Clean {
+        // 本文・混入した字は出さず、固定ラベルだけを残す。
+        log::info!(
+            "found Chinese-only characters in the AI output ({}: {})",
+            kind.label(),
+            foreign_script.label()
+        );
+    }
+    let unlisted_latin_words = count_unlisted_latin_words(&cleaned, input_text);
+    if unlisted_latin_words > 0 {
+        // 単語そのものは出さず、数だけを残す（消さない: 固有名詞の表記ゆれと区別できないため）。
+        log::info!(
+            "the AI output has {unlisted_latin_words} Latin word(s) not found in its input ({})",
             kind.label()
         );
     }
@@ -1071,7 +1112,7 @@ mod tests {
         kind: SummaryOutputKind,
         primary: AiResponse,
     ) -> Result<AiResponse, AppError> {
-        select_valid_output_in_tone(kind, SpeechTone::Normal, primary)
+        select_valid_output_in_tone(kind, SpeechTone::Normal, "", primary)
     }
 
     fn response(text: &str, provider: &str) -> AiResponse {
@@ -1230,9 +1271,13 @@ mod tests {
         let noisy = "わあ、2人が亡くなったんだって！！みんな気をつけようね～♪✨";
         for provider in ["gemini", "local"] {
             for kind in [SummaryOutputKind::Explanation, SummaryOutputKind::Comment] {
-                let selected =
-                    select_valid_output_in_tone(kind, SpeechTone::Calm, response(noisy, provider))
-                        .unwrap();
+                let selected = select_valid_output_in_tone(
+                    kind,
+                    SpeechTone::Calm,
+                    "",
+                    response(noisy, provider),
+                )
+                .unwrap();
                 assert_eq!(
                     selected.text, "2人が亡くなったんだって。みんな気をつけようね",
                     "{provider} {kind:?}"
@@ -1242,6 +1287,7 @@ mod tests {
             let summary = select_valid_output_in_tone(
                 SummaryOutputKind::Summary,
                 SpeechTone::Calm,
+                "",
                 response("台風で被害が出た！", provider),
             )
             .unwrap();
@@ -1259,6 +1305,7 @@ mod tests {
         let mock = select_valid_output_in_tone(
             SummaryOutputKind::Comment,
             SpeechTone::Calm,
+            "",
             response(mock_seed, "mock"),
         )
         .unwrap();
