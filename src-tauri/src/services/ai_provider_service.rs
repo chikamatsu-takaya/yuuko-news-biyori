@@ -13,6 +13,7 @@ use crate::domain::ai_connection::{
     LocalAiFailure,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
+use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::{
     AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
     ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
@@ -77,6 +78,23 @@ const YUUKO_SPEECH_RULES: &str = "出力はゆうこが話す本文だけにし�
 挨拶・自己紹介・前置き・締めの言葉は書かず、すぐに記事の中身から話し始めてください。\
 括弧書きのト書き（動作・表情・声の調子の説明）や、ゆうこの様子を外から説明する文は書かないでください。\
 絵文字・見出し・箇条書きは使わないでください。";
+
+/// 重いニュース（事件・事故・災害・訃報・戦争やテロ・重い病気など）の再説明・一言に足す、
+/// 落ち着いた口調の固定指示（判断台帳 D122）。判定は `SpeechTone::for_request`（入力のキーワード規則）。
+/// ゆうこらしさ（やわらかい常体の語尾・寄り添う言葉）は残し、明るさ・はしゃぎだけを抑える。
+/// 2026-10-13 の評価で、水難事故・地震の記事に根拠のない励まし、性的接待の報道に絵文字付きの明るい一言が
+/// 付いたため、励ましや楽観的な見通しも書かせない。禁止する言葉そのもの（「大丈夫」など）は、小さいモデルが
+/// まねて出しやすくなるため書かない（`YUUKO_SPEECH_RULES` と同じ方針）。
+const YUUKO_CALM_TONE_INSTRUCTION: &str =
+    "この記事は、事件・事故・災害・訃報など重い話題を含むニュースです。\
+ゆうこはふだんの明るさを抑え、落ち着いた、思いやりのある言葉で静かに話してください。\
+絵文字・「！」・はしゃいだ言葉・明るい感嘆の声は使わないでください。\
+被害を受けた人や関係者への敬意を忘れず、記事にある事実だけに沿って話し、\
+根拠のない励ましや楽観的な見通しは書かないでください。";
+
+/// 重いニュースの再説明・一言で、末尾の念押し（`yuuko_speech_reminder`）に足す固定文（D122）。
+const YUUKO_CALM_TONE_REMINDER: &str =
+    "重い話題なので、絵文字や「！」を使わず、落ち着いた思いやりのある言葉で、事実に沿って書いてください。";
 
 /// 再説明・一言のプロンプトの最後（記事情報の後ろ）に置く、出力の形の念押し（固定指示）。
 /// 小さいローカルLLMはプロンプトの末尾に近い指示ほど守りやすく、記事情報の前に置いた規則だけでは
@@ -512,6 +530,12 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
 
     // 再説明・感想はゆうこが話す文なので、口調指示を固定指示側に置く（入力本文より前）。
     // 要約（AI要約セクション）は中立な文体のままにする（データ設計書の記事Markdown例に合わせる）。
+    // 重いニュースでは、口調の規則の後ろに落ち着いた口調の指示を足す（D122。判定は入力のキーワード規則）。
+    let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
+    let calm_instruction = match tone {
+        SpeechTone::Calm => format!("\n{YUUKO_CALM_TONE_INSTRUCTION}"),
+        SpeechTone::Normal => String::new(),
+    };
     let instruction = match request.prompt_id.as_str() {
         "summary_v1" => format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。"),
         // 再説明は画面の1段落に収まる長さにする（解説レベルで文の数と上限だけを変える）。
@@ -523,13 +547,18 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
             };
             format!(
                 "次のニュースの内容を、日本語で{level}読者にやさしく再説明してください。\
-                 {length}の1段落にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}"
+                 {length}の1段落にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}{calm_instruction}"
             )
         }
         id if id == YUUKO_COMMENT_PROMPT_ID => {
+            // 重いニュースでは「親しみやすい」感想を求めない（明るい一言を誘わないため）。
+            let manner = match tone {
+                SpeechTone::Calm => "落ち着いた",
+                SpeechTone::Normal => "親しみやすい",
+            };
             format!(
-                "次のニュースに対する、親しみやすい短い感想を日本語で一言書いてください。\
-                 改行のない1文、60文字以内にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}"
+                "次のニュースに対する、{manner}短い感想を日本語で一言書いてください。\
+                 改行のない1文、60文字以内にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}{calm_instruction}"
             )
         }
         // 要点・注目ポイント・タグ（D18 / D11）。要点と注目ポイントは別の観点で書かせ、要点に注目ポイントを混ぜない。
@@ -558,6 +587,9 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     // 再説明・一言だけ、記事情報の後ろに出力の形の念押し（固定文）を付ける（YUUKO_SPEECH_REMINDER_HEADING）。
     if let Some(reminder) = yuuko_speech_reminder(&request.prompt_id) {
         prompt.push_str(&format!("\n\n{YUUKO_SPEECH_REMINDER_HEADING}\n{reminder}"));
+        if tone == SpeechTone::Calm {
+            prompt.push_str(YUUKO_CALM_TONE_REMINDER);
+        }
     }
     prompt
 }
@@ -886,6 +918,54 @@ mod tests {
         }
         // 用語解説は口調指示だけを共有し、再説明向けの規則は混ぜない（JSON 契約を崩さないため）。
         assert!(!term_explanation_prompt_for(ExplanationLevel::Normal).contains(YUUKO_SPEECH_RULES));
+    }
+
+    #[test]
+    fn heavy_news_speech_prompts_ask_for_a_calm_tone() {
+        // D122: 再説明・一言の入力（タイトル・要約・要点）に重いニュースの語があれば、落ち着いた口調を指示する。
+        let prompt_for = |prompt_id: &str, input_text: &str| {
+            build_prompt(
+                &AiRequest {
+                    prompt_id: prompt_id.to_string(),
+                    input_text: input_text.to_string(),
+                    context: None,
+                },
+                ExplanationLevel::Normal,
+            )
+        };
+        let heavy = "タイトル: 愛知県内で水難事故相次ぐ 2人死亡\n要約: 川や海で事故が続いた。\n要点:\n・2人が亡くなった";
+        let ordinary =
+            "タイトル: 新しいAIチップを発表\n要約: 電力効率が上がる。\n要点:\n・2027年に投入";
+        for prompt_id in [YUUKO_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID] {
+            let calm = prompt_for(prompt_id, heavy);
+            // 落ち着いた口調の指示は、口調の規則の後ろ・外部データより前の固定指示側に置く。
+            let instruction = calm
+                .find(YUUKO_CALM_TONE_INSTRUCTION)
+                .expect("calm instruction");
+            assert!(calm.find(YUUKO_SPEECH_RULES).unwrap() < instruction);
+            assert!(instruction < calm.find(ARTICLE_DATA_HEADING).unwrap());
+            assert!(calm.contains("絵文字・「！」・はしゃいだ言葉"));
+            // 末尾の念押しにも足す（記事情報の後ろ・プロンプトの最後）。
+            assert!(calm.find("2人死亡").unwrap() < calm.find(YUUKO_CALM_TONE_REMINDER).unwrap());
+            assert!(calm.ends_with(YUUKO_CALM_TONE_REMINDER), "{prompt_id}");
+            assert_eq!(calm.matches(YUUKO_SPEECH_REMINDER_HEADING).count(), 1);
+
+            // ふだんの記事は従来のプロンプトのまま。
+            let normal = prompt_for(prompt_id, ordinary);
+            assert!(!normal.contains(YUUKO_CALM_TONE_INSTRUCTION));
+            assert!(!normal.contains(YUUKO_CALM_TONE_REMINDER));
+            assert!(normal.ends_with("書かないでください。"));
+        }
+        // 一言は、重いニュースでは「親しみやすい」感想を求めない。
+        assert!(prompt_for(YUUKO_COMMENT_PROMPT_ID, heavy).contains("落ち着いた短い感想"));
+        assert!(!prompt_for(YUUKO_COMMENT_PROMPT_ID, heavy).contains("親しみやすい短い感想"));
+        assert!(prompt_for(YUUKO_COMMENT_PROMPT_ID, ordinary).contains("親しみやすい短い感想"));
+        // 要約・要点は中立な文体なので、重いニュースでも口調の指示を入れない。
+        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+            let prompt = prompt_for(prompt_id, heavy);
+            assert!(!prompt.contains(YUUKO_CALM_TONE_INSTRUCTION), "{prompt_id}");
+            assert!(!prompt.contains(YUUKO_CALM_TONE_REMINDER), "{prompt_id}");
+        }
     }
 
     #[test]
