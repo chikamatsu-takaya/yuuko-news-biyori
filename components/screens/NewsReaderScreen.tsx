@@ -2097,7 +2097,8 @@ export default function NewsReaderScreen({
           ) : null}
         </main>
 
-        <aside className="flex w-72 shrink-0 flex-col overflow-y-auto p-4">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="flex w-60 lg:w-72 shrink-0 flex-col overflow-y-auto p-4">
           <div className="mb-2">
             <YuukoSpeechBubbleRight
               message={

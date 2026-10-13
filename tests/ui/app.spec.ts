@@ -3394,8 +3394,9 @@ test("term popup: shrinking to a Tauri-like width keeps the close button reachab
   await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
-  // Tauri 初期幅相当の 800px へ縮小。左右固定領域を除くと main は約304px（<固定幅320px）。
-  await page.setViewportSize({ width: 800, height: 600 });
+  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。Tauri 初期幅の 800px では右列が w-60 に狭まり
+  // main が約352pxあるため（D109）、左右固定領域（208px + 240px）を除いて main が約292pxになる 740px を使う。
+  await page.setViewportSize({ width: 740, height: 600 });
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
 
   // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
