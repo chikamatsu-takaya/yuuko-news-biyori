@@ -840,6 +840,35 @@ impl ArticleRepository {
         Ok(true)
     }
 
+    /// 記事詳細を返し、同じ読み込み結果で既読状態を前進させる（記事を開く処理用）。
+    /// `get_article_detail` → `advance_article_read_state` の順に呼ぶと記事ファイルを2回探して読むため、
+    /// 書き込みロックの中で1回だけ探し、詳細（前進前の状態）と前進の結果をまとめて返す。
+    /// 既読の保存は付随処理なので、その失敗は外側の Err にせず、2つ目の値で返す
+    /// （詳細の取得に失敗したときだけ外側を Err にする。従来の2回呼びと同じ扱い）。
+    pub fn get_article_detail_and_advance_read_state(
+        &self,
+        article_id: &str,
+        target: ArticleReadState,
+    ) -> Result<(ArticleDetailDto, Result<bool, AppError>), AppError> {
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let _write_guard = match self.lock_writes() {
+            Ok(guard) => guard,
+            Err(lock_error) => {
+                // ロックが壊れていても、従来どおり読み取りだけの詳細表示は成功させる。
+                let detail = self.get_article_detail(article_id)?;
+                return Ok((detail, Err(lock_error)));
+            }
+        };
+        let mut article = self.find_article_record(article_id)?;
+        let detail = article.to_detail_dto(is_effectively_favorite(&article, &favorite_store));
+        if !article.read_state.can_advance_to(&target) {
+            return Ok((detail, Ok(false)));
+        }
+        article.read_state = target;
+        let advanced = self.save_article_record(&article).map(|()| true);
+        Ok((detail, advanced))
+    }
+
     /// 既存記事の article_id 集合を返す（保存時の上書き防止に使う）。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
         // ID集合は期間に依存しないため、タイトル側の基準時刻は現在時刻で足りる（結果に使わない）。
@@ -1197,7 +1226,55 @@ impl ArticleRepository {
 
     /// 詳細表示・単一記事更新用の検索。他記事の破損で対象記事まで読めなくならないよう寛容ローダーを使う。
     /// 更新時の保存先が破損ファイルと一致する場合は、上書きで破損ファイルを失わないよう中止する。
+    ///
+    /// 記事は必ず `{月バケット}/{article_id}.md` へ保存されるため、まず月フォルダごとにその1ファイルだけを
+    /// 探して読む（全件読み込みは記事数に比例して重いため）。直接引けないとき（ファイルが無い・破損・
+    /// 中身のIDや月が保存先と食い違う・IDがファイル名に使えない・I/Oエラー）は、従来の全件走査へ
+    /// フォールバックして結果を変えない（アーカイブ済みで元Markdownが無い記事も、全件走査で NotFound になる）。
     fn find_article_record(&self, article_id: &str) -> Result<PersistedArticleRecord, AppError> {
+        if let Some(article) = self.find_article_record_direct(article_id) {
+            return Ok(article);
+        }
+        self.find_article_record_by_scan(article_id)
+    }
+
+    /// `{月バケット}/{article_id}.md` を月フォルダの名前順に探し、最初に見つかった1ファイルだけを読む。
+    /// 全件走査（パス順で最初に一致した記事を採る）と同じ結果になると言える場合だけ Some を返す。
+    /// - article_id は外部入力なので、英数字・`-`・`_` だけのときに限ってファイル名へ使う（`..` や区切り文字で
+    ///   ニュースフォルダの外を指さない）。それ以外は None（全件走査で従来どおり判定する）。
+    /// - 見つけたファイルは、中身の article_id と月バケットが保存先と一致するときだけ採用する。
+    ///   一致すれば保存先＝このファイルで、破損ファイルが保存先を占めている状態ではない。
+    /// - 破損・I/Oエラーは None にして、全件走査側に従来どおりのスキップ・エラー判定を任せる。
+    fn find_article_record_direct(&self, article_id: &str) -> Option<PersistedArticleRecord> {
+        if !is_direct_lookup_article_id(article_id) {
+            return None;
+        }
+        let file_name = format!("{article_id}.md");
+        let mut month_dirs = std::fs::read_dir(&self.article_news_dir)
+            .ok()?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.file_name())
+            })
+            .collect::<Vec<_>>();
+        // 全件走査はパスを並べ替えて最初の一致を採るため、月フォルダも同じ名前順で探す。
+        month_dirs.sort();
+
+        let (month, path) = month_dirs.into_iter().find_map(|month| {
+            let path = self.article_news_dir.join(&month).join(&file_name);
+            path.is_file().then_some((month, path))
+        })?;
+        let record = self.load_article_record(&path).ok()?;
+        let is_canonical =
+            record.article_id == article_id && month.to_str() == Some(&record.month_bucket());
+        is_canonical.then_some(record)
+    }
+
+    /// 従来の全件走査による検索。直接引けなかったときのフォールバック。
+    fn find_article_record_by_scan(
+        &self,
+        article_id: &str,
+    ) -> Result<PersistedArticleRecord, AppError> {
         let loaded = self.load_readable_article_records()?;
         let article = loaded
             .records
@@ -1267,6 +1344,8 @@ impl ArticleRepository {
     }
 
     fn load_article_record(&self, path: &Path) -> Result<PersistedArticleRecord, AppError> {
+        #[cfg(test)]
+        tests::count_article_file_read();
         let raw = std::fs::read_to_string(path)?;
         parse_article_record(&raw, &path.display().to_string())
     }
@@ -2359,6 +2438,27 @@ fn validate_month_bucket(bucket: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+/// 記事IDをそのままファイル名（`{article_id}.md`）として直接参照してよいかを返す。
+/// article_id は画面から渡る外部入力なので、パス区切り・`..`・ドライブ指定などを含みうる。
+/// 英数字・`-`・`_` だけ（データ移行の記事ファイル名と同じ規則）に限り、Windows の予約デバイス名
+/// （`CON` `NUL` `COM1` など）も除く。外れたIDは直接参照せず、全件走査で従来どおり判定する。
+fn is_direct_lookup_article_id(article_id: &str) -> bool {
+    const RESERVED_DEVICE_NAMES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let is_safe = !article_id.is_empty()
+        && article_id.len() <= 128
+        && article_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if !is_safe {
+        return false;
+    }
+    let upper = article_id.to_ascii_uppercase();
+    let is_numbered_device = upper.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.as_bytes()[3].is_ascii_digit();
+    !RESERVED_DEVICE_NAMES.contains(&upper.as_str()) && !is_numbered_device
 }
 
 fn month_bucket_from_text(value: &str) -> Option<String> {
@@ -5261,5 +5361,332 @@ mod tests {
             .list_archive_months(archive_delete_now())
             .unwrap()
             .is_empty());
+    }
+
+    // ---- ID からの直接検索（find_article_record）----
+
+    thread_local! {
+        /// このスレッドで記事Markdownを読んで解析した回数。テストは各スレッドで動くため、
+        /// 並行実行中の別テストの読み込みは数えない。
+        static ARTICLE_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// `load_article_record` から呼ばれ、記事ファイルの読み込み回数を数える（テスト時だけ）。
+    pub(super) fn count_article_file_read() {
+        ARTICLE_FILE_READS.with(|reads| reads.set(reads.get() + 1));
+    }
+
+    /// `action` の間に読んだ記事Markdownの件数を返す。
+    fn count_reads<T>(action: impl FnOnce() -> T) -> (T, usize) {
+        let before = ARTICLE_FILE_READS.with(std::cell::Cell::get);
+        let value = action();
+        let after = ARTICLE_FILE_READS.with(std::cell::Cell::get);
+        (value, after - before)
+    }
+
+    /// 月をまたいで `count` 件の記事を保存する（202601〜202606 に振り分ける）。
+    fn save_many_articles(context: &TestRepositoryContext, count: usize) {
+        for index in 0..count {
+            let month = index % 6 + 1;
+            let fetched_at = format!("2026-{month:02}-01T00:00:00Z");
+            let article = PersistedArticleRecord {
+                article_id: format!("bulk-{index:05}"),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+    }
+
+    #[test]
+    fn find_article_record_reads_only_the_target_file() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 60);
+
+        let (found, reads) = count_reads(|| context.repository.find_article_record("bulk-00031"));
+        let found = found.unwrap();
+
+        assert_eq!(found.article_id, "bulk-00031");
+        assert_eq!(found.month_bucket(), "202602");
+        assert_eq!(reads, 1, "直接検索は対象の1ファイルだけを読む");
+
+        // 従来の全件走査は全件を読む（比較用）。
+        let (_, scan_reads) = count_reads(|| {
+            context
+                .repository
+                .find_article_record_by_scan("bulk-00031")
+                .unwrap()
+        });
+        assert_eq!(scan_reads, 60);
+    }
+
+    #[test]
+    fn opening_article_reads_target_file_once_for_detail_and_read_state() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 30);
+
+        let ((detail, advanced), reads) = count_reads(|| {
+            context
+                .repository
+                .get_article_detail_and_advance_read_state(
+                    "bulk-00007",
+                    ArticleReadState::DetailViewed,
+                )
+                .unwrap()
+        });
+
+        assert_eq!(detail.article_id, "bulk-00007");
+        assert!(advanced.unwrap());
+        assert_eq!(reads, 1, "詳細と既読の前進で同じ読み込み結果を使う");
+        let saved = context
+            .repository
+            .find_article_record("bulk-00007")
+            .unwrap();
+        assert_eq!(saved.read_state, ArticleReadState::DetailViewed);
+
+        // 2回目は同じ状態なので保存せず false を返す。
+        let (_, advanced_again) = context
+            .repository
+            .get_article_detail_and_advance_read_state("bulk-00007", ArticleReadState::DetailViewed)
+            .unwrap();
+        assert!(!advanced_again.unwrap());
+    }
+
+    #[test]
+    fn find_article_record_prefers_earliest_month_for_duplicate_ids() {
+        let context = TestRepositoryContext::new();
+        for fetched_at in ["2026-06-01T00:00:00Z", "2026-05-01T00:00:00Z"] {
+            let article = PersistedArticleRecord {
+                article_id: "dup-id".to_string(),
+                title: format!("{fetched_at} の記事"),
+                fetched_at: fetched_at.to_string(),
+                published_at_text: fetched_at.to_string(),
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+
+        let direct = context.repository.find_article_record("dup-id").unwrap();
+        let scanned = context
+            .repository
+            .find_article_record_by_scan("dup-id")
+            .unwrap();
+
+        // 全件走査（パス順で最初の一致）と同じく、名前順で先の月の記事を返す。
+        assert_eq!(direct.month_bucket(), "202605");
+        assert_eq!(direct, scanned);
+    }
+
+    #[test]
+    fn find_article_record_falls_back_to_scan_for_misplaced_file() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        // ファイル名と中身の article_id が食い違う記事（手作業で置かれた等）。直接は引けない。
+        let misplaced = PersistedArticleRecord {
+            article_id: "renamed-id".to_string(),
+            fetched_at: "2026-06-01T00:00:00Z".to_string(),
+            published_at_text: "2026-06-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        std::fs::write(
+            context.news_dir.join("202606").join("other-name.md"),
+            super::serialize_article_markdown(&misplaced).unwrap(),
+        )
+        .unwrap();
+
+        let (found, reads) = count_reads(|| context.repository.find_article_record("renamed-id"));
+
+        assert_eq!(found.unwrap().article_id, "renamed-id");
+        // 直接の候補が無いので、全件走査（7件）で従来どおり見つける。
+        assert_eq!(reads, 7);
+    }
+
+    #[test]
+    fn find_article_record_falls_back_when_month_folder_does_not_match() {
+        let context = TestRepositoryContext::new();
+        // 本来 202605 の記事が 202606 フォルダに置かれている（保存先と食い違う）。
+        let article = PersistedArticleRecord {
+            article_id: "wrong-month".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("wrong-month.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+
+        assert!(context
+            .repository
+            .find_article_record_direct("wrong-month")
+            .is_none());
+        // フォールバックの全件走査で、従来どおり読める。
+        let found = context
+            .repository
+            .find_article_record("wrong-month")
+            .unwrap();
+        assert_eq!(found.month_bucket(), "202605");
+    }
+
+    #[test]
+    fn find_article_record_falls_back_when_target_file_is_corrupt() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        let corrupt_path = context.news_dir.join("202603").join("bulk-00002.md");
+        std::fs::write(&corrupt_path, b"---\narticleId: [unterminated\n---\n").unwrap();
+
+        assert!(context
+            .repository
+            .find_article_record_direct("bulk-00002")
+            .is_none());
+        // 全件走査でも破損ファイルはスキップされ、ほかに同じIDは無いので NotFound（従来どおり）。
+        let error = context
+            .repository
+            .find_article_record("bulk-00002")
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        // ほかの記事は直接読める。
+        assert!(context.repository.find_article_record("bulk-00003").is_ok());
+    }
+
+    #[test]
+    fn find_article_record_rejects_unsafe_ids_without_building_paths() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        // ニュースフォルダの外に、ID を細工すれば届きそうな記事ファイルを置く。
+        let outside = PersistedArticleRecord {
+            article_id: "outside".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        std::fs::write(
+            context.root_dir.join("outside.md"),
+            super::serialize_article_markdown(&outside).unwrap(),
+        )
+        .unwrap();
+
+        for unsafe_id in [
+            "../outside",
+            "..\\outside",
+            "202606/../../outside",
+            "..",
+            ".",
+            "",
+            "C:outside",
+            "a.b",
+            "NUL",
+            "com1",
+        ] {
+            assert!(
+                !super::is_direct_lookup_article_id(unsafe_id),
+                "{unsafe_id} は直接参照しない"
+            );
+            assert!(context
+                .repository
+                .find_article_record_direct(unsafe_id)
+                .is_none());
+            let error = context
+                .repository
+                .find_article_record(unsafe_id)
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::NotFound(_)),
+                "{unsafe_id}: {error:?}"
+            );
+        }
+        assert!(super::is_direct_lookup_article_id("article-001_x"));
+        assert!(super::is_direct_lookup_article_id("CONSOLE"));
+    }
+
+    #[test]
+    fn find_article_record_keeps_semantics_for_archived_articles() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["kept-archived", "retired-archived"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        // archived 印の付いた記事は、元Markdownが残っている間は直接読める。
+        let (kept, reads) = count_reads(|| context.repository.find_article_record("kept-archived"));
+        assert!(kept.unwrap().is_archived);
+        assert_eq!(reads, 1);
+
+        // 元Markdownを退避（削除）した記事は ZIP と索引にだけ残り、従来どおり NotFound。
+        context.repository.retire_archived_markdown().unwrap();
+        assert!(!context
+            .news_dir
+            .join("202605")
+            .join("retired-archived.md")
+            .exists());
+        let error = context
+            .repository
+            .find_article_record("retired-archived")
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert!(matches!(
+            context
+                .repository
+                .get_article_detail("retired-archived")
+                .unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        // 復元すると、元の保存先から直接読めるようになる。
+        context
+            .repository
+            .restore_archived_article("retired-archived")
+            .unwrap();
+        let (restored, reads) =
+            count_reads(|| context.repository.find_article_record("retired-archived"));
+        assert_eq!(restored.unwrap().article_id, "retired-archived");
+        assert_eq!(reads, 1);
+    }
+
+    /// 直接検索と全件走査の所要時間を比べる計測用テスト（通常の `cargo test` では動かさない）。
+    /// 実行: `cargo test --release --manifest-path src-tauri/Cargo.toml find_article_record_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn find_article_record_timing() {
+        let context = TestRepositoryContext::new();
+        let count = 1_000;
+        save_many_articles(&context, count);
+        let target = format!("bulk-{:05}", count - 1);
+        // 書いた直後の初回はウイルス対策ソフトの検査などで遅いことがあるため、1回読んでから測る。
+        context
+            .repository
+            .find_article_record_by_scan(&target)
+            .unwrap();
+
+        let rounds = 5u32;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            context
+                .repository
+                .find_article_record_by_scan(&target)
+                .unwrap();
+        }
+        let scan = started.elapsed() / rounds;
+
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            context.repository.find_article_record(&target).unwrap();
+        }
+        let direct = started.elapsed() / rounds;
+
+        println!("N={count}: 全件走査 {scan:?} / 直接検索 {direct:?}");
+        assert!(direct < scan);
     }
 }
