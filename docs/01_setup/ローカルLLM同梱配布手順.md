@@ -12,29 +12,37 @@
 
 | 置き場所（`src-tauri/resources/local_llm/` 配下） | 中身 | 大きさ | git |
 |---|---|---|---|
-| `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`） | 計 43,721,216 B（約 42 MiB） | 追跡しない（`.gitignore`） |
+| `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`）＋ Visual C++ ランタイム 3 個（`vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`。判断台帳 D112。表は同じファイルの `VC_RUNTIME_FILES`） | 計 44,453,280 B（約 42.4 MiB。うち VC++ ランタイム 732,064 B） | 追跡しない（`.gitignore`） |
 | `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（`MODEL_FILE` / `MODEL_SIZE` / `MODEL_SHA256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
-| `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知を含む） | 約 57 KiB | **追跡する** |
+| `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
-合計は約 1.36 GB（1,355,944,193 B ＝ runtime＋モデル＋LICENSES）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
+合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。
+
+### 1.1 Visual C++ ランタイムを同梱する理由と範囲（判断台帳 D112）
+
+- llama.cpp の部品は Visual C++ ランタイムを読み込む（`dumpbin /dependents` で確認。2026-10-13）。`llama-server.exe` は `VCRUNTIME140.dll`、`llama-server-impl.dll` / `llama-common.dll` / `llama.dll` は `MSVCP140.dll` / `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll`、そのほかの `ggml*.dll` / `mtmd.dll` は `MSVCP140.dll` / `VCRUNTIME140.dll`。`libomp.dll` は `KERNEL32` / `PSAPI` だけ。
+- VC++ ランタイムの 3 つ自身が読み込むのも、この 3 つと `api-ms-win-crt-*` と `KERNEL32` だけ。`msvcp140_1` / `msvcp140_2` / `vcruntime140_threads` / `concrt140` などは、どの部品も読み込まないため同梱しない。
+- `api-ms-win-crt-*`（ユニバーサル C ランタイム・UCRT）は Windows 10 以降に標準で入っているため同梱しない。
+- Windows は、実行ファイルと同じフォルダの DLL を先に探す。`runtime/`（`llama-server.exe` の隣）に置くことで、VC++ 再頒布可能パッケージが入っていないパソコンでも起動できる。入っているパソコンでも、`llama-server` は隣に置いた版を使う。
+- 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
 
 `tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_bundle_dir` でここを見る。
 
 ## 2. 同梱物を置く・確かめる
 
-インターネットからは取らない。手元にある同梱物のフォルダ（`runtime/` と `models/` を持つもの）から写す。
+インターネットからは取らない。手元にある同梱物のフォルダ（`runtime/` と `models/` を持つもの）と、Visual Studio の VC++ ランタイムの再頒布用フォルダ（§1.1）から写す。
 
 ```powershell
 # リポジトリの一番上で
-node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ>
-# 例（参照アプリ「すたりお」の作業ツリーがある場合）
-node scripts/local-llm/place-bundle.mjs C:/WS/saiyou_creater/src-tauri/resources/local_llm
+node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ> --vc-crt <VC++ ランタイムのフォルダ>
+# 例（参照アプリ「すたりお」の作業ツリーと Visual Studio 2022 Build Tools がある場合）
+node scripts/local-llm/place-bundle.mjs C:/WS/saiyou_creater/src-tauri/resources/local_llm --vc-crt "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT"
 
 # 置いた後に照合だけをやり直す（インストーラー作成の直前にも自動で走る）
 node scripts/local-llm/check-bundle.mjs
 ```
 
-- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `MODEL_*`）にあるファイルだけを写す。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
+- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `VC_RUNTIME_FILES` / `MODEL_*`）にあるファイルだけを写す。llama.cpp の部品は `<同梱物のフォルダ>/runtime/` から、VC++ ランタイムは `--vc-crt` のフォルダから写す（`--vc-crt` を省くと `<同梱物のフォルダ>/runtime/` を探し、無ければ指定のしかたを示して止める）。別のプロジェクトの同梱物のフォルダへ VC++ ランタイムを写し足す必要はない。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
 - `check-bundle.mjs`: 置いてあるものを同じ表と照合する。`tauri.conf.json` の `build.beforeBundleCommand` に入っているため、`pnpm tauri build` のときはインストーラーを作る直前に必ず走り、欠け・不一致があればバンドルを止める（`tauri dev`・cargo のビルド・テスト・CI では走らない）。
 - 置いたファイル（runtime・モデル）は **コミットしない**。`git status` に出ないことを確かめる（`LICENSES/` は追跡対象）。
 
@@ -67,9 +75,28 @@ pnpm tauri build --bundles nsis
 ### 3.3 作った後に確かめること（未検証・初回は必ず実施）
 
 1. インストーラーの大きさ（約 1.3GB 前後か）。
-2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（VC++ ランタイムの同梱〔D112・§6.2〕が入った後の版で確かめる）。
+2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（手順は §3.4）。
 3. インストール先の `local_llm/LICENSES/` にライセンス本文があるか。
 4. アンインストールで `local_llm/` が消えるか。
+
+### 3.4 VC++ ランタイムが入っていないパソコンで確かめる（判断台帳 D112・未検証）
+
+開発用のパソコンには VC++ 再頒布可能パッケージが入っていることが多く、同梱した DLL が無くても動いてしまう。同梱の効果は、入っていない環境で確かめる。
+
+1. 環境を用意する。次のどちらか（どちらも VC++ 再頒布可能パッケージを入れない）。
+   - Windows サンドボックス（Windows 10/11 Pro 以上。「Windows の機能」で有効にする）。起動のたびに初期状態に戻り、VC++ ランタイムは入っていない。
+   - 新しく入れた Windows の仮想マシン。
+2. 入っていないことを確かめる（PowerShell）。次の結果が `False` であること。
+
+   ```powershell
+   Test-Path "$env:SystemRoot\System32\vcruntime140_1.dll"
+   ```
+
+3. インストーラーを写して入れ、ゆうこを起動する。設定の AI を「ローカル」にして接続テストを押し、「利用できます」になるか。要約などを 1 回生成できるか。
+4. 比べる場合: インストール先の `local_llm/runtime/` から `vcruntime140_1.dll` を一時的に別の場所へ移すと、照合で「見つからない」（`LocalAiFailure::Missing`）の固定の文言になり、`llama-server` を起動しないことを確かめられる（確かめたら元へ戻す）。
+5. 結果（日付・Windows の版・環境・成否）を本書へ追記する。
+
+インストーラーを作らずに確かめたい場合は、`src-tauri/resources/local_llm/runtime/` を丸ごと上の環境へ写し、PowerShell で `.\llama-server.exe --version` が版を表示して終わるかを見る（DLL が足りなければ「コンピューターに ～.dll がないため」の画面が出る）。
 
 ## 4. MSI の 2GB 制限と配布形式（判断台帳 D111）
 
@@ -105,6 +132,7 @@ pnpm tauri build --bundles nsis
 | `models/stario-qwen3.5-2b-q4_k_m.gguf`（Qwen3.5-2B） | `Qwen3.5-Apache-2.0.txt`（改変の告知は `README.txt`） |
 | `llama-server.exe` / `llama-server-impl.dll` / `llama-common.dll` / `llama.dll` / `mtmd.dll` / `ggml.dll` / `ggml-base.dll` / `ggml-cpu-*.dll`（CPU の種類ごとの 14 個） | `llama.cpp-MIT.txt`（ggml を含む） |
 | `libomp.dll` | `LLVM-OpenMP-Apache-2.0-with-LLVM-exception.txt` |
+| `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`（Microsoft Visual C++ ランタイム。D112） | 本文ファイルは置かない。`README.txt` §3 に「Visual Studio のライセンス条項（再頒布可能コードの条件）に従って再頒布する」旨を書いている（VS の再頒布用フォルダにライセンス本文のファイルは無い。2026-10-13 確認） |
 | 実行ファイルへ組み込まれた部品: cpp-httplib / nlohmann-json / BoringSSL / stb_image / miniaudio / subprocess.h | 各 `*.txt`（`README.txt` §2 に一覧） |
 
 - 実物の DLL の中の文字列からも、httplib・nlohmann・BoringSSL・subprocess の組み込みを確認した（llguidance は「有効でない」旨の文言だけで、組み込まれていないと見られる）。
@@ -149,7 +177,7 @@ pnpm tauri build --bundles nsis
 - 起動済みなら、要約は 17〜20 秒、用語解説は 12〜24 秒。記事 1 件の自動要約（4 生成）は 70〜90 秒。
 - **メモリに余裕のない 16GB 機では、生成が 180 秒の上限で打ち切られることがある**（6 回中 2 回）。そのときは llama-server のワーキングセットが OS に削られ、CPU をほとんど使えなくなっていた（ページング待ち）。上限時間とスレッド数は、ほかの作業を止めた静かな状態で測り直してから決める（判断台帳 D113・後続タスク・未実施）。それまで 180 秒・`-t 4`（論理コア数の半分・上限 4）は暫定のまま。
 - 照合は debug ビルドでは 30 秒前後かかる。配布版での実測は未実施。
-- **`llama-server` と DLL は Visual C++ ランタイム（`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll`）を必要とするが、同梱していない。** 再頒布可能パッケージが入っていないパソコンでは起動できない（アプリは「起動できません」系の失敗になる）見込み（未検証）。**決定（判断台帳 D112・2026-10-13）**: `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll` を `runtime/`（`llama-server.exe` と同じ場所）へ同梱し、照合の表（`RUNTIME_FILES`）にも加える。後続タスクで行う予定で、本書の時点では未実施（同梱物・表・`place-bundle.mjs` の入手元・§1 の大きさとファイル数・§5 のライセンス表への反映もその作業で行う）。
+- **`llama-server` と DLL は Visual C++ ランタイム（`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll`）を必要とするが、同梱していない。** 再頒布可能パッケージが入っていないパソコンでは起動できない（アプリは「起動できません」系の失敗になる）見込み（未検証）。**決定（判断台帳 D112・2026-10-13）**: `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll` を `runtime/`（`llama-server.exe` と同じ場所）へ同梱し、照合の表にも加える。**対応済み（2026-10-13）**: 照合の表 `VC_RUNTIME_FILES`・`place-bundle.mjs --vc-crt`・§1 の大きさとファイル数・§1.1 の範囲・§5 のライセンス表・`LICENSES/README.txt` §3 に反映した。上の実測は同梱前の値（VC++ 再頒布可能パッケージが入ったパソコン）。入っていないパソコンでの確認（§3.4）は未実施。
 
 ### 6.3 計測方法（再計測するとき）
 

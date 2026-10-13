@@ -1,5 +1,6 @@
 // 同梱ローカルLLMの「何を置くか・中身は正しいか」の共通部品（place-bundle.mjs / check-bundle.mjs が使う）。
-// 値の持ち主は Rust の src-tauri/src/infra/local_llm_runtime.rs（MODEL_* と RUNTIME_FILES）で、ここはそれを読むだけ。
+// 値の持ち主は Rust の src-tauri/src/infra/local_llm_runtime.rs（MODEL_* と RUNTIME_FILES / VC_RUNTIME_FILES）で、
+// ここはそれを読むだけ。
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -31,17 +32,30 @@ export function readBundleManifest(rustSource) {
     ),
     sha256: pick("MODEL_SHA256", /pub const MODEL_SHA256: &str =\s*"([0-9a-f]{64})";/),
   };
-  const block = pick(
+  // (ファイル名, SHA-256) の表を読む。source は写し元の区別
+  // （llama: 同梱物のフォルダの runtime/、vc: VC++ ランタイムのフォルダ）。
+  const table = (name, pattern, source) =>
+    [...pick(name, pattern).matchAll(/\(\s*"([^"]+)",\s*"([0-9a-f]{64})",?\s*\)/g)].map(
+      ([, file, sha256]) => ({ name: file, sha256, source })
+    );
+  const llama = table(
     "RUNTIME_FILES",
-    /pub const RUNTIME_FILES: &\[\(&str, &str\)\] = &\[([\s\S]*?)\n\];/
+    /pub const RUNTIME_FILES: &\[\(&str, &str\)\] = &\[([\s\S]*?)\n\];/,
+    "llama"
   );
-  const runtime = [...block.matchAll(/\(\s*"([^"]+)",\s*"([0-9a-f]{64})",?\s*\)/g)].map(
-    ([, name, sha256]) => ({ name, sha256 })
-  );
-  if (!runtime.some((entry) => entry.name === "llama-server.exe")) {
+  if (!llama.some((entry) => entry.name === "llama-server.exe")) {
     throw new Error("RUNTIME_FILES に llama-server.exe がありません");
   }
-  return { model, runtime };
+  // VC++ ランタイム（判断台帳 D112）。llama-server の隣の runtime/ に一緒に置く。
+  const vc = table(
+    "VC_RUNTIME_FILES",
+    /pub const VC_RUNTIME_FILES: &\[\(&str, &str\)\] = &\[([\s\S]*?)\n\];/,
+    "vc"
+  );
+  if (vc.length === 0) {
+    throw new Error("VC_RUNTIME_FILES が空です");
+  }
+  return { model, runtime: [...llama, ...vc] };
 }
 
 export function loadBundleManifest() {
@@ -60,19 +74,40 @@ export function sha256File(path) {
 }
 
 /**
+ * 実行の部品（{ path, label, sha256 } の一覧）がそれぞれ有り、SHA-256 が表どおりかを確かめ、問題の一覧を返す。
+ * 写し元（同梱物の runtime/ と VC++ ランタイムのフォルダ）と置き先の両方の照合に使う。
+ */
+export async function verifyRuntimeFiles(entries) {
+  const problems = [];
+  for (const { path, label, sha256 } of entries) {
+    if (!existsSync(path)) {
+      problems.push(`実行の部品がありません: ${label}`);
+    } else if ((await sha256File(path)) !== sha256) {
+      problems.push(`実行の部品の SHA-256 が合いません: ${label}`);
+    }
+  }
+  return problems;
+}
+
+/**
  * `<dir>/runtime/*` と `<dir>/models/<model>` が表どおりか確かめ、問題の一覧を返す（空なら合格）。
  * 大きさが違うモデルは SHA-256 を読まずに不合格にする。
  */
 export async function verifyBundleDir(dir, manifest) {
+  const problems = await verifyRuntimeFiles(
+    manifest.runtime.map((entry) => ({
+      ...entry,
+      path: join(dir, "runtime", entry.name),
+      label: `runtime/${entry.name}`,
+    }))
+  );
+  problems.push(...(await verifyModelFile(dir, manifest)));
+  return problems;
+}
+
+/** `<dir>/models/<model>` が表どおりか。大きさが違えば SHA-256 を読まずに不合格にする。 */
+export async function verifyModelFile(dir, manifest) {
   const problems = [];
-  for (const { name, sha256 } of manifest.runtime) {
-    const path = join(dir, "runtime", name);
-    if (!existsSync(path)) {
-      problems.push(`実行の部品がありません: runtime/${name}`);
-    } else if ((await sha256File(path)) !== sha256) {
-      problems.push(`実行の部品の SHA-256 が合いません: runtime/${name}`);
-    }
-  }
   const modelPath = join(dir, "models", manifest.model.file);
   if (!existsSync(modelPath)) {
     problems.push(`モデルがありません: models/${manifest.model.file}`);
