@@ -13,6 +13,9 @@
 //! （summary_service の `validate_summary_output`）はこの後に従来どおり行う。
 //! 何でも消すと説明そのものを壊すため、誤って消しても意味が変わりにくい形だけに絞る
 //! （例: 「中小企業（従業員300人以下）」のような説明の括弧は残す）。
+//!
+//! 重いニュース（判断台帳 D122。`domain::speech_tone`）では、上に加えて `calm_yuuko_speech` で
+//! 明るさの飾り（「♪」「★」を含む絵文字・記号、「！」、語尾を伸ばす「～」）を取り除く。
 
 /// 中国語の文末助詞・感嘆詞のうち、日本語の文にはまず現れない字。
 /// 「的」「了」などは日本語でも使うため含めない。中国語の文全体を見分けるのは難しいので、
@@ -162,6 +165,108 @@ pub(crate) fn clean_yuuko_speech(text: &str) -> String {
     let joined = lines.join("\n");
     let without_greeting = strip_leading_greetings(&joined);
     strip_trailing_farewells(without_greeting)
+}
+
+/// 重いニュースの再説明・一言（`SpeechTone::Calm`・D122）を落ち着いた形に整える。`clean_yuuko_speech` の後に使う。
+///
+/// - 絵文字・飾りの記号を広く取り除く（`is_calm_decoration`。ふだんは残す「♪」「★」「☆」「♡」も消す）。
+/// - かぎかっこ「」の外の「！」「!」の連なりを、「？」を含めば「？」に、含まなければ「。」にする
+///   （引用された発言の「！」と、「Yahoo!」のような英字の直後の「!」は残す）。
+/// - 仮名の直後で文の終わりに付く伸ばし記号（「だよ～。」の「～」）を取り除く（「9時〜17時」は残す）。
+/// - 置き換えで続いた「。。」を1つにする。
+///
+/// 文字を消す・「。」へ置き換えるだけで、HTML・制御文字・見出し・区切り行を作らない（続く検証はそのまま効く）。
+pub(crate) fn calm_yuuko_speech(text: &str) -> String {
+    let chars = text
+        .chars()
+        .filter(|&c| !is_emoji(c) && !is_calm_decoration(c))
+        .collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    let mut quote_depth = 0usize;
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        match c {
+            '「' => quote_depth += 1,
+            '」' => quote_depth = quote_depth.saturating_sub(1),
+            _ => {}
+        }
+        if quote_depth == 0 && matches!(c, '！' | '!') {
+            let end = chars[index..]
+                .iter()
+                .position(|d| !matches!(d, '！' | '!' | '？' | '?'))
+                .map_or(chars.len(), |offset| index + offset);
+            let run = &chars[index..end];
+            let after_ascii_word = out
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_ascii_alphanumeric());
+            if after_ascii_word && run.iter().all(|&d| d == '!') {
+                out.extend(run);
+            } else if run.iter().any(|d| matches!(d, '？' | '?')) {
+                out.push('？');
+            } else if !out.ends_with('。') {
+                out.push('。');
+            }
+            index = end;
+            continue;
+        }
+        if matches!(c, '～' | '〜') && quote_depth == 0 && ends_with_kana(&out) {
+            let end = chars[index..]
+                .iter()
+                .position(|d| !matches!(d, '～' | '〜'))
+                .map_or(chars.len(), |offset| index + offset);
+            let at_sentence_end = chars.get(end).is_none_or(|next| {
+                matches!(
+                    next,
+                    '。' | '、' | '！' | '!' | '？' | '?' | '\n' | ' ' | '　'
+                )
+            });
+            if at_sentence_end {
+                index = end;
+                continue;
+            }
+        }
+        if c == '。' && out.ends_with('。') {
+            index += 1;
+            continue;
+        }
+        out.push(c);
+        index += 1;
+    }
+    // 行頭に残った「。」（「！」だけの行など）は詰める。中身が無くなれば空になり、検証の Empty で拒否される。
+    out.lines()
+        .map(|line| line.trim().trim_start_matches('。').trim_start())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// ここまでに書いた部分が平仮名・片仮名で終わっているか（語尾の伸ばし記号の判定用）。
+fn ends_with_kana(written: &str) -> bool {
+    written
+        .chars()
+        .last()
+        .is_some_and(|last| matches!(last, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}'))
+}
+
+/// 重いニュースでだけ取り除く飾りの記号。`is_emoji` に加えて、その他の記号（U+2600〜26FF: ☀★☆♪♡♥⚠ など）、
+/// 装飾記号（U+2700〜2775。丸数字 ❶〜 と矢印 ➔〜 は内容の記号なので残す）、その他の記号と矢印の一部
+/// （U+2B00〜2BFF: ⭐⭕ など）、絵文字の周辺（U+1F000〜1F2FF・U+1FB00〜1FBFF）、囲み数字の飾り（U+20E3）、
+/// 国旗などのタグ文字（U+E0020〜E007F）、波線（〰〽）。ふだんの口調では「♪」「★」を残す（`is_emoji`）。
+fn is_calm_decoration(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2600}'..='\u{26FF}'
+            | '\u{2700}'..='\u{2775}'
+            | '\u{2B00}'..='\u{2BFF}'
+            | '\u{1F000}'..='\u{1F2FF}'
+            | '\u{1FB00}'..='\u{1FBFF}'
+            | '\u{20E3}'
+            | '\u{E0020}'..='\u{E007F}'
+            | '〰'
+            | '〽'
+    )
 }
 
 /// 括弧（全角 `（）`・半角 `()`）のト書きを取り除く。入れ子の括弧は扱わない（そのまま残す）。
@@ -597,6 +702,67 @@ mod tests {
         ] {
             assert_eq!(clean_yuuko_speech(noisy), expected);
         }
+    }
+
+    #[test]
+    fn calm_speech_removes_all_emoji_and_decorative_symbols() {
+        // ふだんは残す「♪」「★」「☆」「♡」も、重いニュースでは消す（D122）。
+        assert_eq!(
+            calm_yuuko_speech("みんなで気をつけようね♪✨ 安全第一だよ★☆♡💦"),
+            "みんなで気をつけようね 安全第一だよ"
+        );
+        assert_eq!(
+            calm_yuuko_speech("⚠避難の情報を確かめてね☀"),
+            "避難の情報を確かめてね"
+        );
+        // 丸数字・矢印のような内容の記号は残す。
+        assert_eq!(
+            calm_yuuko_speech("❶ 避難所 ➔ 2か所に開設されたよ。"),
+            "❶ 避難所 ➔ 2か所に開設されたよ。"
+        );
+    }
+
+    #[test]
+    fn calm_speech_turns_exclamations_into_periods() {
+        assert_eq!(
+            calm_yuuko_speech("2人が亡くなったんだって！！心が痛むね！"),
+            "2人が亡くなったんだって。心が痛むね。"
+        );
+        assert_eq!(
+            calm_yuuko_speech("どうしてこんなことに！？"),
+            "どうしてこんなことに？"
+        );
+        assert_eq!(calm_yuuko_speech("気をつけてね!!。"), "気をつけてね。");
+        // 引用された発言の「！」と、英字の直後の「!」（サービス名）は残す。
+        assert_eq!(
+            calm_yuuko_speech("住民は「逃げろ！」と叫んだそうだよ！"),
+            "住民は「逃げろ！」と叫んだそうだよ。"
+        );
+        assert_eq!(
+            calm_yuuko_speech("Yahoo!ニュースでも伝えられたよ。"),
+            "Yahoo!ニュースでも伝えられたよ。"
+        );
+    }
+
+    #[test]
+    fn calm_speech_drops_drawn_out_endings_but_keeps_ranges() {
+        assert_eq!(
+            calm_yuuko_speech("続報を待とうね～。心配だよ〜〜"),
+            "続報を待とうね。心配だよ"
+        );
+        let range = "受付は9時〜17時だよ。期間は1日～3日だね。";
+        assert_eq!(calm_yuuko_speech(range), range);
+    }
+
+    #[test]
+    fn calm_speech_keeps_plain_calm_text_and_drops_empty_lines() {
+        let calm = "地震で多くの建物が被害を受けたんだね。まずは正確な情報を確かめようね。";
+        assert_eq!(calm_yuuko_speech(calm), calm);
+        assert_eq!(
+            calm_yuuko_speech("💐\n心からお悔やみを伝えたいね。"),
+            "心からお悔やみを伝えたいね。"
+        );
+        assert_eq!(calm_yuuko_speech("！！"), "");
     }
 
     #[test]
