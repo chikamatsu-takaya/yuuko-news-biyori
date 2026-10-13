@@ -1,6 +1,10 @@
-//! Feed client for the news ingestion pipeline. Supports RSS 2.0 and Atom 1.0.
-//! Detects the feed format automatically and routes RSS 2.0 and Atom
+//! Feed client for the news ingestion pipeline. Supports RSS 2.0, RSS 1.0 (RDF) and Atom 1.0.
+//! Detects the feed format automatically and routes every format
 //! through the same fetch, validation, and parsing pipeline.
+//! - RSS 1.0（RDF, 判断台帳 D125）は朝日・毎日・時事・ナショジオ日本版・Impress などが使う。
+//!   ルート `rdf:RDF` が RSS 1.0 / RDF 構文の名前空間を宣言しているときだけ受け付け、`rss` クレートで
+//!   解析する（`<item>` が `<channel>` の兄弟でも子でも読める）。公開日時は `dc:date`（W3CDTF）を使う。
+//!
 //! Security boundary:
 //! - feed URLs must pass the slice 1 allowlist and scheme guard
 //! - resolved IPs must stay on public addresses before connecting
@@ -267,25 +271,46 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeedFormat {
     Rss,
+    /// RSS 1.0（RDF）。解析は RSS 2.0 と同じ `rss` クレートで行い、公開日時だけ `dc:date` を使う。
+    Rdf,
     Atom,
 }
 
+/// RSS 1.0 の名前空間。RDF 文書のうち RSS 1.0 フィードだけを受け付けるために使う。
+const RSS10_NAMESPACE: &str = "http://purl.org/rss/1.0/";
+/// RDF 構文の名前空間。`rdf:` 接頭辞の宣言があることも確認する。
+const RDF_SYNTAX_NAMESPACE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
 /// Detects the feed format from the root element.
-/// Unsupported formats such as RSS 1.0 (RDF) return `None`.
+/// 複数の候補タグが見つかった場合は、文書中で最も手前にあるものをルートとみなす。
+/// `rdf:RDF` は開始タグで RSS 1.0 / RDF 構文の名前空間を宣言している場合だけ RSS 1.0 とする
+/// （RSS ではない RDF 文書を記事候補にしない）。未対応・判別不能は `None`。
 fn detect_feed_format(feed_bytes: &[u8]) -> Option<FeedFormat> {
     let text = String::from_utf8_lossy(feed_bytes);
-    let rss_at = find_root_tag(&text, "rss");
-    let feed_at = find_root_tag(&text, "feed");
-    match (rss_at, feed_at) {
-        (Some(rss_pos), Some(feed_pos)) => Some(if rss_pos <= feed_pos {
-            FeedFormat::Rss
-        } else {
-            FeedFormat::Atom
-        }),
-        (Some(_), None) => Some(FeedFormat::Rss),
-        (None, Some(_)) => Some(FeedFormat::Atom),
-        (None, None) => None,
+    let candidates = [
+        (find_root_tag(&text, "rss"), FeedFormat::Rss),
+        (find_root_tag(&text, "rdf:RDF"), FeedFormat::Rdf),
+        (find_root_tag(&text, "feed"), FeedFormat::Atom),
+    ];
+    let (root_at, format) = candidates
+        .into_iter()
+        .filter_map(|(position, format)| position.map(|position| (position, format)))
+        .min_by_key(|(position, _)| *position)?;
+
+    if format == FeedFormat::Rdf && !declares_rss10_namespaces(&text[root_at..]) {
+        return None;
     }
+    Some(format)
+}
+
+/// `rdf:RDF` の開始タグ（最初の `>` まで）が RSS 1.0 と RDF 構文の名前空間を宣言しているか。
+/// RSS 1.0 名前空間は既定（`xmlns=`）でも接頭辞付き（`xmlns:rss=` など）でもよい。
+fn declares_rss10_namespaces(root_onwards: &str) -> bool {
+    let Some(tag_end) = root_onwards.find('>') else {
+        return false;
+    };
+    let root_tag = &root_onwards[..tag_end];
+    root_tag.contains(RSS10_NAMESPACE) && root_tag.contains(RDF_SYNTAX_NAMESPACE)
 }
 
 /// Returns the position of the opening `<tag` token when it is followed by a
@@ -307,17 +332,20 @@ fn find_root_tag(text: &str, tag: &str) -> Option<usize> {
 }
 
 /// Parses a feed payload into sanitized article candidates.
-/// Supports both RSS 2.0 and Atom.
+/// Supports RSS 2.0, RSS 1.0 (RDF) and Atom.
 fn parse_feed_items(
     feed_bytes: &[u8],
     feed_url: &Url,
     allowlist: &NetworkAllowlist,
 ) -> Result<Vec<RssItem>, AppError> {
     match detect_feed_format(feed_bytes) {
-        Some(FeedFormat::Rss) => parse_rss_items(feed_bytes, feed_url, allowlist),
+        Some(format @ (FeedFormat::Rss | FeedFormat::Rdf)) => {
+            parse_rss_items(feed_bytes, feed_url, allowlist, format)
+        }
         Some(FeedFormat::Atom) => parse_atom_items(feed_bytes, feed_url, allowlist),
         None => Err(AppError::Parse(
-            "unsupported or unrecognized feed format (expected RSS 2.0 or Atom)".to_string(),
+            "unsupported or unrecognized feed format (expected RSS 2.0, RSS 1.0 (RDF) or Atom)"
+                .to_string(),
         )),
     }
 }
@@ -426,13 +454,24 @@ fn atom_entry_link(entry: &AtomEntry) -> Option<&str> {
         })
 }
 
+/// RSS 2.0 と RSS 1.0（RDF）を解析する。`rss` クレートの `Channel::read_from` はルート
+/// `rss` / `rdf:RDF` の両方を受け付け、RSS 1.0 で `<channel>` の兄弟に置かれた `<item>` も
+/// チャンネルの記事として集める（`<channel>` の子に置くフィードもそのまま読める）。
+/// 以降の URL 検証・サニタイズ・重複排除は形式によらず共通。
 fn parse_rss_items(
     feed_bytes: &[u8],
     feed_url: &Url,
     allowlist: &NetworkAllowlist,
+    format: FeedFormat,
 ) -> Result<Vec<RssItem>, AppError> {
-    let channel = Channel::read_from(Cursor::new(feed_bytes))
-        .map_err(|error| AppError::Parse(format!("failed to parse RSS feed: {error}")))?;
+    let channel = Channel::read_from(Cursor::new(feed_bytes)).map_err(|error| {
+        let label = if format == FeedFormat::Rdf {
+            "RSS 1.0 (RDF)"
+        } else {
+            "RSS"
+        };
+        AppError::Parse(format!("failed to parse {label} feed: {error}"))
+    })?;
 
     let source_name = sanitize_plain_text(channel.title())
         .or_else(|| feed_url.host_str().and_then(sanitize_plain_text))
@@ -442,7 +481,7 @@ fn parse_rss_items(
     let mut seen_urls = HashSet::new();
 
     for item in channel.items() {
-        if let Some(candidate) = map_feed_item(item, &source_name, allowlist)? {
+        if let Some(candidate) = map_feed_item(item, &source_name, allowlist, format)? {
             if seen_urls.insert(candidate.article_url.clone()) {
                 results.push(candidate);
             }
@@ -456,6 +495,7 @@ fn map_feed_item(
     item: &Item,
     source_name: &str,
     allowlist: &NetworkAllowlist,
+    format: FeedFormat,
 ) -> Result<Option<RssItem>, AppError> {
     let raw_article_url = item
         .link()
@@ -477,7 +517,15 @@ fn map_feed_item(
         .content()
         .or_else(|| item.description())
         .and_then(sanitize_summary);
-    let published_at = item.pub_date().and_then(sanitize_plain_text);
+    // RSS 2.0 は従来どおり pubDate だけを使う（挙動を変えない）。
+    // RSS 1.0 は通常 pubDate を持たないため dc:date を使い、UTC の ISO 8601 へ正規化する。
+    let published_at = match format {
+        FeedFormat::Rdf => item
+            .pub_date()
+            .and_then(sanitize_plain_text)
+            .or_else(|| rdf_item_date(item)),
+        _ => item.pub_date().and_then(sanitize_plain_text),
+    };
 
     Ok(Some(RssItem {
         title,
@@ -486,6 +534,48 @@ fn map_feed_item(
         source_name: source_name.to_string(),
         published_at,
     }))
+}
+
+/// RSS 1.0 の記事の `dc:date` を取り出す。
+/// `rss` クレートは Dublin Core の名前空間 URI が完全一致するときだけ `dublin_core_ext` に入れるため、
+/// URI の表記ゆれ（末尾スラッシュ違いなど）で `dc` 接頭辞の拡張に残った場合も拾う。
+fn rdf_item_date(item: &Item) -> Option<String> {
+    let raw = item
+        .dublin_core_ext()
+        .and_then(|dc| dc.dates().first().map(String::as_str))
+        .or_else(|| {
+            item.extensions()
+                .get("dc")
+                .and_then(|elements| elements.get("date"))
+                .and_then(|values| values.first())
+                .and_then(|extension| extension.value())
+        })?;
+    let sanitized = sanitize_plain_text(raw)?;
+    // 解釈できない値は加工せずに渡し、news_service::normalize_published_at の取得時刻フォールバックに任せる。
+    Some(normalize_w3cdtf(&sanitized).unwrap_or(sanitized))
+}
+
+/// `dc:date`（W3CDTF = ISO 8601 の部分集合）を UTC の `YYYY-MM-DDTHH:MM:SSZ` へ正規化する。
+/// RFC3339 に加え、W3CDTF で許される秒なし（`2026-10-13T09:30+09:00`）も受け付ける。
+/// 日付だけ（`2026-10-13`）など時差の分からない値は推測せず `None` を返す。
+fn normalize_w3cdtf(value: &str) -> Option<String> {
+    let to_utc = |datetime: chrono::DateTime<chrono::FixedOffset>| {
+        datetime
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(to_utc(datetime));
+    }
+    // %:z は `Z` を受け付けないため、末尾の `Z` は +00:00 として読む。
+    let with_offset = match value.strip_suffix(['Z', 'z']) {
+        Some(head) => format!("{head}+00:00"),
+        None => value.to_string(),
+    };
+    chrono::DateTime::parse_from_str(&with_offset, "%Y-%m-%dT%H:%M%:z")
+        .ok()
+        .map(to_utc)
 }
 
 fn guid_permalink(guid: Option<&Guid>) -> Option<&str> {
@@ -939,5 +1029,426 @@ mod tests {
             item.article_url != "https://rss.example.com/entries/self-only.xml"
                 && item.article_url != "https://news.example.com/articles/self-only-id"
         }));
+    }
+
+    // ---- RSS 1.0（RDF, D125）----
+    // 以下のフィクスチャは日本の報道系 RDF フィードの典型構造を模した合成データ（実フィードは取得しない）。
+
+    fn rdf_allowlist() -> NetworkAllowlist {
+        NetworkAllowlist {
+            allowed_rss_domains: vec!["rss.example.com".to_string()],
+            allowed_article_domains: vec![
+                "news.example.com".to_string(),
+                "watch.example.com".to_string(),
+            ],
+            ..NetworkAllowlist::default()
+        }
+    }
+
+    /// 朝日新聞型: 既定名前空間が RSS 1.0、`<item>` は `<channel>` の兄弟、`dc:date` は秒付きの +09:00。
+    const ASAHI_LIKE_RDF: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xml:lang="ja">
+  <channel rdf:about="https://rss.example.com/headlines/newsheadlines.rdf">
+    <title> 例示新聞 ニュース速報 </title>
+    <link>https://news.example.com/</link>
+    <description>例示新聞の速報ニュース</description>
+    <dc:language>ja</dc:language>
+    <items>
+      <rdf:Seq>
+        <rdf:li rdf:resource="https://news.example.com/articles/A001.html"/>
+        <rdf:li rdf:resource="https://news.example.com/articles/A002.html"/>
+        <rdf:li rdf:resource="https://evil.example.com/articles/A003.html"/>
+      </rdf:Seq>
+    </items>
+  </channel>
+  <item rdf:about="https://news.example.com/articles/A001.html">
+    <title>首相、経済対策を指示</title>
+    <link>https://news.example.com/articles/A001.html</link>
+    <dc:subject>政治</dc:subject>
+    <dc:date>2026-10-13T09:30:15+09:00</dc:date>
+  </item>
+  <item rdf:about="https://news.example.com/articles/A002.html">
+    <title>  台風  が接近
+      交通に影響 </title>
+    <link>https://news.example.com/articles/A002.html</link>
+    <description>&lt;p&gt;各地で&lt;b&gt;運休&lt;/b&gt;が相次ぐ。&lt;/p&gt;</description>
+    <dc:date>2026-10-13T08:05+09:00</dc:date>
+  </item>
+  <item rdf:about="https://evil.example.com/articles/A003.html">
+    <title>許可リスト外</title>
+    <link>https://evil.example.com/articles/A003.html</link>
+    <dc:date>2026-10-13T08:00:00+09:00</dc:date>
+  </item>
+</rdf:RDF>"#;
+
+    /// Impress 型: `content:encoded` と多数の拡張名前空間（dc / content / sy / admin / hatena）を持つ。
+    const IMPRESS_LIKE_RDF: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF
+  xmlns="http://purl.org/rss/1.0/"
+  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+  xmlns:dc="http://purl.org/dc/elements/1.1/"
+  xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+  xmlns:admin="http://webns.net/mvcb/"
+  xmlns:hatena="http://www.hatena.ne.jp/info/xmlns#">
+  <channel rdf:about="https://rss.example.com/watch/index.rdf">
+    <title>例示 Watch</title>
+    <link>https://watch.example.com/</link>
+    <description>IT 総合ニュース</description>
+    <dc:date>2026-10-13T12:00:00+09:00</dc:date>
+    <sy:updatePeriod>hourly</sy:updatePeriod>
+    <sy:updateFrequency>1</sy:updateFrequency>
+    <admin:generatorAgent rdf:resource="https://watch.example.com/generator"/>
+    <items>
+      <rdf:Seq>
+        <rdf:li rdf:resource="https://watch.example.com/docs/news/2001.html"/>
+        <rdf:li rdf:resource="https://watch.example.com/docs/news/2002.html"/>
+      </rdf:Seq>
+    </items>
+  </channel>
+  <item rdf:about="https://watch.example.com/docs/news/2001.html">
+    <title>新型ノート PC が登場</title>
+    <link>https://watch.example.com/docs/news/2001.html?ref=rss</link>
+    <description>短い説明</description>
+    <content:encoded><![CDATA[<p>新型<strong>ノート PC</strong>が発表された。<script>alert(1)</script></p>]]></content:encoded>
+    <dc:creator>例示 太郎</dc:creator>
+    <dc:subject>PC</dc:subject>
+    <dc:date>2026-10-13T11:45:00+09:00</dc:date>
+    <hatena:bookmarkcount>3</hatena:bookmarkcount>
+  </item>
+  <item rdf:about="https://watch.example.com/docs/news/2002.html">
+    <title>同じ記事の重複</title>
+    <link>https://watch.example.com/docs/news/2001.html?ref=rss</link>
+    <dc:date>2026-10-13T11:00:00+09:00</dc:date>
+  </item>
+</rdf:RDF>"#;
+
+    #[test]
+    fn detects_rss10_rdf_format() {
+        assert_eq!(
+            detect_feed_format(ASAHI_LIKE_RDF.as_bytes()),
+            Some(FeedFormat::Rdf)
+        );
+        assert_eq!(
+            detect_feed_format(IMPRESS_LIKE_RDF.as_bytes()),
+            Some(FeedFormat::Rdf)
+        );
+    }
+
+    #[test]
+    fn rejects_rdf_document_without_rss10_namespace() {
+        // RSS 1.0 名前空間を宣言しない RDF 文書（RSS ではない RDF）は未対応形式として扱う。
+        let feed = br#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:foaf="http://xmlns.com/foaf/0.1/">
+  <foaf:Person rdf:about="https://news.example.com/people/1"><foaf:name>x</foaf:name></foaf:Person>
+</rdf:RDF>"#;
+        assert_eq!(detect_feed_format(feed), None);
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let error = parse_feed_items(feed, &feed_url, &rdf_allowlist())
+            .expect_err("non-RSS RDF must be rejected");
+        assert!(matches!(error, AppError::Parse(_)));
+    }
+
+    #[test]
+    fn parses_asahi_like_rdf_with_items_as_channel_siblings() {
+        let feed_url = Url::parse("https://rss.example.com/headlines/newsheadlines.rdf").unwrap();
+        let items = parse_feed_items(ASAHI_LIKE_RDF.as_bytes(), &feed_url, &rdf_allowlist())
+            .expect("RSS 1.0 feed should parse");
+
+        // 許可リスト外の記事は落ち、並び順は保たれる。
+        assert_eq!(
+            items,
+            vec![
+                RssItem {
+                    title: "首相、経済対策を指示".to_string(),
+                    article_url: "https://news.example.com/articles/A001.html".to_string(),
+                    summary: None,
+                    source_name: "例示新聞 ニュース速報".to_string(),
+                    published_at: Some("2026-10-13T00:30:15Z".to_string()),
+                },
+                RssItem {
+                    title: "台風 が接近 交通に影響".to_string(),
+                    article_url: "https://news.example.com/articles/A002.html".to_string(),
+                    summary: Some("各地で運休が相次ぐ。".to_string()),
+                    source_name: "例示新聞 ニュース速報".to_string(),
+                    // W3CDTF の秒なし表記も UTC へ正規化する。
+                    published_at: Some("2026-10-12T23:05:00Z".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_impress_like_rdf_with_content_encoded_and_mixed_namespaces() {
+        let feed_url = Url::parse("https://rss.example.com/watch/index.rdf").unwrap();
+        let items = parse_feed_items(IMPRESS_LIKE_RDF.as_bytes(), &feed_url, &rdf_allowlist())
+            .expect("RSS 1.0 feed with extensions should parse");
+
+        // 同一 URL の 2 件目は重複として落ちる。
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.title, "新型ノート PC が登場");
+        assert_eq!(
+            item.article_url,
+            "https://watch.example.com/docs/news/2001.html?ref=rss"
+        );
+        // content:encoded を description より優先し、タグは除去する。
+        assert_eq!(
+            item.summary.as_deref(),
+            Some("新型ノート PCが発表された。alert(1)")
+        );
+        assert!(!item.summary.as_deref().unwrap().contains('<'));
+        assert_eq!(item.source_name, "例示 Watch");
+        assert_eq!(item.published_at.as_deref(), Some("2026-10-13T02:45:00Z"));
+    }
+
+    #[test]
+    fn parses_rdf_with_items_inside_channel() {
+        // 一部のフィードは RSS 1.0 でも <item> を <channel> の子に置く。
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel rdf:about="https://rss.example.com/index.rdf">
+    <title>Inner Items</title>
+    <link>https://news.example.com/</link>
+    <description>items inside channel</description>
+    <item rdf:about="https://news.example.com/articles/inner-1">
+      <title>Inner 1</title>
+      <link>https://news.example.com/articles/inner-1</link>
+      <dc:date>2026-10-13T10:00:00Z</dc:date>
+    </item>
+  </channel>
+  <item rdf:about="https://news.example.com/articles/outer-1">
+    <title>Outer 1</title>
+    <link>https://news.example.com/articles/outer-1</link>
+  </item>
+</rdf:RDF>"#,
+            &feed_url,
+            &rdf_allowlist(),
+        )
+        .expect("RDF with items inside channel should parse");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].article_url,
+            "https://news.example.com/articles/inner-1"
+        );
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("2026-10-13T10:00:00Z")
+        );
+        assert_eq!(
+            items[1].article_url,
+            "https://news.example.com/articles/outer-1"
+        );
+        // dc:date がない記事は None（news_service 側で取得時刻へフォールバックする）。
+        assert_eq!(items[1].published_at, None);
+    }
+
+    #[test]
+    fn parses_rdf_with_prefixed_rss_namespace_and_nonstandard_dc_uri() {
+        // RSS 1.0 名前空間を既定でなく接頭辞で宣言し、Dublin Core の URI に表記ゆれがあるケース。
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:rss="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1">
+  <channel rdf:about="https://rss.example.com/index.rdf">
+    <title>Mixed NS</title>
+    <link>https://news.example.com/</link>
+    <description>mixed</description>
+  </channel>
+  <item rdf:about="https://news.example.com/articles/ns-1">
+    <title>NS 1</title>
+    <link>https://news.example.com/articles/ns-1</link>
+    <dc:date>2026-10-13T09:00+09:00</dc:date>
+  </item>
+</rdf:RDF>"#,
+            &feed_url,
+            &rdf_allowlist(),
+        )
+        .expect("RDF with mixed namespaces should parse");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "NS 1");
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("2026-10-13T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn rdf_item_link_with_dangerous_scheme_is_dropped() {
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <channel rdf:about="https://rss.example.com/index.rdf">
+    <title>Unsafe</title>
+    <link>https://news.example.com/</link>
+    <description>unsafe links</description>
+  </channel>
+  <item rdf:about="javascript:alert(1)">
+    <title>JS</title>
+    <link>javascript:alert(1)</link>
+  </item>
+  <item rdf:about="http://127.0.0.1/admin">
+    <title>Local</title>
+    <link>http://127.0.0.1/admin</link>
+  </item>
+  <item rdf:about="https://news.example.com/articles/ok">
+    <title>OK</title>
+    <link>https://news.example.com/articles/ok</link>
+  </item>
+</rdf:RDF>"#,
+            &feed_url,
+            &rdf_allowlist(),
+        )
+        .expect("feed should parse even when some links are rejected");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].article_url, "https://news.example.com/articles/ok");
+    }
+
+    #[test]
+    fn truncates_long_rdf_title_and_summary() {
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let long_title = "題".repeat(MAX_TITLE_CHARS + 10);
+        let long_summary = "要".repeat(MAX_SUMMARY_CHARS + 10);
+        let feed = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <channel rdf:about="https://rss.example.com/index.rdf">
+    <title>Long</title>
+    <link>https://news.example.com/</link>
+    <description>long</description>
+  </channel>
+  <item rdf:about="https://news.example.com/articles/long">
+    <title>{long_title}</title>
+    <link>https://news.example.com/articles/long</link>
+    <description>{long_summary}</description>
+  </item>
+</rdf:RDF>"#
+        );
+        let items = parse_feed_items(feed.as_bytes(), &feed_url, &rdf_allowlist())
+            .expect("feed should parse");
+
+        assert_eq!(items[0].title.chars().count(), MAX_TITLE_CHARS);
+        assert_eq!(
+            items[0].summary.as_deref().unwrap().chars().count(),
+            MAX_SUMMARY_CHARS
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_rdf_feeds() {
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let header = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#;
+        let cases = [
+            // 記事の途中で途切れている。
+            format!(
+                r#"{header}
+  <channel rdf:about="x"><title>T</title><link>https://news.example.com/</link><description>d</description></channel>
+  <item rdf:about="https://news.example.com/a"><title>A</title><link>https://news.example.com/a</link>"#
+            ),
+            // 終了タグの対応が崩れている。
+            format!(
+                r#"{header}
+  <channel rdf:about="x"><title>T</title><link>https://news.example.com/</link><description>d</description></channel>
+  <item rdf:about="https://news.example.com/a"><title>A</link></item>
+</rdf:RDF>"#
+            ),
+            // <channel> がない。
+            format!(
+                r#"{header}
+  <item rdf:about="https://news.example.com/a"><title>A</title><link>https://news.example.com/a</link></item>
+</rdf:RDF>"#
+            ),
+            // ルートの開始タグが閉じていない。
+            r#"<?xml version="1.0"?><rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#""#.to_string(),
+        ];
+
+        for (index, feed) in cases.iter().enumerate() {
+            let error = parse_feed_items(feed.as_bytes(), &feed_url, &rdf_allowlist())
+                .expect_err(&format!("malformed RDF case {index} must fail"));
+            assert!(
+                matches!(error, AppError::Parse(_)),
+                "case {index} should be a parse error, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_w3cdtf_dates() {
+        assert_eq!(
+            normalize_w3cdtf("2026-10-13T09:30:15+09:00").as_deref(),
+            Some("2026-10-13T00:30:15Z")
+        );
+        assert_eq!(
+            normalize_w3cdtf("2026-10-13T09:30+09:00").as_deref(),
+            Some("2026-10-13T00:30:00Z")
+        );
+        assert_eq!(
+            normalize_w3cdtf("2026-10-13T09:30Z").as_deref(),
+            Some("2026-10-13T09:30:00Z")
+        );
+        assert_eq!(
+            normalize_w3cdtf("2026-10-13T09:30:15.250+09:00").as_deref(),
+            Some("2026-10-13T00:30:15Z")
+        );
+        // 時差の分からない値は推測しない。
+        assert_eq!(normalize_w3cdtf("2026-10-13"), None);
+        assert_eq!(normalize_w3cdtf("not a date"), None);
+    }
+
+    #[test]
+    fn rdf_dates_flow_through_news_service_normalization() {
+        use crate::services::news_service::normalize_published_at;
+
+        let feed_url = Url::parse("https://rss.example.com/headlines/newsheadlines.rdf").unwrap();
+        let items = parse_feed_items(ASAHI_LIKE_RDF.as_bytes(), &feed_url, &rdf_allowlist())
+            .expect("RSS 1.0 feed should parse");
+        let fallback = "2000-01-01T00:00:00Z";
+        assert_eq!(
+            normalize_published_at(items[0].published_at.as_deref(), fallback),
+            "2026-10-13T00:30:15Z"
+        );
+        assert_eq!(
+            normalize_published_at(items[1].published_at.as_deref(), fallback),
+            "2026-10-12T23:05:00Z"
+        );
+        // 解釈できない dc:date は加工せず渡され、取得時刻へフォールバックする。
+        assert_eq!(
+            normalize_published_at(Some("2026-10-13"), fallback),
+            fallback
+        );
+    }
+
+    #[test]
+    fn rss2_ignores_dc_date_to_keep_existing_behavior() {
+        // RSS 2.0 の公開日時は従来どおり pubDate だけを見る（dc:date を拾わない）。
+        let feed_url = Url::parse("https://rss.example.com/feed.xml").unwrap();
+        let items = parse_feed_items(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Feed</title>
+    <link>https://rss.example.com/</link>
+    <description>test feed</description>
+    <item>
+      <title>No pubDate</title>
+      <link>https://news.example.com/articles/dc-only</link>
+      <dc:date>2026-10-13T09:30:00+09:00</dc:date>
+    </item>
+  </channel>
+</rss>"#,
+            &feed_url,
+            &allowlist(),
+        )
+        .expect("RSS 2.0 feed should parse");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].published_at, None);
     }
 }
