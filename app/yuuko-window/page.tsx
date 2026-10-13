@@ -9,6 +9,9 @@
  * 既存の Tauri command（handle_yuuko_clicked / dismiss / mark_ignored）に任せる。
  * このウィンドウにはウィンドウ操作の権限が無いため、隠す・大きさを変える・メインを開くは
  * それらの command を受けた Rust 側が行う。
+ * このウィンドウから呼べる command は、通知用の 4 つ（状態取得・クリック・閉じる・無反応）と
+ * テーマ ID の取得（get_ui_theme_id）だけ（src-tauri/capabilities/yuuko-window.json、判断台帳 D110・D114）。
+ * それ以外の command は Tauri が実行時に拒否するため、ここから新たに呼ぶ場合は許可の判断が要る。
  */
 
 import React from "react";
@@ -54,7 +57,8 @@ export default function YuukoWindowPage() {
       setLeaving(false);
       setDisplayed(data ? { data, seq: seqRef.current } : null);
       // このウィンドウは隠すだけで作り直さないため、メイン側でテーマを変えても起動時の配色のままになる。
-      // 通知を出すたびに保存済みテーマを読み直して揃える（失敗時は今の配色のまま）。
+      // 通知を出すたびに保存済みテーマ ID を get_ui_theme_id で読み直して揃える（失敗時は今の配色のまま）。
+      // 設定全体の get_user_settings はこのウィンドウでは許可していない（判断台帳 D114）。
       if (data) {
         void refreshUiThemeFromSettings();
       }

@@ -1,3 +1,4 @@
+use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
 use crate::domain::settings::{PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
@@ -15,6 +16,19 @@ impl SettingsService {
     pub fn get_user_settings(&self) -> Result<UserSettingsDto, AppError> {
         let persisted = self.repository.load_or_default()?;
         Ok(persisted.to_dto())
+    }
+
+    /// 適用中の UI テーマ ID だけを返す（`get_ui_theme_id` 用。判断台帳 D114）。
+    /// 常駐ゆうこウィンドウにも許可する command のため、設定全体（ニックネーム・AI 設定など）は渡さない。
+    /// 既知のテーマ以外・設定の読み込み失敗は既定テーマへ倒す（配色だけの問題で、画面を止めない）。
+    pub fn get_ui_theme_id(&self) -> String {
+        match self.repository.load_or_default() {
+            Ok(persisted) => resolve_known_theme_id(&persisted.ui.theme_id).to_string(),
+            Err(error) => {
+                log::warn!("設定を読めなかったため既定テーマを返します: {error}");
+                DEFAULT_THEME_ID.to_string()
+            }
+        }
     }
 
     /// 設定画面からの保存。適用中テーマ（`ui.themeId`）は保存済みの値を保ち、DTO の selectedThemeId では変えない。
@@ -122,6 +136,26 @@ mod tests {
             SettingsService::new(SettingsRepository::with_path(path.clone())),
             path,
         )
+    }
+
+    #[test]
+    fn get_ui_theme_id_returns_known_theme_and_falls_back_to_default() {
+        let (service, path) = temp_service();
+        // ファイルが無い間は既定テーマ。
+        assert_eq!(service.get_ui_theme_id(), "default");
+
+        service.set_theme_id("theme_002").unwrap();
+        assert_eq!(service.get_ui_theme_id(), "theme_002");
+
+        // 手編集などで未知の ID が入っていても、そのまま返さず既定へ倒す。
+        service.set_theme_id("unknown_theme").unwrap();
+        assert_eq!(service.get_ui_theme_id(), "default");
+
+        // 設定ファイルが壊れていても失敗させず既定テーマを返す。
+        std::fs::write(&path, "{ broken json").unwrap();
+        assert_eq!(service.get_ui_theme_id(), "default");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

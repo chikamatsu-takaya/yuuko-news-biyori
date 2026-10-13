@@ -28,6 +28,12 @@ Rust は「何をするか」を扱う。React へ渡す値は UI 表示に適�
 - 具体的・用途限定の動詞始まり command にする（良い例: `get_article_detail` / `save_dictionary_entry` / `explain_selected_term` / `get_user_settings` / `save_user_settings`）。
 - 任意ファイル操作・任意URL取得・任意コマンド実行・環境変数取得のような汎用 command を作らない（避ける例: `read_any_file` / `write_any_file` / `fetch_any_url` / `execute_any_command` / `get_env_value`）。
 - 任意パス・任意URLを扱う場合は Rust 側で必ず検証する（詳細は `.claude/rules/security.md`）。
+- command はウィンドウごとの許可制（判断台帳 D110）。追加時は次をそろえる（手順の詳細はセキュリティ詳細設計書 §5.6.1）。
+  1. `src/lib.rs` の `generate_handler!` へ登録する。
+  2. `command_manifest.rs` の `APP_COMMANDS` へ追加する（`build.rs` が AppManifest へ宣言し、`allow-<commandのkebab-case>` 権限を自動生成する）。
+  3. `permissions/main-window.toml` の `main-window-commands` へ `allow-<commandのkebab-case>` を追加する。
+  4. 常駐ゆうこウィンドウ（`capabilities/yuuko-window.json`）で使う場合だけ、判断を取ってから個別に許可する。
+  - 2・3 を忘れると、ビルドは通っても実行時に `not allowed by ACL` で拒否される。`cargo test` の `command_permissions_tests` が漏れを検出する。
 
 ## 命名 / ファイル粒度
 

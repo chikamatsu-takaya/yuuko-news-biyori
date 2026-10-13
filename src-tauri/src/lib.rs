@@ -1,4 +1,6 @@
 mod app_lifecycle;
+#[cfg(test)]
+mod command_permissions_tests;
 mod commands;
 mod domain;
 mod error;
@@ -240,6 +242,7 @@ pub fn run() {
             commands::dictionary_commands::delete_dictionary_entry,
             commands::health_commands::ping,
             commands::settings_commands::get_user_settings,
+            commands::settings_commands::get_ui_theme_id,
             commands::settings_commands::save_user_settings,
             commands::settings_commands::reset_user_settings,
             commands::settings_commands::test_ai_provider,

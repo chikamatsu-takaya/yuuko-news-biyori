@@ -1,12 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "yuuko-window",
-  "description": "常駐ゆうこ用ウィンドウ専用。Rust から届く通知イベントの購読・解除だけを許可し、ウィンドウ操作・ファイル・URL・シェル系の権限は与えない。",
+  "description": "常駐ゆうこ用ウィンドウ専用。Rust から届く通知イベントの購読・解除と、通知の表示・反応に使う 4 つの command（状態取得・クリック・閉じる・無反応）と、配色用の UI テーマ ID 取得（get_ui_theme_id）だけを許可する。設定全体の取得・保存、辞書・記事などの command、ウィンドウ操作・ファイル・URL・シェル系の権限は与えない。",
   "windows": [
     "yuuko"
   ],
   "permissions": [
     "core:event:allow-listen",
-    "core:event:allow-unlisten"
+    "core:event:allow-unlisten",
+    "allow-get-yuuko-notification-state",
+    "allow-handle-yuuko-clicked",
+    "allow-dismiss-yuuko-notification",
+    "allow-mark-yuuko-ignored",
+    "allow-get-ui-theme-id"
   ]
 }

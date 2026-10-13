@@ -63,6 +63,21 @@ pub fn find_reward(reward_id: &str) -> Option<&'static RewardDefinition> {
     REWARD_MASTER.iter().find(|def| def.reward_id == reward_id)
 }
 
+/// 保存済みのテーマ ID を、画面へ適用してよい既知の ID へ解決する（`get_ui_theme_id` 用。判断台帳 D114）。
+/// フロントの `resolveUiThemeId`（lib/ui-theme.mjs）と同じく、前後の空白を除いたうえで、
+/// 既定テーマ・報酬マスタのテーマ・ガチャマスタのテーマのいずれかなら採用し、それ以外は既定へ倒す。
+/// 解放・所持の判定はしない（書き込み時に `set_active_theme` が行うため。フロントの従来の扱いと同じ）。
+pub fn resolve_known_theme_id(theme_id: &str) -> &'static str {
+    let trimmed = theme_id.trim();
+    if let Some(def) = find_reward(trimmed).filter(|def| def.reward_type == RewardType::Theme) {
+        return def.reward_id;
+    }
+    if let Some(def) = find_gacha_item(trimmed).filter(|def| def.kind == GachaItemKind::Theme) {
+        return def.item_id;
+    }
+    DEFAULT_THEME_ID
+}
+
 /// 未確認の報酬（§11.2 `pendingRewards` の要素）。通知タスクが「いつ解放されたか」を使えるよう時刻を持つ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -304,6 +319,29 @@ mod tests {
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_known_theme_id_matches_frontend_theme_list() {
+        // lib/ui-theme.mjs の UI_THEMES と同じ ID だけを既知とする。
+        for id in [
+            "default",
+            "theme_001",
+            "theme_002",
+            "gacha_theme_001",
+            "gacha_theme_002",
+            "gacha_theme_003",
+        ] {
+            assert_eq!(resolve_known_theme_id(id), id);
+        }
+        assert_eq!(resolve_known_theme_id("  theme_001 "), "theme_001");
+        for unknown in ["", "theme_999", "gacha_theme_999", "<script>", "card_001"] {
+            assert_eq!(
+                resolve_known_theme_id(unknown),
+                DEFAULT_THEME_ID,
+                "{unknown}"
+            );
+        }
     }
 
     #[test]

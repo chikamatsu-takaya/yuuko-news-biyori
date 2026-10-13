@@ -61,6 +61,19 @@ export const getUserSettings = async (): Promise<UserSettingsDto | null> => {
   return invoke<UserSettingsDto>("get_user_settings");
 };
 
+/**
+ * 適用中の UI テーマ ID だけを取得する（判断台帳 D114）。
+ * 設定全体を返す get_user_settings と違い、常駐ゆうこウィンドウにも許可された最小限の command。
+ * Rust 側で既知のテーマ以外・読み込み失敗を既定 "default" へ倒して返す。非Tauri では null。
+ */
+export const getUiThemeId = async (): Promise<string | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<string>("get_ui_theme_id");
+};
+
 // get_user_settings の失敗が「設定ファイルの破損（JSONとして読めない）」かを判定する。
 // Rust 側 AppError::Json は CommandError.code = "JSON_ERROR" で返る（読み込み時はJSON解析でしか発生しない）。
 // 破損時も黙って既定値へ置き換えず、ユーザー操作で初期化させるための判定（判断台帳 D28）。
