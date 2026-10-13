@@ -27,7 +27,7 @@ use url::Url;
 use crate::domain::article::{ArticleDedupeKeys, ArticleReadState, FetchedArticle};
 use crate::error::AppError;
 use crate::infra::allowlist::NetworkAllowlist;
-use crate::infra::html_fetcher::HtmlFetcher;
+use crate::infra::html_fetcher::{ExcerptSource, HtmlFetcher};
 use crate::infra::rss_client::{RssClient, RssItem};
 use crate::infra::url_guard::{validate_url, UrlPurpose};
 use crate::paths::AppPaths;
@@ -376,17 +376,19 @@ impl NewsService {
                 }
 
                 // (制約7) 本文取得失敗時も保存を継続。失敗は errors に記録する。
-                let excerpt = match self.html_fetcher.fetch_and_extract(&item.article_url).await {
-                    Ok(result) => result.excerpt,
-                    Err(error) => {
-                        log::debug!("failed to fetch article '{}': {error}", item.article_url);
-                        errors.push(RefreshError::new(
-                            &item.article_url,
-                            ERROR_ARTICLE_FETCH_FAILED,
-                        ));
-                        None
-                    }
-                };
+                let (excerpt, excerpt_source) =
+                    match self.html_fetcher.fetch_and_extract(&item.article_url).await {
+                        Ok(result) => (result.excerpt, Some(result.excerpt_source)),
+                        Err(error) => {
+                            log::debug!("failed to fetch article '{}': {error}", item.article_url);
+                            errors.push(RefreshError::new(
+                                &item.article_url,
+                                ERROR_ARTICLE_FETCH_FAILED,
+                            ));
+                            (None, None)
+                        }
+                    };
+                log_excerpt_fallback(&item.article_url, excerpt_source, item.summary.is_some());
 
                 let excerpt = excerpt.or_else(|| item.summary.clone());
                 let fetched_at = utc_now_rfc3339();
@@ -504,6 +506,41 @@ fn decide_item(
     ItemDecision::Process
 }
 
+/// 記事本文が取れずに代わりの文を使ったことを、媒体のドメインと理由の区分だけでログへ残す。
+/// 本文抽出の失敗は取得エラーにならず表面化しにくい（品質評価で 15 件中 9 件が RSS 概要だけに
+/// なっていた）ため、info / warn に出して気づけるようにする。URL のパス・クエリや本文は出さない（D29）。
+fn log_excerpt_fallback(article_url: &str, source: Option<ExcerptSource>, has_rss_summary: bool) {
+    let Some(reason) = excerpt_fallback_reason(source) else {
+        return;
+    };
+    let domain = Url::parse(article_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let used = match source {
+        Some(ExcerptSource::MetaDescription) => "meta_description",
+        _ if has_rss_summary => "rss_summary",
+        _ => "none",
+    };
+    match source {
+        // 取得そのものの失敗は errors で画面にも伝わるため info にとどめる。
+        None => log::info!("article excerpt fallback: domain={domain} reason={reason} used={used}"),
+        Some(_) => {
+            log::warn!("article excerpt fallback: domain={domain} reason={reason} used={used}")
+        }
+    }
+}
+
+/// 本文以外で代用したときの理由の区分。本文を抽出できたときは None。
+fn excerpt_fallback_reason(source: Option<ExcerptSource>) -> Option<&'static str> {
+    match source {
+        Some(ExcerptSource::Body) => None,
+        Some(ExcerptSource::MetaDescription) => Some("body_not_extracted"),
+        Some(ExcerptSource::None) => Some("body_and_meta_not_extracted"),
+        None => Some("html_fetch_failed"),
+    }
+}
+
 /// 正規化したURLから安定な article_id を生成する。
 /// 正規化: URLパース → フラグメント除去 → 末尾スラッシュ除去（ホストは url が小文字化）。
 fn article_id_from_url(raw: &str) -> String {
@@ -570,6 +607,20 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn excerpt_fallback_reason_labels_only_non_body_sources() {
+        assert_eq!(excerpt_fallback_reason(Some(ExcerptSource::Body)), None);
+        assert_eq!(
+            excerpt_fallback_reason(Some(ExcerptSource::MetaDescription)),
+            Some("body_not_extracted")
+        );
+        assert_eq!(
+            excerpt_fallback_reason(Some(ExcerptSource::None)),
+            Some("body_and_meta_not_extracted")
+        );
+        assert_eq!(excerpt_fallback_reason(None), Some("html_fetch_failed"));
+    }
 
     fn unique_temp_path() -> std::path::PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);

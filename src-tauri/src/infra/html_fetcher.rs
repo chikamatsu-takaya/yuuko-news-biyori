@@ -68,11 +68,87 @@ const NOISE_PATTERNS: &[&str] = &[
     "関連記事",
     "ランキング",
 ];
+/// NOISE_PATTERNS を当てるのは、この文字数以下の短いブロックだけにする。
+/// 「市場シェアが拡大」「広告事業の売上」のような本文の段落まで落とさないため
+/// （ボタン・ラベル・小見出しはこの長さに収まる）。
+const NOISE_PATTERN_MAX_BLOCK_CHARS: usize = 30;
+/// 本文の外側として扱う要素名。記事コンテナの内側にあっても、ここから下のブロックは拾わない。
+/// form は入れない（ページ全体を form で包む CMS があり、本文ごと落とすため）。
+const NOISE_ANCESTOR_TAGS: &[&str] = &["nav", "aside", "footer", "header"];
+/// class / id による判定を当てない要素名（`is_noise_element` 参照）。
+const CONTAINER_TAGS_EXEMPT_FROM_CLASS_CHECK: &[&str] = &["html", "body", "article", "main"];
+/// class / id を語に分けたとき（`-` `_` 空白・camelCase で区切り、小文字化）、
+/// どれかの語がこの一覧と一致する要素の内側は本文の外として扱う。
+/// 部分一致にしないのは "stage" の "tag"、"inside" の "side" のような誤判定を避けるため。
+const NOISE_CLASS_TOKENS: &[&str] = &[
+    "tag",
+    "tags",
+    "tagcloud",
+    "taglist",
+    "author",
+    "authors",
+    "profile",
+    "byline",
+    "related",
+    "recommend",
+    "recommended",
+    "recommendation",
+    "ranking",
+    "share",
+    "sharing",
+    "social",
+    "sns",
+    "follow",
+    "breadcrumb",
+    "breadcrumbs",
+    "sidebar",
+    "side",
+    "widget",
+    "comment",
+    "comments",
+    "newsletter",
+    "pr",
+    "ad",
+    "ads",
+    "advertisement",
+    "sponsor",
+    "sponsored",
+];
+/// 本文の終わりを示す見出し・ラベル。短いブロック（NOISE_PATTERN_MAX_BLOCK_CHARS 以下）が
+/// これで始まったら、以降は他記事の一覧などとみなして抽出を打ち切る。
+/// どの媒体でも本文の後ろにしか置かれない、意味のはっきりした文言だけに絞る。
+const END_OF_ARTICLE_MARKERS: &[&str] = &[
+    "関連記事",
+    "関連リンク",
+    "関連ニュース",
+    "あわせて読みたい",
+    "合わせて読みたい",
+    "おすすめ記事",
+    "人気記事",
+    "この記事を読んだ人",
+    "この記事のタグ",
+    "著者プロフィール",
+    "Related articles",
+    "Related Articles",
+];
+
+/// 抜粋をどこから得たか。本文抽出の失敗をログで追えるようにするために返す
+/// （ログには媒体のドメインとこの区分だけを出し、本文は出さない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExcerptSource {
+    /// 記事本文のブロックから抽出した。
+    Body,
+    /// 本文が取れず、meta description（og:description 等）で代用した。
+    MetaDescription,
+    /// 本文も meta description も取れなかった。
+    None,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HtmlFetchResult {
     pub excerpt: Option<String>,
     pub html_extracted: bool,
+    pub excerpt_source: ExcerptSource,
 }
 
 #[derive(Debug, Clone)]
@@ -96,11 +172,12 @@ impl HtmlFetcher {
         let article_url =
             canonicalize_request_url(validate_url(article_url, UrlPurpose::Article, &allowlist)?)?;
         let (_final_url, html) = self.fetch_html(article_url, &allowlist).await?;
-        let excerpt = extract_excerpt(&html);
+        let (excerpt, excerpt_source) = extract_excerpt_with_source(&html);
 
         Ok(HtmlFetchResult {
             html_extracted: excerpt.is_some(),
             excerpt,
+            excerpt_source,
         })
     }
 
@@ -316,12 +393,33 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 }
 
 fn extract_excerpt(html: &str) -> Option<String> {
-    let document = Html::parse_document(html);
-    find_best_candidate_excerpt(&document)
-        .or_else(|| extract_meta_description(&document))
-        .map(|excerpt| truncate_text(&excerpt, MAX_EXCERPT_CHARS))
+    extract_excerpt_with_source(html).0
 }
 
+/// 記事HTMLから本文抜粋を取り出す。本文 → meta description の順に試し、どちらも
+/// MAX_EXCERPT_CHARS へ切り詰める。生のHTMLは返さず、サニタイズ済みのテキストだけを返す。
+fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
+    let document = Html::parse_document(html);
+    if let Some(excerpt) = find_best_candidate_excerpt(&document) {
+        return (
+            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            ExcerptSource::Body,
+        );
+    }
+    match extract_meta_description(&document) {
+        Some(excerpt) => (
+            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            ExcerptSource::MetaDescription,
+        ),
+        None => (None, ExcerptSource::None),
+    }
+}
+
+/// 記事コンテナ候補（article / main / 本文用 class 等）からそれぞれ抜粋を作り、最も長いものを採る。
+/// 関連記事カードの `<article>` のように、ナビゲーション・サイドバー等の内側にある候補は使わない。
+/// 候補が全滅したら body 全体から同じ規則で抽出する。
+/// それでも何も残らないときに限り、領域除去・終端判定を外して body から取り直す
+/// （判定が想定外の構造に当たって本文ごと落とした場合でも、修正前と同じ抽出結果までは保つため）。
 fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     let mut best_excerpt = None;
     let mut best_score = 0;
@@ -333,7 +431,10 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
         };
 
         for element in document.select(&selector) {
-            if let Some(excerpt) = extract_excerpt_from_element(&element) {
+            if has_noise_ancestor(&element, None) {
+                continue;
+            }
+            if let Some(excerpt) = extract_excerpt_from_element(&element, RegionFilter::Strict) {
                 let score = excerpt.chars().count();
                 if score > best_score {
                     best_score = score;
@@ -348,18 +449,41 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     }
 
     let body_selector = Selector::parse("body").ok()?;
-    document
-        .select(&body_selector)
-        .find_map(|body| extract_excerpt_from_element(&body))
+    let body = document.select(&body_selector).next()?;
+    extract_excerpt_from_element(&body, RegionFilter::Strict)
+        .or_else(|| extract_excerpt_from_element(&body, RegionFilter::Lenient))
 }
 
-fn extract_excerpt_from_element(element: &ElementRef<'_>) -> Option<String> {
+/// 本文の外側の領域（ナビゲーション・タグ一覧・著者紹介等）と終端の目印を判定するかどうか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionFilter {
+    /// 判定する（通常）。
+    Strict,
+    /// 判定しない（最後の取り直し用）。空ブロックの読み飛ばし・短いノイズ文言の除去は行う。
+    Lenient,
+}
+
+/// コンテナ内の段落・リスト・引用・小見出しを順に集めて抜粋にする。
+/// - 空・画像だけ・空白（&nbsp; を含む）だけのブロックは飛ばす。以前は `?` で抽出全体を
+///   捨てていたため、そうした段落が 1 つあるだけで本文が取れず RSS 概要に落ちていた。
+/// - Strict のとき、ナビゲーション・サイドバー・タグ一覧・著者紹介・共有ボタン等の内側の
+///   ブロックは飛ばし、「関連記事」などの終端の目印が来たら以降を他記事の一覧とみなして打ち切る。
+fn extract_excerpt_from_element(element: &ElementRef<'_>, filter: RegionFilter) -> Option<String> {
     let block_selector = Selector::parse("p, li, blockquote, h2, h3").ok()?;
     let mut blocks = Vec::new();
     let mut seen = HashSet::new();
+    let strict = filter == RegionFilter::Strict;
 
     for block in element.select(&block_selector) {
-        let text = sanitize_plain_text(&block.text().collect::<Vec<_>>().join(" "))?;
+        if strict && has_noise_ancestor(&block, Some(element)) {
+            continue;
+        }
+        let Some(text) = sanitize_plain_text(&block.text().collect::<Vec<_>>().join(" ")) else {
+            continue;
+        };
+        if strict && is_end_of_article_marker(&text) {
+            break;
+        }
         if is_noise_block(&text) {
             continue;
         }
@@ -374,6 +498,76 @@ fn extract_excerpt_from_element(element: &ElementRef<'_>) -> Option<String> {
     }
 
     Some(join_excerpt_blocks(&blocks, MAX_EXCERPT_CHARS))
+}
+
+/// 要素自身か、その祖先（`stop_at` の手前まで。`stop_at` 自身は判定しない）が本文の外側
+/// （nav / aside / footer / header、またはタグ一覧・著者紹介・関連記事等の class / id）か。
+/// `stop_at` が None のときは文書の根までたどる。
+fn has_noise_ancestor(element: &ElementRef<'_>, stop_at: Option<&ElementRef<'_>>) -> bool {
+    let mut current = Some(*element);
+    while let Some(node) = current {
+        if stop_at.is_some_and(|stop| stop.id() == node.id()) {
+            return false;
+        }
+        if is_noise_element(&node) {
+            return true;
+        }
+        current = node.parent().and_then(ElementRef::wrap);
+    }
+    false
+}
+
+fn is_noise_element(element: &ElementRef<'_>) -> bool {
+    let value = element.value();
+    let name = value.name();
+    if NOISE_ANCESTOR_TAGS.contains(&name) {
+        return true;
+    }
+    // html / body / article / main の class は見ない。WordPress 等は記事の `<article>` や `<body>` に
+    // `tag-ai` `author-1` `has-sidebar` のような分類用 class を付けるため、本文ごと落としてしまう。
+    if CONTAINER_TAGS_EXEMPT_FROM_CLASS_CHECK.contains(&name) {
+        return false;
+    }
+    value
+        .classes()
+        .chain(value.id())
+        .flat_map(split_identifier_tokens)
+        .any(|token| NOISE_CLASS_TOKENS.contains(&token.as_str()))
+}
+
+/// class / id を語に分ける（`related-posts` → related, posts / `tagList` → tag, list /
+/// `colBoxPR` → col, box, pr）。語単位で照合し、部分一致による誤判定を避ける。
+fn split_identifier_tokens(identifier: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+
+    for ch in identifier.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && prev_lower {
+            tokens.push(std::mem::take(&mut current));
+        }
+        prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        current.push(ch.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// 短いブロックが本文の終わりの目印（「関連記事」等）で始まるか。
+fn is_end_of_article_marker(text: &str) -> bool {
+    text.chars().count() <= NOISE_PATTERN_MAX_BLOCK_CHARS
+        && END_OF_ARTICLE_MARKERS
+            .iter()
+            .any(|marker| text.starts_with(marker))
 }
 
 fn extract_meta_description(document: &Html) -> Option<String> {
@@ -429,7 +623,8 @@ fn is_noise_block(text: &str) -> bool {
         return true;
     }
 
-    NOISE_PATTERNS.iter().any(|pattern| text.contains(pattern))
+    text.chars().count() <= NOISE_PATTERN_MAX_BLOCK_CHARS
+        && NOISE_PATTERNS.iter().any(|pattern| text.contains(pattern))
 }
 
 fn sanitize_plain_text(value: &str) -> Option<String> {
@@ -625,6 +820,147 @@ mod tests {
         );
 
         assert!(excerpt.is_none());
+    }
+
+    const BODY_1: &str = "最初の段落です。新しいサービスの提供開始を発表しました。";
+    const BODY_2: &str = "二つ目の段落です。料金は従来の半額になるとのことです。";
+
+    fn article_html(inner: &str) -> String {
+        format!(
+            r#"<!doctype html><html><head>
+<meta name="description" content="メタ説明文です。本文が取れないときだけ使う。">
+</head><body><article class="article-body">{inner}</article></body></html>"#
+        )
+    }
+
+    fn extract_body(inner: &str) -> String {
+        let (excerpt, source) = extract_excerpt_with_source(&article_html(inner));
+        assert_eq!(source, ExcerptSource::Body, "本文から抽出できること");
+        excerpt.expect("excerpt")
+    }
+
+    #[test]
+    fn skips_empty_paragraph_instead_of_aborting() {
+        let excerpt = extract_body(&format!("<p>{BODY_1}</p><p></p><p>{BODY_2}</p>"));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn skips_image_only_paragraph_instead_of_aborting() {
+        let excerpt = extract_body(&format!(
+            r#"<p><img src="https://news.example.com/a.png" alt=""></p><p>{BODY_1}</p><p><a href="/x"><img src="b.png"></a></p><p>{BODY_2}</p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+        assert!(!excerpt.contains("png"));
+    }
+
+    #[test]
+    fn skips_nbsp_only_paragraph_instead_of_aborting() {
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>&nbsp;</p><p> &nbsp; \u{3000}</p><li> </li><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_trailing_tag_list() {
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{BODY_2}</p>
+<div class="entry-tags"><ul><li><a href="/t/1">クラウド</a></li><li><a href="/t/2">コンテナ型仮想化</a></li></ul></div>
+<ul class="tagList"><li>プログラミング言語 JavaScript / Java</li></ul>
+<div id="tagcloud"><p>データベース / 機械学習・AI RDB / NoSQL</p></div>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_author_box_and_follow_prompt() {
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{BODY_2}</p>
+<div class="author-box"><p>山田 太郎（やまだ たろう） IT系の雑誌編集者を経て独立。</p></div>
+<div id="profile"><p>詳しいプロフィールはこちらをご覧ください。</p></div>
+<div class="sns-follow"><p>新着情報をチェックしませんか？ Twitterで @example をフォロー</p></div>
+<footer><p>Copyright example news. All rights reserved.</p></footer>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_related_article_list() {
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{BODY_2}</p>
+<section class="related-posts"><h3>この話題の他の記事</h3><ul><li>別の記事の見出しその一が入ります</li></ul></section>
+<aside><ul><li>サイドバーの新着記事の見出しが入ります</li></ul></aside>
+<nav class="breadcrumb"><ol><li>ホーム</li><li>クラウド</li></ol></nav>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn stops_at_end_of_article_marker() {
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{BODY_2}</p><h2>関連記事</h2><ul><li>他の記事の見出しその一が入ります</li><li>他の記事の見出しその二が入ります</li></ul>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn keeps_body_paragraphs_that_mention_noise_words() {
+        // 長い段落は「シェア」「広告」「関連記事」を含んでも本文として残す。
+        let share = "同社の国内市場シェアは前年から5ポイント伸び、広告事業も好調だった。";
+        let related = "関連記事でも触れたとおり、この機能は昨年から段階的に提供されてきたものだ。";
+        let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{share}</p><p>{related}</p>"));
+        assert!(excerpt.contains(share));
+        assert!(excerpt.contains(related));
+    }
+
+    #[test]
+    fn does_not_drop_body_for_classification_classes_on_container() {
+        // WordPress の post_class のように、記事要素や body に分類用 class が付いていても本文は落とさない。
+        let html = format!(
+            r#"<!doctype html><html><body class="single tag-ai has-sidebar">
+<div class="site"><article class="post type-post tag-cloud author-1 category-pr"><div class="entry-content"><p>{BODY_1}</p><p>{BODY_2}</p></div></article></div>
+</body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn identifier_tokens_split_on_separators_and_camel_case() {
+        assert_eq!(
+            split_identifier_tokens("related-posts"),
+            ["related", "posts"]
+        );
+        assert_eq!(split_identifier_tokens("tagList"), ["tag", "list"]);
+        assert_eq!(split_identifier_tokens("colBoxPR"), ["col", "box", "pr"]);
+        // 部分一致では判定しない（stage / inside / header-image は対象外）。
+        assert!(!split_identifier_tokens("stage-inside")
+            .iter()
+            .any(|token| NOISE_CLASS_TOKENS.contains(&token.as_str())));
+    }
+
+    #[test]
+    fn falls_back_to_unfiltered_body_when_region_filter_removes_everything() {
+        // 本文全体が判定対象の class に包まれた想定外の構造でも、修正前と同じく本文は取る。
+        let html = format!(
+            r#"<!doctype html><html><body><div class="share-wrapper"><p>{BODY_1}</p><p>{BODY_2}</p></div></body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn reports_meta_description_source_when_body_is_missing() {
+        let (excerpt, source) =
+            extract_excerpt_with_source(&article_html("<p></p><p><img src=\"a.png\"></p>"));
+        assert_eq!(source, ExcerptSource::MetaDescription);
+        assert_eq!(
+            excerpt.unwrap(),
+            "メタ説明文です。本文が取れないときだけ使う。"
+        );
     }
 
     #[test]
