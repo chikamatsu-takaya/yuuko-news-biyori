@@ -152,7 +152,7 @@ fn main_window_capability_uses_the_bundled_set() {
 }
 
 #[test]
-fn yuuko_window_capability_allows_only_notification_commands() {
+fn yuuko_window_capability_allows_only_notification_and_theme_commands() {
     let permissions = capability_permissions(YUUKO_CAPABILITY);
     assert!(
         !permissions.iter().any(|p| p == MAIN_WINDOW_SET),
@@ -185,7 +185,7 @@ fn yuuko_window_capability_allows_only_notification_commands() {
 /// `runtime_authority_mut` は Tauri の非公開扱い（doc(hidden)）の API のため、Tauri 更新で
 /// 使えなくなった場合はこのテストだけを見直す（設定ファイルの突き合わせテストは残す）。
 #[test]
-fn compiled_acl_allows_main_everything_and_yuuko_only_notification_commands() {
+fn compiled_acl_allows_main_everything_and_yuuko_only_notification_and_theme_commands() {
     let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let authority = context.runtime_authority_mut();
     let local = tauri::ipc::Origin::Local;
