@@ -116,3 +116,18 @@ test("runtimeSources takes the VC++ runtime from --vc-crt, else from <bundle>/ru
   const withoutFlag = runtimeSources(manifest, "src", undefined);
   assert.equal(withoutFlag[1].path, join("src", "runtime", "vcruntime140.dll"));
 });
+
+test("runtime tables accept uppercase SHA-256 and reject rows that cannot be read", () => {
+  const rust = (exeSha) =>
+    [
+      'pub const MODEL_FILE: &str = "m.gguf";',
+      "pub const MODEL_SIZE: u64 = 3;",
+      `pub const MODEL_SHA256: &str = "${ABC_SHA256}";`,
+      `pub const RUNTIME_FILES: &[(&str, &str)] = &[\n    ("llama-server.exe", "${exeSha}"),\n    ("ggml.dll", "${ABC_SHA256}"),\n];`,
+      `pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[\n    ("vcruntime140.dll", "${ABC_SHA256}"),\n];`,
+    ].join("\n");
+  const upper = readBundleManifest(rust(ABC_SHA256.toUpperCase()));
+  assert.equal(upper.runtime.length, 3);
+  assert.equal(upper.runtime[0].sha256, ABC_SHA256);
+  assert.throws(() => readBundleManifest(rust(ABC_SHA256.slice(1))), /RUNTIME_FILES の 2 行のうち 1 行/);
+});

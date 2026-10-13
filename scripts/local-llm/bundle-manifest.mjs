@@ -34,10 +34,21 @@ export function readBundleManifest(rustSource) {
   };
   // (ファイル名, SHA-256) の表を読む。source は写し元の区別
   // （llama: 同梱物のフォルダの runtime/、vc: VC++ ランタイムのフォルダ）。
-  const table = (name, pattern, source) =>
-    [...pick(name, pattern).matchAll(/\(\s*"([^"]+)",\s*"([0-9a-f]{64})",?\s*\)/g)].map(
-      ([, file, sha256]) => ({ name: file, sha256, source })
+  // 読めない行（SHA-256 の桁違いなど）を黙って落とさないよう、`(` で始まる行の数と読めた数を比べる。
+  // 16進は大文字も受け付け、小文字へそろえる（照合は sha256File の小文字と比べるため）。
+  const table = (name, pattern, source) => {
+    const block = pick(name, pattern);
+    const rows = [...block.matchAll(/\(\s*"([^"]+)",\s*"([0-9a-fA-F]{64})",?\s*\)/g)].map(
+      ([, file, sha256]) => ({ name: file, sha256: sha256.toLowerCase(), source })
     );
+    const entries = (block.match(/\(/g) ?? []).length;
+    if (rows.length !== entries) {
+      throw new Error(
+        `${name} の ${entries} 行のうち ${rows.length} 行しか読めません（ファイル名と64桁の SHA-256 か確かめてください）`
+      );
+    }
+    return rows;
+  };
   const llama = table(
     "RUNTIME_FILES",
     /pub const RUNTIME_FILES: &\[\(&str, &str\)\] = &\[([\s\S]*?)\n\];/,

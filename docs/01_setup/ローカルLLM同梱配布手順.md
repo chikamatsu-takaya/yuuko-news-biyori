@@ -16,7 +16,7 @@
 | `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（`MODEL_FILE` / `MODEL_SIZE` / `MODEL_SHA256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
 | `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
-合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。
+合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
 
 ### 1.1 Visual C++ ランタイムを同梱する理由と範囲（判断台帳 D112）
 
@@ -24,7 +24,7 @@
 - VC++ ランタイムの 3 つ自身が読み込むのも、この 3 つと `api-ms-win-crt-*` と `KERNEL32` だけ。`msvcp140_1` / `msvcp140_2` / `vcruntime140_threads` / `concrt140` などは、どの部品も読み込まないため同梱しない。
 - `api-ms-win-crt-*`（ユニバーサル C ランタイム・UCRT）は Windows 10 以降に標準で入っているため同梱しない。
 - Windows は、実行ファイルと同じフォルダの DLL を先に探す。`runtime/`（`llama-server.exe` の隣）に置くことで、VC++ 再頒布可能パッケージが入っていないパソコンでも起動できる。入っているパソコンでも、`llama-server` は隣に置いた版を使う。
-- 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
+- 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。
 
 `tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_bundle_dir` でここを見る。
 
