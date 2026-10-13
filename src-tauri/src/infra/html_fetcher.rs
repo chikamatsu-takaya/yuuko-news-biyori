@@ -250,6 +250,13 @@ const CLUSTER_SWITCH_MAX_CHOSEN_CHARS: usize = 400;
 /// 段落のかたまりに差し替えるには、その抜粋がこの文字数以上で、選んだ抜粋の CLUSTER_SWITCH_RATIO 倍以上、
 /// 直下の段落が CLUSTER_MIN_PARAGRAPHS 個以上あること（同意画面などの短い説明文に差し替えないため）。
 const CLUSTER_MIN_CHARS: usize = 300;
+/// li の中の候補を「文字がごく少ないカード」とみなす上限（見出しと媒体名だけのカード程度）。
+const CARD_MAX_TEXT_CHARS: usize = 100;
+/// 【PR】の囲みを祖先へ広げるときの文字数の上限（空白を除く）。これを超える祖先は本文を包んでいるとみなし、
+/// 囲みに含めない（記事末尾の配信サービス告知は 2 件並んでも 1,000 文字程度に収まる）。
+const PR_BOX_MAX_CHARS: usize = 1_000;
+/// 【PR】の囲みが直下に持ってよい長い段落の数。これより多い祖先は本文の区画とみなして囲みに含めない。
+const PR_BOX_MAX_DIRECT_PARAGRAPHS: usize = 2;
 const CLUSTER_SWITCH_RATIO: usize = 3;
 const CLUSTER_MIN_PARAGRAPHS: usize = 3;
 
@@ -524,17 +531,17 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 //    どちらも空・画像だけのブロックは飛ばし、短いノイズ文言と重複を除く。
 //    集めた文字数が EXTRACTION_COLLECT_LIMIT_CHARS を超えたら走査をやめる（巨大ページの負荷対策）。
 //    strict ではさらに、テキストだけで分かる定型ブロックを除く（いずれも短いブロックに限る）:
-//    「【画像】」「【あわせて読みたい】」などの誘導行、本文の後ろの「【PR】」見出し以降、
+//    「【画像】」「【あわせて読みたい】」などの誘導行、本文の後ろの「【PR】」の囲み（後ろに本文が続けば囲みだけ）、
 //    リンクが大半のブロックの連続（関連記事・参考リンクの一覧）、寄付・会員登録・メルマガの呼びかけ、ページ送り。
 //    lenient には足さない（判定が想定外に当たったときの保険として、修正前と同じ規則のまま残す）。
 // 3. 候補ごとのリンク密度（リンク文字 / 全文字）で長さを割り引き、割り引き後に最長の strict と最長の lenient を
 //    比べる。strict が空、または lenient の 1/4 未満かつ 400 文字未満なら lenient を、それ以外は strict を使う
 //    （class / id の判定が本文を落とした場合の保証）。リンク密度が 0 の候補どうしでは修正前と同じ選び方になる。
 // 4. 候補から何も取れなければ body で 2〜3 を行う（body 直下側のサイト全体の header も除く）。
-// 5. 3 の抜粋が短く（400 文字未満）、その候補がカード（リンク密度 0.5 以上か、一覧の li の中にある
-//    他記事・広告のカード）のときだけ、「段落のかたまり」（直下の p の文字数が最も多い要素。readability 系の
-//    親要素の採点と同じ考え方）も 2 の規則で抽出し、十分に長ければ（300 文字以上かつ 3 倍以上、段落 3 個以上）
-//    差し替える。カードでない短い記事や 4 の body の結果は差し替えない（同意バナー・サイト案内・次の記事など、
+// 5. 3 の抜粋が短く（400 文字未満）、その候補がカード（リンク密度 0.5 以上か、一覧の li の中にあってリンクを含むか
+//    100 文字未満の他記事・広告のカード）のときだけ、「段落のかたまり」（直下の p の文字数が最も多い要素。readability 系の
+//    親要素の採点と同じ考え方）も 2 の規則で抽出し、十分に長ければ（300 文字以上かつ 3 倍以上、段落 3 個以上）、
+//    かつ候補とかたまりの共通の祖先が body / html より内側にあるときに差し替える。カードでない短い記事や 4 の body の結果は差し替えない（同意バナー・サイト案内・次の記事など、
 //    近くの無関係な長い文章で正しい短い記事を置き換えないため。リードだけの article の兄弟にある本文も拾わない）。
 // 6. それでも空なら meta description、それも空なら呼び出し側（news_service）が RSS 概要を使う。
 //
@@ -619,11 +626,12 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     }
     let (chosen, anchor, anchor_link_density) = choose_best_pair(best_strict, best_lenient)?;
 
-    // まとめの 5: 選んだ抜粋が短く、選んだ候補がカード（リンク中心か、一覧の li の中）のときだけ、
-    // 本文は別の場所にあるとみなして段落のかたまりを調べる。カードでない短い記事は、近くに長い文章
-    // （同意バナー・サイト案内・次の記事）があっても差し替えない（短い記事そのものが本文でありうるため）。
-    if chosen.chars().count() >= CLUSTER_SWITCH_MAX_CHOSEN_CHARS
-        || !looks_like_card(&anchor, anchor_link_density)
+    // まとめの 5: 選んだ抜粋が短く、選んだ候補がカードらしいときだけ、本文は別の場所にあるとみなして
+    // 段落のかたまりを調べる。カードでない短い記事は、近くに長い文章（同意バナー・サイト案内・次の記事）が
+    // あっても差し替えない（短い記事そのものが本文でありうるため）。
+    let chosen_chars = chosen.chars().count();
+    if chosen_chars >= CLUSTER_SWITCH_MAX_CHOSEN_CHARS
+        || !looks_like_card(&anchor, anchor_link_density, chosen_chars)
     {
         return Some(chosen);
     }
@@ -631,7 +639,7 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     else {
         return Some(chosen);
     };
-    if paragraphs < CLUSTER_MIN_PARAGRAPHS {
+    if paragraphs < CLUSTER_MIN_PARAGRAPHS || !shares_content_ancestor(&anchor, &cluster) {
         return Some(chosen);
     }
     let pair = extract_excerpt_pair(&cluster, &selectors, &mut cache);
@@ -645,13 +653,29 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     }
 }
 
-/// 候補が他記事・広告のカードらしいか（リンク密度が LINK_DENSE_CANDIDATE_RATIO 以上か、一覧の li の中にある）。
-fn looks_like_card(candidate: &ElementRef<'_>, link_density: f64) -> bool {
-    link_density >= LINK_DENSE_CANDIDATE_RATIO
-        || candidate
-            .ancestors()
-            .filter_map(ElementRef::wrap)
-            .any(|node| node.value().name() == "li")
+/// 候補が他記事・広告のカードらしいか。リンク密度が LINK_DENSE_CANDIDATE_RATIO 以上か、
+/// 一覧の li の中にあって、リンクを含むか文字がごく少ない（CARD_MAX_TEXT_CHARS 未満）とき。
+/// li の中というだけではカードとしない（タイムライン・無限スクロールのページは本物の短信も li で包むため）。
+fn looks_like_card(candidate: &ElementRef<'_>, link_density: f64, text_chars: usize) -> bool {
+    if link_density >= LINK_DENSE_CANDIDATE_RATIO {
+        return true;
+    }
+    let in_list_item = candidate
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .any(|node| node.value().name() == "li");
+    in_list_item && (link_density > 0.0 || text_chars < CARD_MAX_TEXT_CHARS)
+}
+
+/// 候補とかたまりの最も近い共通の祖先が body / html より内側にあるか（同じ本文領域の中にあるか）。
+/// body 直下で別々に置かれた同意バナー・サイト案内などへ差し替えないため。
+fn shares_content_ancestor(candidate: &ElementRef<'_>, cluster: &ElementRef<'_>) -> bool {
+    let candidate_ancestors: HashSet<_> = candidate.ancestors().map(|node| node.id()).collect();
+    cluster
+        .ancestors()
+        .find(|node| candidate_ancestors.contains(&node.id()))
+        .and_then(ElementRef::wrap)
+        .is_some_and(|common| !matches!(common.value().name(), "body" | "html"))
 }
 
 /// 短い抜粋（chosen）を段落のかたまりの抜粋（cluster）へ差し替えるか（長さの条件だけ）。
@@ -832,7 +856,11 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
         (lenient_link_chars.min(lenient_dense_chars) as f64) / lenient_dense_chars as f64
     };
     ExcerptPair {
-        strict: join_body_blocks(select_strict_blocks(container, &strict_candidates)),
+        strict: join_body_blocks(select_strict_blocks(
+            container,
+            &strict_candidates,
+            selectors,
+        )),
         lenient: join_body_blocks(lenient_blocks),
         link_density,
     }
@@ -845,7 +873,11 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
 ///    続けば囲みの中のブロックだけを飛ばす（囲みの要素がない平らな構造では見出しの行だけを飛ばすことになる）。
 /// 3. 「【画像】」「【あわせて読みたい】」などの誘導行、寄付・会員登録の呼びかけ、ページ送りは飛ばす。
 /// 4. リンクが大半のブロックが LINK_LIST_MIN_RUN 個以上続く部分（リンク一覧）は飛ばす。
-fn select_strict_blocks(container: &ElementRef<'_>, candidates: &[StrictBlock]) -> Vec<String> {
+fn select_strict_blocks(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock],
+    selectors: &BlockSelectors,
+) -> Vec<String> {
     let mut selected = Vec::new();
     let mut selected_chars = 0;
     // 本文途中の【PR】の囲み。この要素の内側のブロックは飛ばす。
@@ -868,7 +900,12 @@ fn select_strict_blocks(container: &ElementRef<'_>, candidates: &[StrictBlock]) 
             if selected_chars < PR_SECTION_MIN_PRECEDING_CHARS || index == 0 {
                 continue;
             }
-            let pr_box = pr_section_box(container, &block.element, &candidates[index - 1].element);
+            let pr_box = pr_section_box(
+                container,
+                &block.element,
+                &candidates[index - 1].element,
+                selectors,
+            );
             let body_continues = candidates[index + 1..]
                 .iter()
                 .any(|later| later.is_long_paragraph && !is_inside(&later.element, &pr_box));
@@ -890,21 +927,51 @@ fn select_strict_blocks(container: &ElementRef<'_>, candidates: &[StrictBlock]) 
     selected
 }
 
-/// 【PR】の見出しを含む囲みの要素。見出し自身から祖先へたどり、直前のブロック（本文）を含まない
-/// 最も外側の要素を返す（コンテナ自身は含めない）。見出しと本文が同じ親に並ぶ平らな構造では見出し自身になる。
+/// 【PR】の見出しを含む囲みの要素。見出し自身から祖先へたどり、次のどれかに当たる手前で止める（コンテナ自身は含めない）。
+/// - 直前のブロック（本文）を含む祖先。
+/// - 長い段落（p / blockquote で END_MARKER_BODY_PARAGRAPH_CHARS 以上）を直下に 3 つ以上持つ祖先。見出しが本文の段落と
+///   同じ親に並ぶ構造（本文を包む section の先頭に【PR】の行がある等）では、その親を囲みにすると後ろの本文を落とすため。
+/// - 文字数が PR_BOX_MAX_CHARS を超える祖先（本文を包んでいるとみなす）。
+///
+/// 見出しと本文が同じ親に並ぶ平らな構造では見出し自身になる。
 fn pr_section_box<'a>(
     container: &ElementRef<'_>,
     header: &ElementRef<'a>,
     previous: &ElementRef<'_>,
+    selectors: &BlockSelectors,
 ) -> ElementRef<'a> {
     let mut pr_box = *header;
     for node in header.ancestors().filter_map(ElementRef::wrap) {
-        if node.id() == container.id() || is_inside(previous, &node) {
+        if node.id() == container.id()
+            || is_inside(previous, &node)
+            || has_direct_long_paragraph(&node, &pr_box)
+            || text_and_link_chars(&node, &selectors.links).0 > PR_BOX_MAX_CHARS
+        {
             break;
         }
         pr_box = node;
     }
     pr_box
+}
+
+/// 直下の子（`path` 自身を除く。見出しや、そこまでに広げた囲み）に長い段落
+/// （p / blockquote で END_MARKER_BODY_PARAGRAPH_CHARS 以上）が PR_BOX_MAX_DIRECT_PARAGRAPHS より多くあるか。
+/// 宣伝の囲みは見出し＋数段落程度で、それより多い段落を直接並べる要素は本文の区画とみなす。
+fn has_direct_long_paragraph(element: &ElementRef<'_>, path: &ElementRef<'_>) -> bool {
+    element
+        .children()
+        .filter_map(ElementRef::wrap)
+        .filter(|child| {
+            child.id() != path.id()
+                && matches!(child.value().name(), "p" | "blockquote")
+                && child
+                    .text()
+                    .map(|text| text.chars().filter(|ch| !ch.is_whitespace()).count())
+                    .sum::<usize>()
+                    >= END_MARKER_BODY_PARAGRAPH_CHARS
+        })
+        .count()
+        > PR_BOX_MAX_DIRECT_PARAGRAPHS
 }
 
 /// element が ancestor 自身か、その内側にあるか。
@@ -1973,6 +2040,44 @@ mod tests {
     }
 
     #[test]
+    fn keeps_body_after_pr_line_at_top_of_wrapping_element() {
+        // 【PR】の行が、残りの本文を包む要素（section / div.inner）の先頭にあっても、後ろの本文は落とさない。
+        let first: String = (0..6)
+            .map(|i| format!("<p>前半{i}。{LONG_BODY}</p>"))
+            .collect();
+        let rest: String = (0..10)
+            .map(|i| format!("<p>後半{i}。{LONG_BODY}</p>"))
+            .collect();
+        for html in [
+            format!(
+                "<!doctype html><html><body><article><section>{first}</section><section><p>【PR】スポンサーのお知らせ</p>{rest}</section></article></body></html>"
+            ),
+            format!(
+                r#"<!doctype html><html><body><article><div class="body">{first}<div class="inner"><p>【PR】スポンサーのお知らせ</p>{rest}</div></div></article></body></html>"#
+            ),
+        ] {
+            let excerpt = extract_excerpt(&html).unwrap();
+            assert!(excerpt.contains("後半0。"), "{html}");
+            assert!(excerpt.contains("後半9。") || excerpt.chars().count() > 1_500);
+            assert!(!excerpt.contains("スポンサー"));
+        }
+    }
+
+    #[test]
+    fn keeps_body_when_pr_box_would_wrap_long_text() {
+        // 見出しだけを包む要素から広げても、本文（長い文章）を包む祖先までは囲みにしない。
+        let rest: String = (0..20)
+            .map(|i| format!("<div><p>後半{i}。{LONG_BODY}</p></div>"))
+            .collect();
+        let html = format!(
+            r#"<!doctype html><html><body><article><div class="lead"><p>{LONG_BODY}</p><p>{LONG_BODY}1</p><p>{LONG_BODY}2</p><p>{LONG_BODY}3</p></div><div class="main"><div class="kakomi"><p>【PR】スポンサーのお知らせ</p></div>{rest}</div></article></body></html>"#
+        );
+        let excerpt = extract_excerpt(&html).unwrap();
+        assert!(excerpt.contains("後半0。"));
+        assert!(!excerpt.contains("スポンサー"));
+    }
+
+    #[test]
     fn skips_only_pr_line_in_flat_body() {
         // 囲みの要素がなく本文と同じ親に並ぶ【PR】の行は、後ろに長い段落が続けば行だけを飛ばす。
         let body = format!("<p>{LONG_BODY}</p><p>{BODY_1}</p><p>{LONG_BODY}1</p><p>{BODY_2}</p>");
@@ -2086,8 +2191,8 @@ mod tests {
         let body = long_paragraphs(5);
         let html = format!(
             r#"<!doctype html><html><body>
-<div class="Block_primary__x1"><div class="Article_body__k2 postContent">{body}</div></div>
-<div class="Hot_list__z9"><ul><li><article><p><a href="/k">#話題のキーワード</a></p><p>他の記事のタイトルが入ります</p></article></li></ul></div>
+<div id="mainContent"><div class="Block_primary__x1"><div class="Article_body__k2 postContent">{body}</div></div>
+<div class="Hot_list__z9"><ul><li><article><p><a href="/k">#話題のキーワード</a></p><p>他の記事のタイトルが入ります</p></article></li></ul></div></div>
 </body></html>"#
         );
         let (excerpt, source) = extract_excerpt_with_source(&html);
@@ -2096,6 +2201,24 @@ mod tests {
         assert!(excerpt.starts_with("本文の段落0です。"));
         assert!(excerpt.contains("本文の段落4です。"));
         assert!(!excerpt.contains("他の記事のタイトル"));
+    }
+
+    #[test]
+    fn keeps_short_article_in_list_item_over_consent_text() {
+        // タイムラインのように li で包まれた本物の短信（リンクなし）は、body 直下の同意文に差し替えない。
+        let consent = long_paragraphs(5);
+        let html = format!(
+            r#"<!doctype html><html><body><ul><li><article><p>{BODY_1}</p><p>{BODY_2}</p></article></li></ul><div id="cmp">{consent}</div></body></html>"#
+        );
+        assert_eq!(
+            extract_excerpt(&html).unwrap(),
+            format!("{BODY_1}\n\n{BODY_2}")
+        );
+        // リンクを含むカードでも、かたまりとの共通の祖先が body なら差し替えない。
+        let html = format!(
+            r#"<!doctype html><html><body><ul><li><article><p><a href="/k">#話題</a></p><p>{BODY_1}</p></article></li></ul><div id="cmp">{consent}</div></body></html>"#
+        );
+        assert!(extract_excerpt(&html).unwrap().contains(BODY_1));
     }
 
     #[test]
