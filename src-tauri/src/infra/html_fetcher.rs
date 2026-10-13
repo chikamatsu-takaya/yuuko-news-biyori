@@ -10,6 +10,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     time::Duration,
@@ -486,7 +487,7 @@ fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
 /// 上のまとめの 1〜4 を行う。
 fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
     let block_selector = Selector::parse("p, li, blockquote, h2, h3").ok()?;
-    let mut cache = NoiseCache::default();
+    let mut cache = NoiseCache::new(|element| element.id());
     let mut visited = HashSet::new();
     let mut best_strict: Option<String> = None;
     let mut best_lenient: Option<String> = None;
@@ -561,10 +562,10 @@ struct ExcerptPair {
 ///   捨てていたため、そうした段落が 1 つあるだけで本文が取れず RSS 概要に落ちていた。
 /// - strict では「関連記事」などの終端の目印が来たとき、後ろに長い本文の段落がなければ
 ///   以降を他記事の一覧とみなして打ち切り、あれば目印だけを飛ばして続ける。
-fn extract_excerpt_pair(
+fn extract_excerpt_pair<K: Hash + Eq>(
     container: &ElementRef<'_>,
     block_selector: &Selector,
-    cache: &mut NoiseCache,
+    cache: &mut NoiseCache<K>,
 ) -> ExcerptPair {
     // strict 用は (テキスト, 長い本文の段落か)。終端の目印の後ろを先読みするため、先に集める。
     let mut strict_candidates: Vec<(String, bool)> = Vec::new();
@@ -643,10 +644,11 @@ enum Region {
 }
 
 /// 要素ごとの判定のメモ。各ブロックから祖先をたどるたびに同じ要素の class を照合し直さないため。
-/// キーは文書内で位置の変わらない要素データのアドレス（scraper の NodeId 型は依存を増やさずに名前で書けないため）。
-#[derive(Default)]
-struct NoiseCache {
-    elements: HashMap<usize, ElementNoise>,
+/// キーは `ElementRef::id()`（ego_tree の NodeId）。NodeId 型は依存を増やさずに名前で書けないため、
+/// 型引数にして `NoiseCache::new` に渡すキー関数から推論させる（`visited` の HashSet と同じ扱い）。
+struct NoiseCache<K: Hash + Eq> {
+    elements: HashMap<K, ElementNoise>,
+    key_of: fn(&ElementRef<'_>) -> K,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -658,7 +660,14 @@ struct ElementNoise {
     noise_class: bool,
 }
 
-impl NoiseCache {
+impl<K: Hash + Eq> NoiseCache<K> {
+    fn new(key_of: fn(&ElementRef<'_>) -> K) -> Self {
+        Self {
+            elements: HashMap::new(),
+            key_of,
+        }
+    }
+
     /// 要素自身と、その祖先（`stop_at` の手前まで。`stop_at` 自身は判定しない）を見て領域を決める。
     /// `stop_at` が None のときは文書の根までたどる。
     /// `stop_at` が記事コンテナ（body / html 以外）のとき、その内側の `header` は除かない
@@ -685,7 +694,7 @@ impl NoiseCache {
     }
 
     fn element_noise(&mut self, element: &ElementRef<'_>) -> ElementNoise {
-        let key = std::ptr::from_ref(element.value()) as usize;
+        let key = (self.key_of)(element);
         *self
             .elements
             .entry(key)
