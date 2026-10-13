@@ -305,12 +305,19 @@ fn detect_feed_format(feed_bytes: &[u8]) -> Option<FeedFormat> {
 
 /// `rdf:RDF` の開始タグ（最初の `>` まで）が RSS 1.0 と RDF 構文の名前空間を宣言しているか。
 /// RSS 1.0 名前空間は既定（`xmlns=`）でも接頭辞付き（`xmlns:rss=` など）でもよい。
+/// URI は引用符ごと照合し、`http://purl.org/rss/1.0/modules/content/` のような
+/// 前方一致する別の名前空間を RSS 1.0 の宣言と取り違えないようにする。
+/// この確認は形式の振り分けだけが目的で、安全性はその後の XML 解析・URL 検証・サニタイズ・
+/// 件数上限で担保する（ここで誤判定しても危険な値は記事候補にならない）。
 fn declares_rss10_namespaces(root_onwards: &str) -> bool {
     let Some(tag_end) = root_onwards.find('>') else {
         return false;
     };
     let root_tag = &root_onwards[..tag_end];
-    root_tag.contains(RSS10_NAMESPACE) && root_tag.contains(RDF_SYNTAX_NAMESPACE)
+    let declares = |uri: &str| {
+        root_tag.contains(&format!("\"{uri}\"")) || root_tag.contains(&format!("'{uri}'"))
+    };
+    declares(RSS10_NAMESPACE) && declares(RDF_SYNTAX_NAMESPACE)
 }
 
 /// Returns the position of the opening `<tag` token when it is followed by a
@@ -1133,6 +1140,87 @@ mod tests {
             detect_feed_format(IMPRESS_LIKE_RDF.as_bytes()),
             Some(FeedFormat::Rdf)
         );
+    }
+
+    #[test]
+    fn rss10_namespace_must_match_exact_uri_with_quotes() {
+        // content モジュールの URI は RSS 1.0 名前空間と前方一致するが、宣言として数えない。
+        let modules_only = br#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+</rdf:RDF>"#;
+        assert_eq!(detect_feed_format(modules_only), None);
+
+        // 単引用符での宣言は受け付ける。
+        let single_quoted = br#"<?xml version='1.0'?>
+<rdf:RDF xmlns='http://purl.org/rss/1.0/' xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+</rdf:RDF>"#;
+        assert_eq!(detect_feed_format(single_quoted), Some(FeedFormat::Rdf));
+    }
+
+    #[test]
+    fn rss_token_in_comment_or_cdata_before_rdf_root_stays_safe() {
+        // ルート判別は文字列走査なので、本物の rdf:RDF より前のコメントや CDATA にある `<rss` を
+        // ルートとみなすことがある。その場合も結果は解析エラーか、通常の検証経路を通った安全な
+        // 読み取りのどちらかになることを固定する。
+        let feed_url = Url::parse("https://rss.example.com/index.rdf").unwrap();
+        let body = r#"
+  <channel rdf:about="https://rss.example.com/index.rdf">
+    <title>Tricky</title>
+    <link>https://news.example.com/</link>
+    <description>tricky prolog</description>
+  </channel>
+  <item rdf:about="https://news.example.com/articles/ok">
+    <title>OK</title>
+    <link>https://news.example.com/articles/ok</link>
+    <dc:date>2026-10-13T09:30:00+09:00</dc:date>
+  </item>
+  <item rdf:about="https://evil.example.com/articles/ng">
+    <title>NG</title>
+    <link>https://evil.example.com/articles/ng</link>
+  </item>
+</rdf:RDF>"#;
+        let root = r#"<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/">"#;
+
+        // コメント内の `<rss`: RSS 2.0 と判別されるが、rss クレートは rdf:RDF ルートも読めるため
+        // 同じ URL 検証・サニタイズを通って許可リスト内の記事だけが残る。
+        // RSS 2.0 扱いなので dc:date は使われず、公開日時は None（取得時刻へフォールバック）になる。
+        let with_comment = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><!-- <rss version="2.0"> -->{root}{body}"#
+        );
+        assert_eq!(
+            detect_feed_format(with_comment.as_bytes()),
+            Some(FeedFormat::Rss)
+        );
+        let items = parse_feed_items(with_comment.as_bytes(), &feed_url, &rdf_allowlist())
+            .expect("comment before the root is read through the normal path");
+        assert_eq!(
+            items,
+            vec![RssItem {
+                title: "OK".to_string(),
+                article_url: "https://news.example.com/articles/ok".to_string(),
+                summary: None,
+                source_name: "Tricky".to_string(),
+                published_at: None,
+            }]
+        );
+
+        // ルート前の CDATA 内の `<rss`: 整形式でない文書。解析エラーになるか、
+        // 読めた場合でも許可リスト内の記事だけが残ることを確認する。
+        let with_cdata = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><![CDATA[<rss version="2.0">]]>{root}{body}"#
+        );
+        assert_eq!(
+            detect_feed_format(with_cdata.as_bytes()),
+            Some(FeedFormat::Rss)
+        );
+        match parse_feed_items(with_cdata.as_bytes(), &feed_url, &rdf_allowlist()) {
+            Err(error) => assert!(matches!(error, AppError::Parse(_)), "got {error:?}"),
+            Ok(items) => {
+                assert!(items
+                    .iter()
+                    .all(|item| item.article_url == "https://news.example.com/articles/ok"));
+            }
+        }
     }
 
     #[test]
