@@ -16,8 +16,10 @@
 //! 落ち着いた口調になるだけで害は小さい。そのため語はやや広めに取り、明らかに別の意味になる
 //! 複合語（「テロップ」「爆発的」「台風の目」など）だけを照合の前に除く。
 //! 「事故物件」は不動産やITの記事でも、人が亡くなった物件を指す語なので重い側に倒す（除外しない）。
-//! 「攻撃」「がん」「死」のような1〜2字の語は、野球の「攻撃」・「がんばる」・「死活監視」などに
-//! 当たるため、そのままでは使わず、意味が定まる形（「サイバー攻撃」「がんで」「死亡」）で照合する。
+//! 「攻撃」「がん」「死」「性的」「心中」のような1〜2字の語は、野球の「攻撃」・「がんばる」・「死活監視」・
+//! 「個性的」・「心中を語る」などに当たるため、そのままでは使わず、意味が定まる形（「サイバー攻撃」
+//! 「性的暴行」「無理心中」）か、前後の字を見る規則（`has_kanji_death_compound` / `has_kanji_cancer_compound`）で照合する。
+//! 照合の前に半角カナを全角へそろえる（`normalize_halfwidth_katakana`。依存を増やさない簡単な対応表）。
 
 use crate::domain::summary::{YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID};
 
@@ -69,6 +71,8 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "即死",
     "孤独死",
     "過労死",
+    "急逝",
+    "永眠",
     "亡くな",
     "逝去",
     "他界",
@@ -84,7 +88,13 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "命を落と",
     "命を奪",
     "自殺",
-    "心中",
+    // 「心中」だけでは「心中を語る」（しんちゅう）に当たるため、事件の形だけにする。
+    "無理心中",
+    "一家心中",
+    "親子心中",
+    "心中事件",
+    "心肺停止",
+    "救急搬送",
     "行方不明",
     "安否",
     "意識不明",
@@ -92,6 +102,8 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "重傷",
     "負傷",
     "けが人",
+    "ケガ人",
+    "怪我人",
     // 事件・犯罪
     "殺人",
     "殺害",
@@ -114,7 +126,26 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "虐待",
     "誘拐",
     "監禁",
-    "性的",
+    "拉致",
+    "立てこもり",
+    "立て籠もり",
+    "放火",
+    "刺傷",
+    "ひき逃げ",
+    "痴漢",
+    "盗撮",
+    "窃盗",
+    "横領",
+    "乱射",
+    "爆破",
+    // 「性的」だけでは「個性的」「女性的」「慢性的」などに当たるため、被害の形だけにする。
+    "性的暴行",
+    "性的被害",
+    "性的虐待",
+    "性的接待",
+    "性的嫌がらせ",
+    "性加害",
+    "性暴力",
     "性被害",
     "わいせつ",
     "ストーカー",
@@ -137,9 +168,16 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "脱線",
     "遭難",
     "水難",
-    "情報漏えい",
-    "情報漏洩",
+    // 情報の漏えい（「情報が漏えい」「ガス漏えい」のように助詞や別の語が挟まっても当たるよう、語だけで照合する）。
+    "漏えい",
+    "漏洩",
+    // 「流出」だけでは「人材流出」「資金流出」に当たるため、情報・データの形だけにする。
     "情報流出",
+    "情報が流出",
+    "情報の流出",
+    "情報を流出",
+    "データ流出",
+    "データが流出",
     // 災害
     "災害",
     "被災",
@@ -182,6 +220,10 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
     "がんで",
     "がんと診断",
     "がんの治療",
+    "がん治療",
+    "がん患者",
+    "がん闘病",
+    "がんを公表",
     "癌",
     "熱中症",
     "食中毒",
@@ -192,24 +234,51 @@ const HEAVY_NEWS_KEYWORDS: &[&str] = &[
 
 /// 照合の前に取り除く、重い語を含むが別の意味になる複合語。
 const BENIGN_COMPOUNDS: &[&str] = &[
-    // 「テロ」を含むが無関係な語（字幕・異種混在）。
+    // 「テロ」を含むが無関係な語（字幕・異種混在・医療や生物・天文の語）。
     "テロップ",
     "ヘテロ",
-    // 「爆発」の比喩（爆発的な人気・ヒット・打線の爆発力）。
+    "コレステロール",
+    "ステロイド",
+    "テロメア",
+    // 「爆発」の比喩（爆発的な人気・ヒット・打線の爆発力・人気の爆発）。
     "爆発的",
     "爆発力",
-    // 野球の用語（「犠牲」を含む）。
+    "打線爆発",
+    "打線が爆発",
+    "人気爆発",
+    "人気が爆発",
+    // 野球の用語・比喩（「犠牲」を含む）。
     "犠牲フライ",
     "犠牲バント",
+    "自己犠牲",
+    // 「〇〇難民」の比喩（災害・紛争の難民ではないもの）。「帰宅難民」は災害時の語なので除かない。
+    "買い物難民",
+    "ネットカフェ難民",
+    "ネット難民",
+    "就職難民",
+    "就活難民",
+    "介護難民",
+    "保活難民",
+    "ランチ難民",
+    "レジ難民",
+    "充電難民",
     // 「台風」の比喩（業界の台風の目）。
     "台風の目",
     // 「被害」の比喩・心理の語。
     "被害妄想",
 ];
 
+/// 「漢字＋死」の語の終わり（「転落死」「凍死」「窒息死」「戦死」など）とみなさない語の頭の字。
+/// 「必死」「決死」「不死」は死亡の意味ではないため除く。
+const NON_FATAL_DEATH_PREFIXES: [char; 3] = ['必', '決', '不'];
+
+/// 「漢字＋がん」（「乳がん」「胃がん」「末期がん」）の直後に来たら病名とみなさない字。
+/// 「皆がんばろう」「がんじがらめ」「がんがん」「がんもどき」を除くため。
+const NON_CANCER_FOLLOWERS: [char; 5] = ['ば', 'じ', 'が', 'も', 'ぼ'];
+
 /// 重いニュースの語を含むか。照合は大文字・小文字の区別が要らない日本語の語だけで行う。
 fn is_heavy_news(article_text: &str) -> bool {
-    let mut text = article_text.to_string();
+    let mut text = normalize_halfwidth_katakana(article_text);
     for benign in BENIGN_COMPOUNDS {
         if text.contains(benign) {
             text = text.replace(benign, "　");
@@ -218,11 +287,87 @@ fn is_heavy_news(article_text: &str) -> bool {
     HEAVY_NEWS_KEYWORDS
         .iter()
         .any(|keyword| text.contains(keyword))
+        || has_kanji_death_compound(&text)
+        || has_kanji_cancer_compound(&text)
+}
+
+fn is_kanji(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '々')
+}
+
+/// 「漢字＋死」で語が終わる形（直後が漢字でない）があるか。「転落死」「凍死」「圧死」「餓死」などを
+/// 1語ずつ並べずに拾う。「死活」「死角」は直後が漢字なので当たらない。「必死」「決死」「不死」は除く。
+fn has_kanji_death_compound(text: &str) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars.iter().enumerate().any(|(index, &c)| {
+        c == '死'
+            && index > 0
+            && is_kanji(chars[index - 1])
+            && !NON_FATAL_DEATH_PREFIXES.contains(&chars[index - 1])
+            && chars.get(index + 1).is_none_or(|&next| !is_kanji(next))
+    })
+}
+
+/// 「漢字＋がん」の病名（「乳がん」「胃がん」「肺がん」「末期がん」）があるか。
+/// 直後が「ば」「じ」などなら「皆がんばろう」のような別の語とみなして当てない。
+fn has_kanji_cancer_compound(text: &str) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars.windows(2).enumerate().any(|(index, pair)| {
+        pair == ['が', 'ん']
+            && index > 0
+            && is_kanji(chars[index - 1])
+            && chars
+                .get(index + 2)
+                .is_none_or(|next| !NON_CANCER_FOLLOWERS.contains(next))
+    })
+}
+
+/// 半角カナ（U+FF61〜FF9F）を全角へそろえる。濁点・半濁点（ﾞ ﾟ）は直前の字と合わせて1字にする。
+/// NFKC の一部だけを、依存を増やさずに行う（照合用。表示や保存には使わない）。
+fn normalize_halfwidth_katakana(text: &str) -> String {
+    const BASE: &str = "。「」、・ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン゛゜";
+    let base = BASE.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let code = c as u32;
+        if !(0xFF61..=0xFF9F).contains(&code) {
+            out.push(c);
+            continue;
+        }
+        let full = base[(code - 0xFF61) as usize];
+        match full {
+            // 濁点: 直前のカ行・サ行・タ行・ハ行・ウを濁音へ（Unicode では清音の次の字が濁音）。
+            '゛' => match out.pop() {
+                Some('ウ') => out.push('ヴ'),
+                Some(prev) if "カキクケコサシスセソタチツテトハヒフヘホ".contains(prev) => {
+                    out.push(char::from_u32(prev as u32 + 1).unwrap_or(prev))
+                }
+                Some(prev) => {
+                    out.push(prev);
+                    out.push(full);
+                }
+                None => out.push(full),
+            },
+            // 半濁点: ハ行を半濁音へ（清音の2つ後の字）。
+            '゜' => match out.pop() {
+                Some(prev) if "ハヒフヘホ".contains(prev) => {
+                    out.push(char::from_u32(prev as u32 + 2).unwrap_or(prev))
+                }
+                Some(prev) => {
+                    out.push(prev);
+                    out.push(full);
+                }
+                None => out.push(full),
+            },
+            _ => out.push(full),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SpeechTone;
+    use super::{normalize_halfwidth_katakana, SpeechTone};
 
     fn speech_input(title: &str, summary: &str) -> String {
         format!("タイトル: {title}\n要約: {summary}\n要点:\n・{summary}")
@@ -336,6 +481,123 @@ mod tests {
             SpeechTone::for_request("yuuko_comment_v1", "タイトル: 新しいAIチップ"),
             SpeechTone::Normal
         );
+    }
+
+    #[test]
+    fn personality_words_ending_in_seiteki_are_not_heavy() {
+        // 「性的」は「個性的」「女性的」「慢性的」などにも含まれるため、被害の形だけで照合する（P1 の回帰）。
+        for text in [
+            "個性的なデザインのスマートフォン",
+            "女性的なシルエットの新作コート",
+            "男性的な力強い走り",
+            "中性的な声のAI音声",
+            "慢性的な人手不足が続く物流業界",
+            "理性的な議論を求める",
+            "感性的な表現と知性的な構成",
+            "野性的な味わいのジビエ",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Normal, "{text}");
+        }
+        for text in [
+            "元監督を性的暴行の疑いで",
+            "性加害の告発が相次ぐ",
+            "性暴力の根絶を訴える",
+            "性的嫌がらせで処分",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Calm, "{text}");
+        }
+    }
+
+    #[test]
+    fn more_benign_compounds_do_not_trigger() {
+        for text in [
+            "コレステロールを下げる食事",
+            "ステロイド外用薬の新しい使い方",
+            "テロメアの研究が進む",
+            "アステロイド探査機が帰還",
+            "打線爆発で10得点",
+            "打線が爆発し大勝",
+            "人気が爆発した新作ゲーム",
+            "監督が胸の内の心中を語る",
+            "自己犠牲を描いた映画",
+            "買い物難民を支える移動販売",
+            "ネットカフェ難民を描く漫画",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Normal, "{text}");
+        }
+        // 比喩の語と並んでいても、本来の重い語は当たる。
+        for text in [
+            "工場で爆発 2人けが",
+            "紛争で難民が国境に",
+            "一家心中とみられる事件",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Calm, "{text}");
+        }
+    }
+
+    #[test]
+    fn more_heavy_words_are_detected() {
+        for text in [
+            "人気俳優が急逝",
+            "作家が永眠",
+            "工事現場で転落死",
+            "山中で凍死か",
+            "倒れた棚の下敷きになり圧死",
+            "餅をのどに詰まらせ窒息死",
+            "衰弱死の疑い",
+            "河川敷で変死体",
+            "幼児が餓死",
+            "祖父は戦死した",
+            "空き家に放火",
+            "駅で刺傷事件",
+            "ひき逃げ容疑の男",
+            "電車内で痴漢",
+            "盗撮の疑い",
+            "倉庫で窃盗",
+            "会社の資金を横領",
+            "銀行に立てこもり",
+            "橋を爆破",
+            "学校で乱射",
+            "拉致問題の解決",
+            "心肺停止の状態で発見",
+            "3人が救急搬送",
+            "ケガ人はいない見込み",
+            "怪我人が出た",
+            "乳がんを公表",
+            "胃がんの手術",
+            "肺がんと闘う",
+            "末期がんの告知",
+            "がん患者の支援",
+            "顧客の個人情報が流出",
+            "会員情報が漏えいした可能性",
+            "工場でガス漏洩",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Calm, "{text}");
+        }
+        // 「必死」「決死」「不死鳥」「死活」「死角」、「皆がんばろう」「がんじがらめ」は当たらない。
+        for text in [
+            "必死の追い上げ",
+            "決死の覚悟で挑む",
+            "不死鳥のように復活",
+            "死活監視ツール",
+            "死角をなくすカメラ",
+            "皆がんばろう",
+            "規則でがんじがらめ",
+            "人材流出を防ぐ",
+            "資金流出が続く",
+        ] {
+            assert_eq!(SpeechTone::detect(text), SpeechTone::Normal, "{text}");
+        }
+    }
+
+    #[test]
+    fn halfwidth_katakana_is_normalized_before_matching() {
+        assert_eq!(normalize_halfwidth_katakana("ﾃﾛ"), "テロ");
+        assert_eq!(normalize_halfwidth_katakana("ｹﾞｰﾑ ﾊﾟﾝ ｳﾞ"), "ゲーム パン ヴ");
+        assert_eq!(SpeechTone::detect("自爆ﾃﾛで犠牲"), SpeechTone::Calm);
+        assert_eq!(SpeechTone::detect("ｻｲﾊﾞｰ攻撃を受けた"), SpeechTone::Calm);
+        assert_eq!(SpeechTone::detect("ｹｶﾞ人なし"), SpeechTone::Calm);
+        assert_eq!(SpeechTone::detect("ﾃﾛｯﾌﾟを自動生成"), SpeechTone::Normal);
     }
 
     #[test]
