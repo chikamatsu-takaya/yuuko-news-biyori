@@ -132,13 +132,17 @@ impl ArticleService {
         params: GetArticleDetailParams,
     ) -> Result<ArticleDetailDto, AppError> {
         let article_id = params.validated_article_id()?;
-        let detail = self.repository.get_article_detail(&article_id)?;
         // 詳細設計書 §10.3: 詳細表示に成功した記事を DetailViewed へ進める。
+        // 記事ファイルを2回探さないよう、詳細の取得と既読の前進はリポジトリで1回の読み込みにまとめる。
         // 既読保存は付随処理なので、失敗しても詳細表示自体は成功させる。
-        if self.advance_read_state_or_log(&article_id, ArticleReadState::DetailViewed) {
+        let (detail, advanced) = self.repository.get_article_detail_and_advance_read_state(
+            &article_id,
+            ArticleReadState::DetailViewed,
+        )?;
+        if read_state_advanced_or_log(&article_id, advanced) {
             // 初めて詳細を開いた（既読になった）ときだけ、その日の既読数に数える（データ設計書 §12.3）。
             // DetailViewed は一方向の最終状態なので、同じ記事を二重に数えることはない。
-            // 記事側のロックは advance の中で手放し済み。付与の失敗は詳細表示を止めない。
+            // 記事側のロックはリポジトリ呼び出しの中で手放し済み。付与の失敗は詳細表示を止めない。
             if let Some(gacha_service) = &self.gacha_service {
                 log_grant_failure("news_read", gacha_service.grant_for_news_read());
             }
@@ -163,16 +167,11 @@ impl ArticleService {
     /// 実際に状態を進めて保存できたときだけ true を返す（後退・同じ状態・失敗は false）。
     /// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
     fn advance_read_state_or_log(&self, article_id: &str, target: ArticleReadState) -> bool {
-        match self
-            .repository
-            .advance_article_read_state(article_id, target)
-        {
-            Ok(advanced) => advanced,
-            Err(error) => {
-                log::warn!("Failed to persist article read state for {article_id}: {error}");
-                false
-            }
-        }
+        read_state_advanced_or_log(
+            article_id,
+            self.repository
+                .advance_article_read_state(article_id, target),
+        )
     }
 
     /// 記事IDから保存済みの元記事 URL を引き、検証できたものだけを `opener` で開く（判断台帳 D13）。
@@ -284,6 +283,18 @@ fn age_hours_since(fetched_at: &str, now: DateTime<Utc>) -> Option<f64> {
     let fetched_at = DateTime::parse_from_rfc3339(fetched_at.trim()).ok()?;
     let elapsed = now.signed_duration_since(fetched_at.with_timezone(&Utc));
     Some(elapsed.num_seconds() as f64 / 3600.0)
+}
+
+/// 既読の前進結果を bool にし、失敗時は調査用ログだけ残す（前進して保存できたときだけ true）。
+/// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
+fn read_state_advanced_or_log(article_id: &str, result: Result<bool, AppError>) -> bool {
+    match result {
+        Ok(advanced) => advanced,
+        Err(error) => {
+            log::warn!("Failed to persist article read state for {article_id}: {error}");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
