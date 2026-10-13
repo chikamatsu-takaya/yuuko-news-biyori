@@ -543,7 +543,7 @@ fn excerpt_fallback_reason(source: Option<ExcerptSource>) -> Option<&'static str
 
 /// 正規化したURLから安定な article_id を生成する。
 /// 正規化: URLパース → フラグメント除去 → 末尾スラッシュ除去（ホストは url が小文字化）。
-fn article_id_from_url(raw: &str) -> String {
+pub(crate) fn article_id_from_url(raw: &str) -> String {
     let normalized = normalize_url_for_id(raw);
     format!("news_{:016x}", fnv1a_64(normalized.as_bytes()))
 }
@@ -572,14 +572,14 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 /// 現在時刻を UTC の RFC3339（秒精度）で返す。
-fn utc_now_rfc3339() -> String {
+pub(crate) fn utc_now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// フィードの公開日時を UTC ISO に正規化する。RSS の pubDate(RFC2822) と
 /// Atom の published(RFC3339/ISO8601) の両方に対応する。
 /// パースできない・存在しない場合は fetched_at（UTC）へフォールバックする。
-fn normalize_published_at(raw: Option<&str>, fallback_utc: &str) -> String {
+pub(crate) fn normalize_published_at(raw: Option<&str>, fallback_utc: &str) -> String {
     let Some(value) = raw else {
         return fallback_utc.to_string();
     };

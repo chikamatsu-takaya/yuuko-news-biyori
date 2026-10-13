@@ -2541,3 +2541,7 @@ mod tests {
         find(dir).unwrap_or_else(|| panic!("article file not found under {}", dir.display()))
     }
 }
+
+/// 同梱ローカルLLMの品質評価ハーネス（`#[ignore]`・手動実行専用）。
+#[cfg(test)]
+mod local_llm_quality_eval;
