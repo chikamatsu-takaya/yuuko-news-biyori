@@ -1,0 +1,168 @@
+# ローカルLLM同梱配布手順
+
+同梱ローカルLLM（llama.cpp の `llama-server` ＋ Qwen3.5-2B Q4_K_M。判断台帳 D99〜D102）を入れた配布用インストーラーを作る手順と、ライセンス本文の置き場所、実機での速度・メモリの実測結果をまとめる。
+
+- 開発環境で「ローカル」を動かすだけなら `開発環境構築手順書.md` §17.5 で足りる。本書は **配布物を作る人** 向け。
+- 設計は `docs/02_design/詳細設計書.md` §5.4.5.1（LocalLlmService）。
+- 「未検証」と書いた箇所は、本書の作成時（2026-10-13）にインストーラーを実際には作っていない部分。初めて配布物を作る人が確かめ、結果を本書へ追記する。
+
+---
+
+## 1. 同梱するもの
+
+| 置き場所（`src-tauri/resources/local_llm/` 配下） | 中身 | 大きさ | git |
+|---|---|---|---|
+| `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`） | 計 43,721,216 B（約 42 MiB） | 追跡しない（`.gitignore`） |
+| `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（`MODEL_FILE` / `MODEL_SIZE` / `MODEL_SHA256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
+| `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知を含む） | 約 57 KiB | **追跡する** |
+
+合計は約 1.36 GB（1,355,944,193 B ＝ runtime＋モデル＋LICENSES）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
+
+`tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_bundle_dir` でここを見る。
+
+## 2. 同梱物を置く・確かめる
+
+インターネットからは取らない。手元にある同梱物のフォルダ（`runtime/` と `models/` を持つもの）から写す。
+
+```powershell
+# リポジトリの一番上で
+node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ>
+# 例（参照アプリ「すたりお」の作業ツリーがある場合）
+node scripts/local-llm/place-bundle.mjs C:/WS/saiyou_creater/src-tauri/resources/local_llm
+
+# 置いた後に照合だけをやり直す（インストーラー作成の直前にも自動で走る）
+node scripts/local-llm/check-bundle.mjs
+```
+
+- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `MODEL_*`）にあるファイルだけを写す。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
+- `check-bundle.mjs`: 置いてあるものを同じ表と照合する。`tauri.conf.json` の `build.beforeBundleCommand` に入っているため、`pnpm tauri build` のときはインストーラーを作る直前に必ず走り、欠け・不一致があればバンドルを止める（`tauri dev`・cargo のビルド・テスト・CI では走らない）。
+- 置いたファイル（runtime・モデル）は **コミットしない**。`git status` に出ないことを確かめる（`LICENSES/` は追跡対象）。
+
+## 3. 配布用インストーラーを作る
+
+### 3.1 前提
+
+- `開発環境構築手順書.md` の Node.js / pnpm / Rust / C++ Build Tools がそろっていること。
+- 初めて `pnpm tauri build` を動かすとき、Tauri CLI はインストーラー作成ツール（WiX Toolset v3・NSIS）を自動でダウンロードする（Tauri v2 の既定の動作）。**ビルドするパソコンにインターネット接続が要る**。社内の取り決めでツールの取得に確認が要る場合は、先に確認する。
+- ビルドの出力先（`src-tauri/target/`）に、同梱物の写し（tauri-build が `target/<profile>/local_llm` へ写す約 1.3GB）とインストーラー（約 1.3GB × 形式の数）が増える。空き容量を 5GB 以上見ておく（目安・未検証）。
+
+### 3.2 コマンド
+
+```powershell
+# 1. 同梱物を置く（§2）。済んでいれば照合だけ
+node scripts/local-llm/check-bundle.mjs
+
+# 2. 配布用ビルド（next build → cargo build --release → check-bundle → インストーラー作成）
+pnpm tauri build
+
+# 3. MSI の作成が失敗したときだけ: NSIS だけを作る（判断台帳 D111。未検証）
+pnpm tauri build --bundles nsis
+```
+
+- `tauri.conf.json` は `bundle.targets: "all"` のまま（判断台帳 D111）。Windows では **MSI（WiX）と NSIS（.exe）の両方** を作る。
+- MSI の作成が失敗した（2GB 上限など。§4）ときは、設定を変えずに `pnpm tauri build --bundles nsis` で NSIS だけを作って配る。
+- 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`、`src-tauri/target/release/bundle/msi/*.msi`。
+- ビルド前に、APIキー・`.env`・`app-data/` の実データが混入していないことを確かめる（`開発環境構築手順書.md` §15.3）。
+
+### 3.3 作った後に確かめること（未検証・初回は必ず実施）
+
+1. インストーラーの大きさ（約 1.3GB 前後か）。
+2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（VC++ ランタイムの同梱〔D112・§6.2〕が入った後の版で確かめる）。
+3. インストール先の `local_llm/LICENSES/` にライセンス本文があるか。
+4. アンインストールで `local_llm/` が消えるか。
+
+## 4. MSI の 2GB 制限と配布形式（判断台帳 D111）
+
+### 4.1 事実関係
+
+- Windows Installer（MSI）と WiX には、1 ファイル・1 キャビネット（CAB）・MSI ファイル自体についておおむね **2GB の上限** がある。Tauri の WiX テンプレートは同梱物を 1 つの CAB にまとめて MSI へ埋め込む（`EmbedCab`）ため、**同梱物の合計が 2GB に近づくと MSI が作れない・壊れる** おそれがある（Tauri の公開資料・既知の不具合報告からの知識。本プロジェクトでは未検証）。
+- 現在の同梱物は約 1.36GB（§1）で、2GB には収まる見込み。ただし余裕は 0.6GB ほどしかなく、**モデルを大きくする（例: 4B 級の Q4 は約 2.5GB）と MSI は確実に上限を超える**。
+- NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_bundle_dir` の差し替え・D101 の将来案）を検討する。
+- WiX は 1.3GB の CAB を高圧縮で作るため、ビルドに時間がかかる（GGUF はほぼ縮まない）。NSIS は `bundle.windows.nsis.compression` で圧縮方式（`lzma` / `zlib` / `bzip2` / `none`）を選べる（未検証）。
+
+### 4.2 決定した運用（判断台帳 D111・2026-10-13）
+
+- `bundle.targets` は `"all"` のまま、**MSI と NSIS の両方を作る**。
+- **MSI の作成が失敗したら、`pnpm tauri build --bundles nsis` で NSIS だけを作る**（設定は変えない）。
+- 配るのは作れた形式。両方作れた場合の使い分けは配布先の都合に合わせる。
+
+背景（NSIS を代わりの形式にする理由）:
+
+- 1 つの .exe で配れる。Tauri の NSIS は既定で利用者ごと（管理者権限なし）にインストールできる。
+- MSI の CAB / MSI ファイルの 2GB 上限と、大きな CAB の作成時間を避けられる。
+- 同梱物が増えて MSI が先に作れなくなっても、NSIS は約 2GB まで同じ同梱物で作れる見込み（未検証）。
+
+- NSIS の圧縮は、GGUF がほぼ縮まないため `"bundle": { "windows": { "nsis": { "compression": "zlib" } } }` などへ下げるとビルドが速くなる可能性がある（大きさへの影響は小さい見込み。未検証）。
+
+## 5. ライセンス表記
+
+- 置き場所: `src-tauri/resources/local_llm/LICENSES/`（git で追跡）。`bundle.resources` で `local_llm/LICENSES/` としてインストーラーへ同梱される。
+- `README.txt` に、各部品の入手元・版・ライセンス本文のファイル名と、Qwen の重みを GGUF へ変換・量子化した **改変の告知**（Apache License 2.0 第4条(b)）を書いている。文言は持ち主の確認対象のため、変更するときは持ち主に確認する。
+- 同梱部品とライセンス本文の対応（2026-10-13 に `RUNTIME_FILES` と実物の DLL を突き合わせて確認）:
+
+| 同梱物 | ライセンス本文 |
+|---|---|
+| `models/stario-qwen3.5-2b-q4_k_m.gguf`（Qwen3.5-2B） | `Qwen3.5-Apache-2.0.txt`（改変の告知は `README.txt`） |
+| `llama-server.exe` / `llama-server-impl.dll` / `llama-common.dll` / `llama.dll` / `mtmd.dll` / `ggml.dll` / `ggml-base.dll` / `ggml-cpu-*.dll`（CPU の種類ごとの 14 個） | `llama.cpp-MIT.txt`（ggml を含む） |
+| `libomp.dll` | `LLVM-OpenMP-Apache-2.0-with-LLVM-exception.txt` |
+| 実行ファイルへ組み込まれた部品: cpp-httplib / nlohmann-json / BoringSSL / stb_image / miniaudio / subprocess.h | 各 `*.txt`（`README.txt` §2 に一覧） |
+
+- 実物の DLL の中の文字列からも、httplib・nlohmann・BoringSSL・subprocess の組み込みを確認した（llguidance は「有効でない」旨の文言だけで、組み込まれていないと見られる）。
+- アプリ本体（Rust クレート・npm パッケージ）の第三者ライセンス表記は本書の対象外。
+
+## 6. 実機での速度・メモリの実測
+
+### 6.1 結果（2026-10-13・暫定値）
+
+> **暫定値**: 下の数値はほかの作業を動かしたまま測ったもの。生成の上限時間（180 秒）とスレッド数（`-t`）は、ほかの作業を止めた静かな状態で測り直してから決める（判断台帳 D113・後続タスク・未実施）。
+
+**計測した機械**: Intel Core Ultra 5 125U（論理 14 コア）・メモリ 15.5GB・Windows 11 Pro 26200・AC 電源（電源プラン「HP Optimized」）。llama-server のスレッドは `-t 4`（論理コア数の半分・上限 4）、`-c 4096`、CPU のみ。
+
+**計測時の状態（重要）**: ほかのアプリ（ブラウザ・Discord・Slack・Teams・セキュリティ製品の仮想環境など）を開いたままで、**空きメモリは 1.1〜2.0GB、ページング（Pages/sec）は 1.3〜2.0 万/秒** と、メモリに余裕のない状態だった。数値はこの条件のもの。
+
+| 項目 | 1回目 | 2回目 | 3回目 | メモ |
+|---|---|---|---|---|
+| 照合（モデル・部品の SHA-256。アプリ起動中、照合が通るまで。一度通れば `verified` を覚え、5分使わずに止まった後の再起動でもやり直さない） | 約 39 秒 | 約 28 秒 | 約 33 秒 | テスト（debug ビルド）で、テスト開始から llama-server が現れるまでの時間から推定。最適化した SHA-256（`Get-FileHash`）では 1.22GB のモデルが 2.8〜3.6 秒のため、配布版（release）は数秒の見込み（未検証） |
+| 起動（照合なし・`/health` が応えるまで） | 4.0 秒 | 4.2 秒 | — | llama-server を同じ引数で直接起動して計測 |
+| 接続テスト（照合＋起動＋16トークン生成） | 120.3 秒 | 32.4 秒 | 38.5 秒 | 1回目はファイルが OS のキャッシュに無く、ページングも重かった |
+| 要約 `summary_v1`（入力 848 文字） | **180 秒で打ち切り（失敗）** | 20.2 秒 | 17.1 秒 | 出力 100〜112 文字 |
+| 要点＋タグ `article_points_v2` | — | 27.2 秒 | 45.1 秒 | 出力 303〜317 文字 |
+| 再説明 `yuuko_explanation_v1` | — | 13.5 秒 | 12.7 秒 | |
+| 一言 `yuuko_comment_v1` | — | 10.3 秒 | 13.6 秒 | |
+| 記事1件の4生成の合計 | — | 71.2 秒 | 88.5 秒 | 自動要約1件ぶん（起動済みのとき） |
+| 用語解説 1語目（補助金・Simple。照合＋起動を含む） | 46.1 秒 | 49.5 秒 | 52.4 秒 | 照合・起動を除く生成だけでは 15 秒前後 |
+| 用語解説 クラウドサービス（Normal） | 13.6 秒 | **180 秒で打ち切り（失敗）** | 16.6 秒 | |
+| 用語解説 デジタル化（Detailed） | 19.3 秒 | — | 24.0 秒 | |
+| 用語解説 `Vec<String>`（Normal） | 11.5 秒 | — | 19.7 秒 | |
+
+| メモリ（llama-server） | ワーキングセット | プライベート | メモ |
+|---|---|---|---|
+| 待機（モデル読み込み後・生成していない） | 約 1,974 MB | 約 1,230 MB | 2回とも同じ。30 秒間ほぼ変化なし。ワーキングセットにはモデルのファイル（メモリへ写した読み取り専用の分）が入る |
+| 生成中のピーク | 2,088〜2,273 MB | 1,307〜1,482 MB | 要約 3 回・用語解説 3 回の最大値の範囲。生成が進むほど少しずつ増える（文脈のキャッシュ） |
+| メモリが足りないとき | 1,328 MB まで減少 | 約 1,306 MB | OS がワーキングセットを削り、生成が 180 秒で打ち切られた回（用語解説2回目） |
+
+- アプリ本体（Tauri＋WebView2）のメモリは **計測していない**（テストは Rust の処理だけを動かすため）。テストのプロセス（Rust 側の処理）は 27 MB 以下だった。参考の常駐時の値は `軽量常駐性能確認手順.md` を見る。
+- ローカル AI を使っている間は、上の約 2GB がアプリ本体に上乗せされる。最後に使ってから5分で止まり、そのメモリは戻る（詳細設計書 §5.4.5.1）。
+
+### 6.2 分かったこと・懸念
+
+- 起動済みなら、要約は 17〜20 秒、用語解説は 12〜24 秒。記事 1 件の自動要約（4 生成）は 70〜90 秒。
+- **メモリに余裕のない 16GB 機では、生成が 180 秒の上限で打ち切られることがある**（6 回中 2 回）。そのときは llama-server のワーキングセットが OS に削られ、CPU をほとんど使えなくなっていた（ページング待ち）。上限時間とスレッド数は、ほかの作業を止めた静かな状態で測り直してから決める（判断台帳 D113・後続タスク・未実施）。それまで 180 秒・`-t 4`（論理コア数の半分・上限 4）は暫定のまま。
+- 照合は debug ビルドでは 30 秒前後かかる。配布版での実測は未実施。
+- **`llama-server` と DLL は Visual C++ ランタイム（`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll`）を必要とするが、同梱していない。** 再頒布可能パッケージが入っていないパソコンでは起動できない（アプリは「起動できません」系の失敗になる）見込み（未検証）。**決定（判断台帳 D112・2026-10-13）**: `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll` を `runtime/`（`llama-server.exe` と同じ場所）へ同梱し、照合の表（`RUNTIME_FILES`）にも加える。後続タスクで行う予定で、本書の時点では未実施（同梱物・表・`place-bundle.mjs` の入手元・§1 の大きさとファイル数・§5 のライセンス表への反映もその作業で行う）。
+
+### 6.3 計測方法（再計測するとき）
+
+```powershell
+# 同梱物を置いたうえで（§2）。共有の target を使う場合は CARGO_TARGET_DIR を指定する
+$env:CARGO_TARGET_DIR = "<target の場所>"
+# 要約・要点・再説明・一言（接続テストの時間も出る）
+cargo test --manifest-path src-tauri/Cargo.toml --lib real_local_llm_generates_article_texts -- --ignored --nocapture
+# 用語解説（4語。1語目は照合・起動を含む）
+cargo test --manifest-path src-tauri/Cargo.toml --lib real_local_llm_term_explanation_is_strict_json -- --ignored --nocapture
+```
+
+- 時間はテストが表示する値（`Instant` で測った1回ごとの所要時間）。
+- メモリは、テストを動かしている間、別の PowerShell で 0.5 秒ごとに `Get-Process llama-server` の `WorkingSet64` / `PrivateMemorySize64` を記録し、最大値を取った。
+- 待機時のメモリと起動時間は、`llama-server.exe` をアプリと同じ引数（`-m <モデル> --host 127.0.0.1 --port <空き番号> -c 4096 -np 1 -t 4 --api-key <使い捨ての値> --no-slots --offline`）で直接起動し、`/health` が 200 を返すまでの時間と、その後 30 秒間のメモリを記録した。
+- 同じ条件で比べられるよう、空きメモリ（`Get-Counter '\Memory\Available MBytes'`）も一緒に記録する。
