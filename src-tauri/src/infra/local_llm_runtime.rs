@@ -404,6 +404,7 @@ impl ServerLauncher for ChildProcessLauncher {
     fn launch(&self, spec: &LaunchSpec) -> std::io::Result<Box<dyn ServerProcess>> {
         let mut command = no_window_command(&spec.bundle.exe);
         // Windows 以外では優先度を変えない（このアプリの配布対象は Windows）。
+        // creation_flags は追加ではなく上書きなので、server_creation_flags には CREATE_NO_WINDOW も含めている。
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
