@@ -25,6 +25,21 @@ pub async fn get_user_settings(state: State<'_, AppState>) -> CommandResult<User
     .map_err(CommandError::from)
 }
 
+/// 適用中の UI テーマ ID だけを返す（判断台帳 D114）。テーマの反映（メイン画面・常駐ゆうこウィンドウ）に使う。
+/// 常駐ゆうこウィンドウにも許可するため、設定全体を返す `get_user_settings` とは分けて最小限にしている。
+/// 既知のテーマ以外・読み込み失敗は既定テーマ "default" を返し、エラーにはしない。
+#[tauri::command]
+pub async fn get_ui_theme_id(state: State<'_, AppState>) -> CommandResult<String> {
+    let settings_service = state.settings_service.clone();
+    let theme_id = tauri::async_runtime::spawn_blocking(move || settings_service.get_ui_theme_id())
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("テーマ ID の読み込み処理が完了しなかったため既定テーマを返します: {error}");
+            crate::domain::reward::DEFAULT_THEME_ID.to_string()
+        });
+    Ok(theme_id)
+}
+
 #[tauri::command]
 pub async fn save_user_settings(
     state: State<'_, AppState>,

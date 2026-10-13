@@ -445,6 +445,7 @@ async function installLayoutMocks(page: Page) {
         keywordCandidates: ["E2E用語", "Playwright"],
       }),
       get_yuuko_notification_state: () => waiting,
+      get_ui_theme_id: () => "default",
       get_user_settings: () => ({
         genres: ["AI・テクノロジー"],
         notifyStartTime: "09:00",

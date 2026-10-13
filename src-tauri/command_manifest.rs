@@ -42,6 +42,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "delete_dictionary_entry",
     "ping",
     "get_user_settings",
+    "get_ui_theme_id",
     "save_user_settings",
     "reset_user_settings",
     "test_ai_provider",

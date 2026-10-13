@@ -20,25 +20,30 @@ const MAIN_WINDOW_PERMISSIONS: &str = include_str!("../permissions/main-window.t
 const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
 const YUUKO_CAPABILITY: &str = include_str!("../capabilities/yuuko-window.json");
 
-/// 常駐ゆうこウィンドウに許可してよい command（判断台帳 D110）。広げる場合は判断を取り直す。
+/// 常駐ゆうこウィンドウに許可してよい command（判断台帳 D110・D114）。広げる場合は判断を取り直す。
+/// 通知の表示・反応に使う 4 つと、配色だけに使うテーマ ID の取得（設定全体の `get_user_settings` は不可）。
 const YUUKO_WINDOW_COMMANDS: &[&str] = &[
     "get_yuuko_notification_state",
     "handle_yuuko_clicked",
     "dismiss_yuuko_notification",
     "mark_yuuko_ignored",
+    "get_ui_theme_id",
 ];
 
 const MAIN_WINDOW_SET: &str = "main-window-commands";
 
 /// `generate_handler![ ... ]` に並ぶ command 名（パスの最後の要素）を取り出す。
+/// 前提: lib.rs の `generate_handler!` は 1 か所だけで、`])` で閉じる（`.invoke_handler(...)` の閉じ括弧と続く）。
+/// 範囲は最初の `])` までとするため、要素の途中に `])` を書かないこと（属性 `#[cfg(...)]` 付きの要素も想定しない）。
+/// 書き方を変えて解析できなくなった場合は、件数・一致の検証で失敗するので、ここを合わせて直す。
 fn registered_commands() -> Vec<String> {
     let start = LIB_RS
         .find("generate_handler![")
         .expect("lib.rs に generate_handler! が見つからない")
         + "generate_handler![".len();
     let len = LIB_RS[start..]
-        .find(']')
-        .expect("generate_handler! の閉じ括弧が見つからない");
+        .find("])")
+        .expect("generate_handler! の閉じ括弧 `])` が見つからない");
     LIB_RS[start..start + len]
         .lines()
         // 行末コメントを除いてから、カンマ区切りの各要素を読む。

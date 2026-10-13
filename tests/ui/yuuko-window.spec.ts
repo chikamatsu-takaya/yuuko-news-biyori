@@ -80,9 +80,12 @@ async function installMocks(page: Page, options: MockOptions = {}) {
             return null;
           case "get_yuuko_notification_state":
             return w.__E2E_STATE__ ?? waiting;
-          // テーマ反映（hooks/use-ui-theme.ts）が読む。ここで使うのはテーマ ID だけ。
-          case "get_user_settings":
-            return { selectedThemeId: w.__E2E_THEME_ID__ };
+          // テーマ反映（hooks/use-ui-theme.ts）が読む。実機では Rust が未知の ID を "default" へ倒すが、
+          // フロント側の防御（lib/ui-theme.mjs）も確かめるため、ここでは保存値をそのまま返す。
+          // 設定全体の get_user_settings はこのウィンドウでは許可されない（D114）ため、mock にも置かない
+          // （呼ぶと default 節で失敗する）。
+          case "get_ui_theme_id":
+            return w.__E2E_THEME_ID__;
           case "handle_yuuko_clicked": {
             const current = w.__E2E_STATE__;
             if (!current) {
@@ -390,7 +393,7 @@ test("first click then close keeps the click → dismiss order", async ({
   expect(
     (await calls(page)).filter(
       (cmd) =>
-        cmd !== "get_yuuko_notification_state" && cmd !== "get_user_settings"
+        cmd !== "get_yuuko_notification_state" && cmd !== "get_ui_theme_id"
     )
   ).toEqual(["handle_yuuko_clicked", "dismiss_yuuko_notification"]);
 });
@@ -624,6 +627,9 @@ test("the yuuko window applies the saved UI theme and falls back on unknown ids"
   await openYuukoWindow(page);
   await expect(page.getByRole("region", { name: REGION })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "theme_001");
+  // テーマはテーマ専用の command で読み、許可されていない設定全体の取得は呼ばない（D114）。
+  expect(await commandCalls(page, "get_ui_theme_id")).toBeGreaterThan(0);
+  expect(await commandCalls(page, "get_user_settings")).toBe(0);
 
   // 未知の ID（存在しないテーマ名や不正値）は既定テーマのまま。
   await installMocks(page, { state: activeState(), themeId: "gacha_theme_999" });
@@ -662,13 +668,13 @@ test("the yuuko window keeps the default theme and still shows the notification 
   await installMocks(page, {
     state: activeState(),
     themeId: "theme_001",
-    failCommands: ["get_user_settings"],
+    failCommands: ["get_ui_theme_id"],
   });
   await openYuukoWindow(page);
 
   await expect(page.getByRole("region", { name: REGION })).toBeVisible();
   await expect
-    .poll(() => commandCalls(page, "get_user_settings"))
+    .poll(() => commandCalls(page, "get_ui_theme_id"))
     .toBeGreaterThan(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });

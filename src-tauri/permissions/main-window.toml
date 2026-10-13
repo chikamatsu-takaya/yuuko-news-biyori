@@ -41,6 +41,7 @@ permissions = [
   "allow-delete-dictionary-entry",
   "allow-ping",
   "allow-get-user-settings",
+  "allow-get-ui-theme-id",
   "allow-save-user-settings",
   "allow-reset-user-settings",
   "allow-test-ai-provider",

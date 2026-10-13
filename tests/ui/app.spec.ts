@@ -7892,6 +7892,20 @@ async function installTauriMocks(page: Page) {
             };
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
+          // テーマ反映（hooks/use-ui-theme.ts）が読むテーマ ID 専用 command（D114）。
+          // 設定の上書き値に揃え、設定の読み込み失敗中は Rust と同じく既定テーマを返す。
+          case "get_ui_theme_id": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const themeWin = window as any;
+            if (themeWin.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__) {
+              return "default";
+            }
+            return (
+              themeWin.__E2E_USER_SETTINGS_OVERRIDE__?.selectedThemeId ??
+              userSettings.selectedThemeId
+            );
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           // 設定の初期化。Rust 側 UserSettingsDto::default 相当の既定値を返し、以降の読み込みは成功させる。
           case "reset_user_settings": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
