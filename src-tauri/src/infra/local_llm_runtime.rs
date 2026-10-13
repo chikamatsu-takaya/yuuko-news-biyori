@@ -293,6 +293,9 @@ pub fn thread_count() -> usize {
 /// - `--host 127.0.0.1`: 外から届かない。`--api-key`: 合言葉の無い要求を断る。
 /// - `--no-slots`: 直前に処理した内容を見せる口を閉じる。`--offline`: ネットへ出ない。
 /// - `-np 1`: 同時処理を1本にし、文脈を分割しない（要求はサービス側でも1件ずつ扱う）。
+/// - `--cache-ram 0`: 要求をまたぐプロンプトのキャッシュ（既定は最大 8GB）を切る。既定のままだと
+///   要約などの1回ごとにメモリが 45〜64MB ずつ増え続ける（実測）。要求ごとに文面が違い再利用も
+///   起きていないため、切っても速さは変わらない。
 pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Vec<String> {
     vec![
         "-m".to_string(),
@@ -311,6 +314,8 @@ pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Ve
         api_key.to_string(),
         "--no-slots".to_string(),
         "--offline".to_string(),
+        "--cache-ram".to_string(),
+        "0".to_string(),
     ]
 }
 
@@ -348,10 +353,25 @@ pub fn no_window_command(program: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// コンソール窓を出さない（Windows のプロセス作成フラグ）。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 通常より低い優先度で動かす（Windows のプロセス作成フラグ）。
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// llama-server を起動するときのプロセス作成フラグ（純粋関数）。
+/// 窓を出さないことに加え、優先度を「通常以下」にする。自動要約の生成中も前面のアプリが先に CPU を
+/// 取れるようにし、常駐アプリとして操作感を損なわないため（処理時間はほぼ変わらない）。
+/// 優先度クラスはプロセス作成時の指定なので、起動後に別の API で設定し損ねて起動を止めることはない。
+#[cfg(windows)]
+pub(crate) fn server_creation_flags() -> u32 {
+    CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
 }
 
 /// 1回の起動に渡すもの。テストの偽 llama-server も同じ値を受け取る。
@@ -383,6 +403,12 @@ pub struct ChildProcessLauncher;
 impl ServerLauncher for ChildProcessLauncher {
     fn launch(&self, spec: &LaunchSpec) -> std::io::Result<Box<dyn ServerProcess>> {
         let mut command = no_window_command(&spec.bundle.exe);
+        // Windows 以外では優先度を変えない（このアプリの配布対象は Windows）。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(server_creation_flags());
+        }
         command
             .args(server_args(
                 &spec.bundle.model,
@@ -917,7 +943,19 @@ mod tests {
         assert_eq!(value_of("-np"), "1");
         assert!(args.iter().any(|arg| arg == "--no-slots"));
         assert!(args.iter().any(|arg| arg == "--offline"));
+        assert_eq!(value_of("--cache-ram"), "0");
         assert!(!args.iter().any(|arg| arg == "--mmproj"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn server_runs_below_normal_priority_without_a_window() {
+        let flags = server_creation_flags();
+        assert_eq!(
+            flags & BELOW_NORMAL_PRIORITY_CLASS,
+            BELOW_NORMAL_PRIORITY_CLASS
+        );
+        assert_eq!(flags & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
     }
 
     #[test]
