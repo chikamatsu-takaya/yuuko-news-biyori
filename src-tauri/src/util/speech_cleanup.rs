@@ -171,7 +171,7 @@ pub(crate) fn clean_yuuko_speech(text: &str) -> String {
 ///
 /// - 絵文字・飾りの記号を広く取り除く（`is_calm_decoration`。ふだんは残す「♪」「★」「☆」「♡」も消す）。
 /// - かぎかっこ「」『』の外の「！」「!」の連なりを、「？」を含めば「？」に、含まなければ「。」にする
-///   （引用された発言の「！」と、「Yahoo!」「Yahoo！」のような英数字の直後の「!」「！」は残す）。
+///   （引用された発言の「！」と、「Yahoo!」「Yahoo！」のような英字の直後の「!」「！」は残す）。
 /// - 仮名の直後で文の終わりに付く伸ばし記号（「だよ～。」の「～」）を取り除く（「9時〜17時」は残す）。
 /// - 置き換えで続いた「。。」を1つにする。
 ///
@@ -200,8 +200,9 @@ pub(crate) fn calm_yuuko_speech(text: &str) -> String {
             let after_ascii_word = out
                 .chars()
                 .last()
-                .is_some_and(|last| last.is_ascii_alphanumeric());
-            // 英字・数字の直後の「!」「！」はサービス名などの一部（「Yahoo!」「Yahoo！」）とみなして残す。
+                .is_some_and(|last| last.is_ascii_alphabetic());
+            // 英字の直後の「!」「！」はサービス名などの一部（「Yahoo!」「Yahoo！」）とみなして残す。
+            // 数字の直後（「震度7！」など）は重いニュースで出やすいので残さない。
             if after_ascii_word && run.iter().all(|&d| matches!(d, '!' | '！')) {
                 out.extend(run);
             } else if run.iter().any(|d| matches!(d, '？' | '?')) {
@@ -743,7 +744,7 @@ mod tests {
             calm_yuuko_speech("Yahoo!ニュースでも伝えられたよ。"),
             "Yahoo!ニュースでも伝えられたよ。"
         );
-        // 全角の「！」でも、英数字の直後ならサービス名の一部として残す。
+        // 全角の「！」でも、英字の直後ならサービス名の一部として残す。
         assert_eq!(
             calm_yuuko_speech("Yahoo！ニュースでも伝えられたよ！"),
             "Yahoo！ニュースでも伝えられたよ。"
@@ -753,6 +754,8 @@ mod tests {
             calm_yuuko_speech("番組『逃げろ！』の放送が中止になったよ！"),
             "番組『逃げろ！』の放送が中止になったよ。"
         );
+        // 数字の直後の「！」（「震度7！」）は重いニュースで出やすいので残さない。
+        assert_eq!(calm_yuuko_speech("震度7！"), "震度7。");
     }
 
     #[test]
