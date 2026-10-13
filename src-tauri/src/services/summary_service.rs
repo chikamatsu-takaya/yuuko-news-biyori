@@ -1,5 +1,6 @@
 use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate, ArticleTagsUpdate};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
+use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::{
     AiArticlePoints, AiRequest, AiResponse, GenerateArticleSummaryParams,
     GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
@@ -10,7 +11,7 @@ use crate::domain::summary::{
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::util::speech_cleanup::clean_yuuko_speech;
+use crate::util::speech_cleanup::{calm_yuuko_speech, clean_yuuko_speech};
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
 };
@@ -110,11 +111,6 @@ impl SummaryService {
         let seed_article = neutralize_seed_article(&article);
         let seed_focus_points = build_focus_points(&seed_article, explanation_level);
         let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
-        // 再説明・一言の定型文の種は Mock の結果専用（context で渡し、実AIへは送らない）。
-        // 実AIへの入力は、下で同じ生成の要約・要点から組む（build_yuuko_speech_input）。
-        let yuuko_explanation_mock_text =
-            build_yuuko_explanation_seed(&seed_article, explanation_level, &seed_focus_points);
-        let yuuko_comment_mock_text = build_yuuko_comment_seed(&seed_article, explanation_level);
         let points_seed = build_points_seed(&seed_article);
 
         // 4出力（要約・要点と注目ポイント・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
@@ -164,6 +160,18 @@ impl SummaryService {
             (summary_response.provider != PROVIDER_MOCK).then_some(summary_response.text.as_str());
         let yuuko_speech_input =
             build_yuuko_speech_input(&seed_article.title, speech_summary, &points.key_points);
+        // 再説明・一言の定型文の種は Mock の結果専用（context で渡し、実AIへは送らない）。
+        // 重いニュース（D122）では落ち着いた定型文にする。判定は実AIのプロンプト・後処理と同じく、
+        // 再説明・一言の入力（タイトル・要約・要点）から行う（`SpeechTone::for_request` と同じ判定）。
+        let speech_tone = SpeechTone::detect(&yuuko_speech_input);
+        let yuuko_explanation_mock_text = build_yuuko_explanation_seed(
+            &seed_article,
+            explanation_level,
+            &seed_focus_points,
+            speech_tone,
+        );
+        let yuuko_comment_mock_text =
+            build_yuuko_comment_seed(&seed_article, explanation_level, speech_tone);
         let yuuko_explanation_response = request_validated(
             AiRequest {
                 prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
@@ -271,10 +279,12 @@ impl SummaryService {
         provider: AiProvider,
         explanation_level: ExplanationLevel,
     ) -> Result<AiResponse, AppError> {
+        // 口調はプロンプト（ai_provider_service の build_prompt）と同じ入力から判定する（D122）。
+        let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
         let primary =
             self.ai_provider_service
                 .request_text(request, provider, explanation_level)?;
-        select_valid_output(kind, primary)
+        select_valid_output_in_tone(kind, tone, primary)
     }
 
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約キューの可否判定用）。AI は呼ばない。
@@ -745,11 +755,13 @@ fn is_markdown_separator_line(line: &str) -> bool {
 /// なお、Gemini の通信失敗・キー未設定による Mock への切り替え（`AiProviderService`）は従来どおり。
 ///
 /// 実AIの再説明・一言は、検証の前にト書き・中国語の助詞・挨拶を取り除く（`clean_ai_speech`）。
-fn select_valid_output(
+/// 重いニュース（`SpeechTone::Calm`・D122）では、絵文字・「！」なども取り除く。
+fn select_valid_output_in_tone(
     kind: SummaryOutputKind,
+    tone: SpeechTone,
     primary: AiResponse,
 ) -> Result<AiResponse, AppError> {
-    let primary = clean_ai_speech(kind, primary);
+    let primary = clean_ai_speech(kind, tone, primary);
     let rejection = match validate_summary_output(kind, &primary.text) {
         Ok(text) => {
             return Ok(AiResponse {
@@ -773,7 +785,9 @@ fn select_valid_output(
 /// 除去は文字を消すだけなので、続く `validate_summary_output` の検証（HTML・制御文字・見出し・文字数）は
 /// そのまま効く。すべて消えたときは空になり、検証の Empty で拒否される。
 /// Mock の種（定型文）は手を加えず、決定的な結果のままにする。要約・要点は中立な文体なので対象外。
-fn clean_ai_speech(kind: SummaryOutputKind, response: AiResponse) -> AiResponse {
+/// 重いニュース（`SpeechTone::Calm`・D122）では、続けて `calm_yuuko_speech` で明るさの飾り
+/// （「♪」「★」を含む絵文字・記号、「！」、語尾の「～」）を取り除く。
+fn clean_ai_speech(kind: SummaryOutputKind, tone: SpeechTone, response: AiResponse) -> AiResponse {
     if !matches!(
         kind,
         SummaryOutputKind::Explanation | SummaryOutputKind::Comment
@@ -789,6 +803,19 @@ fn clean_ai_speech(kind: SummaryOutputKind, response: AiResponse) -> AiResponse 
             kind.label()
         );
     }
+    let cleaned = match tone {
+        SpeechTone::Normal => cleaned,
+        SpeechTone::Calm => {
+            let calmed = calm_yuuko_speech(&cleaned);
+            if calmed != cleaned {
+                log::info!(
+                    "removed emoji or exclamations from the AI output for heavy news ({})",
+                    kind.label()
+                );
+            }
+            calmed
+        }
+    };
     AiResponse {
         text: cleaned,
         provider: response.provider,
@@ -925,10 +952,13 @@ fn build_summary_seed(
     }
 }
 
+/// 再説明の Mock 定型文。重いニュース（`SpeechTone::Calm`・D122）では、明るい言い回し
+/// （「読みやすいよ」「現場や利用者に影響」など）を避けた落ち着いた文にする。ふだんの文は従来のまま。
 fn build_yuuko_explanation_seed(
     article: &ArticleDetailDto,
     explanation_level: ExplanationLevel,
     focus_points: &[String],
+    tone: SpeechTone,
 ) -> String {
     let genre = &article.genre;
     let first_point = focus_points
@@ -939,6 +969,20 @@ fn build_yuuko_explanation_seed(
         .get(1)
         .cloned()
         .unwrap_or_else(|| "関連する背景".to_string());
+
+    if tone == SpeechTone::Calm {
+        return match explanation_level {
+            ExplanationLevel::Simple => format!(
+                "この記事は、まず「{first_point}」を確かめると流れがつかめるよ。分かっている事実から、順番に落ち着いて読んでいこうね。"
+            ),
+            ExplanationLevel::Normal => format!(
+                "この記事は、{genre} の出来事を伝えているよ。特に {first_point} について、分かっている事実と、まだはっきりしないことを分けて読むと、落ち着いて整理できるね。"
+            ),
+            ExplanationLevel::Detailed => format!(
+                "この記事は、{genre} の出来事を扱っているよ。まずは {first_point} を押さえて、そのうえで {secondary_focus_point} を確かめてみてね。分かっている事実と、まだ確かでないことを分けて読むと、落ち着いて整理できるよ。"
+            ),
+        };
+    }
 
     match explanation_level {
         ExplanationLevel::Simple => {
@@ -953,12 +997,28 @@ fn build_yuuko_explanation_seed(
     }
 }
 
+/// 一言の Mock 定型文。重いニュース（`SpeechTone::Calm`・D122）では「面白そう」「便利」のような
+/// 明るい感想を避け、落ち着いた一言にする。ふだんの文は従来のまま。
 fn build_yuuko_comment_seed(
     article: &ArticleDetailDto,
     explanation_level: ExplanationLevel,
+    tone: SpeechTone,
 ) -> String {
     let genre = &article.genre;
     let title = &article.title;
+    if tone == SpeechTone::Calm {
+        return match explanation_level {
+            ExplanationLevel::Simple => {
+                format!("{genre}の大事な出来事だから、確かな情報を落ち着いて確かめておきたいね。")
+            }
+            ExplanationLevel::Normal => {
+                format!("{title}の話は、まず分かっている事実を落ち着いて受け止めたいね。")
+            }
+            ExplanationLevel::Detailed => {
+                format!("{title}については、続報も含めて確かな情報を落ち着いて追っていきたいね。")
+            }
+        };
+    }
     match explanation_level {
         ExplanationLevel::Simple => {
             format!("{genre}って、結局どこが便利になるのかを見ると分かりやすそうだね。")
@@ -984,12 +1044,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_yuuko_speech_input, combined_provider, neutralize_seed_text, select_valid_output,
+        build_yuuko_comment_seed, build_yuuko_explanation_seed, build_yuuko_speech_input,
+        combined_provider, neutralize_seed_text, select_valid_output_in_tone,
         validate_article_points, validate_point_item, validate_summary_output, FallbackPolicy,
         OutputRejection, SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
         EXPLANATION_MAX_CHARS, SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
+    use crate::domain::settings::ExplanationLevel;
+    use crate::domain::speech_tone::SpeechTone;
     use crate::domain::summary::{
         AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAG_MAX_CHARS,
         KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
@@ -1002,6 +1065,14 @@ mod tests {
     use std::cell::RefCell;
 
     const ARTICLE_ID: &str = "rss-20261007-tech-01";
+
+    /// ふだんの口調で出力を選ぶ（重いニュースの判定を通さない既存のテスト用）。
+    fn select_valid_output(
+        kind: SummaryOutputKind,
+        primary: AiResponse,
+    ) -> Result<AiResponse, AppError> {
+        select_valid_output_in_tone(kind, SpeechTone::Normal, primary)
+    }
 
     fn response(text: &str, provider: &str) -> AiResponse {
         AiResponse {
@@ -1151,6 +1222,107 @@ mod tests {
         let selected =
             select_valid_output(SummaryOutputKind::Comment, response(mock_seed, "mock")).unwrap();
         assert_eq!(selected.text, mock_seed);
+    }
+
+    #[test]
+    fn heavy_news_speech_from_real_ai_is_calmed_but_mock_and_summary_are_not() {
+        // 重いニュース（D122）: 実AIの再説明・一言からは、絵文字・「！」・語尾の「～」も取り除く。
+        let noisy = "わあ、2人が亡くなったんだって！！みんな気をつけようね～♪✨";
+        for provider in ["gemini", "local"] {
+            for kind in [SummaryOutputKind::Explanation, SummaryOutputKind::Comment] {
+                let selected =
+                    select_valid_output_in_tone(kind, SpeechTone::Calm, response(noisy, provider))
+                        .unwrap();
+                assert_eq!(
+                    selected.text, "2人が亡くなったんだって。みんな気をつけようね",
+                    "{provider} {kind:?}"
+                );
+            }
+            // 要約は中立な文体なので、重いニュースでも手を加えない。
+            let summary = select_valid_output_in_tone(
+                SummaryOutputKind::Summary,
+                SpeechTone::Calm,
+                response("台風で被害が出た！", provider),
+            )
+            .unwrap();
+            assert_eq!(summary.text, "台風で被害が出た！");
+        }
+        // ふだんの口調では「！」「♪」を残す（従来どおり）。
+        let normal = select_valid_output(
+            SummaryOutputKind::Comment,
+            response("新しいチップが出るんだね！楽しみ♪", "local"),
+        )
+        .unwrap();
+        assert_eq!(normal.text, "新しいチップが出るんだね！楽しみ♪");
+        // Mock の種は決定的な結果のまま変えない。
+        let mock_seed = "落ち着いて受け止めたいね！";
+        let mock = select_valid_output_in_tone(
+            SummaryOutputKind::Comment,
+            SpeechTone::Calm,
+            response(mock_seed, "mock"),
+        )
+        .unwrap();
+        assert_eq!(mock.text, mock_seed);
+    }
+
+    #[test]
+    fn heavy_news_mock_seeds_are_calm_and_normal_seeds_are_unchanged() {
+        let article = crate::domain::article::ArticleDetailDto {
+            article_id: ARTICLE_ID.to_string(),
+            title: "住宅で火災 2人死亡".to_string(),
+            source_name: "テスト".to_string(),
+            original_url: "https://example.com/a".to_string(),
+            published_at_text: String::new(),
+            genre: "社会".to_string(),
+            summary: None,
+            excerpt: None,
+            yuuko_explanation: None,
+            key_points: Vec::new(),
+            focus_points: Vec::new(),
+            yuuko_comment: None,
+            is_favorite: false,
+            keyword_candidates: Vec::new(),
+            summary_state: Default::default(),
+            tags: Vec::new(),
+        };
+        let focus = vec!["火災の原因".to_string()];
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let normal_explanation =
+                build_yuuko_explanation_seed(&article, level, &focus, SpeechTone::Normal);
+            let calm_explanation =
+                build_yuuko_explanation_seed(&article, level, &focus, SpeechTone::Calm);
+            let normal_comment = build_yuuko_comment_seed(&article, level, SpeechTone::Normal);
+            let calm_comment = build_yuuko_comment_seed(&article, level, SpeechTone::Calm);
+            assert_ne!(normal_explanation, calm_explanation);
+            assert_ne!(normal_comment, calm_comment);
+            for calm in [&calm_explanation, &calm_comment] {
+                assert!(calm.contains("落ち着いて"), "{calm}");
+                for cheerful in ["！", "面白", "便利", "楽し"] {
+                    assert!(!calm.contains(cheerful), "{calm}");
+                }
+            }
+            // 決定的（同じ入力なら同じ文）。
+            assert_eq!(
+                calm_explanation,
+                build_yuuko_explanation_seed(&article, level, &focus, SpeechTone::Calm)
+            );
+            assert_eq!(
+                calm_comment,
+                build_yuuko_comment_seed(&article, level, SpeechTone::Calm)
+            );
+        }
+        // ふだんの記事の定型文は従来の文のまま。
+        assert_eq!(
+            build_yuuko_comment_seed(&article, ExplanationLevel::Simple, SpeechTone::Normal),
+            format!(
+                "{}って、結局どこが便利になるのかを見ると分かりやすそうだね。",
+                article.genre
+            )
+        );
     }
 
     #[test]

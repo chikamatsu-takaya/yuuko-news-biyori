@@ -59,12 +59,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{
-    clean_ai_speech, select_valid_output, validate_article_points, validate_summary_output,
+    clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
     FallbackPolicy, SummaryGeneration, SummaryOutputKind, SummaryService,
 };
 use crate::domain::article::{ArticleReadState, FetchedArticle};
 use crate::domain::dictionary::ExplainSelectedTermParams;
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
+use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::{AiRequest, AiResponse, GenerateArticleSummaryParams};
 use crate::error::AppError;
 use crate::infra::allowlist::NetworkAllowlist;
@@ -576,6 +577,8 @@ fn record_stage(
     level: ExplanationLevel,
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
+    // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
+    let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
     // 再説明・一言の入力は同じ生成の AI 出力（要約・要点）だけなので、確認用に残す。
     let speech_input = matches!(
         kind,
@@ -592,6 +595,7 @@ fn record_stage(
         "ms": elapsed_ms,
         "inputChars": input_chars,
         "speechInput": speech_input,
+        "calmTone": tone == SpeechTone::Calm,
     });
     let raw = match raw {
         Ok(raw) => raw,
@@ -612,13 +616,13 @@ fn record_stage(
             Err(rejection) => stage["rejection"] = json!(rejection.label()),
         }
     } else {
-        let cleaned = clean_ai_speech(kind, raw.clone());
+        let cleaned = clean_ai_speech(kind, tone, raw.clone());
         stage["cleaned"] = json!(cleaned.text);
         if let Err(rejection) = validate_summary_output(kind, &cleaned.text) {
             stage["rejection"] = json!(rejection.label());
         }
     }
-    let selected = select_valid_output(kind, raw);
+    let selected = select_valid_output_in_tone(kind, tone, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
     }

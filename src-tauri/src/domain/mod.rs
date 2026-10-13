@@ -8,5 +8,6 @@ pub mod gacha;
 pub mod resume_grace;
 pub mod reward;
 pub mod settings;
+pub mod speech_tone;
 pub mod summary;
 pub mod yuuko;
