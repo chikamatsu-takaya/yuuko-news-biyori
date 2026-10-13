@@ -59,6 +59,7 @@ C++ / Qt / QML は MVP段階では使用しない（過去案は別資料とし�
 
 - 外部通信先は許可リスト方式。ローカル/危険スキームを無条件に取得しない。
 - APIキーを React へ渡さない・直書きしない。AI 送信データは最小限。取得HTMLをそのまま表示しない。外部由来文字列はサニタイズする。
+- アプリ定義の Tauri command はウィンドウごとの許可制（D110）。command を追加したら、`src-tauri/src/lib.rs` の `generate_handler!` に加えて、`src-tauri/command_manifest.rs` の `APP_COMMANDS` と `src-tauri/permissions/main-window.toml` の `main-window-commands`（`allow-<commandのkebab-case>`）にも追加する。忘れると実行時に拒否される（`cargo test` で検出）。常駐ゆうこウィンドウ（`capabilities/yuuko-window.json`）へは判断なしに追加しない。
 - 詳細と capability / CSP / allowlist の扱いは `.claude/rules/security.md`。
 
 ## 6. コメント方針（要点）

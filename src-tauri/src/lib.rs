@@ -1,4 +1,6 @@
 mod app_lifecycle;
+#[cfg(test)]
+mod command_permissions_tests;
 mod commands;
 mod domain;
 mod error;
