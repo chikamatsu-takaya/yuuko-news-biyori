@@ -146,6 +146,12 @@ const NOISE_COMPOUND_PARTS: &[&str] = &[
     "space",
     "label",
 ];
+/// ユーティリティ class とみなす接頭辞（Tailwind の余白・大きさ・位置）。`is_utility_class` 参照。
+const UTILITY_CLASS_PREFIXES: &[&str] = &[
+    "p", "px", "py", "pt", "pr", "pb", "pl", "ps", "pe", "m", "mx", "my", "mt", "mr", "mb", "ml",
+    "ms", "me", "w", "h", "min-w", "max-w", "min-h", "max-h", "size", "gap", "gap-x", "gap-y",
+    "space-x", "space-y", "top", "left", "right", "bottom", "inset", "inset-x", "inset-y",
+];
 /// ユーティリティ class（`pr-4` `md:pr-8` `mt-2` `px-0.5`）の値部分とみなす語。数字始まりも同様。
 const UTILITY_SIZE_SUFFIXES: &[&str] = &[
     "px", "auto", "full", "screen", "none", "xs", "sm", "md", "lg", "xl", "2xl",
@@ -463,13 +469,18 @@ fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
 /// 関連記事カードの `<article>` のように、ナビゲーション・サイドバー等の内側にある候補は使わない。
 /// 候補が全滅したら body 全体から判定ありで取る。
 ///
-/// 保証: 判定（領域除去・終端判定）なしで body 全体から取った抜粋も必ず作り、判定ありの結果が
-/// それより極端に短い（1/LENIENT_RATIO 未満かつ LENIENT_MAX_STRICT_CHARS 文字未満、または空）ときは
-/// 判定なしの結果を使う。判定が想定外の構造に当たって本文を落とし、日付やパンくずだけが残る
-/// 事態を防ぐため。判定なしの結果には修正前と同様にノイズが混ざりうるが、本文は失わない。
+/// 保証: 同じ記事コンテナ候補から判定（領域除去・終端判定）なしの抜粋も作り、そのうち最も長いものを
+/// 比較の基準にする。判定ありの結果がそれより極端に短い（1/LENIENT_RATIO 未満かつ
+/// LENIENT_MAX_STRICT_CHARS 文字未満、または空）ときは、判定なしの結果を使う。判定が想定外の構造に
+/// 当たって本文を落とし、日付やパンくずだけが残る事態を防ぐため。
+/// 基準を body 全体にしないのは、メニューの多いページで短い記事が nav の文字列に置き換わるため。
+/// 記事コンテナ候補から何も取れないときだけ、body 全体の判定あり／なしで同じ比較をする。
+/// 判定なしの結果には修正前と同様にノイズが混ざりうるが、本文は失わない。
 fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
-    let mut best_excerpt: Option<String> = None;
-    let mut best_score = 0;
+    let mut best_strict: Option<String> = None;
+    let mut best_strict_len = 0;
+    let mut best_lenient: Option<String> = None;
+    let mut best_lenient_len = 0;
 
     for selector_text in ARTICLE_CONTAINER_SELECTORS {
         let selector = match Selector::parse(selector_text) {
@@ -482,27 +493,32 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
                 continue;
             }
             if let Some(excerpt) = extract_excerpt_from_element(&element, RegionFilter::Strict) {
-                let score = excerpt.chars().count();
-                if score > best_score {
-                    best_score = score;
-                    best_excerpt = Some(excerpt);
+                let len = excerpt.chars().count();
+                if len > best_strict_len {
+                    best_strict_len = len;
+                    best_strict = Some(excerpt);
+                }
+            }
+            if let Some(excerpt) = extract_excerpt_from_element(&element, RegionFilter::Lenient) {
+                let len = excerpt.chars().count();
+                if len > best_lenient_len {
+                    best_lenient_len = len;
+                    best_lenient = Some(excerpt);
                 }
             }
         }
     }
 
-    let body_selector = Selector::parse("body").ok()?;
-    let body = document.select(&body_selector).next();
-    if best_excerpt.is_none() {
-        best_excerpt = body
-            .as_ref()
-            .and_then(|body| extract_excerpt_from_element(body, RegionFilter::Strict));
+    if best_strict.is_some() || best_lenient.is_some() {
+        return choose_strict_or_lenient(best_strict, best_lenient);
     }
-    let lenient = body
-        .as_ref()
-        .and_then(|body| extract_excerpt_from_element(body, RegionFilter::Lenient));
 
-    choose_strict_or_lenient(best_excerpt, lenient)
+    let body_selector = Selector::parse("body").ok()?;
+    let body = document.select(&body_selector).next()?;
+    choose_strict_or_lenient(
+        extract_excerpt_from_element(&body, RegionFilter::Strict),
+        extract_excerpt_from_element(&body, RegionFilter::Lenient),
+    )
 }
 
 /// 判定ありの結果が判定なしの結果より極端に短ければ、判定なしを採る（`find_best_candidate_excerpt` の保証）。
@@ -644,21 +660,31 @@ fn is_noise_identifier(identifier: &str) -> bool {
             is_ambiguous(token)
                 || NOISE_CLASS_TOKENS.contains(&token.as_str())
                 || NOISE_COMPOUND_PARTS.contains(&token.as_str())
+                // `ad-1` `ad-300x250` `ads-2` のような番号付きの広告枠。余白の `pr-4` などは
+                // 先に is_utility_class で除外済みなので、ここに来る数字はユーティリティではない。
+                || token.starts_with(|ch: char| ch.is_ascii_digit())
         })
 }
 
-/// ユーティリティ class か（`^(?:[a-z0-9-]+:)*-?[a-z]{1,3}-<数字始まり or サイズ語>$` 相当）。
-/// `pr-4` `md:pr-8` `mt-2` `px-0.5` `-mt-1` `w-full` は該当、`ad-hoc` `pr-box` `side-bar` は該当しない。
+/// ユーティリティ class か。Tailwind 等の余白・大きさ・位置の接頭辞（UTILITY_CLASS_PREFIXES）＋`-`＋
+/// 数字始まり・`[`始まり・サイズ語の値のときだけ該当とする（`md:` などの前置きと先頭の `-` は外して判定）。
+/// `pr-4` `md:pr-8` `mt-2` `px-0.5` `-mt-1` `w-full` `max-w-[60ch]` は該当、
+/// `ad-1` `tag-1` `ad-300x250` `ads-2` `ad-hoc` `pr-box` は該当しない（広告枠の番号付き class を残さないため）。
 fn is_utility_class(identifier: &str) -> bool {
     let lower = identifier.to_ascii_lowercase();
     // `md:` `hover:` などの前置きを外す。
     let base = lower.rsplit(':').next().unwrap_or(&lower);
     let base = base.strip_prefix('-').unwrap_or(base);
-    let Some((head, rest)) = base.split_once('-') else {
+    // 接頭辞は長いもの（`min-w` など）から照合されるよう、一致したもののうち最長を採る。
+    let Some(rest) = UTILITY_CLASS_PREFIXES
+        .iter()
+        .filter_map(|prefix| base.strip_prefix(prefix)?.strip_prefix('-'))
+        .min_by_key(|rest| rest.len())
+    else {
         return false;
     };
-    if head.is_empty() || head.len() > 3 || !head.chars().all(|ch| ch.is_ascii_lowercase()) {
-        return false;
+    if rest.starts_with('[') {
+        return true;
     }
     if rest.is_empty()
         || !rest
@@ -1174,7 +1200,7 @@ mod tests {
 
     #[test]
     fn uses_lenient_extraction_when_strict_result_is_far_shorter() {
-        // 判定が本文を落として日付だけが残った場合、判定なしの body 抽出を使う（1/4 の保証）。
+        // 判定が本文を落として日付だけが残った場合、記事コンテナの判定なし抽出を使う（1/4 の保証）。
         let long_body = BODY_1.repeat(6);
         let html = format!(
             r#"<!doctype html><html><body><article><div class="share-wrapper"><p>{long_body}</p><p>{BODY_2}</p></div><p>2026年10月13日</p></article></body></html>"#
@@ -1184,6 +1210,70 @@ mod tests {
         let excerpt = excerpt.unwrap();
         assert!(excerpt.contains(&long_body));
         assert!(excerpt.contains(BODY_2));
+    }
+
+    #[test]
+    fn short_article_is_not_replaced_by_huge_navigation() {
+        // 比較の基準は記事コンテナの判定なし抽出なので、body の nav が長くても短い記事本文を保つ。
+        let menu: String = (0..120)
+            .map(|i| format!("<li><a href=\"/c/{i}\">メニュー項目その{i}</a></li>"))
+            .collect();
+        let html = format!(
+            r#"<!doctype html><html><body><nav><ul>{menu}</ul></nav><article><p>{BODY_1}</p><p>{BODY_2}</p></article><footer><p>著作権表示のフッターです。</p></footer></body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn uses_body_lenient_extraction_only_without_container_candidates() {
+        // 記事コンテナ候補がないページでは、body の判定あり／なしで比較する。
+        let long_body = BODY_1.repeat(6);
+        let html = format!(
+            r#"<!doctype html><html><body><div class="share-wrapper"><p>{long_body}</p></div><p>2026年10月13日</p></body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert!(excerpt.unwrap().contains(&long_body));
+    }
+
+    #[test]
+    fn utility_class_detection_is_limited_to_spacing_and_size_prefixes() {
+        for utility in [
+            "pr-4",
+            "md:pr-8",
+            "mt-2",
+            "px-0.5",
+            "-mt-1",
+            "w-full",
+            "max-w-[60ch]",
+            "min-w-0",
+            "gap-x-2",
+            "space-y-4",
+            "lg:p-6",
+            "top-0",
+        ] {
+            assert!(is_utility_class(utility), "{utility}");
+        }
+        for not_utility in [
+            "ad-1",
+            "tag-1",
+            "ad-300x250",
+            "ads-2",
+            "ad-hoc",
+            "pr-box",
+            "side-bar",
+        ] {
+            assert!(!is_utility_class(not_utility), "{not_utility}");
+        }
+        // 番号付きの広告枠・タグはノイズ、余白の class はノイズではない。
+        for noise in ["ad-1", "tag-1", "ad-300x250", "ads-2"] {
+            assert!(is_noise_identifier(noise), "{noise}");
+        }
+        for body in ["pr-4", "md:pr-8", "p-4"] {
+            assert!(!is_noise_identifier(body), "{body}");
+        }
     }
 
     #[test]
