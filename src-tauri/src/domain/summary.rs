@@ -85,6 +85,31 @@ pub const KEY_POINTS_MAX_ITEMS: usize = 4;
 /// 注目ポイントの件数（下限・上限）。
 pub const FOCUS_POINTS_MIN_ITEMS: usize = 1;
 pub const FOCUS_POINTS_MAX_ITEMS: usize = 3;
+/// 要点・注目ポイントの入力（1行目のタイトル＋2行目以降の本文抜粋）のうち、本文抜粋の文字数（空白を除く）が
+/// これ未満なら「短い入力」として、件数を減らして頼む（`is_short_article_points_input`）。
+/// 根拠: 2026-10-13 の評価 v2 では本文抜粋が 28〜151 字（RSS 概要・meta 説明文）の記事が 29 件中 28 件あり、
+/// 材料が 1〜2 文しかないのに要点 3 件・注目ポイント 3 件を求めたため、足りない分の創作（「15 年ぶりの 1 勝」→
+/// 「優勝」など）と要点の繰り返しが出た。本文を取れた記事は約 2,000 字なので、200 字で分ければ両者を取り違えない。
+pub const SHORT_ARTICLE_BODY_MAX_CHARS: usize = 200;
+/// 短い入力のときに頼む要点の件数（検証の下限と同じ。下限を下げると出力の契約が変わるため下げない）。
+pub const SHORT_INPUT_KEY_POINTS_ITEMS: usize = KEY_POINTS_MIN_ITEMS;
+/// 短い入力のときに頼む注目ポイントの件数（検証の下限と同じ）。
+pub const SHORT_INPUT_FOCUS_POINTS_ITEMS: usize = FOCUS_POINTS_MIN_ITEMS;
+
+/// 要点・注目ポイントの入力（`article_points_v2` の input_text）が短いか。1行目をタイトルとみなし、
+/// 2行目以降（本文抜粋）の空白以外の文字数が `SHORT_ARTICLE_BODY_MAX_CHARS` 未満なら短いとする
+/// （抜粋の無い、タイトルだけの入力も短い）。プロンプトの件数とローカルLLMの出力スキーマを切り替えるのに使う。
+pub fn is_short_article_points_input(input_text: &str) -> bool {
+    let body_chars = input_text
+        .trim()
+        .lines()
+        .skip(1)
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .count();
+    body_chars < SHORT_ARTICLE_BODY_MAX_CHARS
+}
+
 /// 要点・注目ポイント1件の文字数上限（Unicode 文字数）。1文の箇条書きなので短めにする。
 /// ローカルLLMの JSON スキーマ（maxLength）と保存前の検証で同じ値を使う。
 pub const POINT_ITEM_MAX_CHARS: usize = 100;
@@ -114,7 +139,28 @@ pub struct AiArticlePoints {
 
 #[cfg(test)]
 mod tests {
-    use super::GenerateArticleSummaryParams;
+    use super::{
+        is_short_article_points_input, GenerateArticleSummaryParams, SHORT_ARTICLE_BODY_MAX_CHARS,
+    };
+
+    #[test]
+    fn short_article_points_input_counts_only_the_body_after_the_title() {
+        // タイトル（1行目）は数えず、本文抜粋の空白以外の文字数で決める。
+        let long_title = "長".repeat(500);
+        assert!(is_short_article_points_input(&format!(
+            "{long_title}\n短い概要。"
+        )));
+        assert!(is_short_article_points_input("タイトルだけ"));
+        let body = "あ".repeat(SHORT_ARTICLE_BODY_MAX_CHARS - 1);
+        assert!(is_short_article_points_input(&format!("タイトル\n{body}")));
+        // 空白・改行は数えない。
+        let spaced = "あ \n".repeat(SHORT_ARTICLE_BODY_MAX_CHARS - 1);
+        assert!(is_short_article_points_input(&format!(
+            "タイトル\n{spaced}"
+        )));
+        let body = "あ".repeat(SHORT_ARTICLE_BODY_MAX_CHARS);
+        assert!(!is_short_article_points_input(&format!("タイトル\n{body}")));
+    }
 
     #[test]
     fn validated_article_id_trims_whitespace() {

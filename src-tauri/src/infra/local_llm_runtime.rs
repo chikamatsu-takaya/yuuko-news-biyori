@@ -27,6 +27,11 @@ use sha2::{Digest, Sha256};
 
 use super::http_body::declared_length_exceeds;
 use super::url_guard::{local_llm_url, LocalLlmRoute, SpawnedLocalLlmPort};
+use crate::domain::summary::{
+    ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
+    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    SHORT_INPUT_FOCUS_POINTS_ITEMS, SHORT_INPUT_KEY_POINTS_ITEMS,
+};
 
 /// 同梱するモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
 /// 値を変えたら `scripts/local-llm/place-bundle.mjs` が読む値と開発環境構築手順書も一緒に直す。
@@ -727,46 +732,77 @@ pub fn term_explanation_response_format() -> ResponseFormat {
 /// 件数・文字数は文法でも縛るが、保存前の検証（件数・文字数・文字種・タグの区切り文字や重複）は
 /// summary_service 側で必ず行う。タグだけが検証に落ちた場合は、タグだけを捨てて要点・要約は保存する。
 pub fn article_points_response_format() -> ResponseFormat {
-    use crate::domain::summary::{
-        ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS,
-        FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-        POINT_ITEM_MAX_CHARS,
-    };
+    article_points_format(ARTICLE_POINTS_FIELDS)
+}
+
+/// 本文抜粋の短い記事（`domain::summary::is_short_article_points_input`）の要点・注目ポイント・タグの出力スキーマ:
+/// 要点ちょうど 2 件・注目ポイントちょうど 1 件（タグと文字数は通常と同じ）。
+/// 材料が 1〜2 文しかないのに件数を多く書かせると、足りない分を作る（2026-10-13 の評価 v2）ため、文法で件数を縛る。
+/// 件数は保存前の検証の範囲（要点 2〜4・注目ポイント 1〜3）の内側なので、出力の契約（prompt_id）は変わらない。
+pub fn article_points_short_input_response_format() -> ResponseFormat {
+    article_points_format(ARTICLE_POINTS_SHORT_INPUT_FIELDS)
+}
+
+fn article_points_format(fields: &'static [(&'static str, FieldSchema)]) -> ResponseFormat {
     ResponseFormat {
         kind: "json_schema",
         json_schema: NamedJsonSchema {
             name: "article_points",
-            schema: ObjectSchema {
-                fields: &[
-                    (
-                        "key_points",
-                        FieldSchema::StringList {
-                            min_items: KEY_POINTS_MIN_ITEMS,
-                            max_items: KEY_POINTS_MAX_ITEMS,
-                            max_length: POINT_ITEM_MAX_CHARS,
-                        },
-                    ),
-                    (
-                        "focus_points",
-                        FieldSchema::StringList {
-                            min_items: FOCUS_POINTS_MIN_ITEMS,
-                            max_items: FOCUS_POINTS_MAX_ITEMS,
-                            max_length: POINT_ITEM_MAX_CHARS,
-                        },
-                    ),
-                    (
-                        "tags",
-                        FieldSchema::StringList {
-                            min_items: ARTICLE_TAGS_MIN_ITEMS,
-                            max_items: ARTICLE_TAGS_MAX_ITEMS,
-                            max_length: ARTICLE_TAG_MAX_CHARS,
-                        },
-                    ),
-                ],
-            },
+            schema: ObjectSchema { fields },
         },
     }
 }
+
+/// 通常の要点・注目ポイント・タグのフィールド（件数は保存前の検証と同じ範囲）。
+const ARTICLE_POINTS_FIELDS: &[(&str, FieldSchema)] = &[
+    (
+        "key_points",
+        FieldSchema::StringList {
+            min_items: KEY_POINTS_MIN_ITEMS,
+            max_items: KEY_POINTS_MAX_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    (
+        "focus_points",
+        FieldSchema::StringList {
+            min_items: FOCUS_POINTS_MIN_ITEMS,
+            max_items: FOCUS_POINTS_MAX_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    ARTICLE_TAGS_FIELD,
+];
+
+/// 短い入力の要点・注目ポイント・タグのフィールド（要点・注目ポイントの件数だけを固定する）。
+const ARTICLE_POINTS_SHORT_INPUT_FIELDS: &[(&str, FieldSchema)] = &[
+    (
+        "key_points",
+        FieldSchema::StringList {
+            min_items: SHORT_INPUT_KEY_POINTS_ITEMS,
+            max_items: SHORT_INPUT_KEY_POINTS_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    (
+        "focus_points",
+        FieldSchema::StringList {
+            min_items: SHORT_INPUT_FOCUS_POINTS_ITEMS,
+            max_items: SHORT_INPUT_FOCUS_POINTS_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    ARTICLE_TAGS_FIELD,
+];
+
+const ARTICLE_TAGS_FIELD: (&str, FieldSchema) = (
+    "tags",
+    FieldSchema::StringList {
+        min_items: ARTICLE_TAGS_MIN_ITEMS,
+        max_items: ARTICLE_TAGS_MAX_ITEMS,
+        max_length: ARTICLE_TAG_MAX_CHARS,
+    },
+);
 
 pub fn build_chat_body(
     prompt: &str,
@@ -1025,6 +1061,21 @@ mod tests {
         // タグも required（ローカルLLMに必ず書かせる）。
         assert!(text.contains(
             r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":4},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":3},"tags":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20},"minItems":3,"maxItems":5}},"required":["key_points","focus_points","tags"],"additionalProperties":false}}}"#
+        ), "{text}");
+    }
+
+    #[test]
+    fn short_input_article_points_schema_fixes_the_point_counts() {
+        let body = build_chat_body(
+            "prompt",
+            1024,
+            Some(article_points_short_input_response_format()),
+        );
+        let text = serde_json::to_string(&body).unwrap();
+        // 短い入力では要点ちょうど2件・注目ポイントちょうど1件（保存前の検証の範囲 2〜4 / 1〜3 の内側）。
+        // タグ・文字数・順番は通常と同じ。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":2},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":1},"tags":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20},"minItems":3,"maxItems":5}},"required":["key_points","focus_points","tags"],"additionalProperties":false}}}"#
         ), "{text}");
     }
 
