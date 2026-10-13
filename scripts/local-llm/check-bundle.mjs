@@ -3,7 +3,7 @@
 // tauri.conf.json の `build.beforeBundleCommand` から呼ばれる（`pnpm tauri build` のときだけ。
 // `tauri dev`・cargo のビルド・テスト・CI の検査では呼ばれない）。
 // 同梱物（git 外・約1.3GB）を置き忘れたままインストーラーを作ると「ローカル」が使えない版を配ってしまうため、
-// src-tauri/resources/local_llm/ の実行の部品とモデルを Rust の表と照合し、1つでも合わなければ
+// src-tauri/resources/local_llm/ の実行の部品（VC++ ランタイムを含む）とモデルを Rust の表と照合し、1つでも合わなければ
 // 失敗で終わらせてバンドルを止める。置き方は開発環境構築手順書 §17.5。
 import { pathToFileURL } from "node:url";
 
@@ -21,7 +21,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
           [
             "同梱ローカルLLMが揃っていないため、インストーラーを作りません。",
             ...problems.map((problem) => `  - ${problem}`),
-            "node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ> で置いてから、もう一度ビルドしてください。",
+            "node scripts/local-llm/place-bundle.mjs <同梱物のフォルダ> --vc-crt <VC++ ランタイムのフォルダ> で置いてから、もう一度ビルドしてください。",
           ].join("\n")
         );
         process.exitCode = 1;

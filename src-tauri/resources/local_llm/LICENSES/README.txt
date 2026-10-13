@@ -39,6 +39,15 @@ This folder contains the license texts of the bundled components.
   - subprocess.h（The Unlicense）→ subprocess.h-Unlicense.txt
 
 ---------------------------------------------------------------------
+3. Visual C++ ランタイム / Microsoft Visual C++ runtime (runtime/)
+---------------------------------------------------------------------
+- vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll（14.44.35211.0）
+  Microsoft Visual C++ 再頒布可能パッケージのファイルです。Visual Studio のライセンス条項
+  （再頒布可能コードの条件）に従って再頒布しています。著作権は Microsoft Corporation にあります。
+  These are Microsoft Visual C++ Redistributable files, redistributed under the
+  Visual Studio license terms for Distributable Code. (c) Microsoft Corporation.
+
+---------------------------------------------------------------------
 外部への送信について / Network
 ---------------------------------------------------------------------
 これらの部品は、このパソコンの中だけで動きます（127.0.0.1・ネットへの接続を切った状態で起動）。

@@ -130,6 +130,30 @@ pub const RUNTIME_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// llama-server と同じ `runtime/` に置く Visual C++ ランタイム（判断台帳 D112）と SHA-256。
+/// `RUNTIME_FILES` の部品は MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1 を読み込むため、
+/// VC++ 再頒布可能パッケージが入っていないパソコンでも起動できるよう、実行ファイルの隣に置く
+/// （Windows は実行ファイルのフォルダの DLL を先に探す）。dumpbin で確かめたところ、ほかの CRT
+/// （msvcp140_1 / msvcp140_2 / vcruntime140_threads / concrt140 等）はどの部品も読み込まない。
+/// `api-ms-win-crt-*`（UCRT）は Windows 10 以降に標準で入っているので同梱しない。
+/// 元は Visual Studio 2022 Build Tools の再頒布用フォルダ（`VC/Redist/MSVC/14.44.35112/x64/
+/// Microsoft.VC143.CRT`、ファイルの版 14.44.35211.0）。llama.cpp の配布物とは置き元が違うため表を分け、
+/// `scripts/local-llm/place-bundle.mjs` は `--vc-crt <フォルダ>` から写す。照合は `RUNTIME_FILES` と同じ扱い。
+pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "vcruntime140.dll",
+        "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+    ),
+    (
+        "vcruntime140_1.dll",
+        "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+    ),
+    (
+        "msvcp140.dll",
+        "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    ),
+];
+
 /// 同梱物の置き場（リソースフォルダからの相対）。
 pub const BUNDLE_DIR_NAME: &str = "local_llm";
 const RUNTIME_DIR_NAME: &str = "runtime";
@@ -247,10 +271,12 @@ pub fn check_runtime_files(runtime_dir: &Path, files: &[(String, String)]) -> Mo
     ModelCheck::Ok
 }
 
-/// `RUNTIME_FILES` を照合用の表へ写す（テストで差し替えられるように所有型にする）。
+/// `RUNTIME_FILES` と `VC_RUNTIME_FILES` を照合用の表へ写す（テストで差し替えられるように所有型にする）。
+/// VC++ ランタイムも同じ表に入れ、無ければ Missing・中身が違えば Broken と同じ扱いにする。
 pub fn runtime_manifest() -> Vec<(String, String)> {
     RUNTIME_FILES
         .iter()
+        .chain(VC_RUNTIME_FILES)
         .map(|(name, sha256)| (name.to_string(), sha256.to_string()))
         .collect()
 }
@@ -997,7 +1023,24 @@ mod tests {
         }
         assert!(RUNTIME_FILES
             .iter()
+            .chain(VC_RUNTIME_FILES)
             .all(|(_, sha)| sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    /// VC++ ランタイム（D112）は llama-server が読み込む3つだけを、照合の表に含める。
+    #[test]
+    fn runtime_manifest_includes_the_vc_runtime() {
+        let vc: Vec<&str> = VC_RUNTIME_FILES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            vc,
+            ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
+        );
+        let manifest = runtime_manifest();
+        assert_eq!(manifest.len(), RUNTIME_FILES.len() + VC_RUNTIME_FILES.len());
+        for name in vc {
+            assert!(manifest.iter().any(|(n, _)| n == name), "{name}");
+            assert!(!RUNTIME_FILES.iter().any(|(n, _)| *n == name), "{name}");
+        }
     }
 
     #[test]
