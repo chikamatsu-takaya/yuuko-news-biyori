@@ -769,7 +769,8 @@ export default function CustomizeScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-64 bg-white border-l border-border flex flex-col shrink-0 overflow-y-auto">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="w-60 lg:w-64 bg-white border-l border-border flex flex-col shrink-0 overflow-y-auto">
           <div className="p-3 space-y-3">
             {/* Current Settings（実データ。口調・性格は扱わないため出さない。D83） */}
             <Card className="border-border">
