@@ -15,16 +15,18 @@ use crate::domain::ai_connection::{
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::{
-    AiArticlePoints, AiRequest, AiResponse, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
-    ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
-    FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-    POINT_ITEM_MAX_CHARS, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
-    YUUKO_EXPLANATION_PROMPT_ID,
+    is_short_article_points_input, AiArticlePoints, AiRequest, AiResponse,
+    ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS,
+    ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
+    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    SHORT_INPUT_FOCUS_POINTS_ITEMS, SHORT_INPUT_KEY_POINTS_ITEMS, TERM_EXPLANATION_PROMPT_ID,
+    YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
 use crate::infra::local_llm_runtime::{
-    article_points_response_format, term_explanation_response_format, ResponseFormat,
+    article_points_response_format, article_points_short_input_response_format,
+    term_explanation_response_format, ResponseFormat,
 };
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
@@ -73,11 +75,25 @@ const YUUKO_TONE_INSTRUCTION: &str = "文章はマスコットキャラクター
 /// （2026-10-09 の実測）。混ざった場合は summary_service で取り除く（`util::speech_cleanup`）が、
 /// まずはプロンプトで出させないようにする。禁止例の字そのもの（中国語の助詞など）は、小さいモデルが
 /// まねて出しやすくなるため書かない。
-const YUUKO_SPEECH_RULES: &str = "出力はゆうこが話す本文だけにしてください。\
-日本語だけで書き、日本語以外の言語の単語や感嘆詞を混ぜないでください。\
-挨拶・自己紹介・前置き・締めの言葉は書かず、すぐに記事の中身から話し始めてください。\
-括弧書きのト書き（動作・表情・声の調子の説明）や、ゆうこの様子を外から説明する文は書かないでください。\
-絵文字・見出し・箇条書きは使わないでください。";
+/// 2026-10-13 の評価 v2 では、短い入力から事実を作る（「15 年ぶりの 1 勝」→「優勝」、「9 月末」→「9 か月」）
+/// 誤りが再説明・一言にも出たため、入力（記事情報）にない事実・数値・日付を足さない規則も置く
+/// （`FACTS_ONLY_RULE`。要約・要点と同じ文）。
+const YUUKO_SPEECH_RULES: &str = concat!(
+    "出力はゆうこが話す本文だけにしてください。",
+    "記事情報に書かれている事実だけを使い、記事情報にない数値・順位・日付・期間・出来事を足したり、",
+    "数や日付を別の言い方に変えたりしないでください。",
+    "日本語だけで書き、日本語以外の言語の単語や感嘆詞を混ぜないでください。",
+    "挨拶・自己紹介・前置き・締めの言葉は書かず、すぐに記事の中身から話し始めてください。",
+    "括弧書きのト書き（動作・表情・声の調子の説明）や、ゆうこの様子を外から説明する文は書かないでください。",
+    "絵文字・見出し・箇条書きは使わないでください。"
+);
+
+/// 要約・要点で使う、入力（記事情報）にない事実を足さない規則（固定指示）。
+/// 小さいローカルLLMは材料の少ない入力（RSS の概要だけなど）で、数値・日付・結果を作りやすい
+/// （2026-10-13 の評価 v2）。再説明・一言の `YUUKO_SPEECH_RULES` にも同じ趣旨の文を置く。
+/// 創作の例そのもの（「優勝」など）は、小さいモデルがまねて出しやすくなるため書かない。
+const FACTS_ONLY_RULE: &str = "記事情報に書かれている事実だけを使い、記事情報にない数値・順位・日付・期間・出来事を足したり、\
+数や日付を別の言い方に変えたりしないでください。";
 
 /// 重いニュース（事件・事故・災害・訃報・戦争やテロ・重い病気など）の再説明・一言に足す、
 /// 落ち着いた口調の固定指示（判断台帳 D122）。判定は `SpeechTone::for_request`（入力のキーワード規則）。
@@ -149,7 +165,7 @@ impl AiProviderService {
         // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
         if provider == AiProvider::Local {
             let prompt = build_prompt(&request, explanation_level);
-            let result = match local_output_shape(&request.prompt_id) {
+            let result = match local_output_shape(&request) {
                 (max_tokens, Some(format)) => self
                     .local_llm
                     .generate_with_format(&prompt, max_tokens, format),
@@ -378,17 +394,22 @@ fn mock_article_tags(genre: &str) -> Vec<String> {
 /// 用語解説と要点・注目ポイントは JSON スキーマで出力を縛る（小さいモデルの前置き・コードフェンスで
 /// 厳格解析が落ちないように）。解析・無害化・文字数の検証は従来どおり dictionary_service / summary_service
 /// 側で行う。Gemini の経路には関わらない。
-fn local_output_shape(prompt_id: &str) -> (u32, Option<ResponseFormat>) {
+/// 要点・注目ポイントは、本文抜粋の短い入力（`is_short_article_points_input`）のとき件数を少なく固定したスキーマにする
+/// （プロンプトの件数と同じ。`article_points_instruction`）。
+fn local_output_shape(request: &AiRequest) -> (u32, Option<ResponseFormat>) {
+    let prompt_id = request.prompt_id.as_str();
     if prompt_id == TERM_EXPLANATION_PROMPT_ID {
         (
             LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS,
             Some(term_explanation_response_format()),
         )
     } else if prompt_id == ARTICLE_POINTS_PROMPT_ID {
-        (
-            LOCAL_MAX_OUTPUT_TOKENS,
-            Some(article_points_response_format()),
-        )
+        let format = if is_short_article_points_input(&request.input_text) {
+            article_points_short_input_response_format()
+        } else {
+            article_points_response_format()
+        };
+        (LOCAL_MAX_OUTPUT_TOKENS, Some(format))
     } else if prompt_id == YUUKO_EXPLANATION_PROMPT_ID {
         (LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS, None)
     } else if prompt_id == YUUKO_COMMENT_PROMPT_ID {
@@ -537,7 +558,9 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         SpeechTone::Normal => String::new(),
     };
     let instruction = match request.prompt_id.as_str() {
-        "summary_v1" => format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。"),
+        "summary_v1" => format!(
+            "次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}"
+        ),
         // 再説明は画面の1段落に収まる長さにする（解説レベルで文の数と上限だけを変える）。
         id if id == YUUKO_EXPLANATION_PROMPT_ID => {
             let length = match explanation_level {
@@ -563,17 +586,9 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         }
         // 要点・注目ポイント・タグ（D18 / D11）。要点と注目ポイントは別の観点で書かせ、要点に注目ポイントを混ぜない。
         // タグは同じ呼び出しで受け取る（ローカルLLMの負荷を抑えるため、タグだけの呼び出しはしない）。
-        id if id == ARTICLE_POINTS_PROMPT_ID => format!(
-            "次のニュースについて、日本語で{level}2種類の箇条書きとタグを作ってください。\n\
-             key_points: 何が起きたかを伝える要点を3つ程度（{KEY_POINTS_MIN_ITEMS}〜{KEY_POINTS_MAX_ITEMS}個）。\n\
-             focus_points: なぜ面白いのか、この記事から何を学べるのかという注目ポイントを{FOCUS_POINTS_MIN_ITEMS}〜{FOCUS_POINTS_MAX_ITEMS}個。要点の言い換えにしないでください。\n\
-             tags: 記事の話題を表す短い名詞のタグを{ARTICLE_TAGS_MIN_ITEMS}〜{ARTICLE_TAGS_MAX_ITEMS}個。各{ARTICLE_TAG_MAX_CHARS}文字以内で重複させず、\
-             先頭に # を付けず、カンマ・読点などの区切り文字を含めないでください。\n\
-             要点と注目ポイントの各項目は改行を含まない1文で、{POINT_ITEM_MAX_CHARS}文字以内にしてください。\
-             先頭に箇条書きの記号・番号・見出し記号を付けず、HTML や URL も書かないでください。\n\
-             出力は次の JSON オブジェクトだけにしてください（前後に文章・コードブロック・注釈を付けない）:\n\
-             {{\"key_points\": [\"要点1\", \"要点2\", \"要点3\"], \"focus_points\": [\"注目ポイント1\"], \"tags\": [\"タグ1\", \"タグ2\", \"タグ3\"]}}"
-        ),
+        id if id == ARTICLE_POINTS_PROMPT_ID => {
+            article_points_instruction(level, is_short_article_points_input(&request.input_text))
+        }
         _ => format!("次のテキストを日本語で{level}整えてください。"),
     };
 
@@ -594,21 +609,88 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     prompt
 }
 
+/// 再説明・一言のプロンプトに入る固定指示の文（利用者の入力・記事を含まない）。出力にこれらの写しが
+/// 混ざったときに取り除くため（`util::speech_cleanup::strip_prompt_echo_sentences`）、summary_service が使う。
+pub(crate) fn yuuko_speech_fixed_prompt_texts() -> [&'static str; 7] {
+    [
+        YUUKO_TONE_INSTRUCTION,
+        YUUKO_SPEECH_RULES,
+        YUUKO_CALM_TONE_INSTRUCTION,
+        YUUKO_CALM_TONE_REMINDER,
+        ARTICLE_DATA_DEFENSE_INSTRUCTION,
+        YUUKO_EXPLANATION_REMINDER,
+        YUUKO_COMMENT_REMINDER,
+    ]
+}
+
+/// 再説明の末尾の念押し（固定文）。
+const YUUKO_EXPLANATION_REMINDER: &str = "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
+記事情報にない事実・数値・日付は足さないでください。\
+1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
+
+/// 一言の末尾の念押し（固定文）。
+const YUUKO_COMMENT_REMINDER: &str =
+    "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
+記事情報にない事実・数値・日付は足さないでください。\
+括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
+
 /// 再説明・一言の末尾の念押し（固定文）。ほかの prompt_id では付けない。
 fn yuuko_speech_reminder(prompt_id: &str) -> Option<&'static str> {
     if prompt_id == YUUKO_EXPLANATION_PROMPT_ID {
-        Some(
-            "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
-             1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
-        )
+        Some(YUUKO_EXPLANATION_REMINDER)
     } else if prompt_id == YUUKO_COMMENT_PROMPT_ID {
-        Some(
-            "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
-             括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。",
-        )
+        Some(YUUKO_COMMENT_REMINDER)
     } else {
         None
     }
+}
+
+/// 要点・注目ポイント・タグ（`article_points_v2`・D18 / D11）の指示。要点と注目ポイントは別の観点で書かせ、
+/// 要点に注目ポイントを混ぜない。タグは同じ呼び出しで受け取る（ローカルLLMの負荷を抑えるため、タグだけの呼び出しはしない）。
+///
+/// 本文抜粋の短い入力（`is_short_article_points_input`）では、要点を2件・注目ポイントを1件だけ頼み、
+/// 足りない分を推測で補わないよう明記する（材料が 1〜2 文なのに 3 件ずつ頼むと創作が出た。2026-10-13 の評価 v2）。
+/// 件数は保存前の検証の範囲（要点 2〜4・注目ポイント 1〜3）の内側なので、出力の契約（prompt_id）は変えない。
+/// ローカルLLMでは出力スキーマでも同じ件数に縛る（`local_output_shape`）。Gemini はプロンプトだけで頼む。
+fn article_points_instruction(level: &str, short_input: bool) -> String {
+    let (key_points, focus_points, example) = if short_input {
+        (
+            format!(
+                "何が起きたかを伝える要点を{SHORT_INPUT_KEY_POINTS_ITEMS}個（記事情報が短いため、項目は少なくします）"
+            ),
+            format!(
+                "この記事から何が分かるかという注目ポイントを{SHORT_INPUT_FOCUS_POINTS_ITEMS}個。要点の言い換えにしないでください。要点と同じ文も書かないでください"
+            ),
+            "{\"key_points\": [\"要点1\", \"要点2\"], \"focus_points\": [\"注目ポイント1\"], \"tags\": [\"タグ1\", \"タグ2\", \"タグ3\"]}",
+        )
+    } else {
+        (
+            format!(
+                "何が起きたかを伝える要点を3つ程度（{KEY_POINTS_MIN_ITEMS}〜{KEY_POINTS_MAX_ITEMS}個）"
+            ),
+            format!(
+                "なぜ面白いのか、この記事から何を学べるのかという注目ポイントを{FOCUS_POINTS_MIN_ITEMS}〜{FOCUS_POINTS_MAX_ITEMS}個。要点の言い換えにしないでください"
+            ),
+            "{\"key_points\": [\"要点1\", \"要点2\", \"要点3\"], \"focus_points\": [\"注目ポイント1\"], \"tags\": [\"タグ1\", \"タグ2\", \"タグ3\"]}",
+        )
+    };
+    let short_input_rule = if short_input {
+        "記事情報に書かれていないことを推測で補って項目数を増やさないでください。\n"
+    } else {
+        ""
+    };
+    format!(
+        "次のニュースについて、日本語で{level}2種類の箇条書きとタグを作ってください。\n\
+         key_points: {key_points}。\n\
+         focus_points: {focus_points}。\n\
+         tags: 記事の話題を表す短い名詞のタグを{ARTICLE_TAGS_MIN_ITEMS}〜{ARTICLE_TAGS_MAX_ITEMS}個。各{ARTICLE_TAG_MAX_CHARS}文字以内で重複させず、\
+         先頭に # を付けず、カンマ・読点などの区切り文字を含めないでください。\n\
+         {FACTS_ONLY_RULE}\n{short_input_rule}\
+         要点と注目ポイントの各項目は改行を含まない1文で、{POINT_ITEM_MAX_CHARS}文字以内にしてください。\
+         先頭に箇条書きの記号・番号・見出し記号を付けず、HTML や URL も書かないでください。\n\
+         出力は次の JSON オブジェクトだけにしてください（前後に文章・コードブロック・注釈を付けない）:\n\
+         {example}"
+    )
 }
 
 /// 要約・再説明・感想プロンプトの外部データ防御指示（固定指示側・区切り見出しより前に置く）。
@@ -727,10 +809,22 @@ fn term_explanation_level_instruction(explanation_level: ExplanationLevel) -> &'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::summary::SHORT_ARTICLE_BODY_MAX_CHARS;
+
+    fn request_for(prompt_id: &str, input_text: &str) -> AiRequest {
+        AiRequest {
+            prompt_id: prompt_id.to_string(),
+            input_text: input_text.to_string(),
+            context: None,
+        }
+    }
 
     #[test]
     fn local_output_shape_constrains_article_points_with_array_schema() {
-        let (max_tokens, format) = local_output_shape(ARTICLE_POINTS_PROMPT_ID);
+        // 本文抜粋が短くない入力では、件数の範囲は保存前の検証と同じ（2〜4 / 1〜3）。
+        let long_input = format!("タイトル\n{}", "本文".repeat(SHORT_ARTICLE_BODY_MAX_CHARS));
+        let (max_tokens, format) =
+            local_output_shape(&request_for(ARTICLE_POINTS_PROMPT_ID, &long_input));
         assert_eq!(max_tokens, LOCAL_MAX_OUTPUT_TOKENS);
         let format = serde_json::to_value(format.expect("schema")).unwrap();
         let schema = &format["json_schema"]["schema"];
@@ -782,6 +876,67 @@ mod tests {
         assert!(prompt.contains("3〜5個"), "{prompt}");
         assert!(prompt.contains(r#""tags": ["#), "{prompt}");
         assert!(prompt.contains("要点の言い換えにしないでください"));
+    }
+
+    #[test]
+    fn short_article_points_input_asks_for_fewer_items_in_prompt_and_schema() {
+        // 本文抜粋が短い（RSS の概要だけなど）入力: 要点2件・注目ポイント1件だけを頼み、推測で補わせない。
+        let short_input = "タイトル\n9月末でサービスを終了すると7日に発表した。";
+        let short = build_prompt(
+            &request_for(ARTICLE_POINTS_PROMPT_ID, short_input),
+            ExplanationLevel::Normal,
+        );
+        assert!(short.contains("要点を2個"), "{short}");
+        assert!(short.contains("注目ポイントを1個"), "{short}");
+        assert!(!short.contains("3つ程度"), "{short}");
+        assert!(short.contains("推測で補って項目数を増やさないでください"));
+        assert!(short.contains(FACTS_ONLY_RULE));
+        assert!(short.contains(r#""key_points": ["要点1", "要点2"], "focus_points""#));
+        // 規則は固定指示側（外部データより前）に置く。
+        assert!(short.find(FACTS_ONLY_RULE).unwrap() < short.find(ARTICLE_DATA_HEADING).unwrap());
+        let (_, format) = local_output_shape(&request_for(ARTICLE_POINTS_PROMPT_ID, short_input));
+        let schema =
+            serde_json::to_value(format.expect("schema")).unwrap()["json_schema"]["schema"].clone();
+        assert_eq!(schema["properties"]["key_points"]["minItems"], 2);
+        assert_eq!(schema["properties"]["key_points"]["maxItems"], 2);
+        assert_eq!(schema["properties"]["focus_points"]["minItems"], 1);
+        assert_eq!(schema["properties"]["focus_points"]["maxItems"], 1);
+        // 頼む件数は保存前の検証の範囲の内側（出力の契約を変えない）。
+        assert!(
+            (KEY_POINTS_MIN_ITEMS..=KEY_POINTS_MAX_ITEMS).contains(&SHORT_INPUT_KEY_POINTS_ITEMS)
+        );
+        assert!((FOCUS_POINTS_MIN_ITEMS..=FOCUS_POINTS_MAX_ITEMS)
+            .contains(&SHORT_INPUT_FOCUS_POINTS_ITEMS));
+
+        // 本文のある入力は従来の件数のまま（事実だけを使う規則は共通）。
+        let long_input = format!("タイトル\n{}", "本文".repeat(SHORT_ARTICLE_BODY_MAX_CHARS));
+        let long = build_prompt(
+            &request_for(ARTICLE_POINTS_PROMPT_ID, &long_input),
+            ExplanationLevel::Normal,
+        );
+        assert!(long.contains("3つ程度（2〜4個）"), "{long}");
+        assert!(long.contains("注目ポイントを1〜3個"), "{long}");
+        assert!(!long.contains("推測で補って項目数を増やさないでください"));
+        assert!(long.contains(FACTS_ONLY_RULE));
+    }
+
+    #[test]
+    fn summary_and_speech_prompts_forbid_facts_beyond_the_input() {
+        let summary = build_prompt(&request_for("summary_v1", "本文"), ExplanationLevel::Normal);
+        assert!(
+            summary.find(FACTS_ONLY_RULE).unwrap() < summary.find(ARTICLE_DATA_HEADING).unwrap()
+        );
+        // 再説明・一言: 固定指示の規則と、末尾の念押しの両方に置く。
+        assert!(YUUKO_SPEECH_RULES.contains(FACTS_ONLY_RULE));
+        for prompt_id in [YUUKO_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID] {
+            let prompt = build_prompt(&request_for(prompt_id, "本文"), ExplanationLevel::Normal);
+            let reminder = prompt.find(YUUKO_SPEECH_REMINDER_HEADING).unwrap();
+            assert!(
+                prompt[reminder..].contains("記事情報にない事実・数値・日付は足さないでください")
+            );
+        }
+        // 用語解説は別の規則（一般的な定義）なので混ぜない。
+        assert!(!term_explanation_prompt_for(ExplanationLevel::Normal).contains(FACTS_ONLY_RULE));
     }
 
     #[test]
@@ -838,7 +993,8 @@ mod tests {
 
     #[test]
     fn local_output_shape_constrains_term_explanation_but_not_free_text() {
-        let (max_tokens, format) = local_output_shape(TERM_EXPLANATION_PROMPT_ID);
+        let (max_tokens, format) =
+            local_output_shape(&request_for(TERM_EXPLANATION_PROMPT_ID, "入力"));
         assert_eq!(max_tokens, LOCAL_TERM_EXPLANATION_MAX_OUTPUT_TOKENS);
         let format = serde_json::to_value(format.expect("schema")).unwrap();
         assert_eq!(format["type"], "json_schema");
@@ -858,7 +1014,7 @@ mod tests {
                 LOCAL_YUUKO_COMMENT_MAX_OUTPUT_TOKENS,
             ),
         ] {
-            let (max_tokens, format) = local_output_shape(prompt_id);
+            let (max_tokens, format) = local_output_shape(&request_for(prompt_id, "入力"));
             assert_eq!(max_tokens, expected, "{prompt_id}");
             assert!(format.is_none(), "{prompt_id}");
         }

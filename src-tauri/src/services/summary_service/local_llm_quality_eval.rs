@@ -577,6 +577,7 @@ fn record_stage(
     level: ExplanationLevel,
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
+    let input_text = request.input_text.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
     let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
     // 再説明・一言の入力は同じ生成の AI 出力（要約・要点）だけなので、確認用に残す。
@@ -616,13 +617,13 @@ fn record_stage(
             Err(rejection) => stage["rejection"] = json!(rejection.label()),
         }
     } else {
-        let cleaned = clean_ai_speech(kind, tone, raw.clone());
+        let cleaned = clean_ai_speech(kind, tone, &input_text, raw.clone());
         stage["cleaned"] = json!(cleaned.text);
         if let Err(rejection) = validate_summary_output(kind, &cleaned.text) {
             stage["rejection"] = json!(rejection.label());
         }
     }
-    let selected = select_valid_output_in_tone(kind, tone, raw);
+    let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
     }
