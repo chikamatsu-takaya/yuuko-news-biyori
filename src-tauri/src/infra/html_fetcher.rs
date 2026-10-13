@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     time::Duration,
@@ -181,6 +181,8 @@ const END_MARKER_BODY_PARAGRAPH_CHARS: usize = 60;
 /// LENIENT_MAX_STRICT_CHARS 未満なら、判定が本文を落としたとみなして判定なしの結果を使う。
 const LENIENT_RATIO: usize = 4;
 const LENIENT_MAX_STRICT_CHARS: usize = 400;
+/// 1 つのコンテナから集める文字数の目安。抜粋の上限の 2 倍あれば、抜粋の組み立てにも比率の判定にも足りる。
+const EXTRACTION_COLLECT_LIMIT_CHARS: usize = MAX_EXCERPT_CHARS * 2;
 
 /// 抜粋をどこから得たか。本文抽出の失敗をログで追えるようにするために返す
 /// （ログには媒体のドメインとこの区分だけを出し、本文は出さない）。
@@ -442,6 +444,22 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
     Ok(url)
 }
 
+// ---------------------------------------------------------------------------
+// 本文抜粋の抽出（判断の流れのまとめ）
+//
+// 1. 記事コンテナ候補（ARTICLE_CONTAINER_SELECTORS）を順に見る。同じ要素は 1 回だけ扱い、
+//    nav / aside / footer / header や、ノイズを表す class / id の内側にある候補（関連記事カード等）は使わない。
+// 2. 候補ごとに 1 回の走査で p / li / blockquote / h2 / h3 の文字を集め、2 種類の抜粋を作る。
+//    - 判定あり（strict）: 要素名による除外 ＋ class / id の語による除外 ＋ 終端の目印での打ち切り。
+//    - 判定なし（lenient）: 要素名による除外だけ（class / id の語と終端の目印は使わない）。
+//    どちらも空・画像だけのブロックは飛ばし、短いノイズ文言と重複を除く。
+//    集めた文字数が EXTRACTION_COLLECT_LIMIT_CHARS を超えたら走査をやめる（巨大ページの負荷対策）。
+// 3. 候補の中で最長の strict と最長の lenient を比べる。strict が空、または lenient の 1/4 未満かつ
+//    400 文字未満なら lenient を、それ以外は strict を使う（class / id の判定が本文を落とした場合の保証）。
+// 4. 候補から何も取れなければ body で 2〜3 を行う（body 直下側のサイト全体の header も除く）。
+// 5. それでも空なら meta description、それも空なら呼び出し側（news_service）が RSS 概要を使う。
+// ---------------------------------------------------------------------------
+
 fn extract_excerpt(html: &str) -> Option<String> {
     extract_excerpt_with_source(html).0
 }
@@ -465,22 +483,13 @@ fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
     }
 }
 
-/// 記事コンテナ候補（article / main / 本文用 class 等）からそれぞれ判定ありで抜粋を作り、最も長いものを採る。
-/// 関連記事カードの `<article>` のように、ナビゲーション・サイドバー等の内側にある候補は使わない。
-/// 候補が全滅したら body 全体から判定ありで取る。
-///
-/// 保証: 同じ記事コンテナ候補から判定（領域除去・終端判定）なしの抜粋も作り、そのうち最も長いものを
-/// 比較の基準にする。判定ありの結果がそれより極端に短い（1/LENIENT_RATIO 未満かつ
-/// LENIENT_MAX_STRICT_CHARS 文字未満、または空）ときは、判定なしの結果を使う。判定が想定外の構造に
-/// 当たって本文を落とし、日付やパンくずだけが残る事態を防ぐため。
-/// 基準を body 全体にしないのは、メニューの多いページで短い記事が nav の文字列に置き換わるため。
-/// 記事コンテナ候補から何も取れないときだけ、body 全体の判定あり／なしで同じ比較をする。
-/// 判定なしの結果には修正前と同様にノイズが混ざりうるが、本文は失わない。
+/// 上のまとめの 1〜4 を行う。
 fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
+    let block_selector = Selector::parse("p, li, blockquote, h2, h3").ok()?;
+    let mut cache = NoiseCache::default();
+    let mut visited = HashSet::new();
     let mut best_strict: Option<String> = None;
-    let mut best_strict_len = 0;
     let mut best_lenient: Option<String> = None;
-    let mut best_lenient_len = 0;
 
     for selector_text in ARTICLE_CONTAINER_SELECTORS {
         let selector = match Selector::parse(selector_text) {
@@ -489,23 +498,16 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
         };
 
         for element in document.select(&selector) {
-            if has_noise_ancestor(&element, None) {
+            // `article` と `main article` のように、同じ要素が複数の候補に当たる場合は 1 回だけ扱う。
+            if !visited.insert(element.id()) {
                 continue;
             }
-            if let Some(excerpt) = extract_excerpt_from_element(&element, RegionFilter::Strict) {
-                let len = excerpt.chars().count();
-                if len > best_strict_len {
-                    best_strict_len = len;
-                    best_strict = Some(excerpt);
-                }
+            if cache.region_of(&element, None) != Region::Body {
+                continue;
             }
-            if let Some(excerpt) = extract_excerpt_from_element(&element, RegionFilter::Lenient) {
-                let len = excerpt.chars().count();
-                if len > best_lenient_len {
-                    best_lenient_len = len;
-                    best_lenient = Some(excerpt);
-                }
-            }
+            let pair = extract_excerpt_pair(&element, &block_selector, &mut cache);
+            keep_longer(&mut best_strict, pair.strict);
+            keep_longer(&mut best_lenient, pair.lenient);
         }
     }
 
@@ -515,13 +517,23 @@ fn find_best_candidate_excerpt(document: &Html) -> Option<String> {
 
     let body_selector = Selector::parse("body").ok()?;
     let body = document.select(&body_selector).next()?;
-    choose_strict_or_lenient(
-        extract_excerpt_from_element(&body, RegionFilter::Strict),
-        extract_excerpt_from_element(&body, RegionFilter::Lenient),
-    )
+    let pair = extract_excerpt_pair(&body, &block_selector, &mut cache);
+    choose_strict_or_lenient(pair.strict, pair.lenient)
 }
 
-/// 判定ありの結果が判定なしの結果より極端に短ければ、判定なしを採る（`find_best_candidate_excerpt` の保証）。
+fn keep_longer(best: &mut Option<String>, candidate: Option<String>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let longer = best
+        .as_ref()
+        .is_none_or(|current| candidate.chars().count() > current.chars().count());
+    if longer {
+        *best = Some(candidate);
+    }
+}
+
+/// strict が lenient より極端に短ければ lenient を採る（まとめの 3）。
 fn choose_strict_or_lenient(strict: Option<String>, lenient: Option<String>) -> Option<String> {
     match (strict, lenient) {
         (Some(strict), Some(lenient)) => {
@@ -537,97 +549,162 @@ fn choose_strict_or_lenient(strict: Option<String>, lenient: Option<String>) -> 
     }
 }
 
-/// 本文の外側の領域（ナビゲーション・タグ一覧・著者紹介等）と終端の目印を判定するかどうか。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegionFilter {
-    /// 判定する（通常）。
-    Strict,
-    /// 判定しない（保証用の取り直し）。空ブロックの読み飛ばし・短いノイズ文言の除去は行う。
-    Lenient,
+/// 1 つのコンテナから作った判定あり（strict）と判定なし（lenient）の抜粋。
+#[derive(Debug, Default)]
+struct ExcerptPair {
+    strict: Option<String>,
+    lenient: Option<String>,
 }
 
-/// コンテナ内の段落・リスト・引用・小見出しを順に集めて抜粋にする。
+/// コンテナ内のブロックを 1 回だけ走査し、strict と lenient の抜粋を作る（まとめの 2）。
 /// - 空・画像だけ・空白（&nbsp; を含む）だけのブロックは飛ばす。以前は `?` で抽出全体を
 ///   捨てていたため、そうした段落が 1 つあるだけで本文が取れず RSS 概要に落ちていた。
-/// - Strict のとき、ナビゲーション・サイドバー・タグ一覧・著者紹介・共有ボタン等の内側の
-///   ブロックは飛ばす。「関連記事」などの終端の目印が来たら、後ろに長い本文の段落がなければ
+/// - strict では「関連記事」などの終端の目印が来たとき、後ろに長い本文の段落がなければ
 ///   以降を他記事の一覧とみなして打ち切り、あれば目印だけを飛ばして続ける。
-fn extract_excerpt_from_element(element: &ElementRef<'_>, filter: RegionFilter) -> Option<String> {
-    let block_selector = Selector::parse("p, li, blockquote, h2, h3").ok()?;
-    let strict = filter == RegionFilter::Strict;
+fn extract_excerpt_pair(
+    container: &ElementRef<'_>,
+    block_selector: &Selector,
+    cache: &mut NoiseCache,
+) -> ExcerptPair {
+    // strict 用は (テキスト, 長い本文の段落か)。終端の目印の後ろを先読みするため、先に集める。
+    let mut strict_candidates: Vec<(String, bool)> = Vec::new();
+    let mut lenient_blocks: Vec<String> = Vec::new();
+    let mut strict_chars = 0;
+    let mut lenient_chars = 0;
 
-    // (テキスト, 長い本文の段落か)。終端の目印の後ろを先読みするため、先に集める。
-    let mut candidates: Vec<(String, bool)> = Vec::new();
-    for block in element.select(&block_selector) {
-        if strict && has_noise_ancestor(&block, Some(element)) {
+    for block in container.select(block_selector) {
+        // strict は lenient の部分集合なので、strict が上限に届けば lenient も届いている。
+        if strict_chars >= EXTRACTION_COLLECT_LIMIT_CHARS {
+            break;
+        }
+        let region = cache.region_of(&block, Some(container));
+        if region == Region::Structural {
             continue;
         }
         let Some(text) = sanitize_plain_text(&block.text().collect::<Vec<_>>().join(" ")) else {
             continue;
         };
-        let is_long_paragraph = matches!(block.value().name(), "p" | "blockquote")
-            && text.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS;
-        candidates.push((text, is_long_paragraph));
+        let text_chars = text.chars().count();
+
+        if region == Region::Body {
+            let is_long_paragraph = matches!(block.value().name(), "p" | "blockquote")
+                && text_chars >= END_MARKER_BODY_PARAGRAPH_CHARS;
+            strict_chars += text_chars;
+            strict_candidates.push((text.clone(), is_long_paragraph));
+        }
+        // lenient は比率の判定に足りる分だけ持てばよい。
+        if lenient_chars < EXTRACTION_COLLECT_LIMIT_CHARS {
+            lenient_chars += text_chars;
+            lenient_blocks.push(text);
+        }
     }
 
-    let mut blocks = Vec::new();
-    let mut seen = HashSet::new();
-    for (index, (text, _)) in candidates.iter().enumerate() {
-        if strict && is_end_of_article_marker(text) {
-            let body_continues = candidates[index + 1..].iter().any(|(_, long)| *long);
+    let mut strict_blocks = Vec::new();
+    for (index, (text, _)) in strict_candidates.iter().enumerate() {
+        if is_end_of_article_marker(text) {
+            let body_continues = strict_candidates[index + 1..].iter().any(|(_, long)| *long);
             if body_continues {
                 continue;
             }
             break;
         }
-        if is_noise_block(text) {
-            continue;
-        }
-
-        if seen.insert(text.clone()) {
-            blocks.push(text.clone());
-        }
+        strict_blocks.push(text.clone());
     }
 
+    ExcerptPair {
+        strict: join_body_blocks(strict_blocks),
+        lenient: join_body_blocks(lenient_blocks),
+    }
+}
+
+/// 短いノイズ文言と重複を除いてつなぐ。何も残らなければ None。
+fn join_body_blocks(texts: Vec<String>) -> Option<String> {
+    let mut seen = HashSet::new();
+    let blocks: Vec<String> = texts
+        .into_iter()
+        .filter(|text| !is_noise_block(text))
+        .filter(|text| seen.insert(text.clone()))
+        .collect();
     if blocks.is_empty() {
         return None;
     }
-
     Some(join_excerpt_blocks(&blocks, MAX_EXCERPT_CHARS))
 }
 
-/// 要素自身か、その祖先（`stop_at` の手前まで。`stop_at` 自身は判定しない）が本文の外側
-/// （nav / aside / footer / header、またはタグ一覧・著者紹介・関連記事等の class / id）か。
-/// `stop_at` が None のときは文書の根までたどる。
-/// `stop_at` が記事コンテナ（body / html 以外）のとき、その内側の `header` は除かない
-/// （記事の `<header>` にはリード文が入ることがあるため。サイト全体のヘッダーは body 直下側にある）。
-fn has_noise_ancestor(element: &ElementRef<'_>, stop_at: Option<&ElementRef<'_>>) -> bool {
-    let keep_header = stop_at.is_some_and(|stop| !matches!(stop.value().name(), "body" | "html"));
-    let mut current = Some(*element);
-    while let Some(node) = current {
-        if stop_at.is_some_and(|stop| stop.id() == node.id()) {
-            return false;
-        }
-        if is_noise_element(&node, keep_header) {
-            return true;
-        }
-        current = node.parent().and_then(ElementRef::wrap);
-    }
-    false
+/// ブロック（または候補コンテナ）がどの領域にあるか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Region {
+    /// 本文として扱う。
+    Body,
+    /// nav / aside / footer / header の内側。strict・lenient の両方で除く。
+    Structural,
+    /// ノイズを表す class / id の内側。strict だけで除く。
+    NoiseClass,
 }
 
-fn is_noise_element(element: &ElementRef<'_>, keep_header: bool) -> bool {
+/// 要素ごとの判定のメモ。各ブロックから祖先をたどるたびに同じ要素の class を照合し直さないため。
+/// キーは文書内で位置の変わらない要素データのアドレス（scraper の NodeId 型は依存を増やさずに名前で書けないため）。
+#[derive(Default)]
+struct NoiseCache {
+    elements: HashMap<usize, ElementNoise>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElementNoise {
+    /// nav / aside / footer / header のどれか。
+    structural_tag: bool,
+    is_header: bool,
+    /// class / id の語がノイズを表す（html / body / article / main 自身は見ない）。
+    noise_class: bool,
+}
+
+impl NoiseCache {
+    /// 要素自身と、その祖先（`stop_at` の手前まで。`stop_at` 自身は判定しない）を見て領域を決める。
+    /// `stop_at` が None のときは文書の根までたどる。
+    /// `stop_at` が記事コンテナ（body / html 以外）のとき、その内側の `header` は除かない
+    /// （記事の `<header>` にはリード文が入ることがあるため。サイト全体のヘッダーは body 直下側にある）。
+    fn region_of(&mut self, element: &ElementRef<'_>, stop_at: Option<&ElementRef<'_>>) -> Region {
+        let keep_header =
+            stop_at.is_some_and(|stop| !matches!(stop.value().name(), "body" | "html"));
+        let mut region = Region::Body;
+        let mut current = Some(*element);
+        while let Some(node) = current {
+            if stop_at.is_some_and(|stop| stop.id() == node.id()) {
+                break;
+            }
+            let noise = self.element_noise(&node);
+            if noise.structural_tag && !(keep_header && noise.is_header) {
+                return Region::Structural;
+            }
+            if noise.noise_class {
+                region = Region::NoiseClass;
+            }
+            current = node.parent().and_then(ElementRef::wrap);
+        }
+        region
+    }
+
+    fn element_noise(&mut self, element: &ElementRef<'_>) -> ElementNoise {
+        let key = std::ptr::from_ref(element.value()) as usize;
+        *self
+            .elements
+            .entry(key)
+            .or_insert_with(|| classify_element(element))
+    }
+}
+
+fn classify_element(element: &ElementRef<'_>) -> ElementNoise {
     let value = element.value();
     let name = value.name();
-    if NOISE_ANCESTOR_TAGS.contains(&name) && !(keep_header && name == "header") {
-        return true;
-    }
     // html / body / article / main の class は見ない。WordPress 等は記事の `<article>` や `<body>` に
     // `tag-ai` `author-1` `has-sidebar` のような分類用 class を付けるため、本文ごと落としてしまう。
-    if CONTAINER_TAGS_EXEMPT_FROM_CLASS_CHECK.contains(&name) {
-        return false;
+    let noise_class = !CONTAINER_TAGS_EXEMPT_FROM_CLASS_CHECK.contains(&name)
+        && value.classes().chain(value.id()).any(is_noise_identifier);
+    ElementNoise {
+        structural_tag: NOISE_ANCESTOR_TAGS.contains(&name),
+        is_header: name == "header",
+        noise_class,
     }
-    value.classes().chain(value.id()).any(is_noise_identifier)
 }
 
 /// class / id の値 1 つがノイズ領域を表すか。
@@ -1226,6 +1303,47 @@ mod tests {
         assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
     }
 
+    fn menu_items(count: usize) -> String {
+        (0..count)
+            .map(|i| format!("<li><a href=\"/c/{i}\">メニュー項目その{i}</a></li>"))
+            .collect()
+    }
+
+    #[test]
+    fn short_article_is_not_replaced_by_nav_inside_main() {
+        // lenient でも要素名（nav / aside / footer）の除外は保つので、main の中の nav は混ざらない。
+        let menu = menu_items(120);
+        let html = format!(
+            r#"<!doctype html><html><body><main><nav><ul>{menu}</ul></nav><article><p>{BODY_1}</p><p>{BODY_2}</p></article></main></body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn short_article_does_not_get_aside_inside_main_appended() {
+        let menu = menu_items(120);
+        let html = format!(
+            r#"<!doctype html><html><body><main><article><p>{BODY_1}</p><p>{BODY_2}</p></article><aside><ul>{menu}</ul></aside></main></body></html>"#
+        );
+        let (excerpt, source) = extract_excerpt_with_source(&html);
+        assert_eq!(source, ExcerptSource::Body);
+        assert_eq!(excerpt.unwrap(), format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn extraction_stops_collecting_after_enough_text() {
+        // 上限の 2 倍を超えたら走査をやめても、抜粋は上限いっぱいまで本文で埋まる。
+        let paragraphs: String = (0..2_000)
+            .map(|i| format!("<p>段落{i}です。{BODY_1}</p>"))
+            .collect();
+        let excerpt = extract_body(&paragraphs);
+        assert!(excerpt.starts_with("段落0です。"));
+        assert!(excerpt.chars().count() > MAX_EXCERPT_CHARS - 100);
+        assert!(excerpt.chars().count() <= MAX_EXCERPT_CHARS);
+    }
+
     #[test]
     fn uses_body_lenient_extraction_only_without_container_candidates() {
         // 記事コンテナ候補がないページでは、body の判定あり／なしで比較する。
@@ -1296,6 +1414,39 @@ mod tests {
             choose_strict_or_lenient(None, Some("い".to_string())),
             Some("い".to_string())
         );
+    }
+
+    /// 抽出の所要時間を測る手動実行用（`cargo test extraction_timing_on_extreme_page -- --ignored --nocapture`）。
+    /// 約 2.8MB・ブロック数の多いページで、修正前後の比較に使う。時間の閾値は置かない。
+    #[test]
+    #[ignore]
+    fn extraction_timing_on_extreme_page() {
+        let mut html =
+            String::from("<!doctype html><html><body><header class=\"site-header\"><nav><ul>");
+        for i in 0..3_000 {
+            html.push_str(&format!(
+                "<li><a href=\"/c/{i}\">メニュー項目その{i}</a></li>"
+            ));
+        }
+        html.push_str("</ul></nav></header><main><article class=\"article-body\">");
+        for i in 0..12_000 {
+            html.push_str(&format!(
+                "<div class=\"row pr-4\"><p>段落{i}です。本文のテキストが入ります。料金や提供時期について説明します。</p><ul><li>項目{i}</li></ul></div>"
+            ));
+        }
+        html.push_str("</article><aside class=\"sidebar\"><ul>");
+        for i in 0..3_000 {
+            html.push_str(&format!("<li>サイドバーの記事見出し{i}</li>"));
+        }
+        html.push_str("</ul></aside></main></body></html>");
+        let started = std::time::Instant::now();
+        let excerpt = extract_excerpt(&html);
+        eprintln!(
+            "extreme page: {} bytes, extraction took {:?}",
+            html.len(),
+            started.elapsed()
+        );
+        assert!(excerpt.is_some());
     }
 
     #[test]
