@@ -1043,7 +1043,8 @@ export default function DictionaryScreen({
             </Card>
           </div>
 
-          <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
+          {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+          <aside className="w-60 lg:w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
             <div className="relative mb-2">
               <div className="relative rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3">
                 <p className="text-xs leading-relaxed text-foreground">
@@ -1085,16 +1086,17 @@ export default function DictionaryScreen({
               <div className="space-y-3">
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-base font-bold text-foreground">
+                    {/* 右列が狭いとき（lg 未満）は「お気に入り」を次の行へ回し、見出し・ボタンの文字が1字ずつ折り返さないようにする。 */}
+                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h3 className="break-words text-base font-bold text-foreground">
                           {selectedEntry.term}
                         </h3>
                         <TypeBadge type={selectedEntry.type} />
                       </div>
                       <button
                         type="button"
-                        className="flex items-center gap-1 text-xs"
+                        className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs"
                         onClick={() =>
                           handleToggleFavorite(
                             selectedEntry.id,

@@ -999,6 +999,23 @@ mod tests {
         let service = service_with(&bundle, launcher.clone(), missing_dll);
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
 
+        // 表にある VC++ ランタイム（D112）が無い → 固定の「見つからない」。
+        let mut missing_vc = test_config();
+        missing_vc
+            .runtime_files
+            .push(("vcruntime140.dll".to_string(), "0".repeat(64)));
+        let service = service_with(&bundle, launcher.clone(), missing_vc);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
+
+        // VC++ ランタイムの中身が表と違う → 固定の「壊れている」。
+        std::fs::write(bundle.0.join("runtime").join("msvcp140.dll"), b"other").unwrap();
+        let mut tampered_vc = test_config();
+        tampered_vc
+            .runtime_files
+            .push(("msvcp140.dll".to_string(), sha256_hex(b"msvcp")));
+        let service = service_with(&bundle, launcher.clone(), tampered_vc);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
+
         assert_eq!(launcher.launches(), 0);
     }
 

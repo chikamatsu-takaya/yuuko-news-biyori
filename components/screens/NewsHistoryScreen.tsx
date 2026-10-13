@@ -964,7 +964,8 @@ export default function NewsHistoryScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
           {/* Yuuko Speech Bubble */}
           <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
             <CardContent className="p-3">

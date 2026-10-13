@@ -257,6 +257,34 @@ for (const viewport of VIEWPORTS) {
   }
 }
 
+// 右列（ゆうこ列）の幅（D109）。lg（1024px）未満では w-60（240px）に狭めて中央列を広げ、lg 以上は従来幅のまま。
+// ホーム（MainScreen）は小柳さんの作り直し中のため対象外で、どちらの幅でも従来の w-64（256px）であることを確かめる。
+const RIGHT_COLUMN_WIDTHS: { id: string; narrow: number; wide: number }[] = [
+  { id: "home", narrow: 256, wide: 256 },
+  { id: "reader", narrow: 240, wide: 288 },
+  { id: "history", narrow: 240, wide: 288 },
+  { id: "dictionary", narrow: 240, wide: 288 },
+  { id: "customize", narrow: 240, wide: 256 },
+  { id: "settings-1", narrow: 240, wide: 288 },
+];
+
+for (const expected of RIGHT_COLUMN_WIDTHS) {
+  test(`right column width ${expected.id}: narrow below lg, unchanged at 1280`, async ({ page }) => {
+    const screen = SCREENS.find((s) => s.id === expected.id);
+    if (!screen) throw new Error(`unknown screen: ${expected.id}`);
+    // 右列は画面内で最後の <aside>（左列も <aside> のため）。
+    const rightColumnWidth = async () =>
+      page.locator("aside").last().evaluate((node) => node.getBoundingClientRect().width);
+
+    await page.setViewportSize({ width: 800, height: 600 });
+    await screen.open(page);
+    expect(await rightColumnWidth()).toBeCloseTo(expected.narrow, 0);
+
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect.poll(rightColumnWidth).toBeCloseTo(expected.wide, 0);
+  });
+}
+
 // 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
 async function checkReachable(
   page: Page,

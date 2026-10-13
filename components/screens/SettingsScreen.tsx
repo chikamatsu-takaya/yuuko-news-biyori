@@ -1505,9 +1505,11 @@ export default function SettingsScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4 overflow-y-auto">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="w-60 lg:w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4 overflow-y-auto">
           {/* Yuuko's Comment Card */}
-          <Card className="border-0 shadow-sm overflow-hidden">
+          {/* shrink-0: 縦に余裕がないとき、下のゆうこ画像に押されて吹き出しが見出しだけに潰れないようにする（右列は縦スクロールで届く）。 */}
+          <Card className="border-0 shadow-sm overflow-hidden shrink-0">
             <div className="bg-[var(--yuuko-green)] px-4 py-2 flex items-center gap-2">
               <Bell className="w-4 h-4 text-white" />
               <span className="text-sm font-medium text-white">
@@ -1516,7 +1518,8 @@ export default function SettingsScreen({
             </div>
             <CardContent className="p-4">
               <div className="relative bg-white rounded-xl p-3 border border-border shadow-sm mb-3">
-                <p className="text-sm text-foreground leading-relaxed">
+                {/* 狭い右列（lg 未満）では文字を一段小さくし、<br /> で区切った行がさらに折り返さないようにする。 */}
+                <p className="text-xs lg:text-sm text-foreground leading-relaxed">
                   この設定で今日も
                   <br />
                   あなたにぴったりの
