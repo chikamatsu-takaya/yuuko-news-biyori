@@ -94,6 +94,10 @@ const QUOTE_NARRATION_MARKERS: [&str; 7] = [
     "挨拶",
 ];
 
+/// `LEADING_GREETINGS` のうち、出力の先頭でだけ取り除くもの。「元気」は文の途中の
+/// 「つらいニュースだね。元気、出していこうね。」のような励ましでも使うため、文の区切りの直後では消さない（レビュー指摘）。
+const LEADING_ONLY_GREETINGS: [&str; 1] = ["元気"];
+
 /// 末尾から取り除く締めの挨拶（文の書き出しで照合する）。
 const TRAILING_FAREWELLS: [&str; 5] = [
     "それじゃあ、またね",
@@ -212,12 +216,14 @@ const STAGE_DIRECTION_NOUN_MAX_CHARS: usize = 10;
 const STAGE_DIRECTION_TRAILING_MARKS: [char; 7] = ['…', '。', '！', '!', '～', '〜', '・'];
 
 /// カメラ・画面の動きの説明（実測の「(カメラがゆっくりとズームインして)」）の書き出し。
-/// 末尾が動作の言い方（`CAMERA_DIRECTION_ENDINGS`）のときだけト書きとみなす
-/// （「（カメラがとらえた映像）」のような名詞で終わる説明は残す）。
+/// 出力の先頭・文頭の括弧で、末尾が動作の言い方（`CAMERA_DIRECTION_ENDINGS`）のときだけト書きとみなす
+/// （「（カメラがとらえた映像）」のような名詞で終わる説明や、文中の「新型スマホ（カメラが3つある）」のような
+/// 製品の説明は残す）。
 const CAMERA_DIRECTION_PREFIXES: [&str; 3] = ["カメラが", "カメラは", "カメラを"];
 
-/// カメラの動きの説明とみなす末尾の言い方。
-const CAMERA_DIRECTION_ENDINGS: [&str; 4] = ["て", "る", "ながら", "く"];
+/// カメラの動きの説明とみなす末尾の言い方。「る」「く」は「（カメラが暗所に強くなる）」
+/// 「（カメラを2基搭載している）」のような製品の説明でも使うため入れない（レビュー指摘）。
+const CAMERA_DIRECTION_ENDINGS: [&str; 2] = ["て", "ながら"];
 
 /// 文頭の括弧で「〜て」をト書きとみなす最大文字数（「（少しうつむいて）」程度の短い動作だけ）。
 /// 長いもの（「（詳しくは後述の資料を見て）」）は補足とみなして残す。
@@ -581,7 +587,8 @@ fn is_inside_quote(written: &str) -> bool {
 }
 
 /// 括弧の中身がト書きか。どの位置でも、目印（`STAGE_DIRECTION_MARKERS`）・笑いの動作の形・感嘆の声の書き出し・
-/// 短い名詞や擬音そのもの（`is_stage_direction_noun`）・カメラの動きの説明（`is_camera_direction`）のどれかを要る。
+/// 短い名詞や擬音そのもの（`is_stage_direction_noun`）のどれかを要る。
+/// 文頭では、カメラの動きの説明（`is_camera_direction`）もト書きとみなす。
 /// 文頭（出力の先頭を含む）では、文頭だけの目印（「優しく」）、語尾「〜ながら」「〜そうに」、
 /// 事実・条件の言い方でない10文字以内の「〜て」でもト書きとみなす。
 /// 中身の無い条件では消さない（「（株）」「（2027年4月から）」を残すため）。
@@ -601,7 +608,6 @@ fn is_stage_direction(inner: &str, at_sentence_start: bool) -> bool {
             .iter()
             .any(|interjection| inner.starts_with(interjection))
         || is_stage_direction_noun(inner)
-        || is_camera_direction(inner)
     {
         return true;
     }
@@ -614,6 +620,7 @@ fn is_stage_direction(inner: &str, at_sentence_start: bool) -> bool {
             .iter()
             .any(|ending| inner.ends_with(ending));
     short_action_te
+        || is_camera_direction(inner)
         || STAGE_DIRECTION_START_ONLY_MARKERS
             .iter()
             .any(|marker| inner.contains(marker))
@@ -831,13 +838,18 @@ fn is_greeting_boundary(next: Option<char>) -> bool {
 /// （「こんにちは、お元気ですか？」→ 両方消す）。挨拶の直後が句読点・「！」・伸ばし記号・行末などのときだけ消す
 /// （`is_greeting_boundary`）。何も消さなかったときは、先頭の空白も詰めずにそのまま返す。
 /// 書き出しの前の改行は詰めない（文の途中から呼ぶとき、前の行とつながらないように。改行の直後でもう一度呼ぶ）。
-fn strip_greeting_prefix(text: &str) -> &str {
+/// `at_output_start` が false（文の区切りの直後）のときは、先頭だけの挨拶（`LEADING_ONLY_GREETINGS`）を照合しない。
+fn strip_greeting_prefix(text: &str, at_output_start: bool) -> &str {
     let mut rest = text.trim_start_matches([' ', '　']);
     let mut stripped = false;
-    while let Some(after) = LEADING_GREETINGS.iter().find_map(|greeting| {
-        rest.strip_prefix(greeting)
-            .filter(|after| is_greeting_boundary(after.chars().next()))
-    }) {
+    while let Some(after) = LEADING_GREETINGS
+        .iter()
+        .filter(|greeting| at_output_start || !LEADING_ONLY_GREETINGS.contains(greeting))
+        .find_map(|greeting| {
+            rest.strip_prefix(greeting)
+                .filter(|after| is_greeting_boundary(after.chars().next()))
+        })
+    {
         stripped = true;
         // 挨拶の後ろの区切り記号・空白・「…」「♪」を詰める（「えっ…新制度なの？」→「新制度なの？」）。
         rest = after
@@ -856,7 +868,7 @@ fn strip_greeting_prefix(text: &str) -> &str {
 /// 文の途中（「、」の後ろなど）やかぎかっこの中の挨拶は消さない。
 fn strip_greetings_at_sentence_starts(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = strip_greeting_prefix(text.trim_start());
+    let mut rest = strip_greeting_prefix(text.trim_start(), true);
     let mut quote_depth = 0usize;
     while let Some(c) = rest.chars().next() {
         rest = &rest[c.len_utf8()..];
@@ -867,7 +879,7 @@ fn strip_greetings_at_sentence_starts(text: &str) -> String {
             _ => {}
         }
         if quote_depth == 0 && (SENTENCE_START_BOUNDARIES.contains(&c) || c == '\n') {
-            rest = strip_greeting_prefix(rest);
+            rest = strip_greeting_prefix(rest, false);
         }
     }
     out
@@ -1241,6 +1253,10 @@ mod tests {
             "議案は（拍手で承認）可決されたよ。",
             "記念式典（拍手喝采の場面を含む映像）が公開されたよ。",
             "番組（カメラがとらえた映像）が話題だよ。",
+            "新型スマホ（カメラが3つある）が出たよ。",
+            "新型スマホだよ。（カメラが暗所に強くなる）",
+            "（カメラを2基搭載している）新型スマホが出たよ。",
+            "新型スマホ（カメラがズームして）が人気だよ。",
             "参加費（オンラインは無料）も安いよ。",
             "時間（間取りの変更を含む）がかかるよ。",
             "映画（音楽）の担当が決まったよ。",
@@ -1255,6 +1271,11 @@ mod tests {
         assert_eq!(
             clean_yuuko_speech("新しい制度だよ。ねえ、こんにちは！今日は申請の話だね。"),
             "新しい制度だよ。今日は申請の話だね。"
+        );
+        // 「元気」は出力の先頭でだけ消す（文の区切りの直後では励ましの言葉として残す）。
+        assert_eq!(
+            clean_yuuko_speech("元気！今日は宇宙の話だよ。"),
+            "今日は宇宙の話だよ。"
         );
         assert_eq!(
             clean_yuuko_speech("ねえ、こんにちは！今日は宇宙の話だよ。"),
@@ -1275,6 +1296,7 @@ mod tests {
             "新しい制度だよ。うんと便利になるね。",
             "新しい制度だよ。ハローワークで相談できるね。",
             "住民は「こんにちは！」と迎えたよ。",
+            "つらいニュースだね。元気、出していこうね。",
         ] {
             assert_eq!(clean_yuuko_speech(kept), kept, "{kept}");
         }
