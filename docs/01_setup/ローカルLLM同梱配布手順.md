@@ -233,4 +233,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib real_local_llm_term_explan
 - テストのビルドが計測に重ならないよう、先に `cargo test ... --no-run` でビルドしておく。
 - メモリは、テストを動かしている間、別の PowerShell で 0.5 秒ごとに `Get-Process llama-server` の `WorkingSet64` / `PrivateMemorySize64` を記録し、最大値を取った。
 - 待機時のメモリと起動時間は、`llama-server.exe` をアプリと同じ引数（`-m <モデル> --host 127.0.0.1 --port <空き番号> -c 4096 -np 1 -t 4 --api-key <使い捨ての値> --no-slots --offline`）で直接起動し、`/health` が 200 を返すまでの時間と、その後 30 秒間のメモリを記録した。
+- アプリが渡す引数は、2026-10-13 から上記に `--cache-ram 0` が加わった（要求をまたぐプロンプトのキャッシュを切り、1 回ごとにメモリが 45〜64MB ずつ増え続けるのを防ぐ。速さは変わらない）。Windows では優先度を「通常以下」（`BELOW_NORMAL_PRIORITY_CLASS`）にして起動する。§6.1 の値はこの変更前の引数・優先度で測った。今後の計測は `--cache-ram 0` を付けて行う（直接起動では優先度は通常のままなので、必要なら `start /belownormal` などで合わせる）。
 - 同じ条件で比べられるよう、空きメモリ（`Get-Counter '\Memory\Available MBytes'`）も一緒に記録する。
