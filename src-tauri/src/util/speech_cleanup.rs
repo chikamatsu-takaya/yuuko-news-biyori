@@ -23,6 +23,10 @@
 //! - 台詞をかぎかっこで囲み、後ろにゆうこの様子を語る地の文（「「…」とゆうこが手を振って教えています。」）
 //! - 中国語の簡体字（日本語の文字コードに無い字）を含む文（`strip_foreign_script_sentences`。入力が要る）
 //! - 入力に無い英単語（`count_unlisted_latin_words`。誤って消すと固有名詞を壊すので、数えてログに出すだけ）
+//!
+//! 2026-10-14 の比較（#347 の後、です・ます調の文が 9% から 37% に増えた）を受けて、文末の丁寧語を
+//! ゆうこの常体の語尾へ言い換える（`casualize_polite_endings`）。これは消すのではなく語尾の数文字を
+//! 置き換える処理なので、活用の形が前の字から1つに決まる文末だけに絞る（決まらない形は硬いまま残す）。
 
 /// 中国語の文末助詞・感嘆詞のうち、日本語の文にはまず現れない字。
 /// 「的」「了」などは日本語でも使うため含めない。中国語の文全体を見分けるのは難しいので、
@@ -911,6 +915,240 @@ fn strip_trailing_farewells(mut text: String) -> String {
     }
 }
 
+/// 丁寧語の語尾の後ろに付いていてよい終助詞（長いものから照合する）。言い換えた後もそのまま付け直す。
+const POLITE_TRAILING_PARTICLES: [&str; 4] = ["よね", "ね", "よ", ""];
+
+/// 終助詞の無い丁寧語の文を常体へ言い換えたときに付ける終助詞（「表明しました。」→「表明したよ。」）。
+/// 終助詞の無い常体（「表明した。」）は、ゆうこの話し方としては硬いため。
+const CASUAL_DEFAULT_PARTICLE: &str = "よ";
+
+/// 文末の語尾の後ろに付いていてよい記号（語尾の判定では読み飛ばし、そのまま残す）。
+const ENDING_TRAILING_MARKS: [char; 9] = ['。', '！', '!', '？', '?', '…', '～', '〜', '♪'];
+
+/// 動詞の丁寧語の語尾の書き換え表（丁寧語 → 常体）。活用の形が1つに決まるものだけを、長いものから並べる。
+/// 「書きました」（書いた／起きた）や「します」（する／話す）のように、前の字だけでは活用が決まらない形は入れない。
+const POLITE_VERB_ENDINGS: [(&str, &str); 13] = [
+    ("ていました", "ていた"),
+    ("でいました", "でいた"),
+    ("ていません", "ていない"),
+    ("でいません", "でいない"),
+    ("ています", "ている"),
+    ("でいます", "でいる"),
+    ("てきました", "てきた"),
+    ("てきます", "てくる"),
+    ("できました", "できた"),
+    ("できません", "できない"),
+    ("できます", "できる"),
+    ("ありません", "ない"),
+    // 「し」で終わる語幹は、する（「表明しました」）でも五段の「す」（「話しました」）でも「した」になる。
+    ("しました", "した"),
+];
+
+/// お願いの形（「確認してください」「読んでください」）は「〜てね」「〜でね」にする（終助詞は付け直さない）。
+const POLITE_REQUEST_ENDINGS: [(&str, &str); 2] = [("てください", "てね"), ("でください", "でね")];
+
+/// 一段動詞（「受けます」「されます」「見えます」）の語幹の終わりに来る、え段の平仮名。
+/// 五段動詞の「ます」の前は い段（「書き」）なので、え段の直後の「ます」「ました」「ません」は一段動詞
+/// （と可能動詞・「〜てます」の縮約）に限られ、「る」「た」「ない」へ機械的に言い換えられる。
+const ICHIDAN_STEM_ENDINGS: [char; 13] = [
+    'え', 'け', 'げ', 'せ', 'ぜ', 'て', 'で', 'ね', 'へ', 'べ', 'ぺ', 'め', 'れ',
+];
+
+/// 「〜ります」の前に来るとき、五段の「〜る」動詞（「始まります」「変わります」「上がります」）と決まる、あ段の平仮名。
+/// 「た」は「足ります」（一段の「足りる」）を仮名で書いた形と区別できないので入れない。
+const GODAN_RU_STEM_ENDINGS: [char; 14] = [
+    'あ', 'か', 'が', 'さ', 'ざ', 'だ', 'な', 'は', 'ば', 'ぱ', 'ま', 'や', 'ら', 'わ',
+];
+
+/// 「です」「でした」の前に来るとき、名詞の終わりとみなす平仮名の語（「ことです」→「ことだよ」）。
+/// 平仮名で終わる語の多くは形容詞・動詞で、「だ」を付けると誤りになる（「おいしいだ」）ため、名詞として
+/// 使われる語だけに絞る。
+const NOUN_LIKE_HIRAGANA_ENDINGS: [&str; 18] = [
+    "こと",
+    "もの",
+    "ため",
+    "から",
+    "だけ",
+    "まで",
+    "ばかり",
+    "ところ",
+    "はず",
+    "わけ",
+    "よう",
+    "そう",
+    "みたい",
+    "ほど",
+    "くらい",
+    "ぐらい",
+    "など",
+    "つもり",
+];
+
+/// 「のです」の「の」の前に来るとき、説明の「の」（「起きたのです」「大切なのです」）と決まる平仮名
+/// （動詞・形容詞・助動詞の終わり）。
+const NO_DESU_PRECEDING: [char; 13] = [
+    'う', 'く', 'ぐ', 'す', 'つ', 'ぬ', 'ぶ', 'む', 'る', 'た', 'だ', 'な', 'い',
+];
+
+/// 「です」の前に来るとき、「です」を落とすだけで常体になる形容詞の語尾（「楽しかったです」→「楽しかったよ」）。
+/// 「〜いです」全般は「違いです」「狙いです」のような名詞と区別できないため、形容詞と決まる形だけにする。
+const ADJECTIVE_POLITE_STEMS: [&str; 3] = ["かった", "ない", "しい"];
+
+/// ゆうこの再説明・一言の AI 出力で、文末の丁寧語（です・ます調）をゆうこの常体の語尾へ言い換える。
+/// `clean_yuuko_speech` の後に使う。戻り値の2つ目は言い換えた文の数（ログ用）。
+///
+/// 小さいローカルLLMは、入力の要約（です・ます調が多い）の文体を写しやすい（2026-10-14 の比較で、
+/// です・ます調の文が 9% から 37% に増えた）。プロンプトでも止めるが、残った分をここで直す。
+/// 意味を変えないため、次の条件をすべて満たす文末だけを言い換える。
+/// - 文の終わり（「。」「！」「？」「…」「～」「♪」の前か行末）にあり、後ろの終助詞は「よ」「ね」「よね」だけ。
+/// - かぎかっこの外（引用された発言の「です」「ます」は残す。かぎかっこの数が合わない文も触らない）。
+/// - 活用の形が前の字から1つに決まる（`POLITE_VERB_ENDINGS`・え段＋「ます」・あ段＋「ります」・漢字＋「ます」、
+///   名詞＋「です」）。決まらない形（「書きました」「します」「おいしいです」）と、「でしょう」「ましょう」
+///   「ですか」「ませんでした」は言い換えずに残す（文が硬くなるだけで、意味は変わらないため）。
+///
+/// 文字は語尾の数文字を置き換えるだけで、HTML・制御文字・見出し・区切り行は作らない（続く検証はそのまま効く）。
+pub(crate) fn casualize_polite_endings(text: &str) -> (String, usize) {
+    let mut rewritten = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            split_sentences(line)
+                .into_iter()
+                .map(|sentence| match casualize_sentence(sentence) {
+                    Some(casual) => {
+                        rewritten += 1;
+                        casual
+                    }
+                    None => sentence.to_string(),
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    (lines.join("\n"), rewritten)
+}
+
+/// 1文の文末の丁寧語を言い換える。言い換えられない文は `None`。
+fn casualize_sentence(sentence: &str) -> Option<String> {
+    let without_space = sentence.trim_end();
+    let body = without_space.trim_end_matches(|c: char| ENDING_TRAILING_MARKS.contains(&c));
+    let tail = &sentence[body.len()..];
+    // かぎかっこの中の発言（「〜です」と述べた）は言い換えない。数の合わない文は判断できないので触らない。
+    if body.matches('「').count() != body.matches('」').count()
+        || body.matches('『').count() != body.matches('』').count()
+    {
+        return None;
+    }
+    POLITE_TRAILING_PARTICLES.iter().find_map(|particle| {
+        let core = body.strip_suffix(particle)?;
+        let casual = casual_core(core, particle)?;
+        Some(format!("{casual}{tail}"))
+    })
+}
+
+/// 終助詞を除いた文の終わり（`core`）の丁寧語を常体へ言い換え、終助詞を付け直して返す。
+fn casual_core(core: &str, particle: &str) -> Option<String> {
+    let particle = if particle.is_empty() {
+        CASUAL_DEFAULT_PARTICLE
+    } else {
+        particle
+    };
+    // 「〜てください」「〜でください」は「〜てね」「〜でね」（終助詞を重ねない）。
+    for (polite, casual) in POLITE_REQUEST_ENDINGS {
+        if let Some(stem) = core.strip_suffix(polite) {
+            return Some(format!("{stem}{casual}"));
+        }
+    }
+    if let Some(plain) = plain_verb_ending(core).or_else(|| plain_copula_ending(core)) {
+        return Some(format!("{plain}{particle}"));
+    }
+    None
+}
+
+/// 動詞の丁寧語の語尾（ます・ました・ません）を常体にする。活用が決まらない形は `None`。
+fn plain_verb_ending(core: &str) -> Option<String> {
+    for (polite, plain) in POLITE_VERB_ENDINGS {
+        if let Some(stem) = core.strip_suffix(polite) {
+            return Some(format!("{stem}{plain}"));
+        }
+    }
+    // え段の平仮名・漢字で終わる語幹（一段動詞「受け」「され」「見」「出」と、「〜てます」の縮約）。
+    for (polite, plain) in [("ました", "た"), ("ません", "ない"), ("ます", "る")] {
+        if let Some(stem) = core.strip_suffix(polite) {
+            if stem
+                .chars()
+                .last()
+                .is_some_and(|last| ICHIDAN_STEM_ENDINGS.contains(&last) || is_kanji(last))
+            {
+                return Some(format!("{stem}{plain}"));
+            }
+        }
+    }
+    // あ段＋「り」で終わる語幹（五段の「〜る」動詞「始まり」「変わり」「なり」「あり」）。
+    for (polite, plain) in [
+        ("りました", "った"),
+        ("りません", "らない"),
+        ("ります", "る"),
+    ] {
+        if let Some(stem) = core.strip_suffix(polite) {
+            if stem
+                .chars()
+                .last()
+                .is_some_and(|last| GODAN_RU_STEM_ENDINGS.contains(&last))
+            {
+                return Some(format!("{stem}{plain}"));
+            }
+        }
+    }
+    None
+}
+
+/// 「です」「でした」を常体にする。名詞（と名詞のように使う語）・「の」「ん」・形容詞と決まる形の後ろだけを扱う。
+fn plain_copula_ending(core: &str) -> Option<String> {
+    if let Some(stem) = core.strip_suffix("でした") {
+        return is_noun_like_end(stem).then(|| format!("{stem}だった"));
+    }
+    let stem = core.strip_suffix("です")?;
+    if is_noun_like_end(stem) {
+        return Some(format!("{stem}だ"));
+    }
+    // 「〜たのです」「〜なのです」→「〜たんだ」「〜なんだ」。「の」の前が活用語の終わり（う段・た・だ・な・い）の
+    // ときだけにする（「私のです」のような持ち主の「の」は言い換えない）。「〜んです」→「〜んだ」。
+    if let Some(before) = stem.strip_suffix('の') {
+        return before
+            .chars()
+            .last()
+            .is_some_and(|last| NO_DESU_PRECEDING.contains(&last))
+            .then(|| format!("{before}んだ"));
+    }
+    if stem.ends_with('ん') {
+        return Some(format!("{stem}だ"));
+    }
+    ADJECTIVE_POLITE_STEMS
+        .iter()
+        .any(|ending| stem.ends_with(ending))
+        .then(|| stem.to_string())
+}
+
+/// 「です」「でした」の前が名詞の終わりとみなせるか（漢字・片仮名・英数字・閉じ括弧、または名詞として使う平仮名の語）。
+fn is_noun_like_end(stem: &str) -> bool {
+    let Some(last) = stem.chars().last() else {
+        return false;
+    };
+    is_kanji(last)
+        || matches!(last, '\u{30A1}'..='\u{30FA}' | 'ー')
+        || last.is_ascii_alphanumeric()
+        || matches!(last, '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ')
+        || matches!(last, '」' | '』' | '）' | ')')
+        || NOUN_LIKE_HIRAGANA_ENDINGS
+            .iter()
+            .any(|ending| stem.ends_with(ending))
+}
+
+/// 漢字（CJK 統合漢字・拡張A・「々」）か。
+fn is_kanji(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '々')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1436,5 +1674,126 @@ mod tests {
             count_unlisted_latin_words("Superbase が excited に発表したよ。", input),
             2
         );
+    }
+
+    #[test]
+    fn rewrites_polite_sentence_endings_to_yuuko_casual_endings() {
+        let casual = |text: &str| casualize_polite_endings(text).0;
+        for (polite, expected) in [
+            // 動詞: 活用の形が決まるもの。
+            ("政府が方針を表明しました。", "政府が方針を表明したよ。"),
+            ("担当者が話しました。", "担当者が話したよ。"),
+            ("重要性を強調しています。", "重要性を強調しているよ。"),
+            ("多くの人が注目していますね！", "多くの人が注目しているね！"),
+            ("まだ結論は出ていません。", "まだ結論は出ていないよ。"),
+            (
+                "会場で手続きを進めていました。",
+                "会場で手続きを進めていたよ。",
+            ),
+            ("大量の食品が廃棄されました。", "大量の食品が廃棄されたよ。"),
+            ("新しい機能が使えます。", "新しい機能が使えるよ。"),
+            ("影響が出るかもしれません。", "影響が出るかもしれないよ。"),
+            ("初めて見ました。", "初めて見たよ。"),
+            ("値段が上がります。", "値段が上がるよ。"),
+            ("試合の流れが変わりました。", "試合の流れが変わったよ。"),
+            (
+                "無料で利用できるようになりました。",
+                "無料で利用できるようになったよ。",
+            ),
+            ("大きな問題はありません。", "大きな問題はないよ。"),
+            ("まだ分かりません。", "まだ分からないよ。"),
+            ("スマホでも予約できます。", "スマホでも予約できるよ。"),
+            ("利用者が増えてきました。", "利用者が増えてきたよ。"),
+            // 名詞＋です・でした。
+            ("とても便利な機能です。", "とても便利な機能だよ。"),
+            (
+                "見どころは新しいエンジンですね。",
+                "見どころは新しいエンジンだね。",
+            ),
+            ("これは大事なことですよね。", "これは大事なことだよね。"),
+            ("開幕は来月の12日です。", "開幕は来月の12日だよ。"),
+            ("合意したそうです。", "合意したそうだよ。"),
+            (
+                "昨年は過去最高の売上でした。",
+                "昨年は過去最高の売上だったよ。",
+            ),
+            ("大きな被害が出たのです。", "大きな被害が出たんだよ。"),
+            ("これが大切なのです。", "これが大切なんだよ。"),
+            ("2人が協力したんです！", "2人が協力したんだよ！"),
+            // 形容詞と決まる形は「です」を落とす。
+            ("旅はとても楽しかったです。", "旅はとても楽しかったよ。"),
+            ("まだ心配はないですね。", "まだ心配はないね。"),
+            ("このパンはおいしいです。", "このパンはおいしいよ。"),
+            (
+                "新しい技術は面白いですが難しいです。",
+                "新しい技術は面白いですが難しいよ。",
+            ),
+            // お願いの形は「〜てね」。
+            ("加熱して食べてくださいね。", "加熱して食べてね。"),
+            ("記事を読んでください。", "記事を読んでね。"),
+            // 文末の記号はそのまま残す。
+            (
+                "ロケットを打ち上げましたね～！",
+                "ロケットを打ち上げたね～！",
+            ),
+        ] {
+            assert_eq!(casual(polite), expected, "{polite}");
+        }
+    }
+
+    #[test]
+    fn keeps_polite_endings_whose_casual_form_is_ambiguous_or_not_at_sentence_end() {
+        let unchanged = |text: &str| {
+            let (casual, rewritten) = casualize_polite_endings(text);
+            assert_eq!(casual, text, "{text}");
+            assert_eq!(rewritten, 0, "{text}");
+        };
+        // 活用が前の字から決まらない動詞（書いた／起きた、する／話す、借りた／帰った）。
+        unchanged("新しい論文を書きました。");
+        unchanged("新しいサービスを紹介します。");
+        unchanged("家に帰りました。");
+        unchanged("今日も練習に行きます。");
+        // 「〜いです」は形容詞（かわいい）と名詞（違い）を区別できないので残す（「〜しい」「〜ない」だけ言い換える）。
+        unchanged("この服はかわいいです。");
+        unchanged("大きな違いです。");
+        // 持ち主の「の」は言い換えない。
+        unchanged("この席は私のです。");
+        // 推量・勧誘・疑問・過去の否定は残す（言い換えると意味や調子が変わる）。
+        unchanged("明日は雨が降るでしょう。");
+        unchanged("一緒に見ていきましょう。");
+        unchanged("どこが便利なのですか？");
+        unchanged("会場には誰も来ませんでした。");
+        // 文の途中の「です」「ます」は文末ではないので触らない。
+        unchanged("便利ですが、注意も必要だよ。");
+        // かぎかっこの中の発言は引用なので触らない。
+        unchanged("首相は「対応を急ぎます」と述べたよ。");
+        unchanged("「準備はできています。」");
+        unchanged("「改革を進めます。");
+        // すでにゆうこの語尾の文と、「です」「ます」だけの文。
+        unchanged("新しい補助金が始まるよ。便利だね。");
+        unchanged("です。");
+    }
+
+    #[test]
+    fn casualizes_each_sentence_and_line_and_counts_the_rewrites() {
+        let (casual, rewritten) = casualize_polite_endings(
+            "工場が完成しました。生産は来年からです！\nまだ課題もあるよ。注目されています。",
+        );
+        assert_eq!(
+            casual,
+            "工場が完成したよ。生産は来年からだよ！\nまだ課題もあるよ。注目されているよ。"
+        );
+        assert_eq!(rewritten, 3);
+    }
+
+    #[test]
+    fn casual_endings_stay_calm_for_heavy_news() {
+        // 重いニュース（D122）: 言い換えは「！」を足さず、続く calm_yuuko_speech で「！」が消える。
+        let (casual, _) =
+            casualize_polite_endings("2人が亡くなりました！被害は広い範囲に出ています。");
+        assert_eq!(casual, "2人が亡くなったよ！被害は広い範囲に出ているよ。");
+        let calm = calm_yuuko_speech(&casual);
+        assert_eq!(calm, "2人が亡くなったよ。被害は広い範囲に出ているよ。");
+        assert!(!calm.contains('！'));
     }
 }

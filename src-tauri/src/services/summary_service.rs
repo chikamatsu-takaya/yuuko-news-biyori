@@ -12,7 +12,7 @@ use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::util::speech_cleanup::{
-    calm_yuuko_speech, clean_yuuko_speech, count_unlisted_latin_words,
+    calm_yuuko_speech, casualize_polite_endings, clean_yuuko_speech, count_unlisted_latin_words,
     strip_foreign_script_sentences, strip_prompt_echo_sentences, ForeignScriptOutcome,
 };
 use crate::util::text_safety::{
@@ -798,6 +798,8 @@ fn select_valid_output_in_tone(
 /// （「♪」「★」を含む絵文字・記号、「！」、語尾の「～」）を取り除く。
 /// 日本語に無い簡体字を含む文は、ほかの文が残るときだけ取り除く（`strip_foreign_script_sentences`）。
 /// 入力に無い英単語は、固有名詞の表記ゆれと区別できないため消さず、数だけをログに残す。
+/// 文末の丁寧語（「〜しました。」「〜です。」）は、活用の形が決まるものだけゆうこの常体の語尾
+/// （「〜したよ。」「〜だよ。」）へ言い換える（`casualize_polite_endings`）。
 fn clean_ai_speech(
     kind: SummaryOutputKind,
     tone: SpeechTone,
@@ -826,6 +828,15 @@ fn clean_ai_speech(
         // 本文は出さず、数と出力種別だけを残す。
         log::info!(
             "removed {prompt_echoes} sentence(s) copying the fixed prompt from the AI output ({})",
+            kind.label()
+        );
+    }
+    // 文末の丁寧語（です・ます調）を、活用の決まる形だけゆうこの常体の語尾へ言い換える（入力の要約の文体の写し対策）。
+    let (cleaned, casualized) = casualize_polite_endings(&cleaned);
+    if casualized > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "rewrote {casualized} polite sentence ending(s) in the AI output ({})",
             kind.label()
         );
     }
@@ -1265,6 +1276,38 @@ mod tests {
         let selected =
             select_valid_output(SummaryOutputKind::Comment, response(mock_seed, "mock")).unwrap();
         assert_eq!(selected.text, mock_seed);
+    }
+
+    #[test]
+    fn polite_endings_from_real_ai_speech_become_yuuko_endings_but_summary_and_mock_do_not() {
+        let polite = "新しい補助金が始まります。とても便利な制度です。";
+        for provider in ["gemini", "local"] {
+            for kind in [SummaryOutputKind::Explanation, SummaryOutputKind::Comment] {
+                let selected = select_valid_output(kind, response(polite, provider)).unwrap();
+                assert_eq!(
+                    selected.text, "新しい補助金が始まるよ。とても便利な制度だよ。",
+                    "{provider} {kind:?}"
+                );
+            }
+            // 重いニュース（D122）でも同じ常体の語尾にし、「！」は落ち着いた形（「。」）にする。
+            let calm = select_valid_output_in_tone(
+                SummaryOutputKind::Comment,
+                SpeechTone::Calm,
+                "",
+                response("2人が亡くなりました！", provider),
+            )
+            .unwrap();
+            assert_eq!(calm.text, "2人が亡くなったよ。", "{provider}");
+            // 要約は中立な文体なので手を加えない。
+            let summary =
+                select_valid_output(SummaryOutputKind::Summary, response(polite, provider))
+                    .unwrap();
+            assert_eq!(summary.text, polite);
+        }
+        // Mock の種（定型文）は決定的な結果のまま変えない。
+        let selected =
+            select_valid_output(SummaryOutputKind::Comment, response(polite, "mock")).unwrap();
+        assert_eq!(selected.text, polite);
     }
 
     #[test]

@@ -78,8 +78,13 @@ const YUUKO_TONE_INSTRUCTION: &str = "文章はマスコットキャラクター
 /// 2026-10-13 の評価 v2 では、短い入力から事実を作る（「15 年ぶりの 1 勝」→「優勝」、「9 月末」→「9 か月」）
 /// 誤りが再説明・一言にも出たため、入力（記事情報）にない事実・数値・日付を足さない規則も置く
 /// （`FACTS_ONLY_RULE`。要約・要点と同じ文）。
+/// 文末の規則（`YUUKO_ENDING_RULE`）と、記事情報の文体を写さない規則（`YUUKO_SOURCE_STYLE_RULE`）も置く
+/// （2026-10-14 の比較で、です・ます調の文が 9% から 37% に増えた。入力の要約がです・ます調で書かれていることが多く、
+/// 小さいモデルがその文体を写すため）。
 const YUUKO_SPEECH_RULES: &str = concat!(
     "出力はゆうこが話す本文だけにしてください。",
+    "文末は「〜だよ」「〜だね」「〜なんだ」などのゆうこの話し方にし、「です」「ます」で終えないでください。",
+    "記事情報の要約・要点は別の文体で書かれた材料なので、文や語尾を写さず、ゆうこの言葉で言い直してください。",
     "記事情報に書かれている事実だけを使い、記事情報にない数値・順位・日付・期間・出来事を足したり、",
     "数や日付を別の言い方に変えたりしないでください。",
     "日本語だけで書き、日本語以外の言語の単語や感嘆詞を混ぜないでください。",
@@ -87,6 +92,19 @@ const YUUKO_SPEECH_RULES: &str = concat!(
     "括弧書きのト書き（動作・表情・声の調子の説明）や、ゆうこの様子を外から説明する文は書かないでください。",
     "絵文字・見出し・箇条書きは使わないでください。"
 );
+
+/// 再説明・一言の文末の規則（固定指示）。`YUUKO_SPEECH_RULES` の先頭近くと、末尾の念押しの両方に同じ趣旨で置く。
+/// 守ってほしい形（ゆうこの常体の語尾）を先に示し、禁止は短く添える。例に挙げる語尾は、小さいモデルが
+/// そのまま写しても困らない、ゆうこの語尾だけにする（記事の内容の文例は書かない。内容の文例は写されやすい）。
+#[cfg(test)]
+const YUUKO_ENDING_RULE: &str =
+    "文末は「〜だよ」「〜だね」「〜なんだ」などのゆうこの話し方にし、「です」「ます」で終えないでください。";
+
+/// 再説明・一言の入力（要約・要点）は、です・ます調で書かれていることが多い。その文体を写させないための固定指示。
+/// 入力の行の見出し（「要約:」「要点:」）は外部データの側にあるので、ここでは固定指示として材料の扱いだけを書く。
+#[cfg(test)]
+const YUUKO_SOURCE_STYLE_RULE: &str =
+    "記事情報の要約・要点は別の文体で書かれた材料なので、文や語尾を写さず、ゆうこの言葉で言い直してください。";
 
 /// 要約・要点で使う、入力（記事情報）にない事実を足さない規則（固定指示）。
 /// 小さいローカルLLMは材料の少ない入力（RSS の概要だけなど）で、数値・日付・結果を作りやすい
@@ -101,16 +119,20 @@ const FACTS_ONLY_RULE: &str = "記事情報に書かれている事実だけを�
 /// 2026-10-13 の評価で、水難事故・地震の記事に根拠のない励まし、性的接待の報道に絵文字付きの明るい一言が
 /// 付いたため、励ましや楽観的な見通しも書かせない。禁止する言葉そのもの（「大丈夫」など）は、小さいモデルが
 /// まねて出しやすくなるため書かない（`YUUKO_SPEECH_RULES` と同じ方針）。
+/// 「落ち着いた・思いやりのある」は丁寧語を誘いやすく、2026-10-14 の比較では重いニュースの再説明・一言が
+/// ほぼすべてです・ます調になっていた。落ち着いた口調でも語尾はゆうこの常体のままにするよう明記する。
 const YUUKO_CALM_TONE_INSTRUCTION: &str =
     "この記事は、事件・事故・災害・訃報など重い話題を含むニュースです。\
 ゆうこはふだんの明るさを抑え、落ち着いた、思いやりのある言葉で静かに話してください。\
+丁寧語にはせず、文末は「〜なんだ」「〜だね」のような、ゆうこのふだんの話し方のままにしてください。\
 絵文字・「！」・はしゃいだ言葉・明るい感嘆の声は使わないでください。\
 被害を受けた人や関係者への敬意を忘れず、記事にある事実だけに沿って話し、\
 根拠のない励ましや楽観的な見通しは書かないでください。";
 
 /// 重いニュースの再説明・一言で、末尾の念押し（`yuuko_speech_reminder`）に足す固定文（D122）。
 const YUUKO_CALM_TONE_REMINDER: &str =
-    "重い話題なので、絵文字や「！」を使わず、落ち着いた思いやりのある言葉で、事実に沿って書いてください。";
+    "重い話題なので、絵文字や「！」を使わず、落ち着いた思いやりのある言葉で、事実に沿って書いてください。\
+語尾は丁寧語にせず、ゆうこの話し方のままにしてください。";
 
 /// 再説明・一言のプロンプトの最後（記事情報の後ろ）に置く、出力の形の念押し（固定指示）。
 /// 小さいローカルLLMはプロンプトの末尾に近い指示ほど守りやすく、記事情報の前に置いた規則だけでは
@@ -623,15 +645,17 @@ pub(crate) fn yuuko_speech_fixed_prompt_texts() -> [&'static str; 7] {
     ]
 }
 
-/// 再説明の末尾の念押し（固定文）。
+/// 再説明の末尾の念押し（固定文）。文末の規則（`YUUKO_ENDING_RULE` の短い形）もここで繰り返す。
 const YUUKO_EXPLANATION_REMINDER: &str = "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。\
 記事情報にない事実・数値・日付は足さないでください。\
+文末は「〜だよ」「〜だね」にし、「です」「ます」で終えないでください。\
 1文目から記事の中身を話し、括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
 
-/// 一言の末尾の念押し（固定文）。
+/// 一言の末尾の念押し（固定文）。文末の規則も再説明と同じ文で繰り返す。
 const YUUKO_COMMENT_REMINDER: &str =
     "上の記事情報への感想を、ゆうこの言葉で改行のない1文だけ書いてください。\
 記事情報にない事実・数値・日付は足さないでください。\
+文末は「〜だよ」「〜だね」にし、「です」「ます」で終えないでください。\
 括弧書きのト書き・挨拶・自己紹介・日本語以外の言葉は書かないでください。";
 
 /// 再説明・一言の末尾の念押し（固定文）。ほかの prompt_id では付けない。
@@ -1074,6 +1098,75 @@ mod tests {
         }
         // 用語解説は口調指示だけを共有し、再説明向けの規則は混ぜない（JSON 契約を崩さないため）。
         assert!(!term_explanation_prompt_for(ExplanationLevel::Normal).contains(YUUKO_SPEECH_RULES));
+    }
+
+    #[test]
+    fn speech_prompts_ask_for_yuuko_endings_instead_of_polite_ones() {
+        let prompt_for = |prompt_id: &str, input_text: &str| {
+            build_prompt(
+                &request_for(prompt_id, input_text),
+                ExplanationLevel::Normal,
+            )
+        };
+        // 文末の規則と、記事情報の文体を写さない規則は、再説明・一言の固定指示に入る。
+        assert!(YUUKO_SPEECH_RULES.contains(YUUKO_ENDING_RULE));
+        assert!(YUUKO_SPEECH_RULES.contains(YUUKO_SOURCE_STYLE_RULE));
+        // 守ってほしい形（ゆうこの語尾）を先に示し、禁止は後ろに短く添える。
+        assert!(
+            YUUKO_ENDING_RULE.find("「〜だよ」").unwrap()
+                < YUUKO_ENDING_RULE
+                    .find("「です」「ます」で終えない")
+                    .unwrap()
+        );
+        let heavy =
+            "タイトル: 水難事故 2人死亡\n要約: 川で事故があった。\n要点:\n・2人が亡くなった";
+        let ordinary =
+            "タイトル: 新しいAIチップ\n要約: 電力効率が上がります。\n要点:\n・2027年に投入";
+        for prompt_id in [YUUKO_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID] {
+            for input in [heavy, ordinary] {
+                let prompt = prompt_for(prompt_id, input);
+                // 固定指示側（外部データの区切り見出しより前）に置き、防御指示の順も変えない。
+                let data = prompt.find(ARTICLE_DATA_HEADING).unwrap();
+                let ending = prompt.find(YUUKO_ENDING_RULE).expect("ending rule");
+                let source_style = prompt.find(YUUKO_SOURCE_STYLE_RULE).unwrap();
+                let defense = prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap();
+                assert!(ending < source_style && source_style < defense && defense < data);
+                // 末尾の念押し（記事情報の後ろ）でも、文末の形を繰り返す。
+                let reminder = prompt.find(YUUKO_SPEECH_REMINDER_HEADING).unwrap();
+                assert!(prompt.find(input.lines().next().unwrap()).unwrap() < reminder);
+                assert!(
+                    prompt[reminder..].contains(
+                        "文末は「〜だよ」「〜だね」にし、「です」「ます」で終えないでください。"
+                    ),
+                    "{prompt_id}"
+                );
+            }
+            // 重いニュースの落ち着いた口調でも、語尾はゆうこの常体のまま（丁寧語にしない）。
+            let calm = prompt_for(prompt_id, heavy);
+            assert!(YUUKO_CALM_TONE_INSTRUCTION.contains("丁寧語にはせず"));
+            assert!(YUUKO_CALM_TONE_REMINDER.contains("丁寧語にせず"));
+            assert!(
+                calm.find(YUUKO_ENDING_RULE).unwrap()
+                    < calm.find(YUUKO_CALM_TONE_INSTRUCTION).unwrap()
+            );
+            assert!(calm.ends_with(YUUKO_CALM_TONE_REMINDER));
+        }
+        // 要約・要点・用語解説は中立な文体・JSON の契約のままなので、文末の規則を入れない。
+        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+            let prompt = prompt_for(prompt_id, ordinary);
+            assert!(!prompt.contains(YUUKO_ENDING_RULE), "{prompt_id}");
+            assert!(
+                !prompt.contains("「です」「ます」で終えない"),
+                "{prompt_id}"
+            );
+        }
+        assert!(!term_explanation_prompt_for(ExplanationLevel::Normal).contains(YUUKO_ENDING_RULE));
+        // 固定指示の写しを取り除くための一覧にも入っている（文末の規則の写しが話に混ざったら消える）。
+        let fixed = yuuko_speech_fixed_prompt_texts();
+        assert!(fixed.iter().any(|text| text.contains(YUUKO_ENDING_RULE)));
+        assert!(fixed
+            .iter()
+            .any(|text| text.contains(YUUKO_SOURCE_STYLE_RULE)));
     }
 
     #[test]
