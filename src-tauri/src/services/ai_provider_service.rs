@@ -176,8 +176,11 @@ impl AiProviderService {
                         &retry_prompt,
                         TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET,
                         |prompt| {
-                            self.local_llm
-                                .generate_with_format(prompt, max_tokens, format.clone())
+                            self.local_llm.generate_with_format_timed(
+                                prompt,
+                                max_tokens,
+                                format.clone(),
+                            )
                         },
                     )
                 }
@@ -861,10 +864,12 @@ fn build_term_explanation_subject_retry_prompt(
 /// 用語解説を生成し、short が別の語を定義していたら1回だけ作り直す（追加の呼び出しは最大1回）。
 ///
 /// - 1回目が失敗したら、そのまま失敗を返す（作り直さない）。
-/// - 1回目が `first_call_budget` より長くかかったら作り直さない（待ち時間を延ばしすぎない）。
+/// - 1回目の生成が `first_call_budget` より長くかかったら作り直さない（待ち時間を延ばしすぎない）。
+///   測るのは生成そのものの時間で、llama-server の起動・同梱物の照合の待ちは含めない
+///   （初回だけ起こる待ちで、作り直しの生成には掛からないため）。
 /// - 作り直しが成功し、選択語の定義になっていればそれを返す。外れた・失敗したときは1回目を返す。
 ///
-/// `generate` はプロンプトを受け取って生成する関数（本番はローカルLLM、テストは偽物）。
+/// `generate` はプロンプトを受け取って生成し、本文と生成にかかった時間を返す関数（本番はローカルLLM、テストは偽物）。
 /// ログには固定の文だけを残し、選択語・出力は出さない。
 fn generate_term_explanation_with_subject_retry<F>(
     selected_term: &str,
@@ -874,14 +879,13 @@ fn generate_term_explanation_with_subject_retry<F>(
     mut generate: F,
 ) -> Result<String, LocalAiFailure>
 where
-    F: FnMut(&str) -> Result<String, LocalAiFailure>,
+    F: FnMut(&str) -> Result<(String, std::time::Duration), LocalAiFailure>,
 {
-    let started = std::time::Instant::now();
-    let first = generate(prompt)?;
+    let (first, first_elapsed) = generate(prompt)?;
     if !term_explanation_defines_other_subject(selected_term, &first) {
         return Ok(first);
     }
-    if started.elapsed() > first_call_budget {
+    if first_elapsed > first_call_budget {
         log::info!(
             "local term explanation named another subject; not retried (first call was slow)"
         );
@@ -889,7 +893,7 @@ where
     }
     log::info!("local term explanation named another subject; retrying once");
     match generate(retry_prompt) {
-        Ok(retried) if !term_explanation_defines_other_subject(selected_term, &retried) => {
+        Ok((retried, _)) if !term_explanation_defines_other_subject(selected_term, &retried) => {
             log::info!("local term explanation retry named the selected term");
             Ok(retried)
         }
@@ -923,7 +927,10 @@ fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> 
     let Some(short) = value.get("short").and_then(serde_json::Value::as_str) else {
         return false;
     };
-    let term = strip_quotes(&normalize_term_notation(selected_term));
+    // 選択語の後ろの括弧書き（「X（旧Twitter）」の「（旧Twitter）」）も、short 側の主語と同じように外して比べる。
+    let mut term = strip_quotes(&normalize_term_notation(selected_term));
+    strip_trailing_parenthetical(&mut term);
+    let term = strip_quotes(&term);
     if term.is_empty() {
         return false;
     }
@@ -1967,6 +1974,7 @@ mod tests {
             ("X", "AIとは、人工知能のことだよ。"),
             // 選択語で始まるが、別の（より長い）語を定義している。
             ("X", "XRPとは、暗号資産の一つだよ。"),
+            ("X（旧Twitter）", "AIとは、人工知能のことだよ。"),
             ("マスク", "イーロン・マスクとは、実業家だよ。"),
             ("証拠金", "証拠金取引とは、担保を預けて行う取引だよ。"),
             // 「とは」の主語がなく、選択語で始まっていない。
@@ -1997,6 +2005,10 @@ mod tests {
             ("証拠金", "証拠金とは、担保だよ。永久先物とは関係が深いよ。"),
             // 選択語自体が「」付きで選ばれた場合。
             ("「証拠金」", "証拠金とは、取引の担保だよ。"),
+            // 選択語の後ろに括弧書き（旧称・読み）が付いている場合。
+            ("X（旧Twitter）", "Xとは、SNSのサービスだよ。"),
+            ("X(旧Twitter)", "X（旧Twitter）とは、SNSのサービスだよ。"),
+            ("「証拠金（しょうこきん）」", "証拠金とは、取引の担保だよ。"),
         ] {
             assert!(!defines_other(term, short), "{term} / {short}");
         }
@@ -2055,7 +2067,8 @@ mod tests {
     struct FakeTermGenerator {
         replies: std::collections::VecDeque<Result<String, LocalAiFailure>>,
         prompts: Vec<String>,
-        delay: std::time::Duration,
+        /// 偽の「生成にかかった時間」（作り直しの目安の判定に使う）。
+        generation_time: std::time::Duration,
     }
 
     impl FakeTermGenerator {
@@ -2063,7 +2076,7 @@ mod tests {
             Self {
                 replies: replies.into(),
                 prompts: Vec::new(),
-                delay: std::time::Duration::ZERO,
+                generation_time: std::time::Duration::ZERO,
             }
         }
 
@@ -2075,8 +2088,10 @@ mod tests {
                 budget,
                 |prompt| {
                     self.prompts.push(prompt.to_string());
-                    std::thread::sleep(self.delay);
-                    self.replies.pop_front().expect("no more fake replies")
+                    self.replies
+                        .pop_front()
+                        .expect("no more fake replies")
+                        .map(|text| (text, self.generation_time))
                 },
             )
         }
@@ -2132,8 +2147,8 @@ mod tests {
         // 1回目が目安より長くかかったら、別の語の定義でも作り直さず1回目を返す。
         let wrong = term_output("永久先物とは、満期のない先物だよ。");
         let mut fake = FakeTermGenerator::new(vec![Ok(wrong.clone())]);
-        fake.delay = std::time::Duration::from_millis(20);
-        assert_eq!(fake.run(std::time::Duration::from_millis(1)), Ok(wrong));
+        fake.generation_time = std::time::Duration::from_secs(61);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(wrong));
         assert_eq!(fake.prompts.len(), 1);
     }
 
