@@ -984,11 +984,21 @@ const NOUN_LIKE_HIRAGANA_ENDINGS: [&str; 18] = [
     "つもり",
 ];
 
-/// 「のです」の「の」の前に来るとき、説明の「の」（「起きたのです」「大切なのです」）と決まる平仮名
-/// （動詞・形容詞・助動詞の終わり）。
-const NO_DESU_PRECEDING: [char; 13] = [
-    'う', 'く', 'ぐ', 'す', 'つ', 'ぬ', 'ぶ', 'む', 'る', 'た', 'だ', 'な', 'い',
+/// 「のです」の「の」の前に来るとき、それだけで説明の「の」（「言うのです」「あるのです」）とみなす平仮名
+/// （動詞の終止形の終わり）。「た」「な」「い」は名詞の終わりでもある（「あなたのです」「みんなのです」）ため、
+/// `is_explanatory_no` で前の字まで見て判定する。「ぬ」は名詞（「いぬ」）と区別しにくいので入れない。
+const NO_DESU_VERB_ENDINGS: [char; 7] = ['う', 'く', 'ぐ', 'す', 'つ', 'む', 'る'];
+
+/// 「たのです」の「た」の前に来るとき、動詞の過去形（「した」「言った」「起きた」「食べた」）と決まる平仮名。
+/// 「あなた」「うた」「かた」のような名詞の終わりの「た」と区別するため、い段・え段・「っ」だけにする（漢字も可）。
+const PAST_TA_PRECEDING: [char; 26] = [
+    'っ', 'い', 'き', 'ぎ', 'し', 'じ', 'ち', 'に', 'ひ', 'び', 'み', 'り', 'え', 'け', 'げ', 'せ',
+    'ぜ', 'て', 'で', 'ね', 'へ', 'べ', 'め', 'れ', 'ぴ', 'ぺ',
 ];
+
+/// 「いのです」の「い」の前に来るとき、形容詞・「ない」「たい」と決まる平仮名（「ないのです」「楽しいのです」
+/// 「行きたいのです」）。漢字の直後（「多いのです」）も形容詞とみなす。
+const ADJECTIVE_I_PRECEDING: [char; 3] = ['な', 'し', 'た'];
 
 /// 「です」の前に来るとき、「です」を落とすだけで常体になる形容詞の語尾（「楽しかったです」→「楽しかったよ」）。
 /// 「〜いです」全般は「違いです」「狙いです」のような名詞と区別できないため、形容詞と決まる形だけにする。
@@ -1038,19 +1048,22 @@ fn casualize_sentence(sentence: &str) -> Option<String> {
     {
         return None;
     }
+    // 「知ってます？」のような「か」の無い問いかけは、「よ」を付けずに「知ってる？」にする。
+    let question = tail.contains(['？', '?']);
     POLITE_TRAILING_PARTICLES.iter().find_map(|particle| {
         let core = body.strip_suffix(particle)?;
-        let casual = casual_core(core, particle)?;
+        let casual = casual_core(core, particle, question)?;
         Some(format!("{casual}{tail}"))
     })
 }
 
 /// 終助詞を除いた文の終わり（`core`）の丁寧語を常体へ言い換え、終助詞を付け直して返す。
-fn casual_core(core: &str, particle: &str) -> Option<String> {
-    let particle = if particle.is_empty() {
-        CASUAL_DEFAULT_PARTICLE
-    } else {
-        particle
+/// 終助詞の無い文には「よ」を付ける。ただし問いかけ（`question`。文末が「？」）には付けない。
+fn casual_core(core: &str, particle: &str, question: bool) -> Option<String> {
+    let particle = match (particle.is_empty(), question) {
+        (true, true) => "",
+        (true, false) => CASUAL_DEFAULT_PARTICLE,
+        (false, _) => particle,
     };
     // 「〜てください」「〜でください」は「〜てね」「〜でね」（終助詞を重ねない）。
     for (polite, casual) in POLITE_REQUEST_ENDINGS {
@@ -1059,6 +1072,11 @@ fn casual_core(core: &str, particle: &str) -> Option<String> {
         }
     }
     if let Some(plain) = plain_verb_ending(core).or_else(|| plain_copula_ending(core)) {
+        // 終助詞の無い問いかけの「名詞＋だ？」は「だ」を落とす（「便利な機能です？」→「便利な機能？」）。
+        // 「〜んだ？」「〜だった？」はそのまま自然なので残す。
+        if question && particle.is_empty() && plain.ends_with('だ') && !plain.ends_with("んだ") {
+            return Some(plain.strip_suffix('だ').unwrap_or(&plain).to_string());
+        }
         return Some(format!("{plain}{particle}"));
     }
     None
@@ -1068,6 +1086,13 @@ fn casual_core(core: &str, particle: &str) -> Option<String> {
 fn plain_verb_ending(core: &str) -> Option<String> {
     for (polite, plain) in POLITE_VERB_ENDINGS {
         if let Some(stem) = core.strip_suffix(polite) {
+            // 「進んできます」「泳いできません」の「でき」は「〜で＋来る」（「進んでくる」）で、「できる」ではない。
+            // 「ん」「い」の直後の「できます」「できません」は活用が決まらないので言い換えない
+            // （「できました」は「進んできた」でも「できた」でも同じ形になるので言い換える）。
+            if matches!(polite, "できます" | "できません") && stem.ends_with(['ん', 'い'])
+            {
+                return None;
+            }
             return Some(format!("{stem}{plain}"));
         }
     }
@@ -1114,11 +1139,7 @@ fn plain_copula_ending(core: &str) -> Option<String> {
     // 「〜たのです」「〜なのです」→「〜たんだ」「〜なんだ」。「の」の前が活用語の終わり（う段・た・だ・な・い）の
     // ときだけにする（「私のです」のような持ち主の「の」は言い換えない）。「〜んです」→「〜んだ」。
     if let Some(before) = stem.strip_suffix('の') {
-        return before
-            .chars()
-            .last()
-            .is_some_and(|last| NO_DESU_PRECEDING.contains(&last))
-            .then(|| format!("{before}んだ"));
+        return is_explanatory_no(before).then(|| format!("{before}んだ"));
     }
     if stem.ends_with('ん') {
         return Some(format!("{stem}だ"));
@@ -1142,6 +1163,30 @@ fn is_noun_like_end(stem: &str) -> bool {
         || NOUN_LIKE_HIRAGANA_ENDINGS
             .iter()
             .any(|ending| stem.ends_with(ending))
+}
+
+/// 「〜のです」の「の」が説明の「の」（「〜んだ」にできる）と決まるか。前の語の終わりで判定し、
+/// 持ち主の「の」（「私のです」「みんなのです」「あなたのです」）は言い換えない。
+/// - う段（「ぬ」以外）: 動詞の終止形（「言うのです」）。
+/// - 「た」: 前がい段・え段・「っ」・漢字（「したのです」「起きたのです」「見たのです」）。
+/// - 「な」: 前が漢字・片仮名・「ー」（「大切なのです」「シンプルなのです」）か、「そうな」「ような」。
+/// - 「い」: 前が「な」「し」「た」・漢字（「ないのです」「楽しいのです」「多いのです」）。
+fn is_explanatory_no(before: &str) -> bool {
+    let mut chars = before.chars().rev();
+    let Some(last) = chars.next() else {
+        return false;
+    };
+    let previous = chars.next();
+    match last {
+        'た' => previous.is_some_and(|p| PAST_TA_PRECEDING.contains(&p) || is_kanji(p)),
+        'な' => {
+            previous.is_some_and(|p| is_kanji(p) || matches!(p, 'ァ'..='ヺ' | 'ー'))
+                || before.ends_with("そうな")
+                || before.ends_with("ような")
+        }
+        'い' => previous.is_some_and(|p| ADJECTIVE_I_PRECEDING.contains(&p) || is_kanji(p)),
+        _ => NO_DESU_VERB_ENDINGS.contains(&last),
+    }
 }
 
 /// 漢字（CJK 統合漢字・拡張A・「々」）か。
@@ -1772,6 +1817,44 @@ mod tests {
         // すでにゆうこの語尾の文と、「です」「ます」だけの文。
         unchanged("新しい補助金が始まるよ。便利だね。");
         unchanged("です。");
+        // 「ん」「い」の直後の「できます」「できません」は「〜で＋来る」なので言い換えない。
+        unchanged("新しい選手が次々と進んできます。");
+        unchanged("ボールが飛んできません。");
+        unchanged("魚が川を泳いできます。");
+        // 持ち主の「の」（名詞の終わりの「な」「た」「い」）は言い換えない。
+        unchanged("この勝利はみんなのです。");
+        unchanged("この席はあなたのです。");
+        unchanged("このメロディーはあのうたのです。");
+    }
+
+    #[test]
+    fn casualizes_te_kuru_past_questions_and_explanatory_no_safely() {
+        let casual = |text: &str| casualize_polite_endings(text).0;
+        // 「できました」は「〜で＋来た」でも「できた」でも同じ形になる。
+        assert_eq!(
+            casual("新しい選手が進んできました。"),
+            "新しい選手が進んできたよ。"
+        );
+        // 「か」の無い問いかけには「よ」を付けない。終助詞があれば付け直す。
+        assert_eq!(casual("この機能、知ってます？"), "この機能、知ってる？");
+        assert_eq!(casual("便利な機能です？"), "便利な機能？");
+        assert_eq!(casual("面白いニュースですよね？"), "面白いニュースだよね？");
+        // 説明の「の」は、前の語の終わりで決まるときだけ「んだ」にする。
+        for (polite, expected) in [
+            ("大きな被害が出たのです。", "大きな被害が出たんだよ。"),
+            ("実は失敗していたのです。", "実は失敗していたんだよ。"),
+            ("それが大切なのです。", "それが大切なんだよ。"),
+            ("とてもシンプルなのです。", "とてもシンプルなんだよ。"),
+            (
+                "どうやら本当のようなのです。",
+                "どうやら本当のようなんだよ。",
+            ),
+            ("まだ決まっていないのです。", "まだ決まっていないんだよ。"),
+            ("費用が多いのです。", "費用が多いんだよ。"),
+            ("みんなで考えるのです。", "みんなで考えるんだよ。"),
+        ] {
+            assert_eq!(casual(polite), expected, "{polite}");
+        }
     }
 
     #[test]
