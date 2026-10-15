@@ -56,6 +56,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             app_lifecycle::handle_window_event(window, event);
         })
+        // メイン画面の再読み込み・レンダラー復帰で、設定画面の未保存の印が残らないよう戻す（D133）。
+        .on_page_load(|webview, payload| {
+            app_lifecycle::handle_page_load(webview, payload);
+        })
         .setup(|app| {
             // 以降の初期化失敗も記録できるよう、ログは setup の最初に登録する。
             register_log_plugin(app);
@@ -231,6 +235,8 @@ pub fn run() {
             commands::autostart_commands::set_autostart_enabled,
             commands::app_commands::restart_app,
             commands::app_commands::quit_resident_app,
+            commands::app_commands::set_main_window_unsaved_changes,
+            commands::app_commands::take_pending_main_window_article,
             commands::data_export_commands::export_migration_data,
             commands::data_export_commands::open_migration_folder,
             commands::data_import_commands::list_migration_imports,
@@ -264,11 +270,17 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            // どの経路で終わっても（トレイ・画面内ボタン・再起動・OS からの終了）同梱 llama-server を残さない。
-            if let tauri::RunEvent::Exit = event {
-                app_lifecycle::stop_side_processes(app);
+        .run(|app, event| match event {
+            // 非表示待機のメインを解放（破棄）して最後のウィンドウが消えても、常駐を続ける（D133）。
+            // 明示終了（トレイ・画面内ボタン）と再起動は code 付きで来るため止めない。
+            tauri::RunEvent::ExitRequested { code, api, .. }
+                if app_lifecycle::should_prevent_exit(code) =>
+            {
+                api.prevent_exit();
             }
+            // どの経路で終わっても（トレイ・画面内ボタン・再起動・OS からの終了）同梱 llama-server を残さない。
+            tauri::RunEvent::Exit => app_lifecycle::stop_side_processes(app),
+            _ => {}
         });
 }
 

@@ -3892,6 +3892,30 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   ).toBeChecked();
 });
 
+// D133: 未保存の設定があるあいだはメインウィンドウを破棄しないよう、未保存の有無を Rust へ知らせる。
+test("settings reports unsaved changes to Rust and clears them after save", async ({
+  page,
+}) => {
+  const readReports = () =>
+    page.evaluate(
+      () =>
+        ((window as unknown as Record<string, unknown>)
+          .__E2E_UNSAVED_CHANGES_REPORTS__ as boolean[] | undefined) ?? []
+    );
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  // 開いただけ（変更なし）では何も送らない。
+  expect(await readReports()).toEqual([]);
+
+  await page
+    .getByRole("switch", { name: "ニュース取得後に自動で要約する" })
+    .click();
+  await expect.poll(readReports).toEqual([true]);
+
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect.poll(readReports).toEqual([true, false]);
+});
+
 // ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
 test("settings storage panel shows 準備中 instead of dummy usage values", async ({
   page,
@@ -5460,6 +5484,32 @@ test("first click shows the light preview, then 詳しく見る opens the articl
     0
   );
   await expect(notification).toHaveCount(0);
+});
+
+// D133: 長い非表示で破棄したメインを「詳しく見る」で作り直した場合、記事は Rust に預けられ、
+// 新しい画面がマウント時に1回だけ取り出して開く。
+test("recreated main window opens the pending article from the yuuko desktop window", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_PENDING_MAIN_ARTICLE__ =
+      "e2e-article-1";
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "戻る", exact: true }).first()
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  // 取り出した後は空になり、二重に開かない。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>).__E2E_PENDING_MAIN_ARTICLE__
+    )
+  ).toBeNull();
 });
 
 test("yuuko desktop window open-article event opens the article in the main window", async ({
@@ -8233,6 +8283,23 @@ async function installTauriMocks(page: Page) {
             migrationWin.__E2E_RESTART_APP_CALLS__ =
               (migrationWin.__E2E_RESTART_APP_CALLS__ || 0) + 1;
             return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "set_main_window_unsaved_changes": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const unsavedWin = window as any;
+            (unsavedWin.__E2E_UNSAVED_CHANGES_REPORTS__ ||= []).push(
+              Boolean((args as any)?.hasUnsaved)
+            );
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "take_pending_main_window_article": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const pendingWin = window as any;
+            const pending = pendingWin.__E2E_PENDING_MAIN_ARTICLE__ ?? null;
+            pendingWin.__E2E_PENDING_MAIN_ARTICLE__ = null;
+            return pending;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "quit_resident_app": {

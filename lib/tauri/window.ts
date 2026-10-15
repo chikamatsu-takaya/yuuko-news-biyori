@@ -28,3 +28,36 @@ export async function quitResidentApp(): Promise<boolean> {
   await invoke<void>("quit_resident_app");
   return true;
 }
+
+/**
+ * 設定画面に未保存の変更があるかを Rust へ知らせる。
+ * Rust は非表示待機が続くとメインウィンドウを破棄して WebView のメモリを返す（D133）が、
+ * true の間は破棄しない（未保存の入力を失わないため）。送るのは真偽値だけ。非Tauriでは何もしない。
+ */
+export async function setMainWindowUnsavedChanges(
+  hasUnsaved: boolean
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  await invoke<void>("set_main_window_unsaved_changes", { hasUnsaved });
+}
+
+/**
+ * 破棄済みのメインウィンドウを「詳しく見る」で作り直したとき、新しい画面で開く記事IDを1回だけ受け取る。
+ * 作り直した画面はイベント送信時点で未購読のため、マウント時にこちらで取り出す（D133）。
+ * 該当が無い・非Tauriでは null。空文字など想定外の値も null にする。
+ */
+export async function takePendingMainWindowArticle(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  const articleId = await invoke<string | null>(
+    "take_pending_main_window_article"
+  );
+  return typeof articleId === "string" && articleId.length > 0
+    ? articleId
+    : null;
+}
