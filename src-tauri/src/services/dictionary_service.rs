@@ -444,6 +444,9 @@ fn build_generic_entry(
     }
 }
 
+/// 固定サンプル記事(article-001〜003)の組み込み解説。文面はゆうこの口調（D123）で、
+/// 短い解説は用語解説プロンプトと同じ「〇〇とは、…だよ。」の形にそろえる。
+/// 辞書ストアへは書き込まず未命中時に毎回この定義から返すため、保存済み辞書の文面は変わらない。
 fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
     vec![
         SampleDictionaryEntry {
@@ -451,72 +454,72 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_title: "生成AIスタートアップの資金調達が再加速",
             key_text: "生成AI",
             entry_type: DictionaryEntryType::Term,
-            short_explanation: "文章や画像などを自動生成する AI 全般を指す言葉です。",
-            detail_explanation: "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
+            short_explanation: "生成AIとは、文章や画像などを自動生成する AI 全般のことだよ。",
+            detail_explanation: "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群だよ。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-001",
             article_title: "生成AIスタートアップの資金調達が再加速",
             key_text: "資金調達",
             entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "企業が事業拡大のために投資や融資で資金を集めることです。",
-            detail_explanation: "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
+            short_explanation: "資金調達とは、企業が事業拡大のために投資や融資で資金を集めることだよ。",
+            detail_explanation: "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-001",
             article_title: "生成AIスタートアップの資金調達が再加速",
             key_text: "業務自動化",
             entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "定型業務を仕組み化して人手を減らす考え方です。",
-            detail_explanation: "業務自動化は、繰り返し作業や定型処理をシステム化して効率を上げる取り組みです。生成AIが評価されやすい背景には、この自動化効果を現場で示しやすいことがあります。",
+            short_explanation: "業務自動化とは、定型業務を仕組み化して人手を減らす考え方のことだよ。",
+            detail_explanation: "業務自動化は、繰り返し作業や定型処理をシステム化して効率を上げる取り組みだよ。生成AIが評価されやすい背景には、この自動化効果を現場で示しやすいことがあるんだよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-002",
             article_title: "国内SaaS企業、業務改善支援の新施策を発表",
             key_text: "SaaS",
             entry_type: DictionaryEntryType::Term,
-            short_explanation: "インターネット経由で利用するソフトウェア提供形態です。",
-            detail_explanation: "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
+            short_explanation: "SaaSとは、インターネット経由で利用するソフトウェア提供形態のことだよ。",
+            detail_explanation: "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態だよ。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-002",
             article_title: "国内SaaS企業、業務改善支援の新施策を発表",
             key_text: "導入支援",
             entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "サービスを使い始める際の設定や定着を支える取り組みです。",
-            detail_explanation: "導入支援は、ツールの初期設定だけでなく、使い方の教育や運用への定着まで含めて支援することです。この記事では、導入後の継続活用まで見据えた支援が価値として語られています。",
+            short_explanation: "導入支援とは、サービスを使い始める際の設定や定着を支える取り組みのことだよ。",
+            detail_explanation: "導入支援は、ツールの初期設定だけでなく、使い方の教育や運用への定着まで含めて支援することだよ。この記事では、導入後の継続活用まで見据えた支援が価値として語られているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-002",
             article_title: "国内SaaS企業、業務改善支援の新施策を発表",
             key_text: "業務改善",
             entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "仕事の流れを見直して効率や成果を高めることです。",
-            detail_explanation: "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
+            short_explanation: "業務改善とは、仕事の流れを見直して効率や成果を高めることだよ。",
+            detail_explanation: "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-003",
             article_title: "量子コンピュータ研究で新たな誤り訂正手法",
             key_text: "量子コンピュータ",
             entry_type: DictionaryEntryType::Term,
-            short_explanation: "量子力学の性質を利用して計算する新しい計算機です。",
-            detail_explanation: "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
+            short_explanation: "量子コンピュータとは、量子力学の性質を利用して計算する新しい計算機のことだよ。",
+            detail_explanation: "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術だよ。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっているよ。",
         },
         SampleDictionaryEntry {
             article_id: "article-003",
             article_title: "量子コンピュータ研究で新たな誤り訂正手法",
             key_text: "誤り訂正",
             entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "計算中の誤差を検知し、補正するための仕組みです。",
-            detail_explanation: "誤り訂正は、計算途中で起こるノイズや誤差を見つけて結果を安定させる考え方です。量子コンピュータでは特に重要で、実用化に向けた大きな課題の一つです。",
+            short_explanation: "誤り訂正とは、計算中の誤差を検知し、補正するための仕組みのことだよ。",
+            detail_explanation: "誤り訂正は、計算途中で起こるノイズや誤差を見つけて結果を安定させる考え方だよ。量子コンピュータでは特に重要で、実用化に向けた大きな課題の一つだね。",
         },
         SampleDictionaryEntry {
             article_id: "article-003",
             article_title: "量子コンピュータ研究で新たな誤り訂正手法",
             key_text: "研究成果",
             entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "研究や実験によって得られた新しい知見や結果です。",
-            detail_explanation: "研究成果は、学術研究や実験を通じて得られた知見のことです。この記事では、新たな誤り訂正手法が今後の実装方式に影響を与える可能性がある点が重要です。",
+            short_explanation: "研究成果とは、研究や実験によって得られた新しい知見や結果のことだよ。",
+            detail_explanation: "研究成果は、学術研究や実験を通じて得られた知見のことだよ。この記事では、新たな誤り訂正手法が今後の実装方式に影響を与える可能性がある点が大事だよ。",
         },
     ]
 }
@@ -1387,6 +1390,35 @@ mod tests {
         assert_eq!(entry.related_article_id.as_deref(), Some("article-001"));
         assert!(!entry.is_starred);
         assert!(entry.short_explanation.contains("自動生成"));
+        // 固定解説もゆうこの口調（D123）。短い解説は用語解説プロンプトと同じ「〇〇とは、…だよ。」の形。
+        assert_eq!(
+            entry.short_explanation,
+            "生成AIとは、文章や画像などを自動生成する AI 全般のことだよ。"
+        );
+    }
+
+    #[test]
+    fn sample_entries_use_yuuko_tone_within_limits() {
+        // 組み込みの固定解説はすべてゆうこの口調（D123）で、AI 応答と同じ文字数上限に収まる。
+        // 丁寧語（です・ます）が混ざると、AI 生成の解説と並んだときに口調がそろわないため検出する。
+        for entry in super::sample_dictionary_entries() {
+            let short = entry.short_explanation;
+            let detail = entry.detail_explanation;
+            assert!(
+                short.starts_with(&format!("{}とは、", entry.key_text)),
+                "{short}"
+            );
+            assert!(short.ends_with("だよ。"), "{short}");
+            assert!(
+                detail.ends_with("よ。") || detail.ends_with("ね。"),
+                "{detail}"
+            );
+            for text in [short, detail] {
+                assert!(!text.contains("です") && !text.contains("ます"), "{text}");
+            }
+            assert!(short.chars().count() <= super::TERM_EXPLANATION_SHORT_MAX_CHARS);
+            assert!(detail.chars().count() <= super::TERM_EXPLANATION_DETAIL_MAX_CHARS);
+        }
     }
 
     #[test]
