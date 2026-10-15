@@ -13,7 +13,8 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::util::speech_cleanup::{
     calm_yuuko_speech, casualize_polite_endings, clean_yuuko_speech, count_unlisted_latin_words,
-    strip_foreign_script_sentences, strip_prompt_echo_sentences, ForeignScriptOutcome,
+    soften_rude_address, strip_foreign_script_sentences, strip_prompt_echo_sentences,
+    strip_repeated_sentences, ForeignScriptOutcome,
 };
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
@@ -800,6 +801,8 @@ fn select_valid_output_in_tone(
 /// 入力に無い英単語は、固有名詞の表記ゆれと区別できないため消さず、数だけをログに残す。
 /// 文末の丁寧語（「〜しました。」「〜です。」）は、活用の形が決まるものだけゆうこの常体の語尾
 /// （「〜したよ。」「〜だよ。」）へ言い換える（`casualize_polite_endings`）。
+/// 失礼な呼びかけ（「お前ら」「てめえ」）は、文頭の呼びかけなら落とし、ほかは「みんな」へ言い換える
+/// （`soften_rude_address`）。同じ文の繰り返しは最初の1つだけを残す（`strip_repeated_sentences`）。
 fn clean_ai_speech(
     kind: SummaryOutputKind,
     tone: SpeechTone,
@@ -821,6 +824,15 @@ fn clean_ai_speech(
             kind.label()
         );
     }
+    // 失礼な呼びかけ（「ねえ、お前ら、」「てめえ」）を落とす・「みんな」へ言い換える（引用の中は触らない）。
+    let (cleaned, rude_terms) = soften_rude_address(&cleaned);
+    if rude_terms > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed or replaced {rude_terms} rude form(s) of address in the AI output ({})",
+            kind.label()
+        );
+    }
     // プロンプトの固定指示の写し（「ゆうこは読者の横で…案内役です。」）の文を取り除く。
     let (cleaned, prompt_echoes) =
         strip_prompt_echo_sentences(&cleaned, &yuuko_speech_fixed_prompt_texts());
@@ -837,6 +849,15 @@ fn clean_ai_speech(
         // 本文は出さず、数と出力種別だけを残す。
         log::info!(
             "rewrote {casualized} polite sentence ending(s) in the AI output ({})",
+            kind.label()
+        );
+    }
+    // 同じ文の繰り返し（語尾の言い換えでそろった文を含む）は、最初の1つだけを残す。
+    let (cleaned, repeated) = strip_repeated_sentences(&cleaned);
+    if repeated > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed {repeated} repeated sentence(s) from the AI output ({})",
             kind.label()
         );
     }
@@ -1308,6 +1329,28 @@ mod tests {
         let selected =
             select_valid_output(SummaryOutputKind::Comment, response(polite, "mock")).unwrap();
         assert_eq!(selected.text, polite);
+    }
+
+    #[test]
+    fn rude_address_and_repeats_from_real_ai_speech_are_removed_but_summary_and_mock_are_not() {
+        let noisy = "ねえ、お前ら、新しい補助金が始まります。新しい補助金が始まるよ！";
+        for provider in ["gemini", "local"] {
+            for kind in [SummaryOutputKind::Explanation, SummaryOutputKind::Comment] {
+                let selected = select_valid_output(kind, response(noisy, provider)).unwrap();
+                assert_eq!(
+                    selected.text, "新しい補助金が始まるよ。",
+                    "{provider} {kind:?}"
+                );
+            }
+            // 要約は中立な文体なので手を加えない。
+            let summary =
+                select_valid_output(SummaryOutputKind::Summary, response(noisy, provider)).unwrap();
+            assert_eq!(summary.text, noisy);
+        }
+        // Mock の種（定型文）は決定的な結果のまま変えない。
+        let selected =
+            select_valid_output(SummaryOutputKind::Comment, response(noisy, "mock")).unwrap();
+        assert_eq!(selected.text, noisy);
     }
 
     #[test]
