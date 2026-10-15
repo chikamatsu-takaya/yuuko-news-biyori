@@ -233,6 +233,7 @@ impl LocalLlmService {
     /// プロンプトを送り、生成された本文を返す（必要なら起動してから）。
     pub fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, LocalAiFailure> {
         self.generate_inner(prompt, max_tokens, None)
+            .map(|(text, _)| text)
     }
 
     /// 出力の形を JSON スキーマで縛って生成する（用語解説）。llama-server が文法で縛るため、
@@ -244,6 +245,18 @@ impl LocalLlmService {
         response_format: ResponseFormat,
     ) -> Result<String, LocalAiFailure> {
         self.generate_inner(prompt, max_tokens, Some(response_format))
+            .map(|(text, _)| text)
+    }
+
+    /// `generate_with_format` と同じだが、生成そのものにかかった時間（起動・同梱物の照合の待ちを除く）も返す。
+    /// 用語解説の作り直しを行うかの判断（ai_provider_service）に使う。
+    pub fn generate_with_format_timed(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        response_format: ResponseFormat,
+    ) -> Result<(String, Duration), LocalAiFailure> {
+        self.generate_inner(prompt, max_tokens, Some(response_format))
     }
 
     fn generate_inner(
@@ -251,7 +264,7 @@ impl LocalLlmService {
         prompt: &str,
         max_tokens: u32,
         response_format: Option<ResponseFormat>,
-    ) -> Result<String, LocalAiFailure> {
+    ) -> Result<(String, Duration), LocalAiFailure> {
         // 起動の前から「走っている」と数える＝起動し終えてから数え始めるまでの間に、見張りが止める道を作らない。
         let _in_flight = InFlight::begin(&self.shared);
         let (port, api_key) = self.ensure_started()?;
@@ -266,11 +279,9 @@ impl LocalLlmService {
         );
         match result {
             Ok(text) => {
-                log::info!(
-                    "local llm generated text in {:.1}s",
-                    started.elapsed().as_secs_f32()
-                );
-                Ok(text)
+                let elapsed = started.elapsed();
+                log::info!("local llm generated text in {:.1}s", elapsed.as_secs_f32());
+                Ok((text, elapsed))
             }
             Err(ChatError::Timeout) => {
                 log::warn!("local llm request timed out");
