@@ -172,9 +172,48 @@ const END_OF_ARTICLE_MARKERS: &[&str] = &[
     "この記事を読んだ人",
     "この記事のタグ",
     "著者プロフィール",
+    "この記事の著者",
+    "この記事の筆者",
+    "この記事の執筆者",
+    "この記事を書いた人",
     "Related articles",
     "Related Articles",
 ];
+/// 本文の先頭・末尾に付く操作ボタンのラベル（ブロック全体がこの文言と一致するときだけ）。
+/// 「3D プリンターで印刷する技術」のような本文の文を落とさないため、部分一致にしない。
+const EDGE_ACTION_LABELS: &[&str] = &[
+    "印刷する",
+    "印刷",
+    "印刷用ページ",
+    "この記事を印刷",
+    "この記事を印刷する",
+];
+/// 本文の末尾に並ぶサイト案内のラベル（ブロック全体がこの文言と一致するときだけ）。
+/// 末尾から続く短いラベルの並びの中にあるときだけ除き、本文の途中にあれば残す。
+const TRAILING_SITE_NAV_LABELS: &[&str] = &[
+    "お問い合わせ",
+    "お問合せ",
+    "お問合わせ",
+    "問い合わせ",
+    "利用規約",
+    "プライバシーポリシー",
+    "個人情報保護方針",
+    "会社概要",
+    "運営会社",
+    "サイトマップ",
+    "広告掲載",
+    "ページトップへ",
+    "ページの先頭へ",
+    "このページの先頭へ",
+    "トップへ戻る",
+];
+/// 末尾のサイト案内のうち「ITmedia NEWS SNS」のような SNS への案内とみなす行の最大文字数。
+const TRAILING_SNS_LABEL_MAX_CHARS: usize = 20;
+/// 著作権表示の行（「Copyright © …」「(C) …」「… All Rights Reserved.」）とみなす最大文字数。
+/// 著作権表示に一言の注記（生成 AI の利用の断りなど）が続く行もこの長さに収まり、
+/// 著作権に触れる本文の段落はふつうこれより長い。末尾の並びの中にあるときだけ除く
+/// （サイト全体の著作権表示の強い形だけは本文の途中でも除く。`is_site_copyright_notice`）。
+const COPYRIGHT_LINE_MAX_CHARS: usize = 150;
 /// 終端の目印の後ろにこの文字数以上の段落（p / blockquote）があれば、まだ本文が続いているとみなす。
 /// 他記事の見出し（li・短い p）はふつうこれより短い。
 const END_MARKER_BODY_PARAGRAPH_CHARS: usize = 60;
@@ -532,7 +571,9 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 //    集めた文字数が EXTRACTION_COLLECT_LIMIT_CHARS を超えたら走査をやめる（巨大ページの負荷対策）。
 //    strict ではさらに、テキストだけで分かる定型ブロックを除く（いずれも短いブロックに限る）:
 //    「【画像】」「【あわせて読みたい】」などの誘導行、本文の後ろの「【PR】」の囲み（後ろに本文が続けば囲みだけ）、
-//    リンクが大半のブロックの連続（関連記事・参考リンクの一覧）、寄付・会員登録・メルマガの呼びかけ、ページ送り。
+//    リンクが大半のブロックの連続（関連記事・参考リンクの一覧）、寄付・会員登録・メルマガの呼びかけ、ページ送り、
+//    「Copyright …」「… All Rights Reserved.」のサイトの著作権表示。最後に、選んだブロックの先頭の「印刷する」と、
+//    末尾から続く短いラベル（著作権表示・「この記事の著者」・「お問い合わせ」「ITmedia NEWS SNS」などのサイト案内）を除く。
 //    lenient には足さない（判定が想定外に当たったときの保険として、修正前と同じ規則のまま残す）。
 // 3. 候補ごとのリンク密度（リンク文字 / 全文字）で長さを割り引き、割り引き後に最長の strict と最長の lenient を
 //    比べる。strict が空、または lenient の 1/4 未満かつ 400 文字未満なら lenient を、それ以外は strict を使う
@@ -871,8 +912,10 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
 /// 2. 「【PR】」の見出し: 前に本文が PR_SECTION_MIN_PRECEDING_CHARS 未満なら（PR 記事の冒頭）見出しだけ飛ばす。
 ///    以上なら、見出しを含む囲み（`pr_section_box`）の外に長い段落が続くかを先読みし、続かなければ以降を打ち切り、
 ///    続けば囲みの中のブロックだけを飛ばす（囲みの要素がない平らな構造では見出しの行だけを飛ばすことになる）。
-/// 3. 「【画像】」「【あわせて読みたい】」などの誘導行、寄付・会員登録の呼びかけ、ページ送りは飛ばす。
+/// 3. 「【画像】」「【あわせて読みたい】」などの誘導行、寄付・会員登録の呼びかけ、ページ送り、
+///    サイトの著作権表示（`is_site_copyright_notice`。後ろに連載の紹介文などが続いて末尾にない場合）は飛ばす。
 /// 4. リンクが大半のブロックが LINK_LIST_MIN_RUN 個以上続く部分（リンク一覧）は飛ばす。
+/// 5. 選び終えたら、先頭・末尾の短いラベルを除く（`trim_edge_label_blocks`）。
 fn select_strict_blocks(
     container: &ElementRef<'_>,
     candidates: &[StrictBlock],
@@ -915,7 +958,11 @@ fn select_strict_blocks(
             skipped_pr_box = Some(pr_box);
             continue;
         }
-        if is_bracket_noise_line(text) || is_appeal_block(text) || is_pagination_block(text) {
+        if is_bracket_noise_line(text)
+            || is_appeal_block(text)
+            || is_pagination_block(text)
+            || is_site_copyright_notice(text)
+        {
             continue;
         }
         if block.is_link_dense && is_in_link_run(candidates, index) {
@@ -924,7 +971,178 @@ fn select_strict_blocks(
         selected_chars += text.chars().count();
         selected.push(text.clone());
     }
+    trim_edge_label_blocks(&mut selected);
     selected
+}
+
+/// 選んだブロックの先頭・末尾にある短いラベルを除く（strict のみ。まとめの 2）。
+/// - 先頭: 「印刷する」などの操作ボタンのラベル（EDGE_ACTION_LABELS と完全に一致するブロック）が続く間。
+/// - 末尾: 操作ボタンのラベル・著作権表示・著者のラベル・サイト案内のラベル（`is_trailing_label_block`）が
+///   続く間。末尾から見て最初の本文のブロックで止めるので、本文の途中にある同じ文言は残す。
+///
+/// どれも短いブロックの完全一致か行頭の定型だけを見るため、本文の段落は落ちない。すべて除いて空になったときは
+/// 抜粋なしとなり、判定なしの抜粋（このラベルを除かない）が使われる（まとめの 3 の保証）。
+fn trim_edge_label_blocks(blocks: &mut Vec<String>) {
+    let leading = blocks
+        .iter()
+        .take_while(|text| is_edge_action_label(text))
+        .count();
+    blocks.drain(..leading);
+    while blocks
+        .last()
+        .is_some_and(|text| is_trailing_label_block(text))
+    {
+        blocks.pop();
+    }
+}
+
+/// 「印刷する」のような操作ボタンのラベルだけのブロックか。
+fn is_edge_action_label(text: &str) -> bool {
+    EDGE_ACTION_LABELS.contains(&text.trim())
+}
+
+/// 本文の末尾に並ぶ短いラベルか（操作ボタン・著作権表示・著者のラベル・サイト案内）。
+fn is_trailing_label_block(text: &str) -> bool {
+    let text = text.trim();
+    is_edge_action_label(text)
+        || is_copyright_line(text)
+        || is_author_label(text)
+        || TRAILING_SITE_NAV_LABELS.contains(&text)
+        || is_sns_nav_label(text)
+}
+
+/// 「この記事の著者」のような著者欄の見出しだけのブロックか（終端の目印と同じ文言の完全一致）。
+/// 終端の目印は後ろに長い段落があると目印だけを飛ばすため、末尾ではここでも除く。
+fn is_author_label(text: &str) -> bool {
+    matches!(
+        text,
+        "この記事の著者"
+            | "この記事の筆者"
+            | "この記事の執筆者"
+            | "この記事を書いた人"
+            | "著者プロフィール"
+            | "著者"
+            | "筆者"
+            | "執筆者"
+    )
+}
+
+/// 著作権表示の行か（末尾の並びの中で使う）。COPYRIGHT_LINE_MAX_CHARS 以下で、英文の文（`is_sentence_like_english`）
+/// でなく、次のどれかに当たるときだけ。
+/// - 「©」で始まる。
+/// - 「Copyright」「(C)」「（C）」で始まり、直後が空白・©・括弧・英数字（「Copyright」は英字を除く）で、
+///   その後ろ（印自身は除く）が著作権表示の形（`has_copyright_notice_shape`: ©・「(C)」・4 桁の年・会社を表す語）をしている
+///   （「Copyright © ITmedia, Inc. …」「Copyright 2026 Example Inc.」「(C) 2026 Example」）。
+///   「Copyright Officeは…」「Copyright law remains unsettled …」「(C) は回答しなかった」は当たらない。
+/// - 「All Rights Reserved」（大文字小文字は問わない。末尾の「.」は除く）で終わる。
+fn is_copyright_line(text: &str) -> bool {
+    if text.chars().count() > COPYRIGHT_LINE_MAX_CHARS {
+        return false;
+    }
+    if text.starts_with('©') {
+        return true;
+    }
+    if is_sentence_like_english(text) {
+        return false;
+    }
+    if let Some(rest) = text.strip_prefix("Copyright") {
+        let starts_like_notice = rest.chars().next().is_none_or(|ch| {
+            ch.is_whitespace() || ch.is_ascii_digit() || matches!(ch, '©' | '(' | '（')
+        });
+        if starts_like_notice && has_copyright_notice_shape(rest) {
+            return true;
+        }
+    }
+    for prefix in COPYRIGHT_C_MARKS {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let starts_like_notice = rest
+                .chars()
+                .next()
+                .is_none_or(|ch| ch.is_whitespace() || ch.is_ascii_alphanumeric());
+            if starts_like_notice && has_copyright_notice_shape(rest) {
+                return true;
+            }
+        }
+    }
+    ends_with_rights_reserved(text)
+}
+
+/// 「(C)」の書き方。
+const COPYRIGHT_C_MARKS: [&str; 4] = ["(C)", "(c)", "（C）", "（c）"];
+/// 著作権表示に付く会社を表す語（英語は語単位で照合する）。
+const COPYRIGHT_COMPANY_WORDS: &[&str] = &["Inc", "Ltd", "Co", "Corp", "LLC", "Company"];
+const COPYRIGHT_COMPANY_JA: &[&str] = &["株式会社", "有限会社"];
+
+/// 著作権表示の形か。©・「(C)」・4 桁の年（19xx / 20xx）・会社を表す語のどれかを含む。
+fn has_copyright_notice_shape(text: &str) -> bool {
+    if text.contains('©') || COPYRIGHT_C_MARKS.iter().any(|mark| text.contains(mark)) {
+        return true;
+    }
+    if COPYRIGHT_COMPANY_JA.iter().any(|word| text.contains(word)) {
+        return true;
+    }
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| {
+            COPYRIGHT_COMPANY_WORDS.contains(&word)
+                || (word.len() == 4
+                    && word.chars().all(|ch| ch.is_ascii_digit())
+                    && (word.starts_with("19") || word.starts_with("20")))
+        })
+}
+
+/// 「All Rights Reserved」（大文字小文字は問わない。末尾の「.」は除く）で終わるか。
+fn ends_with_rights_reserved(text: &str) -> bool {
+    text.trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with("all rights reserved")
+}
+
+/// 英文の文らしいか。小文字で始まる英単語（定型の all / rights / reserved / by は数えない）が 2 つ以上ある。
+/// 著作権表示は社名・年・定型句でできていて小文字の語をほとんど含まないため、
+/// 「Copyright law remains unsettled …」「The studio said all rights reserved」のような本文の文と分けられる。
+fn is_sentence_like_english(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|word| {
+            word.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase())
+                && !matches!(*word, "all" | "rights" | "reserved" | "by")
+        })
+        .count()
+        >= 2
+}
+
+/// サイト全体の著作権表示の行か（本文の途中でも飛ばしてよい強い形だけ）。著作権表示の行
+/// （`is_copyright_line`）のうち、「Copyright」で始まり © /「(C)」を含むもの（「Copyright © ITmedia, Inc. All Rights Reserved.」）。
+/// 「All Rights Reserved」で終わるだけの行（引用したライセンス文・英文）、「© Reuters」「(C) 2026 Example」のような
+/// 写真・図のクレジットは本文の途中に置かれうるため、末尾の並びでだけ除く。
+fn is_site_copyright_notice(text: &str) -> bool {
+    is_copyright_line(text)
+        && text.strip_prefix("Copyright").is_some_and(|rest| {
+            rest.contains('©') || COPYRIGHT_C_MARKS.iter().any(|mark| rest.contains(mark))
+        })
+}
+
+/// 「ITmedia NEWS SNS」「公式SNS」のような SNS への案内のラベルか（末尾の並びの中だけで使う）。
+/// 「SNS」の前がサイト名らしい英数字の名前（空白区切り）か「公式」のときだけ当てる。
+/// 「若者の間で広がるSNS」のような本文の短い行は当たらない。
+fn is_sns_nav_label(text: &str) -> bool {
+    if text.chars().count() > TRAILING_SNS_LABEL_MAX_CHARS {
+        return false;
+    }
+    let Some(name) = text.strip_suffix("SNS") else {
+        return false;
+    };
+    let name = name.trim_end();
+    if name.is_empty() || name.ends_with("公式") {
+        return true;
+    }
+    // サイト名＋空白＋SNS（「ITmedia NEWS SNS」）。空白を挟まない「…広がるSNS」は本文の語とみなす。
+    text[..text.len() - "SNS".len()].ends_with(char::is_whitespace)
+        && name.chars().any(|ch| ch.is_ascii_alphanumeric())
+        && name.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || ch.is_whitespace() || matches!(ch, '.' | '-' | '&')
+        })
 }
 
 /// 【PR】の見出しを含む囲みの要素。見出し自身から祖先へたどり、次のどれかに当たる手前で止める（コンテナ自身は含めない）。
@@ -2297,5 +2515,187 @@ mod tests {
         assert!(!should_switch_to_cluster(150, 400)); // 3 倍未満
         assert!(!should_switch_to_cluster(50, 299)); // 300 文字未満
         assert!(!should_switch_to_cluster(400, 2000)); // 選んだ抜粋が短くない
+    }
+
+    #[test]
+    fn drops_print_label_copyright_and_author_label_at_edges() {
+        // ITmedia NEWS の実記事の形（先頭の「印刷する」、末尾の著作権表示と「この記事の著者」）。
+        let excerpt = extract_body(&format!(
+            "<p>印刷する</p><p>{BODY_1}</p><p>{BODY_2}</p>\
+<p>Copyright © ITmedia, Inc. All Rights Reserved. 本記事は制作段階で生成AIサービスを利用しています。</p>\
+<h2>この記事の著者</h2>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_trailing_run_of_site_nav_labels() {
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{BODY_2}</p><p>(C) 2026 Example Media Inc.</p>\
+<p>ITmedia NEWS SNS</p><p>お問い合わせ</p><p>利用規約</p><p>公式SNS</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_author_label_followed_by_short_profile() {
+        // 著者欄の見出しの後ろに長い段落がなければ、見出しから後ろ（短い紹介文）を打ち切る。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{BODY_2}</p><p>この記事を書いた人</p><p>山田 太郎 編集部記者</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn keeps_body_text_that_mentions_copyright_or_author() {
+        // 著作権・著者・印刷・問い合わせに触れる本文の文は、末尾にあっても残す。
+        let tail_blocks = [
+            "著作権（Copyright）の侵害で出版社が提訴した。",
+            "Copyright Officeは生成AIの扱いについて報告書を公表した。",
+            "Copyrighted works may not be used without permission.",
+            "この記事の著者である山田氏は、取材の経緯を次のように説明している。調査には半年かかったという。",
+            "3Dプリンターで印刷する技術が、住宅の建設にも使われ始めている。",
+            "消費者センターへのお問い合わせが急増している。",
+            "若者の間で広がるSNS",
+            "(C) は回答しなかった",
+            "Copyright law remains unsettled for AI-generated works, experts say.",
+            "The studio said all rights reserved",
+        ];
+        for tail in tail_blocks {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{BODY_2}</p><p>{tail}</p>"));
+            assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}\n\n{tail}"), "{tail}");
+        }
+    }
+
+    #[test]
+    fn keeps_labels_in_the_middle_of_the_body() {
+        // 末尾の並びにない著作権表示（写真のクレジット）・サイト案内の文言は除かない。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>© 2026 Example Photo</p><p>お問い合わせ</p><p>{BODY_2}</p>"
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n© 2026 Example Photo\n\nお問い合わせ\n\n{BODY_2}")
+        );
+    }
+
+    #[test]
+    fn drops_site_copyright_notice_followed_by_series_blurb() {
+        // ITmedia の連載記事の形（著作権表示の後ろに連載の紹介文が続き、末尾にない）。
+        let blurb = "2019年にスタートした本連載は、世界中の幅広い分野から最先端の研究論文を独自の視点で紹介しています。";
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{BODY_2}</p><p>Copyright © ITmedia, Inc. All Rights Reserved.</p><p>{blurb}</p>"
+        ));
+        assert_eq!(
+            excerpt,
+            format!(
+                "{BODY_1}
+
+{BODY_2}
+
+{blurb}"
+            )
+        );
+    }
+
+    #[test]
+    fn keeps_copyright_like_lines_in_the_middle_of_the_body() {
+        // 本文の途中では、サイト全体の著作権表示の強い形だけを除く。英文の引用・写真のクレジットは残す。
+        for middle in [
+            "Copyright law reform was approved in 2026",
+            "© Reuters",
+            "(C) 2026 Example Photo",
+            "The studio said all rights reserved",
+            "Example Pictures. All Rights Reserved.",
+        ] {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{middle}</p><p>{BODY_2}</p>"));
+            assert_eq!(
+                excerpt,
+                format!(
+                    "{BODY_1}
+
+{middle}
+
+{BODY_2}"
+                ),
+                "{middle}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_quoted_license_text_in_the_middle_of_the_body() {
+        // 本文の途中で引用したライセンス文（All Rights Reserved で終わる）は残す。
+        let license = "Licensed under the Example License. All Rights Reserved.";
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><blockquote>{license}</blockquote><p>{BODY_2}</p>"
+        ));
+        assert_eq!(
+            excerpt,
+            format!(
+                "{BODY_1}
+
+{license}
+
+{BODY_2}"
+            )
+        );
+    }
+
+    #[test]
+    fn keeps_long_paragraph_that_ends_with_rights_notice_wording() {
+        let long = format!(
+            "{}All rights reserved",
+            "同社は声明で、すべての権利を保有していると改めて強調し、今後も法的な対応を続ける方針を示した。".repeat(3)
+        );
+        assert!(long.chars().count() > COPYRIGHT_LINE_MAX_CHARS);
+        let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{long}</p>"));
+        assert!(excerpt.ends_with("All rights reserved"));
+    }
+
+    #[test]
+    fn edge_labels_only_fall_back_to_lenient() {
+        // ラベルしかない候補でも抜粋なしにはせず、判定なしの抜粋（修正前と同じ規則）を使う。
+        let excerpt = extract_body("<p>印刷する</p><p>Copyright © Example</p>");
+        assert_eq!(excerpt, "印刷する\n\nCopyright © Example");
+    }
+
+    #[test]
+    fn copyright_line_patterns() {
+        for text in [
+            "Copyright © ITmedia, Inc. All Rights Reserved.",
+            "Copyright 2026 Example Inc.",
+            "Copyright (C) 2026 Example",
+            "© 2026 Example",
+            "(C) 2026 Example Media",
+            "（C）Example Inc.",
+            "Copyright 株式会社サンプル",
+            "Example News. All rights reserved.",
+            "Copyright © 2026 Nikkei Inc. All rights reserved.",
+        ] {
+            assert!(is_copyright_line(text), "{text}");
+        }
+        for text in [
+            "Copyright Officeは報告書を公表した。",
+            "Copyrighted",
+            "著作権（Copyright）の侵害",
+            "(C) は回答しなかった",
+            "（C）共同通信の配信",
+            "Copyright law remains unsettled for AI-generated works, experts say.",
+            "The studio said all rights reserved",
+            "（C）Example",
+        ] {
+            assert!(!is_copyright_line(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn sns_nav_label_patterns() {
+        for text in ["ITmedia NEWS SNS", "公式SNS", "Example 公式 SNS", "SNS"] {
+            assert!(is_sns_nav_label(text), "{text}");
+        }
+        for text in ["若者の間で広がるSNS", "ITmediaSNS", "人気のSNS"] {
+            assert!(!is_sns_nav_label(text), "{text}");
+        }
     }
 }
