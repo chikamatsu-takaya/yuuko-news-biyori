@@ -391,7 +391,9 @@ fn seed_title_without_site_suffix<'a>(title: &'a str, source_name: &str) -> &'a 
     let Some((head, separator, site)) = split_last_title_segment(title_trimmed) else {
         return title;
     };
-    if !is_source_site_name(site, source_name) || head.chars().count() < TITLE_MIN_REMAINING_CHARS {
+    if !is_source_site_name(site, source_name, separator)
+        || head.chars().count() < TITLE_MIN_REMAINING_CHARS
+    {
         return title;
     }
     if matches!(separator, "|" | "｜") {
@@ -421,10 +423,27 @@ fn split_last_title_segment(title: &str) -> Option<(&str, &'static str, &str)> {
     (!head.is_empty() && !tail.is_empty()).then_some((head, separator, tail))
 }
 
+/// 出典名の前方一致で、サイト名の後ろに続いてよい一般的な説明（チャンネル名の飾り）。大文字小文字は問わない。
+/// 「Nintendo Switch」の「Switch」のような固有の語が続くときは、サイト名とみなさない。
+const SOURCE_NAME_GENERIC_TAILS: &[&str] = &[
+    "最新記事一覧",
+    "最新記事",
+    "記事一覧",
+    "新着",
+    "新着記事",
+    "新着情報",
+    "ニュース",
+    "rss",
+    "公式",
+];
+
 /// タイトル末尾の区切りの後ろ（segment）が出典名のサイト名か。空白の連なりは 1 つにそろえ、英字の大小は問わない。
-/// 出典名と一致するか（2 文字以上）、出典名がその語で始まり直後が空白・区切り記号・括弧のとき
-/// （語の途中で切れていない。短い一般語で前方一致しないよう TITLE_SITE_PREFIX_MIN_CHARS 文字以上）だけ。
-fn is_source_site_name(segment: &str, source_name: &str) -> bool {
+/// - 出典名と一致する（2 文字以上）。
+/// - または、出典名がその語で始まり（TITLE_SITE_PREFIX_MIN_CHARS 文字以上）、残りが区切り記号・括弧で始まるか
+///   （「NHKニュース|社会」の「|社会」）、一般的な説明（SOURCE_NAME_GENERIC_TAILS。「ITmedia NEWS 最新記事一覧」の
+///   「最新記事一覧」）だけのとき。区切りが `：` のときは前方一致を使わない（「新作を発表：Nintendo」のように
+///   `：` の後ろは記事の主語・対象であることが多いため）。
+fn is_source_site_name(segment: &str, source_name: &str, separator: &str) -> bool {
     let normalize = |value: &str| {
         value
             .split_whitespace()
@@ -440,18 +459,31 @@ fn is_source_site_name(segment: &str, source_name: &str) -> bool {
     if segment == source {
         return true;
     }
-    if segment.chars().count() < TITLE_SITE_PREFIX_MIN_CHARS {
+    if separator == "：" || segment.chars().count() < TITLE_SITE_PREFIX_MIN_CHARS {
         return false;
     }
-    source.strip_prefix(&segment).is_some_and(|rest| {
-        rest.chars().next().is_some_and(|ch| {
-            ch.is_whitespace()
-                || matches!(
-                    ch,
-                    '|' | '｜' | '-' | '―' | '—' | '–' | ':' | '：' | '(' | '（' | '['
-                )
-        })
-    })
+    let Some(rest) = source.strip_prefix(&segment) else {
+        return false;
+    };
+    let is_separator = |ch: char| {
+        matches!(
+            ch,
+            '|' | '｜' | '-' | '―' | '—' | '–' | ':' | '：' | '(' | '（' | '['
+        )
+    };
+    // 語の途中で切れていない（直後が空白か区切り記号・括弧）。
+    let Some(first) = rest.chars().next() else {
+        return false;
+    };
+    if is_separator(first) {
+        return true;
+    }
+    if !first.is_whitespace() {
+        return false;
+    }
+    // 空白の後ろが区切り記号（「Full-Count（フルカウント） ― 野球ニュース…」）か、一般的な説明だけ。
+    let tail = rest.trim();
+    tail.chars().next().is_some_and(is_separator) || SOURCE_NAME_GENERIC_TAILS.contains(&tail)
 }
 
 /// 種の組み立てに使う外部由来フィールドだけを無害化した記事のコピーを返す（保存には使わない）。
@@ -1758,13 +1790,18 @@ mod tests {
                 "台風13号 影響は長時間続く 警戒を",
             ),
             (
-                "渦巻腕が描く“目”のような銀河の姿 | sorae",
-                "sorae 宇宙へのポータルサイト",
-                "渦巻腕が描く“目”のような銀河の姿",
+                "大谷翔平がスタメン外の可能性 - Full-Count（フルカウント）",
+                "Full-Count（フルカウント） ― 野球ニュース・速報・コラム ―",
+                "大谷翔平がスタメン外の可能性",
             ),
             (
                 "新しい半導体工場の建設計画を発表 | Example News",
                 "example  news",
+                "新しい半導体工場の建設計画を発表",
+            ),
+            (
+                "新しい半導体工場の建設計画を発表：Example News",
+                "Example News",
                 "新しい半導体工場の建設計画を発表",
             ),
         ];
@@ -1791,6 +1828,14 @@ mod tests {
             // 出典名の語の途中で切れる一致・短い語の前方一致は外さない。
             ("OpenAIが新しい推論モデルを公開 | Tech", "TechCrunch Japan"),
             ("OpenAIが新しい推論モデルを公開 | AI", "AI News Japan"),
+            // 出典名の残りが固有の語（「Switch」「宇宙へのポータルサイト」）なら前方一致させない。
+            ("ゲームの新作を発表 - Nintendo", "Nintendo Switch"),
+            (
+                "渦巻腕が描く“目”のような銀河の姿 | sorae",
+                "sorae 宇宙へのポータルサイト",
+            ),
+            // `：` の後ろは前方一致させない（記事の主語・対象であることが多い）。
+            ("ゲームの新作を発表：Nintendo", "Nintendo 公式"),
             // 外すと短くなりすぎる。
             ("速報 | Example News", "Example News"),
             // 出典名が空（取得元不明）。

@@ -1027,13 +1027,13 @@ fn is_author_label(text: &str) -> bool {
     )
 }
 
-/// 著作権表示の行か。COPYRIGHT_LINE_MAX_CHARS 以下で、次のどれかに当たるときだけ。
+/// 著作権表示の行か（末尾の並びの中で使う）。COPYRIGHT_LINE_MAX_CHARS 以下で、英文の文（`is_sentence_like_english`）
+/// でなく、次のどれかに当たるときだけ。
 /// - 「©」で始まる。
-/// - 「Copyright」で始まり、直後が空白・©・括弧・数字・行末で、その後ろに © /「(C)」があるか、
-///   ひらがなを含まない（「Copyright © ITmedia, Inc. …」「Copyright 2026 Example Inc.」）。
-///   「Copyright Office は…」「Copyrighted…」のような本文の書き出しは当たらない。
-/// - 「(C)」「（C）」で始まり、直後が空白・英数字で、ひらがなを含まない（「(C) 2026 Example」）。
-///   「(C) は…」のような選択肢の行は当たらない。
+/// - 「Copyright」「(C)」「（C）」で始まり、直後が空白・©・括弧・英数字（「Copyright」は英字を除く）で、
+///   その後ろ（印自身は除く）が著作権表示の形（`has_copyright_notice_shape`: ©・「(C)」・4 桁の年・会社を表す語）をしている
+///   （「Copyright © ITmedia, Inc. …」「Copyright 2026 Example Inc.」「(C) 2026 Example」）。
+///   「Copyright Officeは…」「Copyright law remains unsettled …」「(C) は回答しなかった」は当たらない。
 /// - 「All Rights Reserved」（大文字小文字は問わない。末尾の「.」は除く）で終わる。
 fn is_copyright_line(text: &str) -> bool {
     if text.chars().count() > COPYRIGHT_LINE_MAX_CHARS {
@@ -1042,56 +1042,85 @@ fn is_copyright_line(text: &str) -> bool {
     if text.starts_with('©') {
         return true;
     }
-    let has_hiragana = |value: &str| value.chars().any(|ch| ('ぁ'..='ゖ').contains(&ch));
-    let has_symbol = |value: &str| {
-        value.contains('©')
-            || ["(C)", "(c)", "（C）", "（c）"]
-                .iter()
-                .any(|s| value.contains(s))
-    };
+    if is_sentence_like_english(text) {
+        return false;
+    }
     if let Some(rest) = text.strip_prefix("Copyright") {
         let starts_like_notice = rest.chars().next().is_none_or(|ch| {
             ch.is_whitespace() || ch.is_ascii_digit() || matches!(ch, '©' | '(' | '（')
         });
-        if starts_like_notice && (has_symbol(rest) || !has_hiragana(rest)) {
+        if starts_like_notice && has_copyright_notice_shape(rest) {
             return true;
         }
     }
-    for prefix in ["(C)", "(c)", "（C）", "（c）"] {
+    for prefix in COPYRIGHT_C_MARKS {
         if let Some(rest) = text.strip_prefix(prefix) {
             let starts_like_notice = rest
                 .chars()
                 .next()
                 .is_none_or(|ch| ch.is_whitespace() || ch.is_ascii_alphanumeric());
-            if starts_like_notice && !has_hiragana(rest) {
+            if starts_like_notice && has_copyright_notice_shape(rest) {
                 return true;
             }
         }
     }
+    ends_with_rights_reserved(text)
+}
+
+/// 「(C)」の書き方。
+const COPYRIGHT_C_MARKS: [&str; 4] = ["(C)", "(c)", "（C）", "（c）"];
+/// 著作権表示に付く会社を表す語（英語は語単位で照合する）。
+const COPYRIGHT_COMPANY_WORDS: &[&str] = &["Inc", "Ltd", "Co", "Corp", "LLC", "Company"];
+const COPYRIGHT_COMPANY_JA: &[&str] = &["株式会社", "有限会社"];
+
+/// 著作権表示の形か。©・「(C)」・4 桁の年（19xx / 20xx）・会社を表す語のどれかを含む。
+fn has_copyright_notice_shape(text: &str) -> bool {
+    if text.contains('©') || COPYRIGHT_C_MARKS.iter().any(|mark| text.contains(mark)) {
+        return true;
+    }
+    if COPYRIGHT_COMPANY_JA.iter().any(|word| text.contains(word)) {
+        return true;
+    }
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| {
+            COPYRIGHT_COMPANY_WORDS.contains(&word)
+                || (word.len() == 4
+                    && word.chars().all(|ch| ch.is_ascii_digit())
+                    && (word.starts_with("19") || word.starts_with("20")))
+        })
+}
+
+/// 「All Rights Reserved」（大文字小文字は問わない。末尾の「.」は除く）で終わるか。
+fn ends_with_rights_reserved(text: &str) -> bool {
     text.trim_end_matches('.')
         .to_ascii_lowercase()
         .ends_with("all rights reserved")
 }
 
+/// 英文の文らしいか。小文字で始まる英単語（定型の all / rights / reserved / by は数えない）が 2 つ以上ある。
+/// 著作権表示は社名・年・定型句でできていて小文字の語をほとんど含まないため、
+/// 「Copyright law remains unsettled …」「The studio said all rights reserved」のような本文の文と分けられる。
+fn is_sentence_like_english(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|word| {
+            word.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase())
+                && !matches!(*word, "all" | "rights" | "reserved" | "by")
+        })
+        .count()
+        >= 2
+}
+
 /// サイト全体の著作権表示の行か（本文の途中でも飛ばしてよい強い形だけ）。著作権表示の行
-/// （`is_copyright_line`）のうち、「All Rights Reserved」で終わるか、「Copyright」で始まり © /「(C)」を含むもの
-/// （「Copyright © ITmedia, Inc. All Rights Reserved.」）。英文の引用（「Copyright law …」）は当たらない。
-/// 「© Reuters」「(C) 2026 Example」のような写真・図のクレジットは本文の途中に置かれるため、末尾の並びでだけ除く。
+/// （`is_copyright_line`）のうち、「Copyright」で始まり © /「(C)」を含むもの（「Copyright © ITmedia, Inc. All Rights Reserved.」）。
+/// 「All Rights Reserved」で終わるだけの行（引用したライセンス文・英文）、「© Reuters」「(C) 2026 Example」のような
+/// 写真・図のクレジットは本文の途中に置かれうるため、末尾の並びでだけ除く。
 fn is_site_copyright_notice(text: &str) -> bool {
-    if !is_copyright_line(text) {
-        return false;
-    }
-    let ends_with_rights_reserved = text
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-        .ends_with("all rights reserved");
-    let copyright_with_symbol = text.strip_prefix("Copyright").is_some_and(|rest| {
-        rest.contains('©')
-            || ["(C)", "(c)", "（C）", "（c）"]
-                .iter()
-                .any(|s| rest.contains(s))
-    });
-    ends_with_rights_reserved || copyright_with_symbol
+    is_copyright_line(text)
+        && text.strip_prefix("Copyright").is_some_and(|rest| {
+            rest.contains('©') || COPYRIGHT_C_MARKS.iter().any(|mark| rest.contains(mark))
+        })
 }
 
 /// 「ITmedia NEWS SNS」「公式SNS」のような SNS への案内のラベルか（末尾の並びの中だけで使う）。
@@ -2529,6 +2558,8 @@ mod tests {
             "消費者センターへのお問い合わせが急増している。",
             "若者の間で広がるSNS",
             "(C) は回答しなかった",
+            "Copyright law remains unsettled for AI-generated works, experts say.",
+            "The studio said all rights reserved",
         ];
         for tail in tail_blocks {
             let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{BODY_2}</p><p>{tail}</p>"));
@@ -2574,6 +2605,8 @@ mod tests {
             "Copyright law reform was approved in 2026",
             "© Reuters",
             "(C) 2026 Example Photo",
+            "The studio said all rights reserved",
+            "Example Pictures. All Rights Reserved.",
         ] {
             let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{middle}</p><p>{BODY_2}</p>"));
             assert_eq!(
@@ -2588,6 +2621,25 @@ mod tests {
                 "{middle}"
             );
         }
+    }
+
+    #[test]
+    fn keeps_quoted_license_text_in_the_middle_of_the_body() {
+        // 本文の途中で引用したライセンス文（All Rights Reserved で終わる）は残す。
+        let license = "Licensed under the Example License. All Rights Reserved.";
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><blockquote>{license}</blockquote><p>{BODY_2}</p>"
+        ));
+        assert_eq!(
+            excerpt,
+            format!(
+                "{BODY_1}
+
+{license}
+
+{BODY_2}"
+            )
+        );
     }
 
     #[test]
@@ -2616,8 +2668,10 @@ mod tests {
             "Copyright (C) 2026 Example",
             "© 2026 Example",
             "(C) 2026 Example Media",
-            "（C）Example",
+            "（C）Example Inc.",
+            "Copyright 株式会社サンプル",
             "Example News. All rights reserved.",
+            "Copyright © 2026 Nikkei Inc. All rights reserved.",
         ] {
             assert!(is_copyright_line(text), "{text}");
         }
@@ -2627,6 +2681,9 @@ mod tests {
             "著作権（Copyright）の侵害",
             "(C) は回答しなかった",
             "（C）共同通信の配信",
+            "Copyright law remains unsettled for AI-generated works, experts say.",
+            "The studio said all rights reserved",
+            "（C）Example",
         ] {
             assert!(!is_copyright_line(text), "{text}");
         }
