@@ -1165,6 +1165,7 @@ export default function SettingsScreen({
                         {currentThemeLabel}
                       </span>
                       <span
+                        id="theme-customize-guide"
                         className="text-[10px] text-muted-foreground"
                         data-testid="theme-customize-guide"
                       >
@@ -1178,6 +1179,7 @@ export default function SettingsScreen({
                         size="sm"
                         className="h-7 gap-1 text-xs text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
                         disabled={hasUnsavedChanges}
+                        aria-describedby="theme-customize-guide"
                         onClick={() => handleNavigate("customize")}
                       >
                         <Sparkles className="w-3.5 h-3.5" />
