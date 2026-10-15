@@ -1152,19 +1152,39 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* テーマは selectedThemeId の表示名を読み取り専用で表示する。テーマ変更機能はMVP対象外（設計 §7:枠のみ）。 */}
+                  {/* テーマの切り替え・適用はカスタマイズ画面が担うため、ここでは selectedThemeId の表示名を読み取り専用で出し、
+                      カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
+                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
                   <SettingRow label="現在のテーマ">
-                    <div className="flex flex-col items-end gap-0.5">
+                    <div className="flex flex-col items-end gap-1">
                       <span
                         className="text-sm text-foreground"
                         data-testid="current-theme-id"
                       >
                         {currentThemeLabel}
                       </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        変更機能は準備中
+                      <span
+                        id="theme-customize-guide"
+                        className="text-[10px] text-muted-foreground"
+                        data-testid="theme-customize-guide"
+                      >
+                        {hasUnsavedChanges
+                          ? "テーマはカスタマイズ画面で変えられるよ。先に設定を保存してね"
+                          : "テーマはカスタマイズ画面で変えられるよ"}
                       </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 gap-1 text-xs text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+                        disabled={hasUnsavedChanges}
+                        aria-describedby="theme-customize-guide"
+                        onClick={() => handleNavigate("customize")}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        カスタマイズを開く
+                      </Button>
                     </div>
                   </SettingRow>
                 </CardContent>
