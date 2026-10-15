@@ -4,9 +4,12 @@ import { Toaster } from "@/components/ui/toaster";
 import UiThemeApplier from "@/components/layout/UiThemeApplier";
 import './globals.css'
 
-const notoSansJP = Noto_Sans_JP({ 
+// Noto Sans JP は weight を指定せず可変フォント（weight 軸 100〜900）として読み込む（D134）。
+// Google Fonts は 400/500/600/700 を指定しても同じ可変 woff2 を返すため、フォント本体は変わらないが、
+// ウェイト指定だと unicode-range 分割（約124区画）の @font-face がウェイト数ぶん複製され、
+// 描画をブロックする CSS が約4倍に膨らむ。見た目は同一で、font-normal〜bold はそのまま使える。
+const notoSansJP = Noto_Sans_JP({
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
   variable: "--font-noto-sans-jp",
 });
 
