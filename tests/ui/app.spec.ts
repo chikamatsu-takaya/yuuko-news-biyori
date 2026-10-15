@@ -2214,7 +2214,7 @@ test("reader: 解説 command failure shows a reselect hint and 再試行 without
   await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
   // フロント生成の仮解説は出さず、辞書へ保存できない（保存ボタン自体が無い）。
-  await expect(page.getByText("はこの記事を理解するためのキーワードです。")).toHaveCount(0);
+  await expect(page.getByText("はこの記事を理解するためのキーワードだよ。")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   expect(await saveDictionaryCallCount(page)).toBe(0);
   // 再試行ボタンが出る。
