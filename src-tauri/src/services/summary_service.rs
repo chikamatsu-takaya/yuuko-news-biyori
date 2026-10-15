@@ -361,10 +361,107 @@ fn neutralize_seed_text(text: &str, max_chars: usize) -> String {
         .join("\n")
 }
 
+/// タイトル末尾のサイト名を区切る記号。` - ` は前後の空白を必須にする（「Wi-Fi」「GPT-5」を切らないため）。
+const TITLE_SITE_SEPARATORS: &[&str] = &["｜", "|", " - ", "："];
+/// サイト名の前のカテゴリ（「… | 政治・経済・投資 | 東洋経済オンライン」）とみなす最大文字数。
+const TITLE_CATEGORY_MAX_CHARS: usize = 20;
+/// サイト名・カテゴリを外した後に残すタイトルの最小文字数。これより短くなるなら外さない。
+const TITLE_MIN_REMAINING_CHARS: usize = 8;
+/// 出典名の先頭の語のまとまりとして一致させるサイト名の最小文字数（「AI」のような短い語で前方一致させない）。
+const TITLE_SITE_PREFIX_MIN_CHARS: usize = 4;
+
+/// AI の種に使うタイトルから、末尾のサイト名（と、その前のカテゴリ）を外す。
+///
+/// RSS のタイトルが「記事タイトル | カテゴリ | サイト名」の形の媒体（東洋経済オンラインなど）では、
+/// サイト名・カテゴリが要点・注目ポイント・タグに入っていた（実ニュース評価 v3）。外すのは AI の種だけで、
+/// 保存するタイトル・画面の表示・重複判定のキー（出典名×タイトル）・記事 ID は変えない
+/// （保存済みの記事と重複判定がずれて同じ記事を二重に保存したり、既存ファイルの移行が要ったりしないため）。
+///
+/// 誤って本文のタイトルを削らないよう、次のときだけ外す（どれかに外れればタイトルをそのまま返す）。
+/// - 最後の区切り（TITLE_SITE_SEPARATORS）より後ろが、出典名（RSS のチャンネル名）と一致するか、
+///   出典名の先頭の語のまとまり（「ITmedia NEWS 最新記事一覧」に対する「ITmedia NEWS」）である。
+///   既知のサイト名の一覧は持たない（媒体ごとの分岐をしない）。
+/// - 外した後に TITLE_MIN_REMAINING_CHARS 文字以上残る。
+///
+/// サイト名を外した区切りが `|` / `｜` で、その前にも同じ記号の区切りがあり、その後ろが TITLE_CATEGORY_MAX_CHARS
+/// 文字以下で、残りがその 2 倍以上かつ最小文字数以上あれば、カテゴリとみなして一緒に外す
+/// （「【連載】第3回｜AIの未来 | サイト名」のように前半が短いときは外さない）。
+fn seed_title_without_site_suffix<'a>(title: &'a str, source_name: &str) -> &'a str {
+    let title_trimmed = title.trim();
+    let Some((head, separator, site)) = split_last_title_segment(title_trimmed) else {
+        return title;
+    };
+    if !is_source_site_name(site, source_name) || head.chars().count() < TITLE_MIN_REMAINING_CHARS {
+        return title;
+    }
+    if matches!(separator, "|" | "｜") {
+        if let Some((rest, category_separator, category)) = split_last_title_segment(head) {
+            let category_chars = category.chars().count();
+            let rest_chars = rest.chars().count();
+            if category_separator == separator
+                && category_chars <= TITLE_CATEGORY_MAX_CHARS
+                && rest_chars >= TITLE_MIN_REMAINING_CHARS
+                && rest_chars >= category_chars * 2
+            {
+                return rest;
+            }
+        }
+    }
+    head
+}
+
+/// タイトルを最後の区切りで分け、（前、区切り、後ろ）を返す。前後の空白は除く。後ろが空なら None。
+fn split_last_title_segment(title: &str) -> Option<(&str, &'static str, &str)> {
+    let (index, separator) = TITLE_SITE_SEPARATORS
+        .iter()
+        .filter_map(|separator| title.rfind(separator).map(|index| (index, *separator)))
+        .max_by_key(|(index, _)| *index)?;
+    let head = title[..index].trim_end();
+    let tail = title[index + separator.len()..].trim();
+    (!head.is_empty() && !tail.is_empty()).then_some((head, separator, tail))
+}
+
+/// タイトル末尾の区切りの後ろ（segment）が出典名のサイト名か。空白の連なりは 1 つにそろえ、英字の大小は問わない。
+/// 出典名と一致するか（2 文字以上）、出典名がその語で始まり直後が空白・区切り記号・括弧のとき
+/// （語の途中で切れていない。短い一般語で前方一致しないよう TITLE_SITE_PREFIX_MIN_CHARS 文字以上）だけ。
+fn is_source_site_name(segment: &str, source_name: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let segment = normalize(segment);
+    let source = normalize(source_name);
+    if segment.chars().count() < 2 || source.is_empty() {
+        return false;
+    }
+    if segment == source {
+        return true;
+    }
+    if segment.chars().count() < TITLE_SITE_PREFIX_MIN_CHARS {
+        return false;
+    }
+    source.strip_prefix(&segment).is_some_and(|rest| {
+        rest.chars().next().is_some_and(|ch| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '|' | '｜' | '-' | '―' | '—' | '–' | ':' | '：' | '(' | '（' | '['
+                )
+        })
+    })
+}
+
 /// 種の組み立てに使う外部由来フィールドだけを無害化した記事のコピーを返す（保存には使わない）。
+/// タイトルは末尾のサイト名・カテゴリを外してから無害化する（`seed_title_without_site_suffix`）。
 fn neutralize_seed_article(article: &ArticleDetailDto) -> ArticleDetailDto {
     let mut seed_article = article.clone();
-    seed_article.title = neutralize_seed_text(&article.title, SEED_TITLE_MAX_CHARS);
+    seed_article.title = neutralize_seed_text(
+        seed_title_without_site_suffix(&article.title, &article.source_name),
+        SEED_TITLE_MAX_CHARS,
+    );
     seed_article.genre = neutralize_seed_text(&article.genre, SEED_GENRE_MAX_CHARS);
     seed_article.excerpt = article
         .excerpt
@@ -1099,10 +1196,11 @@ mod tests {
 
     use super::{
         build_yuuko_comment_seed, build_yuuko_explanation_seed, build_yuuko_speech_input,
-        combined_provider, neutralize_seed_text, select_valid_output_in_tone,
-        validate_article_points, validate_point_item, validate_summary_output, FallbackPolicy,
-        OutputRejection, SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
-        EXPLANATION_MAX_CHARS, SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
+        combined_provider, neutralize_seed_text, seed_title_without_site_suffix,
+        select_valid_output_in_tone, validate_article_points, validate_point_item,
+        validate_summary_output, FallbackPolicy, OutputRejection, SummaryGeneration,
+        SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS,
+        SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::settings::ExplanationLevel;
@@ -1638,6 +1736,138 @@ mod tests {
             // Mock 用の定型文は context にだけ入る（build_prompt は送らない）。
             assert!(request.context.as_deref().unwrap_or("").ends_with("ね。"));
         }
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn strips_site_name_and_category_suffix_from_seed_title() {
+        let cases = [
+            (
+                "高市首相が忘れた第1次安倍政権の教訓 | 政治・経済・投資 | 東洋経済オンライン",
+                "東洋経済オンライン",
+                "高市首相が忘れた第1次安倍政権の教訓",
+            ),
+            (
+                "Microsoft、第3世代AIチップを2027年に投入 - ITmedia NEWS",
+                "ITmedia NEWS 最新記事一覧",
+                "Microsoft、第3世代AIチップを2027年に投入",
+            ),
+            (
+                "台風13号 影響は長時間続く 警戒を｜NHKニュース",
+                "NHKニュース|社会",
+                "台風13号 影響は長時間続く 警戒を",
+            ),
+            (
+                "渦巻腕が描く“目”のような銀河の姿 | sorae",
+                "sorae 宇宙へのポータルサイト",
+                "渦巻腕が描く“目”のような銀河の姿",
+            ),
+            (
+                "新しい半導体工場の建設計画を発表 | Example News",
+                "example  news",
+                "新しい半導体工場の建設計画を発表",
+            ),
+        ];
+        for (title, source, expected) in cases {
+            assert_eq!(
+                seed_title_without_site_suffix(title, source),
+                expected,
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_seed_title_when_suffix_is_not_the_source_site() {
+        let cases = [
+            // 末尾が出典名でない（連載名・人名・製品名）。
+            (
+                "ロイヤルホストの新作メニュー《実食レビュー》 - 今日のリーマンめし!!",
+                "ダイヤモンド・オンライン - 新着記事",
+            ),
+            ("ドジャースが逆転負け - 大谷翔平", "Full-Count"),
+            ("新モデルを発表：GPT-5", "Example News"),
+            ("Wi-Fi 7対応ルーターが登場", "Wi-Fi Times"),
+            // 出典名の語の途中で切れる一致・短い語の前方一致は外さない。
+            ("OpenAIが新しい推論モデルを公開 | Tech", "TechCrunch Japan"),
+            ("OpenAIが新しい推論モデルを公開 | AI", "AI News Japan"),
+            // 外すと短くなりすぎる。
+            ("速報 | Example News", "Example News"),
+            // 出典名が空（取得元不明）。
+            ("新しい半導体工場の建設計画を発表 | Example News", ""),
+        ];
+        for (title, source) in cases {
+            assert_eq!(
+                seed_title_without_site_suffix(title, source),
+                title,
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_short_head_instead_of_treating_it_as_category() {
+        // 前半が短いときは、2 つ目の区切りの後ろを本文のタイトルとみなしてカテゴリ扱いしない。
+        assert_eq!(
+            seed_title_without_site_suffix("【連載】第3回｜AIの未来｜Example News", "Example News"),
+            "【連載】第3回｜AIの未来"
+        );
+        // 区切りの記号が違うものはカテゴリとみなさない。
+        assert_eq!(
+            seed_title_without_site_suffix(
+                "新しい半導体工場の建設計画を発表 - 解説 | Example News",
+                "Example News"
+            ),
+            "新しい半導体工場の建設計画を発表 - 解説"
+        );
+    }
+
+    #[test]
+    fn seed_title_drops_site_suffix_but_saved_title_is_unchanged() {
+        // サイト名を外すのは AI の種だけ。保存するタイトル（表示・重複判定のキー）は変えない。
+        let root_dir = temp_root("seed-title-site");
+        let title = "半導体工場の新設計画が始動 | テクノロジー | Example News";
+        let excerpt = "新しい半導体工場の建設計画が発表されました。";
+        let (service, repository) = build_service_with_title(&root_dir, title, excerpt);
+
+        let requests = RefCell::new(Vec::new());
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::RejectFallback,
+                |request, kind, _provider, _level| {
+                    requests.borrow_mut().push((kind, request));
+                    Ok(match kind {
+                        SummaryOutputKind::Summary => output(kind, "工場が新設される。", "gemini"),
+                        _ => output(kind, "工場", "gemini"),
+                    })
+                },
+            )
+            .unwrap();
+
+        let requests = requests.into_inner();
+        let points_input = &requests[1].1.input_text;
+        assert_eq!(
+            points_input,
+            &format!(
+                "半導体工場の新設計画が始動
+{excerpt}"
+            )
+        );
+        for (kind, request) in &requests[2..] {
+            assert!(
+                request.input_text.starts_with(
+                    "タイトル: 半導体工場の新設計画が始動
+"
+                ),
+                "{kind:?}"
+            );
+        }
+        for (kind, request) in &requests {
+            assert!(!request.input_text.contains("Example News"), "{kind:?}");
+        }
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.title, title);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
