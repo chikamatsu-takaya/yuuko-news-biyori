@@ -188,6 +188,24 @@ impl AiProviderService {
         if provider == AiProvider::Local {
             let prompt = build_prompt(&request, explanation_level);
             let result = match local_output_shape(&request) {
+                // 用語解説は、short が選択語とは別の言葉を定義していたら1回だけ作り直す（§12.4）。
+                (max_tokens, Some(format)) if request.prompt_id == TERM_EXPLANATION_PROMPT_ID => {
+                    let retry_prompt =
+                        build_term_explanation_subject_retry_prompt(&request, explanation_level);
+                    generate_term_explanation_with_subject_retry(
+                        &request.input_text,
+                        &prompt,
+                        &retry_prompt,
+                        TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET,
+                        |prompt| {
+                            self.local_llm.generate_with_format_timed(
+                                prompt,
+                                max_tokens,
+                                format.clone(),
+                            )
+                        },
+                    )
+                }
                 (max_tokens, Some(format)) => self
                     .local_llm
                     .generate_with_format(&prompt, max_tokens, format),
@@ -826,6 +844,258 @@ fn term_explanation_level_instruction(explanation_level: ExplanationLevel) -> &'
              記事の理解に役立つものを加え、normal より説明の範囲を広げてください。\
              normal と同じ範囲にとどめないでください。専門用語を増やして難しい文章にするのではなく、\
              説明する情報・背景・補足の範囲を広げる方向で詳しくしてください。"
+        }
+    }
+}
+
+// --- 用語解説の「別の語を定義した」出力の検出と1回だけの作り直し（ローカルLLMのみ・§12.4） ---
+//
+// 2026-10-13 の評価 v3（112 語）で、short が選択語ではなく別の語の定義になる出力が 10 件あった
+// （証拠金 → 「永久先物とは」、第1段 → 「Falcon 9とは」、ロジテック → 「選択語とは」など）。
+// 参考文脈の先頭にある主題語や、同じ記事で先に選ばれた語に引っ張られる。プロンプト（#342）で
+// short を「〇〇とは、…」の形にしたため、書き出しを見れば機械的に見分けられる。
+// 見つけたら、固定の注意書きを足したプロンプトで1回だけ作り直す。作り直しも外れたとき・失敗したときは
+// 1回目の出力をそのまま返す（従来の挙動。検証と保存は従来どおり dictionary_service が行う）。
+// Gemini には入れない（ローカルLLMで起きた不良で、Gemini の呼び出し回数・失敗時の Mock 切り替えの
+// 扱いを変えないため）。
+
+/// 1回目の生成がこれより長くかかったときは作り直さない。作り直しも1回ごとの生成の時間切れ（180 秒）の
+/// 中で動くが、利用者の待ち時間がさらに大きく延びないようにする（v3 の用語解説は中央値 14.6 秒）。
+const TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// 「別の語を定義した」ときの作り直しで、末尾の念押しの後ろに足す固定の注意書き。
+/// 利用者の入力（選択語・参考文脈）は含めない（外部データは区切りの中だけに置く構造を保つ）。
+const TERM_SUBJECT_RETRY_NOTE: &str = "前の回答は、選択語とは別の言葉を説明していました。\
+short の最初の文は、必ず選択語そのものの名前で始めてください。\
+参考文脈に出てくるほかの言葉や、記事の主題の言葉を説明しないでください。";
+
+/// `とは` の前を主語とみなす最大の長さ（文字数）。これより長いものは定義の主語ではないとみなす。
+const TERM_SUBJECT_MAX_CHARS: usize = 40;
+
+/// 作り直し用の用語解説プロンプト。通常のプロンプト（固定指示 → 外部データ → 念押し）の末尾に、
+/// 固定の注意書きを1つ足すだけで、外部データの位置・防御指示は変えない。
+fn build_term_explanation_subject_retry_prompt(
+    request: &AiRequest,
+    explanation_level: ExplanationLevel,
+) -> String {
+    let mut prompt = build_term_explanation_prompt(request, explanation_level);
+    prompt.push('\n');
+    prompt.push_str(TERM_SUBJECT_RETRY_NOTE);
+    prompt
+}
+
+/// 用語解説を生成し、short が別の語を定義していたら1回だけ作り直す（追加の呼び出しは最大1回）。
+///
+/// - 1回目が失敗したら、そのまま失敗を返す（作り直さない）。
+/// - 1回目の生成が `first_call_budget` より長くかかったら作り直さない（待ち時間を延ばしすぎない）。
+///   測るのは生成そのものの時間で、llama-server の起動・同梱物の照合の待ちは含めない
+///   （初回だけ起こる待ちで、作り直しの生成には掛からないため）。
+/// - 作り直しが成功し、選択語の定義になっていればそれを返す。外れた・失敗したときは1回目を返す。
+///
+/// `generate` はプロンプトを受け取って生成し、本文と生成にかかった時間を返す関数（本番はローカルLLM、テストは偽物）。
+/// ログには固定の文だけを残し、選択語・出力は出さない。
+fn generate_term_explanation_with_subject_retry<F>(
+    selected_term: &str,
+    prompt: &str,
+    retry_prompt: &str,
+    first_call_budget: std::time::Duration,
+    mut generate: F,
+) -> Result<String, LocalAiFailure>
+where
+    F: FnMut(&str) -> Result<(String, std::time::Duration), LocalAiFailure>,
+{
+    let (first, first_elapsed) = generate(prompt)?;
+    if !term_explanation_defines_other_subject(selected_term, &first) {
+        return Ok(first);
+    }
+    if first_elapsed > first_call_budget {
+        log::info!(
+            "local term explanation named another subject; not retried (first call was slow)"
+        );
+        return Ok(first);
+    }
+    log::info!("local term explanation named another subject; retrying once");
+    match generate(retry_prompt) {
+        Ok((retried, _)) if !term_explanation_defines_other_subject(selected_term, &retried) => {
+            log::info!("local term explanation retry named the selected term");
+            Ok(retried)
+        }
+        Ok(_) => {
+            log::info!("local term explanation retry still named another subject; keeping the first output");
+            Ok(first)
+        }
+        Err(failure) => {
+            log::warn!(
+                "local term explanation retry failed ({failure:?}); keeping the first output"
+            );
+            Ok(first)
+        }
+    }
+}
+
+/// 用語解説の出力（JSON `{short, detail}`）の short が、選択語ではなく別の語を定義しているか。
+///
+/// true になるのは次のどちらか:
+/// - short の最初の文に「〇〇とは」の主語があり、それが選択語と違う（例: 証拠金 → 「永久先物とは」）。
+/// - 「〇〇とは」の主語がなく、short が選択語で始まっていない。
+///
+/// 表記の揺れは同じ語とみなす: 全角・半角（英数字・記号・半角カナ）、英字の大文字・小文字、
+/// ひらがな・カタカナ、空白と中黒、前後の「」『』や引用符、語の直後の読み・言い換えの括弧
+/// （例: 「証拠金（しょうこきん）とは」）。
+/// JSON として読めない・short が無いときは判定しない（false。解析の失敗は従来どおり dictionary_service が扱う）。
+fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+        return false;
+    };
+    let Some(short) = value.get("short").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    // 選択語の後ろの括弧書き（「X（旧Twitter）」の「（旧Twitter）」）も、short 側の主語と同じように外して比べる。
+    let mut term = strip_quotes(&normalize_term_notation(selected_term));
+    strip_trailing_parenthetical(&mut term);
+    let term = strip_quotes(&term);
+    if term.is_empty() {
+        return false;
+    }
+    let short = strip_leading_openers(&normalize_term_notation(short));
+    if short.is_empty() {
+        return false;
+    }
+    let term_key = fold_kana(&term);
+    match definition_subject(&short) {
+        Some(subject) => fold_kana(&subject) != term_key,
+        None => !fold_kana(&short).starts_with(&term_key),
+    }
+}
+
+/// short の最初の文の「〇〇とは」の〇〇（引用符と直後の括弧を除いたもの）。
+/// 読点などを含む長い前置き（「証拠金は、取引とは別に…」）は主語とみなさない。
+fn definition_subject(short: &[char]) -> Option<Vec<char>> {
+    let sentence_end = short
+        .iter()
+        .position(|c| matches!(c, '。' | '!' | '?'))
+        .unwrap_or(short.len());
+    let head = &short[..sentence_end];
+    let position = head.windows(2).position(|pair| pair == ['と', 'は'])?;
+    if position == 0 || position > TERM_SUBJECT_MAX_CHARS {
+        return None;
+    }
+    let mut subject = head[..position].to_vec();
+    if subject.iter().any(|c| matches!(c, '、' | ',')) {
+        return None;
+    }
+    // 「証拠金」（しょうこきん）とは / 「証拠金（しょうこきん）」とは の両方を外す。
+    trim_closers(&mut subject);
+    strip_trailing_parenthetical(&mut subject);
+    let subject = strip_quotes(&subject);
+    (!subject.is_empty()).then_some(subject)
+}
+
+/// 表記の揺れをそろえる（比較専用。表示・保存には使わない）。
+/// 全角英数字・記号（U+FF01〜FF5E）と全角空白を半角へ、半角カナを全角カナへ（濁点・半濁点は合成）、
+/// 英字を小文字へそろえ、空白と中黒を除く。ひらがな・カタカナは `fold_kana` で別にそろえる
+/// （「とは」を探す前にカタカナへ変えないため）。
+fn normalize_term_notation(text: &str) -> Vec<char> {
+    const HALF_KANA: &str = "｡｢｣､･ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝﾞﾟ";
+    const FULL_KANA: &str =
+        "。「」、・ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン゛゜";
+    let mut out: Vec<char> = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        let c = match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{FF61}'..='\u{FF9F}' => HALF_KANA
+                .chars()
+                .position(|half| half == c)
+                .and_then(|index| FULL_KANA.chars().nth(index))
+                .unwrap_or(c),
+            _ => c,
+        };
+        // 半角カナの濁点・半濁点は前の文字と合成する（ｶﾞ → ガ、ﾊﾟ → パ、ｳﾞ → ヴ）。
+        if c == '゛' || c == '゜' {
+            if let Some(previous) = out.last_mut() {
+                if let Some(composed) = compose_voiced_mark(*previous, c == '゜') {
+                    *previous = composed;
+                    continue;
+                }
+            }
+        }
+        // 全角空白（U+3000）も is_whitespace に含まれる。
+        if c.is_whitespace() || c == '・' {
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// 全角カナに濁点（`semi_voiced` なら半濁点）を合成する。合成できない文字は None。
+fn compose_voiced_mark(base: char, semi_voiced: bool) -> Option<char> {
+    let code = base as u32;
+    // ハ行（ハ ヒ フ ヘ ホ）は濁点 +1・半濁点 +2。
+    let is_ha_row = (0x30CF..=0x30DB).contains(&code) && (code - 0x30CF).is_multiple_of(3);
+    if semi_voiced {
+        return is_ha_row.then(|| char::from_u32(code + 2)).flatten();
+    }
+    if base == 'ウ' {
+        return Some('ヴ');
+    }
+    // カ行・サ行・タ（チ）は奇数の位置、ツ テ トは偶数の位置に清音があり、濁音は +1。
+    let voiceable = ((0x30AB..=0x30C1).contains(&code) && !code.is_multiple_of(2))
+        || ((0x30C4..=0x30C8).contains(&code) && code.is_multiple_of(2))
+        || is_ha_row;
+    voiceable.then(|| char::from_u32(code + 1)).flatten()
+}
+
+/// ひらがなをカタカナへそろえる（1文字ずつの置き換えなので文字数は変わらない）。
+fn fold_kana(chars: &[char]) -> Vec<char> {
+    chars
+        .iter()
+        .map(|&c| match c {
+            '\u{3041}'..='\u{3096}' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+fn is_opening_quote(c: char) -> bool {
+    matches!(c, '「' | '『' | '"' | '“' | '\'' | '‘' | '【' | '《' | '〈')
+}
+
+fn is_closing_quote(c: char) -> bool {
+    matches!(c, '」' | '』' | '"' | '”' | '\'' | '’' | '】' | '》' | '〉')
+}
+
+fn strip_leading_openers(chars: &[char]) -> Vec<char> {
+    let start = chars
+        .iter()
+        .position(|&c| !is_opening_quote(c))
+        .unwrap_or(chars.len());
+    chars[start..].to_vec()
+}
+
+fn trim_closers(chars: &mut Vec<char>) {
+    while chars.last().is_some_and(|&c| is_closing_quote(c)) {
+        chars.pop();
+    }
+}
+
+/// 前後の引用符を外す。
+fn strip_quotes(chars: &[char]) -> Vec<char> {
+    let mut out = strip_leading_openers(chars);
+    trim_closers(&mut out);
+    out
+}
+
+/// 末尾の括弧書き（読み・言い換え。全角括弧は正規化で半角になっている）を1つ外し、その前の閉じ引用符も外す。
+fn strip_trailing_parenthetical(chars: &mut Vec<char>) {
+    if chars.last() != Some(&')') {
+        return;
+    }
+    if let Some(open) = chars.iter().rposition(|&c| c == '(') {
+        if open > 0 {
+            chars.truncate(open);
+            trim_closers(chars);
         }
     }
 }
@@ -1771,6 +2041,233 @@ mod tests {
             .request_text(request, AiProvider::Local, ExplanationLevel::Normal)
             .expect_err("local without bundle must fail");
         assert!(matches!(error, AppError::LocalAi(LocalAiFailure::Missing)));
+    }
+
+    // --- 用語解説の「別の語を定義した」出力の検出と作り直し（§12.4） ---
+
+    fn term_output(short: &str) -> String {
+        serde_json::json!({ "short": short, "detail": "補足の説明だよ。" }).to_string()
+    }
+
+    fn defines_other(term: &str, short: &str) -> bool {
+        term_explanation_defines_other_subject(term, &term_output(short))
+    }
+
+    #[test]
+    fn subject_check_detects_definitions_of_another_word() {
+        // v3 の評価で実際に出た「別の語の定義」と、同じ形の例。
+        for (term, short) in [
+            ("証拠金", "永久先物とは、満期のない先物取引のことだよ。"),
+            ("デリバティブ", "永久先物とは、暗号資産の取引の一つだよ。"),
+            ("分光観測", "重力レンズとは、光が曲がって見える現象だよ。"),
+            ("第1段", "Falcon 9とは、SpaceXのロケットだよ。"),
+            ("ドメイン", "gTLDとは、トップレベルドメインの一つだよ。"),
+            ("養殖", "アニサキスとは、魚につく寄生虫だよ。"),
+            ("ロジテック", "選択語とは、記事で選ばれた言葉だよ。"),
+            ("X", "AIとは、人工知能のことだよ。"),
+            // 選択語で始まるが、別の（より長い）語を定義している。
+            ("X", "XRPとは、暗号資産の一つだよ。"),
+            ("X（旧Twitter）", "AIとは、人工知能のことだよ。"),
+            ("マスク", "イーロン・マスクとは、実業家だよ。"),
+            ("証拠金", "証拠金取引とは、担保を預けて行う取引だよ。"),
+            // 「とは」の主語がなく、選択語で始まっていない。
+            ("証拠金", "取引のときに預けておくお金のことだよ。"),
+        ] {
+            assert!(defines_other(term, short), "{term} / {short}");
+        }
+    }
+
+    #[test]
+    fn subject_check_accepts_definitions_of_the_selected_term() {
+        for (term, short) in [
+            ("証拠金", "証拠金とは、取引の担保として預けるお金だよ。"),
+            ("証拠金", "「証拠金」とは、取引の担保として預けるお金だよ。"),
+            ("証拠金", "『証拠金』とは、取引の担保だよ。"),
+            ("証拠金", "\"証拠金\"とは、取引の担保だよ。"),
+            ("証拠金", "“証拠金”とは、取引の担保だよ。"),
+            ("証拠金", "証拠金（しょうこきん）とは、取引の担保だよ。"),
+            ("証拠金", "「証拠金」（しょうこきん）とは、取引の担保だよ。"),
+            ("証拠金", "「証拠金（しょうこきん）」とは、取引の担保だよ。"),
+            ("SSD", "SSD（ソリッドステートドライブ）とは、記憶装置だよ。"),
+            ("SSD", "SSD(Solid State Drive)とは、記憶装置だよ。"),
+            // 「とは」の主語がなくても、選択語で始まっていればよい。
+            ("証拠金", "証拠金は、取引の担保として預けるお金だよ。"),
+            // 読点の後ろの「とは」は主語ではない（選択語で始まっているので問題なし）。
+            ("証拠金", "証拠金は、取引とは別に預けるお金だよ。"),
+            // 2文目に別の語の「とは」があっても、最初の文だけを見る。
+            ("証拠金", "証拠金とは、担保だよ。永久先物とは関係が深いよ。"),
+            // 選択語自体が「」付きで選ばれた場合。
+            ("「証拠金」", "証拠金とは、取引の担保だよ。"),
+            // 選択語の後ろに括弧書き（旧称・読み）が付いている場合。
+            ("X（旧Twitter）", "Xとは、SNSのサービスだよ。"),
+            ("X(旧Twitter)", "X（旧Twitter）とは、SNSのサービスだよ。"),
+            ("「証拠金（しょうこきん）」", "証拠金とは、取引の担保だよ。"),
+        ] {
+            assert!(!defines_other(term, short), "{term} / {short}");
+        }
+    }
+
+    #[test]
+    fn subject_check_treats_notation_variants_as_the_same_word() {
+        for (term, short) in [
+            // 全角・半角の英数字、大文字・小文字、空白。
+            ("AI", "ＡＩとは、人工知能のことだよ。"),
+            ("ＡＩ", "AIとは、人工知能のことだよ。"),
+            ("ai", "AIとは、人工知能のことだよ。"),
+            ("Falcon 9", "Falcon9とは、ロケットだよ。"),
+            ("Falcon 9", "Ｆａｌｃｏｎ　９とは、ロケットだよ。"),
+            ("第1段", "第１段とは、ロケットの一番下の部分だよ。"),
+            // 半角カナ（濁点・半濁点の合成を含む）。
+            ("ガソリン", "ｶﾞｿﾘﾝとは、燃料だよ。"),
+            ("ｶﾞｿﾘﾝ", "ガソリンとは、燃料だよ。"),
+            ("パスワード", "ﾊﾟｽﾜｰﾄﾞとは、合言葉だよ。"),
+            ("ヴィーガン", "ｳﾞｨｰｶﾞﾝとは、菜食主義者だよ。"),
+            // ひらがな・カタカナ。
+            ("あにさきす", "アニサキスとは、寄生虫だよ。"),
+            ("アニサキス", "あにさきすとは、寄生虫だよ。"),
+            // 中黒の有無。
+            ("イーロン・マスク", "イーロンマスクとは、実業家だよ。"),
+            ("イーロンマスク", "イーロン・マスクとは、実業家だよ。"),
+            // 全角の括弧・引用符の中の読み。
+            ("Deno", "「Ｄｅｎｏ」（デノ）とは、実行環境だよ。"),
+        ] {
+            assert!(!defines_other(term, short), "{term} / {short}");
+        }
+    }
+
+    #[test]
+    fn subject_check_does_not_judge_unparseable_or_empty_outputs() {
+        // 解析できない出力は判定しない（従来どおり dictionary_service の厳格解析が扱う）。
+        assert!(!term_explanation_defines_other_subject(
+            "証拠金",
+            "not json"
+        ));
+        assert!(!term_explanation_defines_other_subject(
+            "証拠金",
+            r#"{"detail":"説明"}"#
+        ));
+        assert!(!term_explanation_defines_other_subject(
+            "証拠金",
+            &term_output("")
+        ));
+        assert!(!term_explanation_defines_other_subject(
+            "「」",
+            &term_output("永久先物とは、先物だよ。")
+        ));
+    }
+
+    /// 偽のローカルLLM。受け取ったプロンプトを記録し、用意した結果を順に返す。
+    struct FakeTermGenerator {
+        replies: std::collections::VecDeque<Result<String, LocalAiFailure>>,
+        prompts: Vec<String>,
+        /// 偽の「生成にかかった時間」（作り直しの目安の判定に使う）。
+        generation_time: std::time::Duration,
+    }
+
+    impl FakeTermGenerator {
+        fn new(replies: Vec<Result<String, LocalAiFailure>>) -> Self {
+            Self {
+                replies: replies.into(),
+                prompts: Vec::new(),
+                generation_time: std::time::Duration::ZERO,
+            }
+        }
+
+        fn run(&mut self, budget: std::time::Duration) -> Result<String, LocalAiFailure> {
+            generate_term_explanation_with_subject_retry(
+                "証拠金",
+                "FIRST_PROMPT",
+                "RETRY_PROMPT",
+                budget,
+                |prompt| {
+                    self.prompts.push(prompt.to_string());
+                    self.replies
+                        .pop_front()
+                        .expect("no more fake replies")
+                        .map(|text| (text, self.generation_time))
+                },
+            )
+        }
+    }
+
+    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+    #[test]
+    fn subject_retry_is_not_used_when_the_first_output_names_the_term() {
+        let good = term_output("証拠金とは、取引の担保だよ。");
+        let mut fake = FakeTermGenerator::new(vec![Ok(good.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(good));
+        assert_eq!(fake.prompts, vec!["FIRST_PROMPT"]);
+    }
+
+    #[test]
+    fn subject_retry_returns_the_retried_output_when_it_names_the_term() {
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let good = term_output("証拠金とは、取引の担保だよ。");
+        let mut fake = FakeTermGenerator::new(vec![Ok(wrong), Ok(good.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(good));
+        assert_eq!(fake.prompts, vec!["FIRST_PROMPT", "RETRY_PROMPT"]);
+    }
+
+    #[test]
+    fn subject_retry_keeps_the_first_output_when_the_retry_is_also_wrong() {
+        // 作り直しも外れたら、従来どおり1回目の出力を返す（追加の呼び出しは1回だけ）。
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let still_wrong = term_output("ファンディングとは、手数料だよ。");
+        let mut fake = FakeTermGenerator::new(vec![Ok(wrong.clone()), Ok(still_wrong)]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(wrong));
+        assert_eq!(fake.prompts.len(), 2);
+    }
+
+    #[test]
+    fn subject_retry_keeps_the_first_output_when_the_retry_fails() {
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let mut fake =
+            FakeTermGenerator::new(vec![Ok(wrong.clone()), Err(LocalAiFailure::Timeout)]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(wrong));
+        assert_eq!(fake.prompts.len(), 2);
+    }
+
+    #[test]
+    fn subject_retry_does_not_retry_after_a_failed_first_call() {
+        let mut fake = FakeTermGenerator::new(vec![Err(LocalAiFailure::RequestFailed)]);
+        assert_eq!(fake.run(RETRY_BUDGET), Err(LocalAiFailure::RequestFailed));
+        assert_eq!(fake.prompts.len(), 1);
+    }
+
+    #[test]
+    fn subject_retry_is_skipped_when_the_first_call_used_up_the_budget() {
+        // 1回目が目安より長くかかったら、別の語の定義でも作り直さず1回目を返す。
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let mut fake = FakeTermGenerator::new(vec![Ok(wrong.clone())]);
+        fake.generation_time = std::time::Duration::from_secs(61);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(wrong));
+        assert_eq!(fake.prompts.len(), 1);
+    }
+
+    #[test]
+    fn subject_retry_prompt_adds_only_a_fixed_note_after_the_normal_prompt() {
+        let request = AiRequest {
+            prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
+            input_text: "証拠金".to_string(),
+            context: Some("タイトル: 永久先物の仕組み\n抜粋: 永久先物とは…".to_string()),
+        };
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let normal = build_prompt(&request, level);
+            let retry = build_term_explanation_subject_retry_prompt(&request, level);
+            // 通常のプロンプト（固定指示・防御指示・外部データの区切り・念押し）はそのまま残り、
+            // 末尾に固定の注意書きが足されるだけ。
+            assert_eq!(retry, format!("{normal}\n{TERM_SUBJECT_RETRY_NOTE}"));
+            assert!(!normal.contains(TERM_SUBJECT_RETRY_NOTE));
+        }
+        // 注意書きは外部データ（選択語・参考文脈）を含まない固定文。
+        assert!(!TERM_SUBJECT_RETRY_NOTE.contains("証拠金"));
+        assert!(!TERM_SUBJECT_RETRY_NOTE.contains("永久先物"));
+        assert!(TERM_SUBJECT_RETRY_NOTE.contains("選択語そのものの名前で始め"));
     }
 
     /// 実物の llama-server とモデルでの手動確認（CI では動かさない）。
