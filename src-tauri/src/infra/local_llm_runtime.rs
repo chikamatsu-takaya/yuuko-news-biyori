@@ -533,11 +533,62 @@ impl ServerProcess for Child {
     }
 }
 
-/// 生成要求1回の失敗（生のエラー文・本文は持たない）。
+/// 生成要求1回の失敗の種類（生のエラー文・本文・URL は持たない）。
+///
+/// 呼び出し側（`local_llm_service`）が固定の分類（`label`）と数値（状態番号・バイト数）だけをログへ残し、
+/// 呼び出し元へは従来どおり `LocalAiFailure::Timeout` / `RequestFailed` の2つにまとめて返す。
+/// 評価で原因の分からない失敗が続いたため、どの段階で落ちたかを見分けられるように分けている。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatError {
+    /// 接続できなかった（llama-server が止まった・番号が閉じている等）。
+    Connect,
+    /// 接続以外の送信の失敗（応答を返さずに切られた等）。
+    Send,
+    /// 送信・受信の待ち上限を超えた。
     Timeout,
-    Failed,
+    /// 2xx 以外の状態番号が返った。
+    Status(u16),
+    /// 応答本文が受信上限を超えた（値は宣言値、または読み取りを打ち切ったバイト数）。
+    BodyTooLarge(u64),
+    /// 応答本文の読み取りに失敗した。
+    BodyRead,
+    /// 応答本文が JSON として読めない（値は受信したバイト数）。
+    JsonParse(usize),
+    /// `choices` が無い・空。
+    EmptyChoices,
+    /// 本文（`message.content`）が無い・空（考える段を除くと空のときを含む）。
+    EmptyContent,
+    /// 出力の上限で途切れた（`finish_reason=length`）。
+    CutAtLength,
+}
+
+impl ChatError {
+    /// ログに出す固定の分類名（英小文字。可変の情報は含めない）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Send => "send",
+            Self::Timeout => "timeout",
+            Self::Status(_) => "status",
+            Self::BodyTooLarge(_) => "body_too_large",
+            Self::BodyRead => "body_read",
+            Self::JsonParse(_) => "json_parse",
+            Self::EmptyChoices => "empty_choices",
+            Self::EmptyContent => "empty_content",
+            Self::CutAtLength => "finish_length",
+        }
+    }
+
+    /// 送信の失敗（reqwest のエラー）を分類する。生のエラー文は URL を含みうるため取り込まない。
+    fn from_send(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else if error.is_connect() {
+            Self::Connect
+        } else {
+            Self::Send
+        }
+    }
 }
 
 /// 127.0.0.1 の llama-server へ送る HTTP クライアントを作る。
@@ -826,6 +877,7 @@ pub fn build_chat_body(
 }
 
 /// 生成要求を1回送り、本文を返す。上限で途切れた出力（`finish_reason=length`）は返さない。
+/// 失敗は段階ごとの `ChatError` で返す（ログは呼び出し側が分類と数値だけで残す）。
 pub fn chat(
     client: &Client,
     port: SpawnedLocalLlmPort,
@@ -837,22 +889,13 @@ pub fn chat(
         .bearer_auth(api_key)
         .json(body)
         .send()
-        .map_err(|error| {
-            if error.is_timeout() {
-                ChatError::Timeout
-            } else {
-                ChatError::Failed
-            }
-        })?;
+        .map_err(|error| ChatError::from_send(&error))?;
     if !response.status().is_success() {
-        log::warn!(
-            "local llm request was rejected: status={}",
-            response.status().as_u16()
-        );
-        return Err(ChatError::Failed);
+        return Err(ChatError::Status(response.status().as_u16()));
     }
-    if declared_length_exceeds(response.content_length(), MAX_RESPONSE_BODY_BYTES) {
-        return Err(ChatError::Failed);
+    let declared = response.content_length();
+    if declared_length_exceeds(declared, MAX_RESPONSE_BODY_BYTES) {
+        return Err(ChatError::BodyTooLarge(declared.unwrap_or_default()));
     }
     let mut bytes = Vec::new();
     response
@@ -863,27 +906,37 @@ pub fn chat(
             if error.kind() == std::io::ErrorKind::TimedOut {
                 ChatError::Timeout
             } else {
-                ChatError::Failed
+                ChatError::BodyRead
             }
         })?;
     if bytes.len() > MAX_RESPONSE_BODY_BYTES {
-        return Err(ChatError::Failed);
+        return Err(ChatError::BodyTooLarge(bytes.len() as u64));
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| ChatError::Failed)?;
-    extract_content(&value).ok_or(ChatError::Failed)
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| ChatError::JsonParse(bytes.len()))?;
+    extract_content(&value)
 }
 
-/// 応答から本文を取り出す（純粋関数）。途切れた出力・空の出力は None。
+/// 応答から本文を取り出す（純粋関数）。途切れた出力・空の出力は、それぞれの分類の失敗にする。
 /// 考える段の印（`<think>…</think>`）が先頭に残っていたら取り除く（HTML として検証に落ちないように）。
-pub fn extract_content(value: &Value) -> Option<String> {
-    let choice = value.get("choices")?.get(0)?;
+pub fn extract_content(value: &Value) -> Result<String, ChatError> {
+    let choice = value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .ok_or(ChatError::EmptyChoices)?;
     if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
-        log::warn!("local llm output was cut at the token limit");
-        return None;
+        return Err(ChatError::CutAtLength);
     }
-    let content = choice.get("message")?.get("content")?.as_str()?;
+    let content = choice
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .ok_or(ChatError::EmptyContent)?;
     let content = strip_leading_think_block(content).trim();
-    (!content.is_empty()).then(|| content.to_string())
+    if content.is_empty() {
+        return Err(ChatError::EmptyContent);
+    }
+    Ok(content.to_string())
 }
 
 fn strip_leading_think_block(content: &str) -> &str {
@@ -1083,19 +1136,211 @@ mod tests {
     fn extract_content_reads_first_choice_and_rejects_cut_or_empty_output() {
         let ok =
             json!({"choices": [{"message": {"content": "  要約だよ  "}, "finish_reason": "stop"}]});
-        assert_eq!(extract_content(&ok).as_deref(), Some("要約だよ"));
+        assert_eq!(extract_content(&ok).as_deref(), Ok("要約だよ"));
         let cut = json!({"choices": [{"message": {"content": "途中"}, "finish_reason": "length"}]});
-        assert_eq!(extract_content(&cut), None);
+        assert_eq!(extract_content(&cut), Err(ChatError::CutAtLength));
         let empty = json!({"choices": [{"message": {"content": "  "}}]});
-        assert_eq!(extract_content(&empty), None);
-        assert_eq!(extract_content(&json!({})), None);
+        assert_eq!(extract_content(&empty), Err(ChatError::EmptyContent));
+        let no_content = json!({"choices": [{"message": {"role": "assistant"}}]});
+        assert_eq!(extract_content(&no_content), Err(ChatError::EmptyContent));
+        let think_only = json!({"choices": [{"message": {"content": "<think>考え中</think>  "}}]});
+        assert_eq!(extract_content(&think_only), Err(ChatError::EmptyContent));
+        assert_eq!(
+            extract_content(&json!({"choices": []})),
+            Err(ChatError::EmptyChoices)
+        );
+        assert_eq!(extract_content(&json!({})), Err(ChatError::EmptyChoices));
     }
 
     #[test]
     fn extract_content_strips_a_leading_think_block() {
         let value =
             json!({"choices": [{"message": {"content": "<think>\n\n</think>\n\n本文だよ"}}]});
-        assert_eq!(extract_content(&value).as_deref(), Some("本文だよ"));
+        assert_eq!(extract_content(&value).as_deref(), Ok("本文だよ"));
+    }
+
+    #[test]
+    fn chat_error_labels_are_fixed_and_distinct() {
+        let all = [
+            ChatError::Connect,
+            ChatError::Send,
+            ChatError::Timeout,
+            ChatError::Status(500),
+            ChatError::BodyTooLarge(1),
+            ChatError::BodyRead,
+            ChatError::JsonParse(1),
+            ChatError::EmptyChoices,
+            ChatError::EmptyContent,
+            ChatError::CutAtLength,
+        ];
+        let labels: Vec<&str> = all.iter().map(|error| error.label()).collect();
+        for (index, label) in labels.iter().enumerate() {
+            assert!(!labels[..index].contains(label), "{label}");
+            assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        }
+        // 状態番号・大きさは分類名へ混ぜない（ログでは別の数値として出す）。
+        assert_eq!(
+            ChatError::Status(503).label(),
+            ChatError::Status(400).label()
+        );
+    }
+
+    // --- chat() の失敗の分類（127.0.0.1 の偽 HTTP サーバー）---
+
+    /// 1回だけ接続を受け、要求を読み切ってから `raw` をそのまま返す（`None` なら何も返さずに切る）。
+    fn one_shot_server(raw: Option<Vec<u8>>, delay: Duration) -> SpawnedLocalLlmPort {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = SpawnedLocalLlmPort::new(listener.local_addr().unwrap().port()).unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request(&mut stream);
+            std::thread::sleep(delay);
+            if let Some(raw) = raw {
+                let _ = stream.write_all(&raw);
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    /// ヘッダーと Content-Length 分の本文を読む（応答を返す前に要求を受け取り切るため）。
+    fn read_request(stream: &mut std::net::TcpStream) {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => return,
+            }
+        }
+        let length = String::from_utf8_lossy(&head)
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        let _ = stream.read_exact(&mut body);
+    }
+
+    fn http_response(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn chat_against(port: SpawnedLocalLlmPort, timeout: Duration) -> Result<String, ChatError> {
+        let client = build_http_client(timeout).unwrap();
+        chat(&client, port, "key", &build_chat_body("p", 8, None))
+    }
+
+    fn chat_once(raw: Option<Vec<u8>>) -> Result<String, ChatError> {
+        chat_against(one_shot_server(raw, Duration::ZERO), Duration::from_secs(5))
+    }
+
+    #[test]
+    fn chat_returns_the_content_on_success() {
+        let body = r#"{"choices":[{"message":{"content":"できたよ"},"finish_reason":"stop"}]}"#;
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", body))).as_deref(),
+            Ok("できたよ")
+        );
+    }
+
+    #[test]
+    fn chat_classifies_connect_failures() {
+        // 空き番号を選んで閉じる＝誰も待っていない番号へ送る。
+        let port = pick_free_port().unwrap();
+        assert_eq!(
+            chat_against(port, Duration::from_secs(5)),
+            Err(ChatError::Connect)
+        );
+    }
+
+    #[test]
+    fn chat_classifies_a_dropped_connection_as_send() {
+        // 要求を受け取ってから何も返さずに切る。
+        assert_eq!(chat_once(None), Err(ChatError::Send));
+    }
+
+    #[test]
+    fn chat_classifies_timeouts() {
+        let port = one_shot_server(None, Duration::from_millis(1500));
+        assert_eq!(
+            chat_against(port, Duration::from_millis(200)),
+            Err(ChatError::Timeout)
+        );
+    }
+
+    #[test]
+    fn chat_classifies_non_success_status_with_its_number() {
+        assert_eq!(
+            chat_once(Some(http_response("503 Service Unavailable", "{}"))),
+            Err(ChatError::Status(503))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_oversized_bodies() {
+        let declared = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_RESPONSE_BODY_BYTES + 10
+        );
+        assert_eq!(
+            chat_once(Some(declared.into_bytes())),
+            Err(ChatError::BodyTooLarge(MAX_RESPONSE_BODY_BYTES as u64 + 10))
+        );
+        // 宣言なし（接続を閉じて終わる）で上限を超える。読み取りは上限＋1 バイトで打ち切る。
+        let mut undeclared = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        undeclared.extend(std::iter::repeat_n(b'a', MAX_RESPONSE_BODY_BYTES + 10));
+        assert_eq!(
+            chat_once(Some(undeclared)),
+            Err(ChatError::BodyTooLarge(MAX_RESPONSE_BODY_BYTES as u64 + 1))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_a_truncated_body_as_body_read() {
+        // 100 バイトと宣言して 4 バイトで切る。
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"ch".to_vec();
+        assert_eq!(chat_once(Some(raw)), Err(ChatError::BodyRead));
+    }
+
+    #[test]
+    fn chat_classifies_invalid_json_with_its_size() {
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", "not json"))),
+            Err(ChatError::JsonParse(8))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_empty_or_cut_output() {
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", r#"{"choices":[]}"#))),
+            Err(ChatError::EmptyChoices)
+        );
+        assert_eq!(
+            chat_once(Some(http_response(
+                "200 OK",
+                r#"{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}"#
+            ))),
+            Err(ChatError::EmptyContent)
+        );
+        assert_eq!(
+            chat_once(Some(http_response(
+                "200 OK",
+                r#"{"choices":[{"message":{"content":"途中"},"finish_reason":"length"}]}"#
+            ))),
+            Err(ChatError::CutAtLength)
+        );
     }
 
     #[test]

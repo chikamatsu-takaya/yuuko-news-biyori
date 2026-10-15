@@ -3818,6 +3818,31 @@ test("settings shows the default frequency 1日3回まで when there is no saved
 const openSettingsMenu = (page: Page, label: string) =>
   page.getByRole("button", { name: label, exact: true }).click();
 
+// ゆうこ表示メニューのテーマ欄から、テーマを適用するカスタマイズ画面へ移動できる。
+// 未保存の変更があるあいだは、移動で変更が消えないようボタンを止めて保存を促す。
+test("settings theme row guides to the customize screen", async ({ page }) => {
+  await openSettings(page);
+
+  // 通知メニューで1つ変更して未保存にすると、移動ボタンは押せない。
+  await page.getByRole("switch").first().click();
+  await openSettingsMenu(page, "ゆうこ表示");
+  const openCustomize = page.getByRole("button", { name: "カスタマイズを開く" });
+  await expect(openCustomize).toBeDisabled();
+  await expect(page.getByTestId("theme-customize-guide")).toContainText(
+    "先に設定を保存してね"
+  );
+
+  // 変更を戻すと押せるようになり、カスタマイズ画面へ移る。
+  await openSettingsMenu(page, "通知");
+  await page.getByRole("switch").first().click();
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(openCustomize).toBeEnabled();
+  await openCustomize.click();
+  await expect(
+    page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()
+  ).toBeVisible();
+});
+
 // 自動要約スイッチ: 既定は OFF、ON にして保存すると autoSummaryEnabled=true で保存され、再読込で復元される。
 test("settings auto summary switch is off by default and saves autoSummaryEnabled", async ({
   page,
@@ -4341,7 +4366,11 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   // ゆうこ表示メニュー: selectedThemeId が読み取り専用で表示される。
   await openSettingsMenu(page, "ゆうこ表示");
   await expect(page.getByTestId("current-theme-id")).toHaveText("さくら");
-  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+  // テーマ変更は「準備中」ではなく、カスタマイズ画面への案内を出す。
+  await expect(page.getByText("変更機能は準備中")).toHaveCount(0);
+  await expect(page.getByTestId("theme-customize-guide")).toHaveText(
+    "テーマはカスタマイズ画面で変えられるよ"
+  );
 
   // その他メニュー: genres が反映される。
   await openSettingsMenu(page, "その他");
@@ -4457,8 +4486,8 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
   await openSettingsMenu(page, "ゆうこ表示");
   // 未知の ID（"sakura"）は既定テーマの表示名へ倒すが、保存値は書き換えずに維持する（上の saved 確認）。
   await expect(page.getByTestId("current-theme-id")).toHaveText("クリーム");
-  // 「変更機能は準備中」が表示され、テーマ値は編集不可のプレーン表示（span）であること。
-  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+  // カスタマイズ画面への案内が表示され、テーマ値は編集不可のプレーン表示（span）であること。
+  await expect(page.getByTestId("theme-customize-guide")).toBeVisible();
   await expect(page.getByTestId("current-theme-id")).toHaveJSProperty(
     "tagName",
     "SPAN"
@@ -4477,10 +4506,11 @@ test("settings postponed controls without a DTO field are disabled or removed", 
 }) => {
   await openSettings(page);
 
-  // ゆうこ表示: 現在のテーマ（読み取り専用）だけが残り、外した4項目は表示されない。
+  // ゆうこ表示: 現在のテーマ（読み取り専用）とカスタマイズ画面への案内だけが残り、外した4項目は表示されない。
   await openSettingsMenu(page, "ゆうこ表示");
   await expect(page.getByTestId("current-theme-id")).toBeVisible();
-  await expect(page.getByText("変更機能は準備中")).toBeVisible();
+  await expect(page.getByText("変更機能は準備中")).toHaveCount(0);
+  await expect(page.getByTestId("theme-customize-guide")).toBeVisible();
   await expect(page.getByRole("switch")).toHaveCount(0);
   await expect(page.getByRole("combobox")).toHaveCount(0);
   for (const label of [

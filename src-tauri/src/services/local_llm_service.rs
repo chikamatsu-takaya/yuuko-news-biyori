@@ -110,6 +110,38 @@ pub fn should_stop_idle(
     in_flight == 0 && last_used.is_some_and(|used| now.saturating_duration_since(used) >= idle)
 }
 
+/// 生成要求の失敗を呼び出し元へ返す固定分類へまとめる（純粋関数）。
+/// 時間切れだけを分け、それ以外の段階の違いはログだけに残す（画面の文言・エラーコードは変えない）。
+fn chat_failure_to_local(error: ChatError) -> LocalAiFailure {
+    match error {
+        ChatError::Timeout => LocalAiFailure::Timeout,
+        _ => LocalAiFailure::RequestFailed,
+    }
+}
+
+/// ログに添える数値（状態番号・バイト数）。分類だけで足りるものは None（純粋関数）。
+fn chat_failure_detail(error: ChatError) -> Option<(&'static str, u64)> {
+    match error {
+        ChatError::Status(status) => Some(("status", u64::from(status))),
+        ChatError::BodyTooLarge(bytes) => Some(("bytes", bytes)),
+        ChatError::JsonParse(bytes) => Some(("bytes", bytes as u64)),
+        _ => None,
+    }
+}
+
+/// 生成要求の失敗を、固定の分類・数値・所要時間だけでログへ残す。
+/// プロンプト・応答本文・合言葉・URL（番号を含む）は出さない。
+fn log_chat_failure(error: ChatError, elapsed: Duration) {
+    let reason = error.label();
+    let secs = elapsed.as_secs_f32();
+    match chat_failure_detail(error) {
+        Some((name, value)) => {
+            log::warn!("local llm request failed: reason={reason} {name}={value} after {secs:.1}s")
+        }
+        None => log::warn!("local llm request failed: reason={reason} after {secs:.1}s"),
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     /// 起動した子プロセス。起動した直後から持つ（応答を待つ間も `shutdown` で止められるように）。
@@ -370,8 +402,10 @@ impl LocalLlmService {
         // 起動の前から「走っている」と数える＝起動し終えてから数え始めるまでの間に、見張りが止める道を作らない。
         let _in_flight = InFlight::begin(&self.shared, self.usage);
         let (port, api_key) = self.ensure_started()?;
-        let client = build_http_client(self.shared.config.generate_timeout)
-            .ok_or(LocalAiFailure::RequestFailed)?;
+        let Some(client) = build_http_client(self.shared.config.generate_timeout) else {
+            log::warn!("local llm request failed: reason=client_build");
+            return Err(LocalAiFailure::RequestFailed);
+        };
         let started = Instant::now();
         let result = chat(
             &client,
@@ -379,19 +413,15 @@ impl LocalLlmService {
             &api_key,
             &build_chat_body(prompt, max_tokens, response_format),
         );
+        let elapsed = started.elapsed();
         match result {
             Ok(text) => {
-                let elapsed = started.elapsed();
                 log::info!("local llm generated text in {:.1}s", elapsed.as_secs_f32());
                 Ok((text, elapsed))
             }
-            Err(ChatError::Timeout) => {
-                log::warn!("local llm request timed out");
-                Err(LocalAiFailure::Timeout)
-            }
-            Err(ChatError::Failed) => {
-                log::warn!("local llm request failed");
-                Err(LocalAiFailure::RequestFailed)
+            Err(error) => {
+                log_chat_failure(error, elapsed);
+                Err(chat_failure_to_local(error))
             }
         }
     }
@@ -660,6 +690,10 @@ mod tests {
         NeverReady,
         /// 起動直後に止まる。
         ExitImmediately,
+        /// 起動して `/health` に応えるが、生成要求には 500 を返す。
+        RejectChat,
+        /// 起動して `/health` に応えるが、生成は出力の上限で途切れる（`finish_reason=length`）。
+        CutChat,
     }
 
     #[derive(Debug)]
@@ -861,10 +895,23 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let payload = serde_json::json!({
-                "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]
-            });
-            ("200 OK", payload.to_string())
+            match mode {
+                FakeMode::RejectChat => ("500 Internal Server Error", "{}".to_string()),
+                FakeMode::CutChat => (
+                    "200 OK",
+                    serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "length"}]
+                    })
+                    .to_string(),
+                ),
+                _ => (
+                    "200 OK",
+                    serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]
+                    })
+                    .to_string(),
+                ),
+            }
         } else {
             ("404 Not Found", "{}".to_string())
         };
@@ -1017,6 +1064,74 @@ mod tests {
         let bodies = launcher.bodies();
         assert_eq!(bodies[0]["max_tokens"], CONNECTION_CHECK_MAX_TOKENS);
         assert_eq!(bodies[0]["messages"][0]["content"], CONNECTION_CHECK_PROMPT);
+    }
+
+    // --- 生成要求の失敗（分類はログだけに残し、返す値は従来の固定分類）---
+
+    #[test]
+    fn chat_failures_keep_the_returned_failure_kinds() {
+        // 時間切れだけが Timeout、ほかの段階の失敗はすべて RequestFailed（画面の文言・コードを変えない）。
+        assert_eq!(
+            chat_failure_to_local(ChatError::Timeout),
+            LocalAiFailure::Timeout
+        );
+        for error in [
+            ChatError::Connect,
+            ChatError::Send,
+            ChatError::Status(500),
+            ChatError::BodyTooLarge(1),
+            ChatError::BodyRead,
+            ChatError::JsonParse(3),
+            ChatError::EmptyChoices,
+            ChatError::EmptyContent,
+            ChatError::CutAtLength,
+        ] {
+            assert_eq!(
+                chat_failure_to_local(error),
+                LocalAiFailure::RequestFailed,
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_failure_detail_is_only_a_number() {
+        assert_eq!(
+            chat_failure_detail(ChatError::Status(503)),
+            Some(("status", 503))
+        );
+        assert_eq!(
+            chat_failure_detail(ChatError::BodyTooLarge(9)),
+            Some(("bytes", 9))
+        );
+        assert_eq!(
+            chat_failure_detail(ChatError::JsonParse(8)),
+            Some(("bytes", 8))
+        );
+        assert_eq!(chat_failure_detail(ChatError::CutAtLength), None);
+        assert_eq!(chat_failure_detail(ChatError::Connect), None);
+    }
+
+    #[test]
+    fn rejected_or_cut_generation_returns_request_failed_and_keeps_the_server() {
+        for (name, mode) in [("reject", FakeMode::RejectChat), ("cut", FakeMode::CutChat)] {
+            let bundle = temp_bundle(name, true, Some(MODEL_BYTES));
+            let launcher = FakeLauncher::new(mode);
+            let service = service_with(&bundle, launcher.clone(), test_config());
+            assert_eq!(
+                service.generate("p", 8),
+                Err(LocalAiFailure::RequestFailed),
+                "{name}"
+            );
+            // 生成の失敗では llama-server を止めない（次の要求で起動し直さない）。
+            assert!(service.is_running(), "{name}");
+            assert_eq!(
+                service.generate("p", 8),
+                Err(LocalAiFailure::RequestFailed),
+                "{name}"
+            );
+            assert_eq!(launcher.launches(), 1, "{name}");
+        }
     }
 
     // --- 同梱物が無い・壊れている ---
