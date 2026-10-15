@@ -443,6 +443,9 @@ const RUDE_ADDRESS_TERMS: [&str; 18] = [
 /// （「お前らも気をつけてね」→「みんなも気をつけてね」）。
 const RUDE_ADDRESS_REPLACEMENT: &str = "みんな";
 
+/// 「お前さん」のように「さん」が続く形は親しみの呼び方なので言い換えない（「みんなさん」にしないため。レビュー指摘）。
+const RUDE_ADDRESS_POLITE_SUFFIX: &str = "さん";
+
 /// 文頭の呼びかけ（「ねえ、お前ら、」「おい、お前！」）で、失礼な語の前に付く呼びかけの語。語と一緒に落とす。
 const RUDE_VOCATIVE_LEADS: [&str; 6] = ["ねえ", "ねぇ", "おい", "なあ", "なぁ", "ほら"];
 
@@ -469,43 +472,45 @@ pub(crate) fn soften_rude_address(text: &str) -> (String, usize) {
 
 fn soften_rude_address_with(text: &str, drop_vocatives: bool) -> (String, usize) {
     let mut count = 0;
-    let lines =
-        text.lines()
-            .map(|line| {
-                let mut out = String::with_capacity(line.len());
-                let mut quote_depth = 0usize;
-                let mut rest = line;
-                while let Some(c) = rest.chars().next() {
-                    if quote_depth == 0 {
-                        let at_sentence_start = is_at_sentence_start(&out);
-                        if drop_vocatives && at_sentence_start {
-                            if let Some(after) = strip_rude_vocative(rest) {
-                                count += 1;
-                                rest = after;
-                                continue;
-                            }
-                        }
-                        if let Some(term) = RUDE_ADDRESS_TERMS.iter().find(|term| {
-                            rest.starts_with(*term) && is_rude_term_boundary(&out, term)
-                        }) {
+    let lines = text
+        .lines()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut quote_depth = 0usize;
+            let mut rest = line;
+            while let Some(c) = rest.chars().next() {
+                if quote_depth == 0 {
+                    let at_sentence_start = is_at_sentence_start(&out);
+                    if drop_vocatives && at_sentence_start {
+                        if let Some(after) = strip_rude_vocative(rest) {
                             count += 1;
-                            out.push_str(RUDE_ADDRESS_REPLACEMENT);
-                            rest = &rest[term.len()..];
+                            rest = after;
                             continue;
                         }
                     }
-                    match c {
-                        '「' | '『' => quote_depth += 1,
-                        '」' | '』' => quote_depth = quote_depth.saturating_sub(1),
-                        _ => {}
+                    if let Some(term) = RUDE_ADDRESS_TERMS.iter().find(|term| {
+                        rest.starts_with(*term)
+                            && !rest[term.len()..].starts_with(RUDE_ADDRESS_POLITE_SUFFIX)
+                            && is_rude_term_boundary(&out, term)
+                    }) {
+                        count += 1;
+                        out.push_str(RUDE_ADDRESS_REPLACEMENT);
+                        rest = &rest[term.len()..];
+                        continue;
                     }
-                    out.push(c);
-                    rest = &rest[c.len_utf8()..];
                 }
-                out.trim().to_string()
-            })
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
+                match c {
+                    '「' | '『' => quote_depth += 1,
+                    '」' | '』' => quote_depth = quote_depth.saturating_sub(1),
+                    _ => {}
+                }
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+            out.trim().to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
     (lines.join("\n"), count)
 }
 
@@ -2165,6 +2170,7 @@ mod tests {
             "名前を変えたサービスだよ。",
             "職人の腕前が光るね。",
             "とお前後の数だよ。",
+            "お前さんも気をつけてね。",
             "便利な機能が増えたよ。",
         ] {
             assert_eq!(soften_rude_address(text), (text.to_string(), 0), "{text}");
