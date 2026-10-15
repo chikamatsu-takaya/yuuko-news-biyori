@@ -5,6 +5,11 @@
 //!   `shutdown` が子プロセスを見つけて止められるようにする。
 //! - **しばらく使わなければ止める**（既定 5 分）: 常駐アプリなので、メモリ（約 2GB）を長く握らない。
 //!   生成・起動待ちの間は数えておき（in-flight）、使用中の要求を止めない。
+//! - **自動要約が終わったら早めに止める**（既定 60 秒）: 自動要約キューは待機列が空になったら `release_soon` を呼ぶ。
+//!   その後に要求が来なければ、5 分を待たずに止める。ただし利用者の操作（手動の要約・用語解説・接続テスト）が
+//!   直近 5 分以内にあったときは従来どおり 5 分で止める（続けて使う見込みが高いため）。
+//!   早めの停止の予約は、次の要求（手動・自動とも）が始まった時点で取り消す。どの要求かは窓口の用途
+//!   （`LocalLlmUse`。自動要約は `for_background` で作った窓口）で見分ける。
 //! - **アプリ終了で必ず止める**: `app_lifecycle` の終了経路から `shutdown` を呼ぶ。
 //! - 失敗は `LocalAiFailure` の固定分類で返し、黙って Gemini / Mock へ切り替えない。
 //! - モデルの SHA-256 は 1.3GB を読むため、アプリの起動中に1度だけ確かめる（大きさは毎回見る）。
@@ -36,8 +41,10 @@ pub struct LocalLlmConfig {
     pub start_timeout: Duration,
     /// 生成1回の上限（CPU だけ・約 20 トークン/秒で 1024 トークン＋入力の読み込みが収まる長さ）。
     pub generate_timeout: Duration,
-    /// 最後に使ってからこれだけ使わなければ止める。
+    /// 最後に使ってからこれだけ使わなければ止める。利用者の操作が「直近」かを見る幅にも使う。
     pub idle_stop: Duration,
+    /// 自動要約が終わった（`release_soon`）後、これだけ要求が無ければ止める。
+    pub early_release_grace: Duration,
     /// 「しばらく使っていない」を見る間隔。
     pub idle_poll: Duration,
     /// 起動待ちの間に `/health` を見る間隔。
@@ -54,6 +61,7 @@ impl Default for LocalLlmConfig {
             start_timeout: Duration::from_secs(120),
             generate_timeout: Duration::from_secs(180),
             idle_stop: Duration::from_secs(5 * 60),
+            early_release_grace: Duration::from_secs(60),
             idle_poll: Duration::from_secs(30),
             health_interval: Duration::from_millis(300),
             model_size: MODEL_SIZE,
@@ -61,6 +69,33 @@ impl Default for LocalLlmConfig {
             runtime_files: runtime_manifest(),
         }
     }
+}
+
+/// 窓口の用途。手動（利用者の操作）か、自動要約のような裏の処理か。
+/// 早めの停止（`release_soon`）を、直近に利用者の操作があったときには行わないために見分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalLlmUse {
+    /// 利用者の操作（手動の要約・用語解説・接続テスト）。既定。
+    Manual,
+    /// 自動要約キュー（利用者が待っていない処理）。
+    Background,
+}
+
+/// 早めの停止の予約を受けて止めてよいか（純粋関数）。
+/// 生成・起動待ちが走っている間は止めない。予約から `grace` 経っていて、かつ利用者の操作が
+/// 直近 `manual_window` 以内に無いときだけ true（利用者の操作があれば、通常の「しばらく使わなければ止める」に任せる）。
+pub fn should_release_early(
+    release_requested: Option<Instant>,
+    last_manual_used: Option<Instant>,
+    in_flight: u32,
+    now: Instant,
+    grace: Duration,
+    manual_window: Duration,
+) -> bool {
+    in_flight == 0
+        && release_requested
+            .is_some_and(|requested| now.saturating_duration_since(requested) >= grace)
+        && last_manual_used.is_none_or(|used| now.saturating_duration_since(used) >= manual_window)
 }
 
 /// 「しばらく使っていない」で止めてよいか（純粋関数）。生成・起動待ちが走っている間は止めない。
@@ -83,6 +118,10 @@ struct Inner {
     /// `/health` が応えたか（起動待ちの間は false）。
     ready: bool,
     last_used: Option<Instant>,
+    /// 利用者の操作（`LocalLlmUse::Manual`）で最後に使った時刻。止めても消さない（利用者の操作の新しさを見るため）。
+    last_manual_used: Option<Instant>,
+    /// 早めの停止の予約時刻（`release_soon`）。次の要求の開始・停止で消す。
+    release_requested: Option<Instant>,
     /// この回のアプリ起動中に、モデルの SHA-256 を確かめ済みか。
     verified: bool,
     /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わない（または部品が欠けている）と分かったか。
@@ -100,6 +139,7 @@ impl Inner {
         self.api_key = None;
         self.ready = false;
         self.last_used = None;
+        self.release_requested = None;
         self.process.take()
     }
 }
@@ -135,18 +175,37 @@ impl Shared {
         }
     }
 
+    /// 見張りから呼ぶ。しばらく使っていない、または早めの停止の予約が満ちていれば止める。
+    /// 判定と状態からの取り外しを同じロックの中で行うため、要求の開始（`InFlight::begin`）とは前後どちらかに決まる
+    /// （開始が先なら止めない。取り外しが先なら、その要求は起動し直す）。
     fn stop_if_idle(&self, now: Instant) {
-        let process = {
+        let (process, early) = {
             let mut state = self.lock_state();
-            if state.process.is_none()
-                || !should_stop_idle(state.last_used, state.in_flight, now, self.config.idle_stop)
-            {
+            if state.process.is_none() {
                 return;
             }
-            state.take_process()
+            let config = &self.config;
+            let idle = should_stop_idle(state.last_used, state.in_flight, now, config.idle_stop);
+            let early = !idle
+                && should_release_early(
+                    state.release_requested,
+                    state.last_manual_used,
+                    state.in_flight,
+                    now,
+                    config.early_release_grace,
+                    config.idle_stop,
+                );
+            if !idle && !early {
+                return;
+            }
+            (state.take_process(), early)
         };
         if let Some(mut process) = process {
-            log::info!("local llm was idle; stopping llama-server");
+            if early {
+                log::info!("auto summary finished; stopping llama-server early");
+            } else {
+                log::info!("local llm was idle; stopping llama-server");
+            }
             process.stop();
         }
     }
@@ -160,32 +219,49 @@ impl Drop for Shared {
 }
 
 /// 生成・起動待ちが走っている間を数える（失敗した道でも必ず数を戻す）。
-struct InFlight<'a>(&'a Shared);
+/// 始まった時点で早めの停止の予約を取り消す（手動の要求のあとは使い続ける見込みがあり、
+/// 自動要約の次の1件は通常どおり動かすため。待機列が空になれば、キューがまた予約する）。
+struct InFlight<'a> {
+    shared: &'a Shared,
+    usage: LocalLlmUse,
+}
 
 impl<'a> InFlight<'a> {
-    fn begin(shared: &'a Shared) -> Self {
+    fn begin(shared: &'a Shared, usage: LocalLlmUse) -> Self {
+        let now = Instant::now();
         let mut state = shared.lock_state();
         state.in_flight += 1;
-        state.last_used = Some(Instant::now());
+        state.last_used = Some(now);
+        state.release_requested = None;
+        if usage == LocalLlmUse::Manual {
+            state.last_manual_used = Some(now);
+        }
         drop(state);
-        Self(shared)
+        Self { shared, usage }
     }
 }
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.lock_state();
+        let now = Instant::now();
+        let mut state = self.shared.lock_state();
         state.in_flight = state.in_flight.saturating_sub(1);
         if state.process.is_some() {
-            state.last_used = Some(Instant::now());
+            state.last_used = Some(now);
+        }
+        // 手動の要求は終わった時刻からも「直近の操作」として数える（生成に時間がかかっても窓を短くしない）。
+        if self.usage == LocalLlmUse::Manual {
+            state.last_manual_used = Some(now);
         }
     }
 }
 
 /// 同梱ローカルLLMの窓口。`Clone` は同じ状態（同じ子プロセス）を共有する。
+/// `usage` は窓口ごとの用途で、`for_background` で作った窓口だけが自動要約（裏の処理）として数えられる。
 #[derive(Clone)]
 pub struct LocalLlmService {
     shared: Arc<Shared>,
+    usage: LocalLlmUse,
 }
 
 impl std::fmt::Debug for LocalLlmService {
@@ -193,6 +269,7 @@ impl std::fmt::Debug for LocalLlmService {
         // 合言葉・番号は出さない。
         f.debug_struct("LocalLlmService")
             .field("bundle_dir", &self.shared.bundle_dir)
+            .field("usage", &self.usage)
             .finish_non_exhaustive()
     }
 }
@@ -227,7 +304,30 @@ impl LocalLlmService {
                 watcher_started: AtomicBool::new(false),
                 shut_down: AtomicBool::new(false),
             }),
+            usage: LocalLlmUse::Manual,
         }
+    }
+
+    /// 同じ状態（同じ子プロセス）を共有し、自動要約（裏の処理）として数える窓口を返す。
+    /// この窓口からの要求は「利用者の操作」に数えないため、早めの停止（`release_soon`）を妨げない。
+    pub fn for_background(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            usage: LocalLlmUse::Background,
+        }
+    }
+
+    /// 自動要約キューの待機列が空になったときに呼ぶ。動いていれば、`early_release_grace`（既定 60 秒）の間に
+    /// 次の要求が来なければ止める予約をする。直近 5 分以内に利用者の操作があったときは予約しても止めない
+    /// （従来どおり最後に使ってから 5 分で止まる）。止まっていれば何もしない。
+    pub fn release_soon(&self) {
+        let mut state = self.shared.lock_state();
+        if state.process.is_none() {
+            return;
+        }
+        state.release_requested = Some(Instant::now());
+        drop(state);
+        log::debug!("local llm early stop requested");
     }
 
     /// プロンプトを送り、生成された本文を返す（必要なら起動してから）。
@@ -266,7 +366,7 @@ impl LocalLlmService {
         response_format: Option<ResponseFormat>,
     ) -> Result<(String, Duration), LocalAiFailure> {
         // 起動の前から「走っている」と数える＝起動し終えてから数え始めるまでの間に、見張りが止める道を作らない。
-        let _in_flight = InFlight::begin(&self.shared);
+        let _in_flight = InFlight::begin(&self.shared, self.usage);
         let (port, api_key) = self.ensure_started()?;
         let client = build_http_client(self.shared.config.generate_timeout)
             .ok_or(LocalAiFailure::RequestFailed)?;
@@ -825,6 +925,7 @@ mod tests {
             start_timeout: Duration::from_secs(5),
             generate_timeout: Duration::from_secs(5),
             idle_stop: Duration::from_secs(60),
+            early_release_grace: Duration::from_secs(60),
             idle_poll: Duration::from_millis(20),
             health_interval: Duration::from_millis(20),
             model_size: MODEL_BYTES.len() as u64,
@@ -1097,6 +1198,188 @@ mod tests {
         // 次の要求で起動し直す。
         assert_eq!(service.generate("p", 8).as_deref(), Ok("要約だよ"));
         assert_eq!(launcher.launches(), 2);
+    }
+
+    // --- 自動要約が終わったら早めに止める（release_soon）---
+
+    #[test]
+    fn should_release_early_needs_a_request_the_grace_and_no_recent_manual_use() {
+        // Instant を過去へ戻せない環境があるため、基準から未来へ進めて作る（偽の時計）。
+        let base = Instant::now();
+        let grace = Duration::from_secs(60);
+        let window = Duration::from_secs(300);
+        let at = |secs: u64| base + Duration::from_secs(secs);
+
+        // 予約から 60 秒経って、利用者の操作が無い → 止める。
+        assert!(should_release_early(
+            Some(at(0)),
+            None,
+            0,
+            at(60),
+            grace,
+            window
+        ));
+        // 予約が無い・まだ 60 秒経っていない → 止めない。
+        assert!(!should_release_early(None, None, 0, at(600), grace, window));
+        assert!(!should_release_early(
+            Some(at(0)),
+            None,
+            0,
+            at(59),
+            grace,
+            window
+        ));
+        // 生成・起動待ちが走っている → 止めない。
+        assert!(!should_release_early(
+            Some(at(0)),
+            None,
+            1,
+            at(60),
+            grace,
+            window
+        ));
+        // 利用者の操作が直近 5 分以内 → 止めない（通常の 5 分に任せる）。
+        assert!(!should_release_early(
+            Some(at(100)),
+            Some(at(0)),
+            0,
+            at(299),
+            grace,
+            window
+        ));
+        // 利用者の操作が 5 分より前 → 止める。
+        assert!(should_release_early(
+            Some(at(300)),
+            Some(at(0)),
+            0,
+            at(360),
+            grace,
+            window
+        ));
+    }
+
+    fn early_release_config(grace: Duration) -> LocalLlmConfig {
+        LocalLlmConfig {
+            // 通常の「しばらく使わなければ止める」はテストの間に起きない長さにする。
+            idle_stop: Duration::from_secs(60),
+            early_release_grace: grace,
+            ..test_config()
+        }
+    }
+
+    #[test]
+    fn release_soon_stops_the_server_after_the_grace_when_only_background_used_it() {
+        let bundle = temp_bundle("early", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(
+            &bundle,
+            launcher.clone(),
+            early_release_config(Duration::from_millis(100)),
+        );
+        let background = service.for_background();
+        background.generate("自動要約", 8).expect("generated");
+        background.release_soon();
+        assert!(wait_until(|| launcher.stops() == 1, Duration::from_secs(3)));
+        assert!(!service.is_running());
+
+        // 次の自動要約は通常どおり起動し直す。
+        background.generate("次の記事", 8).expect("generated again");
+        assert_eq!(launcher.launches(), 2);
+        assert!(service.is_running());
+    }
+
+    #[test]
+    fn release_soon_does_nothing_while_stopped() {
+        let bundle = temp_bundle("early-stopped", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(
+            &bundle,
+            launcher.clone(),
+            early_release_config(Duration::from_millis(50)),
+        );
+        service.for_background().release_soon();
+        assert!(service.shared.lock_state().release_requested.is_none());
+        assert_eq!(launcher.launches(), 0);
+    }
+
+    #[test]
+    fn recent_manual_use_keeps_the_normal_idle_window() {
+        let bundle = temp_bundle("early-manual", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(
+            &bundle,
+            launcher.clone(),
+            early_release_config(Duration::from_millis(50)),
+        );
+        // 利用者が用語解説などを使った後に、自動要約が走って終わった。
+        service.generate("用語解説", 8).expect("manual");
+        let background = service.for_background();
+        background.generate("自動要約", 8).expect("background");
+        background.release_soon();
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(service.is_running(), "recent manual use keeps the server");
+        assert_eq!(launcher.stops(), 0);
+    }
+
+    #[test]
+    fn a_request_during_the_grace_cancels_the_early_stop() {
+        let bundle = temp_bundle("early-cancel", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let grace = Duration::from_millis(300);
+        let service = service_with(&bundle, launcher.clone(), early_release_config(grace));
+        let background = service.for_background();
+
+        // 自動要約の次の1件が猶予の間に来た → 予約は消え、止めない。
+        background.generate("1件目", 8).expect("first");
+        background.release_soon();
+        background.generate("2件目", 8).expect("second");
+        std::thread::sleep(grace * 2);
+        assert!(
+            service.is_running(),
+            "a new queue item cancels the early stop"
+        );
+
+        // 手動の要求が猶予の間に来た → 止めない（以後は通常の 5 分）。
+        background.release_soon();
+        service.generate("手動", 8).expect("manual");
+        std::thread::sleep(grace * 2);
+        assert!(
+            service.is_running(),
+            "a manual request keeps the server alive"
+        );
+        // 手動の操作が直近にあるので、改めて予約しても止めない。
+        background.release_soon();
+        std::thread::sleep(grace * 2);
+        assert!(service.is_running());
+        assert_eq!(launcher.launches(), 1);
+        assert_eq!(launcher.stops(), 0);
+    }
+
+    #[test]
+    fn early_stop_never_kills_an_in_flight_request() {
+        let bundle = temp_bundle("early-inflight", true, Some(MODEL_BYTES));
+        // 生成に 500ms かかる間に、予約（猶予 30ms）が何度も満ちる。
+        let launcher = FakeLauncher::with_delay(FakeMode::Healthy, Duration::from_millis(500));
+        let service = service_with(
+            &bundle,
+            launcher.clone(),
+            early_release_config(Duration::from_millis(30)),
+        );
+        let background = service.for_background();
+        background.generate("起動", 8).expect("started");
+        let worker = {
+            let background = background.clone();
+            std::thread::spawn(move || background.generate("生成中", 8))
+        };
+        assert!(wait_until(
+            || service.shared.lock_state().in_flight == 1,
+            Duration::from_secs(3)
+        ));
+        background.release_soon();
+        // 走っている要求は止められずに答えを受け取れる。
+        assert_eq!(worker.join().unwrap().as_deref(), Ok("要約だよ"));
+        // 終わった後、予約どおり止まる。
+        assert!(wait_until(|| launcher.stops() == 1, Duration::from_secs(3)));
     }
 
     // --- 終了時の停止 ---
