@@ -161,6 +161,15 @@ impl AiProviderService {
         self
     }
 
+    /// 自動要約キュー用。同じ設定・同じローカルLLMを使い、ローカルLLMへの要求を「利用者の操作」に数えない写し。
+    /// 自動要約が終わった後の早めの停止（`LocalLlmService::release_soon`）を、直近の手動操作だけが妨げるようにする。
+    pub fn for_background(&self) -> Self {
+        Self {
+            gemini_client: self.gemini_client.clone(),
+            local_llm: self.local_llm.for_background(),
+        }
+    }
+
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約の可否判定用・判断台帳 D56 / D103）。
     /// AI を呼ばず、ローカルLLMも起動しない。Gemini はキーの有無（値は扱わない）、
     /// ローカルは同梱物の有無と大きさだけを見る。Mock・未実装の openai は実AIではないので false。

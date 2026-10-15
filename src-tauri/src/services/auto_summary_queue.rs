@@ -24,8 +24,11 @@
 //!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使い、通知の抑制設定には
 //!   左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
 //! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から5分で止まる（`local_llm_service`）。
-//!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使い、
-//!   待機列が空になれば5分後に止まる。要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
+//!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
+//!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
+//!   5分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約2GBを長く握らないため）。
+//!   自動要約からの要求は `for_background` の窓口を通し、利用者の操作とは別に数える（summary_service）。
+//!   要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
 //!   一時ファイルへ書き切ってから tmp→bak→本体 の順に差し替える方式（article_repository の
 //!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
@@ -56,6 +59,7 @@ use crate::infra::fullscreen_detector::{
 use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::article_service::ArticleService;
+use crate::services::local_llm_service::LocalLlmService;
 use crate::services::summary_service::{AutoSummaryOutcome, SummaryService};
 
 /// 1記事あたりの試行回数の上限（初回を含めた合計）。
@@ -143,6 +147,12 @@ impl QueueCore {
 
     fn clear_pending(&self) {
         self.lock().pending.clear();
+    }
+
+    /// 待機中の記事も処理中の記事も無いか（待機列が空になったか）。
+    fn is_drained(&self) -> bool {
+        let state = self.lock();
+        state.pending.is_empty() && state.processing.is_none()
     }
 
     fn state_of(&self, article_id: &str) -> SummaryState {
@@ -295,6 +305,9 @@ type AiReadyCheck = Arc<dyn Fn(AiProvider) -> bool + Send + Sync>;
 /// 全画面・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
 type UserBusyCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// 待機列が空になったときの知らせ。本番は `LocalLlmService::release_soon`（早めの停止の予約）。
+type DrainedHook = Arc<dyn Fn() + Send + Sync>;
+
 /// 全画面（プレゼン・ゲームなど）またはマイク使用中か。会議中は「会議アプリ起動中 かつ マイク使用中」
 /// なので、マイク使用中を見れば含まれる。OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
 /// どのアプリかは扱わず、真偽値だけを使う。
@@ -315,6 +328,8 @@ pub struct AutoSummaryQueue {
     ai_ready: AiReadyCheck,
     /// 本番は `is_user_busy_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
     user_busy: UserBusyCheck,
+    /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm_release` で差し込む）。
+    on_drained: DrainedHook,
 }
 
 impl AutoSummaryQueue {
@@ -331,7 +346,22 @@ impl AutoSummaryQueue {
             settings_repository,
             ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
             user_busy: Arc::new(is_user_busy_on_this_pc),
+            on_drained: Arc::new(|| {}),
         }
+    }
+
+    /// 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（lib.rs で、要約に使うのと同じ窓口を渡す）。
+    /// 動いていなければ何もしない。直近の手動操作があるときにいつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
+    pub fn with_local_llm_release(mut self, local_llm: LocalLlmService) -> Self {
+        self.on_drained = Arc::new(move || local_llm.release_soon());
+        self
+    }
+
+    /// 待機列が空になったときの知らせを差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_drained_hook(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_drained = Arc::new(hook);
+        self
     }
 
     /// 実AIを呼べる見込みの判定を差し替える（テスト用）。
@@ -396,6 +426,7 @@ impl AutoSummaryQueue {
                         })
                 },
             );
+            self.notify_if_drained(&outcome);
             match outcome {
                 // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける
                 // （Gemini は毎分上限を守るため、ローカルは CPU を他の操作へ返すため）。
@@ -415,6 +446,15 @@ impl AutoSummaryQueue {
                 | StepOutcome::Stopped
                 | StepOutcome::Disabled => {}
             }
+        }
+    }
+
+    /// 記事を取り出して片付けた（または無効で捨てた）結果、待機列が空になったら知らせる。
+    /// 次の1件までの間隔を待つ前に呼び、ローカルLLMの早めの停止の猶予をすぐ数え始めてもらう。
+    /// 後から記事が投入されれば、その要約の要求が予約を取り消す（`local_llm_service`）。
+    fn notify_if_drained(&self, outcome: &StepOutcome) {
+        if took_an_item(outcome) && self.core.is_drained() {
+            (self.on_drained)();
         }
     }
 
@@ -515,6 +555,20 @@ fn is_auto_summary_allowed(
         return false;
     }
     true
+}
+
+/// 待機列から記事を取り出した（または無効で捨てた）結果か。取り出していない
+/// （Idle・Stopped・Paused）ときは、空になった知らせを出さない（同じ知らせを繰り返さないため）。
+fn took_an_item(outcome: &StepOutcome) -> bool {
+    match outcome {
+        StepOutcome::Succeeded(_)
+        | StepOutcome::Skipped(_)
+        | StepOutcome::AlreadySummarized(_)
+        | StepOutcome::Retrying(_)
+        | StepOutcome::Failed(_)
+        | StepOutcome::Disabled => true,
+        StepOutcome::Idle | StepOutcome::Stopped | StepOutcome::Paused => false,
+    }
 }
 
 /// 1件処理するごとに空ける間隔。ローカルは短く、それ以外（Gemini・設定を読めないとき）は長く空ける。
@@ -1161,5 +1215,116 @@ mod tests {
         };
         let value = serde_json::to_value(&item).unwrap();
         assert_eq!(value["summaryState"], "waiting");
+    }
+
+    // --- 待機列が空になったら、ローカルLLMへ早めの停止を頼む ---
+
+    fn counting_queue(name: &str) -> (QueueContext, Arc<std::sync::atomic::AtomicUsize>) {
+        let mut ctx = queue_context_with(name, "local", true);
+        let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = drained.clone();
+        ctx.queue = ctx.queue.clone().with_drained_hook(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        (ctx, drained)
+    }
+
+    fn step_and_notify(
+        queue: &AutoSummaryQueue,
+        summarize: impl FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
+    ) -> StepOutcome {
+        let outcome = queue
+            .core
+            .process_next_unless_paused(|| true, || false, not_done, summarize);
+        queue.notify_if_drained(&outcome);
+        outcome
+    }
+
+    #[test]
+    fn drained_hook_fires_once_when_the_last_item_is_done() {
+        let (ctx, drained) = counting_queue("drained-once");
+        let queue = &ctx.queue;
+        queue.core.replace_pending(ids(&["a", "b"]));
+
+        assert_eq!(
+            step_and_notify(queue, |_| Ok(SAVED)),
+            StepOutcome::Succeeded("a".to_string())
+        );
+        // まだ b が待っている。
+        assert_eq!(drained.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            step_and_notify(queue, |_| Ok(SAVED)),
+            StepOutcome::Succeeded("b".to_string())
+        );
+        assert_eq!(drained.load(Ordering::SeqCst), 1);
+        // 取り出すものが無い回（Idle）では繰り返し知らせない。
+        assert_eq!(step_and_notify(queue, |_| Ok(SAVED)), StepOutcome::Idle);
+        assert_eq!(drained.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn drained_hook_waits_for_retries_and_fires_after_giving_up() {
+        let (ctx, drained) = counting_queue("drained-retry");
+        let queue = &ctx.queue;
+        queue.core.replace_pending(ids(&["a"]));
+        let fail = |_: &str| Err(AppError::Validation("x".to_string()));
+        for _ in 1..MAX_ATTEMPTS {
+            assert_eq!(
+                step_and_notify(queue, fail),
+                StepOutcome::Retrying("a".to_string())
+            );
+            // 再試行で待機列へ戻ったので、まだ空ではない。
+            assert_eq!(drained.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(
+            step_and_notify(queue, fail),
+            StepOutcome::Failed("a".to_string())
+        );
+        assert_eq!(drained.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn drained_hook_is_not_called_while_paused() {
+        let (ctx, drained) = counting_queue("drained-paused");
+        let queue = &ctx.queue;
+        queue.core.replace_pending(ids(&["a"]));
+        let outcome =
+            queue
+                .core
+                .process_next_unless_paused(|| true, || true, not_done, |_| panic!("paused"));
+        queue.notify_if_drained(&outcome);
+        assert_eq!(outcome, StepOutcome::Paused);
+        assert_eq!(drained.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn only_steps_that_took_an_item_can_report_a_drained_queue() {
+        for outcome in [
+            StepOutcome::Succeeded("a".to_string()),
+            StepOutcome::Skipped("a".to_string()),
+            StepOutcome::AlreadySummarized("a".to_string()),
+            StepOutcome::Retrying("a".to_string()),
+            StepOutcome::Failed("a".to_string()),
+            StepOutcome::Disabled,
+        ] {
+            assert!(took_an_item(&outcome), "{outcome:?}");
+        }
+        for outcome in [StepOutcome::Idle, StepOutcome::Stopped, StepOutcome::Paused] {
+            assert!(!took_an_item(&outcome), "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn local_llm_release_hook_is_harmless_when_the_server_is_not_running() {
+        let ctx = queue_context_with("drained-local", "local", true);
+        let queue = ctx
+            .queue
+            .clone()
+            .with_local_llm_release(LocalLlmService::unavailable());
+        queue.core.replace_pending(ids(&["a"]));
+        assert_eq!(
+            step_and_notify(&queue, |_| Ok(SAVED)),
+            StepOutcome::Succeeded("a".to_string())
+        );
     }
 }
