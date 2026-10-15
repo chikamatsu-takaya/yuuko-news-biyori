@@ -351,7 +351,7 @@ impl AutoSummaryQueue {
     }
 
     /// 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（lib.rs で、要約に使うのと同じ窓口を渡す）。
-    /// 動いていなければ何もしない。直近の手動操作があるときに止めないかどうかは `LocalLlmService` が決める。
+    /// 動いていなければ何もしない。直近の手動操作があるときにいつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
     pub fn with_local_llm_release(mut self, local_llm: LocalLlmService) -> Self {
         self.on_drained = Arc::new(move || local_llm.release_soon());
         self

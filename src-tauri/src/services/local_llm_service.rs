@@ -6,8 +6,9 @@
 //! - **しばらく使わなければ止める**（既定 5 分）: 常駐アプリなので、メモリ（約 2GB）を長く握らない。
 //!   生成・起動待ちの間は数えておき（in-flight）、使用中の要求を止めない。
 //! - **自動要約が終わったら早めに止める**（既定 60 秒）: 自動要約キューは待機列が空になったら `release_soon` を呼ぶ。
-//!   その後に要求が来なければ、5 分を待たずに止める。ただし利用者の操作（手動の要約・用語解説・接続テスト）が
-//!   直近 5 分以内にあったときは従来どおり 5 分で止める（続けて使う見込みが高いため）。
+//!   その後に要求が来なければ、5 分を待たずに止める。ただし利用者の操作（手動の要約・用語解説・接続テスト）から
+//!   5 分たつまでは止めない（続けて使う見込みが高いため）。その後、予約が残っていれば止める
+//!   （＝予約から 60 秒後と、最後の手動操作から 5 分後の遅いほう。最後の自動要約から 5 分は待たない）。
 //!   早めの停止の予約は、次の要求（手動・自動とも）が始まった時点で取り消す。どの要求かは窓口の用途
 //!   （`LocalLlmUse`。自動要約は `for_background` で作った窓口）で見分ける。
 //! - **アプリ終了で必ず止める**: `app_lifecycle` の終了経路から `shutdown` を呼ぶ。
@@ -83,7 +84,8 @@ pub enum LocalLlmUse {
 
 /// 早めの停止の予約を受けて止めてよいか（純粋関数）。
 /// 生成・起動待ちが走っている間は止めない。予約から `grace` 経っていて、かつ利用者の操作が
-/// 直近 `manual_window` 以内に無いときだけ true（利用者の操作があれば、通常の「しばらく使わなければ止める」に任せる）。
+/// 直近 `manual_window` 以内に無いときだけ true。利用者の操作から `manual_window` たつまでは止めず、
+/// その後も予約が残っていれば止める（予約から `grace` 後と、最後の手動操作から `manual_window` 後の遅いほう）。
 pub fn should_release_early(
     release_requested: Option<Instant>,
     last_manual_used: Option<Instant>,
@@ -318,8 +320,8 @@ impl LocalLlmService {
     }
 
     /// 自動要約キューの待機列が空になったときに呼ぶ。動いていれば、`early_release_grace`（既定 60 秒）の間に
-    /// 次の要求が来なければ止める予約をする。直近 5 分以内に利用者の操作があったときは予約しても止めない
-    /// （従来どおり最後に使ってから 5 分で止まる）。止まっていれば何もしない。
+    /// 次の要求が来なければ止める予約をする。利用者の操作から 5 分たつまでは止めず、その後、予約が残っていれば止める
+    /// （予約から 60 秒後と、最後の手動操作から 5 分後の遅いほう）。止まっていれば何もしない。
     pub fn release_soon(&self) {
         let mut state = self.shared.lock_state();
         if state.process.is_none() {
@@ -1238,7 +1240,7 @@ mod tests {
             grace,
             window
         ));
-        // 利用者の操作が直近 5 分以内 → 止めない（通常の 5 分に任せる）。
+        // 利用者の操作が直近 5 分以内 → まだ止めない（手動操作から 5 分たつまで待つ）。
         assert!(!should_release_early(
             Some(at(100)),
             Some(at(0)),
@@ -1303,22 +1305,51 @@ mod tests {
     }
 
     #[test]
-    fn recent_manual_use_keeps_the_normal_idle_window() {
+    fn recent_manual_use_delays_the_early_stop_until_the_manual_window_ends() {
         let bundle = temp_bundle("early-manual", true, Some(MODEL_BYTES));
         let launcher = FakeLauncher::new(FakeMode::Healthy);
-        let service = service_with(
-            &bundle,
-            launcher.clone(),
-            early_release_config(Duration::from_millis(50)),
-        );
+        // 見張りは動かさず（確認間隔を長くし）、`stop_if_idle` へ偽の時刻を渡して確かめる。
+        let config = LocalLlmConfig {
+            idle_stop: Duration::from_secs(300),
+            early_release_grace: Duration::from_secs(60),
+            idle_poll: Duration::from_secs(3600),
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), config);
         // 利用者が用語解説などを使った後に、自動要約が走って終わった。
         service.generate("用語解説", 8).expect("manual");
+        std::thread::sleep(Duration::from_millis(20));
         let background = service.for_background();
         background.generate("自動要約", 8).expect("background");
         background.release_soon();
-        std::thread::sleep(Duration::from_millis(400));
+        let (manual, requested, last_used) = {
+            let state = service.shared.lock_state();
+            (
+                state.last_manual_used.unwrap(),
+                state.release_requested.unwrap(),
+                state.last_used.unwrap(),
+            )
+        };
+        // 最後の利用（自動要約）は手動操作より後。
+        assert!(last_used > manual);
+
+        // 予約から 60 秒たっても、手動操作から 5 分たつまでは止めない。
+        service
+            .shared
+            .stop_if_idle(requested + Duration::from_secs(61));
+        service
+            .shared
+            .stop_if_idle(manual + Duration::from_secs(300) - Duration::from_millis(1));
         assert!(service.is_running(), "recent manual use keeps the server");
         assert_eq!(launcher.stops(), 0);
+
+        // 手動操作から 5 分たった時点で、予約が残っているので止める
+        // （最後の利用＝自動要約から 5 分を待たない）。
+        let manual_window_end = manual + Duration::from_secs(300);
+        assert!(manual_window_end < last_used + Duration::from_secs(300));
+        service.shared.stop_if_idle(manual_window_end);
+        assert!(!service.is_running(), "stops once the manual window ends");
+        assert_eq!(launcher.stops(), 1);
     }
 
     #[test]
@@ -1339,7 +1370,7 @@ mod tests {
             "a new queue item cancels the early stop"
         );
 
-        // 手動の要求が猶予の間に来た → 止めない（以後は通常の 5 分）。
+        // 手動の要求が猶予の間に来た → 予約が消えるので止めない（以後は通常の 5 分）。
         background.release_soon();
         service.generate("手動", 8).expect("manual");
         std::thread::sleep(grace * 2);
@@ -1347,7 +1378,7 @@ mod tests {
             service.is_running(),
             "a manual request keeps the server alive"
         );
-        // 手動の操作が直近にあるので、改めて予約しても止めない。
+        // 手動の操作が直近にあるので、改めて予約しても手動操作から 5 分たつまでは止めない。
         background.release_soon();
         std::thread::sleep(grace * 2);
         assert!(service.is_running());
