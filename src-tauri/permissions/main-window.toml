@@ -28,6 +28,8 @@ permissions = [
   "allow-set-autostart-enabled",
   "allow-restart-app",
   "allow-quit-resident-app",
+  "allow-set-main-window-unsaved-changes",
+  "allow-take-pending-main-window-article",
   "allow-export-migration-data",
   "allow-open-migration-folder",
   "allow-list-migration-imports",

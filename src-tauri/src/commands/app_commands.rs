@@ -6,6 +6,12 @@
 //! - `quit_resident_app`: 画面内「常駐を終了する」から常駐ごとアプリを終了する（詳細設計書 §10.1.1）。
 //!   トレイの「常駐を終了する」と同じ終了要求フラグ経由で終了し、close-to-hide に横取りされない。
 //!   引数は受け取らず、終了以外の操作はできない。書き出し・取り込みの実行中は `restart_app` と同じく断る。
+//! - `set_main_window_unsaved_changes`: 設定画面に未保存の変更があるかを Rust へ知らせる。true の間は、
+//!   非表示待機が続いてもメインウィンドウを解放（破棄）しない（D133。未保存の入力を失わないため）。
+//!   受け取るのは真偽値だけで、保存内容は受け取らない。
+//! - `take_pending_main_window_article`: 解放済みのメインを「詳しく見る」で作り直したとき、新しい画面が
+//!   マウント時に開くべき記事IDを1回だけ取り出す（作り直した画面はイベント送信時点で未購読のため）。
+//!   どちらもメインウィンドウ専用（ゆうこ用ウィンドウの capability へは付与しない）。
 
 use tauri::{AppHandle, State};
 
@@ -38,6 +44,16 @@ pub fn quit_resident_app(app: AppHandle, state: State<'_, AppState>) -> CommandR
     ensure_migration_idle(state.data_export_service.is_migration_running())?;
     app_lifecycle::request_exit(&app, ExitSource::InAppButton);
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_main_window_unsaved_changes(has_unsaved: bool) {
+    app_lifecycle::set_main_window_unsaved_changes(has_unsaved);
+}
+
+#[tauri::command]
+pub fn take_pending_main_window_article() -> Option<String> {
+    app_lifecycle::take_pending_open_article()
 }
 
 #[cfg(test)]

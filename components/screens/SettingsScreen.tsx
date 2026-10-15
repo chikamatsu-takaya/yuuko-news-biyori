@@ -51,6 +51,7 @@ import {
   type UserSettingsDto,
   type ExplanationLevel,
 } from "@/lib/tauri/settings";
+import { setMainWindowUnsavedChanges } from "@/lib/tauri/window";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
 import { uiThemeLabel } from "@/lib/ui-theme.mjs";
 import {
@@ -882,6 +883,21 @@ export default function SettingsScreen({
   };
 
   const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
+
+  // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
+  // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
+  React.useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+    const report = (hasUnsaved: boolean) => {
+      setMainWindowUnsavedChanges(hasUnsaved).catch((error) => {
+        console.warn("Failed to report unsaved settings to Rust:", error);
+      });
+    };
+    report(true);
+    return () => report(false);
+  }, [hasUnsavedChanges]);
 
   // AI接続テスト（画面詳細設計書 SCR-003 §7.5 / §7.8）。Rust 側は保存済み設定の Provider を確認するため、
   // 画面上の未保存の選択は反映されない（UI にその旨を明記する）。失敗してもアプリは止めず警告表示のみ。

@@ -24,6 +24,7 @@ import {
   markYuukoIgnored,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
+import { takePendingMainWindowArticle } from "@/lib/tauri/window";
 
 type ScreenType =
   | "home"
@@ -222,18 +223,30 @@ export default function Page() {
   React.useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    listenYuukoOpenArticle((articleId) => {
+    const openFromYuuko = (articleId: string) => {
       // 非表示前に保持していた同じ通知は Rust 側で確定済み（非active）。前面表示の直後に
       // 古い吹き出しを記事詳細へ重ねないよう、scheduler の拾い直しを待たずに破棄する。
       setYuukoNotificationState(null);
       handleOpenArticle(articleId);
-    })
+    };
+    listenYuukoOpenArticle(openFromYuuko)
       .then((stop) => {
         if (disposed) {
           stop();
-        } else {
-          unlisten = stop;
+          return;
         }
+        unlisten = stop;
+        // 長い非表示でメインが破棄され「詳しく見る」で作り直された場合、要求はイベントではなく
+        // Rust に預けられている（D133）。購読を始めた後に1回だけ取り出して同じ経路で開く。
+        takePendingMainWindowArticle()
+          .then((articleId) => {
+            if (!disposed && articleId) {
+              openFromYuuko(articleId);
+            }
+          })
+          .catch((error) => {
+            console.error("Failed to take pending article for main window:", error);
+          });
       })
       .catch((error) => {
         console.error("Failed to listen yuuko open-article event:", error);

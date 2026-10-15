@@ -409,7 +409,8 @@ fn is_active_news(state: YuukoResidentState) -> bool {
 /// ゆうこ通知 command の処理後に呼び、ゆうこ用ウィンドウの表示とメインの前面表示を状態に合わせる。
 ///
 /// 後処理の失敗で command の結果（保存済みの状態）を変えないよう、失敗はログだけにする。
-/// command（async・非メインスレッド）から呼ぶため、ウィンドウの生成は行わない。
+/// command から呼ぶため、ゆうこ用ウィンドウの生成はここでは行わない。解放（破棄）済みのメインウィンドウは
+/// `app_lifecycle::show_main_window_with_article` が専用スレッドで作り直す（D133）。
 pub fn after_yuuko_action<R: Runtime, E>(
     app: &AppHandle<R>,
     caller_label: &str,
@@ -431,16 +432,16 @@ pub fn after_yuuko_action<R: Runtime, E>(
         FollowUp::Hide => hide_after_action(app),
         FollowUp::OpenInMain { article_id } => {
             hide_after_action(app);
-            // 先に記事を開かせてから前面表示し、直前の画面が一瞬見えるのを避ける。
-            // メインは非表示でも WebView とイベント購読は生きている。
-            if let Err(error) = app.emit_to(
-                MAIN_WINDOW_LABEL,
+            // メインが残っていれば記事を開かせてから前面表示し、直前の画面が一瞬見えるのを避ける。
+            // 長い非表示で解放（破棄）済みなら作り直し、新しい画面がマウント時に記事IDを取り出して開く（D133）。
+            crate::app_lifecycle::show_main_window_with_article(
+                app,
                 YUUKO_OPEN_ARTICLE_EVENT,
-                YuukoOpenArticleRequest { article_id },
-            ) {
-                log::warn!("メインウィンドウへ記事を開く要求を送れませんでした: {error}");
-            }
-            crate::app_lifecycle::show_main_window(app);
+                YuukoOpenArticleRequest {
+                    article_id: article_id.clone(),
+                },
+                article_id,
+            );
         }
     }
 }
@@ -452,7 +453,11 @@ fn hide_after_action<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn main_window_visibility<R: Runtime>(app: &AppHandle<R>) -> Option<(bool, bool)> {
-    let window = app.get_webview_window(MAIN_WINDOW_LABEL)?;
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        // 長い非表示でメインを解放（破棄）した場合は「非表示中」として判定を続ける（D133）。
+        // それ以外で無いとき（終了処理中など）は状態不明として何もしない。
+        return main_window_absent_visibility(crate::app_lifecycle::is_main_window_released());
+    };
     match (window.is_visible(), window.is_minimized()) {
         (Ok(visible), Ok(minimized)) => Some((visible, minimized)),
         (Err(error), _) | (_, Err(error)) => {
@@ -460,6 +465,11 @@ fn main_window_visibility<R: Runtime>(app: &AppHandle<R>) -> Option<(bool, bool)
             None
         }
     }
+}
+
+/// メインウィンドウが無いときの (表示中か, 最小化中か)。解放済みなら非表示として扱う。
+fn main_window_absent_visibility(released: bool) -> Option<(bool, bool)> {
+    released.then_some((false, false))
 }
 
 fn is_yuuko_window_visible<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -579,6 +589,20 @@ mod tests {
     #[test]
     fn main_visible_only_hides_desktop_without_judgement() {
         assert_eq!(decide_tick(Some((true, false))), TickAction::HideDesktop);
+    }
+
+    #[test]
+    fn released_main_window_is_treated_as_hidden() {
+        // 長い非表示で解放（破棄）されたメインは非表示扱いにし、デスクトップ通知の判定を続ける（D133）。
+        assert_eq!(
+            decide_tick(main_window_absent_visibility(true)),
+            TickAction::RunJudgement
+        );
+        // 解放以外で無い（終了処理中など）ときは従来どおり何もしない。
+        assert_eq!(
+            decide_tick(main_window_absent_visibility(false)),
+            TickAction::Skip
+        );
     }
 
     #[test]
