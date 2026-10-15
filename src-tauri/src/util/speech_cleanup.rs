@@ -27,6 +27,10 @@
 //! 2026-10-14 の比較（#347 の後、です・ます調の文が 9% から 37% に増えた）を受けて、文末の丁寧語を
 //! ゆうこの常体の語尾へ言い換える（`casualize_polite_endings`）。これは消すのではなく語尾の数文字を
 //! 置き換える処理なので、活用の形が前の字から1つに決まる文末だけに絞る（決まらない形は硬いまま残す）。
+//!
+//! 2026-10-15（Firestore タスク H0BIec）: 失礼な呼びかけ（「お前ら」「てめえ」）を落とす・「みんな」へ言い換える
+//! （`soften_rude_address`）。同じ文の繰り返しは最初の1つだけ残す（`strip_repeated_sentences`）。
+//! どちらもかぎかっこ「」『』の中（引用）は触らず、空でない出力を空にしない。
 
 /// 中国語の文末助詞・感嘆詞のうち、日本語の文にはまず現れない字。
 /// 「的」「了」などは日本語でも使うため含めない。中国語の文全体を見分けるのは難しいので、
@@ -409,6 +413,233 @@ fn is_prompt_echo(sentence: &str, fixed_texts: &[&str]) -> bool {
     let core = core.trim_end_matches(['、', '，']);
     core.chars().count() >= PROMPT_ECHO_MIN_CHARS
         && fixed_texts.iter().any(|fixed| fixed.contains(core))
+}
+
+/// 失礼な呼びかけの語（長いものから照合する）。ゆうこは読者を「お前」などとは呼ばない。
+/// 平仮名で始まる語（「おまえ」「てめえ」）は、直前が平仮名なら語の途中とみなして当てない（`is_rude_term_boundary`）。
+/// 「きさま」は「ゆきさま」のような語の途中に当たるため、漢字の「貴様」だけにする。
+const RUDE_ADDRESS_TERMS: [&str; 18] = [
+    "お前たち",
+    "おまえたち",
+    "お前ら",
+    "おまえら",
+    "てめえら",
+    "てめぇら",
+    "テメエら",
+    "テメェら",
+    "貴様ら",
+    "お前",
+    "おまえ",
+    "オマエ",
+    "てめえ",
+    "てめぇ",
+    "テメエ",
+    "テメェ",
+    "貴様",
+    "てめー",
+];
+
+/// 失礼な語を文の途中で置き換える語。読者全体への呼びかけになるので、意味を壊さずに言い換えられる
+/// （「お前らも気をつけてね」→「みんなも気をつけてね」）。
+const RUDE_ADDRESS_REPLACEMENT: &str = "みんな";
+
+/// 「お前さん」のように「さん」が続く形は親しみの呼び方なので言い換えない（「みんなさん」にしないため。レビュー指摘）。
+const RUDE_ADDRESS_POLITE_SUFFIX: &str = "さん";
+
+/// 文頭の呼びかけ（「ねえ、お前ら、」「おい、お前！」）で、失礼な語の前に付く呼びかけの語。語と一緒に落とす。
+const RUDE_VOCATIVE_LEADS: [&str; 6] = ["ねえ", "ねぇ", "おい", "なあ", "なぁ", "ほら"];
+
+/// 文頭の失礼な語の直後に来たら、呼びかけ（文の中身ではない）とみなす字。
+const RUDE_VOCATIVE_SEPARATORS: [char; 9] = ['、', '，', ',', '！', '!', '…', '～', ' ', '　'];
+
+/// 実AIの再説明・一言から、失礼な呼びかけ（「お前ら」「お前」「てめえ」など）を取り除く・言い換える。
+/// 戻り値の2つ目は、取り除いた・言い換えた語の数（ログ用）。
+///
+/// - 文頭の呼びかけ（「ねえ、お前ら、」「おい、お前！」「お前ら、」）は、呼びかけの語ごと落とす
+///   （呼びかけは文の中身ではないので、落としても説明は残る）。
+/// - それ以外の位置の語は「みんな」に言い換える（「お前らはどう思う？」→「みんなはどう思う？」）。
+/// - かぎかっこ「」『』の中（記事の発言・作品名の引用）は触らない。
+/// - 落とした結果すべて空になる（呼びかけだけの出力）ときは、落とさずに言い換えだけを行う（空にしない）。
+///
+/// 文字を消すか、決まった語に置き換えるだけで、HTML・制御文字・見出し・区切り行は作らない（続く検証はそのまま効く）。
+pub(crate) fn soften_rude_address(text: &str) -> (String, usize) {
+    let (softened, count) = soften_rude_address_with(text, true);
+    if count > 0 && softened.trim().is_empty() {
+        return soften_rude_address_with(text, false);
+    }
+    (softened, count)
+}
+
+fn soften_rude_address_with(text: &str, drop_vocatives: bool) -> (String, usize) {
+    let mut count = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut quote_depth = 0usize;
+            let mut rest = line;
+            while let Some(c) = rest.chars().next() {
+                if quote_depth == 0 {
+                    let at_sentence_start = is_at_sentence_start(&out);
+                    if drop_vocatives && at_sentence_start {
+                        if let Some(after) = strip_rude_vocative(rest) {
+                            count += 1;
+                            rest = after;
+                            continue;
+                        }
+                    }
+                    if let Some(term) = RUDE_ADDRESS_TERMS.iter().find(|term| {
+                        rest.starts_with(*term)
+                            && !rest[term.len()..].starts_with(RUDE_ADDRESS_POLITE_SUFFIX)
+                            && is_rude_term_boundary(&out, term)
+                    }) {
+                        count += 1;
+                        out.push_str(RUDE_ADDRESS_REPLACEMENT);
+                        rest = &rest[term.len()..];
+                        continue;
+                    }
+                }
+                match c {
+                    '「' | '『' => quote_depth += 1,
+                    '」' | '』' => quote_depth = quote_depth.saturating_sub(1),
+                    _ => {}
+                }
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+            out.trim().to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    (lines.join("\n"), count)
+}
+
+/// 文頭の「（呼びかけの語＋区切り）＋失礼な語＋区切り」を落とした残りを返す。当たらなければ `None`。
+/// 失礼な語の直後が区切りでない（「お前らはどう思う？」）ときは、文の主語なので落とさない（呼び出し側で言い換える）。
+fn strip_rude_vocative(text: &str) -> Option<&str> {
+    let mut rest = text.trim_start_matches([' ', '　']);
+    if let Some(after) = RUDE_VOCATIVE_LEADS
+        .iter()
+        .find_map(|lead| rest.strip_prefix(lead))
+        .filter(|after| after.starts_with(RUDE_VOCATIVE_SEPARATORS))
+    {
+        rest = after.trim_start_matches(RUDE_VOCATIVE_SEPARATORS);
+    }
+    let term = RUDE_ADDRESS_TERMS
+        .iter()
+        .find(|term| rest.starts_with(*term))?;
+    let after = &rest[term.len()..];
+    if !(after.is_empty() || after.starts_with(RUDE_VOCATIVE_SEPARATORS)) {
+        return None;
+    }
+    Some(after.trim_start_matches(|c: char| {
+        RUDE_VOCATIVE_SEPARATORS.contains(&c) || LEADING_LEFTOVERS.contains(&c)
+    }))
+}
+
+/// 「お前」「おまえ」の直前に来たら、別の語の終わりの「お」（「なお前年比」の「なお」・「とお」）とみなす字。
+const RUDE_O_TERM_NON_BOUNDARY_PRECEDING: [char; 3] = ['な', 'と', 'お'];
+
+/// 失礼な語が語の途中でないか。「お前」「おまえ」は、直前が「な」「と」「お」なら別の語（「なお前年比」
+/// ＝「なお、前年比」）とみなして当てない。そのほかの仮名で始まる語（「てめえ」「テメエ」「オマエ」）は、
+/// 直前が同じ種類の仮名なら語の途中とみなして当てない。
+fn is_rude_term_boundary(written: &str, term: &str) -> bool {
+    let Some(first) = term.chars().next() else {
+        return false;
+    };
+    let Some(previous) = written.chars().last() else {
+        return true;
+    };
+    if first == 'お' {
+        return !RUDE_O_TERM_NON_BOUNDARY_PRECEDING.contains(&previous);
+    }
+    !(is_hiragana(first) && is_hiragana(previous) || is_katakana(first) && is_katakana(previous))
+}
+
+fn is_hiragana(c: char) -> bool {
+    matches!(c, '\u{3041}'..='\u{3096}')
+}
+
+fn is_katakana(c: char) -> bool {
+    matches!(c, '\u{30A1}'..='\u{30FA}' | 'ー')
+}
+
+/// 重複とみなす最小の文字数（記号・空白・文末の終助詞を除いた本体）。短い相づち（「うん。」）は数えない。
+const REPEATED_SENTENCE_MIN_CHARS: usize = 5;
+
+/// 重複の照合の前に、文の終わりから1つだけ取り除く終助詞（「〜なんだ。」と「〜なんだね。」を同じ文とみなす）。
+const REPEATED_SENTENCE_TRAILING_PARTICLES: [&str; 3] = ["よね", "よ", "ね"];
+
+/// 実AIの再説明・一言から、同じ文（または記号・空白・文末の「よ」「ね」だけが違う文）の繰り返しを取り除き、
+/// 最初の1つだけを残す。戻り値の2つ目は、取り除いた文の数（ログ用）。
+///
+/// 小さいローカルLLMは、同じ文を2回以上書くことがある。繰り返しは情報を足さないので、後ろの方を落とす。
+/// - 文の分け方は `split_sentences`（かぎかっこの中では切らない）。行をまたいだ繰り返しも落とす。
+/// - かぎかっこ「」『』を含む文（記事の発言・作品名の引用）は、照合も削除もしない。
+/// - 本体が `REPEATED_SENTENCE_MIN_CHARS` 文字未満の短い文は照合しない。
+/// - 最初の文は必ず残すので、空でない出力が空になることはない。
+pub(crate) fn strip_repeated_sentences(text: &str) -> (String, usize) {
+    let mut seen: Vec<String> = Vec::new();
+    let mut removed = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            split_sentences(line)
+                .into_iter()
+                .filter(|sentence| {
+                    let Some(key) = repeated_sentence_key(sentence) else {
+                        return true;
+                    };
+                    if seen.contains(&key) {
+                        removed += 1;
+                        return false;
+                    }
+                    seen.push(key);
+                    true
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if removed == 0 {
+        return (text.to_string(), 0);
+    }
+    (lines.join("\n"), removed)
+}
+
+/// 重複の照合に使う文の本体。引用を含む文・短い文は照合しない（`None`）。
+fn repeated_sentence_key(sentence: &str) -> Option<String> {
+    if sentence.contains(['「', '」', '『', '』']) {
+        return None;
+    }
+    let body = sentence
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && !matches!(
+                    c,
+                    '、' | '，'
+                        | ','
+                        | '。'
+                        | '.'
+                        | '！'
+                        | '!'
+                        | '？'
+                        | '?'
+                        | '…'
+                        | '～'
+                        | '〜'
+                        | '♪'
+                )
+        })
+        .collect::<String>();
+    let core = REPEATED_SENTENCE_TRAILING_PARTICLES
+        .iter()
+        .find_map(|particle| body.strip_suffix(particle))
+        .unwrap_or(&body);
+    (core.chars().count() >= REPEATED_SENTENCE_MIN_CHARS).then(|| core.to_string())
 }
 
 /// 行を文に分ける（区切り記号は前の文に含める）。かぎかっこ（「」）の中の区切りでは切らない。
@@ -1878,5 +2109,175 @@ mod tests {
         let calm = calm_yuuko_speech(&casual);
         assert_eq!(calm, "2人が亡くなったよ。被害は広い範囲に出ているよ。");
         assert!(!calm.contains('！'));
+    }
+
+    #[test]
+    fn rude_vocatives_at_sentence_start_are_dropped() {
+        for (input, expected) in [
+            (
+                "ねえ、お前ら、この補助金は便利だよ。",
+                "この補助金は便利だよ。",
+            ),
+            ("お前ら、気をつけてね。", "気をつけてね。"),
+            (
+                "おい、お前！新しい制度が始まるよ。",
+                "新しい制度が始まるよ。",
+            ),
+            (
+                "制度が変わるよ。てめえら、よく読んでね。",
+                "制度が変わるよ。よく読んでね。",
+            ),
+            ("テメエ…これは大事な話だよ。", "これは大事な話だよ。"),
+            ("貴様ら、注目だよ。\nお前、見てね。", "注目だよ。\n見てね。"),
+        ] {
+            let (softened, count) = soften_rude_address(input);
+            assert_eq!(softened, expected, "{input}");
+            assert!(count >= 1, "{input}");
+        }
+    }
+
+    #[test]
+    fn rude_address_in_the_middle_of_a_sentence_becomes_minna() {
+        for (input, expected) in [
+            ("お前らはどう思う？", "みんなはどう思う？"),
+            (
+                "これはお前の問題でもあるよ。",
+                "これはみんなの問題でもあるよ。",
+            ),
+            (
+                "だからおまえらも気をつけてね。",
+                "だからみんなも気をつけてね。",
+            ),
+        ] {
+            assert_eq!(soften_rude_address(input), (expected.to_string(), 1));
+        }
+        // 呼びかけだけの出力は、落とすと空になるので言い換えだけにする（空にしない）。
+        assert_eq!(soften_rude_address("お前ら！"), ("みんな！".to_string(), 1));
+        assert_eq!(
+            soften_rude_address("ねえ、お前ら、"),
+            ("ねえ、みんな、".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn rude_address_guards_quotes_and_ordinary_words() {
+        // かぎかっこの中（記事の発言・作品名の引用）と、「なお前年比」「名前」「腕前」は触らない。
+        for text in [
+            "監督は「お前ら、走れ」と選手に話したんだって。",
+            "『てめえらの血は何色だ』という名台詞の作品だよ。",
+            "なお前年比で5%増えたよ。",
+            "なおまえむきな話だね。",
+            "名前を変えたサービスだよ。",
+            "職人の腕前が光るね。",
+            "とお前後の数だよ。",
+            "お前さんも気をつけてね。",
+            "便利な機能が増えたよ。",
+        ] {
+            assert_eq!(soften_rude_address(text), (text.to_string(), 0), "{text}");
+        }
+        // 引用の外の語だけを言い換える。
+        assert_eq!(
+            soften_rude_address("「お前ら」という言い方だけど、お前らも気をつけてね。"),
+            (
+                "「お前ら」という言い方だけど、みんなも気をつけてね。".to_string(),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn rude_address_is_multibyte_safe() {
+        assert_eq!(
+            soften_rude_address("すごい😀。お前ら、見てね😀"),
+            ("すごい😀。見てね😀".to_string(), 1)
+        );
+        assert_eq!(
+            soften_rude_address("🎉お前ら、ニュースだよ。"),
+            ("🎉みんな、ニュースだよ。".to_string(), 1)
+        );
+        // 仮名・絵文字・半角が並んでも、文字の途中で切らない。
+        for text in ["お", "お前", "てめ", "ｵﾏｴ", "🙂お", "「お前", "」お前ら"]
+        {
+            let _ = soften_rude_address(text);
+        }
+        assert_eq!(soften_rude_address(""), (String::new(), 0));
+    }
+
+    #[test]
+    fn repeated_sentences_keep_only_the_first() {
+        for (input, expected, removed) in [
+            (
+                "制度が変わるんだ。制度が変わるんだ。",
+                "制度が変わるんだ。",
+                1,
+            ),
+            // 記号・空白・文末の「よ」「ね」だけが違う文も同じ文とみなす。
+            (
+                "制度が変わるんだ。制度が変わるんだね！",
+                "制度が変わるんだ。",
+                1,
+            ),
+            (
+                "新しいアプリが出たよ。 新しいアプリが、出たよ！",
+                "新しいアプリが出たよ。",
+                1,
+            ),
+            // 行をまたいだ繰り返しも落とし、空になった行は詰める。
+            (
+                "補助金の話だよ。\n補助金の話だよ。\n申請は来月からだよ。",
+                "補助金の話だよ。\n申請は来月からだよ。",
+                1,
+            ),
+            (
+                "対象は中小企業だよ。申請は来月からだよ。対象は中小企業だよ。対象は中小企業だよ。",
+                "対象は中小企業だよ。申請は来月からだよ。",
+                2,
+            ),
+        ] {
+            assert_eq!(
+                strip_repeated_sentences(input),
+                (expected.to_string(), removed),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_sentence_guards() {
+        for text in [
+            // 短い相づち・短い文は照合しない。
+            "うん。うん。便利だね。",
+            "便利だね。便利だね。",
+            // 引用（かぎかっこ）を含む文は照合も削除もしない。
+            "社長は「挑戦を続ける」と話したよ。社長は「挑戦を続ける」と話したよ。",
+            "『未来の街』という本だよ。『未来の街』という本だよ。",
+            // 似ているが違う文は残す。
+            "対象は中小企業だよ。対象は大企業ではないよ。",
+            "1文だけの一言だよ。",
+            "",
+        ] {
+            assert_eq!(
+                strip_repeated_sentences(text),
+                (text.to_string(), 0),
+                "{text}"
+            );
+        }
+        // すべて同じ文でも、最初の1つは残す（空にしない）。
+        assert_eq!(
+            strip_repeated_sentences("同じ内容の文だよ。同じ内容の文だよ。同じ内容の文だよ。"),
+            ("同じ内容の文だよ。".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn repeated_sentences_are_multibyte_safe() {
+        assert_eq!(
+            strip_repeated_sentences("新機能が便利だね😀。新機能が便利だね😀！"),
+            ("新機能が便利だね😀。".to_string(), 1)
+        );
+        assert_eq!(
+            strip_repeated_sentences("ｶﾞｲﾄﾞが出たよ。ｶﾞｲﾄﾞが出たよ。"),
+            ("ｶﾞｲﾄﾞが出たよ。".to_string(), 1)
+        );
     }
 }
