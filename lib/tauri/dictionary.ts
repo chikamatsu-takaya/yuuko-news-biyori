@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { isTauriRuntime } from "@/lib/tauri/settings";
 
-export type DictionaryEntryType = "term" | "phrase" | "key_point";
+// 旧種別 key_point（要点説明）は phrase に統合済み（判断台帳 D144）。旧データは Rust 側で phrase として読み込まれる。
+export type DictionaryEntryType = "term" | "phrase";
 
 export type DictionaryEntryDto = {
   entryId: string;

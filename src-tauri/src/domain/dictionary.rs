@@ -4,13 +4,17 @@ use crate::error::AppError;
 use crate::util::text_safety::contains_disallowed_control_char;
 
 /// 辞書項目の種別。種別を持たない旧データ・旧呼び出しは「用語」として読む（`#[serde(default)]` 側で使う既定値）。
+///
+/// 旧種別 `key_point`（要点説明）は D21 で長文の要点説明が `phrase` に統合されたため廃止した（判断台帳 D144）。
+/// 過去に `key_point` で保存された項目も辞書全体の読み込みを失敗させず、読み込み時に `phrase` として扱う
+/// （`alias`）。ファイルは書き換えず、通常の保存（★・メモ・参照回数の更新など）のときに `phrase` で書き出される。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DictionaryEntryType {
     #[default]
     Term,
+    #[serde(alias = "key_point")]
     Phrase,
-    KeyPoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,7 +22,7 @@ pub enum DictionaryEntryType {
 pub struct DictionaryEntryDto {
     pub entry_id: String,
     pub key_text: String,
-    /// 種別（用語 / フレーズ / 要点）。保存パラメータで欠けているときは「用語」として受ける（旧画面との互換）。
+    /// 種別（用語 / フレーズ）。保存パラメータで欠けているときは「用語」として受ける（旧画面との互換）。
     #[serde(rename = "type", default)]
     pub entry_type: DictionaryEntryType,
     pub short_explanation: String,
@@ -92,11 +96,11 @@ impl DictionaryEntryType {
     pub fn from_filter_value(value: &str) -> Result<Self, AppError> {
         match value.trim() {
             "term" => Ok(Self::Term),
-            "phrase" => Ok(Self::Phrase),
-            "key_point" => Ok(Self::KeyPoint),
+            // 旧種別 `key_point` は `phrase` に統合済み（D144）。古い呼び出しでもフレーズとして絞り込む。
+            "phrase" | "key_point" => Ok(Self::Phrase),
             // 入力値はエラー文言へ含めない（§16.3）。
             _ => Err(AppError::Validation(
-                "type must be one of term, phrase, key_point".to_string(),
+                "type must be one of term, phrase".to_string(),
             )),
         }
     }
@@ -876,7 +880,7 @@ mod tests {
     fn unknown_type_filter_message_excludes_input_value() {
         match DictionaryEntryType::from_filter_value("secret-type<script>") {
             Err(crate::error::AppError::Validation(message)) => {
-                assert_eq!(message, "type must be one of term, phrase, key_point");
+                assert_eq!(message, "type must be one of term, phrase");
                 assert!(!message.contains("secret-type"));
             }
             other => panic!("expected validation error, got {other:?}"),
@@ -1044,6 +1048,28 @@ mod tests {
         assert_eq!(value["type"], "phrase");
         let stored = serde_json::to_value(&entry).unwrap();
         assert_eq!(stored["entryType"], "phrase");
+    }
+
+    #[test]
+    fn legacy_key_point_entry_loads_and_saves_as_phrase() {
+        // 旧種別 key_point（要点説明）は phrase に統合済み（D144）。読み込みを失敗させずフレーズとして扱い、
+        // 次に保存されるときは phrase で書き出す。
+        let mut json = persisted_entry_json();
+        json["entryType"] = serde_json::json!("key_point");
+        let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        let value = serde_json::to_value(entry.to_list_item_dto()).unwrap();
+        assert_eq!(value["type"], "phrase");
+        let stored = serde_json::to_value(&entry).unwrap();
+        assert_eq!(stored["entryType"], "phrase");
+    }
+
+    #[test]
+    fn legacy_key_point_filter_value_maps_to_phrase() {
+        assert_eq!(
+            DictionaryEntryType::from_filter_value("key_point").unwrap(),
+            DictionaryEntryType::Phrase
+        );
     }
 
     #[test]

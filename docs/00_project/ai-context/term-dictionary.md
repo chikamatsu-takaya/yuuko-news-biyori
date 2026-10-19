@@ -36,6 +36,7 @@
 
 - （2026-10-19 更新）解説文の生成は AI 層へ接続済み。実ニュース記事の辞書未命中時は `dictionary_service.rs` の `explain_with_ai` が `ai_provider_service`（ローカルLLM / Gemini / Mock）を呼ぶ。固定サンプル記事（article-001〜003）だけが固定解説・汎用文のまま。なお Tauri 版は初回起動でサンプル記事を書き込まなくなり、旧版のサンプルも起動時に消す（D139・データ設計書 §4.3.1）ため、この分岐に来るのは実質ブラウザプレビュー（モック）と過去ニュースに退避済みの旧サンプルだけ。
 - （2026-10-19 追加・D21）選択が「用語」か「フレーズ（文章）」かを `domain/dictionary.rs` の `classify_selected_text` で決定的に判定し、フレーズは `phrase_explanation_v1` のプロンプトで説明して `phrase` 種別で返す・保存する。上限は用語・フレーズ共通の200文字のまま。判定ルールは詳細設計書 §5.3.4、プロンプトは §12.4.2。
+- （2026-10-19 追加・D144）旧種別 `key_point`（要点説明）は `phrase` に統合した。Rust の `DictionaryEntryType` は `term` / `phrase` の2種で、旧データの `key_point` は `#[serde(alias)]` で `phrase` として読む（一覧の `phrase` 絞り込みにも含む。読み込みだけではファイルを書き換えない）。辞書画面の「要点説明」チップと設定画面の「長文要点説明の自動候補（準備中）」は削除済み。固定サンプル解説の種別は `classify_selected_text` の判定に合わせる（テストで一致を確認）。
 - （2026-10-19 更新）実ニュース記事の記事IDは `ArticleRepository` で解決する（固定サンプル前提ではない）。解説対象は本文の範囲選択＋「解説」ボタン（`NewsReaderScreen.tsx` の `readExplainSelectionFromDom` → `handleExplainButtonClick`）。
 
 ### 未実装

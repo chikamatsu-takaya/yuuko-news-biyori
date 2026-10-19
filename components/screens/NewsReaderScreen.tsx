@@ -285,9 +285,6 @@ const dictionaryTypeLabel = (type: DictionaryEntryType): string => {
   if (type === "phrase") {
     return "フレーズ";
   }
-  if (type === "key_point") {
-    return "要点";
-  }
   return "用語";
 };
 
