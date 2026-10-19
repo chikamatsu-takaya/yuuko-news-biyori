@@ -619,9 +619,10 @@ mod tests {
     #[test]
     fn get_article_detail_succeeds_even_when_read_state_save_fails() {
         let ctx = make_context();
-        // 一時ファイルの位置にディレクトリを置き、保存（atomic_write）だけを失敗させる。
-        let blocker = ctx.news_dir.join("202606").join("article-001.md.tmp");
-        std::fs::create_dir_all(&blocker).unwrap();
+        // 記事ファイルの保存（atomic_write）だけを失敗させる。
+        crate::infra::atomic_file::test_hooks::fail_writes_to(
+            &ctx.news_dir.join("202606").join("article-001.md"),
+        );
 
         let detail = ctx
             .service

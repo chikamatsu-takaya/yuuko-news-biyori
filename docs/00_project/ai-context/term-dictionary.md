@@ -7,7 +7,7 @@
 
 ## このコンテキストを使うタスク
 
-- 用語解説を「範囲選択ベース」に作り直す
+- 範囲選択からの用語解説・フレーズ説明（D21）の修正・改善
 - 用語解説ポップアップの表示・失敗時挙動の修正
 - 辞書保存・辞書画面（一覧 / 詳細 / メモ / ★ / 削除）の不具合調査
 
@@ -21,14 +21,14 @@
 
 ## 現在の実装状態
 
-調査日: 2026-07-16。コードとテストで確認した事実のみを記載する。**着手前に最新の状態を再確認すること**（タスクの Status は Firestore が正本で変動するため、本ファイルには書かない）。
+調査日: 2026-07-16（一部 2026-10-19 更新）。コードとテストで確認した事実のみを記載する。**着手前に最新の状態を再確認すること**（タスクの Status は Firestore が正本で変動するため、本ファイルには書かない）。
 
 ### 実装済み
 
 - Tauri command の境界: `explain_selected_term` / `save_dictionary_entry` / `list_dictionary_entries` / `update_dictionary_memo` / `update_dictionary_favorite` / `delete_dictionary_entry`
 - 型付きラッパー（`lib/tauri/dictionary.ts`）。`explain_selected_term` は `articleId` と **`selectedText`（任意文字列）を受け取れる**
-- 入力検証（`domain/dictionary.rs` の `validated_inputs` 等）: `articleId` / `selectedText` の trim・空チェック
-- 完全一致再利用の土台（`repositories/dictionary_repository.rs` の `find_saved_entry` ＋ `normalize_text`）: 保存済みエントリを正規化テキストで再利用する
+- 入力検証（`domain/dictionary.rs` の `validated_inputs` 等）: `articleId` / `selectedText` の trim・空チェック・200文字上限
+- 完全一致再利用の土台（`repositories/dictionary_repository.rs` の `find_saved_entry` ＋ `domain/dictionary.rs` の `normalize_text`）: 保存済みエントリを正規化テキストで再利用する
 - 解説結果の表示（`NewsReaderScreen.tsx` の用語解説ポップアップ）と辞書保存への接続
 - ゆうこ辞書画面（`DictionaryScreen.tsx`）でのメモ編集・削除・★操作の実データ接続
 
@@ -41,7 +41,7 @@
 ### 未実装
 
 - （2026-10-19 更新）本文の範囲選択から解説する導線は実装済み（上記）。
-- 用語解説・辞書保存フローの E2E。`tests/ui/app.spec.ts` の辞書関連は画面遷移と表示のスモークのみ（`ゆうこ辞書` 見出しと項目の表示確認）。Rust 側は `domain/dictionary.rs` と `repositories/dictionary_repository.rs` に単体テストがある。
+- （2026-10-19 更新）用語解説・辞書保存フローの E2E も実装済み。`tests/ui/app.spec.ts` の `reader: ... 解説 ...` 系（範囲選択→「解説」→ポップアップ→辞書保存・失敗時・200文字・フレーズ）にある。Tauri command は Mock のため、実 Rust・実 AI を含む確認は実機で行う。Rust 側は `domain/dictionary.rs` / `repositories/dictionary_repository.rs` / `services/dictionary_service.rs` に単体テストがある。
 
 ### タスク資料との差異
 
@@ -51,13 +51,13 @@
 
 ```text
 NewsReaderScreen（記事本文・候補語）
-  → 解説対象の文字列を決める（現状は候補語クリック / 将来は範囲選択）
+  → 解説対象の文字列を決める（本文の範囲選択＋「解説」ボタン。用語サポートの候補語クリックも同じ経路）
   → lib/tauri/dictionary.ts: explainSelectedTerm({ articleId, selectedText })
   → commands/dictionary_commands.rs: explain_selected_term
-  → services/dictionary_service.rs（validated_inputs で検証）
-  → repositories/dictionary_repository.rs
-       → find_saved_entry で完全一致再利用（あれば即返す）
-       → なければサンプル一致 or build_generic_entry の定型文
+  → services/dictionary_service.rs（validated_inputs で検証 → resolve_article で記事解決）
+       → repositories/dictionary_repository.rs の find_saved_entry で完全一致再利用（あれば即返す・AI は呼ばない）
+       → 未命中の実記事: explain_with_ai → services/ai_provider_service.rs（ローカルLLM / Gemini / Mock）
+       → 未命中の固定サンプル記事（article-001〜003）: サンプル一致 or build_generic_entry の定型文
   → 用語解説ポップアップに表示
   → saveDictionaryEntry で辞書へ保存 → DictionaryScreen で再利用
 ```
@@ -69,12 +69,12 @@ NewsReaderScreen（記事本文・候補語）
 - `components/screens/NewsReaderScreen.tsx` — 解説対象の決定・ポップアップ表示・辞書保存の呼び出し。**この領域の起点。**
 - `lib/tauri/dictionary.ts` — command ラッパーと DTO 型（`ExplainSelectedTermParams` など）。
 - `src-tauri/src/commands/dictionary_commands.rs` — command 定義と入出力。
-- `src-tauri/src/services/dictionary_service.rs` — 検証と repository への委譲。
+- `src-tauri/src/services/dictionary_service.rs` — 検証・記事解決・辞書の再利用判定・AI 呼び出し（`explain_with_ai`）・固定サンプル応答。
 
 必要になった場合だけ読む:
 
 - `src-tauri/src/domain/dictionary.rs` — 入力検証・DTO・正規化を確認したいとき。
-- `src-tauri/src/repositories/dictionary_repository.rs` — 再利用判定・保存・サンプル応答を確認したいとき。
+- `src-tauri/src/repositories/dictionary_repository.rs` — 再利用判定・保存を確認したいとき。
 - `components/screens/DictionaryScreen.tsx` — 保存後の一覧・詳細・メモ・★・削除に問題があるとき。
 - `tests/ui/app.spec.ts` — 既存の期待動作を確認したいとき。
 
@@ -82,15 +82,15 @@ NewsReaderScreen（記事本文・候補語）
 
 | 症状・変更内容 | 最初に見る場所 |
 |---|---|
-| 文字列を選択しても解説操作が表示されない | `NewsReaderScreen.tsx`。現状は範囲選択の取得自体が未実装（候補語クリック方式）である点を先に確認する |
-| 選択範囲と解説対象の文字列が一致しない | `NewsReaderScreen.tsx` の `selectedTerm` → `selectedText` の受け渡し |
+| 文字列を選択しても解説操作が表示されない | `NewsReaderScreen.tsx` の `readExplainSelectionFromDom`（選択範囲の取得・選択できる範囲・200文字上限） |
+| 選択範囲と解説対象の文字列が一致しない | `NewsReaderScreen.tsx` の `handleExplainButtonClick`（選択文字列 → `selectedTerm`）→ `selectedText` の受け渡し |
 | 解説commandが呼ばれない | `NewsReaderScreen.tsx` の `explainSelectedTerm` 呼び出し → `lib/tauri/dictionary.ts` |
 | 解説結果が表示されない | `NewsReaderScreen.tsx` のポップアップ表示状態 → command の戻り値（`DictionaryEntryDto`） |
-| 解説が定型文になる / 記事が見つからない | `repositories/dictionary_repository.rs` の `sample_dictionary_entries` / `article_title_for` / `build_generic_entry`（仮実装のため） |
+| 解説が定型文になる / 記事が見つからない | `services/dictionary_service.rs` の `resolve_article`（固定サンプル記事 article-001〜003 は `sample_dictionary_entries` / `build_generic_entry` の固定文。未知IDは NotFound）→ 実記事なら `explain_with_ai` |
 | 辞書へ保存できない | `NewsReaderScreen.tsx` の `saveDictionaryEntry` → `dictionary_commands.rs` → `domain/dictionary.rs` の検証 |
 | 保存した用語が辞書画面に表示されない | `DictionaryScreen.tsx` の `listDictionaryEntries` → `dictionary_repository.rs` の一覧取得 |
-| 同じ用語が重複保存される | `repositories/dictionary_repository.rs` の `find_saved_entry` / `normalize_text`（正規化と一致条件） |
-| AI Provider未設定時に安全に失敗しない | `services/dictionary_service.rs` の `explain_with_ai` → `services/ai_provider_service.rs`（Mock fallback）と `.claude/rules/security.md` を参照 |
+| 同じ用語が重複保存される | `repositories/dictionary_repository.rs` の `find_saved_entry` ＋ `domain/dictionary.rs` の `normalize_text`（正規化と一致条件） |
+| AI Provider未設定時に安全に失敗しない | `services/dictionary_service.rs` の `explain_with_ai` → `services/ai_provider_service.rs`（Gemini はキー未設定・失敗時に Mock fallback。ローカルLLMの失敗は `AppError::LocalAi` で返り、Mock へは切り替えない）と `.claude/rules/security.md` を参照 |
 
 ## 関連設計書（必要な章だけを優先）
 
@@ -102,10 +102,10 @@ NewsReaderScreen（記事本文・候補語）
 ## 重点確認項目
 
 - `validated_inputs`（`domain/dictionary.rs`）— `selectedText` の検証。**外部由来・ユーザー選択の文字列を未検証で扱わない**。
-- `find_saved_entry` / `normalize_text`（`dictionary_repository.rs`）— 完全一致再利用の判定。ここを変えると重複保存・再利用漏れに直結する。
+- `find_saved_entry`（`dictionary_repository.rs`）/ `normalize_text`（`domain/dictionary.rs`）— 完全一致再利用の判定。ここを変えると重複保存・再利用漏れに直結する。
 - **選択文字列の全文をログへ出さない**（`AGENTS.md` §4 / MVPスコープ §5.6 完了条件）。表示・辞書保存に必要な選択語句（`DictionaryEntryDto` の `keyText` など）をDTOで返すことは問題ない。記事本文全文など、処理に不要なデータを戻り値へ含めない。
 - 原文の大量転載に相当する UI にしない。`dangerouslySetInnerHTML` を使わない。
-- 範囲選択を実装する場合、選択文字列の長さ上限と空白のみの選択の扱いをフロント側でも決める（現状 Rust 側は trim・空チェックのみ）。
+- 選択文字列の長さ上限（用語・フレーズ共通 200文字・D21）は、フロント（`NewsReaderScreen.tsx`）と Rust（`validated_inputs`）の両方で扱う。変えるときは両方をそろえる。
 - 削除は確認を挟む（MVPスコープ §5.7 完了条件）。
 
 ## 他の ai-context との境界
@@ -131,7 +131,7 @@ NewsReaderScreen（記事本文・候補語）
 ```bash
 pnpm exec eslint components/screens/NewsReaderScreen.tsx components/screens/DictionaryScreen.tsx
 pnpm run typecheck
-pnpm exec playwright test -g "dictionary|辞書"
+pnpm exec playwright test -g "dictionary|辞書|解説"
 git diff --check
 ```
 
@@ -143,7 +143,7 @@ cargo check
 cargo test
 ```
 
-- 用語解説フローの E2E は現状ないため、フロントを変更したら**確認手段が足りているか**を併せて報告する。
+- 用語解説フローの E2E は Mock（Tauri command を差し替え）のため、Rust・AI 側を変えたときは実機での確認が要るかを併せて報告する。
 
 ## 更新時の注意
 

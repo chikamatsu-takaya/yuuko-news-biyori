@@ -3,6 +3,8 @@ use crate::domain::settings::{PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
 
+/// 設定の更新（読み→変更→保存）は、どれも `SettingsRepository::lock_updates` を取って直列にする
+/// （設定画面の保存・テーマ変更・自動起動の写し・リセットが同時に走っても互いの変更を消さない）。
 #[derive(Debug, Clone)]
 pub struct SettingsService {
     repository: SettingsRepository,
@@ -37,6 +39,7 @@ impl SettingsService {
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
         dto.validate()?;
 
+        let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
         let current_theme_id = persisted.ui.theme_id.clone();
         persisted.apply_from_dto(dto);
@@ -48,6 +51,7 @@ impl SettingsService {
     /// 適用中テーマ（`ui.themeId`）だけを更新して保存する。
     /// 選んでよいテーマかの判定は呼び出し側（RewardService::set_active_theme）で済ませてから呼ぶ。
     pub fn set_theme_id(&self, theme_id: &str) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
         if persisted.ui.theme_id == theme_id && self.repository.exists() {
             return Ok(());
@@ -62,6 +66,7 @@ impl SettingsService {
     /// 既存ファイル（旧形式でフィールドが無いものを含む）は触らず、完了扱いのまま案内を出さない。
     /// 既存ファイルの AI 設定も変えない（欄が無ければ従来どおり mock・自動要約無効として読む）。
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
         if !self.repository.exists() {
             let mut persisted = self.repository.load_or_default()?;
             // load_or_default は .bak から復元できた場合は既存設定を返す（その場合は既存ユーザー）。
@@ -84,6 +89,7 @@ impl SettingsService {
     /// 退避に失敗したら初期化を中止し、元ファイルを残したままエラーを返す（判断台帳 D57）。
     /// 初回起動の案内の完了状態も引き継ぐ（リセットで案内を再表示しない）。読めない場合は完了扱い。
     pub fn reset_user_settings(&self) -> Result<UserSettingsDto, AppError> {
+        let _guard = self.repository.lock_updates();
         let (current_auto_start, onboarding_completed) = match self.repository.load_or_default() {
             Ok(persisted) => (
                 persisted.ui.auto_start_on_pc_boot,
@@ -105,6 +111,7 @@ impl SettingsService {
     /// 自動起動の設定値（OS 登録状態の写し）だけを更新する。値が同じなら書き込まない。
     /// 自動起動の ON/OFF は通常の保存ではなく autostart command からだけ変わる（autostart_service）。
     pub fn sync_auto_start_on_pc_boot(&self, enabled: bool) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
         if persisted.ui.auto_start_on_pc_boot == enabled && self.repository.exists() {
             return Ok(());
