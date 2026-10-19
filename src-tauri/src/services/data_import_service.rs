@@ -38,7 +38,8 @@ use crate::domain::settings::PersistedSettings;
 use crate::error::AppError;
 use crate::paths::{
     AppPaths, ARTICLE_FAVORITES_RELATIVE_PATH, DICTIONARY_RELATIVE_PATH, FRIENDSHIP_RELATIVE_PATH,
-    GACHA_STATE_RELATIVE_PATH, MIGRATION_BACKUPS_RELATIVE_DIR, MIGRATION_IMPORTS_RELATIVE_DIR,
+    GACHA_STATE_RELATIVE_PATH, LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH,
+    MIGRATION_BACKUPS_RELATIVE_DIR, MIGRATION_IMPORTS_RELATIVE_DIR,
     MIGRATION_IMPORT_STAGING_RELATIVE_DIR, REWARDS_RELATIVE_PATH, SETTINGS_RELATIVE_PATH,
 };
 use crate::repositories::article_repository::{
@@ -157,6 +158,20 @@ impl MigrationWriteLocks {
     }
 }
 
+/// 取り込むデータに旧版のサンプル記事（D139）が入っていても次回起動で片付くよう、掃除済みの印を消す。
+/// 差し替え前に消すので、途中で失敗しても次回起動で確認し直すだけで済む（掃除は冪等）。
+/// 消せなかったときはログだけ残して取り込みは続ける（サンプルが残っても利用者データは失わない）。
+fn forget_legacy_seed_cleanup_state(root: &Path) {
+    match std::fs::remove_file(root.join(LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!(
+            "Failed to reset legacy sample cleanup state before import ({:?})",
+            error.kind()
+        ),
+    }
+}
+
 /// 守る値を持たないロックなので、別の処理が panic していても使い続ける。
 fn lock_ignoring_poison(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -270,6 +285,7 @@ impl DataImportService {
 
         let swap_result = {
             let _write_guards = self.write_locks.acquire();
+            forget_legacy_seed_cleanup_state(root);
             swap_in(root, &staging, &backups_root, &files, now)
         };
         remove_staging_dir(&staging);
@@ -1217,8 +1233,13 @@ mod tests {
             "{}",
         );
         write(&target, "migration-backups/keep-me/note.txt", "note");
+        write(&target, LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH, "{}");
 
         let result = service(&target).import_at(&file_name, fixed_now()).unwrap();
+        // 取り込んだデータに旧サンプル記事があっても次回起動で片付くよう、掃除済みの印は消える（D139）。
+        assert!(!target
+            .join(LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH)
+            .exists());
 
         assert_eq!(result.file_name, file_name);
         assert_eq!(result.file_count, 10);
