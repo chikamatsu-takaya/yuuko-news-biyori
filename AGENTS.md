@@ -28,7 +28,7 @@ Claude Code / Codex 共通の開発ルール（全タスクで必ず守る最小
 | 中核ロジック | Rust |
 | パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
-| AI利用 | Gemini API + MockProvider |
+| AI利用 | 同梱ローカルLLM（llama-server + Qwen3.5-2B。主経路）+ Gemini API（任意）+ MockProvider |
 
 C++ / Qt / QML は MVP段階では使用しない（過去案は別資料として残す）。
 
@@ -78,7 +78,7 @@ C++ / Qt / QML は MVP段階では使用しない（過去案は別資料とし�
 ## 8. エラー処理（要点）
 
 - 失敗時は安全側へ倒す。一部機能の失敗でアプリ全体を落とさない。フォールバック可能なら代替動作。
-- React はユーザー向け文言、Rust ログは調査用情報に分ける。APIキー未設定時は MockProvider へ切り替える。
+- React はユーザー向け文言、Rust ログは調査用情報に分ける。Gemini の APIキー未設定時は MockProvider へ切り替える。
 
 ## 9. Git 運用
 
