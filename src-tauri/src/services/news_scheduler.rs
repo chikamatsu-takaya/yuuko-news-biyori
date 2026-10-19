@@ -97,9 +97,7 @@ impl NewsRefreshState {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let payload = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, payload)?;
-        Ok(())
+        crate::infra::atomic_file::write_json_atomic(path, self, "news refresh state")
     }
 }
 

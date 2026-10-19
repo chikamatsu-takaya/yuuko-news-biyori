@@ -44,8 +44,7 @@ impl ArchiveMaintenanceState {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let payload = serde_json::to_vec_pretty(self)?;
-        atomic_write_state(path, &payload)
+        crate::infra::atomic_file::write_json_atomic(path, self, "archive maintenance state")
     }
 }
 
@@ -121,42 +120,6 @@ where
         archived_article_count: archive_summary.archived_article_count,
         retired_article_count: retirement_summary.retired_article_count,
     })
-}
-
-fn atomic_write_state(path: &Path, payload: &[u8]) -> Result<(), AppError> {
-    let temp_path = path.with_extension("json.tmp");
-    let backup_path = path.with_extension("json.bak");
-    std::fs::write(&temp_path, payload)?;
-
-    let had_existing = path.exists();
-    if had_existing {
-        if backup_path.exists() {
-            std::fs::remove_file(&backup_path)?;
-        }
-        std::fs::rename(path, &backup_path)?;
-    }
-
-    match std::fs::rename(&temp_path, path) {
-        Ok(()) => {
-            if had_existing && backup_path.exists() {
-                if let Err(error) = std::fs::remove_file(&backup_path) {
-                    log::warn!("failed to remove archive maintenance state backup: {error}");
-                }
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_existing && backup_path.exists() {
-                if let Err(restore_error) = std::fs::rename(&backup_path, path) {
-                    log::error!(
-                        "failed to restore archive maintenance state backup: {restore_error}"
-                    );
-                }
-            }
-            let _ = std::fs::remove_file(&temp_path);
-            Err(error.into())
-        }
-    }
 }
 
 #[cfg(test)]

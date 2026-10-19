@@ -205,6 +205,8 @@ impl YuukoService {
 
     pub fn get_yuuko_notification_state(&self) -> Result<YuukoNotificationState, AppError> {
         let settings = self.settings_repository.load_or_default()?;
+        // 読み取り用の command だが、報酬通知の整合・既定文言の補完で保存することがあるため更新ロックを取る。
+        let _guard = self.yuuko_state_repository.lock_updates();
         let mut yuuko_state = self.yuuko_state_repository.load_or_default()?;
         let mut response = yuuko_state.to_notification_state();
 
@@ -301,6 +303,8 @@ impl YuukoService {
         let mut confirmed_reward_ids = outcome.confirmed_reward_ids;
         let mut remaining_pending_reward_ids = outcome.remaining_pending_reward_ids;
 
+        // rewards.json 側の確認（RewardService のロック）を終えてから通知状態のロックを取る（ロックを入れ子にしない）。
+        let _guard = self.yuuko_state_repository.lock_updates();
         let mut state = self.yuuko_state_repository.load_or_default()?;
         if state.reward_notification.is_some() {
             // 通知状態側で一致が無い場合のエラーは無視する（rewards.json 側で確認できていればよい）。
@@ -334,6 +338,7 @@ impl YuukoService {
 
     /// ゆうこの通知を閉じる。pending 報酬は保持し、再通知抑制（クールタイム）を設定する。
     pub fn dismiss_yuuko_notification(&self) -> Result<YuukoNotificationState, AppError> {
+        let _guard = self.yuuko_state_repository.lock_updates();
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.dismiss_notification(Utc::now());
         self.yuuko_state_repository.save(&state)?;
@@ -343,6 +348,7 @@ impl YuukoService {
     /// 無操作タイムアウト（無視）を記録する。フロントの自動退場タイマーから呼ぶ想定
     /// （Rust側はタイマー/ポーリングを持たない）。pending 報酬は保持する。
     pub fn mark_yuuko_ignored(&self) -> Result<YuukoNotificationState, AppError> {
+        let _guard = self.yuuko_state_repository.lock_updates();
         let mut state = self.yuuko_state_repository.load_or_default()?;
         state.mark_ignored(Utc::now());
         self.yuuko_state_repository.save(&state)?;
@@ -355,6 +361,9 @@ impl YuukoService {
     /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。未確認の報酬があればニュースより優先して報酬通知にする（§6.4）。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
         let settings = self.settings_repository.load_or_default()?;
+        // 判定から保存までを1つの更新として扱う（同時に「閉じる」が来ても、そのクールタイムを後勝ちで消さない）。
+        // 保持中に呼ぶ記事・報酬・全画面判定は、このロックを取らないため入れ子にならない。
+        let _guard = self.yuuko_state_repository.lock_updates();
         let mut state = self.yuuko_state_repository.load_or_default()?;
 
         if !settings.notification.enabled {
@@ -510,6 +519,7 @@ impl YuukoService {
     /// 報酬通知（RewardNotifying）のクリック（OK）は、表示中の報酬を確認済みにする。確認処理は
     /// confirm_rank_up_reward と同じ関数を通す（確認の実装は一本・D35）。2段階クリックは無い。
     pub fn handle_yuuko_clicked(&self) -> Result<YuukoNotificationState, AppError> {
+        let guard = self.yuuko_state_repository.lock_updates();
         let mut state = self.yuuko_state_repository.load_or_default()?;
         if state.has_active_reward_notice() {
             let reward_ids = state
@@ -517,6 +527,8 @@ impl YuukoService {
                 .as_ref()
                 .map(|reward| reward.reward_ids.clone())
                 .unwrap_or_default();
+            // 確認処理は自分で通知状態のロックを取り、読み直してから更新するため、ここで手放す。
+            drop(guard);
             self.confirm_rank_up_reward(ConfirmRankUpRewardParams { reward_ids })?;
             let state = self.yuuko_state_repository.load_or_default()?;
             return Ok(self.display_state(&state));
@@ -576,7 +588,8 @@ impl YuukoService {
     /// 知らせ済みの記録から未確認でなくなった ID を取り除く（保存は呼び出し側の通知・ニュース保存に任せる）。
     ///
     /// 正は rewards.json の pendingRewards（RewardService）。RewardService は friendship → reward の順に
-    /// ロックを取るが、YuukoService は自前のロックを持たないため順序の逆転は起きない。
+    /// ロックを取る。YuukoService は通知状態のロックを保持したまま呼ぶが、RewardService 側から
+    /// 通知状態のロックを取ることは無いため、順序の逆転は起きない。
     /// 読み込みに失敗しても通知全体は止めず、報酬通知だけを見送る（ニュース通知は続ける）。
     fn pending_rewards_for_notice(
         &self,
@@ -617,6 +630,7 @@ impl YuukoService {
     }
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
+        let _guard = self.yuuko_state_repository.lock_updates();
         if !self.yuuko_state_repository.exists() {
             let state = self.yuuko_state_repository.load_or_default()?;
             self.yuuko_state_repository.save(&state)?;
