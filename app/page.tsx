@@ -21,6 +21,7 @@ import {
   handleYuukoClicked,
   isActiveRewardNotice,
   listenYuukoOpenArticle,
+  listenYuukoSummoned,
   markYuukoIgnored,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
@@ -256,6 +257,41 @@ export default function Page() {
       unlisten?.();
     };
   }, [handleOpenArticle]);
+
+  // トレイ「ゆうこを呼ぶ」（判断台帳 D140）で紹介できるものが無いときの一言（メイン表示中だけ届く）。
+  // 通知状態ではない見た目だけの表示なので Rust の command は呼ばず、OK・閉じる・自動退場で外すだけにする。
+  // 記事を紹介できた場合の知らせは useNotificationScheduler が受け取り、通常のアプリ内通知として出す。
+  const [summonMessage, setSummonMessage] = React.useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let seq = 0;
+    listenYuukoSummoned((notice) => {
+      if (disposed || !notice.message) {
+        return;
+      }
+      seq += 1;
+      setSummonMessage({ text: notice.message, seq });
+    })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to listen yuuko summoned event:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  const clearSummonMessage = React.useCallback(() => setSummonMessage(null), []);
 
   // 各一覧に渡す onOpenArticle を、遷移元を固定して生成する（ホーム/履歴/辞書で戻り先を分ける）。
   const openArticleFrom = React.useCallback(
@@ -498,6 +534,14 @@ export default function Page() {
   const activeNotification = isActiveYuukoNotification(yuukoNotificationState)
     ? yuukoNotificationState
     : null;
+  // 「ゆうこを呼ぶ」の一言はその場限りの表示。ウィンドウが隠れた・本物の通知が出たら捨て、
+  // 後で再表示したときや通知を閉じた後に古い一言が出てこないようにする。
+  const hasActiveNotification = activeNotification !== null;
+  React.useEffect(() => {
+    if (!isWindowVisible || hasActiveNotification) {
+      setSummonMessage(null);
+    }
+  }, [isWindowVisible, hasActiveNotification]);
   // active が無い間だけ、退場演出中のコピーを同じ位置（同じ key）に描画する。
   // 同じ要素を使い続けることで、初回クリック後の軽量プレビューのまま退場させる。
   const displayedNotification = activeNotification ?? exitingNotification;
@@ -537,6 +581,18 @@ export default function Page() {
           onIgnore={handleNotificationIgnore}
           exiting={isNotificationExiting}
           onExited={handleNotificationExited}
+        />
+      )}
+      {/* 「ゆうこを呼ぶ」の一言。通知（ニュース・報酬）を表示中ならそちらを優先して出さない。 */}
+      {isWindowVisible && !isOnboardingOpen && !displayedNotification && summonMessage && (
+        <YuukoInAppNotification
+          key={`yuuko-summon-message-${summonMessage.seq}`}
+          balloonText={summonMessage.text}
+          positionMode="RightBottom"
+          variant="message"
+          onOpen={clearSummonMessage}
+          onClose={clearSummonMessage}
+          onIgnore={clearSummonMessage}
         />
       )}
       {/* 初回起動時だけ案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}

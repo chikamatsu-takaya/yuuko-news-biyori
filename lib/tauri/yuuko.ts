@@ -53,6 +53,11 @@ export type YuukoNotificationState = {
    * previewArticle.summary は要約が無いと本文抜粋で補われるため、デスクトップ通知ではこちらだけを使う。
    */
   previewShortSummary?: string;
+  /**
+   * トレイ「ゆうこを呼ぶ」で紹介できるものが無かったときの一言（固定文言・判断台帳 D140）。
+   * ゆうこ用ウィンドウのマウント時の状態取得にだけ、Rust が1回だけ詰めて返す（初回生成直後はイベントを取りこぼすため）。
+   */
+  summonMessage?: string;
 };
 
 /**
@@ -184,6 +189,11 @@ export type YuukoDesktopNotification = {
    * 報酬通知では記事の欄（articleId / title / sourceName）は空で、文言は balloonText だけを使う。
    */
   reward?: boolean;
+  /**
+   * 一言だけの吹き出し（トレイ「ゆうこを呼ぶ」で紹介できるものが無いとき・判断台帳 D140）か。
+   * 記事の欄は空で、文言は balloonText だけを使う。ニュース・報酬通知では省略される。
+   */
+  message?: boolean;
 };
 
 /**
@@ -241,6 +251,17 @@ export const toYuukoDesktopNotification = (
     !["Appearing", "BalloonVisible", "PreviewVisible"].includes(state.state) ||
     !state.previewArticle
   ) {
+    // 表示中の通知が無いときだけ、「ゆうこを呼ぶ」で預けられた一言を出す（Rust 側も同じ条件で詰める）。
+    if (state?.summonMessage) {
+      return {
+        articleId: "",
+        title: "",
+        balloonText: state.summonMessage,
+        sourceName: "",
+        previewVisible: false,
+        message: true,
+      };
+    }
     return null;
   }
   // previewArticle.summary は本文抜粋で補われ得るため使わない（無ければ固定の一言になる）。
@@ -297,6 +318,36 @@ export const listenYuukoOpenArticle = async (
     if (typeof articleId === "string" && articleId.length > 0) {
       handler(articleId);
     }
+  });
+};
+
+/**
+ * トレイ「ゆうこを呼ぶ」をメイン表示中に行ったとき、Rust がメインウィンドウへ送るイベント名（判断台帳 D140）。
+ * Rust 側 yuuko_desktop_notifier::YUUKO_SUMMONED_EVENT と一致させる。
+ */
+export const YUUKO_SUMMONED_EVENT = "yuuko-summoned";
+
+/**
+ * 「ゆうこを呼ぶ」の知らせ。message があれば一言だけを出す（紹介できるものが無い・通知OFF）。
+ * 無ければ紹介中の通知が Rust に保存済みなので、通知状態を拾い直す。
+ */
+export type YuukoSummonedNotice = {
+  message?: string;
+};
+
+/** メインウィンドウで「ゆうこを呼ぶ」の知らせを購読する。非Tauriでは何もしない。 */
+export const listenYuukoSummoned = async (
+  handler: (notice: YuukoSummonedNotice) => void
+): Promise<() => void> => {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  return listen<YuukoSummonedNotice>(YUUKO_SUMMONED_EVENT, (event) => {
+    const message = event.payload?.message;
+    // 文言は Rust の固定文言だが、念のため空でない文字列だけを渡す（テキストとして描画する）。
+    handler(
+      typeof message === "string" && message.length > 0 ? { message } : {}
+    );
   });
 };
 

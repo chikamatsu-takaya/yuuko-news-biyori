@@ -189,15 +189,34 @@ export default function YuukoWindowPage() {
             summary={notification.summary}
             positionMode="RightBottom"
             // 報酬通知は吹き出し＋OK。OK も handle_yuuko_clicked を通り、Rust が確認済みにしてウィンドウを隠す。
-            variant={notification.reward ? "reward" : "news"}
+            // 一言（「ゆうこを呼ぶ」で紹介できるものが無いとき）も吹き出し＋OK。
+            variant={
+              notification.reward
+                ? "reward"
+                : notification.message
+                  ? "message"
+                  : "news"
+            }
             // ウィンドウは段階ごとの固定サイズ（Rust 側）なので、長文で上へはみ出さないよう行数を抑える。
             clampText
             onFirstClick={() => {
               void enqueue(handleYuukoClicked);
             }}
-            onOpen={() => finish(handleYuukoClicked)}
+            // 一言は OK・閉じる・自動退場のどれも dismiss を通す。表示中の通知が無いため Rust は状態を変えず
+            // （クールタイムも付かない）、ウィンドウだけを隠す（このウィンドウにはウィンドウ操作の権限が無い）。
+            onOpen={() =>
+              finish(
+                notification.message
+                  ? dismissYuukoNotification
+                  : handleYuukoClicked
+              )
+            }
             onClose={() => finish(dismissYuukoNotification)}
-            onIgnore={() => finish(markYuukoIgnored)}
+            onIgnore={() =>
+              finish(
+                notification.message ? dismissYuukoNotification : markYuukoIgnored
+              )
+            }
           />
         </div>
       ) : null}

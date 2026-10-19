@@ -379,6 +379,64 @@ test("reward event payload shows the reward notice and close uses dismiss", asyn
   expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(0);
 });
 
+// トレイ「ゆうこを呼ぶ」（判断台帳 D140）で紹介できるものが無いときの一言。Rust の固定文言と揃える。
+const SUMMON_MESSAGE = "いま紹介できるニュースがないみたい。";
+
+test("summon message from the saved state shows balloon + OK and OK goes through dismiss", async ({
+  page,
+}) => {
+  // 初回生成直後はイベントを取りこぼすため、マウント時の状態取得に一言が1回だけ詰められて届く。
+  await installMocks(page, {
+    state: {
+      state: "Waiting",
+      positionMode: "RightBottom",
+      hasNotification: false,
+      summonMessage: SUMMON_MESSAGE,
+    },
+  });
+  await openYuukoWindow(page);
+  const region = page.getByRole("region", { name: REGION });
+
+  await expect(region.getByText(SUMMON_MESSAGE)).toBeVisible();
+  await expect(
+    region.getByRole("button", { name: "ニュースをプレビュー" })
+  ).toHaveCount(0);
+  await expectFitsInWindow(page, BALLOON_HEIGHT);
+
+  await region.getByRole("button", { name: "OK", exact: true }).click();
+  await expect
+    .poll(() => commandCalls(page, "dismiss_yuuko_notification"))
+    .toBe(1);
+  expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(0);
+  await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+});
+
+test("summon message event auto-exits through dismiss, not mark_yuuko_ignored", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page);
+
+  await emit(page, {
+    articleId: "",
+    title: "",
+    balloonText: SUMMON_MESSAGE,
+    sourceName: "",
+    previewVisible: false,
+    message: true,
+  });
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText(SUMMON_MESSAGE)).toBeVisible();
+
+  await page.clock.fastForward(21_000);
+  await page.clock.fastForward(1_000);
+  await expect
+    .poll(() => commandCalls(page, "dismiss_yuuko_notification"))
+    .toBe(1);
+  expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
+});
+
 test("close button goes through dismiss_yuuko_notification", async ({ page }) => {
   await installMocks(page, { state: activeState() });
   await openYuukoWindow(page);

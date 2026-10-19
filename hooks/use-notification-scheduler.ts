@@ -5,6 +5,7 @@ import { listenNewsRefreshed } from "@/lib/tauri/news";
 import {
   getYuukoNotificationState,
   isActiveRewardNotice,
+  listenYuukoSummoned,
   requestYuukoNotification,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
@@ -278,6 +279,42 @@ export const useNotificationScheduler = ({
         // 購読できなくても定期ポーリングで候補生成は続くため、警告だけ残す。
         console.warn(
           "[NotificationScheduler] ニュース取得完了イベントを購読できませんでした:",
+          error
+        );
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [generateCandidates]);
+
+  // トレイ「ゆうこを呼ぶ」（判断台帳 D140）をメイン表示中に行ったとき、次の定期 tick を待たずに1回 poll する。
+  // 紹介中の通知は Rust に保存済みのため、request は already_active として同じ通知を返す（通知枠は消費しない）。
+  // 一言だけの知らせ（message あり）は Page 側が表示するため、ここでは何もしない。
+  // ガード（実行中・表示不可）はニュース取得完了時と同じ。記事閲覧中などは閲覧を離れた後の poll で出る。
+  useEffect(() => {
+    if (!generateCandidates) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    listenYuukoSummoned((notice) => {
+      if (disposed || notice.message) {
+        return;
+      }
+      void pollRef.current?.();
+    })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((error) => {
+        // 購読できなくても、保存済みの通知は定期ポーリングで拾われるため警告だけ残す。
+        console.warn(
+          "[NotificationScheduler] ゆうこ呼び出しイベントを購読できませんでした:",
           error
         );
       });

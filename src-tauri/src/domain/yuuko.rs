@@ -11,6 +11,14 @@ use crate::util::text_safety::neutralize_html_and_control;
 const MIN_COOLTIME_MINUTES: i64 = 60; // 前回通知からの最短間隔
 const DISMISS_COOLDOWN_MINUTES: i64 = 120; // ユーザーが閉じた後の再通知抑制
 const IGNORE_COOLDOWN_MINUTES: i64 = 180; // 無操作（無視）後の再通知抑制
+/// トレイ「ゆうこを呼ぶ」（判断台帳 D140）で紹介できる記事が無いときの一言（固定文言）。
+pub const SUMMON_NO_ARTICLE_MESSAGE: &str = "いま紹介できるニュースがないみたい。";
+/// トレイ「ゆうこを呼ぶ」で、通知設定が OFF のときの一言（固定文言）。
+pub const SUMMON_NOTIFICATIONS_OFF_MESSAGE: &str =
+    "通知がOFFになっているよ。設定でONにすると、ニュースを紹介できるよ。";
+/// トレイ「ゆうこを呼ぶ」で、記事一覧などを読めなかったときの一言（固定文言）。
+pub const SUMMON_FAILED_MESSAGE: &str =
+    "いまはニュースを確認できなかったみたい。少ししてからまた呼んでね。";
 /// 紹介済みIDの保持上限（FIFO）。状態ファイルの肥大化を防ぐ。
 const INTRODUCED_HISTORY_CAP: usize = 500;
 /// 保存用タイムスタンプ形式（UTC）。news / friendship / summary と統一。
@@ -70,6 +78,30 @@ pub enum NotificationGate {
     DailyLimitReached,
     CoolingDown,
     OutsideTimeRange,
+}
+
+/// トレイ「ゆうこを呼ぶ」の表示先（判断台帳 D140）。一言の閉じ方が違うため、計画の優先順位に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummonSurface {
+    /// メイン表示中のアプリ内。一言は画面だけで消える（command を呼ばない）。
+    InApp,
+    /// ゆうこ用ウィンドウ。一言の OK・閉じる・自動退場は dismiss_yuuko_notification を通る。
+    Desktop,
+}
+
+/// トレイ「ゆうこを呼ぶ」（利用者の明示操作・判断台帳 D140）で何を出すか（内部用・非永続）。
+///
+/// 明示的に呼ばれたため、日次上限・クールタイム・時間帯・全画面/会議中・スリープ復帰後の猶予は見ない。
+/// 通知設定 OFF だけは「通知しない」という利用者の設定なので、記事は選ばず一言で知らせる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummonPlan {
+    /// 通知設定が OFF: 記事は選ばず、OFF になっている旨の一言を出す（デスクトップでは表示中の通知が無いときだけ）。
+    NotificationsOff,
+    /// 表示中（ユーザー未対応）のニュース・報酬通知がある: 上書きせず、それを出し直す（通知枠は消費しない）。
+    /// デスクトップでは通知OFFより優先する（一言の「閉じる」で表示中の通知を消さないため）。
+    ReshowActive,
+    /// おすすめから未紹介・未読・スコア順で1件選ぶ（無ければ「紹介できるニュースがない」一言）。
+    PickArticle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +166,13 @@ pub struct YuukoNotificationState {
     /// 要約が無い記事・非 active では None（送らない）。既存フィールドの意味は変えない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_short_summary: Option<String>,
+    /// トレイ「ゆうこを呼ぶ」で紹介できるものが無かったときの一言（判断台帳 D140）。永続化しない。
+    ///
+    /// ゆうこ用ウィンドウを初めて作った直後はページの購読開始より先にイベントを送ってしまうため、
+    /// Rust に1回だけ預けた一言を、ゆうこ用ウィンドウのマウント時の状態取得に限って詰めて返す。
+    /// それ以外（メイン画面からの取得・通常の通知判定）では常に None（送らない）。固定文言だけを入れる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summon_message: Option<String>,
 }
 
 /// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
@@ -241,6 +280,7 @@ impl PersistedYuukoState {
             current_article_id: self.current_article_id.clone(),
             reward_notification: self.reward_notification.clone(),
             preview_short_summary: None,
+            summon_message: None,
         }
     }
 
@@ -628,7 +668,38 @@ impl PersistedYuukoState {
         article: ArticleSummaryDto,
     ) {
         self.record_notification_slot_in(tz, now);
+        self.present_article(article);
+    }
 
+    /// トレイ「ゆうこを呼ぶ」（判断台帳 D140）の計画を決める。ゲート（日次上限・クールタイム等）は見ない。
+    ///
+    /// 通知OFFでは、呼んだのに何も出ない状態にしないため、OFF の一言を出すのが原則。
+    /// - アプリ内（メイン表示中）: 通知OFF中はアプリ内通知が出ない（既存方針）ため、出し直しでは何も見えない。
+    ///   アプリ内の一言は画面だけで消える（command を呼ばない）ので、表示中の通知があっても OFF の一言を出す。
+    /// - デスクトップ: 一言は閉じると dismiss_yuuko_notification を通るため、表示中の通知が残ったまま一言を
+    ///   出すと、閉じる操作でその通知を消してクールタイムまで付けてしまう。表示中の通知を先に判定して出し直す。
+    pub fn plan_summon(&self, notifications_enabled: bool, surface: SummonSurface) -> SummonPlan {
+        let has_active = self.has_active_notification() || self.has_active_reward_notice();
+        match (notifications_enabled, has_active, surface) {
+            (false, _, SummonSurface::InApp) | (false, false, SummonSurface::Desktop) => {
+                SummonPlan::NotificationsOff
+            }
+            (_, true, _) => SummonPlan::ReshowActive,
+            (true, false, _) => SummonPlan::PickArticle,
+        }
+    }
+
+    /// トレイ「ゆうこを呼ぶ」で選んだ記事を「紹介中」にする（判断台帳 D140）。
+    ///
+    /// 利用者が明示的に呼んだものなので、通知回数（日次上限）と前回通知時刻（最短クールタイムの基点）は
+    /// 記録しない（自動の通知枠を減らさない）。同じ記事を繰り返し紹介しないよう、紹介済み（FIFO）には記録する。
+    /// 閉じる・無視の後のクールタイムは通常の通知と同じ（dismiss_notification / mark_ignored）。
+    pub fn mark_summoned(&mut self, article: ArticleSummaryDto) {
+        self.present_article(article);
+    }
+
+    /// 記事を紹介済みに記録し、吹き出し・紹介中記事・状態を「紹介中」にそろえる（通知枠は扱わない）。
+    fn present_article(&mut self, article: ArticleSummaryDto) {
         if !self.is_introduced(&article.article_id) {
             self.introduced_article_ids.push(article.article_id.clone());
             if self.introduced_article_ids.len() > INTRODUCED_HISTORY_CAP {
@@ -1101,6 +1172,87 @@ mod tests {
         assert_eq!(state.current_article_id.as_deref(), Some("a1"));
         assert_eq!(state.state, YuukoResidentState::BalloonVisible);
         assert!(state.preview_article.is_some());
+    }
+
+    #[test]
+    fn mark_summoned_marks_introduced_without_consuming_count_or_cooltime() {
+        let mut state = PersistedYuukoState {
+            cooldown_until: Some("2099-01-01T00:00:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        state.mark_summoned(article("a1", ArticleReadState::Unread, false, 0.9));
+
+        // 通知枠（日次回数・前回通知時刻）は使わず、閉じる/無視のクールタイムも変えない。
+        assert_eq!(state.daily_notification.count, 0);
+        assert!(state.last_notified_at.is_none());
+        assert_eq!(
+            state.cooldown_until.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        // 同じ記事を繰り返さないよう紹介済みには記録し、通常の通知と同じ「紹介中」にする。
+        assert!(state.is_introduced("a1"));
+        assert_eq!(state.current_article_id.as_deref(), Some("a1"));
+        assert_eq!(state.state, YuukoResidentState::BalloonVisible);
+        assert!(state.has_active_notification());
+    }
+
+    #[test]
+    fn plan_summon_ignores_gates_but_respects_notifications_off_and_active() {
+        let now = jst_at(2026, 6, 9, 12, 0);
+        // 日次上限に達し、クールタイム中の状態でも、呼ばれたら記事を選ぶ。
+        let mut gated = PersistedYuukoState::default();
+        gated.mark_notified_in(
+            &jst(),
+            now,
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
+        gated.dismiss_notification(now);
+        assert_eq!(
+            gated.can_notify_in(&jst(), now, 1, [("00:00", "23:59")]),
+            NotificationGate::DailyLimitReached
+        );
+        assert_eq!(
+            gated.plan_summon(true, SummonSurface::Desktop),
+            SummonPlan::PickArticle
+        );
+        // 通知設定 OFF は記事を選ばない。
+        assert_eq!(
+            gated.plan_summon(false, SummonSurface::Desktop),
+            SummonPlan::NotificationsOff
+        );
+        assert_eq!(
+            gated.plan_summon(false, SummonSurface::InApp),
+            SummonPlan::NotificationsOff
+        );
+        // 表示中のニュース・報酬通知は上書きせず出し直す。
+        assert_eq!(
+            state_with_notification().plan_summon(true, SummonSurface::Desktop),
+            SummonPlan::ReshowActive
+        );
+        let reward_only = PersistedYuukoState {
+            state: YuukoResidentState::Waiting,
+            current_article_id: None,
+            ..state_with_notification()
+        };
+        assert_eq!(
+            reward_only.plan_summon(true, SummonSurface::Desktop),
+            SummonPlan::ReshowActive
+        );
+        // 通知OFFでも表示中の通知が残っていれば、一言ではなく出し直す（一言の閉じるで消さない）。
+        assert_eq!(
+            state_with_notification().plan_summon(false, SummonSurface::Desktop),
+            SummonPlan::ReshowActive
+        );
+        // アプリ内は一言が画面だけで消えるため、通知OFFなら表示中の通知があっても OFF の一言を出す
+        // （通知OFF中はアプリ内通知が出ず、出し直しでは何も見えないため）。
+        assert_eq!(
+            state_with_notification().plan_summon(false, SummonSurface::InApp),
+            SummonPlan::NotificationsOff
+        );
+        assert_eq!(
+            state_with_notification().plan_summon(true, SummonSurface::InApp),
+            SummonPlan::ReshowActive
+        );
     }
 
     #[test]

@@ -2,21 +2,47 @@ use tauri::{AppHandle, State, WebviewWindow};
 
 use crate::domain::yuuko::{
     ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, RequestYuukoNotificationResult,
-    YuukoNotificationState,
+    YuukoNotificationState, YuukoResidentState,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 use crate::yuuko_desktop_notifier::{self, YuukoAction};
+use crate::yuuko_window::YUUKO_WINDOW_LABEL;
 
+/// 現在のゆうこ通知状態を返す。
+///
+/// ゆうこ用ウィンドウからの呼び出し（マウント時の初期表示）に限り、トレイ「ゆうこを呼ぶ」で預けた一言
+/// （紹介できるものが無いとき・判断台帳 D140）を1回だけ取り出して summon_message に詰める。
+/// 初回生成直後のページはイベントを取りこぼすため。表示中の通知があればそちらを優先し、一言は捨てる。
 #[tauri::command]
 pub async fn get_yuuko_notification_state(
+    window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> CommandResult<YuukoNotificationState> {
     let yuuko_service = state.yuuko_service.clone();
-    tauri::async_runtime::spawn_blocking(move || yuuko_service.get_yuuko_notification_state())
-        .await
-        .map_err(|error| CommandError::join_error("yuuko-notification-state", error))?
-        .map_err(CommandError::from)
+    let mut response =
+        tauri::async_runtime::spawn_blocking(move || yuuko_service.get_yuuko_notification_state())
+            .await
+            .map_err(|error| CommandError::join_error("yuuko-notification-state", error))?
+            .map_err(CommandError::from)?;
+    if window.label() == YUUKO_WINDOW_LABEL {
+        let message = yuuko_desktop_notifier::take_pending_summon_message();
+        if !is_displayable_notification(&response) {
+            response.summon_message = message;
+        }
+    }
+    Ok(response)
+}
+
+/// ゆうこ用ウィンドウが初期表示に使う通知（ニュース・報酬）が表示中か。
+fn is_displayable_notification(state: &YuukoNotificationState) -> bool {
+    matches!(
+        state.state,
+        YuukoResidentState::Appearing
+            | YuukoResidentState::BalloonVisible
+            | YuukoResidentState::PreviewVisible
+            | YuukoResidentState::RewardNotifying
+    )
 }
 
 #[tauri::command]

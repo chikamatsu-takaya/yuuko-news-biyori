@@ -10,8 +10,11 @@
 //! - ゆうこ用ウィンドウの生成は Windows の同期 command デッドロックを避けるため、本スレッドからだけ行う。
 //! - 本スレッドはメインの表示状態に関係なく回り続けるため、各周期の心拍をスリープ復帰の検知に使う
 //!   （設計書 §5.2 / §5.4。domain::resume_grace）。OS の電源イベントは使わない。
+//! - トレイ「ゆうこを呼ぶ」（判断台帳 D140）も、表示先の決め方（メイン表示中はアプリ内、それ以外はデスクトップ）と
+//!   ゆうこ用ウィンドウの生成をここに集める（[`summon`]。トレイのメニュー処理から専用スレッドで呼ぶ）。
 
-use std::time::Duration;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -19,9 +22,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::app_lifecycle::MAIN_WINDOW_LABEL;
 use crate::domain::fullscreen_suppression::FullscreenGate;
 use crate::domain::yuuko::{
-    RequestYuukoNotificationResult, YuukoNotificationState, YuukoResidentState,
+    RequestYuukoNotificationResult, SummonSurface, YuukoNotificationState, YuukoResidentState,
+    SUMMON_FAILED_MESSAGE, SUMMON_NO_ARTICLE_MESSAGE,
 };
-use crate::services::yuuko_service::YuukoService;
+use crate::services::yuuko_service::{YuukoService, YuukoSummonOutcome};
 use crate::yuuko_window::{self, YuukoWindowStage, YUUKO_WINDOW_LABEL};
 
 /// 判定間隔。アプリ内通知のスケジューラ（5分）と揃え、表示中/非表示中で通知の出やすさを変えない。
@@ -46,6 +50,18 @@ pub const YUUKO_DESKTOP_NOTIFICATION_EVENT: &str = "yuuko-desktop-notification";
 /// ゆうこ用ウィンドウで「詳しく見る」が確定したとき、メインウィンドウへ記事を開かせるイベント名。
 /// lib/tauri/yuuko.ts の YUUKO_OPEN_ARTICLE_EVENT と一致させる。
 pub const YUUKO_OPEN_ARTICLE_EVENT: &str = "yuuko-open-article";
+
+/// トレイ「ゆうこを呼ぶ」をメイン表示中に行ったとき、メインウィンドウへ送るイベント名（判断台帳 D140）。
+/// lib/tauri/yuuko.ts の YUUKO_SUMMONED_EVENT と一致させる。
+pub const YUUKO_SUMMONED_EVENT: &str = "yuuko-summoned";
+
+/// 「ゆうこを呼ぶ」の一言を、ゆうこ用ウィンドウのマウント時の状態取得のために預けておく時間。
+/// 初回生成からページの購読開始までの間だけ使えればよく、古い一言を後から出さないよう短くする。
+const PENDING_SUMMON_MESSAGE_TTL: Duration = Duration::from_secs(30);
+
+/// ゆうこ用ウィンドウへ渡す一言（「ゆうこを呼ぶ」で紹介できるものが無いとき）の預かり場所。
+/// 初回生成直後のページはイベントを取りこぼすため、マウント時の get_yuuko_notification_state で1回だけ取り出す。
+static PENDING_SUMMON_MESSAGE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 /// ゆうこ用ウィンドウへ渡す最小限の表示用データ。
 ///
@@ -72,6 +88,11 @@ pub struct YuukoDesktopNotification {
     /// OK は既存の handle_yuuko_clicked を通り、Rust 側で表示中の報酬を確認済みにする。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reward: bool,
+    /// 一言だけの吹き出し（トレイ「ゆうこを呼ぶ」で紹介できるものが無いとき。判断台帳 D140）か。
+    /// 記事の欄は空で、文言は balloon_text（固定文言）だけを使う。閉じる・OK・自動退場はどれも
+    /// dismiss_yuuko_notification を通り、表示中の通知が無いため状態は変えずにウィンドウだけを隠す。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub message: bool,
 }
 
 impl YuukoDesktopNotification {
@@ -160,6 +181,7 @@ fn desktop_notification_from_state(
             summary: None,
             preview_visible: false,
             reward: true,
+            message: false,
         });
     }
     let is_active_news = matches!(
@@ -184,7 +206,22 @@ fn desktop_notification_from_state(
         summary: state.preview_short_summary.clone(),
         preview_visible: state.state == YuukoResidentState::PreviewVisible,
         reward: false,
+        message: false,
     })
+}
+
+/// 一言だけの吹き出しを表示用データにする（「ゆうこを呼ぶ」で紹介できるものが無いとき）。
+fn message_notification(text: String) -> YuukoDesktopNotification {
+    YuukoDesktopNotification {
+        article_id: String::new(),
+        title: String::new(),
+        balloon_text: Some(text),
+        source_name: String::new(),
+        summary: None,
+        preview_visible: false,
+        reward: false,
+        message: true,
+    }
 }
 
 /// 判定スレッドを開始する。起動直後はメインが表示中のため、最初の判定は1周期待ってから行う。
@@ -332,6 +369,145 @@ fn present<R: Runtime>(
         notification,
     )?;
     yuuko_window::show_yuuko_window(app, notification.stage())
+}
+
+/// トレイ「ゆうこを呼ぶ」の表示先。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummonTarget {
+    /// メイン表示中: アプリ内通知で出す（判定周期と同じく、表示先を1か所にして二重表示を避ける）。
+    InApp,
+    /// メイン非表示・最小化・解放済み（D133）: ゆうこ用ウィンドウで出す。メインは作り直さない。
+    Desktop,
+    /// メインの状態が分からない（終了処理中など）: 何もしない。
+    Skip,
+}
+
+/// メインウィンドウの (表示中か, 最小化中か) から「ゆうこを呼ぶ」の表示先を決める（判定周期と同じ基準）。
+/// デスクトップ通知を止めている間（DESKTOP_NOTIFICATION_ENABLED=false）は、デスクトップには出さない。
+fn decide_summon_target(enabled: bool, main_window: Option<(bool, bool)>) -> SummonTarget {
+    match gate_tick(enabled, decide_tick(main_window)) {
+        TickAction::HideDesktop => SummonTarget::InApp,
+        TickAction::RunJudgement => SummonTarget::Desktop,
+        TickAction::Skip => SummonTarget::Skip,
+    }
+}
+
+/// メインへ送る「ゆうこを呼ぶ」の知らせ。message があれば一言だけを出し、無ければ通知状態を拾い直させる
+/// （紹介中の状態は保存済みなので、画面は既存の request_yuuko_notification で already_active として受け取る）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YuukoSummonedNotice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+/// 判定結果をメインへ送る知らせにする（記事・出し直しなら拾い直しだけ、一言ならその文言）。
+fn summoned_notice(outcome: YuukoSummonOutcome) -> YuukoSummonedNotice {
+    match outcome {
+        YuukoSummonOutcome::Notification(_) => YuukoSummonedNotice { message: None },
+        YuukoSummonOutcome::Message(message) => YuukoSummonedNotice {
+            message: Some(message),
+        },
+    }
+}
+
+/// トレイ「ゆうこを呼ぶ」（判断台帳 D140）。今すぐゆうこを出す。
+///
+/// トレイのメニュー処理はメインスレッドで動き、Windows ではそこでのウィンドウ生成がデッドロックし得るため、
+/// 判定（ファイル読み書き）と表示は専用スレッドで行う。日次上限・クールタイム・時間帯・全画面/会議中の
+/// 抑制は通さない（`YuukoService::summon_yuuko`）。メインが解放（破棄）済みでも作り直さず、
+/// ゆうこ用ウィンドウだけで完結する。
+pub fn summon<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
+    let spawned = std::thread::Builder::new()
+        .name("yuuko-summon".to_string())
+        .spawn(move || run_summon(&app, &yuuko_service));
+    if let Err(error) = spawned {
+        log::warn!("ゆうこを呼ぶ処理を開始できませんでした: {error}");
+    }
+}
+
+fn run_summon<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) {
+    let target = decide_summon_target(DESKTOP_NOTIFICATION_ENABLED, main_window_visibility(app));
+    if target == SummonTarget::Skip {
+        log::warn!("メインウィンドウの状態が分からないため、ゆうこを呼べませんでした");
+        return;
+    }
+    let surface = match target {
+        SummonTarget::InApp => SummonSurface::InApp,
+        _ => SummonSurface::Desktop,
+    };
+    let outcome = yuuko_service.summon_yuuko(surface).unwrap_or_else(|error| {
+        log::warn!("ゆうこを呼ぶための判定に失敗しました: {error}");
+        YuukoSummonOutcome::Message(SUMMON_FAILED_MESSAGE.to_string())
+    });
+    match target {
+        SummonTarget::InApp => {
+            if let Err(error) = app.emit_to(
+                MAIN_WINDOW_LABEL,
+                YUUKO_SUMMONED_EVENT,
+                summoned_notice(outcome),
+            ) {
+                // 紹介中の状態は保存済みのため、次の定期判定（already_active）で画面に出る。
+                log::warn!("メイン画面へゆうこを呼んだことを知らせられませんでした: {error}");
+            }
+        }
+        SummonTarget::Desktop => {
+            let notification = summoned_desktop_notification(yuuko_service, outcome);
+            if let Err(error) = present(app, &notification) {
+                log::warn!("ゆうこ用ウィンドウに呼び出しの結果を表示できませんでした: {error}");
+            }
+        }
+        SummonTarget::Skip => {}
+    }
+}
+
+/// 「ゆうこを呼ぶ」の結果をゆうこ用ウィンドウの表示用データにする。
+/// 明示的な操作なので、全画面中・表示中でも出し直す（判定周期の出し直し抑制は通さない）。
+/// 一言は、初回生成直後のページがイベントを取りこぼしてもマウント時に拾えるよう預けておく。
+fn summoned_desktop_notification(
+    yuuko_service: &YuukoService,
+    outcome: YuukoSummonOutcome,
+) -> YuukoDesktopNotification {
+    match outcome {
+        YuukoSummonOutcome::Notification(state) => {
+            let mut state = *state;
+            set_pending_summon_message(None);
+            yuuko_service.attach_preview_short_summary(&mut state);
+            desktop_notification_from_state(&state).unwrap_or_else(|| {
+                // 表示中の通知にタイトルが無い等で出せない場合も、呼んだのに何も出ない状態にはしない。
+                let message = SUMMON_NO_ARTICLE_MESSAGE.to_string();
+                set_pending_summon_message(Some(message.clone()));
+                message_notification(message)
+            })
+        }
+        YuukoSummonOutcome::Message(message) => {
+            set_pending_summon_message(Some(message.clone()));
+            message_notification(message)
+        }
+    }
+}
+
+fn lock_pending_summon_message() -> MutexGuard<'static, Option<(Instant, String)>> {
+    PENDING_SUMMON_MESSAGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn set_pending_summon_message(message: Option<String>) {
+    *lock_pending_summon_message() = message.map(|message| (Instant::now(), message));
+}
+
+/// 預けた「ゆうこを呼ぶ」の一言を1回だけ取り出す（ゆうこ用ウィンドウのマウント時の状態取得から呼ぶ）。
+/// 預けてから [`PENDING_SUMMON_MESSAGE_TTL`] を過ぎたものは捨てる（イベントで表示済みの古い一言を出さない）。
+pub(crate) fn take_pending_summon_message() -> Option<String> {
+    let entry = lock_pending_summon_message().take();
+    fresh_pending_message(entry, Instant::now())
+}
+
+fn fresh_pending_message(entry: Option<(Instant, String)>, now: Instant) -> Option<String> {
+    entry.and_then(|(stored_at, message)| {
+        (now.saturating_duration_since(stored_at) <= PENDING_SUMMON_MESSAGE_TTL).then_some(message)
+    })
 }
 
 /// ゆうこ通知を操作する既存 command（クリック確定 / 閉じる / 無視）の種類。
@@ -509,6 +685,7 @@ mod tests {
             current_article_id: with_article.then(|| "article-001".to_string()),
             reward_notification: None,
             preview_short_summary: with_article.then(|| "保存済みの要約".to_string()),
+            summon_message: None,
         }
     }
 
@@ -667,6 +844,7 @@ mod tests {
                 summary: Some("保存済みの要約".to_string()),
                 preview_visible: false,
                 reward: false,
+                message: false,
             })
         );
     }
@@ -791,6 +969,7 @@ mod tests {
             summary: None,
             preview_visible: false,
             reward: false,
+            message: false,
         })
         .unwrap();
         // 本文・URL などの欄は持たない。要約が無いときは summary 自体を送らない。
@@ -902,5 +1081,99 @@ mod tests {
             decide_follow_up(true, YuukoAction::Dismiss, Some(&balloon)),
             FollowUp::None
         );
+    }
+
+    // --- トレイ「ゆうこを呼ぶ」（判断台帳 D140） ---
+
+    #[test]
+    fn summon_goes_in_app_only_while_main_is_visible() {
+        assert_eq!(
+            decide_summon_target(true, Some((true, false))),
+            SummonTarget::InApp
+        );
+        // 非表示・最小化はデスクトップ。
+        assert_eq!(
+            decide_summon_target(true, Some((false, false))),
+            SummonTarget::Desktop
+        );
+        assert_eq!(
+            decide_summon_target(true, Some((true, true))),
+            SummonTarget::Desktop
+        );
+        // 状態が分からないときは出さない。デスクトップ通知を止めている間もデスクトップには出さない。
+        assert_eq!(decide_summon_target(true, None), SummonTarget::Skip);
+        assert_eq!(
+            decide_summon_target(false, Some((false, false))),
+            SummonTarget::Skip
+        );
+        assert_eq!(
+            decide_summon_target(false, Some((true, false))),
+            SummonTarget::InApp
+        );
+    }
+
+    #[test]
+    fn summon_with_released_main_window_uses_desktop_without_main() {
+        // 長い非表示でメインを解放（D133）していても、メインを作り直さずゆうこ用ウィンドウへ出す。
+        assert_eq!(
+            decide_summon_target(true, main_window_absent_visibility(true)),
+            SummonTarget::Desktop
+        );
+        assert_eq!(
+            decide_summon_target(true, main_window_absent_visibility(false)),
+            SummonTarget::Skip
+        );
+    }
+
+    #[test]
+    fn summon_message_becomes_balloon_only_message_payload() {
+        let payload = message_notification(SUMMON_NO_ARTICLE_MESSAGE.to_string());
+        assert_eq!(payload.stage(), YuukoWindowStage::Balloon);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "articleId": "",
+                "title": "",
+                "balloonText": SUMMON_NO_ARTICLE_MESSAGE,
+                "sourceName": "",
+                "previewVisible": false,
+                "message": true
+            })
+        );
+    }
+
+    #[test]
+    fn summoned_notice_for_main_carries_message_only_when_nothing_to_show() {
+        assert_eq!(
+            serde_json::to_value(summoned_notice(YuukoSummonOutcome::Notification(Box::new(
+                state(YuukoResidentState::BalloonVisible, true)
+            ))))
+            .unwrap(),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(summoned_notice(YuukoSummonOutcome::Message(
+                SUMMON_NO_ARTICLE_MESSAGE.to_string()
+            )))
+            .unwrap(),
+            serde_json::json!({ "message": SUMMON_NO_ARTICLE_MESSAGE })
+        );
+    }
+
+    #[test]
+    fn pending_summon_message_expires() {
+        let now = Instant::now();
+        let fresh = Some((now, "a".to_string()));
+        assert_eq!(fresh_pending_message(fresh, now), Some("a".to_string()));
+        let stale = Some((now, "a".to_string()));
+        assert_eq!(
+            fresh_pending_message(
+                stale,
+                now + PENDING_SUMMON_MESSAGE_TTL + Duration::from_secs(1)
+            ),
+            None
+        );
+        assert_eq!(fresh_pending_message(None, now), None);
     }
 }
