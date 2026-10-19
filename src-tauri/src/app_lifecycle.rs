@@ -628,8 +628,8 @@ pub(crate) fn request_exit<R: Runtime>(app: &AppHandle<R>, source: ExitSource) {
         ExitSource::InAppButton => log::info!("画面内のボタンからアプリ終了が要求されました"),
     }
     // 自動要約は新しい記事を取り出さないようにする。処理中の1件は待たない
-    // （記事の保存は tmp→bak→本体 の差し替えのため書きかけの .md は残らない。ただし2回の rename の
-    // 間で強制終了されると .bak だけが残る短い隙間がある。既存の全保存処理に共通の制約）。
+    // （記事の保存は一時ファイル→本体への1回の rename〔infra::atomic_file〕のため、強制終了されても
+    // 書きかけの .md は残らず、本体が無くなる隙間も無い。残りうるのは使われない一時ファイルだけ）。
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         state.auto_summary_queue.request_stop();
     }

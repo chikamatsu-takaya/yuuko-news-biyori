@@ -16,6 +16,7 @@ use crate::domain::article::{
     FetchedArticle, RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
+use crate::infra::atomic_file;
 use crate::paths::AppPaths;
 
 const FRONT_MATTER_DELIMITER: &str = "---";
@@ -72,6 +73,7 @@ impl ArticleRepository {
 
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
         let _write_guard = self.lock_writes()?;
+        self.restore_legacy_backups()?;
         self.recover_retirement_staging()?;
         std::fs::create_dir_all(&self.article_news_dir)?;
         if news_dir_contains_markdown_files(&self.article_news_dir)? {
@@ -251,6 +253,14 @@ impl ArticleRepository {
         let mut zip_files = Vec::new();
         let mut archived_article_count = 0usize;
 
+        if !by_month.is_empty() {
+            let months = by_month
+                .keys()
+                .map(|bucket| format_month_label(bucket))
+                .collect::<Vec<_>>();
+            self.ensure_archive_index_covers_zips(&archive_index, &months)?;
+        }
+
         for (bucket, mut month_records) in by_month {
             month_records.sort_by(|left, right| left.article_id.cmp(&right.article_id));
             let mut zip_records = archived_by_month.remove(&bucket).unwrap_or_default();
@@ -339,14 +349,162 @@ impl ArticleRepository {
         })
     }
 
+    /// `archive_index.json` を読む。無いときだけ空の索引。読めない・壊れているときは Err
+    /// （アーカイブ保守・月削除は壊れた索引を上書きしないよう、ここで止める）。
     fn load_archive_index_or_default(&self) -> Result<ArchiveIndex, AppError> {
-        if !self.archive_index_path.exists() {
+        let Some(raw) = atomic_file::read_if_exists(&self.archive_index_path)? else {
             return Ok(ArchiveIndex::default());
-        }
-        let raw = std::fs::read_to_string(&self.archive_index_path)?;
+        };
+        let raw = String::from_utf8(raw)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let index = serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(&raw))?;
         index.validate()?;
         Ok(index)
+    }
+
+    /// ニュース取得の重複判定用に索引を読む（呼び出し側で `lock_writes` を取得済みであること）。
+    ///
+    /// 索引が壊れている（JSON・検証・文字コードの不正）ときは、`archive_index.corrupt-<UTC時刻>.json` へ
+    /// 名前を変えて退避し、空の索引として続ける。壊れたままだと取得が毎回失敗し続けるため（履歴一覧が
+    /// 壊れた索引を無視して表示を続けるのと同じ扱い）。カタログを使うのは 30 日超の記事の重複判定だけなので、
+    /// 空として続けても新しい記事の取り込みには影響しない。退避した索引は消さないので手作業で戻せる。
+    /// 退避後のアーカイブ保守は、索引に無い月の ZIP を上書きしないよう `ensure_archive_index_covers_zips` で
+    /// エラーにして止まる（ZIP 内の記事を失わないため。復旧は手作業。データ設計書 §14.4）。
+    /// 読み込み自体の I/O エラー（権限など一時的な失敗）は退避せずにそのまま返す。
+    /// 新しい版のアプリが書いた索引（対応していない新しい `version`）は壊れていないので退避せず、エラーを返す。
+    fn load_archive_index_for_dedupe_locked(&self) -> Result<ArchiveIndex, AppError> {
+        match self.load_archive_index_or_default() {
+            Ok(index) => Ok(index),
+            Err(error) => match archive_index_corruption_kind(&error) {
+                Some(_) if self.archive_index_is_from_newer_version() => {
+                    log::warn!(
+                        "archive index was written by a newer app version; leaving it untouched"
+                    );
+                    Err(error)
+                }
+                Some(kind) => {
+                    self.quarantine_corrupt_archive_index(kind);
+                    Ok(ArchiveIndex::default())
+                }
+                None => Err(error),
+            },
+        }
+    }
+
+    /// 索引が JSON としては読め、`version` がこの版の対応範囲より新しいか（新しい版のアプリで保存した索引）。
+    fn archive_index_is_from_newer_version(&self) -> bool {
+        let Ok(Some(raw)) = atomic_file::read_if_exists(&self.archive_index_path) else {
+            return false;
+        };
+        let Ok(text) = std::str::from_utf8(&raw) else {
+            return false;
+        };
+        serde_json::from_str::<serde_json::Value>(crate::util::strip_utf8_bom(text))
+            .ok()
+            .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64))
+            .is_some_and(|version| version > u64::from(ARCHIVE_INDEX_VERSION))
+    }
+
+    /// アーカイブ保守で月次ZIPを書き直す前の安全確認（呼び出し側で `lock_writes` を取得済みであること）。
+    ///
+    /// 索引に載っていない月の ZIP を書き直すと、元Markdownを退避（削除）済みの記事が ZIP からも索引からも
+    /// 消える。索引が退避（破損）・紛失した後にこの状態になるため、次のどれかに当たればエラーで止め、
+    /// ZIP には触れない。復旧は手作業（退避した索引を直して `archive_index.json` へ戻す等。データ設計書 §14.4）。
+    /// - 索引ファイルが無いのに、月次ZIP（`YYYY-MM.zip`）か退避した索引（`archive_index.corrupt-*.json`）がある。
+    /// - 書き直す月（`months`）の ZIP があるのに、索引にその月のエントリが無い。
+    fn ensure_archive_index_covers_zips(
+        &self,
+        archive_index: &ArchiveIndex,
+        months: &[String],
+    ) -> Result<(), AppError> {
+        let index_exists = self.archive_index_path.try_exists()?;
+        if !index_exists && self.archive_dir.try_exists()? {
+            for entry in std::fs::read_dir(&self.archive_dir)? {
+                let name = entry?.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                let is_month_zip = name
+                    .strip_suffix(".zip")
+                    .is_some_and(is_valid_archive_month);
+                let is_quarantined_index =
+                    name.starts_with("archive_index.corrupt-") && name.ends_with(".json");
+                if is_month_zip || is_quarantined_index {
+                    return Err(AppError::Archive(
+                        "archive index is missing while month archives exist; manual recovery is required"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        for month in months {
+            let zip_exists = self.archive_dir.join(format!("{month}.zip")).try_exists()?;
+            if zip_exists
+                && !archive_index
+                    .archives
+                    .iter()
+                    .any(|entry| &entry.month == month)
+            {
+                return Err(AppError::Archive(format!(
+                    "archive zip for {month} is not in the archive index; refusing to overwrite it"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// 壊れた索引を別名へ退避する。中身・フルパスはログへ出さない。失敗しても取得は続ける（次回また試みる）。
+    fn quarantine_corrupt_archive_index(&self, kind: &str) {
+        // 同じ秒に複数回退避しても前の退避ファイルを上書きしないよう、ミリ秒とプロセスIDまで入れる。
+        let file_name = format!(
+            "archive_index.corrupt-{}-{}.json",
+            Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
+            std::process::id()
+        );
+        let quarantine_path = self.archive_dir.join(file_name);
+        match std::fs::rename(&self.archive_index_path, &quarantine_path) {
+            Ok(()) => log::warn!(
+                "archive index was unreadable ({kind}); moved it aside and continuing with an empty catalog"
+            ),
+            Err(error) => log::warn!(
+                "archive index was unreadable ({kind}) and could not be moved aside ({:?}); continuing with an empty catalog",
+                error.kind()
+            ),
+        }
+    }
+
+    /// 旧形式の保存（本体→.bak 退避→昇格）が途中で止まって残った索引・記事の .bak を、本体が無いときだけ戻す。
+    /// 起動時に記事の書き込みロックを取った状態で1回だけ呼ぶ（以後の保存は .bak を作らない）。
+    fn restore_legacy_backups(&self) -> Result<(), AppError> {
+        atomic_file::restore_legacy_backup_if_missing(&self.archive_index_path, "archive index");
+        let mut pending_dirs = vec![self.article_news_dir.clone()];
+        while let Some(dir) = pending_dirs.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    pending_dirs.push(entry.path());
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(markdown_name) = name.to_str().and_then(|name| name.strip_suffix(".bak"))
+                else {
+                    continue;
+                };
+                if file_type.is_file() && markdown_name.ends_with(".md") {
+                    atomic_file::restore_legacy_backup_if_missing(
+                        &dir.join(markdown_name),
+                        "article markdown",
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     fn update_archive_index(
@@ -869,10 +1027,13 @@ impl ArticleRepository {
         Ok((detail, advanced))
     }
 
-    /// 既存記事の article_id 集合を返す（保存時の上書き防止に使う）。
+    /// 既存記事の article_id 集合を返す（テスト・品質評価用。保存処理はロック下で `collect_dedupe_keys` を直接使う）。
+    #[cfg(test)]
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
         // ID集合は期間に依存しないため、タイトル側の基準時刻は現在時刻で足りる（結果に使わない）。
-        Ok(self.existing_dedupe_keys(Utc::now())?.into_article_ids())
+        Ok(self
+            .existing_dedupe_keys(chrono::Utc::now())?
+            .into_article_ids())
     }
 
     /// 取得時の重複排除に使うキー集合（article_id と 出典名×正規化タイトル）を返す。
@@ -884,7 +1045,23 @@ impl ArticleRepository {
     /// article_id は期間なしで全件入れる。出典名×正規化タイトルは、取得日時（なければ公開日時）が
     /// `now` から `TITLE_DEDUPE_WINDOW_DAYS` 以内の記事だけを入れる（D58）。`now` はテストで
     /// 壁時計に依存しないよう呼び出し側から渡す。
+    ///
+    /// 壊れた `archive_index.json` は退避して空として扱う（`load_archive_index_for_dedupe_locked`）。
+    /// 退避は書き込みロック下で行い、記事の走査はロックを手放してから行う（既読保存などを長く待たせない）。
     pub fn existing_dedupe_keys(&self, now: DateTime<Utc>) -> Result<ArticleDedupeKeys, AppError> {
+        let archive_index = {
+            let _write_guard = self.lock_writes()?;
+            self.load_archive_index_for_dedupe_locked()?
+        };
+        self.collect_dedupe_keys(now, archive_index)
+    }
+
+    /// 記事Markdownと、読み込み済みのアーカイブ索引から重複判定キーを作る。
+    fn collect_dedupe_keys(
+        &self,
+        now: DateTime<Utc>,
+        archive_index: ArchiveIndex,
+    ) -> Result<ArticleDedupeKeys, AppError> {
         let loaded = self.load_readable_article_records()?;
         let mut keys = ArticleDedupeKeys::default();
         for article in loaded.records {
@@ -898,8 +1075,7 @@ impl ArticleRepository {
                 keys.insert_id(stem.to_string_lossy().into_owned());
             }
         }
-        for article in self
-            .load_archive_index_or_default()?
+        for article in archive_index
             .archives
             .into_iter()
             .flat_map(|archive| archive.articles)
@@ -918,7 +1094,11 @@ impl ArticleRepository {
     /// 既存 article_id はスキップして重複排除し、新規保存できた件数を返す。
     pub fn save_fetched_articles(&self, articles: Vec<FetchedArticle>) -> Result<usize, AppError> {
         let _write_guard = self.lock_writes()?;
-        let mut existing = self.existing_article_ids()?;
+        // ロック保持中なので、ロックを取る existing_article_ids ではなく内部処理を直接使う。
+        let archive_index = self.load_archive_index_for_dedupe_locked()?;
+        let mut existing = self
+            .collect_dedupe_keys(Utc::now(), archive_index)?
+            .into_article_ids();
         let mut saved = 0usize;
 
         for article in articles {
@@ -1218,10 +1398,14 @@ impl ArticleRepository {
         Arc::clone(&self.write_lock)
     }
 
+    /// 保持中の panic で poison になっても取り直す（守る値の無いロックで、保存は1回の rename なので
+    /// ファイルは常に整合している。以後ずっと既読・お気に入り・取得の保存が失敗し続けるのを防ぐ。
+    /// データ移行の取り込み側と同じ扱い）。
     fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
-        self.write_lock
-            .lock()
-            .map_err(|_| AppError::Archive("article write lock is poisoned".to_string()))
+        Ok(atomic_file::lock_ignoring_poison(
+            &self.write_lock,
+            "article write",
+        ))
     }
 
     /// 詳細表示・単一記事更新用の検索。他記事の破損で対象記事まで読めなくならないよう寛容ローダーを使う。
@@ -1391,20 +1575,12 @@ impl ArticleRepository {
         atomic_write(&self.article_favorites_path, &payload, "article favorites")
     }
 
+    /// 旧形式の保存（本体→.bak 退避→昇格）が途中で止まって残った .bak を、本体が無いときだけ戻す。
     fn restore_backup_if_primary_missing(&self) {
-        if self.article_favorites_path.exists() {
-            return;
-        }
-
-        let backup_path = self.article_favorites_path.with_extension("json.bak");
-        if !backup_path.exists() {
-            return;
-        }
-
-        log::warn!("article favorites file is missing. attempting backup restore.");
-        if let Err(error) = std::fs::rename(&backup_path, &self.article_favorites_path) {
-            log::error!("Failed to restore article favorites backup: {error}");
-        }
+        atomic_file::restore_legacy_backup_if_missing(
+            &self.article_favorites_path,
+            "article favorites",
+        );
     }
 }
 
@@ -2526,53 +2702,23 @@ fn default_read_state() -> ArticleReadState {
     ArticleReadState::Unread
 }
 
-fn atomic_write(path: &Path, payload: &[u8], label: &str) -> Result<(), AppError> {
-    let temp_path = with_extension_suffix(path, "tmp");
-    let backup_path = with_extension_suffix(path, "bak");
-    std::fs::write(&temp_path, payload)?;
-
-    let had_existing = path.exists();
-    if had_existing {
-        if backup_path.exists() {
-            std::fs::remove_file(&backup_path)?;
+/// 索引の読み込みエラーが「中身の破損」ならログ用の分類を返す。I/O エラー（権限など一時的なもの）は None。
+fn archive_index_corruption_kind(error: &AppError) -> Option<&'static str> {
+    match error {
+        AppError::Json(_) => Some("invalid json"),
+        AppError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData => {
+            Some("not valid UTF-8")
         }
-        std::fs::rename(path, &backup_path)?;
-    }
-
-    match std::fs::rename(&temp_path, path) {
-        Ok(()) => {
-            if had_existing && backup_path.exists() {
-                if let Err(error) = std::fs::remove_file(&backup_path) {
-                    log::warn!("Failed to remove {label} backup: {error}");
-                }
-            }
-            Ok(())
-        }
-        Err(error) => {
-            log::error!("Failed to promote temporary {label} file: {error}");
-
-            if had_existing && backup_path.exists() {
-                if let Err(restore_error) = std::fs::rename(&backup_path, path) {
-                    log::error!("Failed to restore {label} backup: {restore_error}");
-                }
-            }
-
-            if temp_path.exists() {
-                let _ = std::fs::remove_file(&temp_path);
-            }
-
-            Err(error.into())
-        }
+        AppError::Io(_) => None,
+        _ => Some("failed validation"),
     }
 }
 
-fn with_extension_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let base_extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| format!("{value}.{suffix}"))
-        .unwrap_or_else(|| suffix.to_string());
-    path.with_extension(base_extension)
+/// 記事 Markdown・お気に入り・アーカイブ索引の保存。一時ファイル→1回の rename（`infra::atomic_file`）で、
+/// 途中で終了しても本体は「古い中身」か「新しい中身」のどちらかで残る（本体が無くなる隙間を作らない）。
+fn atomic_write(path: &Path, payload: &[u8], label: &str) -> Result<(), AppError> {
+    atomic_file::write_atomic(path, payload, label)?;
+    Ok(())
 }
 
 fn seed_articles() -> Vec<PersistedArticleRecord> {
@@ -3905,6 +4051,274 @@ mod tests {
         assert_eq!(articles.len(), 3);
     }
 
+    fn corrupt_index_quarantine_files(archive_dir: &std::path::Path) -> Vec<PathBuf> {
+        std::fs::read_dir(archive_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("archive_index.corrupt-") && name.ends_with(".json")
+                    })
+            })
+            .collect()
+    }
+
+    fn fetched_for_corrupt_index_test(article_id: &str) -> crate::domain::article::FetchedArticle {
+        crate::domain::article::FetchedArticle {
+            article_id: article_id.to_string(),
+            title: format!("新着記事 {article_id}"),
+            source_name: "テストソース".to_string(),
+            original_url: "https://example.com/news".to_string(),
+            fetched_at: "2026-06-20T00:00:00Z".to_string(),
+            published_at_text: "2026-06-20T00:00:00Z".to_string(),
+            genre: "テクノロジー".to_string(),
+            tags: Vec::new(),
+            excerpt: None,
+            recommendation_score: 0.5,
+            read_state: ArticleReadState::Unread,
+        }
+    }
+
+    #[test]
+    fn dedupe_keys_quarantine_corrupt_archive_index_and_continue() {
+        // 壊れた索引でもニュース取得の重複判定は止まらない。壊れた索引は別名へ退避して空として続ける。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let index_path = archive_dir.join("archive_index.json");
+        std::fs::write(&index_path, "{broken").unwrap();
+
+        let keys = context
+            .repository
+            .existing_dedupe_keys(chrono::Utc::now())
+            .expect("corrupt archive index must not stop news fetch");
+
+        assert!(keys.into_article_ids().contains("article-001"));
+        assert!(!index_path.exists());
+        let quarantined = corrupt_index_quarantine_files(&archive_dir);
+        assert_eq!(quarantined.len(), 1);
+        // 退避した索引は中身をそのまま残す（手作業で戻せる）。
+        assert_eq!(std::fs::read(&quarantined[0]).unwrap(), b"{broken");
+        // 2回目以降は索引なしとして普通に読める。
+        assert!(context
+            .repository
+            .existing_dedupe_keys(chrono::Utc::now())
+            .is_ok());
+    }
+
+    #[test]
+    fn save_fetched_articles_continues_when_archive_index_is_corrupt() {
+        // 取得の保存（ロック保持中の重複判定）も、壊れた索引で失敗し続けない。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        // 整合チェックで弾かれる索引（件数とカタログの不一致）も「壊れている」側で扱う。
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{"version": 2, "archives": [{"month": "2026-05", "file": "2026-05.zip",
+                "articleCount": 1, "createdAt": "2026-06-01T00:00:00Z", "sizeBytes": 1,
+                "catalogComplete": true, "articles": []}]}"#,
+        )
+        .unwrap();
+
+        let saved = context
+            .repository
+            .save_fetched_articles(vec![
+                fetched_for_corrupt_index_test("article-001"),
+                fetched_for_corrupt_index_test("fresh-after-corrupt-index"),
+            ])
+            .expect("corrupt archive index must not stop saving fetched articles");
+
+        assert_eq!(saved, 1);
+        assert!(context
+            .news_dir
+            .join("202606")
+            .join("fresh-after-corrupt-index.md")
+            .exists());
+        assert_eq!(corrupt_index_quarantine_files(&archive_dir).len(), 1);
+    }
+
+    #[test]
+    fn archive_index_from_newer_version_is_not_quarantined() {
+        // 新しい版のアプリで保存した索引（未対応の version）は壊れていないので退避せず、エラーを返す。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let index_path = archive_dir.join("archive_index.json");
+        std::fs::write(&index_path, r#"{"version": 999, "archives": []}"#).unwrap();
+
+        assert!(context
+            .repository
+            .existing_dedupe_keys(chrono::Utc::now())
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&index_path).unwrap(),
+            r#"{"version": 999, "archives": []}"#
+        );
+        assert!(corrupt_index_quarantine_files(&archive_dir).is_empty());
+    }
+
+    #[test]
+    fn rearchiving_a_month_after_index_quarantine_refuses_to_drop_retired_articles() {
+        // 索引を退避した後に同じ月を再アーカイブすると、元Markdownを退避済みの記事が ZIP から消える。
+        // そうならないよう、索引に無い月の ZIP は書き直さずエラーで止める。
+        use chrono::TimeZone;
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let retired = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(retired.retired_article_count, 1);
+        let archive_dir = context.root_dir.join("archive");
+        let zip_path = archive_dir.join("2026-05.zip");
+        let zip_before = std::fs::read(&zip_path).unwrap();
+
+        std::fs::write(archive_dir.join("archive_index.json"), "{broken").unwrap();
+        context
+            .repository
+            .existing_dedupe_keys(chrono::Utc::now())
+            .unwrap();
+        assert_eq!(corrupt_index_quarantine_files(&archive_dir).len(), 1);
+
+        let may_b = PersistedArticleRecord {
+            article_id: "may-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&may_b).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+
+        assert!(context.repository.archive_candidates(now).is_err());
+
+        // ZIP は書き直されず、退避済みの記事も残る。新しい候補には archived 印を付けない。
+        assert_eq!(std::fs::read(&zip_path).unwrap(), zip_before);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert!(archive.by_name("may-a.md").is_ok());
+        assert!(!archive_dir.join("2026-05.zip.rollback").exists());
+        assert!(
+            !context
+                .repository
+                .find_article_record("may-b")
+                .unwrap()
+                .is_archived
+        );
+    }
+
+    #[test]
+    fn archiving_refuses_when_index_is_missing_but_month_zips_exist() {
+        // 索引が無いのに別の月の ZIP があるときも、索引の作り直しで既存の月を失わないよう止める。
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::remove_file(archive_dir.join("archive_index.json")).unwrap();
+
+        let may_b = PersistedArticleRecord {
+            article_id: "may-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&may_b).unwrap();
+        let now = archive_delete_now();
+
+        assert!(context.repository.archive_candidates(now).is_err());
+        assert!(!archive_dir.join("2026-05.zip").exists());
+        assert!(!archive_dir.join("archive_index.json").exists());
+    }
+
+    #[test]
+    fn dedupe_keys_still_error_on_unreadable_archive_index_without_quarantine() {
+        // 読み込み自体の I/O エラー（ここでは索引の位置がフォルダ）は破損と断定せず、退避もしない。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(archive_dir.join("archive_index.json")).unwrap();
+
+        assert!(context
+            .repository
+            .existing_dedupe_keys(chrono::Utc::now())
+            .is_err());
+        assert!(archive_dir.join("archive_index.json").is_dir());
+        assert!(corrupt_index_quarantine_files(&archive_dir).is_empty());
+    }
+
+    #[test]
+    fn initialize_restores_legacy_backups_of_index_and_markdown() {
+        // 旧バージョンの保存（本体→.bak 退避→昇格）が途中で止まって本体が無いとき、起動時に .bak から戻す。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        let index_path = archive_dir.join("archive_index.json");
+        let index_before = std::fs::read(&index_path).unwrap();
+        std::fs::rename(&index_path, archive_dir.join("archive_index.json.bak")).unwrap();
+        let article_path = context.news_dir.join("202606").join("article-001.md");
+        let article_before = std::fs::read(&article_path).unwrap();
+        std::fs::rename(
+            &article_path,
+            context.news_dir.join("202606").join("article-001.md.bak"),
+        )
+        .unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        assert_eq!(std::fs::read(&index_path).unwrap(), index_before);
+        assert_eq!(std::fs::read(&article_path).unwrap(), article_before);
+        assert!(!archive_dir.join("archive_index.json.bak").exists());
+        assert!(!context
+            .news_dir
+            .join("202606")
+            .join("article-001.md.bak")
+            .exists());
+    }
+
+    #[test]
+    fn article_saves_leave_no_temp_or_backup_files() {
+        // 保存は一時ファイル→1回の rename。保存後に .tmp・.bak が残らない。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let record = context
+            .repository
+            .find_article_record("article-001")
+            .unwrap();
+        context.repository.save_article_record(&record).unwrap();
+
+        let leftovers = std::fs::read_dir(context.news_dir.join("202606"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with(".md"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn writes_continue_after_write_lock_is_poisoned() {
+        // ロック保持中に panic しても、以後の保存がずっと失敗し続けない。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let lock = context.repository.write_lock_handle();
+        let _ = std::thread::spawn(move || {
+            let _guard = lock.lock().unwrap();
+            panic!("poison the article write lock");
+        })
+        .join();
+        assert!(context.repository.write_lock_handle().is_poisoned());
+
+        let saved = context
+            .repository
+            .save_fetched_articles(vec![fetched_for_corrupt_index_test("after-poison")])
+            .unwrap();
+        assert_eq!(saved, 1);
+    }
+
     #[test]
     fn list_history_includes_catalog_article_after_markdown_is_removed() {
         use chrono::{TimeZone, Utc};
@@ -4158,7 +4572,9 @@ mod tests {
             ..super::seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_b).unwrap();
-        std::fs::create_dir_all(context.news_dir.join("202605").join("old-b.md.tmp")).unwrap();
+        crate::infra::atomic_file::test_hooks::fail_writes_to(
+            &context.news_dir.join("202605").join("old-b.md"),
+        );
 
         let result = context.repository.archive_candidates(now);
         assert!(result.is_err());
@@ -4249,7 +4665,9 @@ mod tests {
         context.repository.save_article_record(&old_b).unwrap();
 
         // 2件目保存時の atomic_write を失敗させ、1件目だけ archived 済みで残らないことを確認する。
-        std::fs::create_dir_all(context.news_dir.join("202605").join("old-b.md.tmp")).unwrap();
+        crate::infra::atomic_file::test_hooks::fail_writes_to(
+            &context.news_dir.join("202605").join("old-b.md"),
+        );
 
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
         let result = context.repository.archive_candidates(now);
@@ -5252,9 +5670,8 @@ mod tests {
         let archive_dir = context.root_dir.join("archive");
         let index_path = archive_dir.join("archive_index.json");
         let original_index = std::fs::read(&index_path).unwrap();
-        // 一時ファイルの位置をディレクトリで塞ぎ、index の書き込みを失敗させる。
-        let blocker = archive_dir.join("archive_index.json.tmp");
-        std::fs::create_dir_all(&blocker).unwrap();
+        // index の書き込みだけを失敗させる。
+        crate::infra::atomic_file::test_hooks::fail_writes_to(&index_path);
 
         let result = context
             .repository
@@ -5269,7 +5686,7 @@ mod tests {
             PersistedArchiveState::Archived
         );
         // 失敗後も既存の退避・復元はそのまま動く（ZIPと index が一致している）。
-        std::fs::remove_dir_all(&blocker).unwrap();
+        crate::infra::atomic_file::test_hooks::allow_writes_to(&index_path);
         let summary = context.repository.retire_archived_markdown().unwrap();
         assert_eq!(summary.retired_article_count, 1);
         context
