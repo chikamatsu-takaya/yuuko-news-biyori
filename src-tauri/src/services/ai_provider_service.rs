@@ -171,6 +171,13 @@ impl AiProviderService {
         }
     }
 
+    /// 自動要約の段を送る前に、ローカルLLMへの利用者の要求の最中・直後なら待つ（ローカルのときだけ）。
+    /// 待った後に呼び出し側が「まだ生成する必要があるか」を確かめ直せるよう、生成とは分けて呼べるようにする。
+    /// アプリ終了で起こされたら false。
+    pub fn wait_for_local_priority(&self, provider: AiProvider) -> bool {
+        provider != AiProvider::Local || self.local_llm.wait_for_manual_priority()
+    }
+
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約の可否判定用・判断台帳 D56 / D103）。
     /// AI を呼ばず、ローカルLLMも起動しない。Gemini はキーの有無（値は扱わない）、
     /// ローカルは同梱物の有無と大きさだけを見る。Mock・未実装の openai は実AIではないので false。
