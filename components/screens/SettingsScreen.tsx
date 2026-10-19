@@ -994,7 +994,7 @@ export default function SettingsScreen({
                   <br />
                   調整すると、より快適に
                   <br />
-                  ゆうこと過ごせますよ♪
+                  ゆうこと過ごせるよ♪
                 </p>
                 <div className="flex justify-end mt-1">
                   <span className="text-[var(--yuuko-green)]">🐾</span>
