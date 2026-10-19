@@ -3564,7 +3564,14 @@ mod tests {
         let mut archive = ZipArchive::new(file).unwrap();
         let mut names = Vec::new();
         for index in 0..archive.len() {
-            names.push(archive.by_index(index).unwrap().name().to_string());
+            names.push(
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned(),
+            );
         }
         names.sort();
         assert_eq!(names, vec!["old-a.md", "old-b.md", "old-c.md"]);
