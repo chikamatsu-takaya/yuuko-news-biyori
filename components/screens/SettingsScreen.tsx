@@ -47,6 +47,7 @@ import {
   resetUserSettings,
   testAiProvider,
   type AiProviderConnectionTestResult,
+  type NotificationMode,
   type WorkTimeRangeDto,
   type UserSettingsDto,
   type ExplanationLevel,
@@ -70,14 +71,19 @@ import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
 import {
+  DEFAULT_NOTIFICATION_MODE,
   GENRE_OPTIONS,
   NICKNAME_MAX_LENGTH,
+  NOTIFICATION_MODE_OPTIONS,
+  normalizeNotificationMode,
   normalizeWorkTimeRanges,
 } from "@/lib/settings-options";
 
 // Types
 type NotificationSettings = {
   enabled: boolean;
+  // 通知モード（時間帯内ランダム / ランダム / 定時 / 通知しない。D143）。
+  mode: NotificationMode;
   workTimeRanges: WorkTimeRangeDto[];
   frequency: string;
   maxPerDay: number;
@@ -148,6 +154,7 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
+    mode: DEFAULT_NOTIFICATION_MODE,
     workTimeRanges: [
       { start: "09:00", end: "12:00" },
       { start: "13:00", end: "18:00" },
@@ -197,6 +204,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
     { start: "09:00", end: "12:00" },
     { start: "13:00", end: "18:00" },
   ],
+  notificationMode: DEFAULT_NOTIFICATION_MODE,
   notifyMaxPerDay: 3,
   enableYuukoPopup: true,
   suppressDuringMeeting: true,
@@ -286,6 +294,7 @@ const mapSettingsFromDto = (
     notification: {
       ...base.notification,
       enabled: dto.enableYuukoPopup,
+      mode: normalizeNotificationMode(dto.notificationMode),
       workTimeRanges,
       // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3（=「1日3回まで」）。
       maxPerDay: dto.notifyMaxPerDay,
@@ -341,6 +350,7 @@ const buildDtoForSave = (
     notifyStartTime: workTimeRanges[0].start,
     notifyEndTime: workTimeRanges[workTimeRanges.length - 1].end,
     workTimeRanges,
+    notificationMode: settingsState.notification.mode,
     notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
@@ -1094,6 +1104,50 @@ export default function SettingsScreen({
                         updateNotification("enabled", checked)
                       }
                     />
+                  </SettingRow>
+                  <SettingRow label="通知のタイミング">
+                    <div className="flex flex-col items-end gap-1">
+                      {/* 通知OFFのあいだはモードが効かないため選べなくする（値は保持する）。 */}
+                      <Select
+                        value={settings.notification.mode}
+                        disabled={!settings.notification.enabled}
+                        onValueChange={(v) =>
+                          updateNotification("mode", normalizeNotificationMode(v))
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-52"
+                          aria-label="通知のタイミング"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {NOTIFICATION_MODE_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p
+                        className="max-w-xs text-right text-xs text-muted-foreground"
+                        data-testid="notification-mode-description"
+                      >
+                        {
+                          NOTIFICATION_MODE_OPTIONS.find(
+                            (option) => option.value === settings.notification.mode
+                          )?.description
+                        }
+                      </p>
+                      {settings.notification.mode === "random" && (
+                        <p
+                          className="max-w-xs text-right text-xs text-muted-foreground"
+                          data-testid="notification-mode-random-note"
+                        >
+                          ランダムでは下の通知時間帯の設定は使わないよ。
+                        </p>
+                      )}
+                    </div>
                   </SettingRow>
                   <SettingRow label={settings.notification.workTimeRanges.length > 1 ? "午前の通知時間帯" : "通知時間帯"}>
                     <div className="flex items-center gap-2">
