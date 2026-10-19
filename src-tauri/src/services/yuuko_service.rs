@@ -2143,9 +2143,7 @@ mod tests {
     #[test]
     fn summon_bypasses_gates_and_does_not_consume_daily_count() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         // 日次上限1回を使い切り、閉じた直後（クールタイム中）・時間帯の外・全画面・会議中にする。
         save_notification_settings(&ctx, true, 1, all_day_ranges());
         assert!(ctx.service.request_yuuko_notification().unwrap().notified);
@@ -2188,9 +2186,7 @@ mod tests {
     #[test]
     fn summon_reshows_active_notification_without_picking_another() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         let first = ctx.service.request_yuuko_notification().unwrap();
         let before = load_state(&ctx);
@@ -2225,9 +2221,7 @@ mod tests {
     #[test]
     fn summon_with_notifications_off_reshows_active_notification_instead_of_message() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         let first = ctx.service.request_yuuko_notification().unwrap();
         assert!(first.notified);
@@ -2318,9 +2312,7 @@ mod tests {
     #[test]
     fn summon_in_app_with_notifications_off_shows_off_message_even_with_active() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         assert!(ctx.service.request_yuuko_notification().unwrap().notified);
         save_notification_settings(&ctx, false, 3, all_day_ranges());
