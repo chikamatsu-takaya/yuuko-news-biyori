@@ -1253,6 +1253,261 @@ test("dictionary shows the no-results state for the favorite filter and clearing
   ).toHaveClass(/bg-\[var\(--yuuko-green\)\]/);
 });
 
+// ---- 辞書の編集操作（メモ・★・削除）。モックの可変ストアで結果を一覧へ反映させて確かめる ----
+
+// 一覧（中央列）の辞書カードの見出し。詳細ペインの見出し（h3）とは区別する。
+const dictionaryListItem = (page: Page, term: string) =>
+  page.locator("main span.line-clamp-2").filter({ hasText: term });
+
+// 詳細ペイン（右列）。見出し h3 に選択中の語が出る。
+const dictionaryDetailHeading = (page: Page) => page.locator("main aside h3");
+
+// 詳細ペインの「お気に入り」切替（フィルタチップと同名のため、右列内に限定する）。
+const dictionaryDetailFavoriteButton = (page: Page) =>
+  page
+    .locator("main aside")
+    .getByRole("button", { name: "お気に入り", exact: true });
+
+// 一覧上部のフィルタチップ（DOM 上で詳細ペインより先に並ぶ）。
+const dictionaryFilterChip = (page: Page, name: string) =>
+  page.locator("main").getByRole("button", { name, exact: true }).first();
+
+// メモ欄のカード。保存・取消ボタンはアイコンのみ（アクセシブル名なし）のため、見出し行の並び順で取る。
+const dictionaryMemoCard = (page: Page) =>
+  page
+    .locator("main aside")
+    .getByRole("heading", { name: "メモ", exact: true })
+    .locator("xpath=ancestor::div[contains(concat(' ',normalize-space(@class),' '),' p-3 ')][1]");
+const dictionaryMemoSaveButton = (page: Page) =>
+  dictionaryMemoCard(page).getByRole("button").nth(0);
+
+const dictionaryCalls = (page: Page, key: string) =>
+  page.evaluate(
+    (k) => (window as unknown as Record<string, unknown[]>)[k] ?? [],
+    key
+  );
+
+// 可変ストアモードで辞書画面を開く（既定項目「E2E用語」＋2件目「E2Eサンプル語」）。
+const openMutableDictionary = async (page: Page) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_MUTABLE__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+  await expect(dictionaryListItem(page, "E2E用語")).toBeVisible();
+  await expect(dictionaryListItem(page, "E2Eサンプル語")).toBeVisible();
+};
+
+// 辞書画面を一度離れて開き直す（画面の再マウントで list_dictionary_entries を取り直させる）。
+const reopenDictionary = async (page: Page) => {
+  await page.getByRole("button", { name: "ホームへ戻る" }).click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "ゆうこ辞書" }).first()
+  ).toBeVisible();
+};
+
+test("dictionary memo edit saves and persists after the list is reloaded", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  const memoCard = dictionaryMemoCard(page);
+  await expect(memoCard).toContainText("メモはまだありません。");
+
+  await memoCard.getByRole("button", { name: "編集", exact: true }).click();
+  await memoCard.getByPlaceholder("メモを入力...").fill("E2Eで書いたメモ");
+  await dictionaryMemoSaveButton(page).click();
+
+  // 保存後は表示モードへ戻り、保存した内容が出る。
+  await expect(memoCard.getByPlaceholder("メモを入力...")).toHaveCount(0);
+  await expect(memoCard).toContainText("E2Eで書いたメモ");
+  expect(await dictionaryCalls(page, "__E2E_DICTIONARY_MEMO_CALLS__")).toEqual([
+    { entryId: "entry-e2e", memo: "E2Eで書いたメモ" },
+  ]);
+
+  // 画面を開き直して一覧を取り直しても、保存済みのメモが残る。
+  await reopenDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  await expect(dictionaryMemoCard(page)).toContainText("E2Eで書いたメモ");
+});
+
+test("dictionary memo save failure shows a toast and keeps the edited input", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_DICTIONARY_MEMO_FAIL__ =
+      true;
+  });
+  await dictionaryListItem(page, "E2E用語").click();
+  const memoCard = dictionaryMemoCard(page);
+  await memoCard.getByRole("button", { name: "編集", exact: true }).click();
+  const memoInput = memoCard.getByPlaceholder("メモを入力...");
+  await memoInput.fill("失敗しても消えないメモ");
+  await dictionaryMemoSaveButton(page).click();
+
+  await expect(
+    page.getByText("保存に失敗しちゃった", { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText("メモの保存ができなかったよ。もう一度試してみてね。", {
+      exact: true,
+    })
+  ).toBeVisible();
+  // 編集中のまま入力内容が残る（打ち直さずに再試行できる）。
+  await expect(memoInput).toHaveValue("失敗しても消えないメモ");
+  // 生エラー・内部パスは出さない。
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+
+  // 失敗が解消すれば、同じ入力のまま保存できる。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_DICTIONARY_MEMO_FAIL__ =
+      false;
+  });
+  await dictionaryMemoSaveButton(page).click();
+  await expect(memoInput).toHaveCount(0);
+  await expect(memoCard).toContainText("失敗しても消えないメモ");
+});
+
+test("dictionary ★ toggle updates the star and the favorites filter follows", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  const favoriteStar = dictionaryDetailFavoriteButton(page).locator("svg");
+  await expect(favoriteStar).not.toHaveClass(/fill-yellow-400/);
+
+  // 未登録のうちはお気に入りフィルタで0件（検索結果なし）。
+  await dictionaryFilterChip(page, "お気に入り").click();
+  await expect(page.getByText("見つからなかったよ")).toBeVisible();
+  await dictionaryFilterChip(page, "すべて").click();
+  await expect(dictionaryListItem(page, "E2E用語")).toBeVisible();
+
+  // ★ を付けると詳細の星が塗られ、お気に入りフィルタに出る（★ なしの2件目は出ない）。
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  await dictionaryDetailFavoriteButton(page).click();
+  await expect(favoriteStar).toHaveClass(/fill-yellow-400/);
+  expect(
+    await dictionaryCalls(page, "__E2E_DICTIONARY_FAVORITE_CALLS__")
+  ).toEqual([{ entryId: "entry-e2e", isStarred: true }]);
+
+  await dictionaryFilterChip(page, "お気に入り").click();
+  await expect(dictionaryListItem(page, "E2E用語")).toBeVisible();
+  await expect(dictionaryListItem(page, "E2Eサンプル語")).toHaveCount(0);
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  // フィルタ表示中に ★ を外すと一覧から消える。
+  await dictionaryDetailFavoriteButton(page).click();
+  await expect(page.getByText("見つからなかったよ")).toBeVisible();
+  await expect(dictionaryListItem(page, "E2E用語")).toHaveCount(0);
+  expect(
+    await dictionaryCalls(page, "__E2E_DICTIONARY_FAVORITE_CALLS__")
+  ).toEqual([
+    { entryId: "entry-e2e", isStarred: true },
+    { entryId: "entry-e2e", isStarred: false },
+  ]);
+});
+
+test("dictionary delete with the confirm accepted removes the entry", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  const dialogMessages: string[] = [];
+  page.on("dialog", (dialog) => {
+    dialogMessages.push(dialog.message());
+    void dialog.accept();
+  });
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(dictionaryListItem(page, "E2E用語")).toHaveCount(0);
+  await expect(dictionaryListItem(page, "E2Eサンプル語")).toBeVisible();
+  // 削除後は残っている項目が詳細に選ばれる。
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2Eサンプル語");
+  expect(dialogMessages).toEqual(["「E2E用語」を辞書から削除しますか？"]);
+  expect(await dictionaryCalls(page, "__E2E_DICTIONARY_DELETE_CALLS__")).toEqual([
+    "entry-e2e",
+  ]);
+  await expect(
+    page.locator("footer").getByText("辞書項目 1件を表示中")
+  ).toBeVisible();
+});
+
+test("dictionary delete with the confirm dismissed keeps the entry", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  const dialogMessages: string[] = [];
+  page.on("dialog", (dialog) => {
+    dialogMessages.push(dialog.message());
+    void dialog.dismiss();
+  });
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect.poll(() => dialogMessages.length).toBe(1);
+  await expect(dictionaryListItem(page, "E2E用語")).toBeVisible();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  // キャンセル時は削除 command を呼ばない。
+  expect(await dictionaryCalls(page, "__E2E_DICTIONARY_DELETE_CALLS__")).toEqual(
+    []
+  );
+  await expect(
+    page.locator("footer").getByText("辞書項目 2件を表示中")
+  ).toBeVisible();
+});
+
+test("dictionary delete failure shows a toast and keeps the entry", async ({
+  page,
+}) => {
+  await openMutableDictionary(page);
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_DICTIONARY_DELETE_FAIL__ =
+      true;
+  });
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  page.on("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "削除する" }).click();
+
+  await expect(
+    page.getByText("削除に失敗しちゃった", { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText("辞書項目の削除ができなかったよ。もう一度試してみてね。", {
+      exact: true,
+    })
+  ).toBeVisible();
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  expect(await dictionaryCalls(page, "__E2E_DICTIONARY_DELETE_CALLS__")).toEqual([
+    "entry-e2e",
+  ]);
+  // 項目は一覧・詳細ともに残る。
+  await expect(dictionaryListItem(page, "E2E用語")).toBeVisible();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+  await expect(
+    page.locator("footer").getByText("辞書項目 2件を表示中")
+  ).toBeVisible();
+});
+
 const collapseSelection = (page: Page) =>
   page.evaluate(() => {
     window.getSelection()?.removeAllRanges();
@@ -7804,6 +8059,28 @@ async function installTauriMocks(page: Page) {
       /* eslint-enable @typescript-eslint/no-explicit-any */
     };
 
+    // 辞書の可変ストア（メモ・★・削除の検証用）。初回参照時に既定項目＋2件目で初期化し、
+    // 画面を開き直しても同じ window 内では変更が残る（＝保存済みの状態を一覧の再取得で確かめられる）。
+    type MutableDictionaryEntry = typeof dictionaryEntry & { memo?: string };
+    const ensureDictionaryStore = (): MutableDictionaryEntry[] => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const storeWin = window as any;
+      if (!Array.isArray(storeWin.__E2E_DICTIONARY_STORE__)) {
+        storeWin.__E2E_DICTIONARY_STORE__ = [
+          { ...dictionaryEntry },
+          {
+            ...dictionaryEntry,
+            entryId: "entry-e2e-second",
+            keyText: "E2Eサンプル語",
+            shortExplanation: "2件目の辞書項目です。",
+            lastViewedAtText: "2026/06/01",
+          },
+        ];
+      }
+      return storeWin.__E2E_DICTIONARY_STORE__;
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    };
+
     const internals = {
       invoke: async (cmd: string, args?: { params?: Record<string, unknown> }) => {
         const params = args?.params ?? {};
@@ -8560,6 +8837,18 @@ async function installTauriMocks(page: Page) {
           }
           case "list_dictionary_entries": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
+            // 可変ストアモード: メモ編集・★切替・削除の結果を一覧へ反映する（辞書の編集操作の検証用）。
+            // 絞り込みは Rust 側（keyword / type / starredOnly）と同じ条件をここで簡易に再現する。
+            if ((window as any).__E2E_DICTIONARY_MUTABLE__) {
+              const store = ensureDictionaryStore();
+              const keyword =
+                typeof params.keyword === "string" ? params.keyword : "";
+              return store
+                .filter((entry) => !keyword || entry.keyText.includes(keyword))
+                .filter((entry) => !params.type || entry.type === params.type)
+                .filter((entry) => params.starredOnly !== true || entry.isStarred)
+                .map((entry) => ({ ...entry }));
+            }
             // 辞書が空の状態を再現する（空状態と検索結果なしの区別の検証用）。
             if ((window as any).__E2E_DICTIONARY_EMPTY__) {
               return [];
@@ -8691,6 +8980,66 @@ async function installTauriMocks(page: Page) {
               ...(params.entry as Record<string, unknown>),
               savedInDictionary: true,
             };
+          }
+          case "update_dictionary_memo": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const memoWin = window as any;
+            memoWin.__E2E_DICTIONARY_MEMO_CALLS__ = [
+              ...(memoWin.__E2E_DICTIONARY_MEMO_CALLS__ || []),
+              { entryId: params.entryId, memo: params.memo },
+            ];
+            // 生エラー・内部パスがUIへ出ないことも確認できる識別子を含める（本番と同じ CommandError 形）。
+            if (memoWin.__E2E_DICTIONARY_MEMO_FAIL__) {
+              throw { code: "STORAGE_ERROR", message: "E2E raw memo failure /internal/secret/path" };
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            const memoTarget = ensureDictionaryStore().find(
+              (entry) => entry.entryId === params.entryId
+            );
+            if (!memoTarget) {
+              throw { code: "NOT_FOUND", message: "E2E dictionary entry not found" };
+            }
+            const trimmedMemo = String(params.memo ?? "").trim();
+            // Rust 側と同じく、前後の空白を除き、空ならメモ削除として扱う。
+            memoTarget.memo = trimmedMemo || undefined;
+            return { ...memoTarget };
+          }
+          case "update_dictionary_favorite": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const favWin = window as any;
+            favWin.__E2E_DICTIONARY_FAVORITE_CALLS__ = [
+              ...(favWin.__E2E_DICTIONARY_FAVORITE_CALLS__ || []),
+              { entryId: params.entryId, isStarred: params.isStarred },
+            ];
+            if (favWin.__E2E_DICTIONARY_FAVORITE_FAIL__) {
+              throw { code: "STORAGE_ERROR", message: "E2E raw favorite failure /internal/secret/path" };
+            }
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            const favTarget = ensureDictionaryStore().find(
+              (entry) => entry.entryId === params.entryId
+            );
+            if (!favTarget) {
+              throw { code: "NOT_FOUND", message: "E2E dictionary entry not found" };
+            }
+            favTarget.isStarred = params.isStarred === true;
+            return { ...favTarget };
+          }
+          case "delete_dictionary_entry": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const deleteWin = window as any;
+            deleteWin.__E2E_DICTIONARY_DELETE_CALLS__ = [
+              ...(deleteWin.__E2E_DICTIONARY_DELETE_CALLS__ || []),
+              params.entryId,
+            ];
+            if (deleteWin.__E2E_DICTIONARY_DELETE_FAIL__) {
+              throw { code: "STORAGE_ERROR", message: "E2E raw delete failure /internal/secret/path" };
+            }
+            const deleteStore = ensureDictionaryStore();
+            deleteWin.__E2E_DICTIONARY_STORE__ = deleteStore.filter(
+              (entry) => entry.entryId !== params.entryId
+            );
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            return String(params.entryId);
           }
           case "confirm_rank_up_reward": {
             // 確認済みにした報酬 ID を積む（ランクアップ報酬の確認テスト用）。
