@@ -1,3 +1,7 @@
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use crate::domain::article::{ArticleDetailDto, ArticleSummaryUpdate, ArticleTagsUpdate};
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::speech_tone::SpeechTone;
@@ -22,11 +26,61 @@ use crate::util::text_safety::{
 
 use super::ai_provider_service::{yuuko_speech_fixed_prompt_texts, AiProviderService};
 
+/// 手動の要約（「今すぐ要約」「要約を作成」「作り直す」）を生成中の記事ID。
+/// 自動要約キューは、ここにある記事を取り出さず（`AutoSummaryQueue`）、生成中の記事でも段の合間に
+/// 手動の要約が始まったら残りの段をやめる（同じ記事の4段生成を二重に走らせないため）。
+/// clone しても同じ集合を指す。値は記事IDだけで、本文は持たない。
+#[derive(Debug, Clone, Default)]
+struct ManualSummaryRegistry {
+    /// 記事IDごとの生成中の数（同じ記事の手動要約が重なっても、片方の終わりで外さないため）。
+    in_progress: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+impl ManualSummaryRegistry {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, u32>> {
+        // 中身は単純な数だけなので、他スレッドの panic で poison されてもそのまま使う。
+        self.in_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn begin(&self, article_id: &str) -> ManualSummaryGuard {
+        *self.lock().entry(article_id.to_string()).or_insert(0) += 1;
+        ManualSummaryGuard {
+            registry: self.clone(),
+            article_id: article_id.to_string(),
+        }
+    }
+
+    fn contains(&self, article_id: &str) -> bool {
+        self.lock().contains_key(article_id)
+    }
+}
+
+/// 手動の要約の生成中を表す。失敗・panic の道でも、外れたときに集合から外す。
+pub(crate) struct ManualSummaryGuard {
+    registry: ManualSummaryRegistry,
+    article_id: String,
+}
+
+impl Drop for ManualSummaryGuard {
+    fn drop(&mut self) {
+        let mut in_progress = self.registry.lock();
+        if let Some(count) = in_progress.get_mut(&self.article_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                in_progress.remove(&self.article_id);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SummaryService {
     ai_provider_service: AiProviderService,
     article_repository: ArticleRepository,
     settings_repository: SettingsRepository,
+    manual_summaries: ManualSummaryRegistry,
 }
 
 impl SummaryService {
@@ -39,13 +93,17 @@ impl SummaryService {
             ai_provider_service,
             article_repository,
             settings_repository,
+            manual_summaries: ManualSummaryRegistry::default(),
         }
     }
 
+    /// 手動の要約。生成中は記事IDを `manual_summaries` に載せ、自動要約キューに同じ記事を生成させない。
     pub fn generate_article_summary(
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<GeneratedArticleSummaryDto, AppError> {
+        let article_id = params.validated_article_id()?;
+        let _manual = self.manual_summaries.begin(&article_id);
         let generation = self.generate_article_summary_with(
             params,
             FallbackPolicy::SaveFallback,
@@ -69,23 +127,97 @@ impl SummaryService {
     /// `AutoSummaryOutcome::AlreadySummarized` を返す。
     /// 手動の `generate_article_summary` は Gemini の通信失敗などによる Mock の結果を従来どおり保存し、
     /// 要約済みでも作り直す。
+    /// 各段（要約・要点・再説明・感想）の AI 呼び出しの前に、同じ記事の手動要約が始まっていないか・
+    /// 要約済みになっていないかを確かめ、そうなら残りの段をやめる（`generate_auto_summary_with`）。
     pub fn generate_article_summary_without_fallback(
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<AutoSummaryOutcome, AppError> {
         // ローカルLLMへの要求を「利用者の操作」に数えない（自動要約後の早めの停止を妨げないため）。
+        // ローカルLLMでは、この窓口の要求は手動の要求の最中・直後に待たされる（local_llm_service）。
         let background_ai = self.ai_provider_service.for_background();
+        self.generate_auto_summary_with(
+            params,
+            // 手動の要求を待つのは、手を引くかの確認より前（待っている間に手動で要約されることが多いため）。
+            |provider| background_ai.wait_for_local_priority(provider),
+            |request, kind, provider, level| {
+                request_validated_text_via(&background_ai, request, kind, provider, level)
+            },
+        )
+    }
+
+    /// 手動の要約が同じ記事を生成中か（自動要約キューが取り出す前に確かめる）。
+    pub fn is_manual_summary_in_progress(&self, article_id: &str) -> bool {
+        self.manual_summaries.contains(article_id)
+    }
+
+    /// 手動の要約が生成中の状態を作る（テスト用。戻り値を捨てると外れる）。
+    #[cfg(test)]
+    pub(crate) fn mark_manual_summary_in_progress(&self, article_id: &str) -> ManualSummaryGuard {
+        self.manual_summaries.begin(article_id)
+    }
+
+    /// 自動要約の本体。各段の前に `wait_before_stage`（ローカルLLMでは手動の要求の優先待ち）を済ませてから、
+    /// 手動要約との重なりを確かめる。手動要約が生成中なら `YieldedToManual`、要約済みになっていれば
+    /// `AlreadySummarized` を返し、残りの AI 呼び出しも保存もしない（どちらも失敗には数えない）。
+    /// 待った後に確かめるので、待っている間に利用者が同じ記事を要約しても、その段（20〜60 秒）を無駄に生成しない。
+    fn generate_auto_summary_with<W, F>(
+        &self,
+        params: GenerateArticleSummaryParams,
+        wait_before_stage: W,
+        request_validated: F,
+    ) -> Result<AutoSummaryOutcome, AppError>
+    where
+        W: Fn(AiProvider) -> bool,
+        F: Fn(
+            AiRequest,
+            SummaryOutputKind,
+            AiProvider,
+            ExplanationLevel,
+        ) -> Result<AiResponse, AppError>,
+    {
+        let article_id = params.validated_article_id()?;
+        let stopped_by = Cell::new(None);
         let generation = self.generate_article_summary_with(
             params,
             FallbackPolicy::RejectFallback,
             |request, kind, provider, level| {
-                request_validated_text_via(&background_ai, request, kind, provider, level)
+                if !wait_before_stage(provider) {
+                    // アプリ終了で待ちを打ち切った。失敗として返す（終了中なので再試行はされない）。
+                    return Err(AppError::Validation(
+                        "auto summary stopped because the app is exiting".to_string(),
+                    ));
+                }
+                if let Some(outcome) = self.auto_summary_preempted_by(&article_id) {
+                    stopped_by.set(Some(outcome));
+                    return Err(AppError::Validation(
+                        "auto summary stopped because the article was summarized manually"
+                            .to_string(),
+                    ));
+                }
+                request_validated(request, kind, provider, level)
             },
-        )?;
-        Ok(match generation {
+        );
+        if let Some(outcome) = stopped_by.get() {
+            log::info!("auto summary for {article_id} stopped before {outcome:?}");
+            return Ok(outcome);
+        }
+        Ok(match generation? {
             SummaryGeneration::Generated(_) => AutoSummaryOutcome::Saved,
             SummaryGeneration::AlreadySummarized => AutoSummaryOutcome::AlreadySummarized,
         })
+    }
+
+    /// 自動要約の次の段へ進む前に、やめるべきか。手動要約が生成中なら `YieldedToManual`、
+    /// 記事ファイルで要約済みなら `AlreadySummarized`。読めないときは続ける（保存直前の確認が守る）。
+    fn auto_summary_preempted_by(&self, article_id: &str) -> Option<AutoSummaryOutcome> {
+        if self.manual_summaries.contains(article_id) {
+            return Some(AutoSummaryOutcome::YieldedToManual);
+        }
+        match self.article_repository.is_article_summarized(article_id) {
+            Ok(true) => Some(AutoSummaryOutcome::AlreadySummarized),
+            Ok(false) | Err(_) => None,
+        }
     }
 
     /// 要約生成の本体。検証済み出力の取得手段（`request_validated`）を差し替えられるようにし、
@@ -558,6 +690,9 @@ pub enum AutoSummaryOutcome {
     Saved,
     /// AI 呼び出し中に手動要約などで要約済みになっていたため、上書きせずに保存をやめた。
     AlreadySummarized,
+    /// 同じ記事の手動要約が始まったため、残りの段をやめた（保存しない）。手動要約が失敗した場合は、
+    /// 次の投入（ニュース取得後・起動時・設定保存後）でまた並ぶ。
+    YieldedToManual,
 }
 
 /// 要約生成本体の結果。`AlreadySummarized` は自動要約（RejectFallback）でだけ返る。
@@ -2399,6 +2534,183 @@ mod tests {
         assert_eq!(detail.summary.as_deref(), Some("手動の要約"));
         assert_eq!(detail.yuuko_explanation.as_deref(), Some("手動の再説明"));
         assert_eq!(detail.yuuko_comment.as_deref(), Some("手動の一言"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_stops_before_the_next_stage_when_a_manual_summary_starts() {
+        let root_dir = temp_root("auto-yield-manual");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let calls = RefCell::new(Vec::new());
+        let manual = RefCell::new(None);
+        let outcome = service
+            .generate_auto_summary_with(
+                params(),
+                |_| true,
+                |_request, kind, _provider, _level| {
+                    calls.borrow_mut().push(kind);
+                    // 1段目の生成中に、利用者が同じ記事の「今すぐ要約」を押した。
+                    manual.replace(Some(service.mark_manual_summary_in_progress(ARTICLE_ID)));
+                    Ok(output(kind, "自動の出力", "gemini"))
+                },
+            )
+            .unwrap();
+
+        // 残りの段は呼ばず、保存もしない（失敗ではなく手動へ譲った扱い）。
+        assert_eq!(outcome, super::AutoSummaryOutcome::YieldedToManual);
+        assert_eq!(*calls.borrow(), vec![SummaryOutputKind::Summary]);
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+        drop(manual);
+        assert!(!service.is_manual_summary_in_progress(ARTICLE_ID));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_stops_before_the_next_stage_when_the_article_was_summarized() {
+        let root_dir = temp_root("auto-yield-saved");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let calls = RefCell::new(0);
+        let outcome = service
+            .generate_auto_summary_with(
+                params(),
+                |_| true,
+                |_request, kind, _provider, _level| {
+                    *calls.borrow_mut() += 1;
+                    // 1段目の生成中に、手動の要約が保存まで終わった。
+                    repository
+                        .update_article_summary(
+                            ARTICLE_ID,
+                            ArticleSummaryUpdate {
+                                summary: "手動の要約".to_string(),
+                                yuuko_explanation: "手動の再説明".to_string(),
+                                key_points: Vec::new(),
+                                focus_points: vec!["手動の観点".to_string()],
+                                yuuko_comment: "手動の一言".to_string(),
+                                tags: crate::domain::article::ArticleTagsUpdate::Keep,
+                                ai_provider: "gemini".to_string(),
+                                generated_at: "2026-10-08T00:00:00Z".to_string(),
+                            },
+                        )
+                        .unwrap();
+                    Ok(output(kind, "自動の出力", "gemini"))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome, super::AutoSummaryOutcome::AlreadySummarized);
+        assert_eq!(*calls.borrow(), 1, "the remaining stages are not generated");
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.summary.as_deref(), Some("手動の要約"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_rechecks_after_waiting_for_manual_priority() {
+        let root_dir = temp_root("auto-wait-recheck");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        // 1段目を送る前の待ち（手動の要求の優先）の間に、利用者が同じ記事を手動で要約し終えた。
+        let waits = RefCell::new(0);
+        let outcome = service
+            .generate_auto_summary_with(
+                params(),
+                |_provider| {
+                    *waits.borrow_mut() += 1;
+                    repository
+                        .update_article_summary(
+                            ARTICLE_ID,
+                            ArticleSummaryUpdate {
+                                summary: "手動の要約".to_string(),
+                                yuuko_explanation: "手動の再説明".to_string(),
+                                key_points: Vec::new(),
+                                focus_points: vec!["手動の観点".to_string()],
+                                yuuko_comment: "手動の一言".to_string(),
+                                tags: crate::domain::article::ArticleTagsUpdate::Keep,
+                                ai_provider: "local".to_string(),
+                                generated_at: "2026-10-08T00:00:00Z".to_string(),
+                            },
+                        )
+                        .unwrap();
+                    true
+                },
+                |_request, _kind, _provider, _level| {
+                    panic!("must not generate a stage after the article was summarized")
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, super::AutoSummaryOutcome::AlreadySummarized);
+        assert_eq!(*waits.borrow(), 1);
+
+        // 待ちの間に手動要約が始まった（まだ生成中）場合も、送らずに手を引く。
+        let root_dir2 = temp_root("auto-wait-recheck-manual");
+        let (service2, _) = build_service(&root_dir2, "新しい半導体工場の建設計画です。");
+        let manual = RefCell::new(None);
+        let outcome = service2
+            .generate_auto_summary_with(
+                params(),
+                |_provider| {
+                    manual.replace(Some(service2.mark_manual_summary_in_progress(ARTICLE_ID)));
+                    true
+                },
+                |_request, _kind, _provider, _level| panic!("must yield to the manual summary"),
+            )
+            .unwrap();
+        assert_eq!(outcome, super::AutoSummaryOutcome::YieldedToManual);
+
+        // アプリ終了で待ちが打ち切られたら、生成せずにエラーで終わる。
+        drop(manual);
+        let result = service2.generate_auto_summary_with(
+            params(),
+            |_provider| false,
+            |_request, _kind, _provider, _level| panic!("must not generate while exiting"),
+        );
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&root_dir);
+        let _ = std::fs::remove_dir_all(&root_dir2);
+    }
+
+    #[test]
+    fn auto_summary_without_manual_overlap_runs_all_stages_and_saves() {
+        let root_dir = temp_root("auto-no-overlap");
+        let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        let calls = RefCell::new(0);
+        let outcome = service
+            .generate_auto_summary_with(
+                params(),
+                |_| true,
+                |_request, kind, _provider, _level| {
+                    *calls.borrow_mut() += 1;
+                    Ok(output(kind, "自動の出力", "gemini"))
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, super::AutoSummaryOutcome::Saved);
+        assert_eq!(*calls.borrow(), 4);
+        assert!(repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn manual_summary_is_in_progress_only_while_generating() {
+        let root_dir = temp_root("manual-registry");
+        let (service, _) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
+
+        // 同じ記事の手動要約が重なっても、片方が終わっただけでは外さない。
+        let first = service.mark_manual_summary_in_progress(ARTICLE_ID);
+        let second = service.mark_manual_summary_in_progress(ARTICLE_ID);
+        assert!(service.is_manual_summary_in_progress(ARTICLE_ID));
+        assert!(!service.is_manual_summary_in_progress("other"));
+        drop(first);
+        assert!(service.is_manual_summary_in_progress(ARTICLE_ID));
+        drop(second);
+        assert!(!service.is_manual_summary_in_progress(ARTICLE_ID));
+
+        // 手動の要約（既定の Mock）は、終われば成功でも外れている。
+        service.generate_article_summary(params()).unwrap();
+        assert!(!service.is_manual_summary_in_progress(ARTICLE_ID));
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 

@@ -394,6 +394,10 @@ pub trait ServerProcess: Send {
     fn has_exited(&mut self) -> bool;
     /// 止める（止まるまで待つ）。
     fn stop(&mut self);
+    /// 終わっていれば終了コード（起動失敗の原因調べのログ用）。動いている・取れないときは None。
+    fn exit_code(&mut self) -> Option<i32> {
+        None
+    }
 }
 
 /// llama-server の起動方法。本番は子プロセス、テストは偽の HTTP サーバーへ差し替える。
@@ -422,6 +426,8 @@ impl ServerLauncher for ChildProcessLauncher {
                 &spec.api_key,
                 spec.threads,
             ))
+            // 出力（読み込みの経過・要求の中身を含み得る）は残さない。起動失敗の原因は、
+            // 呼び出し側（local_llm_service）が終了コードと固定の分類でログへ残す。
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -530,6 +536,13 @@ impl ServerProcess for Child {
     fn stop(&mut self) {
         let _ = self.kill();
         let _ = self.wait();
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        self.try_wait()
+            .ok()
+            .flatten()
+            .and_then(|status| status.code())
     }
 }
 

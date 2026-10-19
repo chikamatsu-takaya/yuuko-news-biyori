@@ -11,6 +11,16 @@
 //!   （＝予約から 60 秒後と、最後の手動操作から 5 分後の遅いほう。最後の自動要約から 5 分は待たない）。
 //!   早めの停止の予約は、次の要求（手動・自動とも）が始まった時点で取り消す。どの要求かは窓口の用途
 //!   （`LocalLlmUse`。自動要約は `for_background` で作った窓口）で見分ける。
+//! - **手動の要求を優先する**: llama-server は `-np 1`（同時に1要求）なので、自動要約の要求は、利用者の要求
+//!   （手動の要約・用語解説・フレーズ解説・接続テスト）が走っている間と、その終わりから
+//!   `MANUAL_PRIORITY_GRACE` の間は送らずに待つ（`background_yield_remaining`）。待つのは要求を送る前だけで、
+//!   送り済みの自動要約の段は止めない（手動の要求が待つのは、走っている1段の残りだけになる）。
+//!   待ちは条件変数で行い、手動の要求が終わったら起こす（常時ポーリングはしない）。
+//! - **起動失敗が続いたら起動を控える**: `START_FAILURE_THRESHOLD` 回続けて起動に失敗したら、最後の失敗から
+//!   `START_FAILURE_COOLDOWN` の間、自動要約からは起動しない（1.3GB の読み込みを繰り返さない）。手動の要求は、
+//!   最後の失敗から `MANUAL_START_RETRY_GAP` たっていれば1回試す（利用者が原因を取り除いてやり直せるように）。
+//!   それより短い間隔の手動の要求は、起動せずにすぐ `StartFailed` を返す（画面の文言は従来の起動失敗と同じ）。
+//!   起動に1度成功すれば数え直す。失敗はプロセスの終了コードと固定の分類だけをログへ残す。
 //! - **アプリ終了で必ず止める**: `app_lifecycle` の終了経路から `shutdown` を呼ぶ。
 //! - 失敗は `LocalAiFailure` の固定分類で返し、黙って Gemini / Mock へ切り替えない。
 //! - モデルの SHA-256 は 1.3GB を読むため、アプリの起動中に1度だけ確かめる（大きさは毎回見る）。
@@ -19,7 +29,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use crate::domain::ai_connection::LocalAiFailure;
@@ -34,6 +44,20 @@ use crate::infra::url_guard::SpawnedLocalLlmPort;
 /// 接続テストで使う固定・無害な最小プロンプト（ログ・DTO・画面へは出さない）。
 const CONNECTION_CHECK_PROMPT: &str = "「接続確認OK」とだけ日本語で短く返してください。";
 const CONNECTION_CHECK_MAX_TOKENS: u32 = 16;
+
+/// 手動の要求の終わりから、自動要約の次の要求を送らずに待つ長さ。用語解説を続けて選ぶ・要約を読んでから
+/// 次の語を選ぶ程度の間（数十秒）は、自動要約の段（20〜60 秒）を割り込ませないため 45 秒にする。
+pub const MANUAL_PRIORITY_GRACE: Duration = Duration::from_secs(45);
+
+/// 起動を控え始めるまでの連続起動失敗の回数。1回だけの失敗（番号の取り合い等の一時的なもの）では控えない。
+pub const START_FAILURE_THRESHOLD: u32 = 2;
+
+/// 起動失敗が続いたとき、自動要約から起動しない長さ（最後の失敗から数える）。
+pub const START_FAILURE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
+
+/// 起動を控えている間に、手動の要求が改めて起動を試してよい最短の間隔（最後の失敗から数える）。
+/// 用語を続けて選ぶたびに 1.3GB の読み込みと最大 120 秒の起動待ちを繰り返させないため。
+pub const MANUAL_START_RETRY_GAP: Duration = Duration::from_secs(60);
 
 /// 時間・照合値の設定。本番は `Default`、テストは短い値へ差し替える。
 #[derive(Debug, Clone)]
@@ -50,6 +74,14 @@ pub struct LocalLlmConfig {
     pub idle_poll: Duration,
     /// 起動待ちの間に `/health` を見る間隔。
     pub health_interval: Duration,
+    /// 手動の要求の後、自動要約の要求を待たせる長さ（`MANUAL_PRIORITY_GRACE`）。
+    pub manual_priority_grace: Duration,
+    /// 起動を控え始める連続失敗の回数（`START_FAILURE_THRESHOLD`）。
+    pub start_failure_threshold: u32,
+    /// 起動を控える長さ（`START_FAILURE_COOLDOWN`）。
+    pub start_failure_cooldown: Duration,
+    /// 控えている間に手動の要求が起動を試してよい間隔（`MANUAL_START_RETRY_GAP`）。
+    pub manual_start_retry_gap: Duration,
     pub model_size: u64,
     pub model_sha256: String,
     /// 実行の部品（ファイル名と SHA-256）。本番は `RUNTIME_FILES`。
@@ -65,6 +97,10 @@ impl Default for LocalLlmConfig {
             early_release_grace: Duration::from_secs(60),
             idle_poll: Duration::from_secs(30),
             health_interval: Duration::from_millis(300),
+            manual_priority_grace: MANUAL_PRIORITY_GRACE,
+            start_failure_threshold: START_FAILURE_THRESHOLD,
+            start_failure_cooldown: START_FAILURE_COOLDOWN,
+            manual_start_retry_gap: MANUAL_START_RETRY_GAP,
             model_size: MODEL_SIZE,
             model_sha256: MODEL_SHA256.to_string(),
             runtime_files: runtime_manifest(),
@@ -108,6 +144,101 @@ pub fn should_stop_idle(
     idle: Duration,
 ) -> bool {
     in_flight == 0 && last_used.is_some_and(|used| now.saturating_duration_since(used) >= idle)
+}
+
+/// 自動要約の要求を送る前に、あとどれだけ待つか（純粋関数）。None なら待たずに送ってよい。
+/// 手動の要求が走っている間は `grace` を目安に待ち（終われば起こされて測り直す）、終わった後は
+/// 最後の手動の利用から `grace` たつまで待つ。
+pub fn background_yield_remaining(
+    manual_in_flight: u32,
+    last_manual_used: Option<Instant>,
+    now: Instant,
+    grace: Duration,
+) -> Option<Duration> {
+    if grace.is_zero() {
+        return None;
+    }
+    if manual_in_flight > 0 {
+        return Some(grace);
+    }
+    let elapsed = now.saturating_duration_since(last_manual_used?);
+    grace
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+}
+
+/// 連続した起動失敗のため、起動を控えている残り時間（純粋関数）。None なら控えていない。
+pub fn start_cooldown_remaining(
+    consecutive_failures: u32,
+    last_failure: Option<Instant>,
+    now: Instant,
+    threshold: u32,
+    cooldown: Duration,
+) -> Option<Duration> {
+    if consecutive_failures < threshold.max(1) {
+        return None;
+    }
+    let elapsed = now.saturating_duration_since(last_failure?);
+    cooldown
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+}
+
+/// llama-server の起動を試してよいか（純粋関数）。控えていなければ常に試す。控えている間は、
+/// 自動要約（Background）は試さず、手動の要求は最後の失敗から `manual_retry_gap` たっていれば試す。
+pub fn may_attempt_start(
+    usage: LocalLlmUse,
+    consecutive_failures: u32,
+    last_failure: Option<Instant>,
+    now: Instant,
+    threshold: u32,
+    cooldown: Duration,
+    manual_retry_gap: Duration,
+) -> bool {
+    if start_cooldown_remaining(consecutive_failures, last_failure, now, threshold, cooldown)
+        .is_none()
+    {
+        return true;
+    }
+    usage == LocalLlmUse::Manual
+        && last_failure
+            .is_none_or(|failed| now.saturating_duration_since(failed) >= manual_retry_gap)
+}
+
+/// 起動1回の失敗。ログへは固定の分類（`label`）と終了コードだけを残す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartFailure {
+    failure: LocalAiFailure,
+    label: &'static str,
+    /// 起動中に子プロセスが終わったときの終了コード（取れたときだけ）。
+    exit_code: Option<i32>,
+    /// 連続起動失敗に数えるか。終了要求・見張りによる停止は数えない。
+    counts: bool,
+}
+
+impl StartFailure {
+    fn counted(failure: LocalAiFailure, label: &'static str) -> Self {
+        Self {
+            failure,
+            label,
+            exit_code: None,
+            counts: true,
+        }
+    }
+
+    fn not_counted(label: &'static str) -> Self {
+        Self {
+            failure: LocalAiFailure::StartFailed,
+            label,
+            exit_code: None,
+            counts: false,
+        }
+    }
+}
+
+/// ログ用の終了コード。取れないとき（まだ動いている・シグナルで止まった等）は "unknown"。
+fn format_exit_code(exit_code: Option<i32>) -> String {
+    exit_code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
 }
 
 /// 生成要求の失敗を呼び出し元へ返す固定分類へまとめる（純粋関数）。
@@ -164,6 +295,12 @@ struct Inner {
     found_broken: bool,
     /// 走っている生成・接続テストの数（起動待ちを含む）。
     in_flight: u32,
+    /// そのうち利用者の操作（`LocalLlmUse::Manual`）の数。自動要約を待たせるために見る。
+    manual_in_flight: u32,
+    /// 続けて起動に失敗した回数（起動に成功したら 0 に戻す）。
+    start_failures: u32,
+    /// 最後に起動に失敗した時刻。
+    last_start_failure: Option<Instant>,
 }
 
 impl Inner {
@@ -185,6 +322,8 @@ struct Shared {
     state: Mutex<Inner>,
     /// 起動を1本にまとめる（同時に2つ要求が来ても2つ起動しない）。
     starting: Mutex<()>,
+    /// 手動の要求が終わった・アプリ終了の合図。自動要約の要求の待ち（`state` と組で使う）を起こす。
+    priority: Condvar,
     watcher_started: AtomicBool,
     /// アプリ終了で止めた後は、二度と起動しない。
     shut_down: AtomicBool,
@@ -269,6 +408,7 @@ impl<'a> InFlight<'a> {
         state.release_requested = None;
         if usage == LocalLlmUse::Manual {
             state.last_manual_used = Some(now);
+            state.manual_in_flight += 1;
         }
         drop(state);
         Self { shared, usage }
@@ -286,6 +426,10 @@ impl Drop for InFlight<'_> {
         // 手動の要求は終わった時刻からも「直近の操作」として数える（生成に時間がかかっても窓を短くしない）。
         if self.usage == LocalLlmUse::Manual {
             state.last_manual_used = Some(now);
+            state.manual_in_flight = state.manual_in_flight.saturating_sub(1);
+            drop(state);
+            // 待っている自動要約の要求に、待つ長さを測り直させる（終わった時刻から `grace` 待つ）。
+            self.shared.priority.notify_all();
         }
     }
 }
@@ -335,6 +479,7 @@ impl LocalLlmService {
                 config,
                 state: Mutex::new(Inner::default()),
                 starting: Mutex::new(()),
+                priority: Condvar::new(),
                 watcher_started: AtomicBool::new(false),
                 shut_down: AtomicBool::new(false),
             }),
@@ -399,6 +544,12 @@ impl LocalLlmService {
         max_tokens: u32,
         response_format: Option<ResponseFormat>,
     ) -> Result<(String, Duration), LocalAiFailure> {
+        // 自動要約の要求は、利用者の要求の最中・直後には送らない（`-np 1` で手動の要求を後ろに並ばせないため）。
+        // 待つ間は「走っている」と数えない（早めの停止・しばらく使わない判定はこれまでどおり）。
+        // アプリ終了で起こされたら、生成せずに戻る。
+        if self.usage == LocalLlmUse::Background && !self.wait_for_manual_priority() {
+            return Err(LocalAiFailure::StartFailed);
+        }
         // 起動の前から「走っている」と数える＝起動し終えてから数え始めるまでの間に、見張りが止める道を作らない。
         let _in_flight = InFlight::begin(&self.shared, self.usage);
         let (port, api_key) = self.ensure_started()?;
@@ -424,6 +575,59 @@ impl LocalLlmService {
                 Err(chat_failure_to_local(error))
             }
         }
+    }
+
+    /// 利用者の要求が走っている間と、その直後 `manual_priority_grace` の間だけ待つ（自動要約の窓口用）。
+    /// 条件変数で待ち、手動の要求の終わり・アプリ終了で起こされたら測り直す。
+    /// 送ってよければ true、アプリ終了後なら待たずに false。
+    pub(crate) fn wait_for_manual_priority(&self) -> bool {
+        let grace = self.shared.config.manual_priority_grace;
+        let mut state = self.shared.lock_state();
+        let mut logged = false;
+        loop {
+            if self.shared.shut_down.load(Ordering::SeqCst) {
+                return false;
+            }
+            let Some(wait) = background_yield_remaining(
+                state.manual_in_flight,
+                state.last_manual_used,
+                Instant::now(),
+                grace,
+            ) else {
+                return true;
+            };
+            if !logged {
+                log::debug!("background local llm request is waiting for a manual request");
+                logged = true;
+            }
+            state = match self.shared.priority.wait_timeout(state, wait) {
+                Ok((guard, _)) => guard,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+    }
+
+    /// 自動要約キューが次の記事を取り出す前に待つ長さ。None なら取り出してよい。
+    /// 手動の要求の最中・直後（`background_yield_remaining`）と、起動を控えている間
+    /// （`start_cooldown_remaining`）の長いほう。キューはローカルLLMを使う設定のときだけ見る。
+    pub fn background_wait(&self) -> Option<Duration> {
+        let config = &self.shared.config;
+        let now = Instant::now();
+        let state = self.shared.lock_state();
+        let manual = background_yield_remaining(
+            state.manual_in_flight,
+            state.last_manual_used,
+            now,
+            config.manual_priority_grace,
+        );
+        let cooldown = start_cooldown_remaining(
+            state.start_failures,
+            state.last_start_failure,
+            now,
+            config.start_failure_threshold,
+            config.start_failure_cooldown,
+        );
+        manual.max(cooldown)
     }
 
     /// 接続テスト。起動（必要なら）＋固定の最小プロンプトで1回生成できるかを確かめる。
@@ -454,6 +658,11 @@ impl LocalLlmService {
     /// アプリ終了時に呼ぶ。動いていれば止め、以後は起動しない。
     pub fn shutdown(&self) {
         self.shared.shut_down.store(true, Ordering::SeqCst);
+        // 手動の要求を待っている自動要約の要求を起こす（終了を待たせない）。
+        // 待つ側は `state` のロックを持ったまま終了の印を確かめてから待ちに入るため、ここで一度ロックを
+        // 取ってから起こす（印を確かめた直後・待ちに入る前の取りこぼしを防ぐ）。
+        drop(self.shared.lock_state());
+        self.shared.priority.notify_all();
         if self.shared.stop_process() {
             log::info!("stopped llama-server on app exit");
         }
@@ -464,7 +673,14 @@ impl LocalLlmService {
         let mut state = self.shared.lock_state();
         let exited = state.process.as_mut().map(|process| process.has_exited())?;
         if exited {
-            log::warn!("llama-server exited unexpectedly");
+            let exit_code = state
+                .process
+                .as_mut()
+                .and_then(|process| process.exit_code());
+            log::warn!(
+                "llama-server exited unexpectedly: exit_code={}",
+                format_exit_code(exit_code)
+            );
             // 既に止まっているので、外すだけでよい。
             drop(state.take_process());
             return None;
@@ -490,11 +706,82 @@ impl LocalLlmService {
         if self.shared.shut_down.load(Ordering::SeqCst) {
             return Err(LocalAiFailure::StartFailed);
         }
+        // 起動失敗が続いている間は、1.3GB の読み込みを繰り返さない（モジュール先頭の方針）。
+        {
+            let config = &self.shared.config;
+            let state = self.shared.lock_state();
+            if !may_attempt_start(
+                self.usage,
+                state.start_failures,
+                state.last_start_failure,
+                Instant::now(),
+                config.start_failure_threshold,
+                config.start_failure_cooldown,
+                config.manual_start_retry_gap,
+            ) {
+                log::info!(
+                    "llama-server start skipped: cooling down after {} consecutive start failures",
+                    state.start_failures
+                );
+                return Err(LocalAiFailure::StartFailed);
+            }
+        }
 
         let bundle = self.verified_bundle()?;
+        match self.launch_and_wait(bundle) {
+            Ok(endpoint) => {
+                let mut state = self.shared.lock_state();
+                state.start_failures = 0;
+                state.last_start_failure = None;
+                drop(state);
+                self.ensure_idle_watcher();
+                Ok(endpoint)
+            }
+            Err(failure) => {
+                self.record_start_failure(failure);
+                Err(failure.failure)
+            }
+        }
+    }
+
+    /// 起動の失敗を固定の分類・終了コード・連続回数だけでログへ残し、数えるものは数える。
+    fn record_start_failure(&self, failure: StartFailure) {
+        let exit_code = format_exit_code(failure.exit_code);
+        if !failure.counts {
+            log::info!(
+                "llama-server start aborted: reason={} exit_code={exit_code}",
+                failure.label
+            );
+            return;
+        }
+        let config = &self.shared.config;
+        let mut state = self.shared.lock_state();
+        state.start_failures = state.start_failures.saturating_add(1);
+        state.last_start_failure = Some(Instant::now());
+        let count = state.start_failures;
+        drop(state);
+        log::warn!(
+            "llama-server failed to start: reason={} exit_code={exit_code} consecutive={count}",
+            failure.label
+        );
+        if count >= config.start_failure_threshold.max(1) {
+            log::warn!(
+                "llama-server starts from auto summary are paused for {}s after {count} consecutive failures",
+                config.start_failure_cooldown.as_secs()
+            );
+        }
+    }
+
+    /// 子プロセスを起動し、`/health` が応えるまで待つ。失敗は `StartFailure`（分類・終了コード）で返す。
+    fn launch_and_wait(
+        &self,
+        bundle: LocalLlmBundle,
+    ) -> Result<(SpawnedLocalLlmPort, String), StartFailure> {
         let Some(port) = pick_free_port() else {
-            log::warn!("no free loopback port for llama-server");
-            return Err(LocalAiFailure::StartFailed);
+            return Err(StartFailure::counted(
+                LocalAiFailure::StartFailed,
+                "no_free_port",
+            ));
         };
         let api_key = new_api_key();
         let spec = LaunchSpec {
@@ -506,7 +793,7 @@ impl LocalLlmService {
         let started = Instant::now();
         let mut process = self.shared.launcher.launch(&spec).map_err(|error| {
             log::warn!("failed to launch llama-server: {}", error.kind());
-            LocalAiFailure::StartFailed
+            StartFailure::counted(LocalAiFailure::StartFailed, "launch_error")
         })?;
         {
             let mut state = self.shared.lock_state();
@@ -514,7 +801,7 @@ impl LocalLlmService {
             if self.shared.shut_down.load(Ordering::SeqCst) {
                 drop(state);
                 process.stop();
-                return Err(LocalAiFailure::StartFailed);
+                return Err(StartFailure::not_counted("shut_down"));
             }
             state.process = Some(process);
             state.port = Some(port);
@@ -524,32 +811,43 @@ impl LocalLlmService {
 
         let Some(client) = build_http_client(self.shared.config.start_timeout) else {
             self.shared.stop_process();
-            return Err(LocalAiFailure::StartFailed);
+            return Err(StartFailure::counted(
+                LocalAiFailure::StartFailed,
+                "client_build",
+            ));
         };
         loop {
             {
                 let mut state = self.shared.lock_state();
                 let exited = match state.process.as_mut() {
                     // 終了・見張りで止められた（子が片付けられた）＝待ち続けない。
-                    None => {
-                        log::info!("llama-server was stopped while starting");
-                        return Err(LocalAiFailure::StartFailed);
-                    }
+                    None => return Err(StartFailure::not_counted("stopped_while_starting")),
                     Some(process) => process.has_exited(),
                 };
                 if exited {
+                    let exit_code = state
+                        .process
+                        .as_mut()
+                        .and_then(|process| process.exit_code());
                     drop(state.take_process());
-                    log::warn!("llama-server exited while starting");
-                    return Err(LocalAiFailure::StartFailed);
+                    return Err(StartFailure {
+                        exit_code,
+                        ..StartFailure::counted(
+                            LocalAiFailure::StartFailed,
+                            "exited_while_starting",
+                        )
+                    });
                 }
             }
             if health_ok(&client, port, &api_key) {
                 break;
             }
             if started.elapsed() >= self.shared.config.start_timeout {
-                log::warn!("llama-server did not become ready in time");
                 self.shared.stop_process();
-                return Err(LocalAiFailure::Timeout);
+                return Err(StartFailure::counted(
+                    LocalAiFailure::Timeout,
+                    "health_timeout",
+                ));
             }
             std::thread::sleep(self.shared.config.health_interval);
         }
@@ -557,7 +855,7 @@ impl LocalLlmService {
         {
             let mut state = self.shared.lock_state();
             if state.process.is_none() {
-                return Err(LocalAiFailure::StartFailed);
+                return Err(StartFailure::not_counted("stopped_while_starting"));
             }
             state.ready = true;
             state.last_used = Some(Instant::now());
@@ -566,7 +864,6 @@ impl LocalLlmService {
             "llama-server became ready in {:.1}s",
             started.elapsed().as_secs_f32()
         );
-        self.ensure_idle_watcher();
         Ok((port, api_key))
     }
 
@@ -977,6 +1274,11 @@ mod tests {
             early_release_grace: Duration::from_secs(60),
             idle_poll: Duration::from_millis(20),
             health_interval: Duration::from_millis(20),
+            // 手動の要求の後でも自動要約を待たせない（待たせる動きは専用のテストで確かめる）。
+            manual_priority_grace: Duration::ZERO,
+            start_failure_threshold: START_FAILURE_THRESHOLD,
+            start_failure_cooldown: START_FAILURE_COOLDOWN,
+            manual_start_retry_gap: MANUAL_START_RETRY_GAP,
             model_size: MODEL_BYTES.len() as u64,
             model_sha256: sha256_hex(MODEL_BYTES),
             runtime_files: vec![(exe_name(), sha256_hex(EXE_BYTES))],
@@ -1526,6 +1828,273 @@ mod tests {
         assert_eq!(worker.join().unwrap().as_deref(), Ok("要約だよ"));
         // 終わった後、予約どおり止まる。
         assert!(wait_until(|| launcher.stops() == 1, Duration::from_secs(3)));
+    }
+
+    // --- 手動の要求の優先 ---
+
+    #[test]
+    fn background_yield_waits_while_manual_runs_and_for_the_grace_after() {
+        // 過去の時刻を引き算で作るため、起動直後の環境でも負にならないよう先の時刻を「今」とする。
+        let now = Instant::now() + Duration::from_secs(3600);
+        let grace = Duration::from_secs(45);
+        // 手動の要求が無ければ待たない。
+        assert_eq!(background_yield_remaining(0, None, now, grace), None);
+        // 手動の要求が走っている間は待つ（時刻に関わらず）。
+        assert_eq!(background_yield_remaining(1, None, now, grace), Some(grace));
+        assert_eq!(
+            background_yield_remaining(1, Some(now - Duration::from_secs(600)), now, grace),
+            Some(grace)
+        );
+        // 終わってから 10 秒なら、残り 35 秒待つ。
+        assert_eq!(
+            background_yield_remaining(0, Some(now - Duration::from_secs(10)), now, grace),
+            Some(Duration::from_secs(35))
+        );
+        // 猶予を過ぎた・ちょうど満ちたら待たない。
+        assert_eq!(
+            background_yield_remaining(0, Some(now - grace), now, grace),
+            None
+        );
+        assert_eq!(
+            background_yield_remaining(0, Some(now - Duration::from_secs(46)), now, grace),
+            None
+        );
+        // 猶予 0（テスト・無効化）は常に待たない。
+        assert_eq!(
+            background_yield_remaining(3, Some(now), now, Duration::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn background_request_waits_for_a_running_manual_request_and_the_grace() {
+        let bundle = temp_bundle("priority", true, Some(MODEL_BYTES));
+        // 手動の生成に 300ms かかる。
+        let launcher = FakeLauncher::with_delay(FakeMode::Healthy, Duration::from_millis(300));
+        let grace = Duration::from_millis(400);
+        let config = LocalLlmConfig {
+            manual_priority_grace: grace,
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), config);
+        let manual = {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                let result = service.generate("手動の用語解説", 8);
+                (result, Instant::now())
+            })
+        };
+        assert!(wait_until(
+            || service.shared.lock_state().manual_in_flight == 1,
+            Duration::from_secs(3)
+        ));
+        assert!(service.background_wait().is_some());
+
+        // 自動要約の要求は、手動の要求が終わって猶予が過ぎるまで送らない。
+        let background_started = Instant::now();
+        let background = service.for_background().generate("自動要約", 8);
+        let background_finished = Instant::now();
+        let (manual_result, manual_finished) = manual.join().unwrap();
+        assert_eq!(manual_result.as_deref(), Ok("要約だよ"));
+        assert_eq!(background.as_deref(), Ok("要約だよ"));
+        assert!(background_finished >= manual_finished + grace);
+        assert!(background_finished - background_started >= grace);
+        // llama-server へ届いた順も、手動が先。
+        let prompts: Vec<String> = launcher
+            .bodies()
+            .iter()
+            .map(|body| body["messages"].to_string())
+            .collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains("手動の用語解説"));
+        assert!(prompts[1].contains("自動要約"));
+        assert_eq!(service.shared.lock_state().manual_in_flight, 0);
+    }
+
+    #[test]
+    fn manual_request_does_not_wait_for_the_priority_grace() {
+        let bundle = temp_bundle("priority-manual", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let config = LocalLlmConfig {
+            manual_priority_grace: Duration::from_secs(30),
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), config);
+        service.generate("1回目", 8).expect("first manual");
+        // 続けて選んだ用語解説は待たずに送る（待つのは自動要約だけ）。
+        let started = Instant::now();
+        service.generate("2回目", 8).expect("second manual");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // 自動要約のキューには、猶予の残りが伝わる。
+        let wait = service.background_wait().expect("background waits");
+        assert!(wait <= Duration::from_secs(30));
+        assert!(wait > Duration::from_secs(20));
+    }
+
+    #[test]
+    fn shutdown_wakes_a_background_request_waiting_for_manual_priority() {
+        let bundle = temp_bundle("priority-shutdown", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let config = LocalLlmConfig {
+            manual_priority_grace: Duration::from_secs(60),
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), config);
+        service.generate("手動", 8).expect("manual");
+        let waiting = {
+            let background = service.for_background();
+            std::thread::spawn(move || background.generate("自動要約", 8))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        service.shutdown();
+        // 60 秒の猶予を待たずに戻り、起動もし直さない。
+        let started = Instant::now();
+        assert_eq!(waiting.join().unwrap(), Err(LocalAiFailure::StartFailed));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(launcher.launches(), 1);
+    }
+
+    // --- 起動失敗のバックオフ ---
+
+    #[test]
+    fn start_cooldown_begins_after_the_threshold_and_ends_after_the_cooldown() {
+        // 過去の時刻を引き算で作るため、起動直後の環境でも負にならないよう先の時刻を「今」とする。
+        let now = Instant::now() + Duration::from_secs(3600);
+        let cooldown = Duration::from_secs(600);
+        let last = Some(now - Duration::from_secs(100));
+        // 1回だけの失敗では控えない。
+        assert_eq!(start_cooldown_remaining(1, last, now, 2, cooldown), None);
+        // 2回続けば、最後の失敗から 10 分控える。
+        assert_eq!(
+            start_cooldown_remaining(2, last, now, 2, cooldown),
+            Some(Duration::from_secs(500))
+        );
+        assert_eq!(
+            start_cooldown_remaining(5, Some(now - cooldown), now, 2, cooldown),
+            None
+        );
+        assert_eq!(start_cooldown_remaining(0, None, now, 2, cooldown), None);
+        assert_eq!(start_cooldown_remaining(3, None, now, 2, cooldown), None);
+    }
+
+    #[test]
+    fn may_attempt_start_blocks_background_and_spaces_manual_retries() {
+        // 過去の時刻を引き算で作るため、起動直後の環境でも負にならないよう先の時刻を「今」とする。
+        let now = Instant::now() + Duration::from_secs(3600);
+        let cooldown = Duration::from_secs(600);
+        let gap = Duration::from_secs(60);
+        let attempt = |usage, failures, ago: u64| {
+            may_attempt_start(
+                usage,
+                failures,
+                Some(now - Duration::from_secs(ago)),
+                now,
+                2,
+                cooldown,
+                gap,
+            )
+        };
+        // 控えていなければ、どちらも試す。
+        assert!(attempt(LocalLlmUse::Background, 1, 1));
+        assert!(attempt(LocalLlmUse::Manual, 1, 1));
+        // 控えている間、自動要約は試さない。
+        assert!(!attempt(LocalLlmUse::Background, 2, 1));
+        assert!(!attempt(LocalLlmUse::Background, 2, 599));
+        // 手動は最後の失敗から 60 秒たっていれば試す（それより短いとすぐ断る）。
+        assert!(!attempt(LocalLlmUse::Manual, 2, 30));
+        assert!(attempt(LocalLlmUse::Manual, 2, 60));
+        // 10 分たてば自動要約も試す。
+        assert!(attempt(LocalLlmUse::Background, 2, 600));
+    }
+
+    #[test]
+    fn repeated_start_failures_stop_relaunching_from_auto_summary() {
+        let bundle = temp_bundle("start-backoff", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::ExitImmediately);
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        let background = service.for_background();
+
+        // 2回続けて起動に失敗するまでは、毎回起動を試す。
+        assert_eq!(
+            background.generate("1", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(background.background_wait(), None);
+        assert_eq!(
+            background.generate("2", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(launcher.launches(), 2);
+        assert_eq!(service.shared.lock_state().start_failures, 2);
+
+        // 控えている間、自動要約からは起動せずにすぐ断る。キューにも待つ長さが伝わる。
+        assert_eq!(
+            background.generate("3", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(launcher.launches(), 2);
+        let wait = background.background_wait().expect("cooling down");
+        assert!(wait > START_FAILURE_COOLDOWN - Duration::from_secs(60));
+
+        // 手動でも、直前の失敗から 60 秒たつまでは起動せずにすぐ断る。
+        assert_eq!(
+            service.generate("手動", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(launcher.launches(), 2);
+
+        // 60 秒たてば、手動は1回試す（失敗すれば数え直しの起点が新しくなる）。
+        let Some(earlier) = Instant::now().checked_sub(MANUAL_START_RETRY_GAP) else {
+            return; // 起動直後で時刻を戻せない環境では、ここから先は確かめない。
+        };
+        service.shared.lock_state().last_start_failure = Some(earlier);
+        assert_eq!(
+            service.generate("手動", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(launcher.launches(), 3);
+        assert_eq!(service.shared.lock_state().start_failures, 3);
+        assert_eq!(
+            background.generate("4", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(launcher.launches(), 3);
+    }
+
+    #[test]
+    fn a_successful_start_after_the_cooldown_resets_the_failure_count() {
+        let bundle = temp_bundle("start-backoff-reset", true, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        let Some(earlier) = Instant::now().checked_sub(START_FAILURE_COOLDOWN) else {
+            return;
+        };
+        {
+            let mut state = service.shared.lock_state();
+            state.start_failures = 4;
+            state.last_start_failure = Some(earlier);
+        }
+        assert_eq!(service.for_background().background_wait(), None);
+        service
+            .for_background()
+            .generate("自動要約", 8)
+            .expect("started after the cooldown");
+        assert_eq!(launcher.launches(), 1);
+        let state = service.shared.lock_state();
+        assert_eq!(state.start_failures, 0);
+        assert!(state.last_start_failure.is_none());
+    }
+
+    #[test]
+    fn missing_bundle_is_not_counted_as_a_start_failure() {
+        // 同梱物が無い・壊れているのは起動の失敗ではない（`found_broken` が別に扱う）。
+        let bundle = temp_bundle("start-backoff-missing", false, Some(MODEL_BYTES));
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        for _ in 0..3 {
+            assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
+        }
+        assert_eq!(service.shared.lock_state().start_failures, 0);
     }
 
     // --- 終了時の停止 ---
