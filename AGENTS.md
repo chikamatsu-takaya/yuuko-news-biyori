@@ -123,3 +123,13 @@ Claude Code は、各ルールの `paths` に一致するファイルを扱っ�
 ## 14. 最終原則
 
 軽く・安全に・速く・分かりやすく・要件に忠実に作る。責務を混ぜず、React と Rust の境界を守り、人間がレビューしやすい形で残す。**React / TypeScript で顔を、Rust で中身を作る。**
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

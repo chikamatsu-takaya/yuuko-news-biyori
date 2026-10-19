@@ -4902,6 +4902,29 @@ test("settings genre section notes the all-sources fallback only when Rust repor
   await expect(note).toBeVisible();
 });
 
+// 同梱の既定取得元（D138）のジャンルを興味ジャンルとして選べる（D141）。
+test("settings genre section offers the bundled source genres", async ({ page }) => {
+  await openSettings(page);
+  await openSettingsMenu(page, "その他");
+  for (const genre of ["国際", "社会", "科学", "スポーツ", "暮らし"]) {
+    const checkbox = page.getByRole("checkbox", { name: genre, exact: true });
+    await expect(checkbox).toBeVisible();
+    await expect(checkbox).not.toBeChecked();
+  }
+  await page.getByRole("checkbox", { name: "スポーツ", exact: true }).click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  const savedGenres = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __E2E_SAVED_USER_SETTINGS__?: { genres?: string[] };
+        }
+      ).__E2E_SAVED_USER_SETTINGS__?.genres
+  );
+  expect(savedGenres).toEqual(expect.arrayContaining(["スポーツ"]));
+});
+
 test("settings genre section has no fallback note by default", async ({ page }) => {
   await openSettings(page);
   await openSettingsMenu(page, "その他");
@@ -7204,10 +7227,10 @@ test("onboarding overlay saves the chosen settings with はじめる", async ({
   const dialog = onboardingDialog(page);
   await expect(dialog).toBeVisible();
 
-  // 設定画面と同じ選択肢・範囲（ジャンル7種、通知時間帯2レンジ、ニックネーム32文字）。
+  // 設定画面と同じ選択肢・範囲（ジャンル12種〔D141〕、通知時間帯2レンジ、ニックネーム32文字）。
   await dialog.getByLabel("IT", { exact: true }).click();
   await dialog.getByLabel("セキュリティ", { exact: true }).click();
-  await expect(dialog.getByRole("checkbox")).toHaveCount(7);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(12);
   await expect(dialog.getByLabel("ニックネーム")).toHaveAttribute("maxlength", "32");
   await dialog.getByRole("textbox").nth(1).fill("10:00");
   await dialog.getByLabel("ニックネーム").fill("ゆうちゃん");
