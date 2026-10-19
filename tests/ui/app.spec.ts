@@ -3166,6 +3166,13 @@ test("reader: a real article with no keyword candidates shows the selection hint
   expect((await lastExplainTermArgs(page)).articleId).toBe("e2e-article-1");
 });
 
+// 辞書のフレーズ項目（__E2E_DICTIONARY_WITH_PHRASE__ のモックで一覧に加わる）。
+const E2E_PHRASE_KEY_TEXT = "E2Eのフレーズは、辞書でフレーズとして区別される。";
+
+// 選択が上限（200字）を超えたときのゆうこの案内（lib/explain-selection.mjs の SELECTION_TOO_LONG_MESSAGE）。
+const SELECTION_TOO_LONG_TEXT =
+  "ちょっと長すぎるみたい。200字くらいまでにして選び直してね";
+
 test("reader: a selection longer than 200 characters shows a hint and is not sent", async ({
   page,
 }) => {
@@ -3177,7 +3184,7 @@ test("reader: a selection longer than 200 characters shows a hint and is not sen
   await openReaderWithoutExplain(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
-  await expect(page.getByText("もう少し短く選んでみてね")).toBeVisible();
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toBeVisible();
   await expect(explainButton(page)).toHaveCount(0);
   await page.waitForTimeout(200);
   expect(await explainTermCallCount(page)).toBe(0);
@@ -3185,8 +3192,30 @@ test("reader: a selection longer than 200 characters shows a hint and is not sen
 
   // 上限以内（ゆうこの再説明）を選び直すと案内が消えて「解説」ボタンが出る。
   await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
-  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
   await expect(explainButton(page)).toBeVisible();
+});
+
+test("reader: the too-long hint stays inside the smallest audited window", async ({
+  page,
+}) => {
+  // tauri.conf.json に最小幅の指定はない。案内は最大幅を画面幅に合わせて折り返せるようにしてあり、
+  // 画面監査の最小サイズ（800x600）で、選択の右下に出しても画面からはみ出さないことを確かめる。
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "あ".repeat(201);
+  });
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  const hint = page.locator('[data-explain-too-long-hint="true"]');
+  await expect(hint).toHaveText(SELECTION_TOO_LONG_TEXT);
+  const box = await hint.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(800);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(600);
 });
 
 test("reader: a selection of exactly 200 characters can still be explained", async ({
@@ -3201,10 +3230,72 @@ test("reader: a selection of exactly 200 characters can still be explained", asy
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
-  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
   await explainButton(page).click();
   await expect.poll(() => explainTermCallCount(page)).toBe(1);
   expect((await lastExplainTermArgs(page)).selectedText).toBe(text);
+});
+
+test("reader: a long sentence is explained as a phrase and saved with the phrase type", async ({
+  page,
+}) => {
+  // 用語かフレーズかは Rust 側（classify_selected_text）が決め、DTO の type で返す。
+  // ここではモックがフレーズとして返したときの表示と保存の受け渡しを確かめる（D21）。
+  const phrase =
+    "円安が進み、輸入品の値段が上がったため、家計の負担が増えている。政府は物価高への対策を急ぐ考えを示した。";
+  await page.addInitScript((summary) => {
+    const win = window as unknown as Record<string, string>;
+    win.__E2E_ARTICLE_DETAIL_SUMMARY__ = summary;
+    win.__E2E_EXPLAIN_TERM_TYPE__ = "phrase";
+  }, phrase);
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  expect((await lastExplainTermArgs(page)).selectedText).toBe(phrase);
+
+  const popup = termPopup(page);
+  await expect(popup.getByText("フレーズ", { exact: true })).toBeVisible();
+  // 長い見出しは3行で省略し、全文は title で確認できる。
+  await expect(popup.getByRole("heading", { name: phrase })).toHaveAttribute(
+    "title",
+    phrase
+  );
+
+  await popup.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(popup.getByRole("button", { name: "辞書保存済み" })).toBeVisible();
+  const saved = (await lastSavedDictionaryEntry(page)) as {
+    keyText?: string;
+    type?: string;
+  } | null;
+  expect(saved?.type).toBe("phrase");
+  expect(saved?.keyText).toBe(phrase);
+});
+
+test("dictionary: the フレーズ filter separates phrases from terms", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_WITH_PHRASE__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+  const main = page.locator("main");
+  const list = main.locator("[data-slot='card']");
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+
+  await main.getByRole("button", { name: "フレーズ", exact: true }).first().click();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+  await expect(list.getByText("E2E用語", { exact: true })).toHaveCount(0);
+
+  await main.getByRole("button", { name: "単語", exact: true }).first().click();
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT)).toHaveCount(0);
 });
 
 test("term popup: dragging the background moves the dialog", async ({ page }) => {
@@ -8351,6 +8442,19 @@ async function installTauriMocks(page: Page) {
             ) {
               return [];
             }
+            // フレーズ項目を加え、種別（params.type）で絞り込む（フレーズの種別絞り込みの検証用・D21）。
+            if ((window as any).__E2E_DICTIONARY_WITH_PHRASE__) {
+              const phraseEntry = {
+                ...dictionaryEntry,
+                entryId: "entry-e2e-phrase",
+                keyText: "E2Eのフレーズは、辞書でフレーズとして区別される。",
+                type: "phrase",
+                shortExplanation: "フレーズの説明だよ。",
+              };
+              return [dictionaryEntry, phraseEntry].filter(
+                (entry) => !params.type || entry.type === params.type
+              );
+            }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             // keyword は見出し語の部分一致で簡易に絞り込む（検索結果なしの再現用）。
             const keyword =
@@ -8414,9 +8518,15 @@ async function installTauriMocks(page: Page) {
             const savedUnstarred =
               explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
             /* eslint-enable @typescript-eslint/no-explicit-any */
+            // 種別のテスト用（既定は用語）。フレーズの判定自体は Rust 側の単体テストで確かめる。
+            const explainType =
+              typeof explainWin.__E2E_EXPLAIN_TERM_TYPE__ === "string"
+                ? explainWin.__E2E_EXPLAIN_TERM_TYPE__
+                : dictionaryEntry.type;
             return {
               ...dictionaryEntry,
               keyText: params.selectedText,
+              type: explainType,
               isStarred: false,
               savedInDictionary: savedUnstarred,
             };

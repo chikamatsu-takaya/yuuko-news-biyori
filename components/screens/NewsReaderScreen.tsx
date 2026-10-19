@@ -65,6 +65,7 @@ import {
   resolveAnchorRect,
   clampExplainButtonPosition,
   isSelectedTextTooLong,
+  SELECTION_TOO_LONG_MESSAGE,
   readCommandErrorCode,
   termExplainFailureMessage,
 } from "@/lib/explain-selection.mjs";
@@ -654,8 +655,13 @@ function TermPopup({
       onLostPointerCapture={endDrag}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div data-term-popup-no-drag="true">
-          <h4 className="cursor-text text-sm font-semibold text-foreground">
+        <div data-term-popup-no-drag="true" className="min-w-0">
+          {/* フレーズ（約200字までの文章・D21）でもポップアップが縦に伸びすぎないよう3行で省略し、
+              全文は title で確認できるようにする（用語は短いので省略されない）。 */}
+          <h4
+            className="line-clamp-3 cursor-text break-words text-sm font-semibold text-foreground"
+            title={term}
+          >
             {term}
           </h4>
           {dictionaryEntry ? (
@@ -901,13 +907,14 @@ function NotGeneratedText({ children }: { children: React.ReactNode }) {
 const EXPLAIN_SELECTABLE_ATTR = "data-explain-selectable";
 // 「解説」ボタンのおおよその表示サイズ（画面端での位置補正に使う）。
 const EXPLAIN_BUTTON_SIZE = { width: 60, height: 30 } as const;
-// 選択が長すぎるときにボタンの代わりに出す案内のおおよその表示サイズ。
-const EXPLAIN_TOO_LONG_HINT_SIZE = { width: 180, height: 30 } as const;
+// 選択が長すぎるときにボタンの代わりに出す案内のおおよその表示サイズ。最大幅（1行に収まる幅）を超える
+// 狭いウィンドウ（tauri.conf.json に最小幅の指定はない）では折り返すため、高さは2行分で見積もる。
+const EXPLAIN_TOO_LONG_HINT_SIZE = { width: 380, height: 48 } as const;
 
 type ExplainSelectionState = {
   // trim 済みの選択文字列。後続タスクで explain_selected_term へ渡す（全文はログへ出さない）。
   text: string;
-  // 上限（D21: 200文字）超過か。true なら「解説」ボタンを出さず短く選び直す案内だけを出す。
+  // 上限（D21: 200文字。用語・フレーズ共通）超過か。true なら「解説」ボタンを出さず選び直す案内だけを出す。
   tooLong: boolean;
   // ボタンの表示座標（position: fixed / viewport 座標）。
   left: number;
@@ -2168,13 +2175,14 @@ export default function NewsReaderScreen({
           onClick で選択文字列を確定し、既存の用語解説（TermPopup）へ接続する。 */}
       {explainSelection?.tooLong ? (
         // 上限（D21: 200文字）を超える選択は送らず、短く選び直すよう案内する（ボタンは出さない）。
+        // 用語かフレーズかの判定は Rust 側で行うため、ここでは長さの上限だけを見る。
         <div
           role="status"
           data-explain-too-long-hint="true"
-          className="pointer-events-none fixed z-50 rounded-md border border-amber-300 bg-white px-2 py-1 text-xs text-amber-700 shadow-md"
+          className="pointer-events-none fixed z-50 max-w-[min(380px,calc(100vw-16px))] break-words rounded-md border border-amber-300 bg-white px-2 py-1 text-xs text-amber-700 shadow-md"
           style={{ left: explainSelection.left, top: explainSelection.top }}
         >
-          もう少し短く選んでみてね
+          {SELECTION_TOO_LONG_MESSAGE}
         </div>
       ) : explainSelection ? (
         <button

@@ -427,7 +427,8 @@ function DictionaryEntryCard({
         <EntryIcon type={entry.iconType} />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">
+            {/* フレーズ（約200字までの文章・D21）は一覧で2行に省略する（全文は詳細で表示）。 */}
+            <span className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground">
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />
