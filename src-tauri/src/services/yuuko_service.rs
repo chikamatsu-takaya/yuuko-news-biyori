@@ -9,9 +9,10 @@ use crate::domain::fullscreen_suppression::{
 use crate::domain::resume_grace::{ResumeGate, ResumeGraceTracker};
 use crate::domain::reward::find_reward;
 use crate::domain::yuuko::{
-    short_preview_summary, ConfirmRankUpRewardParams, ConfirmRankUpRewardResult, NotificationGate,
-    PersistedYuukoState, RequestYuukoNotificationResult, YuukoNotificationState,
-    YuukoResidentState,
+    personalize_balloon_text, short_preview_summary, ConfirmRankUpRewardParams,
+    ConfirmRankUpRewardResult, NotificationGate, PersistedYuukoState,
+    RequestYuukoNotificationResult, SummonPlan, SummonSurface, YuukoNotificationState,
+    YuukoResidentState, SUMMON_NOTIFICATIONS_OFF_MESSAGE, SUMMON_NO_ARTICLE_MESSAGE,
 };
 use crate::error::AppError;
 use crate::infra::fullscreen_detector::{
@@ -26,6 +27,15 @@ use crate::services::reward_service::RewardService;
 
 /// 「詳しく見る」確定で記録する友情イベント（加算量 5pt は domain::friendship 側で定義）。
 const YUUKO_TO_MAIN_EVENT: &str = "yuuko_to_main";
+
+/// トレイ「ゆうこを呼ぶ」（判断台帳 D140）の結果。表示先（アプリ内 / デスクトップ）は呼び出し側が決める。
+#[derive(Debug, Clone)]
+pub enum YuukoSummonOutcome {
+    /// 表示する通知（新たに選んだ記事、または表示中だった通知の出し直し）。呼び名は反映済み。
+    Notification(Box<YuukoNotificationState>),
+    /// 記事を出さず、ゆうこが一言だけ伝える（紹介できる記事が無い・通知OFF）。固定文言に呼び名を付けたもの。
+    Message(String),
+}
 
 /// Clone しても全画面抑制・スリープ復帰の記録（Arc 内）は共有され、アプリ内通知とデスクトップ通知スレッドで
 /// 同じ猶予を見る。
@@ -511,6 +521,57 @@ impl YuukoService {
         ))
     }
 
+    /// トレイ「ゆうこを呼ぶ」（判断台帳 D140・設計書 §4.2 手動の呼び出し）。今すぐ出すものを決めて保存する。
+    ///
+    /// 利用者の明示操作なので、request_yuuko_notification のゲート（日次上限・クールタイム・時間帯・
+    /// 全画面/会議中・スリープ復帰後の猶予）は通さない。候補選定（未紹介・未読・スコア順／お気に入り除外）は
+    /// 同じ pick_introducible を使う。通知回数と前回通知時刻は記録せず（自動の通知枠を減らさない）、
+    /// 紹介済みには記録する（mark_summoned）。表示中の通知（ニュース・報酬）があれば上書きせず出し直す。
+    /// 未通知の報酬は先に知らせない（「呼ぶ」はニュースを見せる操作のため。報酬は通常の判定で知らせる）。
+    /// 判定から保存までは request_yuuko_notification と同じ更新ロックの中で行う。
+    /// 通知OFFの扱いは表示先で変わる（`PersistedYuukoState::plan_summon`）。
+    pub fn summon_yuuko(&self, surface: SummonSurface) -> Result<YuukoSummonOutcome, AppError> {
+        let settings = self.settings_repository.load_or_default()?;
+        let nickname = settings.user.nickname.as_str();
+        let _guard = self.yuuko_state_repository.lock_updates();
+        let mut state = self.yuuko_state_repository.load_or_default()?;
+
+        // 表示中の報酬通知は、先に確認済みになっていれば外す（request と同じ。二重に知らせない）。
+        if self.sync_reward_notice(&mut state) {
+            self.yuuko_state_repository.save(&state)?;
+        }
+
+        match state.plan_summon(settings.notification.enabled, surface) {
+            SummonPlan::NotificationsOff => {
+                return Ok(YuukoSummonOutcome::Message(personalize_balloon_text(
+                    SUMMON_NOTIFICATIONS_OFF_MESSAGE,
+                    nickname,
+                )));
+            }
+            SummonPlan::ReshowActive => {
+                return Ok(YuukoSummonOutcome::Notification(Box::new(
+                    notification_state_with_nickname(&state, nickname),
+                )));
+            }
+            SummonPlan::PickArticle => {}
+        }
+
+        let candidates = self
+            .article_service
+            .get_recommended_articles(GetRecommendedArticlesParams::default())?;
+        let Some(article) = state.pick_introducible(&candidates) else {
+            return Ok(YuukoSummonOutcome::Message(personalize_balloon_text(
+                SUMMON_NO_ARTICLE_MESSAGE,
+                nickname,
+            )));
+        };
+        state.mark_summoned(article);
+        self.yuuko_state_repository.save(&state)?;
+        Ok(YuukoSummonOutcome::Notification(Box::new(
+            notification_state_with_nickname(&state, nickname),
+        )))
+    }
+
     /// ゆうこクリックの2段階遷移（最小実装）。遷移が起きた場合のみ保存する。
     ///
     /// デスクトップのゆうこ用ウィンドウ・アプリ内通知のどちらの「詳しく見る」もこの関数を通るため、
@@ -647,13 +708,21 @@ fn notification_result(
     state: &PersistedYuukoState,
     nickname: &str,
 ) -> RequestYuukoNotificationResult {
-    let mut state = state.to_notification_state();
-    state.apply_nickname(nickname);
     RequestYuukoNotificationResult {
         notified,
         reason: reason.to_string(),
-        state,
+        state: notification_state_with_nickname(state, nickname),
     }
+}
+
+/// 保存状態を通知DTOへ変換し、吹き出し文言へ設定の呼び名を反映する（保存状態は変えない）。
+fn notification_state_with_nickname(
+    state: &PersistedYuukoState,
+    nickname: &str,
+) -> YuukoNotificationState {
+    let mut response = state.to_notification_state();
+    response.apply_nickname(nickname);
+    response
 }
 
 #[cfg(test)]
@@ -2089,5 +2158,220 @@ mod tests {
         let result = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(result.reason, "disabled");
         assert!(!load_state(&ctx).has_active_reward_notice());
+    }
+
+    // --- トレイ「ゆうこを呼ぶ」（判断台帳 D140） ---
+
+    fn summoned_notification(outcome: YuukoSummonOutcome) -> YuukoNotificationState {
+        match outcome {
+            YuukoSummonOutcome::Notification(state) => *state,
+            YuukoSummonOutcome::Message(message) => panic!("unexpected message: {message}"),
+        }
+    }
+
+    fn summoned_message(outcome: YuukoSummonOutcome) -> String {
+        match outcome {
+            YuukoSummonOutcome::Message(message) => message,
+            YuukoSummonOutcome::Notification(state) => panic!("unexpected notification: {state:?}"),
+        }
+    }
+
+    #[test]
+    fn summon_bypasses_gates_and_does_not_consume_daily_count() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        // 日次上限1回を使い切り、閉じた直後（クールタイム中）・時間帯の外・全画面・会議中にする。
+        save_notification_settings(&ctx, true, 1, all_day_ranges());
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        let mut settings = PersistedSettings::default();
+        settings.notification.enabled = true;
+        settings.notification.max_per_day = 1;
+        settings.notification.work_time_ranges = ranges_excluding_now();
+        settings.notification.suppress_in_fullscreen = true;
+        settings.notification.suppress_during_meeting = true;
+        settings.notification.suppress_when_mic_in_use = true;
+        ctx.settings_repository.save(&settings).unwrap();
+        ctx.meeting.set(true, true);
+        ctx.fullscreen.set(FullscreenStatus::Busy);
+        let before = load_state(&ctx);
+        assert_eq!(
+            ctx.service.request_yuuko_notification().unwrap().reason,
+            "outside_time_range"
+        );
+
+        let state =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        // 呼ばれたら、ゲートに関係なく次の候補（未紹介）を紹介中にする。
+        assert_eq!(state.state, YuukoResidentState::BalloonVisible);
+        let article_id = state.current_article_id.clone().unwrap();
+        assert!(!before.is_introduced(&article_id));
+        let saved = load_state(&ctx);
+        assert!(saved.has_active_notification());
+        assert!(saved.is_introduced(&article_id));
+        // 通知枠（日次回数・前回通知時刻）と閉じた後のクールタイムは変えない。
+        assert_eq!(
+            saved.daily_notification.count,
+            before.daily_notification.count
+        );
+        assert_eq!(saved.last_notified_at, before.last_notified_at);
+        assert_eq!(saved.cooldown_until, before.cooldown_until);
+    }
+
+    #[test]
+    fn summon_reshows_active_notification_without_picking_another() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        let first = ctx.service.request_yuuko_notification().unwrap();
+        let before = load_state(&ctx);
+
+        let state =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        assert_eq!(state.current_article_id, first.state.current_article_id);
+        let saved = load_state(&ctx);
+        assert_eq!(saved.introduced_article_ids, before.introduced_article_ids);
+        assert_eq!(saved.daily_notification.count, 1);
+    }
+
+    #[test]
+    fn summon_without_candidate_returns_fixed_message_and_saves_nothing() {
+        let ctx = make_context();
+        // 記事を seed しない → 候補なし。
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+
+        let message = summoned_message(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        assert_eq!(message, crate::domain::yuuko::SUMMON_NO_ARTICLE_MESSAGE);
+        let saved = load_state(&ctx);
+        assert!(!saved.has_active_notification());
+        assert!(saved.introduced_article_ids.is_empty());
+        assert!(saved.cooldown_until.is_none());
+        // 一言の OK・閉じる・自動退場が通る dismiss は、表示中の通知が無いため状態を変えない。
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        assert!(load_state(&ctx).cooldown_until.is_none());
+    }
+
+    #[test]
+    fn summon_with_notifications_off_reshows_active_notification_instead_of_message() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        let first = ctx.service.request_yuuko_notification().unwrap();
+        assert!(first.notified);
+        // 紹介中のまま通知を OFF にする。
+        save_notification_settings(&ctx, false, 3, all_day_ranges());
+        let before = load_state(&ctx);
+
+        let state =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        // 一言（閉じると dismiss を通る）にはせず、表示中の通知を出し直す。状態は変えない。
+        assert_eq!(state.current_article_id, first.state.current_article_id);
+        let saved = load_state(&ctx);
+        assert!(saved.has_active_notification());
+        assert_eq!(saved.cooldown_until, before.cooldown_until);
+        assert_eq!(saved.introduced_article_ids, before.introduced_article_ids);
+    }
+
+    #[test]
+    fn summon_with_notifications_off_returns_message_without_picking() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, false, 3, all_day_ranges());
+
+        let message = summoned_message(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        assert_eq!(
+            message,
+            crate::domain::yuuko::SUMMON_NOTIFICATIONS_OFF_MESSAGE
+        );
+        assert!(load_state(&ctx).introduced_article_ids.is_empty());
+    }
+
+    #[test]
+    fn summon_shows_news_and_leaves_unannounced_reward_for_regular_flow() {
+        let ctx = reward_pending_context(3);
+
+        let state =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        // 「呼ぶ」はニュースを見せる。未通知の報酬は知らせ済みにせず、通常の判定に残す。
+        assert_eq!(state.state, YuukoResidentState::BalloonVisible);
+        assert!(state.preview_article.is_some());
+        let saved = load_state(&ctx);
+        assert!(saved.announced_reward_ids.is_empty());
+        assert!(!saved.has_active_reward_notice());
+
+        // 紹介を閉じてクールタイムが明けた後の通常判定で、報酬通知として知らせる（取りこぼさない）。
+        ctx.service.dismiss_yuuko_notification().unwrap();
+        let mut cooled = load_state(&ctx);
+        cooled.cooldown_until = None;
+        ctx.yuuko_state_repository.save(&cooled).unwrap();
+        let result = ctx.service.request_yuuko_notification().unwrap();
+        assert!(result.notified);
+        assert_eq!(result.state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(pending_reward_ids(&ctx), vec!["theme_001".to_string()]);
+    }
+
+    #[test]
+    fn summon_reshows_active_reward_notice() {
+        let ctx = reward_pending_context(3);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+
+        let state =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        assert!(load_state(&ctx).introduced_article_ids.is_empty());
+    }
+
+    #[test]
+    fn summon_message_carries_nickname() {
+        let ctx = make_context();
+        let mut settings = PersistedSettings::default();
+        settings.user.nickname = "ゆう".to_string();
+        ctx.settings_repository.save(&settings).unwrap();
+
+        let message = summoned_message(ctx.service.summon_yuuko(SummonSurface::Desktop).unwrap());
+
+        assert_eq!(
+            message,
+            format!("ゆう、{}", crate::domain::yuuko::SUMMON_NO_ARTICLE_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn summon_in_app_with_notifications_off_shows_off_message_even_with_active() {
+        let ctx = make_context();
+        ctx.article_repository
+            .initialize_default_if_missing()
+            .unwrap();
+        save_notification_settings(&ctx, true, 3, all_day_ranges());
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        save_notification_settings(&ctx, false, 3, all_day_ranges());
+        let before = load_state(&ctx);
+
+        // メイン表示中（アプリ内）は、通知OFFなら表示中の通知があっても OFF の一言を返す。状態は変えない。
+        let message = summoned_message(ctx.service.summon_yuuko(SummonSurface::InApp).unwrap());
+
+        assert_eq!(
+            message,
+            crate::domain::yuuko::SUMMON_NOTIFICATIONS_OFF_MESSAGE
+        );
+        let saved = load_state(&ctx);
+        assert!(saved.has_active_notification());
+        assert_eq!(saved.introduced_article_ids, before.introduced_article_ids);
+        assert_eq!(saved.cooldown_until, before.cooldown_until);
     }
 }

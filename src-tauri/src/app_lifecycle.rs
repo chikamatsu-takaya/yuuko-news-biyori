@@ -2,6 +2,7 @@
 //!
 //! OSの閉じる操作ではプロセスを終了させず、既存の低頻度スケジューラを継続する。
 //! アプリ終了は固定トレイメニューと、画面内「常駐を終了する」（`quit_resident_app`）の明示操作だけに限定する。
+//! トレイ「ゆうこを呼ぶ」（判断台帳 D140）は、ゆうこを今すぐ出す手動の呼び出し（`yuuko_desktop_notifier::summon`）。
 //!
 //! 非表示待機が [`MAIN_WINDOW_RELEASE_DELAY`] 続いたら、メインウィンドウを破棄して WebView のメモリを返す
 //! （判断台帳 D133）。再表示の要求（トレイ・2つ目の起動・ゆうこの「詳しく見る」）で、tauri.conf.json の
@@ -24,6 +25,7 @@ use tauri::{
 pub const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "resident-tray";
 const SHOW_MENU_ID: &str = "resident-show-main-window";
+const SUMMON_YUUKO_MENU_ID: &str = "resident-summon-yuuko";
 const QUIT_MENU_ID: &str = "resident-quit-application";
 
 /// 非表示待機のメインウィンドウを破棄するまでの時間（D133）。
@@ -140,10 +142,11 @@ pub(crate) enum ExitSource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResidentMenuAction {
     ShowMainWindow,
+    SummonYuuko,
     QuitApplication,
 }
 
-/// 常駐用トレイを作成し、再表示と明示終了だけを公開する。
+/// 常駐用トレイを作成し、再表示・ゆうこの呼び出し・明示終了だけを公開する。
 pub fn setup(app: &App) -> tauri::Result<()> {
     EXIT_REQUESTED.store(false, Ordering::SeqCst);
     RESIDENT_MODE_ENABLED.store(false, Ordering::SeqCst);
@@ -151,8 +154,15 @@ pub fn setup(app: &App) -> tauri::Result<()> {
     MAIN_WINDOW_UNSAVED_CHANGES.store(false, Ordering::SeqCst);
 
     let show_item = MenuItem::with_id(app, SHOW_MENU_ID, "画面を開く", true, None::<&str>)?;
+    let summon_item = MenuItem::with_id(
+        app,
+        SUMMON_YUUKO_MENU_ID,
+        "ゆうこを呼ぶ",
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, QUIT_MENU_ID, "常駐を終了する", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&show_item, &summon_item, &quit_item])?;
     let icon = app.default_window_icon().cloned().ok_or_else(|| {
         tauri::Error::AssetNotFound("resident tray requires a default window icon".to_string())
     })?;
@@ -164,6 +174,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match menu_action(event.id().as_ref()) {
             Some(ResidentMenuAction::ShowMainWindow) => show_main_window(app),
+            Some(ResidentMenuAction::SummonYuuko) => summon_yuuko(app),
             Some(ResidentMenuAction::QuitApplication) => request_exit(app, ExitSource::TrayMenu),
             None => {}
         })
@@ -646,6 +657,16 @@ pub(crate) fn stop_side_processes<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// トレイ「ゆうこを呼ぶ」。判定と表示は専用スレッドで行う（メニュー処理のメインスレッドで
+/// ウィンドウを作らない）。状態の初期化前（起動直後）に押された場合は何もしない。
+fn summon_yuuko<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        log::warn!("初期化が終わっていないため、ゆうこを呼べませんでした");
+        return;
+    };
+    crate::yuuko_desktop_notifier::summon(app.clone(), state.yuuko_service.clone());
+}
+
 fn mark_exit_requested() {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
 }
@@ -653,6 +674,7 @@ fn mark_exit_requested() {
 fn menu_action(menu_id: &str) -> Option<ResidentMenuAction> {
     match menu_id {
         SHOW_MENU_ID => Some(ResidentMenuAction::ShowMainWindow),
+        SUMMON_YUUKO_MENU_ID => Some(ResidentMenuAction::SummonYuuko),
         QUIT_MENU_ID => Some(ResidentMenuAction::QuitApplication),
         _ => None,
     }
@@ -694,6 +716,10 @@ mod tests {
         assert_eq!(
             menu_action(SHOW_MENU_ID),
             Some(ResidentMenuAction::ShowMainWindow)
+        );
+        assert_eq!(
+            menu_action(SUMMON_YUUKO_MENU_ID),
+            Some(ResidentMenuAction::SummonYuuko)
         );
         assert_eq!(
             menu_action(QUIT_MENU_ID),

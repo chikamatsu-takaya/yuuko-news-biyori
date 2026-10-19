@@ -6973,6 +6973,116 @@ test("news-refreshed event while the window is hidden does not generate candidat
   );
 });
 
+// トレイ「ゆうこを呼ぶ」（判断台帳 D140）をメイン表示中に行ったとき、Rust が送る yuuko-summoned を模擬する。
+function emitYuukoSummoned(page: Page, payload: Record<string, unknown>) {
+  return page.evaluate(
+    (p) =>
+      (
+        window as unknown as {
+          __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+        }
+      ).__E2E_EMIT_EVENT__("yuuko-summoned", p),
+    payload
+  );
+}
+
+test("yuuko-summoned event picks up the summoned notification without waiting for the 5-minute poll", async ({
+  page,
+}) => {
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toHaveCount(0);
+
+  // Rust 側で紹介中が保存された状態を、次の request の結果で模擬する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_REQUEST_NOTIFIED__ = true;
+  });
+  await expect.poll(() => emitYuukoSummoned(page, {})).toBeGreaterThan(0);
+  await expect(
+    page.getByRole("region", { name: NOTIFICATION_REGION })
+  ).toBeVisible();
+});
+
+test("yuuko-summoned message is shown as a balloon with OK and does not request candidates", async ({
+  page,
+}) => {
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBe(1);
+
+  const message = "いま紹介できるニュースがないみたい。";
+  await expect
+    .poll(() => emitYuukoSummoned(page, { message }))
+    .toBeGreaterThan(0);
+  const region = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(region.getByText(message)).toBeVisible();
+  await page.waitForTimeout(200);
+  // 一言は見た目だけの表示で、候補生成（request）は増やさない。
+  expect(await readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__")).toBe(
+    1
+  );
+
+  await region.getByRole("button", { name: "OK", exact: true }).click();
+  await expect(region).toHaveCount(0);
+});
+
+test("yuuko-summoned OFF message is shown even while notifications are disabled", async ({
+  page,
+}) => {
+  // 通知OFF（request は disabled）。通常のアプリ内通知は出ないが、「ゆうこを呼ぶ」の一言は通知ではないため出す。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_REQUEST_DISABLED__ =
+      true;
+  });
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_REQUEST_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+  const region = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(region).toHaveCount(0);
+
+  const message =
+    "通知がOFFになっているよ。設定でONにすると、ニュースを紹介できるよ。";
+  await expect
+    .poll(() => emitYuukoSummoned(page, { message }))
+    .toBeGreaterThan(0);
+  await expect(region.getByText(message)).toBeVisible();
+  await region.getByRole("button", { name: "OK", exact: true }).click();
+  await expect(region).toHaveCount(0);
+});
+
+test("yuuko-summoned message is dropped when the window is hidden and does not come back", async ({
+  page,
+}) => {
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  const message = "いま紹介できるニュースがないみたい。";
+  await expect
+    .poll(() => emitYuukoSummoned(page, { message }))
+    .toBeGreaterThan(0);
+  const region = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(region.getByText(message)).toBeVisible();
+
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+  await setVisible(false);
+  await expect(region).toHaveCount(0);
+  await setVisible(true);
+  await page.waitForTimeout(200);
+  await expect(page.getByText(message)).toHaveCount(0);
+});
+
 test("news list reloads on the next re-show after a scheduled news refresh", async ({
   page,
 }) => {

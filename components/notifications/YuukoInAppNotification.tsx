@@ -20,6 +20,10 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
  * 2段階クリックは無く、吹き出し＋「OK」だけを出す。OK は onOpen（Page 側で handle_yuuko_clicked →
  * Rust が確認済みにする）、閉じる/Esc はニュースと同じ onClose（未確認のままクールタイム）を使う。
  * 報酬通知は自動退場しない（§9.4。OK か閉じるまで表示を続ける）。
+ *
+ * variant="message" は一言だけの吹き出し（トレイ「ゆうこを呼ぶ」で紹介できるものが無いとき・判断台帳 D140）。
+ * 見た目は報酬通知と同じ吹き出し＋「OK」で、OK は onOpen、閉じる/Esc は onClose、
+ * 吹き出しと同じ時間で自動退場（onIgnore）する。どれも呼び出し側で「閉じる」として扱う。
  */
 
 // 自動退場（無操作）までの時間。設計書 §9.4：吹き出し20秒 / 軽量プレビュー30秒。
@@ -72,8 +76,11 @@ type YuukoInAppNotificationProps = {
   exiting?: boolean;
   /** 退場演出の終了（またはアンマウント）時に呼ばれる。親は表示を外す。 */
   onExited?: () => void;
-  /** 通知の種類（既定 "news"）。"reward" は吹き出し＋OK だけの報酬通知。 */
-  variant?: "news" | "reward";
+  /**
+   * 通知の種類（既定 "news"）。"reward" は吹き出し＋OK だけの報酬通知。
+   * "message" は吹き出し＋OK だけの一言（「ゆうこを呼ぶ」で紹介できるものが無いとき）。
+   */
+  variant?: "news" | "reward" | "message";
 };
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
@@ -243,7 +250,7 @@ export default function YuukoInAppNotification({
             <X className="h-4 w-4" />
           </button>
 
-          {variant === "reward" ? (
+          {variant !== "news" ? (
             // 報酬通知: 短い吹き出し＋OK。OK で確認済みにする（Rust 側）。閉じる・放置では未確認のまま。
             // デスクトップの吹き出し段階のウィンドウ（固定サイズ）に収まるよう、余白は小さめにする。
             <div className="flex flex-col gap-1">
