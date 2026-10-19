@@ -271,18 +271,33 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
 
 const fallbackArticle = fallbackArticleCatalog[0];
 
+// 左列「ゆうこの一言」の固定文。ゆうこの発話なので、くだけた口調にそろえる。
 const fallbackYuukoComment = `記事を読むときは
 「何が便利になるのか」
-を探すとぐっと分かりやすくなります。
-一緒に見ていきましょう。`;
+を探すと、ぐっと分かりやすくなるよ。
+一緒に見ていこうね。`;
 
-const fallbackSpeechBubble = `この記事を、わかりやすく
-まとめてみました。
-気になる言葉も
-すぐに開けますよ。`;
+// 右の吹き出しで、記事の「ゆうこの感想」が無いときに出す文。
+// 未要約・読み込み中・失敗時に「まとめた」と言わないよう、記事の状態ごとに出し分ける。
+const speechBubbleMessages = {
+  loading: `いま記事を読み込んでいるよ。
+ちょっと待っててね。`,
+  loadError: `この記事、うまく読めなかったみたい。
+もう一度試してみてね。`,
+  summaryWaiting: `この記事は、まとめる順番を
+待っているところだよ。`,
+  summaryProcessing: `いま、この記事を
+まとめているところだよ。`,
+  summaryFailed: `この記事、うまくまとめられなかったんだ。
+「要約を作り直す」でもう一度試してみてね。`,
+  unsummarized: `この記事は、まだまとめていないよ。
+気になる言葉は、選んで聞いてね。`,
+  noThoughts: `気になる言葉があったら、
+選んで聞いてね。`,
+} as const;
 
 const defaultTermExplanation = (term: string) =>
-  `「${term}」はこの記事を理解するための補助キーワードです。現時点では記事文脈に沿った簡易解説を表示しています。`;
+  `「${term}」は、この記事を読むときの手がかりになる言葉だよ。いまは記事の流れに沿った簡単な説明を出しているね。`;
 
 const dictionaryTypeLabel = (type: DictionaryEntryType): string => {
   if (type === "phrase") {
@@ -693,7 +708,7 @@ function TermPopup({
           className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
         >
           <Spinner className="size-4" />
-          <span>用語解説を取得しています…</span>
+          <span>用語解説を調べているよ…</span>
         </div>
       ) : null}
 
@@ -770,7 +785,7 @@ function TermPopup({
           data-term-popup-no-drag="true"
           className="cursor-text text-xs leading-relaxed text-muted-foreground"
         >
-          用語解説を表示できませんでした。
+          用語解説を表示できなかったよ。
         </p>
       ) : null}
     </div>
@@ -867,7 +882,10 @@ function YuukoCharacter() {
 
 function YuukoSpeechBubbleRight({ message }: { message: string }) {
   return (
-    <div className="relative max-w-[200px] rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white px-4 py-3 shadow-md">
+    <div
+      data-testid="reader-yuuko-bubble"
+      className="relative max-w-[200px] rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white px-4 py-3 shadow-md"
+    >
       <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
         {message}
       </p>
@@ -1098,11 +1116,11 @@ export default function NewsReaderScreen({
   const resolvedArticleId = articleId ?? fallbackArticle.id;
   // 未要約の実記事（summaryState≠done）。要約欄を「準備中」表示にし、ボタンを「要約を作成」にする。
   const isUnsummarized = article.isSummarized === false;
-  // 自動要約キューで処理中の記事。「ゆうこが要約中です」を出し、手動作成ボタンは隠す（生成中の重複操作を避ける）。
+  // 自動要約キューで処理中の記事。「ゆうこが要約中だよ」を出し、手動作成ボタンは隠す（生成中の重複操作を避ける）。
   const isSummaryProcessing =
     isUnsummarized && article.summaryState === "processing";
   // 順番待ちの記事。すぐ読みたい人向けに既存の手動要約を「今すぐ要約」として出す。
-  // キューは要約済み記事を飛ばし、AlreadySummarized も吸収するため二重生成にはならない。
+  // 手動で生成中の記事はキューが取り出さず（自動で生成中でも段の合間で手を引き）、要約済み記事も飛ばすため二重生成にはならない。
   const isSummaryWaiting = isUnsummarized && article.summaryState === "waiting";
   // 待機中・処理中は完了確認のポーリング対象。
   const isSummaryInProgress =
@@ -1111,6 +1129,22 @@ export default function NewsReaderScreen({
       article.summaryState === "processing");
   // 自動要約が再試行上限まで失敗した記事。既存の手動要約を「要約を作り直す」として出す。
   const isSummaryFailed = isUnsummarized && article.summaryState === "failed";
+  // 右の吹き出しの代替文（ゆうこの感想が無いとき）。記事の読み込み・要約の状態と食い違わない文を選ぶ。
+  // 手動の「要約を作成」実行中（isGeneratingSummary）も、自動要約の処理中と同じく「まとめているところ」を出す。
+  const fallbackSpeechBubbleMessage =
+    articleLoadState === "loading"
+      ? speechBubbleMessages.loading
+      : articleLoadState === "error"
+        ? speechBubbleMessages.loadError
+        : isSummaryProcessing || (isGeneratingSummary && isUnsummarized)
+          ? speechBubbleMessages.summaryProcessing
+          : isSummaryWaiting
+            ? speechBubbleMessages.summaryWaiting
+            : isSummaryFailed
+              ? speechBubbleMessages.summaryFailed
+              : isUnsummarized
+                ? speechBubbleMessages.unsummarized
+                : speechBubbleMessages.noThoughts;
   // 候補語が無い実記事ではサンプル語で埋めず、候補語ボタンを出さない（範囲選択の案内に任せる）。
   // 同じ語のボタンを2つ並べないよう、先頭2件だけを表示する。
   const quickTerms = article.highlightedTerms.slice(0, 2);
@@ -1510,7 +1544,7 @@ export default function NewsReaderScreen({
         isFavorite: previousFavorite,
       }));
       setFavoriteNotice(
-        "お気に入りの更新に失敗しました。時間をおいてもう一度お試しください。"
+        "お気に入りの更新ができなかったよ。時間をおいてもう一度試してみてね。"
       );
       toast({
         variant: "destructive",
@@ -1554,7 +1588,7 @@ export default function NewsReaderScreen({
         isMountedRef.current &&
         requestId === saveDictionaryRequestIdRef.current
       ) {
-        setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
+        setTermNotice("辞書の保存ができなかったよ。時間をおいてもう一度試してみてね。");
         toast({
           variant: "destructive",
           title: "保存に失敗しちゃった",
@@ -1616,7 +1650,7 @@ export default function NewsReaderScreen({
         setSummaryNotice(
           isOutputRejected
             ? "うまくまとめられなかったよ。もう一度試してね"
-            : "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+            : "要約の作成ができなかったよ。時間をおいてもう一度試してみてね。"
         );
         toast({
           variant: "destructive",
@@ -1872,7 +1906,7 @@ export default function NewsReaderScreen({
                 ) : isSummaryProcessing ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Spinner className="size-4" />
-                    <span>ゆうこが要約中です。できあがったらここに表示するね。</span>
+                    <span>ゆうこが要約中だよ。できあがったらここに表示するね。</span>
                   </div>
                 ) : isSummaryFailed ? (
                   <NotGeneratedText>
@@ -2111,7 +2145,7 @@ export default function NewsReaderScreen({
               message={
                 articleLoadState === "ready" && article.yuukoThoughts
                   ? article.yuukoThoughts
-                  : fallbackSpeechBubble
+                  : fallbackSpeechBubbleMessage
               }
             />
           </div>
