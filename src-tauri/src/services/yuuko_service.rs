@@ -698,6 +698,24 @@ impl YuukoService {
         }
         Ok(())
     }
+
+    /// 消えた記事（旧サンプル記事・D139）への参照を、保存済みのゆうこ状態から外す。
+    /// 状態ファイルが無ければ何もしない（作らない）。変更があったときだけ保存し、true を返す。
+    pub fn forget_removed_articles(&self, article_ids: &[String]) -> Result<bool, AppError> {
+        if article_ids.is_empty() {
+            return Ok(false);
+        }
+        let _guard = self.yuuko_state_repository.lock_updates();
+        if !self.yuuko_state_repository.exists() {
+            return Ok(false);
+        }
+        let mut state = self.yuuko_state_repository.load_or_default()?;
+        if !state.forget_articles(article_ids) {
+            return Ok(false);
+        }
+        self.yuuko_state_repository.save(&state)?;
+        Ok(true)
+    }
 }
 
 /// request_yuuko_notification の結果を組み立てる（最新状態を通知DTOへ変換）。
@@ -903,9 +921,7 @@ mod tests {
     fn request_returns_disabled_when_notifications_are_off() {
         let ctx = make_context();
         // 候補記事は存在するが、通知OFF。
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, false, 3, all_day_ranges());
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -923,9 +939,7 @@ mod tests {
     #[test]
     fn request_respects_saved_max_per_day_as_daily_limit() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 1, all_day_ranges());
 
         // 1回目: 通知される（当日カウント=1）。
@@ -946,9 +960,7 @@ mod tests {
     #[test]
     fn request_returns_outside_time_range_when_now_is_not_in_work_ranges() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, ranges_excluding_now());
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -979,9 +991,7 @@ mod tests {
     #[test]
     fn request_notifies_and_populates_display_fields_when_conditions_met() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -1010,9 +1020,7 @@ mod tests {
     #[test]
     fn request_returns_already_active_without_consuming_new_candidate() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
 
         // 既存の active 通知を永続化しておく。
@@ -1052,9 +1060,7 @@ mod tests {
     #[test]
     fn first_click_marks_introduced_article_previewed() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         let notified = ctx.service.request_yuuko_notification().unwrap();
         let article_id = notified.state.current_article_id.clone().unwrap();
@@ -1087,9 +1093,7 @@ mod tests {
     #[test]
     fn first_click_does_not_regress_detail_viewed_article() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         ctx.article_repository
             .advance_article_read_state("article-001", ArticleReadState::DetailViewed)
             .unwrap();
@@ -1113,9 +1117,7 @@ mod tests {
     #[test]
     fn request_skips_detail_viewed_article_in_favor_of_unread() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         // 最高スコアの article-001 を記事詳細で閲覧済みにする。
         ctx.service
@@ -1162,9 +1164,7 @@ mod tests {
     #[test]
     fn request_holds_candidate_while_fullscreen_and_notifies_after_grace() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         ctx.fullscreen.set(FullscreenStatus::Busy);
 
@@ -1215,9 +1215,7 @@ mod tests {
     #[test]
     fn request_holds_candidate_after_resume_and_notifies_after_grace() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         simulate_sleep_since_last_heartbeat(&ctx);
 
@@ -1256,9 +1254,7 @@ mod tests {
     #[test]
     fn request_is_not_held_without_resume_gap() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         ctx.service
             .record_notifier_heartbeat(std::time::Duration::from_secs(5 * 60));
@@ -1274,9 +1270,7 @@ mod tests {
     #[test]
     fn resume_detected_by_notifier_is_honored_and_fullscreen_takes_precedence() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         simulate_sleep_since_last_heartbeat(&ctx);
         ctx.service.observe_resume();
@@ -1342,9 +1336,7 @@ mod tests {
     #[test]
     fn request_ignores_fullscreen_when_setting_is_off() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         let mut settings = PersistedSettings::default();
         settings.notification.work_time_ranges = all_day_ranges();
         settings.notification.suppress_in_fullscreen = false;
@@ -1361,9 +1353,7 @@ mod tests {
     #[test]
     fn request_notifies_when_fullscreen_state_is_unknown() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
         ctx.fullscreen.set(FullscreenStatus::Unknown);
 
@@ -1376,9 +1366,7 @@ mod tests {
     #[test]
     fn existing_gates_take_precedence_over_fullscreen() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 0, all_day_ranges());
         ctx.fullscreen.set(FullscreenStatus::Busy);
 
@@ -1400,9 +1388,7 @@ mod tests {
     #[test]
     fn request_holds_candidate_during_meeting_and_notifies_after_it_ends() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
         ctx.meeting.set(true, true);
 
@@ -1421,9 +1407,7 @@ mod tests {
     #[test]
     fn request_holds_candidate_while_mic_in_use() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
         ctx.meeting.set(true, false);
 
@@ -1437,9 +1421,7 @@ mod tests {
     #[test]
     fn meeting_app_without_mic_use_is_not_a_meeting() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
         ctx.meeting.set(false, true);
 
@@ -1453,9 +1435,7 @@ mod tests {
     #[test]
     fn request_skips_detection_when_both_settings_are_off() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, false, false);
         ctx.meeting.set(true, true);
 
@@ -1469,9 +1449,7 @@ mod tests {
     #[test]
     fn only_meeting_setting_on_suppresses_meeting_but_not_plain_mic_use() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, false);
 
         ctx.meeting.set(true, true);
@@ -1488,9 +1466,7 @@ mod tests {
     #[test]
     fn only_mic_setting_on_reports_mic_in_use_without_process_query() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, false, true);
         ctx.meeting.set(true, true);
 
@@ -1505,9 +1481,7 @@ mod tests {
     #[test]
     fn fullscreen_takes_precedence_over_meeting() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
         ctx.fullscreen.set(FullscreenStatus::Busy);
         ctx.meeting.set(true, true);
@@ -1522,9 +1496,7 @@ mod tests {
     #[test]
     fn existing_gates_take_precedence_over_meeting() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 0, all_day_ranges());
         ctx.meeting.set(true, true);
 
@@ -1840,9 +1812,7 @@ mod tests {
     #[test]
     fn notified_balloon_text_uses_nickname_but_saved_text_does_not() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_nickname(&ctx, "ゆうさん", true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -1859,9 +1829,7 @@ mod tests {
     #[test]
     fn balloon_text_is_unchanged_when_nickname_is_empty() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_nickname(&ctx, "", true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -1935,9 +1903,7 @@ mod tests {
     #[test]
     fn click_result_also_carries_nickname() {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_nickname(&ctx, "ゆう", true);
         assert!(ctx.service.request_yuuko_notification().unwrap().notified);
 
@@ -1950,9 +1916,7 @@ mod tests {
     /// 未確認の報酬（Rank3 → theme_001）と候補記事があり、通知は終日・上限 `max_per_day`。
     fn reward_pending_context(max_per_day: u32) -> ServiceContext {
         let ctx = make_context();
-        ctx.article_repository
-            .initialize_default_if_missing()
-            .unwrap();
+        ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, max_per_day, all_day_ranges());
         save_friendship_total(&ctx, 25);
         ctx

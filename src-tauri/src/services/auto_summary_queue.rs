@@ -989,9 +989,7 @@ mod tests {
         let paths = AppPaths::new(root.clone());
         paths.ensure_storage_dirs().expect("create storage dirs");
         let article_repository = ArticleRepository::new(&paths);
-        article_repository
-            .initialize_default_if_missing()
-            .expect("seed articles");
+        article_repository.seed_sample_articles_for_tests();
         // 取得直後と同じ、未要約の記事を1件置く。
         let fetched_at = chrono::Utc::now().to_rfc3339();
         article_repository

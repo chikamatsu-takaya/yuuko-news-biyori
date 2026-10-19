@@ -193,6 +193,42 @@ impl DictionaryRepository {
         Ok(entry_id.to_string())
     }
 
+    /// 消えた記事（旧サンプル記事・D139）への参照だけを辞書項目から外す。項目そのものは消さない
+    /// （利用者が保存した解説・メモ・★は残す）。外すのは `source_article_ids` の該当IDと、関連記事が
+    /// 該当IDのときの関連記事ID・タイトル（存在しない記事を「記事を開く」の対象に残さないため）。
+    /// 書き換えた項目数を返す。変更が無ければ保存しない（辞書ファイルが無ければ作らない）。
+    pub fn remove_article_references(&self, article_ids: &[String]) -> Result<usize, AppError> {
+        if article_ids.is_empty() {
+            return Ok(0);
+        }
+        let _guard = self.lock_writes()?;
+        let mut store = self.load_store_or_default()?;
+        let mut changed_entries = 0usize;
+        for entry in &mut store.entries {
+            let before = entry.source_article_ids.len();
+            entry
+                .source_article_ids
+                .retain(|article_id| !article_ids.contains(article_id));
+            let mut changed = entry.source_article_ids.len() != before;
+            if entry
+                .related_article_id
+                .as_ref()
+                .is_some_and(|article_id| article_ids.contains(article_id))
+            {
+                entry.related_article_id = None;
+                entry.related_article_title = None;
+                changed = true;
+            }
+            if changed {
+                changed_entries += 1;
+            }
+        }
+        if changed_entries > 0 {
+            self.save_store(&store)?;
+        }
+        Ok(changed_entries)
+    }
+
     /// 辞書の読み書きロック。データ移行の取り込みが差し替え中に保持する。
     pub(crate) fn write_lock_handle(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.write_lock)
@@ -939,5 +975,83 @@ mod tests {
 
         writer_handle.join().unwrap();
         reader_handle.join().unwrap();
+    }
+
+    #[test]
+    fn remove_article_references_keeps_entries_and_drops_only_removed_article_ids() {
+        // D139: 旧サンプル記事を消しても、利用者の辞書項目（解説・メモ・★）は消さず参照だけ外す。
+        let context = TestRepositoryContext::new();
+        let mut sample_only =
+            persisted_entry("entry-a", "生成ai", "100", &["article-001"], "説明A");
+        sample_only.related_article_title = Some("サンプル記事".to_string());
+        sample_only.favorite = true;
+        sample_only.memo = Some("メモ".to_string());
+        let mut mixed = persisted_entry(
+            "entry-b",
+            "saas",
+            "100",
+            &["news_0123456789abcdef", "article-002"],
+            "説明B",
+        );
+        mixed.related_article_title = Some("実記事".to_string());
+        let untouched = persisted_entry("entry-c", "別の語", "100", &["news_aa"], "説明C");
+        context.write_store(vec![sample_only, mixed, untouched]);
+        let removed = vec!["article-001".to_string(), "article-002".to_string()];
+
+        let changed = context
+            .repository
+            .remove_article_references(&removed)
+            .unwrap();
+
+        assert_eq!(changed, 2);
+        let raw = std::fs::read_to_string(&context.dictionary_path).unwrap();
+        let store = serde_json::from_str::<PersistedDictionaryStore>(&raw).unwrap();
+        assert_eq!(store.entries.len(), 3);
+        let a = &store.entries[0];
+        assert!(a.source_article_ids.is_empty());
+        assert_eq!(a.related_article_id, None);
+        assert_eq!(a.related_article_title, None);
+        assert!(a.favorite);
+        assert_eq!(a.memo.as_deref(), Some("メモ"));
+        assert_eq!(a.short_explanation, "説明A");
+        // 関連記事が実記事のままなら関連記事表示は残し、消えたIDだけを外す。
+        let b = &store.entries[1];
+        assert_eq!(
+            b.source_article_ids,
+            vec!["news_0123456789abcdef".to_string()]
+        );
+        assert_eq!(
+            b.related_article_id.as_deref(),
+            Some("news_0123456789abcdef")
+        );
+        assert_eq!(b.related_article_title.as_deref(), Some("実記事"));
+        assert_eq!(
+            store.entries[2].source_article_ids,
+            vec!["news_aa".to_string()]
+        );
+
+        // 2回目は変更なし（冪等）。
+        let before = std::fs::read(&context.dictionary_path).unwrap();
+        assert_eq!(
+            context
+                .repository
+                .remove_article_references(&removed)
+                .unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read(&context.dictionary_path).unwrap(), before);
+    }
+
+    #[test]
+    fn remove_article_references_does_not_create_missing_dictionary() {
+        let context = TestRepositoryContext::new();
+        assert_eq!(
+            context
+                .repository
+                .remove_article_references(&["article-001".to_string()])
+                .unwrap(),
+            0
+        );
+        assert!(!context.dictionary_path.exists());
     }
 }

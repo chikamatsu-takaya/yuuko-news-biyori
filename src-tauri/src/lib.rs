@@ -108,7 +108,8 @@ pub fn run() {
             let settings_service = SettingsService::new(settings_repository);
             settings_service.initialize_default_if_missing()?;
             let article_repository = ArticleRepository::new(&paths);
-            article_repository.initialize_default_if_missing()?;
+            // 旧版が書いたサンプル記事（D139）の掃除結果。辞書・ゆうこ状態の参照掃除に使う。
+            let legacy_seed_cleanup = article_repository.initialize_default_if_missing()?;
             // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
             // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
             let gacha_service = GachaService::new(GachaRepository::new(&paths));
@@ -187,6 +188,11 @@ pub fn run() {
                 friendship_service.clone(),
             );
             yuuko_service.initialize_default_if_missing()?;
+            remove_legacy_sample_article_references(
+                &legacy_seed_cleanup,
+                &dictionary_repository,
+                &yuuko_service,
+            );
             let desktop_notifier_yuuko_service = yuuko_service.clone();
             // 書き出しと取り込みは同じロックを共有し、同時には走らせない。
             let data_export_service = DataExportService::new(&paths);
@@ -294,6 +300,45 @@ pub fn run() {
             tauri::RunEvent::Exit => app_lifecycle::stop_side_processes(app),
             _ => {}
         });
+}
+
+/// 旧版のサンプル記事（D139）を消した後に、辞書・ゆうこ状態へ残る参照を外す。
+/// 辞書項目そのものは消さない。付随処理なので失敗しても起動は続け、次回起動で再試行する。
+/// サンプルが記事・過去ニュースのどこにも無く、参照の掃除もすべて成功したときだけ完了印を書き、
+/// 以後の起動では確認を省く（失敗したら印を書かず、次回起動でもう一度確かめる）。
+fn remove_legacy_sample_article_references(
+    cleanup: &repositories::article_repository::LegacySeedCleanup,
+    dictionary_repository: &DictionaryRepository,
+    yuuko_service: &YuukoService,
+) {
+    let article_ids = &cleanup.article_ids_without_data;
+    if article_ids.is_empty() {
+        return;
+    }
+    let mut all_succeeded = true;
+    match dictionary_repository.remove_article_references(article_ids) {
+        Ok(0) => {}
+        Ok(count) => log::info!(
+            "Removed legacy sample article references from dictionary entries (count: {count})"
+        ),
+        Err(error) => {
+            all_succeeded = false;
+            log::warn!("Failed to remove legacy sample article references from dictionary: {error}")
+        }
+    }
+    match yuuko_service.forget_removed_articles(article_ids) {
+        Ok(false) => {}
+        Ok(true) => log::info!("Removed legacy sample article references from yuuko state"),
+        Err(error) => {
+            all_succeeded = false;
+            log::warn!(
+                "Failed to remove legacy sample article references from yuuko state: {error}"
+            )
+        }
+    }
+    if all_succeeded {
+        cleanup.mark_done();
+    }
 }
 
 /// ログプラグインを登録する（開発: Info 以上を従来どおり / 配布: 警告とエラーだけをファイルへ。D29）。
