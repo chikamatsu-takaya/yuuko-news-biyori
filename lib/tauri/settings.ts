@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AiProvider = "mock" | "gemini" | "openai" | "local";
 export type ExplanationLevel = "simple" | "normal" | "detailed";
+// 通知モード（Rust: domain::notification_mode の保存値。判断台帳 D143）。
+export type NotificationMode = "random_in_work_time" | "random" | "fixed_time" | "none";
 
 export type WorkTimeRangeDto = {
   start: string;
@@ -13,6 +15,8 @@ export type UserSettingsDto = {
   notifyStartTime: string;
   notifyEndTime: string;
   workTimeRanges?: WorkTimeRangeDto[];
+  // 通知モード。読み込み時は常に返る。旧データ互換のため任意（未指定で保存すると既存値のまま）。
+  notificationMode?: NotificationMode;
   notifyMaxPerDay: number;
   enableYuukoPopup: boolean;
   suppressDuringMeeting: boolean;

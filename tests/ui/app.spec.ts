@@ -4479,6 +4479,83 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   ).toBeChecked();
 });
 
+// D143: 通知のタイミング（通知モード）を選び、未保存表示→保存→開き直しで復元される。
+test("settings notification mode select saves notificationMode and restores it", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  const modeSelect = page.getByRole("combobox", { name: "通知のタイミング" });
+  const description = page.getByTestId("notification-mode-description");
+  const saveState = page.getByTestId("settings-save-state");
+  // 既定は時間帯内ランダムで、読み込んだだけでは未保存にならない。
+  await expect(modeSelect).toHaveText("時間帯内ランダム（既定）");
+  await expect(description).toContainText("通知時間帯の中で");
+  await expect(saveState).not.toHaveText("未保存の変更あり");
+
+  // 選択肢は4つ。
+  await modeSelect.click();
+  for (const label of ["時間帯内ランダム（既定）", "ランダム", "定時", "通知しない"]) {
+    await expect(page.getByRole("option", { name: label, exact: true })).toBeVisible();
+  }
+  await page.getByRole("option", { name: "通知しない", exact: true }).click();
+  await expect(description).toContainText("報酬のお知らせも含む");
+  await expect(description).toContainText("「ゆうこを呼ぶ」");
+  const randomNote = page.getByTestId("notification-mode-random-note");
+  await expect(randomNote).toHaveCount(0);
+
+  // ランダムを選ぶと、通知時間帯を使わないことを添える。
+  await modeSelect.click();
+  await page.getByRole("option", { name: "ランダム", exact: true }).click();
+  await expect(description).toContainText("7:00〜23:00");
+  await expect(randomNote).toHaveText("ランダムでは下の通知時間帯の設定は使わないよ。");
+
+  // 通知OFFのあいだは選べない（ONに戻すと選べる）。
+  const notificationSwitch = page.getByRole("switch").first();
+  await notificationSwitch.click();
+  await expect(modeSelect).toBeDisabled();
+  await notificationSwitch.click();
+  await expect(modeSelect).toBeEnabled();
+
+  await modeSelect.click();
+  await page.getByRole("option", { name: "定時", exact: true }).click();
+  await expect(description).toHaveText("各時間帯の開始時刻に1回ずつ声をかけるね。");
+  await expect(randomNote).toHaveCount(0);
+  await expect(saveState).toHaveText("未保存の変更あり");
+
+  await page.getByRole("button", { name: "保存する" }).click();
+  const saved = (await readSavedSettings(page)) as
+    | { notificationMode?: string; notifyMaxPerDay?: number }
+    | undefined;
+  expect(saved?.notificationMode).toBe("fixed_time");
+  // 他の通知設定は変わらない。
+  expect(saved?.notifyMaxPerDay).toBe(3);
+  await expect(saveState).not.toHaveText("未保存の変更あり");
+
+  // 保存値を次回の読込値にして画面を開き直すと「定時」のまま表示される。
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      __E2E_SAVED_USER_SETTINGS__?: Record<string, unknown>;
+      __E2E_USER_SETTINGS_OVERRIDE__?: Record<string, unknown>;
+    };
+    target.__E2E_USER_SETTINGS_OVERRIDE__ = structuredClone(
+      target.__E2E_SAVED_USER_SETTINGS__
+    );
+  });
+  await page.getByRole("button", { name: "ホームへ戻る" }).click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await expect(
+    page.getByRole("combobox", { name: "通知のタイミング" })
+  ).toHaveText("定時");
+  await expect(page.getByTestId("settings-save-state")).not.toHaveText(
+    "未保存の変更あり"
+  );
+});
+
 // D133: 未保存の設定があるあいだはメインウィンドウを破棄しないよう、未保存の有無を Rust へ知らせる。
 test("settings reports unsaved changes to Rust and clears them after save", async ({
   page,

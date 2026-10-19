@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::notification_mode::NotificationMode;
 use crate::error::AppError;
 
 // 入力値の上限（セキュリティ詳細設計書 §15.2 / §15.3）。
@@ -87,6 +88,10 @@ pub struct UserSettingsDto {
     pub notify_end_time: String,
     #[serde(default)]
     pub work_time_ranges: Option<Vec<WorkTimeRange>>,
+    /// 通知モード（`random_in_work_time` / `random` / `fixed_time` / `none`。判断台帳 D143）。
+    /// 旧画面・旧データとの互換のため任意。読み込み時は常に Some を返し、保存時に None なら既存値のまま。
+    #[serde(default)]
+    pub notification_mode: Option<String>,
     pub notify_max_per_day: u32,
     pub enable_yuuko_popup: bool,
     pub suppress_during_meeting: bool,
@@ -123,6 +128,7 @@ impl Default for UserSettingsDto {
             notify_start_time: "09:00".to_string(),
             notify_end_time: "18:00".to_string(),
             work_time_ranges: Some(default_work_time_ranges()),
+            notification_mode: Some(NotificationMode::RandomInWorkTime.as_storage().to_string()),
             notify_max_per_day: 3,
             enable_yuuko_popup: true,
             suppress_during_meeting: true,
@@ -151,6 +157,15 @@ impl UserSettingsDto {
             for range in ranges {
                 validate_time(&range.start)?;
                 validate_time(&range.end)?;
+            }
+        }
+
+        if let Some(mode) = &self.notification_mode {
+            if NotificationMode::parse_storage(mode).is_none() {
+                return Err(AppError::Validation(
+                    "notificationMode must be one of random_in_work_time, random, fixed_time, none"
+                        .to_string(),
+                ));
             }
         }
 
@@ -283,6 +298,12 @@ impl PersistedSettings {
             notify_start_time,
             notify_end_time,
             work_time_ranges: Some(work_time_ranges),
+            // 未知の保存値（手編集など）は判定と同じ既定値として画面へ渡す。
+            notification_mode: Some(
+                NotificationMode::from_storage(&self.notification.mode)
+                    .as_storage()
+                    .to_string(),
+            ),
             notify_max_per_day: self.notification.max_per_day,
             enable_yuuko_popup: self.notification.enabled,
             suppress_during_meeting: self.notification.suppress_during_meeting,
@@ -309,6 +330,10 @@ impl PersistedSettings {
         self.news.max_daily_recommendations = dto.max_daily_recommendations;
         self.notification.enabled = dto.enable_yuuko_popup;
         self.notification.max_per_day = dto.notify_max_per_day;
+        // 未指定（旧画面など）は既存のモードを変えない。値は validate で検証済み。
+        if let Some(mode) = dto.notification_mode {
+            self.notification.mode = mode;
+        }
         self.notification.suppress_during_meeting = dto.suppress_during_meeting;
         self.notification.suppress_when_mic_in_use = dto.suppress_during_mic_use;
         self.notification.suppress_in_fullscreen = dto.suppress_during_fullscreen;
@@ -719,6 +744,64 @@ mod tests {
         assert!(settings.to_dto().auto_summary_enabled);
         let stored = serde_json::to_value(&settings).unwrap();
         assert_eq!(stored["ai"]["autoSummaryEnabled"], true);
+    }
+
+    #[test]
+    fn notification_mode_round_trips_and_is_kept_when_omitted() {
+        let mut settings = PersistedSettings::default();
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("random_in_work_time")
+        );
+
+        settings.apply_from_dto(UserSettingsDto {
+            notification_mode: Some("fixed_time".to_string()),
+            ..UserSettingsDto::default()
+        });
+        assert_eq!(settings.notification.mode, "fixed_time");
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("fixed_time")
+        );
+
+        // 旧画面など notificationMode を送らない保存では、既存のモードを変えない。
+        settings.apply_from_dto(UserSettingsDto {
+            notification_mode: None,
+            ..UserSettingsDto::default()
+        });
+        assert_eq!(settings.notification.mode, "fixed_time");
+
+        // 手編集などの未知の保存値は、判定と同じ既定値として画面へ渡す。
+        settings.notification.mode = "unknown".to_string();
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("random_in_work_time")
+        );
+    }
+
+    #[test]
+    fn notification_mode_is_validated_and_optional_in_json() {
+        for mode in ["random_in_work_time", "random", "fixed_time", "none"] {
+            let dto = UserSettingsDto {
+                notification_mode: Some(mode.to_string()),
+                ..UserSettingsDto::default()
+            };
+            assert!(dto.validate().is_ok(), "{mode}");
+        }
+        for mode in ["", "RANDOM", "off", "random "] {
+            let dto = UserSettingsDto {
+                notification_mode: Some(mode.to_string()),
+                ..UserSettingsDto::default()
+            };
+            assert!(dto.validate().is_err(), "{mode:?}");
+        }
+
+        // 欄が無い JSON（旧画面）も読み込め、None（既存値のまま）になる。
+        let mut value = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        value.as_object_mut().unwrap().remove("notificationMode");
+        let dto: UserSettingsDto = serde_json::from_value(value).unwrap();
+        assert!(dto.notification_mode.is_none());
+        assert!(dto.validate().is_ok());
     }
 
     #[test]

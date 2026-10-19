@@ -127,6 +127,10 @@ pub struct PersistedYuukoState {
     /// OK せずに閉じた・放置した報酬も再通知しない（ランクアップダイアログ・カスタマイズ画面で気づける）。
     /// 未確認でなくなった ID は通知判定時に取り除き、肥大化させない。旧データには無いため既定は空。
     pub announced_reward_ids: Vec<String>,
+    /// ランダム系の通知モードで「次に自動通知してよい時刻」（UTC・RFC3339。判断台帳 D143）。
+    /// クールタイム明けにランダムな待ちを足した時刻を保存し、再起動しても待ちをやり直さない。
+    /// 決め方と失効条件は domain::notification_mode。旧データには無く、既定は None（次の判定で決める）。
+    pub next_random_notify_at: Option<String>,
 }
 
 impl Default for PersistedYuukoState {
@@ -144,6 +148,7 @@ impl Default for PersistedYuukoState {
             daily_notification: DailyNotificationCount::default(),
             introduced_article_ids: Vec::new(),
             announced_reward_ids: Vec::new(),
+            next_random_notify_at: None,
         }
     }
 }
@@ -787,7 +792,7 @@ pub struct RequestYuukoNotificationResult {
 }
 
 /// 保存用タイムスタンプ文字列を生成する（UTC・他サービスと同形式）。
-fn format_timestamp(value: DateTime<Utc>) -> String {
+pub(crate) fn format_timestamp(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
 }
 
@@ -804,14 +809,14 @@ pub(crate) fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> Strin
 
 /// 保存済みRFC3339文字列を UTC DateTime へ復元する。
 /// パース不能ならその制約は無視（fail-open）し、恒久的に通知が止まらないようにする。
-fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// "HH:MM" 形式の文字列をパースして (時, 分) を返す。
-fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
     let (h_str, m_str) = s.split_once(':')?;
     let h: u32 = h_str.parse().ok()?;
     let m: u32 = m_str.parse().ok()?;
