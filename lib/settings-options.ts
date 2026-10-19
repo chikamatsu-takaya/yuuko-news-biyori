@@ -3,6 +3,9 @@
 import type { WorkTimeRangeDto } from "@/lib/tauri/settings";
 
 // 関心のあるジャンルの選択肢。
+// 国際〜暮らしは同梱の既定取得元（D138）のジャンルに合わせて追加した（D141）。
+// 既定取得元のジャンル（src-tauri/src/services/default_news_sources.rs）は必ずこの中の値にする
+// （興味ジャンルの絞り込みで選べない取得元を作らないため。lib/genre-options.test.mjs で確認）。
 export const GENRE_OPTIONS = [
   "IT",
   "AI",
@@ -11,6 +14,11 @@ export const GENRE_OPTIONS = [
   "クラウド",
   "ビジネス",
   "ガジェット",
+  "国際",
+  "社会",
+  "科学",
+  "スポーツ",
+  "暮らし",
 ] as const;
 
 // ニックネームの最大文字数（Rust: UserSettingsDto::validate の上限と一致）。

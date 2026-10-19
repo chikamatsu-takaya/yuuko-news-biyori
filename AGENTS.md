@@ -28,7 +28,7 @@ Claude Code / Codex 共通の開発ルール（全タスクで必ず守る最小
 | 中核ロジック | Rust |
 | パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
-| AI利用 | Gemini API + MockProvider |
+| AI利用 | 同梱ローカルLLM（llama-server + Qwen3.5-2B。主経路）+ Gemini API（任意）+ MockProvider |
 
 C++ / Qt / QML は MVP段階では使用しない（過去案は別資料として残す）。
 
@@ -78,7 +78,7 @@ C++ / Qt / QML は MVP段階では使用しない（過去案は別資料とし�
 ## 8. エラー処理（要点）
 
 - 失敗時は安全側へ倒す。一部機能の失敗でアプリ全体を落とさない。フォールバック可能なら代替動作。
-- React はユーザー向け文言、Rust ログは調査用情報に分ける。APIキー未設定時は MockProvider へ切り替える。
+- React はユーザー向け文言、Rust ログは調査用情報に分ける。Gemini の APIキー未設定時は MockProvider へ切り替える。
 
 ## 9. Git 運用
 
@@ -123,3 +123,13 @@ Claude Code は、各ルールの `paths` に一致するファイルを扱っ�
 ## 14. 最終原則
 
 軽く・安全に・速く・分かりやすく・要件に忠実に作る。責務を混ぜず、React と Rust の境界を守り、人間がレビューしやすい形で残す。**React / TypeScript で顔を、Rust で中身を作る。**
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
