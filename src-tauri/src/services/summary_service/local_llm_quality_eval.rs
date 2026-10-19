@@ -20,6 +20,8 @@
 //! - `YUUKO_LLM_EVAL_PER_SOURCE`: 取得元1件あたりの記事数（既定 4。追加取得元の `maxArticles` が優先）。
 //! - `YUUKO_LLM_EVAL_MAX_ARTICLES`: 全体の上限（既定 30）。
 //! - `YUUKO_LLM_EVAL_TERMS`: 用語の指定ファイル（既定 `<RUN>/terms.json`）。
+//! - `YUUKO_LLM_EVAL_FORCE_TERM_PROMPT`: 指定すると、フレーズも用語解説のプロンプトで作らせる
+//!   （フレーズ対応 D21 の前の挙動との比較用。後処理前の出力は記録の `raw` にある）。
 //!
 //! 段階:
 //! - `fetch`: 取得元ごとに RSS を取り、先頭から上限件数まで本文を取得・抽出して保存し、`<RUN>/articles.json`
@@ -32,6 +34,7 @@
 //! - `terms`: 用語の指定（`[{"articleId": "...", "terms": ["..."]}]`。人が記事を読んで選ぶ）の語を
 //!   `DictionaryService::explain_selected_term` で解説させ、`<RUN>/terms.jsonl` へ追記する。
 //!   語ごとに空の辞書を使い、保存済み辞書の命中で AI 呼び出しが省かれないようにする。
+//!   長めの文章（フレーズ・D21）を指定すると、アプリと同じ判定でフレーズの説明になる（記録の `type` で分かる）。
 //!
 //! 追加取得元の JSON（`YUUKO_LLM_EVAL_EXTRA_SOURCES`）:
 //! ```text
@@ -66,7 +69,9 @@ use crate::domain::article::{ArticleReadState, FetchedArticle};
 use crate::domain::dictionary::ExplainSelectedTermParams;
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
 use crate::domain::speech_tone::SpeechTone;
-use crate::domain::summary::{AiRequest, AiResponse, GenerateArticleSummaryParams};
+use crate::domain::summary::{
+    AiRequest, AiResponse, GenerateArticleSummaryParams, TERM_EXPLANATION_PROMPT_ID,
+};
 use crate::error::AppError;
 use crate::infra::allowlist::NetworkAllowlist;
 use crate::infra::html_fetcher::{ExcerptSource, HtmlFetcher};
@@ -93,6 +98,7 @@ const PER_SOURCE_ENV: &str = "YUUKO_LLM_EVAL_PER_SOURCE";
 const MAX_ARTICLES_ENV: &str = "YUUKO_LLM_EVAL_MAX_ARTICLES";
 const TERMS_ENV: &str = "YUUKO_LLM_EVAL_TERMS";
 const BUNDLE_DIR_ENV: &str = "YUUKO_LOCAL_LLM_DIR";
+const FORCE_TERM_PROMPT_ENV: &str = "YUUKO_LLM_EVAL_FORCE_TERM_PROMPT";
 const DEFAULT_PER_SOURCE: usize = 4;
 const DEFAULT_MAX_ARTICLES: usize = 30;
 
@@ -653,6 +659,12 @@ impl TermExplanationAi for RecordingTermAi {
         explanation_level: ExplanationLevel,
     ) -> Result<AiResponse, AppError> {
         let context_chars = request.context.as_deref().map_or(0, |c| c.chars().count());
+        // 比較用: フレーズも従来どおり用語解説のプロンプトで作らせる（D21 の前の挙動）。
+        // 後処理は dictionary_service 側で行われるため、比べるときは記録の `raw` を見る。
+        let mut request = request;
+        if std::env::var_os(FORCE_TERM_PROMPT_ENV).is_some() {
+            request.prompt_id = TERM_EXPLANATION_PROMPT_ID.to_string();
+        }
         let started = Instant::now();
         let result = self
             .inner
@@ -730,6 +742,8 @@ fn run_terms(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             match result {
                 Ok(entry) => {
                     record["status"] = json!("ok");
+                    // 用語 / フレーズの判定結果（D21）。フレーズは別のプロンプトで説明させるため、集計で分ける。
+                    record["type"] = json!(entry.entry_type);
                     record["short"] = json!(entry.short_explanation);
                     record["detail"] = json!(entry.detail_explanation);
                 }

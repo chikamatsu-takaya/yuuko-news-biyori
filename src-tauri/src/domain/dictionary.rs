@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::util::text_safety::contains_disallowed_control_char;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// 辞書項目の種別。種別を持たない旧データ・旧呼び出しは「用語」として読む（`#[serde(default)]` 側で使う既定値）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DictionaryEntryType {
+    #[default]
     Term,
     Phrase,
     KeyPoint,
@@ -16,7 +18,8 @@ pub enum DictionaryEntryType {
 pub struct DictionaryEntryDto {
     pub entry_id: String,
     pub key_text: String,
-    #[serde(rename = "type")]
+    /// 種別（用語 / フレーズ / 要点）。保存パラメータで欠けているときは「用語」として受ける（旧画面との互換）。
+    #[serde(rename = "type", default)]
     pub entry_type: DictionaryEntryType,
     pub short_explanation: String,
     pub detail_explanation: String,
@@ -101,7 +104,134 @@ impl DictionaryEntryType {
 
 /// 選択語(selectedText)の Unicode 文字数上限（trim 後・chars 単位）。AIへ渡す入力の可変部分を
 /// 明示的に有界化する。バイト長ではなく文字数で判定し、日本語・絵文字でも文字境界を壊さない。
+/// 用語・フレーズ共通の全体上限（#213）。フレーズ対応（D21）でもこの値は変えない。
 const TERM_EXPLANATION_SELECTED_TEXT_MAX_CHARS: usize = 200;
+
+/// 「用語」とみなす選択の最大文字数（trim 後・chars 単位）。これより長い選択はフレーズ（文章）として扱う。
+/// 正式名称の長い用語（「環太平洋パートナーシップに関する包括的及び先進的な協定」27字）も用語に残る長さにする。
+pub const TERM_SELECTION_MAX_CHARS: usize = 30;
+
+/// 文末の述語（「〜する」「〜した」など）で終わる選択をフレーズとみなす最小の文字数。
+/// 短い語（「もったいない」など）を述語の形だけでフレーズにしないための下限。
+const PREDICATE_PHRASE_MIN_CHARS: usize = 8;
+
+/// 空白で区切った語の数がこれ以上ならフレーズとみなす（英文・語の並びの文章）。
+/// 「Large Language Model」のような3語までの英語の用語は用語に残す。
+const PHRASE_MIN_WORDS: usize = 4;
+
+/// 文・節の区切りを示す記号。これを含む選択は文章（フレーズ）とみなす。
+/// 半角の `!` `?` は「Yahoo!」のような名称にも使われるため含めない。
+const PHRASE_PUNCTUATION: [char; 5] = ['。', '、', '，', '！', '？'];
+
+/// 文末の述語の形。これで終わる（8字以上の）選択は文章の一部（フレーズ）とみなす。
+const PREDICATE_ENDINGS: [&str; 17] = [
+    "する",
+    "した",
+    "った",
+    "される",
+    "された",
+    "です",
+    "ます",
+    "ました",
+    "でした",
+    "である",
+    "だった",
+    "ない",
+    "なかった",
+    "いる",
+    "いた",
+    "れる",
+    "れた",
+];
+
+/// 選択した文字列（trim 済み・上限検証済み）が「用語」か「フレーズ（文章）」かを決める（純粋関数・決定的）。
+///
+/// 次のどれかに当てはまればフレーズ、どれにも当てはまらなければ用語にする（判断台帳 D21）:
+/// 1. 文字数が `TERM_SELECTION_MAX_CHARS`（30字）を超える。
+/// 2. 文・節の区切り記号（。、，！？）を含む。
+/// 3. 空白で区切った語が `PHRASE_MIN_WORDS`（4語）以上ある。
+/// 4. `PREDICATE_PHRASE_MIN_CHARS`（8字）以上で、文末の述語の形（「する」「した」「った」「です」「ない」など）で終わる。
+///
+/// 例外（用語のままにする）:
+/// - 英字の固有名（`is_latin_proper_name`。各語が大文字・数字で始まるか短い機能語で、
+///   `LATIN_PROPER_NAME_MAX_CHARS`〔60字〕以内）は、1・3 に当たっても用語にする
+///   （「Federal Open Market Committee」「Organisation for Economic Co-operation and Development」）。
+/// - 数字の桁区切りの「，」「、」（「１，０００億円」）は 2 の区切り記号として数えない。
+///
+/// 既知の限界: 名前に「。」を含む語（「モーニング娘。」）はフレーズになる。英字の見出し風の文
+/// （全語が大文字始まり）は用語になる。どちらもプロンプトが変わるだけで、上限・検証・保存は同じ。
+///
+/// AI は使わない（同じ選択には常に同じ結果を返す）。結果は解説のプロンプト・保存する種別の選択だけに使う。
+pub fn classify_selected_text(selected_text: &str) -> DictionaryEntryType {
+    let text = selected_text.trim();
+    if is_latin_proper_name(text) {
+        return DictionaryEntryType::Term;
+    }
+    let char_count = text.chars().count();
+    let is_phrase = char_count > TERM_SELECTION_MAX_CHARS
+        || has_clause_punctuation(text)
+        || text.split_whitespace().count() >= PHRASE_MIN_WORDS
+        || (char_count >= PREDICATE_PHRASE_MIN_CHARS
+            && PREDICATE_ENDINGS
+                .iter()
+                .any(|ending| text.ends_with(ending)));
+    if is_phrase {
+        DictionaryEntryType::Phrase
+    } else {
+        DictionaryEntryType::Term
+    }
+}
+
+/// 英字の固有名を用語として扱う最大の文字数（「Organisation for Economic Co-operation and Development」54字が入る長さ）。
+const LATIN_PROPER_NAME_MAX_CHARS: usize = 60;
+
+/// 英字の固有名の途中に小文字で現れる短い機能語（「Bank of Japan」「Software as a Service」）。
+const LATIN_NAME_FUNCTION_WORDS: [&str; 10] =
+    ["of", "and", "for", "as", "a", "an", "the", "on", "in", "to"];
+
+/// 英字の固有名（組織名・正式名称など）か。2語以上・60字以内で、どの語も英数字と `-` `&` `.` `'` だけでできており、
+/// 大文字か数字で始まるか、短い機能語（`LATIN_NAME_FUNCTION_WORDS`・小文字）である。機能語だけの並びは除く。
+/// 小文字の普通の語を含む英文（「The central bank raised …」）は当たらない。
+fn is_latin_proper_name(text: &str) -> bool {
+    if text.chars().count() > LATIN_PROPER_NAME_MAX_CHARS {
+        return false;
+    }
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.len() < 2 {
+        return false;
+    }
+    let mut has_capitalized = false;
+    for word in &words {
+        if !word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '&' | '.' | '\''))
+        {
+            return false;
+        }
+        let first = word.chars().next().unwrap_or(' ');
+        if first.is_ascii_uppercase() || first.is_ascii_digit() {
+            has_capitalized = true;
+        } else if !LATIN_NAME_FUNCTION_WORDS.contains(word) {
+            return false;
+        }
+    }
+    has_capitalized
+}
+
+/// 文・節の区切り記号（`PHRASE_PUNCTUATION`）を含むか。数字に挟まれた「，」「、」（桁区切り「１，０００」）は数えない。
+fn has_clause_punctuation(text: &str) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars.iter().enumerate().any(|(index, c)| {
+        if !PHRASE_PUNCTUATION.contains(c) {
+            return false;
+        }
+        let between_digits = matches!(c, '，' | '、')
+            && index > 0
+            && chars[index - 1].is_numeric()
+            && chars.get(index + 1).is_some_and(|next| next.is_numeric());
+        !between_digits
+    })
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,6 +432,8 @@ pub struct PersistedDictionaryEntry {
     pub dictionary_id: String,
     pub target_text: String,
     pub normalized_text: String,
+    // 種別を持たない旧データは「用語」として読む（辞書全体の読み込みを失敗させない・D21）。
+    #[serde(default)]
     pub entry_type: DictionaryEntryType,
     pub short_explanation: String,
     pub detail_explanation: String,
@@ -416,9 +548,10 @@ pub fn normalize_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryType,
-        ExplainSelectedTermParams, ListDictionaryEntriesParams, PersistedDictionaryEntry,
-        SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
+        classify_selected_text, DeleteDictionaryEntryParams, DictionaryEntryDto,
+        DictionaryEntryType, ExplainSelectedTermParams, ListDictionaryEntriesParams,
+        PersistedDictionaryEntry, SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams,
+        UpdateDictionaryMemoParams,
     };
 
     #[test]
@@ -748,5 +881,187 @@ mod tests {
             }
             other => panic!("expected validation error, got {other:?}"),
         }
+    }
+
+    // --- 用語 / フレーズの判定（D21） ---
+
+    #[test]
+    fn classify_keeps_short_words_and_names_as_terms() {
+        for term in [
+            "生成AI",
+            "SaaS",
+            "資金調達",
+            "もったいない",
+            "Yahoo!",
+            "Large Language Model",
+            "日本銀行 金融政策決定会合",
+            // 正式名称の長い用語（27字）も用語のまま。
+            "環太平洋パートナーシップに関する包括的及び先進的な協定",
+        ] {
+            assert_eq!(
+                classify_selected_text(term),
+                DictionaryEntryType::Term,
+                "{term}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_treats_sentences_and_clauses_as_phrases() {
+        for phrase in [
+            // 句点・読点・全角の感嘆符・疑問符を含む。
+            "物価は上がった。",
+            "円安が進み、輸入品の値段が上がった",
+            "本当に必要なのか？",
+            // 文末の述語で終わる8字以上の選択。
+            "政府は補助金を拡充する",
+            "日銀は利上げを見送った",
+            "需要は回復していない",
+            // 4語以上の英文。
+            "The central bank raised rates",
+        ] {
+            assert_eq!(
+                classify_selected_text(phrase),
+                DictionaryEntryType::Phrase,
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_uses_the_term_length_boundary() {
+        // 30字ちょうどは用語、31字はフレーズ（記号・述語の形を含まない文字列で境界だけを見る）。
+        assert_eq!(
+            classify_selected_text(&"ア".repeat(super::TERM_SELECTION_MAX_CHARS)),
+            DictionaryEntryType::Term
+        );
+        assert_eq!(
+            classify_selected_text(&"ア".repeat(super::TERM_SELECTION_MAX_CHARS + 1)),
+            DictionaryEntryType::Phrase
+        );
+        // 前後の空白は数えない。
+        assert_eq!(
+            classify_selected_text(&format!("  {}  ", "ア".repeat(30))),
+            DictionaryEntryType::Term
+        );
+        // 述語の形でも8字未満は用語のまま（「する」で終わる短い語）。
+        assert_eq!(
+            classify_selected_text("炎上する"),
+            DictionaryEntryType::Term
+        );
+    }
+
+    #[test]
+    fn classify_keeps_latin_proper_names_as_terms() {
+        for name in [
+            "Federal Open Market Committee",
+            "Software as a Service",
+            // 30字を超える正式名称（54字）も、固有名なら用語のまま。
+            "Organisation for Economic Co-operation and Development",
+            "Bank of Japan Monetary Policy Meeting",
+            "AT&T Inc.",
+            "Windows 11 Pro for Workstations",
+        ] {
+            assert_eq!(
+                classify_selected_text(name),
+                DictionaryEntryType::Term,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_keeps_english_sentences_as_phrases() {
+        for sentence in [
+            "The central bank raised interest rates again this week",
+            "The central bank raised rates",
+            // 機能語だけの並びは固有名とみなさない。
+            "of the and for",
+            // 固有名の形でも上限（60字）を超えたら固有名とみなさない。
+            "Very Long Title Case Words That Keep Going Beyond Sixty Characters Total",
+        ] {
+            assert_eq!(
+                classify_selected_text(sentence),
+                DictionaryEntryType::Phrase,
+                "{sentence}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_ignores_digit_group_separators() {
+        // 数字に挟まれた「，」「、」は桁区切りとして数えない。
+        assert_eq!(
+            classify_selected_text("１，０００億円"),
+            DictionaryEntryType::Term
+        );
+        assert_eq!(
+            classify_selected_text("1，000億円"),
+            DictionaryEntryType::Term
+        );
+        // 数字に挟まれていない読点は従来どおりフレーズの手がかり。
+        assert_eq!(
+            classify_selected_text("1000億円、増加"),
+            DictionaryEntryType::Phrase
+        );
+    }
+
+    #[test]
+    fn classify_known_limitation_name_with_period() {
+        // 既知の限界: 名前に「。」を含む語はフレーズになる（プロンプトが変わるだけで上限・保存は同じ）。
+        assert_eq!(
+            classify_selected_text("モーニング娘。"),
+            DictionaryEntryType::Phrase
+        );
+    }
+
+    #[test]
+    fn classify_is_deterministic() {
+        let text = "円安が進み、輸入品の値段が上がった";
+        assert_eq!(classify_selected_text(text), classify_selected_text(text));
+    }
+
+    #[test]
+    fn legacy_entry_without_entry_type_loads_as_term() {
+        // 種別を持たない旧データは「用語」として読む（辞書全体の読み込みを失敗させない）。
+        let mut json = persisted_entry_json();
+        json.as_object_mut().unwrap().remove("entryType");
+        let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.entry_type, DictionaryEntryType::Term);
+        assert_eq!(
+            entry.to_list_item_dto().entry_type,
+            DictionaryEntryType::Term
+        );
+    }
+
+    #[test]
+    fn phrase_entry_type_round_trips_through_storage_and_dto() {
+        let mut json = persisted_entry_json();
+        json["entryType"] = serde_json::json!("phrase");
+        let entry: PersistedDictionaryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        let value = serde_json::to_value(entry.to_list_item_dto()).unwrap();
+        assert_eq!(value["type"], "phrase");
+        let stored = serde_json::to_value(&entry).unwrap();
+        assert_eq!(stored["entryType"], "phrase");
+    }
+
+    #[test]
+    fn save_params_without_type_default_to_term() {
+        // 種別を送らない旧画面からの保存も受け付け、用語として保存する。
+        let params: SaveDictionaryEntryParams = serde_json::from_value(serde_json::json!({
+            "entry": {
+                "entryId": "entry-1",
+                "keyText": "生成AI",
+                "shortExplanation": "短い説明",
+                "detailExplanation": "詳しい説明",
+                "isStarred": false
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            params.validated_entry().unwrap().entry_type,
+            DictionaryEntryType::Term
+        );
     }
 }

@@ -61,6 +61,11 @@ pub const YUUKO_COMMENT_PROMPT_ID: &str = "yuuko_comment_v1";
 /// 単一文字列出力の既存契約に、用語解説だけの構造化出力（JSON: short/detail）契約を1つ追加する。
 pub const TERM_EXPLANATION_PROMPT_ID: &str = "term_explanation_v1";
 
+/// フレーズ（約200字までの文章）の説明をAIへ依頼するときの prompt_id（v1・判断台帳 D21）。
+/// 用語解説と同じ出力契約（JSON: short/detail・`AiTermExplanation`）を使い、検証・無害化・保存の経路も共通にする。
+/// 違うのはプロンプト（語の定義ではなく、選んだ部分をかみ砕いて説明させる）だけ。
+pub const PHRASE_EXPLANATION_PROMPT_ID: &str = "phrase_explanation_v1";
+
 /// 用語解説AI出力（`TERM_EXPLANATION_PROMPT_ID`）の構造化契約（v1）。
 /// AI の単一文字列出力を、この JSON として **厳格に** 解析して short/detail を得る。
 /// フィールドは `DictionaryEntryDto` の shortExplanation / detailExplanation に対応する。

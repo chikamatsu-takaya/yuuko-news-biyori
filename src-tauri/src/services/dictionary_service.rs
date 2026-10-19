@@ -3,22 +3,30 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::domain::dictionary::{
-    normalize_text, DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryListItemDto,
-    DictionaryEntryType, ExplainSelectedTermParams, ListDictionaryEntriesParams,
-    SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
+    classify_selected_text, normalize_text, DeleteDictionaryEntryParams, DictionaryEntryDto,
+    DictionaryEntryListItemDto, DictionaryEntryType, ExplainSelectedTermParams,
+    ListDictionaryEntriesParams, SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams,
+    UpdateDictionaryMemoParams,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
 use crate::domain::summary::{
-    AiRequest, AiResponse, AiTermExplanation, TERM_EXPLANATION_PROMPT_ID,
+    AiRequest, AiResponse, AiTermExplanation, PHRASE_EXPLANATION_PROMPT_ID,
+    TERM_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
-use crate::services::ai_provider_service::AiProviderService;
+use crate::services::ai_provider_service::{
+    phrase_explanation_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
+};
+use crate::util::speech_cleanup::{
+    casualize_polite_endings, clean_yuuko_speech, strip_prompt_echo_sentences,
+    strip_repeated_sentences,
+};
 use crate::util::text_safety::neutralize_html_and_control;
 
-/// DictionaryService が必要とする最小のAI呼び出し境界（辞書未命中時の用語解説生成のみ）。
+/// DictionaryService が必要とする最小のAI呼び出し境界（辞書未命中時の用語解説・フレーズの説明の生成のみ）。
 /// 本番は AiProviderService を注入し、テストは呼び出し回数を数えるダブルを注入する。
 /// Gemini直呼び・APIキー直読み・Provider選択の重複実装はしない（既存 AiProviderService に委譲）。
 pub(crate) trait TermExplanationAi: std::fmt::Debug + Send + Sync {
@@ -79,6 +87,8 @@ impl DictionaryService {
     /// - 保存済み辞書の命中時は、その項目の最終参照日時と参照回数を更新する（新規項目は作らない）。
     ///   更新に失敗しても解説の表示は続け、失敗は調査用ログに残すだけにする（要件 §9.3 / D20）。
     /// - AI結果は既存 DictionaryEntryDto へ変換して返すだけで、辞書へは保存・更新しない。
+    /// - 選択が「用語」か「フレーズ（文章）」かは `classify_selected_text`（決定的な規則・D21）で決め、
+    ///   プロンプトと返す種別（`type`）だけを切り替える。入力上限・記事文脈の上限・出力の検証は共通。
     pub fn explain_selected_term(
         &self,
         params: ExplainSelectedTermParams,
@@ -115,6 +125,7 @@ impl DictionaryService {
                 &article_id,
                 &title,
                 &selected_text,
+                classify_selected_text(&selected_text),
             )),
         }
     }
@@ -142,8 +153,9 @@ impl DictionaryService {
         }
     }
 
-    /// 実ニュース記事の辞書未命中時に、既存 AiProviderService 経路で用語解説を生成する。
-    /// Provider 選択・解説レベルは既存設定から取得し、AI へは選択語・タイトル・上限内の抜粋のみを渡す。
+    /// 実ニュース記事の辞書未命中時に、既存 AiProviderService 経路で用語解説（フレーズなら説明）を生成する。
+    /// Provider 選択・解説レベルは既存設定から取得し、AI へは選択語・タイトル・上限内の抜粋のみを渡す
+    /// （フレーズでも記事文脈の上限は用語と同じ）。
     /// 単一文字列出力を JSON(short/detail) として厳格に解析し、既存 DTO へ変換する（保存はしない）。
     fn explain_with_ai(
         &self,
@@ -158,8 +170,13 @@ impl DictionaryService {
 
         // 外部データ（タイトル＋抜粋）は context として渡し、プロンプト側で指示部と分離する。
         // 抜粋は既存の抜粋上限(MAX_EXCERPT_CHARS)で UTF-8 安全に切り詰める（記事本文全文は渡さない）。
+        let entry_type = classify_selected_text(selected_text);
+        let prompt_id = match entry_type {
+            DictionaryEntryType::Phrase => PHRASE_EXPLANATION_PROMPT_ID,
+            _ => TERM_EXPLANATION_PROMPT_ID,
+        };
         let request = AiRequest {
-            prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
+            prompt_id: prompt_id.to_string(),
             input_text: selected_text.to_string(),
             context: Some(build_ai_context(article_title, excerpt)),
         };
@@ -167,11 +184,18 @@ impl DictionaryService {
         let response = self
             .ai
             .generate_term_explanation(request, provider, explanation_level)?;
-        let parsed = parse_ai_term_explanation(&response.text)?;
+        // フレーズも用語と同じ契約（JSON short/detail）・同じ検証と無害化を通す。
+        let mut parsed = parse_ai_term_explanation(&response.text)?;
+        // フレーズの説明はゆうこが話す数文の説明なので、実AI（Mock 以外）の出力には再説明・一言と同じ
+        // 後処理（ト書き・挨拶の除去、です・ます調の言い換え、繰り返しの除去）をかける。用語の経路は変えない。
+        if entry_type == DictionaryEntryType::Phrase && response.provider != PROVIDER_MOCK {
+            parsed = clean_phrase_explanation(parsed)?;
+        }
         Ok(build_ai_entry(
             article_id,
             article_title,
             selected_text,
+            entry_type,
             &parsed,
         ))
     }
@@ -339,18 +363,94 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
     })
 }
 
+/// Mock の応答（AiProviderService が返す provider 名）。Mock の定型文には後処理をかけない。
+const PROVIDER_MOCK: &str = "mock";
+
+/// フレーズの説明プロンプトの見出し名を写した書き出し（`clean_phrase_explanation` で取り除く）。
+const PHRASE_PROMPT_LABEL_ECHOES: [&str; 4] = [
+    "参考文脈によると、",
+    "参考文脈によれば、",
+    "選んだ文章によると、",
+    "選んだ文章は、",
+];
+
+/// 文の書き出し（出力の先頭・改行の直後・「。」「！」「？」の直後）にある見出し名の写し
+/// （`PHRASE_PROMPT_LABEL_ECHOES`）だけを取り除く。文の途中の同じ言葉（引用・説明の一部）は残す。
+fn strip_label_echoes_at_sentence_starts(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut at_start = true;
+    while !rest.is_empty() {
+        if at_start {
+            if let Some(echo) = PHRASE_PROMPT_LABEL_ECHOES
+                .iter()
+                .find(|echo| rest.starts_with(**echo))
+            {
+                rest = &rest[echo.len()..];
+                continue;
+            }
+        }
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+        // 区切りの後ろの空白は書き出しの扱いを続ける（「。 参考文脈によると、」も消す）。
+        at_start =
+            matches!(c, '\n' | '。' | '！' | '？' | '!' | '?') || (at_start && c.is_whitespace());
+    }
+    out
+}
+
+/// フレーズの説明（実AIの出力・解析と無害化の後）を、ゆうこの再説明・一言と同じ後処理で整える（D21）。
+/// 文字を消す・語尾を言い換えるだけで、HTML・制御文字は作らない（無害化と文字数の検証はこの前に済んでいる）。
+/// 除去で空になったら、用語解説の空応答と同じ安全なエラーにする。
+fn clean_phrase_explanation(parsed: AiTermExplanation) -> Result<AiTermExplanation, AppError> {
+    let phrase_fixed_texts = phrase_explanation_fixed_prompt_texts();
+    let fixed_texts = yuuko_speech_fixed_prompt_texts()
+        .into_iter()
+        .chain(phrase_fixed_texts.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let clean = |text: &str| {
+        // 小さいローカルLLMはプロンプトの見出し名を「参考文脈によると、」と書き出しに写すことがある
+        // （2026-10-19 の実モデル評価）。言葉の写しだけを消し、続く説明は残す。
+        let unechoed = strip_label_echoes_at_sentence_starts(text);
+        let cleaned = clean_yuuko_speech(&unechoed);
+        // 固定指示の写しの文は、再説明・一言の固定文に加えてフレーズの説明プロンプトの固定部分とも照合する。
+        let (cleaned, prompt_echoes) = strip_prompt_echo_sentences(&cleaned, &fixed_texts);
+        let (cleaned, casualized) = casualize_polite_endings(&cleaned);
+        let (cleaned, repeated) = strip_repeated_sentences(&cleaned);
+        if cleaned != text || prompt_echoes + casualized + repeated > 0 {
+            // 内容は出さず固定ラベルだけ残す（選択文・応答本文をログへ出さない）。
+            log::debug!("AI phrase explanation was cleaned up");
+        }
+        cleaned.trim().to_string()
+    };
+    let short = clean(&parsed.short);
+    let detail = clean(&parsed.detail);
+    if short.is_empty() || detail.is_empty() {
+        log::warn!("AI phrase explanation was empty after cleanup");
+        return Err(AppError::Parse(
+            "ai term explanation was incomplete".to_string(),
+        ));
+    }
+    Ok(AiTermExplanation { short, detail })
+}
+
 /// AI 解析結果を既存 DictionaryEntryDto へ変換する（保存はしない・そのまま save_dictionary_entry へ渡せる）。
 /// entryId は既存の固定/汎用文と同じ生成方法を再利用。keyText はユーザー選択表記を維持。isStarred は未保存扱い(false)。
+/// entryType は選択の判定結果（用語 / フレーズ）で、そのまま辞書へ保存される種別になる。
 fn build_ai_entry(
     article_id: &str,
     article_title: &str,
     selected_text: &str,
+    entry_type: DictionaryEntryType,
     parsed: &AiTermExplanation,
 ) -> DictionaryEntryDto {
     DictionaryEntryDto {
         entry_id: build_entry_id(article_id, selected_text),
         key_text: selected_text.to_string(),
-        entry_type: DictionaryEntryType::Term,
+        entry_type,
         short_explanation: parsed.short.trim().to_string(),
         detail_explanation: parsed.detail.trim().to_string(),
         related_article_id: Some(article_id.to_string()),
@@ -374,10 +474,12 @@ fn sample_article_title(article_id: &str) -> Option<&'static str> {
 }
 
 /// 固定サンプル記事の解説に一致すればそれを、無ければ汎用文を返す（純粋関数）。
+/// 汎用文は選択の種別（用語 / フレーズ）で文面と種別を変える。
 fn build_dictionary_miss_entry(
     article_id: &str,
     article_title: &str,
     selected_text: &str,
+    entry_type: DictionaryEntryType,
 ) -> DictionaryEntryDto {
     let normalized_text = normalize_text(selected_text);
     sample_dictionary_entries()
@@ -386,7 +488,12 @@ fn build_dictionary_miss_entry(
             entry.article_id == article_id && normalize_text(entry.key_text) == normalized_text
         })
         .map(|entry| entry.to_dto())
-        .unwrap_or_else(|| build_generic_entry(article_id, article_title, selected_text))
+        .unwrap_or_else(|| match entry_type {
+            DictionaryEntryType::Phrase => {
+                build_generic_phrase_entry(article_id, article_title, selected_text)
+            }
+            _ => build_generic_entry(article_id, article_title, selected_text),
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +543,28 @@ fn build_generic_entry(
         ),
         detail_explanation: format!(
             "「{selected_text}」は、記事「{article_title}」の文脈で大事な言葉だよ。いまは簡単な説明だけだけど、記事を読むときのヒントにしてね。"
+        ),
+        related_article_id: Some(article_id.to_string()),
+        related_article_title: Some(article_title.to_string()),
+        is_starred: false,
+        saved_in_dictionary: false,
+    }
+}
+
+/// フレーズ用の汎用文（固定サンプル記事の未命中・AI 不使用）。選んだ文章（最大200字）は見出しに出るため、
+/// 説明の文面には埋め込まない。
+fn build_generic_phrase_entry(
+    article_id: &str,
+    article_title: &str,
+    selected_text: &str,
+) -> DictionaryEntryDto {
+    DictionaryEntryDto {
+        entry_id: build_entry_id(article_id, selected_text),
+        key_text: selected_text.to_string(),
+        entry_type: DictionaryEntryType::Phrase,
+        short_explanation: "この部分は、記事の流れをつかむための大事なところだよ。".to_string(),
+        detail_explanation: format!(
+            "記事「{article_title}」の中で、起きたことや理由を伝えている部分だよ。いまは簡単な説明だけだけど、前後の文とあわせて読んでみてね。"
         ),
         related_article_id: Some(article_id.to_string()),
         related_article_title: Some(article_title.to_string()),
@@ -927,6 +1056,135 @@ mod tests {
         );
     }
 
+    // --- フレーズ（約200字までの文章）の説明と保存（D21）---
+
+    const PHRASE: &str = "円安が進み、輸入品の値段が上がったため、家計の負担が増えている";
+
+    #[test]
+    fn explain_phrase_uses_phrase_prompt_and_returns_phrase_type() {
+        let context = build_service();
+        let entry = explain(&context, REAL_ARTICLE_ID, PHRASE);
+
+        let request = context.ai.last_request().expect("AI へ渡ったリクエスト");
+        assert_eq!(request.prompt_id, super::PHRASE_EXPLANATION_PROMPT_ID);
+        assert_eq!(request.input_text, PHRASE);
+        // 記事文脈は用語と同じ組み立て・同じ上限（タイトル＋抜粋のみ）。
+        assert_eq!(
+            request.context.as_deref(),
+            Some(super::build_ai_context(REAL_ARTICLE_TITLE, Some(REAL_ARTICLE_EXCERPT)).as_str())
+        );
+        assert_eq!(context.ai.call_count(), 1);
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        assert_eq!(entry.key_text, PHRASE);
+        assert!(!entry.saved_in_dictionary);
+    }
+
+    #[test]
+    fn explain_short_term_keeps_term_prompt_and_type() {
+        let context = build_service();
+        let entry = explain(&context, REAL_ARTICLE_ID, "生成AI");
+        let request = context.ai.last_request().expect("AI へ渡ったリクエスト");
+        assert_eq!(request.prompt_id, super::TERM_EXPLANATION_PROMPT_ID);
+        assert_eq!(entry.entry_type, DictionaryEntryType::Term);
+    }
+
+    #[test]
+    fn explain_phrase_up_to_200_chars_is_accepted_and_201_is_rejected() {
+        let context = build_service();
+        // 200字ちょうどのフレーズは受け付ける（全体の上限 #213 は変えない）。
+        let phrase_200 = format!("{}。", "あ".repeat(199));
+        let entry = explain(&context, REAL_ARTICLE_ID, &phrase_200);
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        assert_eq!(context.ai.call_count(), 1);
+
+        // 201字は AI を呼ばずに検証エラー（入力本文はエラーへ含めない）。
+        let phrase_201 = format!("{}。", "あ".repeat(200));
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: phrase_201.clone(),
+            })
+            .unwrap_err();
+        let command_error = CommandError::from(error);
+        assert_eq!(command_error.code, "VALIDATION_ERROR");
+        assert!(!command_error.message.contains(&phrase_201));
+        assert_eq!(context.ai.call_count(), 1);
+    }
+
+    #[test]
+    fn explain_phrase_output_is_neutralized_like_terms() {
+        let context = build_service();
+        context
+            .ai
+            .set_response_text(r#"{"short":"<b>要点</b>だよ。","detail":"かみ砕いた説明だよ。"}"#);
+        let entry = explain(&context, REAL_ARTICLE_ID, PHRASE);
+        // 用語と同じ無害化（`<` は全角へ）を通る。
+        assert!(!entry.short_explanation.contains('<'));
+        // 契約外の JSON は用語と同じく解析失敗（安全なエラー）。
+        context.ai.set_response_text("要点だよ。");
+        let error = context
+            .service
+            .explain_selected_term(ExplainSelectedTermParams {
+                article_id: REAL_ARTICLE_ID.to_string(),
+                selected_text: format!("{PHRASE}。"),
+            })
+            .unwrap_err();
+        assert_eq!(CommandError::from(error).code, "PARSE_ERROR");
+    }
+
+    #[test]
+    fn phrase_can_be_saved_and_filtered_separately_from_terms() {
+        let context = build_service();
+        for text in [PHRASE, "生成AI"] {
+            let entry = explain(&context, REAL_ARTICLE_ID, text);
+            context
+                .service
+                .save_dictionary_entry(SaveDictionaryEntryParams { entry })
+                .unwrap();
+        }
+        let list = |entry_type: Option<&str>| {
+            context
+                .service
+                .list_dictionary_entries(ListDictionaryEntriesParams {
+                    keyword: None,
+                    entry_type: entry_type.map(str::to_string),
+                    starred_only: None,
+                })
+                .unwrap()
+                .into_iter()
+                .map(|item| (item.key_text, item.entry_type))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            list(Some("phrase")),
+            vec![(PHRASE.to_string(), DictionaryEntryType::Phrase)]
+        );
+        assert_eq!(
+            list(Some("term")),
+            vec![("生成AI".to_string(), DictionaryEntryType::Term)]
+        );
+        assert_eq!(list(None).len(), 2);
+
+        // 保存済みのフレーズは再選択で再利用され、AI を呼ばない（種別もフレーズのまま）。
+        let calls = context.ai.call_count();
+        let reused = explain(&context, OTHER_ARTICLE_ID, PHRASE);
+        assert!(reused.saved_in_dictionary);
+        assert_eq!(reused.entry_type, DictionaryEntryType::Phrase);
+        assert_eq!(context.ai.call_count(), calls);
+    }
+
+    #[test]
+    fn fixed_sample_article_phrase_returns_generic_phrase_without_ai() {
+        let context = build_service();
+        let entry = explain(&context, "article-001", PHRASE);
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        assert_eq!(context.ai.call_count(), 0);
+        // 選んだ文章（最大200字）は説明の文面へ繰り返さない。
+        assert!(!entry.short_explanation.contains(PHRASE));
+        assert!(!entry.detail_explanation.contains(PHRASE));
+    }
+
     #[test]
     fn explain_rejects_unknown_article_as_safe_not_found() {
         let context = build_service();
@@ -1384,6 +1642,7 @@ mod tests {
             "article-001",
             "生成AIスタートアップの資金調達が再加速",
             "生成AI",
+            DictionaryEntryType::Term,
         );
 
         assert_eq!(entry.key_text, "生成AI");
@@ -1427,6 +1686,7 @@ mod tests {
             "article-002",
             "国内SaaS企業、業務改善支援の新施策を発表",
             "saas",
+            DictionaryEntryType::Term,
         );
 
         assert_eq!(entry.key_text, "SaaS");
@@ -1439,6 +1699,7 @@ mod tests {
             "rss-20260728-tech-42",
             "実ニュース記事のタイトル",
             "新しい概念",
+            DictionaryEntryType::Term,
         );
 
         assert_eq!(entry.key_text, "新しい概念");
@@ -1449,6 +1710,79 @@ mod tests {
         assert!(entry
             .detail_explanation
             .contains("実ニュース記事のタイトル"));
+    }
+
+    // --- フレーズの説明の後処理（clean_phrase_explanation の直接テスト・D21）---
+
+    #[test]
+    fn phrase_cleanup_casualizes_polite_endings_and_removes_stage_directions() {
+        let cleaned = super::clean_phrase_explanation(AiTermExplanation {
+            short: "（にっこり）物価が上がったという話だよ。".to_string(),
+            detail: "円安で輸入品が高くなった話です。家計の負担が増えているよ。".to_string(),
+        })
+        .unwrap();
+        assert_eq!(cleaned.short, "物価が上がったという話だよ。");
+        assert!(!cleaned.detail.contains("です"), "{}", cleaned.detail);
+        assert!(cleaned.detail.contains("家計の負担が増えているよ。"));
+    }
+
+    #[test]
+    fn phrase_cleanup_removes_prompt_label_echo() {
+        let cleaned = super::clean_phrase_explanation(AiTermExplanation {
+            short: "魚の中では幼虫のままだよ。".to_string(),
+            detail: "参考文脈によると、魚の中では成虫になれないよ。".to_string(),
+        })
+        .unwrap();
+        assert_eq!(cleaned.detail, "魚の中では成虫になれないよ。");
+    }
+
+    #[test]
+    fn phrase_cleanup_keeps_label_words_in_the_middle_of_a_sentence() {
+        // 文の書き出しだけを消し、文の途中の同じ言葉は残す。改行・句点の直後は書き出しとして消す。
+        let cleaned = super::clean_phrase_explanation(AiTermExplanation {
+            short: "記事では、参考文脈によると、という言い方が出てくるよ。".to_string(),
+            detail: "魚の話だよ。参考文脈によると、成虫になれないよ。\n参考文脈によれば、幼虫のままだよ。"
+                .to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            cleaned.short,
+            "記事では、参考文脈によると、という言い方が出てくるよ。"
+        );
+        assert_eq!(
+            cleaned.detail,
+            "魚の話だよ。成虫になれないよ。\n幼虫のままだよ。"
+        );
+    }
+
+    #[test]
+    fn phrase_cleanup_removes_copied_phrase_prompt_sentences() {
+        // フレーズの説明プロンプトの固定文（念押し）を写した文は取り除く。
+        let cleaned = super::clean_phrase_explanation(AiTermExplanation {
+            short: "物価が上がった話だよ。".to_string(),
+            detail: "記事全体の要約は書かず、書かれていないことは作らないでください。家計の負担が増えているよ。"
+                .to_string(),
+        })
+        .unwrap();
+        assert_eq!(cleaned.detail, "家計の負担が増えているよ。");
+    }
+
+    #[test]
+    fn phrase_cleanup_rejects_output_that_becomes_empty() {
+        let error = super::clean_phrase_explanation(AiTermExplanation {
+            short: "（にっこり）".to_string(),
+            detail: "説明だよ。".to_string(),
+        })
+        .unwrap_err();
+        assert_eq!(CommandError::from(error).code, "PARSE_ERROR");
+    }
+
+    #[test]
+    fn phrase_mock_output_is_returned_without_cleanup() {
+        // Mock（FakeAi の provider は "mock"）の定型文には後処理をかけない（決定的な結果のまま）。
+        let context = build_service();
+        let entry = explain(&context, REAL_ARTICLE_ID, PHRASE);
+        assert_eq!(entry.short_explanation, "AIの短い解説です。");
     }
 
     // --- 用語解説AI応答の厳格解析・上限検証（parse_ai_term_explanation の直接テスト）---
