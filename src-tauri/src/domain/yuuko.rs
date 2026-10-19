@@ -404,6 +404,35 @@ impl PersistedYuukoState {
         )
     }
 
+    /// 消えた記事（旧サンプル記事・D139）への参照を外す。変更があれば true。
+    /// 紹介中の吹き出し・プレビューがその記事なら、開けない記事を出し続けないよう待機へ戻す
+    /// （利用者が閉じたわけではないのでクールタイムは付けない）。紹介済みIDの記録からも外す。
+    pub fn forget_articles(&mut self, article_ids: &[String]) -> bool {
+        let refers_removed = |article_id: &str| article_ids.iter().any(|id| id == article_id);
+        let mut changed = false;
+        let shows_removed = self
+            .current_article_id
+            .as_deref()
+            .is_some_and(refers_removed)
+            || self
+                .preview_article
+                .as_ref()
+                .is_some_and(|article| refers_removed(&article.article_id));
+        if shows_removed {
+            if self.has_active_notification() {
+                self.clear_active_notification();
+            } else {
+                self.preview_article = None;
+                self.current_article_id = None;
+            }
+            changed = true;
+        }
+        let before = self.introduced_article_ids.len();
+        self.introduced_article_ids
+            .retain(|article_id| !refers_removed(article_id));
+        changed || self.introduced_article_ids.len() != before
+    }
+
     /// アクティブな通知表示をクリアして待機へ戻す（reward は保持）。
     fn clear_active_notification(&mut self) {
         self.balloon_text = None;
@@ -1754,5 +1783,37 @@ mod tests {
             state.balloon_text.as_deref(),
             Some("ゆう、今日もニュースを見つけたら声をかけるね。")
         );
+    }
+
+    #[test]
+    fn forget_articles_clears_notification_for_removed_article_without_cooldown() {
+        let mut state = state_with_notification();
+        state.preview_article = Some(article("article-001", ArticleReadState::Unread, false, 0.9));
+        state.introduced_article_ids = vec!["article-001".to_string(), "news_aa".to_string()];
+        let removed = vec!["article-001".to_string()];
+
+        assert!(state.forget_articles(&removed));
+
+        assert_eq!(state.state, YuukoResidentState::Waiting);
+        assert!(state.balloon_text.is_none());
+        assert!(state.preview_article.is_none());
+        assert!(state.current_article_id.is_none());
+        assert!(state.cooldown_until.is_none());
+        assert!(state.reward_notification.is_some());
+        assert_eq!(state.introduced_article_ids, vec!["news_aa".to_string()]);
+        // 2回目は変更なし（冪等）。
+        assert!(!state.forget_articles(&removed));
+    }
+
+    #[test]
+    fn forget_articles_keeps_notification_for_other_articles() {
+        let mut state = state_with_notification();
+        state.current_article_id = Some("news_aa".to_string());
+        let before = state.clone();
+
+        assert!(!state.forget_articles(&["article-001".to_string()]));
+        assert_eq!(state.state, before.state);
+        assert_eq!(state.current_article_id, before.current_article_id);
+        assert_eq!(state.balloon_text, before.balloon_text);
     }
 }

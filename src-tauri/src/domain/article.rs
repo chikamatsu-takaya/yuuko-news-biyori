@@ -27,6 +27,41 @@ pub fn is_archive_candidate(
     }
 }
 
+/// 旧版が初回起動時に書き込んでいた架空のサンプル記事（D139 で書き込みを廃止）。
+/// 実ニュースの article_id は `news_<16桁hex>`（URL由来）なので、固定IDの `article-00N` とは重ならない。
+/// 起動時の掃除で消すのは、ID・元記事URL・タイトルの3つがすべて一致する記事ファイルだけ
+/// （推測やあいまい一致では消さない）。
+pub struct LegacySeedArticle {
+    pub article_id: &'static str,
+    pub original_url: &'static str,
+    pub title: &'static str,
+}
+
+pub const LEGACY_SEED_ARTICLES: [LegacySeedArticle; 3] = [
+    LegacySeedArticle {
+        article_id: "article-001",
+        original_url: "https://example.com/articles/article-001",
+        title: "生成AIスタートアップの資金調達が活発化",
+    },
+    LegacySeedArticle {
+        article_id: "article-002",
+        original_url: "https://example.com/articles/article-002",
+        title: "SaaS企業が中堅市場向け新プランを発表",
+    },
+    LegacySeedArticle {
+        article_id: "article-003",
+        original_url: "https://example.com/articles/article-003",
+        title: "新型コンピュータ実験で省電力な推論手法を確認",
+    },
+];
+
+/// 旧サンプル記事の記事ファイルか（ID・URL・タイトルの完全一致。純粋関数）。
+pub fn is_legacy_seed_article(article_id: &str, original_url: &str, title: &str) -> bool {
+    LEGACY_SEED_ARTICLES.iter().any(|seed| {
+        seed.article_id == article_id && seed.original_url == original_url && seed.title == title
+    })
+}
+
 /// 同一出典・同一タイトルの重複判定で比べる既存記事の期間（日数）。D58（2026-10-07）。
 /// 毎日同じタイトルで配信される記事（定例コラム等）を取りこぼさないよう、タイトル側の判定は
 /// 直近この日数以内に取得（取得日時がなければ公開日時）された既存記事とだけ比べる。

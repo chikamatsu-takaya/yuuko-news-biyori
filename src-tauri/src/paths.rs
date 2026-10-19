@@ -8,6 +8,8 @@ pub const NEWS_SOURCES_RELATIVE_PATH: &str = "config/news_sources.json";
 pub const YUUKO_STATE_RELATIVE_PATH: &str = "state/yuuko_notification_state.json";
 pub const NEWS_REFRESH_STATE_RELATIVE_PATH: &str = "state/news_refresh_state.json";
 pub const ARCHIVE_MAINTENANCE_STATE_RELATIVE_PATH: &str = "state/archive_maintenance_state.json";
+/// 旧版のサンプル記事の起動時掃除（D139）が済んだ印。移行ZIPには含めない（`state/` は対象外）。
+pub const LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH: &str = "state/legacy_seed_cleanup_state.json";
 pub const DICTIONARY_RELATIVE_PATH: &str = "dictionary/entries.json";
 pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
@@ -35,6 +37,7 @@ pub struct AppPaths {
     pub friendship_path: PathBuf,
     pub friendship_events_path: PathBuf,
     pub gacha_state_path: PathBuf,
+    pub legacy_seed_cleanup_state_path: PathBuf,
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
     pub news_sources_path: PathBuf,
@@ -53,6 +56,8 @@ impl AppPaths {
         let friendship_path = app_data_dir.join(FRIENDSHIP_RELATIVE_PATH);
         let friendship_events_path = app_data_dir.join(FRIENDSHIP_EVENTS_RELATIVE_PATH);
         let gacha_state_path = app_data_dir.join(GACHA_STATE_RELATIVE_PATH);
+        let legacy_seed_cleanup_state_path =
+            app_data_dir.join(LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH);
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
         let news_sources_path = app_data_dir.join(NEWS_SOURCES_RELATIVE_PATH);
@@ -68,6 +73,7 @@ impl AppPaths {
             friendship_path,
             friendship_events_path,
             gacha_state_path,
+            legacy_seed_cleanup_state_path,
             network_allowlist_path,
             news_refresh_state_path,
             news_sources_path,
