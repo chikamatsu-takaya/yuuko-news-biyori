@@ -107,9 +107,9 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-001-generated-ai",
     term: "生成AI",
     type: "term",
-    shortDescription: "文章や画像などを自動生成する AI 全般を指す言葉です。",
+    shortDescription: "文章や画像などを自動生成する AI 全般のことだよ。",
     fullDescription:
-      "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
+      "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群だよ。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっているよ。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
     createdAtText: "2025/05/20",
@@ -124,9 +124,9 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-001-fundraising",
     term: "資金調達",
     type: "phrase",
-    shortDescription: "企業が事業拡大のために投資や融資で資金を集めることです。",
+    shortDescription: "企業が事業拡大のために投資や融資で資金を集めることだよ。",
     fullDescription:
-      "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
+      "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
     createdAtText: "2025/05/20",
@@ -140,9 +140,9 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-002-saas",
     term: "SaaS",
     type: "term",
-    shortDescription: "インターネット経由で利用するソフトウェア提供形態です。",
+    shortDescription: "インターネット経由で利用するソフトウェア提供形態のことだよ。",
     fullDescription:
-      "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
+      "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態だよ。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われているよ。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
     createdAtText: "2025/05/18",
@@ -156,9 +156,9 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-002-business-improvement",
     term: "業務改善",
     type: "key_point",
-    shortDescription: "仕事の流れを見直して効率や成果を高めることです。",
+    shortDescription: "仕事の流れを見直して効率や成果を高めることだよ。",
     fullDescription:
-      "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
+      "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
     createdAtText: "2025/05/18",
@@ -172,9 +172,9 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-003-quantum",
     term: "量子コンピュータ",
     type: "term",
-    shortDescription: "量子力学の性質を利用して計算する新しい計算機です。",
+    shortDescription: "量子力学の性質を利用して計算する新しい計算機のことだよ。",
     fullDescription:
-      "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
+      "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術だよ。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっているよ。",
     lastViewedText: "2025/05/16",
     lastViewedRaw: "1747353600",
     createdAtText: "2025/05/16",
@@ -427,7 +427,8 @@ function DictionaryEntryCard({
         <EntryIcon type={entry.iconType} />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">
+            {/* フレーズ（約200字までの文章・D21）は一覧で2行に省略する（全文は詳細で表示）。 */}
+            <span className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground">
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />

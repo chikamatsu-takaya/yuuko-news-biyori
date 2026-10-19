@@ -65,6 +65,7 @@ import {
   resolveAnchorRect,
   clampExplainButtonPosition,
   isSelectedTextTooLong,
+  SELECTION_TOO_LONG_MESSAGE,
   readCommandErrorCode,
   termExplainFailureMessage,
 } from "@/lib/explain-selection.mjs";
@@ -136,19 +137,19 @@ const fallbackSupportTerms: SupportTerm[] = [
     id: "article-001-term-0",
     term: "生成AI",
     explanation:
-      "文章や画像などを自動生成するAI全般を指す言葉です。個人利用だけでなく、業務支援への活用も広がっています。",
+      "文章や画像などを自動生成するAI全般のことだよ。個人利用だけでなく、業務支援への活用も広がっているんだ。",
   },
   {
     id: "article-001-term-1",
     term: "資金調達",
     explanation:
-      "企業が事業拡大のために投資家や金融機関から資金を集めることです。",
+      "企業が事業拡大のために投資家や金融機関から資金を集めることだよ。",
   },
   {
     id: "article-001-term-2",
     term: "業務自動化",
     explanation:
-      "定型業務や繰り返し作業を仕組み化し、手間を減らして効率化する考え方です。",
+      "定型業務や繰り返し作業を仕組み化し、手間を減らして効率化する考え方だよ。",
   },
 ];
 
@@ -165,7 +166,7 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "生成AIを活用するスタートアップへの投資が再び活発化し、業務支援や自動化領域の案件に注目が集まっています。",
     yuukoExplanation:
-      "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
+      "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると分かりやすいよ。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっているんだ。",
     highlightedTerms: fallbackSupportTerms,
     keyPoints: [
       "投資対象が研究寄りから業務課題の解決寄りへ移っている",
@@ -173,10 +174,10 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "既存業務フローへ自然に組み込める点が差別化要因になっている",
     ],
     focusPoints: [
-      "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
+      "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると分かりやすいテーマだよ。",
     ],
     yuukoThoughts:
-      "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
+      "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうだね。",
   },
   {
     id: "article-002",
@@ -190,25 +191,25 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "国内SaaS企業が中堅企業向けの業務改善プログラムを発表し、導入支援と教育体制をセットで提供する方針を示しました。",
     yuukoExplanation:
-      "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントです。現場で定着するかどうかが成果を大きく左右します。",
+      "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントだよ。現場で定着するかどうかが成果を大きく左右するんだ。",
     highlightedTerms: [
       {
         id: "article-002-term-0",
         term: "SaaS",
         explanation:
-          "インターネット経由で利用するソフトウェア提供形態です。導入しやすさと運用しやすさが特徴です。",
+          "インターネット経由で利用するソフトウェア提供形態だよ。導入しやすさと運用しやすさが特徴なんだ。",
       },
       {
         id: "article-002-term-1",
         term: "導入支援",
         explanation:
-          "サービスを使い始める際の設定や教育、現場への定着を支える取り組みです。",
+          "サービスを使い始める際の設定や教育、現場への定着を支える取り組みのことだよ。",
       },
       {
         id: "article-002-term-2",
         term: "業務改善",
         explanation:
-          "仕事の流れを見直して、時間や手間を減らしながら成果を上げることです。",
+          "仕事の流れを見直して、時間や手間を減らしながら成果を上げることだよ。",
       },
     ],
     keyPoints: [
@@ -217,10 +218,10 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "単発導入ではなく継続改善を前提にしている",
     ],
     focusPoints: [
-      "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが重要です。",
+      "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが大事だよ。",
     ],
     yuukoThoughts:
-      "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうですね。",
+      "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうだね。",
   },
   {
     id: "article-003",
@@ -234,25 +235,25 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "量子コンピュータの安定運用に向けて、従来より少ない負荷で誤りを検知・補正できる新手法が報告されました。",
     yuukoExplanation:
-      "量子コンピュータは速さだけでなく、誤差に弱い点が課題です。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいです。",
+      "量子コンピュータは速さだけでなく、誤差に弱い点が課題なんだ。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいよ。",
     highlightedTerms: [
       {
         id: "article-003-term-0",
         term: "量子コンピュータ",
         explanation:
-          "量子力学の性質を利用して計算を行う新しい計算機の考え方です。",
+          "量子力学の性質を利用して計算を行う新しい計算機の考え方だよ。",
       },
       {
         id: "article-003-term-1",
         term: "誤り訂正",
         explanation:
-          "計算中の誤差を検知・補正して、正しい結果に近づけるための仕組みです。",
+          "計算中の誤差を検知・補正して、正しい結果に近づけるための仕組みだよ。",
       },
       {
         id: "article-003-term-2",
         term: "研究成果",
         explanation:
-          "研究や実験によって得られた、新しい知見や結果のことです。",
+          "研究や実験によって得られた、新しい知見や結果のことだよ。",
       },
     ],
     keyPoints: [
@@ -261,10 +262,10 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "研究成果は今後の実装方式に影響する可能性がある",
     ],
     focusPoints: [
-      "速度の話題に見えても、実際には安定して正しく動かす工夫が中心です。",
+      "速度の話題に見えても、実際には安定して正しく動かす工夫が中心だよ。",
     ],
     yuukoThoughts:
-      "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいですね。",
+      "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいね。",
   },
 ];
 
@@ -357,7 +358,7 @@ const buildFallbackDictionaryEntry = (
   entryId: `${currentArticle.id}-${term.id}`,
   keyText: term.term,
   type: "term",
-  shortExplanation: `「${term.term}」はこの記事を理解するためのキーワードです。`,
+  shortExplanation: `「${term.term}」はこの記事を理解するためのキーワードだよ。`,
   detailExplanation: term.explanation || defaultTermExplanation(term.term),
   relatedArticleId: currentArticle.id,
   relatedArticleTitle: currentArticle.title,
@@ -654,8 +655,13 @@ function TermPopup({
       onLostPointerCapture={endDrag}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div data-term-popup-no-drag="true">
-          <h4 className="cursor-text text-sm font-semibold text-foreground">
+        <div data-term-popup-no-drag="true" className="min-w-0">
+          {/* フレーズ（約200字までの文章・D21）でもポップアップが縦に伸びすぎないよう3行で省略し、
+              全文は title で確認できるようにする（用語は短いので省略されない）。 */}
+          <h4
+            className="line-clamp-3 cursor-text break-words text-sm font-semibold text-foreground"
+            title={term}
+          >
             {term}
           </h4>
           {dictionaryEntry ? (
@@ -901,13 +907,14 @@ function NotGeneratedText({ children }: { children: React.ReactNode }) {
 const EXPLAIN_SELECTABLE_ATTR = "data-explain-selectable";
 // 「解説」ボタンのおおよその表示サイズ（画面端での位置補正に使う）。
 const EXPLAIN_BUTTON_SIZE = { width: 60, height: 30 } as const;
-// 選択が長すぎるときにボタンの代わりに出す案内のおおよその表示サイズ。
-const EXPLAIN_TOO_LONG_HINT_SIZE = { width: 180, height: 30 } as const;
+// 選択が長すぎるときにボタンの代わりに出す案内のおおよその表示サイズ。最大幅（1行に収まる幅）を超える
+// 狭いウィンドウ（tauri.conf.json に最小幅の指定はない）では折り返すため、高さは2行分で見積もる。
+const EXPLAIN_TOO_LONG_HINT_SIZE = { width: 380, height: 48 } as const;
 
 type ExplainSelectionState = {
   // trim 済みの選択文字列。後続タスクで explain_selected_term へ渡す（全文はログへ出さない）。
   text: string;
-  // 上限（D21: 200文字）超過か。true なら「解説」ボタンを出さず短く選び直す案内だけを出す。
+  // 上限（D21: 200文字。用語・フレーズ共通）超過か。true なら「解説」ボタンを出さず選び直す案内だけを出す。
   tooLong: boolean;
   // ボタンの表示座標（position: fixed / viewport 座標）。
   left: number;
@@ -2168,13 +2175,14 @@ export default function NewsReaderScreen({
           onClick で選択文字列を確定し、既存の用語解説（TermPopup）へ接続する。 */}
       {explainSelection?.tooLong ? (
         // 上限（D21: 200文字）を超える選択は送らず、短く選び直すよう案内する（ボタンは出さない）。
+        // 用語かフレーズかの判定は Rust 側で行うため、ここでは長さの上限だけを見る。
         <div
           role="status"
           data-explain-too-long-hint="true"
-          className="pointer-events-none fixed z-50 rounded-md border border-amber-300 bg-white px-2 py-1 text-xs text-amber-700 shadow-md"
+          className="pointer-events-none fixed z-50 max-w-[min(380px,calc(100vw-16px))] break-words rounded-md border border-amber-300 bg-white px-2 py-1 text-xs text-amber-700 shadow-md"
           style={{ left: explainSelection.left, top: explainSelection.top }}
         >
-          もう少し短く選んでみてね
+          {SELECTION_TOO_LONG_MESSAGE}
         </div>
       ) : explainSelection ? (
         <button

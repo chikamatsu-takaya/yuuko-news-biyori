@@ -73,11 +73,13 @@ impl SummaryService {
         &self,
         params: GenerateArticleSummaryParams,
     ) -> Result<AutoSummaryOutcome, AppError> {
+        // ローカルLLMへの要求を「利用者の操作」に数えない（自動要約後の早めの停止を妨げないため）。
+        let background_ai = self.ai_provider_service.for_background();
         let generation = self.generate_article_summary_with(
             params,
             FallbackPolicy::RejectFallback,
             |request, kind, provider, level| {
-                self.request_validated_text(request, kind, provider, level)
+                request_validated_text_via(&background_ai, request, kind, provider, level)
             },
         )?;
         Ok(match generation {
@@ -283,20 +285,35 @@ impl SummaryService {
         provider: AiProvider,
         explanation_level: ExplanationLevel,
     ) -> Result<AiResponse, AppError> {
-        // 口調はプロンプト（ai_provider_service の build_prompt）と同じ入力から判定する（D122）。
-        let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
-        // 再説明・一言の後処理（中国語の字・英単語の混入の判定）で、入力にある字・語を除くために使う。
-        let input_text = request.input_text.clone();
-        let primary =
-            self.ai_provider_service
-                .request_text(request, provider, explanation_level)?;
-        select_valid_output_in_tone(kind, tone, &input_text, primary)
+        request_validated_text_via(
+            &self.ai_provider_service,
+            request,
+            kind,
+            provider,
+            explanation_level,
+        )
     }
 
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約キューの可否判定用）。AI は呼ばない。
     pub fn is_real_ai_ready(&self, provider: AiProvider) -> bool {
         self.ai_provider_service.is_real_ai_ready(provider)
     }
+}
+
+/// AI 出力を指定の窓口（手動用・自動要約用）で取得し、§12.5 の出力検証を通した結果だけを返す。
+fn request_validated_text_via(
+    ai_provider_service: &AiProviderService,
+    request: AiRequest,
+    kind: SummaryOutputKind,
+    provider: AiProvider,
+    explanation_level: ExplanationLevel,
+) -> Result<AiResponse, AppError> {
+    // 口調はプロンプト（ai_provider_service の build_prompt）と同じ入力から判定する（D122）。
+    let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
+    // 再説明・一言の後処理（中国語の字・英単語の混入の判定）で、入力にある字・語を除くために使う。
+    let input_text = request.input_text.clone();
+    let primary = ai_provider_service.request_text(request, provider, explanation_level)?;
+    select_valid_output_in_tone(kind, tone, &input_text, primary)
 }
 
 // --- AI出力検証（詳細設計書 §12.5）: 副作用なしの純粋 helper ---

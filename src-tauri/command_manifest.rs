@@ -29,6 +29,8 @@ pub const APP_COMMANDS: &[&str] = &[
     "set_autostart_enabled",
     "restart_app",
     "quit_resident_app",
+    "set_main_window_unsaved_changes",
+    "take_pending_main_window_article",
     "export_migration_data",
     "open_migration_folder",
     "list_migration_imports",

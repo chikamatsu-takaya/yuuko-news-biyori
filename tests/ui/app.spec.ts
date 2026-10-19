@@ -1629,6 +1629,108 @@ test("customize: friendship load failure keeps the screen and rewards visible", 
   // 報酬側は独立して表示される（既定モック: どれも未解放）。
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
   await expect(page.getByTestId("customize-theme-option").first()).toBeVisible();
+
+  // 失敗した欄だけ「もう一度読み込む」で読み直せる。
+  const retry = page.getByTestId("customize-friendship-retry");
+  await expect(retry).toHaveText("もう一度読み込む");
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 6,
+      currentPoint: 3,
+      nextRequiredPoint: 30,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await retry.click();
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("6");
+  await expect(page.getByTestId("customize-friendship-status")).toHaveCount(0);
+  await expect(page.getByTestId("customize-friendship-retry")).toHaveCount(0);
+});
+
+test("customize: reward and gacha load failures offer a retry that restores the theme list", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_REWARD_STATE__ = "fail";
+    win.__E2E_GACHA_LOAD_FAIL__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-theme-load-error")).toBeVisible();
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-load-error")).toBeVisible();
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 読めないあいだはテーマを選べない（既定を「使用中」と見せない）。
+  await expect(page.getByTestId("customize-theme-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-theme-retry")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-retry")).toBeVisible();
+
+  // ランク報酬欄の再試行は報酬だけを読み直す（ガチャは失敗のまま）。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: [],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByTestId("customize-rank-reward-retry").click();
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
+  await expect(page.getByTestId("customize-rank-reward-retry")).toHaveCount(0);
+  await expect(page.getByTestId("customize-theme-load-error")).toHaveCount(0);
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toBeVisible();
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "クリーム" })
+  ).toHaveAttribute("aria-pressed", "true");
+
+  // テーマ欄の再試行で、残っていたガチャのテーマも読み直せる。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_LOAD_FAIL__ = false;
+  });
+  await page.getByTestId("customize-theme-retry").click();
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toHaveCount(0);
+  await expect(page.getByTestId("customize-theme-retry")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "さくら色テーマ" })
+  ).toBeEnabled();
+});
+
+test("customize: nickname load failure offers a retry", async ({ page }) => {
+  await openHome(page);
+  // ホームの読み込み後に失敗させ、カスタマイズの get_user_settings だけを失敗にする。
+  await page.evaluate(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ = "IO_ERROR";
+    win.__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "カスタマイズ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
+  await page.getByRole("tab", { name: "呼び名" }).click();
+
+  await expect(page.getByTestId("customize-nickname")).toHaveText("呼び名を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__;
+  });
+  await page.getByTestId("customize-nickname-retry").click();
+  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
+  await expect(page.getByTestId("customize-nickname-retry")).toHaveCount(0);
 });
 
 test("customize: browser preview (outside Tauri) labels the sample rank values", async ({
@@ -1739,7 +1841,7 @@ test("customize: theme list locks unreleased themes and saves an unlocked theme"
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });
 
-test("customize: theme save failure shows a fixed message and keeps the current theme", async ({
+test("customize: theme save failure shows a toast and keeps the current theme", async ({
   page,
 }) => {
   await setupThemeState(page);
@@ -1750,9 +1852,12 @@ test("customize: theme save failure shows a fixed message and keeps the current 
 
   const sky = page.getByTestId("customize-theme-option").filter({ hasText: "そらいろ" });
   await sky.click();
-  await expect(page.getByTestId("customize-theme-message")).toHaveText(
-    "テーマを保存できなかったよ。もう一度ためしてね。"
-  );
+  // 操作の失敗は辞書・設定画面と同じくトーストで知らせる。
+  await expect(page.getByText("保存に失敗しちゃった").first()).toBeVisible();
+  await expect(
+    page.getByText("テーマを保存できなかったよ。もう一度ためしてね。").first()
+  ).toBeVisible();
+  await expect(page.getByTestId("customize-theme-message")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
   await expect(sky).toHaveAttribute("aria-pressed", "false");
   await expect(
@@ -2214,7 +2319,7 @@ test("reader: 解説 command failure shows a reselect hint and 再試行 without
   await expect(page.getByText("E2E explain term failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
   // フロント生成の仮解説は出さず、辞書へ保存できない（保存ボタン自体が無い）。
-  await expect(page.getByText("はこの記事を理解するためのキーワードです。")).toHaveCount(0);
+  await expect(page.getByText("はこの記事を理解するためのキーワードだよ。")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   expect(await saveDictionaryCallCount(page)).toBe(0);
   // 再試行ボタンが出る。
@@ -3166,6 +3271,13 @@ test("reader: a real article with no keyword candidates shows the selection hint
   expect((await lastExplainTermArgs(page)).articleId).toBe("e2e-article-1");
 });
 
+// 辞書のフレーズ項目（__E2E_DICTIONARY_WITH_PHRASE__ のモックで一覧に加わる）。
+const E2E_PHRASE_KEY_TEXT = "E2Eのフレーズは、辞書でフレーズとして区別される。";
+
+// 選択が上限（200字）を超えたときのゆうこの案内（lib/explain-selection.mjs の SELECTION_TOO_LONG_MESSAGE）。
+const SELECTION_TOO_LONG_TEXT =
+  "ちょっと長すぎるみたい。200字くらいまでにして選び直してね";
+
 test("reader: a selection longer than 200 characters shows a hint and is not sent", async ({
   page,
 }) => {
@@ -3177,7 +3289,7 @@ test("reader: a selection longer than 200 characters shows a hint and is not sen
   await openReaderWithoutExplain(page);
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
-  await expect(page.getByText("もう少し短く選んでみてね")).toBeVisible();
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toBeVisible();
   await expect(explainButton(page)).toHaveCount(0);
   await page.waitForTimeout(200);
   expect(await explainTermCallCount(page)).toBe(0);
@@ -3185,8 +3297,30 @@ test("reader: a selection longer than 200 characters shows a hint and is not sen
 
   // 上限以内（ゆうこの再説明）を選び直すと案内が消えて「解説」ボタンが出る。
   await selectContentsWithin(page, '[data-explain-selectable="explanation"]');
-  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
   await expect(explainButton(page)).toBeVisible();
+});
+
+test("reader: the too-long hint stays inside the smallest audited window", async ({
+  page,
+}) => {
+  // tauri.conf.json に最小幅の指定はない。案内は最大幅を画面幅に合わせて折り返せるようにしてあり、
+  // 画面監査の最小サイズ（800x600）で、選択の右下に出しても画面からはみ出さないことを確かめる。
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "あ".repeat(201);
+  });
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  const hint = page.locator('[data-explain-too-long-hint="true"]');
+  await expect(hint).toHaveText(SELECTION_TOO_LONG_TEXT);
+  const box = await hint.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(800);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(600);
 });
 
 test("reader: a selection of exactly 200 characters can still be explained", async ({
@@ -3201,10 +3335,72 @@ test("reader: a selection of exactly 200 characters can still be explained", asy
 
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
   await expect(explainButton(page)).toBeVisible();
-  await expect(page.getByText("もう少し短く選んでみてね")).toHaveCount(0);
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
   await explainButton(page).click();
   await expect.poll(() => explainTermCallCount(page)).toBe(1);
   expect((await lastExplainTermArgs(page)).selectedText).toBe(text);
+});
+
+test("reader: a long sentence is explained as a phrase and saved with the phrase type", async ({
+  page,
+}) => {
+  // 用語かフレーズかは Rust 側（classify_selected_text）が決め、DTO の type で返す。
+  // ここではモックがフレーズとして返したときの表示と保存の受け渡しを確かめる（D21）。
+  const phrase =
+    "円安が進み、輸入品の値段が上がったため、家計の負担が増えている。政府は物価高への対策を急ぐ考えを示した。";
+  await page.addInitScript((summary) => {
+    const win = window as unknown as Record<string, string>;
+    win.__E2E_ARTICLE_DETAIL_SUMMARY__ = summary;
+    win.__E2E_EXPLAIN_TERM_TYPE__ = "phrase";
+  }, phrase);
+  await openReaderWithoutExplain(page);
+
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await expect(explainButton(page)).toBeVisible();
+  await expect(page.getByText(SELECTION_TOO_LONG_TEXT)).toHaveCount(0);
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  expect((await lastExplainTermArgs(page)).selectedText).toBe(phrase);
+
+  const popup = termPopup(page);
+  await expect(popup.getByText("フレーズ", { exact: true })).toBeVisible();
+  // 長い見出しは3行で省略し、全文は title で確認できる。
+  await expect(popup.getByRole("heading", { name: phrase })).toHaveAttribute(
+    "title",
+    phrase
+  );
+
+  await popup.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(popup.getByRole("button", { name: "辞書保存済み" })).toBeVisible();
+  const saved = (await lastSavedDictionaryEntry(page)) as {
+    keyText?: string;
+    type?: string;
+  } | null;
+  expect(saved?.type).toBe("phrase");
+  expect(saved?.keyText).toBe(phrase);
+});
+
+test("dictionary: the フレーズ filter separates phrases from terms", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_DICTIONARY_WITH_PHRASE__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+  const main = page.locator("main");
+  const list = main.locator("[data-slot='card']");
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+
+  await main.getByRole("button", { name: "フレーズ", exact: true }).first().click();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+  await expect(list.getByText("E2E用語", { exact: true })).toHaveCount(0);
+
+  await main.getByRole("button", { name: "単語", exact: true }).first().click();
+  await expect(main.getByText("E2E用語").first()).toBeVisible();
+  await expect(main.getByText(E2E_PHRASE_KEY_TEXT)).toHaveCount(0);
 });
 
 test("term popup: dragging the background moves the dialog", async ({ page }) => {
@@ -3890,6 +4086,30 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   await expect(
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeChecked();
+});
+
+// D133: 未保存の設定があるあいだはメインウィンドウを破棄しないよう、未保存の有無を Rust へ知らせる。
+test("settings reports unsaved changes to Rust and clears them after save", async ({
+  page,
+}) => {
+  const readReports = () =>
+    page.evaluate(
+      () =>
+        ((window as unknown as Record<string, unknown>)
+          .__E2E_UNSAVED_CHANGES_REPORTS__ as boolean[] | undefined) ?? []
+    );
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  // 開いただけ（変更なし）では何も送らない。
+  expect(await readReports()).toEqual([]);
+
+  await page
+    .getByRole("switch", { name: "ニュース取得後に自動で要約する" })
+    .click();
+  await expect.poll(readReports).toEqual([true]);
+
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect.poll(readReports).toEqual([true, false]);
 });
 
 // ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
@@ -5460,6 +5680,32 @@ test("first click shows the light preview, then 詳しく見る opens the articl
     0
   );
   await expect(notification).toHaveCount(0);
+});
+
+// D133: 長い非表示で破棄したメインを「詳しく見る」で作り直した場合、記事は Rust に預けられ、
+// 新しい画面がマウント時に1回だけ取り出して開く。
+test("recreated main window opens the pending article from the yuuko desktop window", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_PENDING_MAIN_ARTICLE__ =
+      "e2e-article-1";
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "戻る", exact: true }).first()
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  // 取り出した後は空になり、二重に開かない。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>).__E2E_PENDING_MAIN_ARTICLE__
+    )
+  ).toBeNull();
 });
 
 test("yuuko desktop window open-article event opens the article in the main window", async ({
@@ -8235,6 +8481,23 @@ async function installTauriMocks(page: Page) {
             return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
+          case "set_main_window_unsaved_changes": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const unsavedWin = window as any;
+            (unsavedWin.__E2E_UNSAVED_CHANGES_REPORTS__ ||= []).push(
+              Boolean((args as any)?.hasUnsaved)
+            );
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "take_pending_main_window_article": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const pendingWin = window as any;
+            const pending = pendingWin.__E2E_PENDING_MAIN_ARTICLE__ ?? null;
+            pendingWin.__E2E_PENDING_MAIN_ARTICLE__ = null;
+            return pending;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "quit_resident_app": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const quitWin = window as any;
@@ -8283,6 +8546,19 @@ async function installTauriMocks(page: Page) {
               params.starredOnly === true
             ) {
               return [];
+            }
+            // フレーズ項目を加え、種別（params.type）で絞り込む（フレーズの種別絞り込みの検証用・D21）。
+            if ((window as any).__E2E_DICTIONARY_WITH_PHRASE__) {
+              const phraseEntry = {
+                ...dictionaryEntry,
+                entryId: "entry-e2e-phrase",
+                keyText: "E2Eのフレーズは、辞書でフレーズとして区別される。",
+                type: "phrase",
+                shortExplanation: "フレーズの説明だよ。",
+              };
+              return [dictionaryEntry, phraseEntry].filter(
+                (entry) => !params.type || entry.type === params.type
+              );
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             // keyword は見出し語の部分一致で簡易に絞り込む（検索結果なしの再現用）。
@@ -8347,9 +8623,15 @@ async function installTauriMocks(page: Page) {
             const savedUnstarred =
               explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
             /* eslint-enable @typescript-eslint/no-explicit-any */
+            // 種別のテスト用（既定は用語）。フレーズの判定自体は Rust 側の単体テストで確かめる。
+            const explainType =
+              typeof explainWin.__E2E_EXPLAIN_TERM_TYPE__ === "string"
+                ? explainWin.__E2E_EXPLAIN_TERM_TYPE__
+                : dictionaryEntry.type;
             return {
               ...dictionaryEntry,
               keyText: params.selectedText,
+              type: explainType,
               isStarred: false,
               savedInDictionary: savedUnstarred,
             };
@@ -8420,10 +8702,13 @@ async function installTauriMocks(page: Page) {
             );
           }
           case "get_reward_state": {
-            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える。
+            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える（"fail" で失敗させる）。
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const rewardState = (window as any).__E2E_REWARD_STATE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (rewardState === "fail") {
+              throw new Error("E2E reward failure /internal/secret/path");
+            }
             return (
               rewardState ?? {
                 currentRank: 1,
