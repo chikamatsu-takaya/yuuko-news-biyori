@@ -12,7 +12,6 @@ import {
   Settings,
   ArrowLeft,
   Search,
-  Filter,
   List,
   Star,
   Bot,
@@ -22,11 +21,9 @@ import {
   CircuitBoard,
   ChevronLeft,
   ChevronRight,
-  Share2,
   Trash2,
   Pencil,
   Bell,
-  HelpCircle,
   Save,
   X,
   Info,
@@ -895,10 +892,6 @@ export default function DictionaryScreen({
                   className="bg-white pl-10"
                 />
               </div>
-              <Button variant="outline" className="gap-2" disabled>
-                <Filter className="h-4 w-4" />
-                絞り込み
-              </Button>
             </div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -1243,18 +1236,8 @@ export default function DictionaryScreen({
                   </CardContent>
                 </Card>
 
+                {/* 辞書項目の共有機能は無いため「共有する」ボタンは置かない（削除のみ）。 */}
                 <div className="flex items-center gap-2 pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-                    onClick={() =>
-                      console.log("Share dictionary entry:", selectedEntry.id)
-                    }
-                  >
-                    <Share2 className="mr-1 h-4 w-4" />
-                    共有する
-                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
@@ -1299,13 +1282,8 @@ export default function DictionaryScreen({
             </span>
           </div>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            className="text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
           <PawIcon className="h-4 w-4 text-muted-foreground" />
         </div>
       </footer>

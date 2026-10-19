@@ -24,7 +24,6 @@ import {
   ExternalLink,
   Gift,
   Heart,
-  HelpCircle,
   History,
   Home,
   Newspaper,
@@ -131,6 +130,9 @@ const navigationItems: NavigationItem[] = [
   { id: "gacha", label: "ガチャ", icon: Gift },
   { id: "settings", label: "設定", icon: Settings },
 ];
+
+// 右サイド「用語サポート」に既定で並べる候補語の件数。超える分は「すべての関連ワードを見る」で展開する。
+const SUPPORT_TERMS_PREVIEW_LIMIT = 5;
 
 const fallbackSupportTerms: SupportTerm[] = [
   {
@@ -1058,6 +1060,8 @@ export default function NewsReaderScreen({
   // 用語解説は開いた直後には出さない。ユーザーが範囲選択して「解説」を押したとき（または
   // 候補語を明示的に押したとき）だけ開き、explain_selected_term を呼ぶ（自動解説で AI・報酬を消費しない）。
   const [showTermPopup, setShowTermPopup] = React.useState(false);
+  // 「用語サポート」の候補語を全件表示しているか（記事を切り替えたら畳み直す）。
+  const [showAllSupportTerms, setShowAllSupportTerms] = React.useState(false);
   const [selectedTerm, setSelectedTerm] = React.useState<SupportTerm | null>(
     null
   );
@@ -1151,6 +1155,11 @@ export default function NewsReaderScreen({
   // 右サイド「用語サポート」の候補語。読み込み中・失敗時は state に残る初期値（サンプル記事）を出さない。
   const supportTerms =
     articleLoadState === "ready" ? article.highlightedTerms : [];
+  // 候補語は件数に上限が無いため、既定では先頭だけを出し、「すべての関連ワードを見る」でその場に全件を広げる。
+  const visibleSupportTerms = showAllSupportTerms
+    ? supportTerms
+    : supportTerms.slice(0, SUPPORT_TERMS_PREVIEW_LIMIT);
+  const hiddenSupportTermCount = supportTerms.length - visibleSupportTerms.length;
   // 関連記事が無ければ null（サンプル記事で埋めず「関連記事はまだないよ」を出す）。
   const featuredRelatedArticle =
     relatedArticles.find((item) => item.id !== article.id) ?? null;
@@ -1232,6 +1241,7 @@ export default function NewsReaderScreen({
     setIsSavingDictionaryEntry(false);
     setTermNotice(null);
     setTermNoticeKind("info");
+    setShowAllSupportTerms(false);
     explainInFlightRef.current = false;
   }, [resolvedArticleId]);
 
@@ -2171,7 +2181,7 @@ export default function NewsReaderScreen({
               {supportTerms.length > 0 ? (
               <>
               <div className="space-y-2">
-                {supportTerms.map((term) => (
+                {visibleSupportTerms.map((term) => (
                   <div key={term.id} className="flex items-center justify-between">
                     <span className="text-xs text-foreground">{term.term}</span>
                     <Badge
@@ -2184,15 +2194,18 @@ export default function NewsReaderScreen({
                   </div>
                 ))}
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="mt-3 h-8 w-full text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] hover:text-[var(--yuuko-green)]"
-                onClick={() => console.log("View all related words")}
-              >
-                すべての関連ワードを見る
-                <ChevronRight className="ml-1 h-4 w-4" />
-              </Button>
+              {/* 候補語が上限を超えるときだけ、残りをその場で展開するボタンを出す（別画面は無い）。 */}
+              {hiddenSupportTermCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-3 h-8 w-full text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] hover:text-[var(--yuuko-green)]"
+                  onClick={() => setShowAllSupportTerms(true)}
+                >
+                  すべての関連ワードを見る（ほか{hiddenSupportTermCount}件）
+                  <ChevronRight className="ml-1 h-4 w-4" aria-hidden="true" />
+                </Button>
+              )}
               </>
               ) : (
                 <p className="text-xs leading-relaxed text-muted-foreground">
@@ -2246,13 +2259,8 @@ export default function NewsReaderScreen({
             </span>
           </div>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            className="text-muted-foreground transition-colors hover:text-foreground"
-            onClick={() => console.log("Help")}
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
           <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]" />
         </div>
       </footer>
