@@ -2223,9 +2223,10 @@ mod tests {
             })
             .unwrap();
         set_saved_reference(&context, "1000", 1);
-        // 一時ファイルの位置にディレクトリを置き、保存（書き込み）だけを失敗させる（読み込みは成功する）。
-        let temp_path = context.root_dir.join("dictionary").join("entries.json.tmp");
-        std::fs::create_dir_all(&temp_path).unwrap();
+        // 保存（書き込み）だけを失敗させる（読み込みは成功する）。
+        crate::infra::atomic_file::test_hooks::fail_writes_to(
+            &context.root_dir.join("dictionary").join("entries.json"),
+        );
 
         // 更新に失敗しても解説は返る（エラーにしない）。
         let entry = explain(&context, REAL_ARTICLE_ID, "生成AI");

@@ -15,8 +15,8 @@ pub struct DictionaryRepository {
     dictionary_path: PathBuf,
     // 読み込み→変更→保存（read-modify-write）を直列化する。参照記録（解説表示時の書き込み）と
     // メモ・お気に入り・保存・削除が同時に走っても、互いの変更を上書きで失わないようにする。
-    // 読み込み（検索・一覧）も同じロックを取る。保存中の差し替え（本体→.bak→tmp昇格）の隙間に
-    // 読むと「本体なし」に見え、空の辞書を返したり .bak の復元が書き込み側と競合したりするため。
+    // 読み込み（検索・一覧）も同じロックを取る。保存は1回の rename（infra::atomic_file）で本体が無くなる
+    // 隙間は無いが、旧形式の .bak の復元（読み込み時）を書き込み側と競合させないため、従来どおり揃えている。
     // std の Mutex は再入不可なので、ロックを取る公開メソッドから別の公開メソッドを呼ばない。
     // AI 呼び出しはロック外（Service 側で find_saved_entry が戻った後）で行う。
     write_lock: Arc<Mutex<()>>,
@@ -198,10 +198,13 @@ impl DictionaryRepository {
         Arc::clone(&self.write_lock)
     }
 
+    /// 保持中の panic で poison になっても取り直す（守る値の無いロックで、保存は1回の rename なので
+    /// ファイルは常に整合している。以後ずっと辞書を使えなくなるのを防ぐ。取り込み側と同じ扱い）。
     fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
-        self.write_lock
-            .lock()
-            .map_err(|_| AppError::Io(io::Error::other("dictionary write lock was poisoned")))
+        Ok(crate::infra::atomic_file::lock_ignoring_poison(
+            &self.write_lock,
+            "dictionary write",
+        ))
     }
 
     /// 呼び出し側で `lock_writes` を取得済みであること（.bak 復元と保存の差し替えを競合させないため）。
@@ -234,66 +237,17 @@ impl DictionaryRepository {
         Ok(store)
     }
 
+    /// 一時ファイル→1回の rename で置き換える（`infra::atomic_file`。本体が無くなる隙間を作らない）。
     fn save_store(&self, store: &PersistedDictionaryStore) -> Result<(), AppError> {
-        if let Some(parent) = self.dictionary_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let temp_path = self.dictionary_path.with_extension("json.tmp");
-        let backup_path = self.dictionary_path.with_extension("json.bak");
-        let payload = serde_json::to_vec_pretty(store)?;
-        std::fs::write(&temp_path, payload)?;
-
-        let had_existing = self.dictionary_path.exists();
-        if had_existing {
-            if backup_path.exists() {
-                std::fs::remove_file(&backup_path)?;
-            }
-            std::fs::rename(&self.dictionary_path, &backup_path)?;
-        }
-
-        match std::fs::rename(&temp_path, &self.dictionary_path) {
-            Ok(()) => {
-                if had_existing && backup_path.exists() {
-                    if let Err(error) = std::fs::remove_file(&backup_path) {
-                        log::warn!("Failed to remove dictionary backup: {error}");
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => {
-                log::error!("Failed to promote temporary dictionary file: {error}");
-
-                if had_existing && backup_path.exists() {
-                    if let Err(restore_error) = std::fs::rename(&backup_path, &self.dictionary_path)
-                    {
-                        log::error!("Failed to restore dictionary backup: {restore_error}");
-                    }
-                }
-
-                if temp_path.exists() {
-                    let _ = std::fs::remove_file(&temp_path);
-                }
-
-                Err(error.into())
-            }
-        }
+        crate::infra::atomic_file::write_json_atomic(&self.dictionary_path, store, "dictionary")
     }
 
+    /// 旧形式の保存（本体→.bak 退避→昇格）が途中で止まって残った .bak を、本体が無いときだけ戻す。
     fn restore_backup_if_primary_missing(&self) {
-        if self.dictionary_path.exists() {
-            return;
-        }
-
-        let backup_path = self.dictionary_path.with_extension("json.bak");
-        if !backup_path.exists() {
-            return;
-        }
-
-        log::warn!("dictionary entries file is missing. attempting backup restore.");
-        if let Err(error) = std::fs::rename(&backup_path, &self.dictionary_path) {
-            log::error!("Failed to restore dictionary backup: {error}");
-        }
+        crate::infra::atomic_file::restore_legacy_backup_if_missing(
+            &self.dictionary_path,
+            "dictionary",
+        );
     }
 }
 

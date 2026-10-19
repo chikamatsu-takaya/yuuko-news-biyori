@@ -1120,7 +1120,7 @@ export default function NewsReaderScreen({
   const isSummaryProcessing =
     isUnsummarized && article.summaryState === "processing";
   // 順番待ちの記事。すぐ読みたい人向けに既存の手動要約を「今すぐ要約」として出す。
-  // キューは要約済み記事を飛ばし、AlreadySummarized も吸収するため二重生成にはならない。
+  // 手動で生成中の記事はキューが取り出さず（自動で生成中でも段の合間で手を引き）、要約済み記事も飛ばすため二重生成にはならない。
   const isSummaryWaiting = isUnsummarized && article.summaryState === "waiting";
   // 待機中・処理中は完了確認のポーリング対象。
   const isSummaryInProgress =

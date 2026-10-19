@@ -285,6 +285,94 @@ for (const expected of RIGHT_COLUMN_WIDTHS) {
   });
 }
 
+// メインウィンドウの最小サイズ（tauri.conf.json の minWidth / minHeight）。
+// 各画面は左サイドバー w-52（208px）と右列 w-60（240px）が固定幅のため、これより狭いと中央列が細り、
+// 約 450px 未満では中央列が消える。最小サイズでも中央列が読める幅で、横にはみ出さないことを確かめる。
+// 高さは高 DPI（1366×768 の 150% 等）でも作業領域に収まるよう 440 とし、中央列の見出し・本文が縦スクロールで届くことを確かめる。
+// 設定画面は最小サイズのまま開き、左サイドバーの設定タブがすべて届いて押せることも確かめる
+// （ヒントカードが設定メニューを高さ 0 に押し潰していたため、低い高さではカードを隠している）。
+// ほかの画面は既定の 800×600 で開いてから最小サイズへ縮める。ホーム（小柳さん担当）は高さ 440 で
+// 記事一覧がゆうこ表示に押されて高さ 0 になり、そこから記事詳細を開けないため（レイアウト側の別対応が要る）。
+const MIN_WINDOW = { width: 800, height: 440 } as const;
+// 中央列として最低限ほしい幅（スマートフォン相当の 320px）。
+const MIN_CENTER_WIDTH = 320;
+// ホーム（MainScreen）は小柳さんの作り直し中のため、中央列が見えることだけを確かめる。
+const MIN_WINDOW_SCREENS = ["home", "reader", "dictionary", "history", "settings-1"] as const;
+
+for (const id of MIN_WINDOW_SCREENS) {
+  test(`min window ${id} @ ${MIN_WINDOW.width}x${MIN_WINDOW.height}: center column visible and reachable without horizontal overflow`, async ({
+    page,
+  }) => {
+    const screen = SCREENS.find((s) => s.id === id);
+    if (!screen) throw new Error(`unknown screen: ${id}`);
+    const isSettings = id.startsWith("settings");
+    await page.setViewportSize(isSettings ? MIN_WINDOW : { width: MIN_WINDOW.width, height: 600 });
+    await screen.open(page);
+    await page.waitForLoadState("networkidle");
+    await page.setViewportSize(MIN_WINDOW);
+
+    if (isSettings) {
+      // 設定タブは左サイドバーのメニュー領域のスクロールで届き、押すと切り替わること。
+      for (const tab of settingsTabs) {
+        const button = page.getByRole("button", { name: tab, exact: true });
+        expect(await checkReachable(page, button), `設定タブ「${tab}」`).toBeNull();
+      }
+      const lastTab = settingsTabs[settingsTabs.length - 1];
+      await page.getByRole("button", { name: lastTab, exact: true }).click();
+      await page.getByRole("button", { name: settingsTabs[0], exact: true }).click();
+    }
+
+    const center = page.locator("main").first();
+    await expect(center).toBeVisible();
+    const measured = await center.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      // 辞書画面は右列（<aside>）を <main> の中に持つため、その分を除いた範囲を中央列とする。
+      const innerAsideWidth = Array.from(node.querySelectorAll(":scope > aside")).reduce(
+        (sum, aside) => sum + aside.getBoundingClientRect().width,
+        0
+      );
+      return {
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+        centerRight: rect.right - innerAsideWidth,
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        docScrollWidth: document.documentElement.scrollWidth,
+        docClientWidth: document.documentElement.clientWidth,
+        docClientHeight: document.documentElement.clientHeight,
+      };
+    });
+    // 中央列が画面内にあり、読める幅と高さを持つこと。
+    expect(measured.left).toBeGreaterThanOrEqual(-1);
+    expect(measured.right).toBeLessThanOrEqual(measured.docClientWidth + 1);
+    expect(measured.centerRight - measured.left).toBeGreaterThanOrEqual(MIN_CENTER_WIDTH);
+    expect(measured.top).toBeLessThan(measured.docClientHeight);
+    expect(Math.min(measured.bottom, measured.docClientHeight) - Math.max(measured.top, 0)).toBeGreaterThan(0);
+    if (id === "home") return;
+
+    // 中央列そのもの・ページ全体に横のはみ出しが無いこと。
+    expect(measured.scrollWidth).toBeLessThanOrEqual(measured.clientWidth + 1);
+    expect(measured.docScrollWidth).toBeLessThanOrEqual(measured.docClientWidth + 1);
+    for (const target of screen.keyTargets(page)) {
+      const element = target.locator.first();
+      // 中央列（辞書は内側の右列を除く）の中にある見出し・本文だけを対象にする。
+      const inCenter = await element.evaluate(
+        (node) => node.closest("main") !== null && node.closest("main aside") === null
+      );
+      if (!inCenter) continue;
+      // 高さが足りない分は縦スクロールで届き、切れずに前面に出ること。
+      expect(await checkReachable(page, element), target.name).toBeNull();
+      // 中央列の横幅に収まっていること。
+      const box = await element.boundingBox();
+      if (!box) continue;
+      expect(box.x, target.name).toBeGreaterThanOrEqual(measured.left - 1);
+      expect(box.x + box.width, target.name).toBeLessThanOrEqual(measured.centerRight + 1);
+    }
+  });
+}
+
 // 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
 async function checkReachable(
   page: Page,
