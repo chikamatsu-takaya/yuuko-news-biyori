@@ -1,4 +1,6 @@
-use chrono::{DateTime, Duration, Utc};
+use std::collections::HashSet;
+
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -25,6 +27,117 @@ pub fn is_archive_candidate(
     }
 }
 
+/// 同一出典・同一タイトルの重複判定で比べる既存記事の期間（日数）。D58（2026-10-07）。
+/// 毎日同じタイトルで配信される記事（定例コラム等）を取りこぼさないよう、タイトル側の判定は
+/// 直近この日数以内に取得（取得日時がなければ公開日時）された既存記事とだけ比べる。
+/// URL（article_id）側の判定には期間を設けない。
+pub const TITLE_DEDUPE_WINDOW_DAYS: i64 = 7;
+
+/// 画面へ渡す記事タグの最大件数。AI生成は3〜5件だが、手編集・旧データの多すぎるタグで一覧が崩れないよう上限を設ける。
+pub const MAX_DISPLAY_TAGS: usize = 5;
+/// 画面へ渡す記事タグ1件の最大文字数。AI生成は1〜20文字。長すぎる値は切り詰めて DTO を小さく保つ。
+pub const MAX_DISPLAY_TAG_CHARS: usize = 40;
+
+/// 記事ファイルのタグを画面表示・履歴の絞り込み用に整える（純粋関数・I/Oなし）。
+///
+/// タグは外部由来（AI生成・手編集）の文字列のため、前後の空白を除き、空文字と重複を捨て、
+/// 件数・文字数の上限で切る。履歴の絞り込みは整形後の値どうしを比べるため、一覧・記事詳細とも
+/// 必ずこの関数を通した値を返す（表示の安全性は画面側でテキストとして描画することで担保する）。
+pub fn display_tags(tags: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tag: String = trimmed.chars().take(MAX_DISPLAY_TAG_CHARS).collect();
+        let tag = tag.trim_end().to_string();
+        if result.contains(&tag) {
+            continue;
+        }
+        result.push(tag);
+        if result.len() >= MAX_DISPLAY_TAGS {
+            break;
+        }
+    }
+    result
+}
+
+/// 既存記事を「同一出典・同一タイトル」の比較対象に含めるか（純粋関数・I/Oなし）。
+///
+/// 基準時刻は `fetched_at`、解釈できなければ `published_at` を使う。どちらもRFC3339として
+/// 解釈できない場合は比較対象に含めない（D58 の目的は同一タイトル記事の取りこぼし防止であり、
+/// 時期不明の記事で新しい記事を落とさないため。同一URLの判定は別途期間なしで行われる）。
+/// 基準時刻が `now` より未来（時計ずれ等）の場合は直近とみなして含める。
+pub fn is_within_title_dedupe_window(
+    fetched_at: &str,
+    published_at: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    match parse_rfc3339_utc(fetched_at).or_else(|| parse_rfc3339_utc(published_at)) {
+        Some(at) => at >= now - Duration::days(TITLE_DEDUPE_WINDOW_DAYS),
+        None => false,
+    }
+}
+
+/// 取得時の重複判定に使う既存記事のキー集合（要件定義書 §7.2.4・純粋データ・I/Oなし）。
+///
+/// - 同一 article_id（正規化URL由来）は重複。
+/// - URLが異なっても「同一出典名かつ正規化タイトルが同一」なら重複。出典が異なれば別記事として扱う。
+///
+/// 1回の取得（refresh）につき1度だけ構築し、保存予定に加えた記事も `insert` で追記して、
+/// 同じ取得内の重複も弾く。タイトル類似度による判定は扱わない。
+/// 既存記事のタイトル側キーは `TITLE_DEDUPE_WINDOW_DAYS` 以内の記事だけを入れる（呼び出し側で絞る）。
+#[derive(Debug, Clone, Default)]
+pub struct ArticleDedupeKeys {
+    article_ids: HashSet<String>,
+    source_titles: HashSet<(String, String)>,
+}
+
+impl ArticleDedupeKeys {
+    pub fn insert_id(&mut self, article_id: String) {
+        self.article_ids.insert(article_id);
+    }
+
+    pub fn insert_source_title(&mut self, source_name: &str, title: &str) {
+        if let Some(key) = source_title_key(source_name, title) {
+            self.source_titles.insert(key);
+        }
+    }
+
+    pub fn insert(&mut self, article_id: String, source_name: &str, title: &str) {
+        self.insert_id(article_id);
+        self.insert_source_title(source_name, title);
+    }
+
+    /// 既存記事（または同じ取得で保存予定の記事）と重複するか。
+    pub fn is_duplicate(&self, article_id: &str, source_name: &str, title: &str) -> bool {
+        self.article_ids.contains(article_id)
+            || source_title_key(source_name, title)
+                .is_some_and(|key| self.source_titles.contains(&key))
+    }
+
+    pub fn into_article_ids(self) -> HashSet<String> {
+        self.article_ids
+    }
+}
+
+/// 出典名×正規化タイトルのキー。タイトルが空白だけなら同一視の根拠にならないため None。
+fn source_title_key(source_name: &str, title: &str) -> Option<(String, String)> {
+    let normalized = normalize_title_for_dedupe(title);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some((source_name.to_string(), normalized))
+}
+
+/// 重複判定用にタイトルを正規化する。
+/// 前後空白の除去と、連続空白（全角空白 U+3000・タブ・改行を含む）の半角空白1つへの集約だけを行う。
+/// 大文字小文字や全半角英数の統一はしない（要件にない同一視で別記事を落とさないため）。
+pub fn normalize_title_for_dedupe(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// RFC3339文字列を UTC の `DateTime` へ変換する。解釈不能なら `None`。
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value.trim())
@@ -40,6 +153,41 @@ pub enum ArticleReadState {
     DetailViewed,
 }
 
+impl ArticleReadState {
+    /// 閲覧の進み具合（Unread < Previewed < DetailViewed）。詳細設計書 §11.2 の一方向遷移を表す。
+    fn progress_rank(&self) -> u8 {
+        match self {
+            Self::Unread => 0,
+            Self::Previewed => 1,
+            Self::DetailViewed => 2,
+        }
+    }
+
+    /// `target` が現在より進んだ状態のときだけ true。
+    /// 詳細閲覧後に軽量プレビューを開いても DetailViewed→Previewed へ後退させないために使う。
+    pub fn can_advance_to(&self, target: &ArticleReadState) -> bool {
+        target.progress_rank() > self.progress_rank()
+    }
+}
+
+/// 記事ごとの自動要約の状態（画面表示用）。
+///
+/// - `Done` は記事ファイルの `status.summarized` から決まる（保存済み＝完了）。
+/// - `Waiting` / `Processing` / `Failed` は自動要約キューのメモリ上の状態で、アプリ再起動で消える。
+///   再試行待ちの記事は `Waiting`、再試行上限に達した記事は `Failed`。
+/// - `None` は未要約でキューにも入っていない記事（自動要約が無効・まだ取得後の投入前など）。
+///   キューに入っていない記事を `Waiting` と見せると、自動要約が無効なのに待っているように誤解させるため分ける。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryState {
+    #[default]
+    None,
+    Waiting,
+    Processing,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleSummaryDto {
@@ -52,6 +200,9 @@ pub struct ArticleSummaryDto {
     pub is_favorite: bool,
     pub read_state: ArticleReadState,
     pub recommendation_score: f32,
+    /// 自動要約の状態。ゆうこ状態ファイルに保存された旧データにも無いため既定値で読む。
+    #[serde(default)]
+    pub summary_state: SummaryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +219,13 @@ pub struct ArticleHistoryItemDto {
     pub read_state: ArticleReadState,
     pub is_archived: bool,
     pub recommendation_score: f32,
+    /// 自動要約の状態（ArticleSummaryDto と同じ意味）。履歴・一覧のタグ表示に使う読み取り専用の値。
+    #[serde(default)]
+    pub summary_state: SummaryState,
+    /// 記事のタグ（表示・履歴の絞り込み用）。空・重複を除き最大 MAX_DISPLAY_TAGS 件に整えた値。
+    /// タグの無い記事・旧データでは空。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,10 +241,19 @@ pub struct ArticleDetailDto {
     /// 元の本文抜粋。AI要約の種・再生成の基にする（表示は summary を優先）。
     pub excerpt: Option<String>,
     pub yuuko_explanation: Option<String>,
+    /// 要点（何が起きたか）。D18 で注目ポイントと別に作る。要点の節が無い既存の記事ファイルでは空。
+    #[serde(default)]
+    pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
     pub yuuko_comment: Option<String>,
     pub is_favorite: bool,
     pub keyword_candidates: Vec<String>,
+    /// 自動要約の状態（ArticleSummaryDto と同じ意味）。
+    #[serde(default)]
+    pub summary_state: SummaryState,
+    /// 記事のタグ（ArticleHistoryItemDto と同じ整形）。タグの無い記事では空。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +279,106 @@ pub struct ArchiveZipInfoDto {
     pub file: String,
     pub article_count: usize,
     pub size_bytes: u64,
+}
+
+/// 過去ニュース画面・設定画面「アーカイブ管理」の月別アーカイブ一覧の1行（`archive_index.json` の月エントリから作る）。
+/// 設定画面のアーカイブ管理で月ごとの容量と削除可否を示すため（判断台帳 D26）、サイズと削除可否も返す。
+/// どちらも index の値と現在時刻だけで決まり、ZIPは開かない。ZIPファイル名・保存場所は画面に不要なため返さない。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDto {
+    /// `YYYY-MM` 形式。表示用の「2026年9月」への整形は画面側で行う。
+    pub month: String,
+    pub article_count: usize,
+    /// false は記事カタログ未移行（v1）の月。記事一覧は返せないが件数は表示できる。
+    pub catalog_complete: bool,
+    /// 月次ZIPのサイズ（index の `sizeBytes`）。設定画面のアーカイブ管理で容量表示に使う。
+    pub size_bytes: u64,
+    /// 古い月として削除できる時期か（`is_archive_month_deletable`）。true でも、アーカイブにしか
+    /// 本文が無いお気に入りを含む月は削除の事前確認で検証エラーになる。
+    pub deletable: bool,
+}
+
+/// 指定月のアーカイブ記事一覧。ZIPは開かず、記事カタログのスナップショットを返す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthArticlesDto {
+    pub month: String,
+    pub catalog_complete: bool,
+    pub articles: Vec<ArticleHistoryItemDto>,
+}
+
+/// アーカイブの年月（`YYYY-MM`・月は01〜12）かを判定する。
+/// 年月はアーカイブファイル名の元になるため、区切り文字や相対パスを含む値を通さない。
+pub fn is_valid_archive_month(month: &str) -> bool {
+    let bytes = month.as_bytes();
+    bytes.len() == 7
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && month
+            .get(5..7)
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|value| (1..=12).contains(&value))
+}
+
+/// 月単位アーカイブ削除（判断台帳 D26）の対象にできる「通常は追記されなくなった月」かを判定する
+/// （純粋関数・I/Oなし）。
+///
+/// 記事の月は公開日時（無ければ取得日時）で決まり、取得から `ARCHIVE_AGE_DAYS` 日経つと
+/// その月のZIPへ追記される。翌月1日（UTC）から `ARCHIVE_AGE_DAYS` 日＋時差吸収の1日が過ぎるまでは
+/// 通常の取得でも追記され得る月として扱い、削除させない。
+/// ただし公開日時の古い記事を後から取得した場合は、この期間後でも同じ月のZIPが作り直されることがある
+/// （新しく取得した記事だけのZIPになるだけで、既存データは失われない）。
+/// 形式が不正な年月は false（安全側）。
+pub fn is_archive_month_deletable(month: &str, now: DateTime<Utc>) -> bool {
+    if !is_valid_archive_month(month) {
+        return false;
+    }
+    let (Some(year), Some(month_number)) = (
+        month.get(0..4).and_then(|value| value.parse::<i32>().ok()),
+        month.get(5..7).and_then(|value| value.parse::<u32>().ok()),
+    ) else {
+        return false;
+    };
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+    match Utc
+        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+        .single()
+    {
+        Some(next_month_start) => next_month_start + Duration::days(ARCHIVE_AGE_DAYS + 1) <= now,
+        None => false,
+    }
+}
+
+/// 月単位アーカイブ削除の事前確認。削除前に件数・ZIPサイズを画面へ示すために返す。
+/// ZIPのファイル名・パスは返さない。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeletePreviewDto {
+    pub month: String,
+    /// 削除でアーカイブから消える記事数（index の件数）。
+    pub article_count: usize,
+    /// 月次ZIPのサイズ（index に記録したZIP作成時の値）。
+    pub size_bytes: u64,
+    /// 通常のニュース領域にMarkdownが残っていて、削除後も残る記事数（復元済み・お気に入り等）。
+    pub kept_article_count: usize,
+}
+
+/// 月単位アーカイブ削除の結果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeleteResultDto {
+    pub month: String,
+    pub deleted_article_count: usize,
+    pub kept_article_count: usize,
+    /// index からは削除済みだが、ZIPファイル自体を消せなかった場合だけ true。
+    /// 参照されないZIPが残るだけで、履歴・復元・取得済み判定には影響しない。
+    pub cleanup_pending: bool,
 }
 
 /// ZIPとindexの整合確認後に、通常ニュース領域から退避したMarkdownの結果。
@@ -158,13 +425,29 @@ pub struct FetchedArticle {
     pub read_state: ArticleReadState,
 }
 
+/// 要約の保存時に、front matter の `tags` をどう反映するか（判断台帳 D11）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArticleTagsUpdate {
+    /// 既存のタグをそのまま残す（タグの生成・検証に失敗したとき）。
+    Keep,
+    /// 実AIの検証済みタグで置き換える。
+    Replace(Vec<String>),
+    /// 既存のタグが空のときだけ入れる（Mock の定型タグ。既存のタグを Mock で上書きしないため）。
+    /// 空かどうかの確認は保存と同じ書き込みロックの中で行う。
+    FillIfEmpty(Vec<String>),
+}
+
 /// 生成済み要約を記事Markdownへ永続化する際の入力（内部Rust API・Tauri commandでは公開しない）。
 /// B-4決定: 生成要約は記事Markdownへ保存し、再表示はキャッシュ／更新は明示再生成とする。
 #[derive(Debug, Clone)]
 pub struct ArticleSummaryUpdate {
     pub summary: String,
     pub yuuko_explanation: String,
+    /// 要点（AI生成・検証済み）。記事ファイルの「要点」節へ保存する。
+    pub key_points: Vec<String>,
     pub focus_points: Vec<String>,
+    /// 記事タグ（AI生成・検証済み・D11）の反映方法。タグの失敗では要約の保存を止めない。
+    pub tags: ArticleTagsUpdate,
     pub yuuko_comment: String,
     /// 実際に生成に使ったプロバイダ（"gemini" / "mock"）。
     pub ai_provider: String,
@@ -243,6 +526,26 @@ impl GetArticleDetailParams {
     }
 }
 
+/// 「元記事を開く」の入力。URL は受け取らず、記事IDから保存済みの元記事 URL を Rust 側で引く（判断台帳 D13）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenOriginalArticleParams {
+    pub article_id: String,
+}
+
+impl OpenOriginalArticleParams {
+    pub fn validated_article_id(&self) -> Result<String, AppError> {
+        let article_id = self.article_id.trim();
+        if article_id.is_empty() {
+            return Err(AppError::Validation(
+                "articleId must not be empty".to_string(),
+            ));
+        }
+
+        Ok(article_id.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateArticleFavoriteParams {
@@ -285,14 +588,177 @@ impl RestoreArchivedArticleParams {
     }
 }
 
+/// 月別アーカイブ記事一覧の引数。年月だけを受け取り、パスやファイル名は受け取らない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListArchiveMonthArticlesParams {
+    pub month: String,
+}
+
+impl ListArchiveMonthArticlesParams {
+    pub fn validated_month(&self) -> Result<String, AppError> {
+        validate_archive_month_param(&self.month)
+    }
+}
+
+/// 月単位アーカイブ削除（事前確認・削除）の引数。年月だけを受け取り、パスやファイル名は受け取らない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMonthDeleteParams {
+    pub month: String,
+}
+
+impl ArchiveMonthDeleteParams {
+    pub fn validated_month(&self) -> Result<String, AppError> {
+        validate_archive_month_param(&self.month)
+    }
+}
+
+fn validate_archive_month_param(month: &str) -> Result<String, AppError> {
+    let month = month.trim();
+    if !is_valid_archive_month(month) {
+        return Err(AppError::Validation(
+            "month must be in YYYY-MM format".to_string(),
+        ));
+    }
+    Ok(month.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_archive_candidate, ArticleHistoryFilter, GetArticleDetailParams,
-        GetRecommendedArticlesParams, ListArticleHistoryParams, RestoreArchivedArticleParams,
-        UpdateArticleFavoriteParams,
+        display_tags, is_archive_candidate, is_archive_month_deletable,
+        is_within_title_dedupe_window, normalize_title_for_dedupe, ArchiveMonthDeleteParams,
+        ArticleDedupeKeys, ArticleHistoryFilter, GetArticleDetailParams,
+        GetRecommendedArticlesParams, ListArchiveMonthArticlesParams, ListArticleHistoryParams,
+        RestoreArchivedArticleParams, UpdateArticleFavoriteParams,
     };
     use chrono::{TimeZone, Utc};
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn display_tags_trims_and_skips_empty_and_duplicate_tags() {
+        let tags = strings(&["  AI ", "", "   ", "生成AI", "AI", "資金調達"]);
+        assert_eq!(display_tags(&tags), strings(&["AI", "生成AI", "資金調達"]));
+    }
+
+    #[test]
+    fn display_tags_caps_count_and_length() {
+        let tags = strings(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(display_tags(&tags), strings(&["a", "b", "c", "d", "e"]));
+
+        let long = "あ".repeat(super::MAX_DISPLAY_TAG_CHARS + 10);
+        let shown = display_tags(&[long]);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].chars().count(), super::MAX_DISPLAY_TAG_CHARS);
+    }
+
+    #[test]
+    fn display_tags_returns_empty_for_untagged_articles() {
+        assert!(display_tags(&[]).is_empty());
+    }
+
+    #[test]
+    fn normalize_title_absorbs_surrounding_repeated_and_fullwidth_spaces() {
+        let expected = "新製品 発表";
+        assert_eq!(normalize_title_for_dedupe("  新製品 発表 "), expected);
+        assert_eq!(normalize_title_for_dedupe("新製品   発表"), expected);
+        assert_eq!(
+            normalize_title_for_dedupe("\u{3000}新製品\u{3000}発表\u{3000}"),
+            expected
+        );
+        assert_eq!(
+            normalize_title_for_dedupe("新製品 \u{3000}\t発表"),
+            expected
+        );
+        // 大文字小文字などは同一視しない。
+        assert_eq!(normalize_title_for_dedupe(" Apple  News "), "Apple News");
+    }
+
+    #[test]
+    fn dedupe_keys_match_same_source_and_normalized_title_regardless_of_url() {
+        let mut keys = ArticleDedupeKeys::default();
+        keys.insert("news_a".to_string(), "出典A", "同じ\u{3000}タイトル");
+
+        assert!(keys.is_duplicate("news_a", "出典B", "別タイトル"));
+        assert!(keys.is_duplicate("news_b", "出典A", " 同じ  タイトル "));
+        // 出典が異なる同一タイトルは別記事。
+        assert!(!keys.is_duplicate("news_b", "出典B", "同じ タイトル"));
+        assert!(!keys.is_duplicate("news_b", "出典A", "違う タイトル"));
+        // 大文字小文字の違いは同一視しない。
+        keys.insert("news_c".to_string(), "出典A", "Apple News");
+        assert!(!keys.is_duplicate("news_d", "出典A", "apple news"));
+    }
+
+    #[test]
+    fn dedupe_keys_ignore_blank_titles() {
+        let mut keys = ArticleDedupeKeys::default();
+        keys.insert("news_a".to_string(), "出典A", " \u{3000} ");
+        assert!(!keys.is_duplicate("news_b", "出典A", ""));
+    }
+
+    #[test]
+    fn title_dedupe_window_includes_only_last_seven_days() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        // 境界（ちょうど7日前）は含める。
+        assert!(is_within_title_dedupe_window(
+            "2026-09-30T12:00:00Z",
+            "",
+            now
+        ));
+        assert!(is_within_title_dedupe_window(
+            "2026-10-06T21:00:00+09:00",
+            "",
+            now
+        ));
+        // 7日を1秒でも過ぎたら比較対象外。
+        assert!(!is_within_title_dedupe_window(
+            "2026-09-30T11:59:59Z",
+            "2026-10-07T00:00:00Z",
+            now
+        ));
+        // 未来時刻（時計ずれ）は直近とみなす。
+        assert!(is_within_title_dedupe_window(
+            "2026-10-08T00:00:00Z",
+            "",
+            now
+        ));
+    }
+
+    #[test]
+    fn title_dedupe_window_falls_back_to_published_at_and_excludes_unknown_time() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        // 取得日時が解釈できなければ公開日時で判定する。
+        assert!(is_within_title_dedupe_window(
+            "",
+            "2026-10-05T00:00:00Z",
+            now
+        ));
+        assert!(!is_within_title_dedupe_window(
+            "不明",
+            "2026-09-01T00:00:00Z",
+            now
+        ));
+        // どちらも解釈できなければ比較対象に含めない。
+        assert!(!is_within_title_dedupe_window("", "1時間前", now));
+    }
+
+    #[test]
+    fn read_state_advances_only_forward() {
+        use super::ArticleReadState::{DetailViewed, Previewed, Unread};
+
+        assert!(Unread.can_advance_to(&Previewed));
+        assert!(Unread.can_advance_to(&DetailViewed));
+        assert!(Previewed.can_advance_to(&DetailViewed));
+        // 同じ状態・後退方向は更新しない。
+        assert!(!Previewed.can_advance_to(&Previewed));
+        assert!(!DetailViewed.can_advance_to(&Previewed));
+        assert!(!DetailViewed.can_advance_to(&Unread));
+        assert!(!Previewed.can_advance_to(&Unread));
+    }
 
     #[test]
     fn normalized_limit_defaults_to_twenty() {
@@ -387,6 +853,35 @@ mod tests {
     }
 
     #[test]
+    fn list_archive_month_articles_params_accept_only_year_month() {
+        let params = ListArchiveMonthArticlesParams {
+            month: " 2026-09 ".to_string(),
+        };
+        assert_eq!(params.validated_month().unwrap(), "2026-09");
+
+        for invalid in [
+            "",
+            "2026-9",
+            "2026-00",
+            "2026-13",
+            "202609",
+            "2026/09",
+            "../2026-09",
+            "2026-09.zip",
+            "2026-09/../../x",
+            "２０２６-０９",
+        ] {
+            let params = ListArchiveMonthArticlesParams {
+                month: invalid.to_string(),
+            };
+            assert!(
+                params.validated_month().is_err(),
+                "{invalid} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn restore_archived_article_params_validate_and_trim() {
         let params = RestoreArchivedArticleParams {
             article_id: " article-001 ".to_string(),
@@ -465,5 +960,55 @@ mod tests {
     fn is_archive_candidate_false_for_unparseable_fetched_at() {
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
         assert!(!is_archive_candidate("not-a-date", false, false, now));
+    }
+    #[test]
+    fn archive_month_deletable_only_after_month_can_no_longer_grow() {
+        // 2026-05 は 6/1 + 31日 = 7/2 00:00 UTC から削除可能。
+        let before = Utc.with_ymd_and_hms(2026, 7, 1, 23, 59, 59).unwrap();
+        let boundary = Utc.with_ymd_and_hms(2026, 7, 2, 0, 0, 0).unwrap();
+        assert!(!is_archive_month_deletable("2026-05", before));
+        assert!(is_archive_month_deletable("2026-05", boundary));
+        // 当月・前月（まだ追記され得る月）は削除できない。
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 0, 0, 0).unwrap();
+        assert!(!is_archive_month_deletable("2026-10", now));
+        assert!(!is_archive_month_deletable("2026-09", now));
+        assert!(is_archive_month_deletable("2026-08", now));
+        // 12月は翌年1月1日起点（+31日 = 2/1）。
+        assert!(!is_archive_month_deletable(
+            "2025-12",
+            Utc.with_ymd_and_hms(2026, 1, 31, 23, 59, 59).unwrap()
+        ));
+        assert!(is_archive_month_deletable(
+            "2025-12",
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()
+        ));
+        // 不正な年月は常に false。
+        for invalid in ["", "2026-13", "../2026-05", "2026-05.zip"] {
+            assert!(!is_archive_month_deletable(invalid, now));
+        }
+    }
+
+    #[test]
+    fn archive_month_delete_params_accept_only_year_month() {
+        let params = ArchiveMonthDeleteParams {
+            month: " 2026-05 ".to_string(),
+        };
+        assert_eq!(params.validated_month().unwrap(), "2026-05");
+        for invalid in [
+            "",
+            "2026-5",
+            "2026-00",
+            "../2026-05",
+            "2026-05.zip",
+            "archive_index",
+        ] {
+            let params = ArchiveMonthDeleteParams {
+                month: invalid.to_string(),
+            };
+            assert!(matches!(
+                params.validated_month(),
+                Err(crate::error::AppError::Validation(_))
+            ));
+        }
     }
 }

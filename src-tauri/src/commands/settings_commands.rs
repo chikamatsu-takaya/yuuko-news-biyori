@@ -6,21 +6,38 @@ use crate::domain::ai_connection::{
 use crate::domain::settings::UserSettingsDto;
 use crate::error::{CommandError, CommandResult};
 use crate::services::ai_provider_service::AiProviderService;
+use crate::services::news_service::NewsService;
 use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 
+/// 設定を読み込む。興味ジャンルの絞り込みが全取得元へフォールバックする状態かも併せて返す（D10）。
 #[tauri::command]
 pub async fn get_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
     let settings_service = state.settings_service.clone();
-    tauri::async_runtime::spawn_blocking(move || settings_service.get_user_settings())
+    let news_service = state.news_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_service
+            .get_user_settings()
+            .map(|dto| with_genre_filter_fallback(dto, &news_service))
+    })
+    .await
+    .map_err(|error| CommandError::join_error("settings", error))?
+    .map_err(CommandError::from)
+}
+
+/// 適用中の UI テーマ ID だけを返す（判断台帳 D114）。テーマの反映（メイン画面・常駐ゆうこウィンドウ）に使う。
+/// 常駐ゆうこウィンドウにも許可するため、設定全体を返す `get_user_settings` とは分けて最小限にしている。
+/// 既知のテーマ以外・読み込み失敗は既定テーマ "default" を返し、エラーにはしない。
+#[tauri::command]
+pub async fn get_ui_theme_id(state: State<'_, AppState>) -> CommandResult<String> {
+    let settings_service = state.settings_service.clone();
+    let theme_id = tauri::async_runtime::spawn_blocking(move || settings_service.get_ui_theme_id())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join settings task: {error}"),
-            )
-        })?
-        .map_err(CommandError::from)
+        .unwrap_or_else(|error| {
+            log::warn!("テーマ ID の読み込み処理が完了しなかったため既定テーマを返します: {error}");
+            crate::domain::reward::DEFAULT_THEME_ID.to_string()
+        });
+    Ok(theme_id)
 }
 
 #[tauri::command]
@@ -29,16 +46,15 @@ pub async fn save_user_settings(
     params: SaveUserSettingsParams,
 ) -> CommandResult<CommandOk> {
     let settings_service = state.settings_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        settings_service.save_user_settings(params.settings)
+        settings_service.save_user_settings(params.settings)?;
+        // 自動要約を有効にした直後から次回のニュース取得を待たずに動かし、無効にしたら待機列を空にする。
+        auto_summary_queue.enqueue_unsummarized();
+        Ok::<(), crate::error::AppError>(())
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join settings task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("settings", error))?
     .map_err(CommandError::from)?;
 
     Ok(CommandOk { ok: true })
@@ -48,15 +64,24 @@ pub async fn save_user_settings(
 #[tauri::command]
 pub async fn reset_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
     let settings_service = state.settings_service.clone();
-    tauri::async_runtime::spawn_blocking(move || settings_service.reset_user_settings())
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join settings task: {error}"),
-            )
-        })?
-        .map_err(CommandError::from)
+    let news_service = state.news_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_service
+            .reset_user_settings()
+            .map(|dto| with_genre_filter_fallback(dto, &news_service))
+    })
+    .await
+    .map_err(|error| CommandError::join_error("settings", error))?
+    .map_err(CommandError::from)
+}
+
+/// 設定DTOへ、保存済みジャンルでの取得元フォールバック有無を載せる（読み取り専用の表示用）。
+fn with_genre_filter_fallback(
+    mut dto: UserSettingsDto,
+    news_service: &NewsService,
+) -> UserSettingsDto {
+    dto.genre_filter_fallback = news_service.genre_filter_fallback_for(&dto.genres);
+    dto
 }
 
 /// AIプロバイダ接続テスト（接続確認専用・画面詳細設計書 SCR-003 §7.5 / §7.10）。

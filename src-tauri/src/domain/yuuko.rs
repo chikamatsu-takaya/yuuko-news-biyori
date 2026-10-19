@@ -1,8 +1,11 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
+use crate::domain::reward::{find_reward, RewardType};
+use crate::domain::settings::NICKNAME_MAX_CHARS;
 use crate::error::AppError;
+use crate::util::text_safety::neutralize_html_and_control;
 
 /// 通知ゲートの時間しきい値（分）。設計書 §6.2「通知頻度制御」。将来は設定化可能とする。
 const MIN_COOLTIME_MINUTES: i64 = 60; // 前回通知からの最短間隔
@@ -88,6 +91,10 @@ pub struct PersistedYuukoState {
     pub daily_notification: DailyNotificationCount,
     /// ゆうこが紹介済みの記事ID（FIFO・上限キャップ）。再紹介の抑止に使う。
     pub introduced_article_ids: Vec<String>,
+    /// ゆうこが報酬通知で知らせ済みの報酬 ID（判断台帳 D93: 1つの報酬は1回だけ知らせる）。
+    /// OK せずに閉じた・放置した報酬も再通知しない（ランクアップダイアログ・カスタマイズ画面で気づける）。
+    /// 未確認でなくなった ID は通知判定時に取り除き、肥大化させない。旧データには無いため既定は空。
+    pub announced_reward_ids: Vec<String>,
 }
 
 impl Default for PersistedYuukoState {
@@ -104,6 +111,7 @@ impl Default for PersistedYuukoState {
             cooldown_until: None,
             daily_notification: DailyNotificationCount::default(),
             introduced_article_ids: Vec::new(),
+            announced_reward_ids: Vec::new(),
         }
     }
 }
@@ -118,6 +126,97 @@ pub struct YuukoNotificationState {
     pub has_notification: bool,
     pub current_article_id: Option<String>,
     pub reward_notification: Option<RewardNotificationState>,
+    /// 紹介中記事の保存済み AI 要約を、軽量プレビュー用に短く切り詰めたもの（デスクトップ通知用）。
+    ///
+    /// preview_article.summary は要約が無いとき本文抜粋（excerpt）で補われるため、
+    /// デスクトップ通知では本文を送らないよう、補う前の要約だけをここに別に持たせる。
+    /// 永続化はせず、サービス層が active なニュース通知のときだけ記事から読み直して詰める。
+    /// 要約が無い記事・非 active では None（送らない）。既存フィールドの意味は変えない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_short_summary: Option<String>,
+}
+
+/// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
+///
+/// プレビューの要約欄は幅約240px・12px・3行のため、全角だと1行約20字×3行＝約60字で埋まる。
+/// それ以上送っても画面では切れて見えないうえ、外部由来文字列の露出が増えるだけなので、
+/// Rust 側で切り詰めてから渡す。lib/tauri/yuuko.ts の YUUKO_PREVIEW_SUMMARY_MAX_CHARS と一致させる。
+pub const PREVIEW_SUMMARY_MAX_CHARS: usize = 60;
+
+/// 保存済みの要約を、軽量プレビュー用に前後空白を除いて最大文字数へ切り詰める。
+/// 空なら None（UI 側の固定の一言へフォールバックさせる）。
+/// 文字数はバイトではなく char（コードポイント）で数え、マルチバイト文字の途中で切らない。
+pub fn short_preview_summary(summary: &str) -> Option<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= PREVIEW_SUMMARY_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let mut short: String = trimmed
+        .chars()
+        .take(PREVIEW_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    // 切り詰め位置の直前が空白だと「… 」の見た目が崩れるため落としてから省略記号を付ける。
+    short.truncate(short.trim_end().len());
+    short.push('…');
+    Some(short)
+}
+
+/// 設定の呼び名を、吹き出しへ差し込める形に整える（要件定義書 §7.6.5）。
+///
+/// 呼び名はユーザー入力で、保存時の検証（32文字・制御文字なし）より前に保存された値も読み込み時は
+/// そのまま通るため、表示直前にもう一度安全側へ倒す: 制御文字（改行・タブを含む）は除き、`<` は全角へ
+/// 置換し、前後空白を除いてから 32 文字（char 数）で切る。空になれば None（呼び名なし＝従来の文言）。
+/// UI はテキストとして描画するが、表示経路（OS 通知等）が増えても HTML として解釈されないようにしておく。
+pub fn display_nickname(nickname: &str) -> Option<String> {
+    let neutralized: String = neutralize_html_and_control(nickname)
+        .chars()
+        .filter(|c| !c.is_control() && !is_invisible_format_char(*c))
+        .collect();
+    let trimmed = neutralized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let limited: String = trimmed.chars().take(NICKNAME_MAX_CHARS).collect();
+    Some(limited.trim_end().to_string())
+}
+
+/// 表示順を入れ替える双方向制御文字（U+202A〜U+202E, U+2066〜U+2069）と、
+/// 見えない幅ゼロ文字（U+200B〜U+200F, U+FEFF）か。後続の文言を見かけ上書き換えられないよう呼び名から除く。
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+    )
+}
+
+/// ゆうこの吹き出し文言の先頭に呼び名を付ける（仮: 「{呼び名}、{文言}」）。
+///
+/// 「さん」等の敬称は付けない（ユーザーが「ゆうさん」のように敬称込みで入力する場合があるため、入力どおりに使う）。
+/// 呼び名が未設定・空なら文言を一切変えない。保存済みの文言（yuuko_state.json）には適用せず、
+/// 表示用の状態を返す直前だけで使うため、設定の変更は次の表示から反映される。
+pub fn personalize_balloon_text(text: &str, nickname: &str) -> String {
+    match display_nickname(nickname) {
+        Some(name) => format!("{name}、{text}"),
+        None => text.to_string(),
+    }
+}
+
+impl YuukoNotificationState {
+    /// 表示用の吹き出し文言へ呼び名を反映する。文言が無い場合（UI 側の既定文言を使う場合）は何もしない。
+    pub fn apply_nickname(&mut self, nickname: &str) {
+        if let Some(text) = self.balloon_text.as_deref() {
+            self.balloon_text = Some(personalize_balloon_text(text, nickname));
+        }
+        // 報酬通知の文言も吹き出しとして表示されるため、同じ規則で呼び名を付ける。
+        if let Some(reward) = self.reward_notification.as_mut() {
+            if !reward.message.is_empty() {
+                reward.message = personalize_balloon_text(&reward.message, nickname);
+            }
+        }
+    }
 }
 
 impl PersistedYuukoState {
@@ -141,6 +240,7 @@ impl PersistedYuukoState {
             has_notification: has_reward_notification,
             current_article_id: self.current_article_id.clone(),
             reward_notification: self.reward_notification.clone(),
+            preview_short_summary: None,
         }
     }
 
@@ -190,9 +290,20 @@ impl PersistedYuukoState {
 
         reward_notification.pending = !reward_notification.reward_ids.is_empty();
         let remaining_pending_reward_ids = reward_notification.reward_ids.clone();
+        // 一部だけ確認した場合は、残った報酬で文言を作り直す（確認済みの報酬名を出し続けない）。
+        if reward_notification.pending {
+            reward_notification.message = reward_notice_message(&reward_notification.reward_ids);
+            if self.state == YuukoResidentState::RewardNotifying {
+                self.balloon_text = Some(reward_notification.message.clone());
+            }
+        }
 
         if !reward_notification.pending {
             self.reward_notification = None;
+            // 報酬通知の吹き出し文言を待機中の表示へ残さない（未設定なら取得時に既定文言が入る）。
+            if self.state == YuukoResidentState::RewardNotifying {
+                self.balloon_text = None;
+            }
             self.state = YuukoResidentState::Waiting;
         }
 
@@ -207,13 +318,19 @@ impl PersistedYuukoState {
     /// 再通知抑制（クールタイム）を設定する（設計書 §6.2/§10.6「閉じる→クールタイム設定」）。
     /// pending な reward_notification と confirmed_reward_ids は保持する
     /// （報酬確認は confirm_rank_up_reward が担当するため、ここでは消さない）。
+    ///
+    /// 表示中の報酬通知（RewardNotifying）を閉じた場合は表示だけを外す。未確認の正は rewards.json の
+    /// pendingRewards で、閉じても確認済みにはしない（ただし同じ報酬はゆうこから再通知しない・D93）。
     pub fn dismiss_notification(&mut self, now: DateTime<Utc>) {
         // アクティブな通知が無い状態（Waiting等）での誤呼び出しは no-op。
         // 不要なクールダウンで通知が長時間ブロックされるのを防ぐ。
-        if !self.has_active_notification() {
+        if self.has_active_notification() {
+            self.clear_active_notification();
+        } else if self.has_active_reward_notice() {
+            self.clear_reward_notice();
+        } else {
             return;
         }
-        self.clear_active_notification();
         self.cooldown_until = Some(format_timestamp(
             now + Duration::minutes(DISMISS_COOLDOWN_MINUTES),
         ));
@@ -223,10 +340,14 @@ impl PersistedYuukoState {
     /// reward は保持する。フロントの自動退場タイマーから呼ぶ想定（Rustはタイマーを持たない）。
     pub fn mark_ignored(&mut self, now: DateTime<Utc>) {
         // アクティブな通知が無ければ no-op（誤クールダウン防止）。
-        if !self.has_active_notification() {
+        // 報酬通知は表示だけを外す（未確認のまま。dismiss_notification と同じ扱い）。
+        if self.has_active_notification() {
+            self.clear_active_notification();
+        } else if self.has_active_reward_notice() {
+            self.clear_reward_notice();
+        } else {
             return;
         }
-        self.clear_active_notification();
         self.cooldown_until = Some(format_timestamp(
             now + Duration::minutes(IGNORE_COOLDOWN_MINUTES),
         ));
@@ -251,6 +372,118 @@ impl PersistedYuukoState {
         self.state = YuukoResidentState::Waiting;
     }
 
+    /// 報酬通知（RewardNotifying）を表示中か。ニュース通知ではないため has_active_notification とは別に扱う。
+    /// 旧データの reward_notification（pending）もここに含め、同じ確認・閉じる導線で解消できるようにする。
+    pub fn has_active_reward_notice(&self) -> bool {
+        self.reward_notification
+            .as_ref()
+            .is_some_and(|reward| reward.pending && !reward.reward_ids.is_empty())
+    }
+
+    /// 表示中の報酬通知を外して待機へ戻す（確認済みにはしない）。
+    fn clear_reward_notice(&mut self) {
+        self.reward_notification = None;
+        self.balloon_text = None;
+        self.state = YuukoResidentState::Waiting;
+    }
+
+    /// 表示中の報酬通知を、未確認の報酬（rewards.json の pendingRewards が正）に合わせる。
+    ///
+    /// ランクアップダイアログ等で先に確認された報酬は通知から外し、残りが無ければ通知自体を外す
+    /// （同じ報酬を二重に知らせない）。文言は残った報酬で作り直す。変更があれば true（呼び出し側が保存する）。
+    pub fn sync_reward_notice(&mut self, pending_reward_ids: &[String]) -> bool {
+        let Some(reward) = self.reward_notification.as_mut() else {
+            return false;
+        };
+        let before = reward.reward_ids.len();
+        reward
+            .reward_ids
+            .retain(|id| pending_reward_ids.iter().any(|pending| pending == id));
+        if reward.reward_ids.is_empty() {
+            self.reward_notification = None;
+            if self.state == YuukoResidentState::RewardNotifying {
+                self.balloon_text = None;
+                self.state = YuukoResidentState::Waiting;
+            }
+            return true;
+        }
+        // 件数が変わらなくても文言は毎回マスタから作り直す。保存済みの文言に古い表示名
+        // （例: 仮名「テーマ①」）が残っていても、次の同期で現在の名前へ揃えるため。
+        // 保存は実際に変化したときだけにする（呼び出し側の無駄な書き込みを避ける）。
+        let mut changed = reward.reward_ids.len() != before;
+        let message = reward_notice_message(&reward.reward_ids);
+        if reward.message != message {
+            reward.message = message;
+            changed = true;
+        }
+        if self.state == YuukoResidentState::RewardNotifying
+            && self.balloon_text.as_deref() != Some(reward.message.as_str())
+        {
+            self.balloon_text = Some(reward.message.clone());
+            changed = true;
+        }
+        changed
+    }
+
+    /// 未確認の報酬を「ゆうこが報酬を知らせ中」にし、ニュース通知と同じく通知回数・クールタイム基点を記録する
+    /// （設計書 §6.3 報酬通知も通知回数に含める・§6.4 報酬も上限とクールタイムの対象）。
+    /// 紹介済み記事の記録は変えない。`reward_ids` はマスタで検証済みの未確認 ID を渡す。
+    pub fn mark_reward_notified(&mut self, now: DateTime<Utc>, rank: u32, reward_ids: Vec<String>) {
+        self.mark_reward_notified_in(&chrono::Local, now, rank, reward_ids);
+    }
+
+    /// `mark_reward_notified` の本体（タイムゾーン注入版。理由は `can_notify_in` と同じ）。
+    fn mark_reward_notified_in<Tz: TimeZone>(
+        &mut self,
+        tz: &Tz,
+        now: DateTime<Utc>,
+        rank: u32,
+        reward_ids: Vec<String>,
+    ) {
+        self.record_notification_slot_in(tz, now);
+        for id in &reward_ids {
+            if !self.announced_reward_ids.contains(id) {
+                self.announced_reward_ids.push(id.clone());
+            }
+        }
+        let message = reward_notice_message(&reward_ids);
+        self.balloon_text = Some(message.clone());
+        self.preview_article = None;
+        self.current_article_id = None;
+        self.reward_notification = Some(RewardNotificationState {
+            pending: true,
+            rank,
+            reward_ids,
+            message,
+        });
+        self.state = YuukoResidentState::RewardNotifying;
+    }
+
+    /// 未確認の報酬のうち、まだ知らせていないものを返す（D93: 報酬通知は1報酬につき1回）。
+    /// あわせて、未確認でなくなった（確認済みになった）ID を知らせ済みの記録から取り除く。
+    /// 取り除いた結果は、呼び出し側が次に状態を保存するときに一緒に保存される。
+    pub fn unannounced_rewards(&mut self, pending_reward_ids: &[String]) -> Vec<String> {
+        self.announced_reward_ids
+            .retain(|id| pending_reward_ids.contains(id));
+        pending_reward_ids
+            .iter()
+            .filter(|id| !self.announced_reward_ids.contains(id))
+            .cloned()
+            .collect()
+    }
+
+    /// 通知1回分として、当日の通知回数と前回通知時刻（最短クールタイムの基点）を記録する。
+    /// ローカル日付が変わっていれば日次カウントをリセットしてから加算する。
+    fn record_notification_slot_in<Tz: TimeZone>(&mut self, tz: &Tz, now: DateTime<Utc>) {
+        let today = local_date_key(now, tz);
+        // last_notified_at を上書きする前に、既存カウントが今日の分かを判定する。
+        let used_today = self.notifications_used_on(&today, tz);
+        // 旧形式（UTC日付）の date もここでローカル日付へ正規化される。
+        self.daily_notification.date = today;
+        self.daily_notification.count = used_today.saturating_add(1);
+        self.last_notified_at = Some(format_timestamp(now));
+    }
+
     /// ゆうこが紹介済みの記事か。
     pub fn is_introduced(&self, article_id: &str) -> bool {
         self.introduced_article_ids
@@ -266,6 +499,7 @@ impl PersistedYuukoState {
     /// 通知を出してよいか判定する（設計書 §4.3/§5.2 のMVP抑制条件）。
     /// 日次上限・閉じる/無視クールダウン・前回通知からの最短クールタイムを確認する。
     /// 時間帯判定（start_time, end_time）が指定されている場合は、ローカル時刻で判定する。
+    /// 日次上限もローカル日付で区切る（ローカル深夜0時にリセット）。
     /// notification.enabled と報酬優先は呼び出し側（service）が判定する。
     pub fn can_notify<'a>(
         &self,
@@ -273,7 +507,19 @@ impl PersistedYuukoState {
         max_per_day: u32,
         time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> NotificationGate {
-        let local_time = now.with_timezone(&chrono::Local);
+        self.can_notify_in(&chrono::Local, now, max_per_day, time_ranges)
+    }
+
+    /// `can_notify` の本体。タイムゾーンを引数で受け取り、テストでは固定オフセットを注入して
+    /// 実行端末のタイムゾーンに依存せず日付境界を検証できるようにする（本番は chrono::Local）。
+    fn can_notify_in<'a, Tz: TimeZone>(
+        &self,
+        tz: &Tz,
+        now: DateTime<Utc>,
+        max_per_day: u32,
+        time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> NotificationGate {
+        let local_time = now.with_timezone(tz);
         use chrono::Timelike;
         let current_minutes = local_time.hour() * 60 + local_time.minute();
 
@@ -281,13 +527,8 @@ impl PersistedYuukoState {
             return NotificationGate::OutsideTimeRange;
         }
 
-        let today = now.format(DATE_FORMAT).to_string();
-        let used_today = if self.daily_notification.date == today {
-            self.daily_notification.count
-        } else {
-            0
-        };
-        if used_today >= max_per_day {
+        let today = local_date_key(now, tz);
+        if self.notifications_used_on(&today, tz) >= max_per_day {
             return NotificationGate::DailyLimitReached;
         }
 
@@ -304,6 +545,28 @@ impl PersistedYuukoState {
         }
 
         NotificationGate::Allowed
+    }
+
+    /// ローカル日付 `today` に既に出した通知回数を返す（日付が違えば 0）。
+    ///
+    /// カウントの所属日は「前回通知時刻 last_notified_at のローカル日付」を正とする。
+    /// mark_notified は count と last_notified_at を必ず同時に更新するため両者は常に対応する。
+    /// 旧バージョンは daily_notification.date を UTC 日付で保存しており、JST 00:00〜09:00 の間は
+    /// ローカル日付と1日ずれる。date 文字列だけで比較すると、移行直後に同じローカル日内で
+    /// カウントが 0 に戻り上限を超えて通知してしまうため、時刻から日付を導出し直す。
+    /// 旧データの count は UTC 1日分の累計で「最後の通知のローカル日」の実回数以上になるため、
+    /// 判定は過剰許可にならない側（安全側）へ倒れ、翌ローカル日には必ずリセットされる。
+    /// last_notified_at が無い/壊れている場合のみ、保存済み date との一致で判定する。
+    fn notifications_used_on<Tz: TimeZone>(&self, today: &str, tz: &Tz) -> u32 {
+        let counted_date = match self.last_notified_at.as_deref().and_then(parse_timestamp) {
+            Some(last) => local_date_key(last, tz),
+            None => self.daily_notification.date.clone(),
+        };
+        if counted_date == today {
+            self.daily_notification.count
+        } else {
+            0
+        }
     }
 
     /// おすすめ候補（スコア順）から紹介する1件を選ぶ。未紹介・非お気に入りを対象に未読を優先する
@@ -323,15 +586,19 @@ impl PersistedYuukoState {
     }
 
     /// 選んだ記事を「ゆうこが紹介中」の状態にし、通知回数・クールタイム基点・紹介済みを記録する。
-    /// 日付が変わっていれば日次カウントをリセットしてから加算する。
+    /// ローカル日付が変わっていれば日次カウントをリセットしてから加算する。
     pub fn mark_notified(&mut self, now: DateTime<Utc>, article: ArticleSummaryDto) {
-        let today = now.format(DATE_FORMAT).to_string();
-        if self.daily_notification.date != today {
-            self.daily_notification.date = today;
-            self.daily_notification.count = 0;
-        }
-        self.daily_notification.count = self.daily_notification.count.saturating_add(1);
-        self.last_notified_at = Some(format_timestamp(now));
+        self.mark_notified_in(&chrono::Local, now, article);
+    }
+
+    /// `mark_notified` の本体（タイムゾーン注入版。理由は `can_notify_in` と同じ）。
+    fn mark_notified_in<Tz: TimeZone>(
+        &mut self,
+        tz: &Tz,
+        now: DateTime<Utc>,
+        article: ArticleSummaryDto,
+    ) {
+        self.record_notification_slot_in(tz, now);
 
         if !self.is_introduced(&article.article_id) {
             self.introduced_article_ids.push(article.article_id.clone());
@@ -353,6 +620,8 @@ impl PersistedYuukoState {
     /// 2段階クリックの最小遷移。操作対象（preview_article / current_article_id）が
     /// 無ければ no-op（安全側）。初回クリック → PreviewVisible、
     /// PreviewVisible での再クリック → Leaving（確定）。
+    /// Leaving は退場中で戻らない（詳細設計書 YS-008）ため、退場中のクリックは no-op。
+    /// プレビューへ戻すと再確定で「詳しく見る」の友情ポイントが二重に加算されるのも防ぐ。
     /// 記事既読・画面遷移・クールタイム等の副作用は持たない。
     /// 戻り値は状態遷移が起きたか。
     pub fn handle_click(&mut self) -> bool {
@@ -361,10 +630,32 @@ impl PersistedYuukoState {
         }
 
         self.state = match self.state {
+            YuukoResidentState::Leaving => return false,
             YuukoResidentState::PreviewVisible => YuukoResidentState::Leaving,
             _ => YuukoResidentState::PreviewVisible,
         };
         true
+    }
+}
+
+/// 報酬通知の吹き出し文言（固定文言＋報酬マスタの名前）。保存ファイル由来の未知 ID は名前に使わない。
+///
+/// 報酬は当面テーマのみ（D34）。1件ならマスタの名前を入れ、複数なら件数で伝える。
+pub fn reward_notice_message(reward_ids: &[String]) -> String {
+    let names: Vec<&'static str> = reward_ids
+        .iter()
+        .filter_map(|id| find_reward(id))
+        .map(|def| match def.reward_type {
+            RewardType::Theme => def.name,
+        })
+        .collect();
+    match names.as_slice() {
+        [] => "新しいテーマが届いたよ！カスタマイズで切り替えられるよ。".to_string(),
+        [name] => format!("新しいテーマ「{name}」が届いたよ！カスタマイズで切り替えられるよ。"),
+        many => format!(
+            "新しいテーマが{}つ届いたよ！カスタマイズで切り替えられるよ。",
+            many.len()
+        ),
     }
 }
 
@@ -387,7 +678,10 @@ pub struct ConfirmRankUpRewardResult {
 #[serde(rename_all = "camelCase")]
 pub struct RequestYuukoNotificationResult {
     pub notified: bool,
-    /// "notified" / "disabled" / "reward_pending" / "already_active" / "daily_limit" / "cooling_down" / "no_candidate"
+    /// "notified"（ニュース・報酬のどちらか）/ "disabled" / "already_active"（ニュース・報酬通知を表示中）/
+    /// "daily_limit" / "cooling_down" /
+    /// "outside_time_range" / "fullscreen"（全画面・プレゼン中）/ "fullscreen_grace"（解除後の猶予中）/
+    /// "resume_grace"（スリープ復帰後の猶予中）/ "no_candidate"
     pub reason: String,
     pub state: YuukoNotificationState,
 }
@@ -395,6 +689,17 @@ pub struct RequestYuukoNotificationResult {
 /// 保存用タイムスタンプ文字列を生成する（UTC・他サービスと同形式）。
 fn format_timestamp(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
+}
+
+/// 日次上限の日付キー（YYYY-MM-DD）を `tz` のローカル日付で返す。
+/// news_scheduler の local_today() と同じくローカル日付で日を区切り、
+/// UTC 日付で区切ると JST 09:00 に上限がリセットされてしまう問題を避ける。
+/// 友情ポイントの日次上限（friendship_service）も同じ日付境界にそろえるため crate 内で共有する。
+pub(crate) fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> String {
+    now.with_timezone(tz)
+        .date_naive()
+        .format(DATE_FORMAT)
+        .to_string()
 }
 
 /// 保存済みRFC3339文字列を UTC DateTime へ復元する。
@@ -449,7 +754,9 @@ fn is_within_notification_time_range(
     }
 }
 
-fn is_within_any_notification_time_range<'a>(
+/// 現在時刻（0時からの分）が通知の時間帯のいずれかに入っているか。
+/// ニュースの定期取得（news_scheduler）も「通知の時間帯内だけ取得する」判定に同じ規則を使う。
+pub(crate) fn is_within_any_notification_time_range<'a>(
     current_minutes: u32,
     time_ranges: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> bool {
@@ -462,7 +769,7 @@ fn is_within_any_notification_time_range<'a>(
 mod tests {
     use super::*;
     use crate::domain::settings::PersistedSettings;
-    use chrono::{Local, TimeZone};
+    use chrono::{FixedOffset, Local};
 
     fn article(
         id: &str,
@@ -480,6 +787,7 @@ mod tests {
             is_favorite,
             read_state,
             recommendation_score: score,
+            summary_state: Default::default(),
         }
     }
 
@@ -547,8 +855,40 @@ mod tests {
     }
 
     #[test]
+    fn handle_click_is_noop_while_leaving() {
+        let mut state = state_with_notification();
+        state.handle_click();
+        state.handle_click();
+        assert_eq!(state.state, YuukoResidentState::Leaving);
+        let before = state.clone();
+
+        // 退場中のクリックはプレビューへ戻さず、何も変えない。
+        assert!(!state.handle_click());
+        assert_eq!(state.state, YuukoResidentState::Leaving);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+    }
+
+    /// テスト用の固定タイムゾーン（JST, +09:00）。実行端末のタイムゾーンに依存させない。
+    fn jst() -> FixedOffset {
+        FixedOffset::east_opt(9 * 3600).unwrap()
+    }
+
+    /// JST の壁時計時刻を UTC に変換する。
+    fn jst_at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        jst()
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    const ALL_DAY: [(&str, &str); 1] = [("00:00", "23:59")];
+
+    #[test]
     fn can_notify_blocks_when_daily_limit_reached_and_resets_next_day() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = jst_at(2026, 6, 9, 12, 0);
         let state = PersistedYuukoState {
             daily_notification: DailyNotificationCount {
                 date: "2026-06-09".to_string(),
@@ -557,15 +897,144 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         assert_eq!(
-            state.can_notify(now, 3, [("00:00", "23:59")]),
+            state.can_notify_in(&jst(), now, 3, ALL_DAY),
             NotificationGate::DailyLimitReached
         );
         // 翌日は日次カウントがリセットされ通知可能。
-        let tomorrow = Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
+        let tomorrow = jst_at(2026, 6, 10, 9, 0);
         assert_eq!(
-            state.can_notify(tomorrow, 3, [("00:00", "23:59")]),
+            state.can_notify_in(&jst(), tomorrow, 3, ALL_DAY),
             NotificationGate::Allowed
         );
+    }
+
+    #[test]
+    fn daily_limit_resets_at_local_midnight_not_utc_midnight() {
+        let mut state = PersistedYuukoState::default();
+        // JST 6/9 に上限（3回）まで通知する。最後は 22:00。
+        for (i, hour) in [10, 16, 22].into_iter().enumerate() {
+            state.mark_notified_in(
+                &jst(),
+                jst_at(2026, 6, 9, hour, 0),
+                article(&format!("a{i}"), ArticleReadState::Unread, false, 0.9),
+            );
+            state.clear_active_notification();
+        }
+        assert_eq!(state.daily_notification.date, "2026-06-09");
+        assert_eq!(state.daily_notification.count, 3);
+
+        // ローカル深夜0時の直前は上限到達のまま。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 9, 23, 59), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+        // ローカル深夜0時を越えたらリセット（UTC ではまだ 6/9 15:00 で日付は変わっていない）。
+        let after_midnight = jst_at(2026, 6, 10, 0, 0);
+        assert_eq!(after_midnight.format(DATE_FORMAT).to_string(), "2026-06-09");
+        assert_eq!(
+            state.can_notify_in(&jst(), after_midnight, 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+
+        // 深夜0時以降の通知は新しいローカル日の1回目として数える。
+        state.mark_notified_in(
+            &jst(),
+            after_midnight,
+            article("b0", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 1);
+    }
+
+    #[test]
+    fn daily_limit_does_not_reset_at_jst_nine_oclock() {
+        // JST 6/10 00:30〜02:30 に3回通知（UTC 日付はすべて 6/9）。
+        let mut state = PersistedYuukoState::default();
+        for (i, hour) in [0, 1, 2].into_iter().enumerate() {
+            state.mark_notified_in(
+                &jst(),
+                jst_at(2026, 6, 10, hour, 30),
+                article(&format!("a{i}"), ArticleReadState::Unread, false, 0.9),
+            );
+            state.clear_active_notification();
+        }
+        // UTC 日付が 6/10 に変わる JST 09:00 を過ぎても、同じローカル日なら上限のまま。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 10, 9, 30), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+    }
+
+    #[test]
+    fn legacy_utc_date_does_not_over_allow_within_same_local_day() {
+        // 旧バージョンが JST 6/10 07:30（= UTC 6/9 22:30）に3回目を記録した状態。
+        // date は UTC 日付 "2026-06-09" で保存されている。
+        let state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 3,
+            },
+            last_notified_at: Some("2026-06-09T22:30:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // 同じローカル日（JST 6/10）のうちは date 文字列が違っても上限を維持する。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 10, 10, 0), 3, ALL_DAY),
+            NotificationGate::DailyLimitReached
+        );
+        // 翌ローカル日には必ずリセットされ、永久停止にならない。
+        assert_eq!(
+            state.can_notify_in(&jst(), jst_at(2026, 6, 11, 0, 0), 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+    }
+
+    #[test]
+    fn legacy_utc_date_from_previous_local_day_is_reset() {
+        // 旧バージョンが JST 6/9 12:00（= UTC 6/9 03:00）に3回目を記録した状態。
+        let mut state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 3,
+            },
+            last_notified_at: Some("2026-06-09T03:00:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // JST 6/10 07:00 は UTC ではまだ 6/9 だが、ローカルでは翌日なので通知できる。
+        let now = jst_at(2026, 6, 10, 7, 0);
+        assert_eq!(
+            state.can_notify_in(&jst(), now, 3, ALL_DAY),
+            NotificationGate::Allowed
+        );
+        // 通知時にローカル日付へ正規化され、1回目として数える。
+        state.mark_notified_in(
+            &jst(),
+            now,
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 1);
+    }
+
+    #[test]
+    fn legacy_count_is_kept_when_marking_within_same_local_day() {
+        // 旧バージョンが JST 6/10 06:00（= UTC 6/9 21:00）に1回目を記録した状態。
+        let mut state = PersistedYuukoState {
+            daily_notification: DailyNotificationCount {
+                date: "2026-06-09".to_string(),
+                count: 1,
+            },
+            last_notified_at: Some("2026-06-09T21:00:00Z".to_string()),
+            ..PersistedYuukoState::default()
+        };
+        // 同じローカル日の2回目は 1 に戻さず 2 として数える（上限超過を防ぐ）。
+        state.mark_notified_in(
+            &jst(),
+            jst_at(2026, 6, 10, 8, 0),
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
+        assert_eq!(state.daily_notification.date, "2026-06-10");
+        assert_eq!(state.daily_notification.count, 2);
     }
 
     #[test]
@@ -588,9 +1057,13 @@ mod tests {
 
     #[test]
     fn mark_notified_records_count_cooltime_and_introduced() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = jst_at(2026, 6, 9, 12, 0);
         let mut state = PersistedYuukoState::default();
-        state.mark_notified(now, article("a1", ArticleReadState::Unread, false, 0.9));
+        state.mark_notified_in(
+            &jst(),
+            now,
+            article("a1", ArticleReadState::Unread, false, 0.9),
+        );
 
         assert_eq!(state.daily_notification.count, 1);
         assert_eq!(state.daily_notification.date, "2026-06-09");
@@ -642,6 +1115,176 @@ mod tests {
             state.can_notify(after_dismiss_window, 3, [("00:00", "23:59")]),
             NotificationGate::CoolingDown
         );
+    }
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn reward_notice_message_uses_master_name_or_count() {
+        assert_eq!(
+            reward_notice_message(&ids(&["theme_001"])),
+            "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。"
+        );
+        assert_eq!(
+            reward_notice_message(&ids(&["theme_001", "theme_002"])),
+            "新しいテーマが2つ届いたよ！カスタマイズで切り替えられるよ。"
+        );
+        // マスタに無い ID の文字列は文言に入れない。
+        let unknown = reward_notice_message(&ids(&["<b>evil</b>"]));
+        assert_eq!(
+            unknown,
+            "新しいテーマが届いたよ！カスタマイズで切り替えられるよ。"
+        );
+    }
+
+    #[test]
+    fn mark_reward_notified_counts_toward_daily_limit_and_cooltime() {
+        let tz = jst();
+        let now = jst_at(2026, 10, 9, 10, 0);
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified_in(&tz, now, 3, ids(&["theme_001"]));
+
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        assert!(state.has_active_reward_notice());
+        // ニュース通知ではない（ニュースの active 判定・紹介済みには含めない）。
+        assert!(!state.has_active_notification());
+        assert!(state.introduced_article_ids.is_empty());
+        assert!(state.preview_article.is_none() && state.current_article_id.is_none());
+        assert_eq!(
+            state.balloon_text.as_deref(),
+            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
+        );
+        let reward = state.reward_notification.clone().unwrap();
+        assert!(reward.pending);
+        assert_eq!(reward.rank, 3);
+        assert_eq!(reward.reward_ids, ids(&["theme_001"]));
+        // 通知回数とクールタイム基点はニュース通知と同じく記録する（§6.3 / §6.4）。
+        assert_eq!(state.daily_notification.count, 1);
+        assert_eq!(
+            state.can_notify_in(&tz, now + Duration::minutes(30), 3, [("00:00", "23:59")]),
+            NotificationGate::CoolingDown
+        );
+        assert_eq!(
+            state.can_notify_in(&tz, now + Duration::minutes(61), 1, [("00:00", "23:59")]),
+            NotificationGate::DailyLimitReached
+        );
+
+        let dto = state.to_notification_state();
+        assert_eq!(dto.state, YuukoResidentState::RewardNotifying);
+        assert!(dto.has_notification);
+    }
+
+    #[test]
+    fn dismiss_and_ignore_remove_reward_notice_display_and_set_cooldown() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        for ignore in [false, true] {
+            let mut state = PersistedYuukoState::default();
+            state.mark_reward_notified(now, 3, ids(&["theme_001"]));
+            if ignore {
+                state.mark_ignored(now);
+            } else {
+                state.dismiss_notification(now);
+            }
+            // 表示だけを外す（未確認の正は rewards.json で、ここでは確認済みにしない）。
+            assert_eq!(state.state, YuukoResidentState::Waiting);
+            assert!(state.reward_notification.is_none());
+            assert!(state.balloon_text.is_none());
+            assert!(state.confirmed_reward_ids.is_empty());
+            assert!(state.cooldown_until.is_some(), "ignore={ignore}");
+        }
+    }
+
+    #[test]
+    fn sync_reward_notice_drops_rewards_confirmed_elsewhere() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
+
+        // 変化なしなら保存不要。
+        assert!(!state.sync_reward_notice(&ids(&["theme_001", "theme_002"])));
+        // 一部が確認済みになったら残りで文言を作り直す。
+        assert!(state.sync_reward_notice(&ids(&["theme_002"])));
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(
+            state.balloon_text.as_deref(),
+            Some("新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。")
+        );
+        // すべて確認済みなら通知自体を外す（二重に知らせない）。クールタイムは付けない。
+        assert!(state.sync_reward_notice(&[]));
+        assert_eq!(state.state, YuukoResidentState::Waiting);
+        assert!(state.reward_notification.is_none());
+        assert!(state.balloon_text.is_none());
+        assert!(state.cooldown_until.is_none());
+        assert!(!state.sync_reward_notice(&[]));
+    }
+
+    #[test]
+    fn sync_reward_notice_refreshes_stale_reward_names_in_saved_text() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 3, ids(&["theme_001"]));
+        // 仮名時代に保存された文言が残っている状態を再現する。
+        let stale = "新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
+        state.reward_notification.as_mut().unwrap().message = stale.to_string();
+        state.balloon_text = Some(stale.to_string());
+
+        // 件数は同じでも、文言を現在の表示名で作り直して保存対象にする。
+        assert!(state.sync_reward_notice(&ids(&["theme_001"])));
+        let expected = "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(
+            state.reward_notification.as_ref().unwrap().message,
+            expected
+        );
+        assert_eq!(state.balloon_text.as_deref(), Some(expected));
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        // 揃った後は変化なし（保存不要）。
+        assert!(!state.sync_reward_notice(&ids(&["theme_001"])));
+    }
+
+    #[test]
+    fn confirming_reward_notice_returns_to_waiting_without_reward_text() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 3, ids(&["theme_001"]));
+        state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
+        assert_eq!(state.state, YuukoResidentState::Waiting);
+        assert!(state.reward_notification.is_none());
+        assert!(state.balloon_text.is_none());
+    }
+
+    #[test]
+    fn partially_confirming_reward_notice_rebuilds_the_message() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
+        state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
+
+        let expected = "新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(state.state, YuukoResidentState::RewardNotifying);
+        assert_eq!(state.balloon_text.as_deref(), Some(expected));
+        let reward = state.reward_notification.unwrap();
+        assert_eq!(reward.reward_ids, ids(&["theme_002"]));
+        assert_eq!(reward.message, expected);
+    }
+
+    #[test]
+    fn nickname_is_applied_to_reward_notice_message() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        let mut state = PersistedYuukoState::default();
+        state.mark_reward_notified(now, 3, ids(&["theme_001"]));
+        let mut dto = state.to_notification_state();
+        dto.apply_nickname("ゆう");
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        assert_eq!(dto.balloon_text.as_deref(), Some(expected));
+        assert_eq!(dto.reward_notification.unwrap().message, expected);
+        // 保存状態には焼き込まない。
+        assert!(!state
+            .reward_notification
+            .unwrap()
+            .message
+            .starts_with("ゆう"));
     }
 
     #[test]
@@ -843,6 +1486,121 @@ mod tests {
         assert_eq!(
             state.can_notify(now, 3, ranges),
             NotificationGate::OutsideTimeRange
+        );
+    }
+
+    #[test]
+    fn long_summary_is_truncated_by_chars_with_ellipsis() {
+        let long = "あ".repeat(PREVIEW_SUMMARY_MAX_CHARS + 20);
+        let short = short_preview_summary(&long).unwrap();
+        assert_eq!(short.chars().count(), PREVIEW_SUMMARY_MAX_CHARS);
+        assert!(short.ends_with('…'));
+        assert!(short.starts_with(&"あ".repeat(PREVIEW_SUMMARY_MAX_CHARS - 1)));
+
+        // ちょうど上限なら切らない。前後の空白は落とす。
+        let exact = "い".repeat(PREVIEW_SUMMARY_MAX_CHARS);
+        assert_eq!(
+            short_preview_summary(&format!("  {exact}\n")),
+            Some(exact.clone())
+        );
+        // 切り詰め位置の直前の空白は省略記号の前に残さない。
+        let spaced = format!(
+            "{} {}",
+            "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2),
+            "え".repeat(10)
+        );
+        assert_eq!(
+            short_preview_summary(&spaced),
+            Some(format!("{}…", "う".repeat(PREVIEW_SUMMARY_MAX_CHARS - 2)))
+        );
+    }
+
+    #[test]
+    fn blank_summary_is_omitted() {
+        assert_eq!(short_preview_summary(""), None);
+        assert_eq!(short_preview_summary(" \n\t "), None);
+    }
+
+    #[test]
+    fn notification_state_never_carries_short_summary_from_persisted_state() {
+        // 短い要約は永続化せず、サービス層が記事から読み直して詰める。
+        assert_eq!(
+            PersistedYuukoState::default()
+                .to_notification_state()
+                .preview_short_summary,
+            None
+        );
+    }
+
+    #[test]
+    fn balloon_text_is_unchanged_without_nickname() {
+        for nickname in ["", "   ", "\n\t", "\u{1b}"] {
+            assert_eq!(
+                personalize_balloon_text("気になるニュースを見つけたよ。", nickname),
+                "気になるニュースを見つけたよ。"
+            );
+        }
+    }
+
+    #[test]
+    fn balloon_text_is_prefixed_with_nickname_as_entered() {
+        // 敬称は付けず、入力どおりに使う（「さん」込みの入力もそのまま）。
+        assert_eq!(
+            personalize_balloon_text("気になるニュースを見つけたよ。", "ゆう"),
+            "ゆう、気になるニュースを見つけたよ。"
+        );
+        assert_eq!(
+            personalize_balloon_text("気になるニュースを見つけたよ。", "  ゆうさん "),
+            "ゆうさん、気になるニュースを見つけたよ。"
+        );
+    }
+
+    #[test]
+    fn display_nickname_neutralizes_html_and_control_chars() {
+        assert_eq!(
+            display_nickname("<b>ゆう</b>").as_deref(),
+            Some("＜b>ゆう＜/b>")
+        );
+        // 旧データに残り得る改行・ESC などの制御文字は除く。
+        assert_eq!(
+            display_nickname("ゆう\nこ\u{1b}").as_deref(),
+            Some("ゆうこ")
+        );
+        let personalized = personalize_balloon_text("やあ", "<script>x</script>");
+        assert!(!crate::util::text_safety::contains_html_tag(&personalized));
+    }
+
+    #[test]
+    fn display_nickname_strips_bidi_and_zero_width_chars() {
+        let nickname = "\u{202E}ゆ\u{2066}う\u{200B}\u{200F}\u{FEFF}さん\u{2069}\u{202A}";
+        assert_eq!(display_nickname(nickname).as_deref(), Some("ゆうさん"));
+        // それらだけの呼び名は未設定と同じ扱い（文言を変えない）。
+        assert_eq!(display_nickname("\u{200B}\u{FEFF}\u{202E}"), None);
+        assert_eq!(personalize_balloon_text("やあ", "\u{200B}\u{2067}"), "やあ");
+    }
+
+    #[test]
+    fn display_nickname_is_limited_to_32_chars() {
+        let long = "あ".repeat(NICKNAME_MAX_CHARS + 5);
+        let name = display_nickname(&long).unwrap();
+        assert_eq!(name.chars().count(), NICKNAME_MAX_CHARS);
+    }
+
+    #[test]
+    fn apply_nickname_leaves_missing_balloon_text_alone() {
+        let mut state = PersistedYuukoState {
+            balloon_text: None,
+            ..PersistedYuukoState::default()
+        }
+        .to_notification_state();
+        state.apply_nickname("ゆう");
+        assert_eq!(state.balloon_text, None);
+
+        let mut state = PersistedYuukoState::default().to_notification_state();
+        state.apply_nickname("ゆう");
+        assert_eq!(
+            state.balloon_text.as_deref(),
+            Some("ゆう、今日もニュースを見つけたら声をかけるね。")
         );
     }
 }

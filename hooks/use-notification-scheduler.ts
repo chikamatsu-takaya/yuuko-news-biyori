@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { listenNewsRefreshed } from "@/lib/tauri/news";
 import {
   getYuukoNotificationState,
+  isActiveRewardNotice,
   requestYuukoNotification,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
@@ -35,13 +37,14 @@ type UseNotificationSchedulerOptions = {
   canGenerateCandidates?: boolean;
 };
 
-// ニュース通知が「表示中（active）」とみなせる状態（Rust has_active_notification と同基準）。
-// reward 専用の hasNotification は使わない。
+// 通知が「表示中（active）」とみなせる状態（Rust has_active_notification / has_active_reward_notice と同基準）。
+// ニュースは紹介対象あり、報酬通知は未確認の報酬あり。reward 専用の hasNotification は使わない。
 const ACTIVE_NEWS_STATES = ["Appearing", "BalloonVisible", "PreviewVisible"];
-const isActiveNewsState = (state: YuukoNotificationState | null): boolean =>
-  !!state &&
-  ACTIVE_NEWS_STATES.includes(state.state) &&
-  (Boolean(state.previewArticle) || Boolean(state.currentArticleId));
+const isActiveYuukoState = (state: YuukoNotificationState | null): boolean =>
+  isActiveRewardNotice(state) ||
+  (!!state &&
+    ACTIVE_NEWS_STATES.includes(state.state) &&
+    (Boolean(state.previewArticle) || Boolean(state.currentArticleId)));
 
 /**
  * ゆうこの通知状態をアプリ起動中に一定間隔でチェックするフック。
@@ -57,6 +60,12 @@ const isActiveNewsState = (state: YuukoNotificationState | null): boolean =>
  *   あれば表示する（無ければ通常の request に進む）。これにより余分な request 二重実行も避ける。
  *
  * いずれのモードでも 1tick につき command は1回（取得経路と生成経路を二重化しない）。
+ *
+ * ニュース取得完了（Rust の news-refreshed イベント）時の即時実行（設計書 §4.2 新着ニュース取得後）:
+ * - 生成モードでのみ購読し、受信時に定期 tick と同じ処理を1回だけ実行する。
+ *   inFlight / canGenerateCandidates / 再表示時の get 先行のガードをそのまま通すため、
+ *   実行中なら新たな request は始めず、非表示中は何もしない（キューにも積まない。
+ *   再表示後は既存の resurface→request の流れで拾われる）。
  */
 export const useNotificationScheduler = ({
   intervalMs = 300000,
@@ -77,6 +86,8 @@ export const useNotificationScheduler = ({
   const visibilityGenerationRef = useRef(0);
   // 非表示→表示の直後に、まず get で既存 active を拾い直すためのフラグ。
   const resurfaceNeededRef = useRef(false);
+  // 現在の poll 処理。イベント購読を poll effect の再実行（可視性変化）から切り離すために ref で持つ。
+  const pollRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     onStateChangeRef.current = onStateChange;
@@ -140,7 +151,7 @@ export const useNotificationScheduler = ({
               if (
                 canGenerateCandidatesRef.current &&
                 mountedRef.current &&
-                isActiveNewsState(state)
+                isActiveYuukoState(state)
               ) {
                 onStateChangeRef.current?.(state);
               }
@@ -170,7 +181,7 @@ export const useNotificationScheduler = ({
         let resurfaced = false;
         try {
           const state = await getPromise;
-          if (canAdopt(generationAtStart) && isActiveNewsState(state)) {
+          if (canAdopt(generationAtStart) && isActiveYuukoState(state)) {
             onStateChangeRef.current?.(state);
             resurfaced = true;
           }
@@ -223,6 +234,8 @@ export const useNotificationScheduler = ({
       }
     };
 
+    pollRef.current = pollNotificationState;
+
     // マウント時に初回チェックを行う。
     void pollNotificationState();
 
@@ -232,9 +245,45 @@ export const useNotificationScheduler = ({
 
     return () => {
       mountedRef.current = false;
+      if (pollRef.current === pollNotificationState) {
+        pollRef.current = null;
+      }
       clearInterval(timerId);
     };
     // canGenerateCandidates が false→true に変わると effect が再実行され、
     // 再表示直後の get 先行（resurface）→必要なら request の流れになる。
   }, [intervalMs, generateCandidates, canGenerateCandidates]);
+
+  // ニュース取得完了イベントで、次の定期 tick を待たずに1回だけ poll する（生成モードのみ）。
+  useEffect(() => {
+    if (!generateCandidates) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    listenNewsRefreshed(() => {
+      if (disposed) {
+        return;
+      }
+      void pollRef.current?.();
+    })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((error) => {
+        // 購読できなくても定期ポーリングで候補生成は続くため、警告だけ残す。
+        console.warn(
+          "[NotificationScheduler] ニュース取得完了イベントを購読できませんでした:",
+          error
+        );
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [generateCandidates]);
 };

@@ -14,5 +14,10 @@ use crate::state::AppState;
 #[tauri::command]
 pub async fn refresh_news(state: State<'_, AppState>) -> CommandResult<RefreshNewsResult> {
     let news_service = state.news_service.clone();
-    news_service.refresh().await.map_err(CommandError::from)
+    let result = news_service.refresh().await.map_err(CommandError::from)?;
+    // 手動取得でも定期取得と同じく自動要約キューへ並べ直す（無効時は何もしない）。
+    // 記事一覧の読み込みを伴うため別スレッドで行い、取得結果の返却は待たせない。
+    let auto_summary_queue = state.auto_summary_queue.clone();
+    tauri::async_runtime::spawn_blocking(move || auto_summary_queue.enqueue_unsummarized());
+    Ok(result)
 }

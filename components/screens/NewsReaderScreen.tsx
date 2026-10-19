@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
@@ -37,10 +39,12 @@ import {
   generateArticleSummary,
   getArticleDetail,
   getRecommendedArticles,
+  openOriginalArticle,
   updateArticleFavorite,
   type ArticleDetailDto as TauriArticleDetail,
   type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
   type ArticleSummaryDto as TauriArticleSummary,
+  type ArticleSummaryState,
 } from "@/lib/tauri/articles";
 import {
   explainSelectedTerm,
@@ -50,7 +54,23 @@ import {
 } from "@/lib/tauri/dictionary";
 import { recordFriendshipEvent } from "@/lib/tauri/yuuko";
 import { RankUpDialog } from "@/components/dialogs/RankUpDialog";
+import {
+  ArticleTagList,
+  normalizeArticleTags,
+} from "@/components/news/ArticleTagList";
 import { useToast } from "@/hooks/use-toast";
+// 範囲選択→「解説」ボタン表示の純粋ロジック（DOM非依存・node --test 済み）。
+import {
+  shouldShowExplainButton,
+  resolveAnchorRect,
+  clampExplainButtonPosition,
+  isSelectedTextTooLong,
+  SELECTION_TOO_LONG_MESSAGE,
+  readCommandErrorCode,
+  termExplainFailureMessage,
+} from "@/lib/explain-selection.mjs";
+// 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
+import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
 
 type NavigationItem = {
   id: string;
@@ -77,10 +97,21 @@ type ReaderArticleDetail = {
   summary: string;
   yuukoExplanation: string;
   highlightedTerms: SupportTerm[];
+  // 要点（何が起きたか）と注目ポイント（なぜ面白いか・何を学べるか）は別々にAIで作る（判断台帳 D18）。
   keyPoints: string[];
-  attentionPoint: string;
+  focusPoints: string[];
   yuukoThoughts: string;
+  // 要約済みか。false のときだけ「要約はまだ準備中」表示と「要約を作成」を出す。
+  // ブラウザプレビュー用のサンプル記事は省略（＝要約済み扱い）で従来表示を保つ。
+  isSummarized?: boolean;
+  // 自動要約の状態（判断台帳 D17）。未要約時の表示（要約中／作り直し／作成）の出し分けに使う。
+  summaryState?: ArticleSummaryState;
+  // 記事のタグ（表示のみ）。サンプル記事・タグの無い記事では省略または空で、何も表示しない。
+  tags?: string[];
 };
+
+// 記事詳細の取得状態。Tauri で実記事を読み込み中・失敗のときは、サンプル記事を見せずに状態表示へ切り替える。
+type ArticleLoadState = "loading" | "ready" | "error";
 
 type RelatedArticle = {
   id: string;
@@ -106,19 +137,19 @@ const fallbackSupportTerms: SupportTerm[] = [
     id: "article-001-term-0",
     term: "生成AI",
     explanation:
-      "文章や画像などを自動生成するAI全般を指す言葉です。個人利用だけでなく、業務支援への活用も広がっています。",
+      "文章や画像などを自動生成するAI全般のことだよ。個人利用だけでなく、業務支援への活用も広がっているんだ。",
   },
   {
     id: "article-001-term-1",
     term: "資金調達",
     explanation:
-      "企業が事業拡大のために投資家や金融機関から資金を集めることです。",
+      "企業が事業拡大のために投資家や金融機関から資金を集めることだよ。",
   },
   {
     id: "article-001-term-2",
     term: "業務自動化",
     explanation:
-      "定型業務や繰り返し作業を仕組み化し、手間を減らして効率化する考え方です。",
+      "定型業務や繰り返し作業を仕組み化し、手間を減らして効率化する考え方だよ。",
   },
 ];
 
@@ -135,17 +166,18 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "生成AIを活用するスタートアップへの投資が再び活発化し、業務支援や自動化領域の案件に注目が集まっています。",
     yuukoExplanation:
-      "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると理解しやすいです。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっています。",
+      "この記事は、生成AIそのものの新しさよりも、どの業務に役立てられているかを見ると分かりやすいよ。企業が導入効果を数字で示せるかどうかが評価の分かれ目になっているんだ。",
     highlightedTerms: fallbackSupportTerms,
     keyPoints: [
       "投資対象が研究寄りから業務課題の解決寄りへ移っている",
       "導入効果を定量化できるサービスが評価されやすい",
       "既存業務フローへ自然に組み込める点が差別化要因になっている",
     ],
-    attentionPoint:
-      "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると理解しやすいテーマです。",
+    focusPoints: [
+      "派手な技術トレンドだけでなく、現場で本当に使い続けられる仕組みかどうかを見ると分かりやすいテーマだよ。",
+    ],
     yuukoThoughts:
-      "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうですね。",
+      "AIそのもののすごさより、使ったあとに何が楽になるのかが大切そうだね。",
   },
   {
     id: "article-002",
@@ -159,25 +191,25 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "国内SaaS企業が中堅企業向けの業務改善プログラムを発表し、導入支援と教育体制をセットで提供する方針を示しました。",
     yuukoExplanation:
-      "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントです。現場で定着するかどうかが成果を大きく左右します。",
+      "製品そのものの機能より、導入後の支援体制まで含めて提供するのが今回のポイントだよ。現場で定着するかどうかが成果を大きく左右するんだ。",
     highlightedTerms: [
       {
         id: "article-002-term-0",
         term: "SaaS",
         explanation:
-          "インターネット経由で利用するソフトウェア提供形態です。導入しやすさと運用しやすさが特徴です。",
+          "インターネット経由で利用するソフトウェア提供形態だよ。導入しやすさと運用しやすさが特徴なんだ。",
       },
       {
         id: "article-002-term-1",
         term: "導入支援",
         explanation:
-          "サービスを使い始める際の設定や教育、現場への定着を支える取り組みです。",
+          "サービスを使い始める際の設定や教育、現場への定着を支える取り組みのことだよ。",
       },
       {
         id: "article-002-term-2",
         term: "業務改善",
         explanation:
-          "仕事の流れを見直して、時間や手間を減らしながら成果を上げることです。",
+          "仕事の流れを見直して、時間や手間を減らしながら成果を上げることだよ。",
       },
     ],
     keyPoints: [
@@ -185,10 +217,11 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "中堅企業の現場定着を重視した設計になっている",
       "単発導入ではなく継続改善を前提にしている",
     ],
-    attentionPoint:
-      "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが重要です。",
+    focusPoints: [
+      "使い始めの支援だけでなく、現場に定着するまでの運用をどう支えるかが大事だよ。",
+    ],
     yuukoThoughts:
-      "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうですね。",
+      "便利な仕組みでも、使い続けられるように伴走してくれるかが大切そうだね。",
   },
   {
     id: "article-003",
@@ -202,25 +235,25 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     summary:
       "量子コンピュータの安定運用に向けて、従来より少ない負荷で誤りを検知・補正できる新手法が報告されました。",
     yuukoExplanation:
-      "量子コンピュータは速さだけでなく、誤差に弱い点が課題です。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいです。",
+      "量子コンピュータは速さだけでなく、誤差に弱い点が課題なんだ。今回の記事は『どれだけ正確に動かし続けられるか』に注目すると読みやすいよ。",
     highlightedTerms: [
       {
         id: "article-003-term-0",
         term: "量子コンピュータ",
         explanation:
-          "量子力学の性質を利用して計算を行う新しい計算機の考え方です。",
+          "量子力学の性質を利用して計算を行う新しい計算機の考え方だよ。",
       },
       {
         id: "article-003-term-1",
         term: "誤り訂正",
         explanation:
-          "計算中の誤差を検知・補正して、正しい結果に近づけるための仕組みです。",
+          "計算中の誤差を検知・補正して、正しい結果に近づけるための仕組みだよ。",
       },
       {
         id: "article-003-term-2",
         term: "研究成果",
         explanation:
-          "研究や実験によって得られた、新しい知見や結果のことです。",
+          "研究や実験によって得られた、新しい知見や結果のことだよ。",
       },
     ],
     keyPoints: [
@@ -228,10 +261,11 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
       "安定運用への実用面で前進があった",
       "研究成果は今後の実装方式に影響する可能性がある",
     ],
-    attentionPoint:
-      "速度の話題に見えても、実際には安定して正しく動かす工夫が中心です。",
+    focusPoints: [
+      "速度の話題に見えても、実際には安定して正しく動かす工夫が中心だよ。",
+    ],
     yuukoThoughts:
-      "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいですね。",
+      "難しく見えても、計算を安定させるための工夫だと考えると掴みやすいね。",
   },
 ];
 
@@ -308,18 +342,14 @@ const getFallbackRelatedArticles = (articleId?: string): RelatedArticle[] => {
 const buildSupportTerms = (
   articleId: string,
   keywordCandidates: string[]
-): SupportTerm[] => {
-  const normalizedKeywords =
-    keywordCandidates.length > 0
-      ? keywordCandidates
-      : fallbackSupportTerms.map((term) => term.term);
-
-  return normalizedKeywords.map((term, index) => ({
+): SupportTerm[] =>
+  // 実記事の候補語が空でもサンプル語（「生成AI」等）で埋めない（判断台帳 D11: 候補語は自動生成しない）。
+  // 空のときは「用語サポート」側で範囲選択の案内を出す。
+  keywordCandidates.map((term, index) => ({
     id: `${articleId}-term-${index}`,
     term,
     explanation: defaultTermExplanation(term),
   }));
-};
 
 const buildFallbackDictionaryEntry = (
   currentArticle: Pick<ReaderArticleDetail, "id" | "title">,
@@ -328,11 +358,12 @@ const buildFallbackDictionaryEntry = (
   entryId: `${currentArticle.id}-${term.id}`,
   keyText: term.term,
   type: "term",
-  shortExplanation: `「${term.term}」はこの記事を理解するためのキーワードです。`,
+  shortExplanation: `「${term.term}」はこの記事を理解するためのキーワードだよ。`,
   detailExplanation: term.explanation || defaultTermExplanation(term.term),
   relatedArticleId: currentArticle.id,
   relatedArticleTitle: currentArticle.title,
   isStarred: false,
+  savedInDictionary: false,
 });
 
 const mapTauriArticleToUi = (
@@ -342,6 +373,10 @@ const mapTauriArticleToUi = (
     article.articleId,
     article.keywordCandidates
   );
+  // 要約済みフラグ（status.summarized）は summaryState=done で届く。
+  // 未要約の記事では summary に本文抜粋が入るため要約として出さず、
+  // 未生成の項目はサンプル記事や抜粋で埋めずに空のまま渡して「まだ作成されていない」表示にする。
+  const isSummarized = article.summaryState === "done";
 
   return {
     id: article.articleId,
@@ -352,22 +387,15 @@ const mapTauriArticleToUi = (
     categoryColor: toCategoryColor(article.genre),
     isFavorite: article.isFavorite,
     externalUrl: article.originalUrl,
-    summary: article.summary ?? fallbackArticle.summary,
-    yuukoExplanation:
-      article.yuukoExplanation ??
-      article.summary ??
-      fallbackArticle.yuukoExplanation,
+    summary: isSummarized ? (article.summary ?? "") : "",
+    yuukoExplanation: article.yuukoExplanation ?? "",
     highlightedTerms,
-    keyPoints:
-      article.focusPoints.length > 0
-        ? article.focusPoints
-        : fallbackArticle.keyPoints,
-    attentionPoint:
-      article.focusPoints[1] ??
-      article.summary ??
-      fallbackArticle.attentionPoint,
-    yuukoThoughts:
-      article.yuukoComment ?? article.summary ?? fallbackArticle.yuukoThoughts,
+    keyPoints: article.keyPoints,
+    focusPoints: article.focusPoints,
+    yuukoThoughts: article.yuukoComment ?? "",
+    isSummarized,
+    summaryState: article.summaryState,
+    tags: normalizeArticleTags(article.tags),
   };
 };
 
@@ -446,18 +474,203 @@ function TermPopup({
   onClose: () => void;
   onRetry?: () => void;
 }) {
+  // 中央配置からのドラッグオフセット（px）。位置は永続化しない。
+  // 閉じる/記事切替は再マウントで初期化、別用語への切替は term 変更の effect で初期化する。
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const [offset, setOffset] = React.useState({ x: 0, y: 0 });
+  const offsetRef = React.useRef(offset);
+  // ドラッグ状態（pointerId・開始座標・開始オフセット）。差分積み上げではなく開始基準で毎回算出する。
+  const dragStateRef = React.useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startOffsetX: number;
+    startOffsetY: number;
+  } | null>(null);
+
+  const applyOffset = React.useCallback((next: { x: number; y: number }) => {
+    offsetRef.current = next;
+    setOffset(next);
+  }, []);
+
+  // 希望オフセットを main 表示領域内（8px 余白）へ補正する。main と popup の実サイズを基準にする。
+  const clampToMain = React.useCallback(
+    (rawX: number, rawY: number): { x: number; y: number } => {
+      const rootEl = rootRef.current;
+      const mainEl = rootEl?.closest("main") ?? null;
+      if (!rootEl || !mainEl) {
+        return { x: rawX, y: rawY };
+      }
+      const mainRect = mainEl.getBoundingClientRect();
+      const popupRect = rootEl.getBoundingClientRect();
+      const { dx, dy } = clampTermPopupOffset({
+        offsetX: rawX,
+        offsetY: rawY,
+        mainWidth: mainRect.width,
+        mainHeight: mainRect.height,
+        popupWidth: popupRect.width,
+        popupHeight: popupRect.height,
+        margin: 8,
+      });
+      return { x: dx, y: dy };
+    },
+    []
+  );
+
+  // 位置は永続化しない。中央初期位置への復帰は、呼び出し側の key（記事ID＋用語）で
+  // 再マウントさせて実現する（閉じて再開・別用語・記事切替のいずれでも新規マウント＝中央）。
+
+  // resize と高さ変化（取得中→成功など）で表示領域内へ再補正する。リスナー/Observerは必ず解除する。
+  React.useEffect(() => {
+    const reclamp = () => {
+      applyOffset(clampToMain(offsetRef.current.x, offsetRef.current.y));
+    };
+    window.addEventListener("resize", reclamp);
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined" && rootRef.current) {
+      observer = new ResizeObserver(() => reclamp());
+      observer.observe(rootRef.current);
+    }
+    return () => {
+      window.removeEventListener("resize", reclamp);
+      observer?.disconnect();
+    };
+  }, [applyOffset, clampToMain]);
+
+  // アンマウント時にドラッグ状態と pointer capture を確実に解除する。
+  React.useEffect(() => {
+    const rootEl = rootRef.current;
+    return () => {
+      const drag = dragStateRef.current;
+      if (drag && rootEl) {
+        try {
+          rootEl.releasePointerCapture(drag.pointerId);
+        } catch {
+          // capture 済みでなければ無視。
+        }
+      }
+      dragStateRef.current = null;
+    };
+  }, []);
+
+  // ドラッグ禁止領域（文字・ボタン・リンク・入力・スクロールバー）を子要素含めて判定する。
+  const NO_DRAG_SELECTOR =
+    'button, a, input, textarea, select, option, [contenteditable="true"], [role="button"], [role="link"], [data-term-popup-no-drag="true"]';
+
+  // スクロール可能要素のスクロールバー上での押下ではドラッグを開始しない。
+  const isOnScrollbar = (
+    target: EventTarget | null,
+    clientX: number,
+    clientY: number
+  ): boolean => {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    const hasVertical = target.scrollHeight > target.clientHeight;
+    const hasHorizontal = target.scrollWidth > target.clientWidth;
+    if (!hasVertical && !hasHorizontal) {
+      return false;
+    }
+    const rect = target.getBoundingClientRect();
+    const onVertical = hasVertical && clientX >= rect.left + target.clientWidth;
+    const onHorizontal =
+      hasHorizontal && clientY >= rect.top + target.clientHeight;
+    return onVertical || onHorizontal;
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // 主ポインターの左ボタンのみ。既に別ポインターでドラッグ中なら無視。
+    if (!event.isPrimary) {
+      return;
+    }
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+    if (dragStateRef.current) {
+      return;
+    }
+    const target = event.target as Element | null;
+    // 文字・操作要素・スクロールバーからはドラッグ開始しない（文字選択/クリック/フォーカスを維持）。
+    if (target && target.closest(NO_DRAG_SELECTOR)) {
+      return;
+    }
+    if (isOnScrollbar(target, event.clientX, event.clientY)) {
+      return;
+    }
+
+    // 有効なドラッグ開始時だけ preventDefault する。
+    event.preventDefault();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startOffsetX: offsetRef.current.x,
+      startOffsetY: offsetRef.current.y,
+    };
+    try {
+      // ダイアログ外へ出ても move/終了イベントを受け取れるよう capture する。
+      rootRef.current?.setPointerCapture(event.pointerId);
+    } catch {
+      // capture 不可でも通常のイベント経路で継続する。
+    }
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    // 開始座標＋開始オフセットから毎回算出する（差分積み上げはイベント欠落でずれるため避ける）。
+    const rawX = drag.startOffsetX + (event.clientX - drag.startX);
+    const rawY = drag.startOffsetY + (event.clientY - drag.startY);
+    applyOffset(clampToMain(rawX, rawY));
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    dragStateRef.current = null;
+    try {
+      rootRef.current?.releasePointerCapture(drag.pointerId);
+    } catch {
+      // 既に解除済みなら無視。
+    }
+  };
+
   return (
-    <div className="absolute left-1/2 top-1/2 z-50 w-80 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/50 bg-white p-4 shadow-lg">
+    <div
+      ref={rootRef}
+      data-term-popup="true"
+      data-term-popup-drag-surface="true"
+      className="absolute left-1/2 top-1/2 z-50 w-80 rounded-xl border border-border/50 bg-white p-4 shadow-lg"
+      style={{
+        transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
+      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
+    >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-foreground">{term}</h4>
+        <div data-term-popup-no-drag="true" className="min-w-0">
+          {/* フレーズ（約200字までの文章・D21）でもポップアップが縦に伸びすぎないよう3行で省略し、
+              全文は title で確認できるようにする（用語は短いので省略されない）。 */}
+          <h4
+            className="line-clamp-3 cursor-text break-words text-sm font-semibold text-foreground"
+            title={term}
+          >
+            {term}
+          </h4>
           {dictionaryEntry ? (
             <div className="mt-1 flex items-center gap-2">
               <Badge variant="outline" className="text-[10px]">
                 {dictionaryTypeLabel(dictionaryEntry.type)}
               </Badge>
               {dictionaryEntry.relatedArticleTitle ? (
-                <span className="text-[10px] text-muted-foreground">
+                <span className="cursor-text text-[10px] text-muted-foreground">
                   {dictionaryEntry.relatedArticleTitle}
                 </span>
               ) : null}
@@ -465,6 +678,8 @@ function TermPopup({
           ) : null}
         </div>
         <button
+          type="button"
+          aria-label="閉じる"
           className="text-muted-foreground transition-colors hover:text-foreground"
           onClick={onClose}
         >
@@ -473,7 +688,10 @@ function TermPopup({
       </div>
 
       {isLoading ? (
-        <div className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <div
+          data-term-popup-no-drag="true"
+          className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
           <Spinner className="size-4" />
           <span>用語解説を取得しています…</span>
         </div>
@@ -481,7 +699,9 @@ function TermPopup({
 
       {notice ? (
         <Alert role="presentation" className="mb-3 border-[var(--yuuko-green)]/30 bg-white p-2">
-          <div className="flex items-start gap-2">
+          {/* Alert は grid-cols-[0_1fr]（直下 svg が無いと col1 幅0）。ここは svg を直下に置かず
+              独自レイアウトのため、col-span-2 で全幅を確保しないと補助説明が幅0で不可視になる。 */}
+          <div className="col-span-2 flex items-start gap-2" data-term-popup-no-drag="true">
             <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <span
@@ -508,18 +728,26 @@ function TermPopup({
 
       {dictionaryEntry ? (
         <div className="space-y-2">
-          <p className="text-xs font-medium leading-relaxed text-foreground">
+          <p
+            data-term-popup-no-drag="true"
+            className="cursor-text text-xs font-medium leading-relaxed text-foreground"
+          >
             {dictionaryEntry.shortExplanation}
           </p>
-          <p className="text-xs leading-relaxed text-muted-foreground">
+          <p
+            data-term-popup-no-drag="true"
+            className="cursor-text text-xs leading-relaxed text-muted-foreground"
+          >
             {dictionaryEntry.detailExplanation}
           </p>
           <div className="pt-1">
+            {/* 保存状態は savedInDictionary で判定する（★ を外した保存済み項目も「辞書保存済み」）。
+                ★ の塗りは isStarred を反映するだけで、保存操作では ★ を付けない（要件定義書 §7.4.10）。 */}
             <Button
-              variant={dictionaryEntry.isStarred ? "secondary" : "outline"}
+              variant={dictionaryEntry.savedInDictionary ? "secondary" : "outline"}
               size="sm"
               className="h-8 gap-1.5 text-xs"
-              disabled={isLoading || isSaving || dictionaryEntry.isStarred}
+              disabled={isLoading || isSaving || dictionaryEntry.savedInDictionary}
               onClick={onSave}
             >
               <Star
@@ -529,7 +757,7 @@ function TermPopup({
                     : ""
                 }`}
               />
-              {dictionaryEntry.isStarred
+              {dictionaryEntry.savedInDictionary
                 ? "辞書保存済み"
                 : isSaving
                   ? "保存中..."
@@ -537,11 +765,14 @@ function TermPopup({
             </Button>
           </div>
         </div>
-      ) : (
-        <p className="text-xs leading-relaxed text-muted-foreground">
+      ) : !isLoading && !notice ? (
+        <p
+          data-term-popup-no-drag="true"
+          className="cursor-text text-xs leading-relaxed text-muted-foreground"
+        >
           用語解説を表示できませんでした。
         </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -655,16 +886,134 @@ const applyGeneratedSummary = (
   ...currentArticle,
   summary: generatedSummary.summary,
   yuukoExplanation: generatedSummary.yuukoExplanation,
-  keyPoints:
-    generatedSummary.focusPoints.length > 0
-      ? generatedSummary.focusPoints
-      : currentArticle.keyPoints,
-  attentionPoint:
-    generatedSummary.focusPoints[1] ??
-    generatedSummary.focusPoints[0] ??
-    generatedSummary.summary,
+  // 生成結果をそのまま使う（要点に注目ポイントや要約文を流用しない）。
+  keyPoints: generatedSummary.keyPoints,
+  focusPoints: generatedSummary.focusPoints,
   yuukoThoughts: generatedSummary.yuukoComment,
+  isSummarized: true,
+  summaryState: "done",
 });
+
+// 自動要約の完了確認の間隔。要約中の記事を表示しているときだけ使う（常駐負荷を抑えるため短くしすぎない）。
+const SUMMARY_PROGRESS_POLL_INTERVAL_MS = 10_000;
+
+// 要約・再説明・要点・感想が未生成のときの固定表示（本文抜粋やサンプル記事で埋めない）。
+function NotGeneratedText({ children }: { children: React.ReactNode }) {
+  return <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>;
+}
+
+// 範囲選択の対象領域（ニュース要約・ゆうこの再説明）に付与するマーカー属性。
+// closest() でこの属性を持つ要素内に選択が収まっているかを判定する。
+const EXPLAIN_SELECTABLE_ATTR = "data-explain-selectable";
+// 「解説」ボタンのおおよその表示サイズ（画面端での位置補正に使う）。
+const EXPLAIN_BUTTON_SIZE = { width: 60, height: 30 } as const;
+// 選択が長すぎるときにボタンの代わりに出す案内のおおよその表示サイズ。最大幅（1行に収まる幅）を超える
+// 狭いウィンドウ（tauri.conf.json に最小幅の指定はない）では折り返すため、高さは2行分で見積もる。
+const EXPLAIN_TOO_LONG_HINT_SIZE = { width: 380, height: 48 } as const;
+
+type ExplainSelectionState = {
+  // trim 済みの選択文字列。後続タスクで explain_selected_term へ渡す（全文はログへ出さない）。
+  text: string;
+  // 上限（D21: 200文字。用語・フレーズ共通）超過か。true なら「解説」ボタンを出さず選び直す案内だけを出す。
+  tooLong: boolean;
+  // ボタンの表示座標（position: fixed / viewport 座標）。
+  left: number;
+  top: number;
+};
+
+// 選択ノードから対象領域要素（EXPLAIN_SELECTABLE_ATTR を持つ最近接要素）を辿る。
+const closestSelectableRegion = (node: Node | null): Element | null => {
+  if (!node) {
+    return null;
+  }
+  const element =
+    node.nodeType === Node.ELEMENT_NODE
+      ? (node as Element)
+      : node.parentElement;
+  return element?.closest(`[${EXPLAIN_SELECTABLE_ATTR}]`) ?? null;
+};
+
+// 現在の DOM 選択から「解説」ボタン表示情報を作る。無効な選択なら null。
+// 判定・座標補正は純粋関数（explain-selection.mjs）へ委譲し、ここは DOM 取得に限定する。
+// 選択文字列全文はログへ出さない。
+const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const selection = window.getSelection();
+  const rangeCount = selection?.rangeCount ?? 0;
+  // 単一Rangeのみ扱う。複数Range（rangeCount>=2）や range 無しは無効にして、
+  // getRangeAt(0) は rangeCount===1 を確認した後だけ呼ぶ。
+  // 複数Rangeの toString() は対象外文字列が混入し得るため state へ保持しない。
+  const isSingleRange = Boolean(selection) && rangeCount === 1;
+  const range = isSingleRange ? selection!.getRangeAt(0) : null;
+  const trimmedText = isSingleRange ? (selection?.toString() ?? "").trim() : "";
+
+  const startRegion = closestSelectableRegion(range?.startContainer ?? null);
+  const endRegion = closestSelectableRegion(range?.endContainer ?? null);
+  const sameSelectableRegion =
+    startRegion != null && startRegion === endRegion;
+
+  const valid = shouldShowExplainButton({
+    hasSelection: Boolean(selection),
+    rangeCount,
+    isCollapsed: selection?.isCollapsed ?? true,
+    trimmedTextLength: trimmedText.length,
+    sameSelectableRegion,
+  });
+  if (!valid || !range) {
+    return null;
+  }
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  const clientRects = Array.from(range.getClientRects()).map((rect) => ({
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  }));
+
+  const bounding = range.getBoundingClientRect();
+  const boundingRect = {
+    left: bounding.left,
+    top: bounding.top,
+    right: bounding.right,
+    bottom: bounding.bottom,
+    width: bounding.width,
+    height: bounding.height,
+  };
+
+  // 可視矩形の最後を採用。getClientRects が空のときだけ boundingRect をフォールバックにする。
+  // 非空かつ全件画面外なら null（boundingRect が交差しても再表示しない）。
+  // 選択が完全に viewport 外なら null → clamp で画面端へボタンだけを残さず非表示にする。
+  const anchor = resolveAnchorRect(
+    clientRects,
+    boundingRect,
+    viewportWidth,
+    viewportHeight
+  );
+  if (!anchor) {
+    return null;
+  }
+
+  // Rust 側の上限（D21）を超える選択は command へ送らないため、ボタンの代わりに案内を出す。
+  const tooLong = isSelectedTextTooLong(trimmedText);
+  const elementSize = tooLong ? EXPLAIN_TOO_LONG_HINT_SIZE : EXPLAIN_BUTTON_SIZE;
+  const { left, top } = clampExplainButtonPosition({
+    anchorRight: anchor.right,
+    anchorBottom: anchor.bottom,
+    viewportWidth,
+    viewportHeight,
+    buttonWidth: elementSize.width,
+    buttonHeight: elementSize.height,
+  });
+
+  return { text: trimmedText, tooLong, left, top };
+};
 
 export default function NewsReaderScreen({
   articleId,
@@ -679,30 +1028,23 @@ export default function NewsReaderScreen({
   // ボタン表示は遷移元によらず「戻る」に統一し、戻り先の制御は onBack が担う。
   onBack?: () => void;
 }) {
-  const [isAutoStart] = React.useState(true);
   const { toast } = useToast();
   const [article, setArticle] = React.useState<ReaderArticleDetail>(() =>
     getFallbackArticleById(articleId)
   );
+  // 関連記事は取得結果が届くまで空にする。Tauri の実記事画面にサンプル記事を混ぜず、
+  // サンプル記事IDへの遷移も起こさないため（サンプルはブラウザプレビューで取得結果が null のときだけ）。
   const [relatedArticles, setRelatedArticles] = React.useState<RelatedArticle[]>(
-    () => getFallbackRelatedArticles(articleId)
+    []
   );
-  const [showTermPopup, setShowTermPopup] = React.useState(true);
+  // 用語解説は開いた直後には出さない。ユーザーが範囲選択して「解説」を押したとき（または
+  // 候補語を明示的に押したとき）だけ開き、explain_selected_term を呼ぶ（自動解説で AI・報酬を消費しない）。
+  const [showTermPopup, setShowTermPopup] = React.useState(false);
   const [selectedTerm, setSelectedTerm] = React.useState<SupportTerm | null>(
-    getFallbackArticleById(articleId).highlightedTerms[0] ?? null
+    null
   );
   const [selectedDictionaryEntry, setSelectedDictionaryEntry] =
-    React.useState<TauriDictionaryEntry | null>(() =>
-      selectedTerm
-        ? buildFallbackDictionaryEntry(
-            {
-              id: getFallbackArticleById(articleId).id,
-              title: getFallbackArticleById(articleId).title,
-            },
-            selectedTerm
-          )
-        : null
-    );
+    React.useState<TauriDictionaryEntry | null>(null);
   const [isLoadingTermExplanation, setIsLoadingTermExplanation] =
     React.useState(false);
   const [isSavingDictionaryEntry, setIsSavingDictionaryEntry] =
@@ -710,22 +1052,28 @@ export default function NewsReaderScreen({
   const [isUpdatingFavorite, setIsUpdatingFavorite] = React.useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = React.useState(false);
   const [isLoadingArticle, setIsLoadingArticle] = React.useState(true);
+  // 初期値を loading にして、Tauri の実記事が届く前にサンプル記事が一瞬出ないようにする
+  // （ブラウザプレビューでは取得結果が null になり、すぐ ready でサンプル表示へ移る）。
+  const [articleLoadState, setArticleLoadState] =
+    React.useState<ArticleLoadState>("loading");
   const [isLoadingRelatedArticles, setIsLoadingRelatedArticles] =
     React.useState(false);
   const [termNotice, setTermNotice] = React.useState<string | null>(null);
   const [termNoticeKind, setTermNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  // 記事詳細の取得失敗文言。エラー状態の状態表示カード（articleLoadState="error"）でだけ表示する。
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
-  const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
-    "info"
-  );
   const [relatedNotice, setRelatedNotice] = React.useState<string | null>(null);
   const [relatedNoticeKind, setRelatedNoticeKind] = React.useState<
     "info" | "error"
   >("info");
   const [favoriteNotice, setFavoriteNotice] = React.useState<string | null>(null);
   const [summaryNotice, setSummaryNotice] = React.useState<string | null>(null);
+  // 範囲選択→「解説」ボタン。選択文字列（trim済み）とボタン座標を保持する。null で非表示。
+  // 押下時は handleExplainButtonClick が既存の用語解説経路（selectedTerm→TermPopup）へ接続する。
+  const [explainSelection, setExplainSelection] =
+    React.useState<ExplainSelectionState | null>(null);
   // 友情ランクアップ演出（ranked_up=true の時に表示）。
   const [rankUpState, setRankUpState] = React.useState<{
     open: boolean;
@@ -738,14 +1086,40 @@ export default function NewsReaderScreen({
   const loadArticleRequestIdRef = React.useRef(0);
   const loadRelatedRequestIdRef = React.useRef(0);
   const loadTermRequestIdRef = React.useRef(0);
+  // 辞書保存の世代管理。記事切替・新しい保存で更新し、旧記事の保存応答が
+  // 新記事の state（selectedDictionaryEntry・通知・toast・保存中）へ反映されないようにする。
+  const saveDictionaryRequestIdRef = React.useRef(0);
+  // 「解説」ボタン連打による用語解説 command の重複呼び出しを防ぐ同期ガード。
+  // state 更新の反映を待たずに再入を弾くため useRef を使う。
+  const explainInFlightRef = React.useRef(false);
+  // 選択由来の用語へ内部用 id を振る連番。選択文字列全文を id へ埋め込まないための採番。
+  const explainSelectionSeqRef = React.useRef(0);
 
   const resolvedArticleId = articleId ?? fallbackArticle.id;
-  const primaryTerm = article.highlightedTerms[0] ?? fallbackArticle.highlightedTerms[0];
-  const secondaryTerm =
-    article.highlightedTerms[1] ?? article.highlightedTerms[0] ?? primaryTerm;
+  // 未要約の実記事（summaryState≠done）。要約欄を「準備中」表示にし、ボタンを「要約を作成」にする。
+  const isUnsummarized = article.isSummarized === false;
+  // 自動要約キューで処理中の記事。「ゆうこが要約中です」を出し、手動作成ボタンは隠す（生成中の重複操作を避ける）。
+  const isSummaryProcessing =
+    isUnsummarized && article.summaryState === "processing";
+  // 順番待ちの記事。すぐ読みたい人向けに既存の手動要約を「今すぐ要約」として出す。
+  // キューは要約済み記事を飛ばし、AlreadySummarized も吸収するため二重生成にはならない。
+  const isSummaryWaiting = isUnsummarized && article.summaryState === "waiting";
+  // 待機中・処理中は完了確認のポーリング対象。
+  const isSummaryInProgress =
+    isUnsummarized &&
+    (article.summaryState === "waiting" ||
+      article.summaryState === "processing");
+  // 自動要約が再試行上限まで失敗した記事。既存の手動要約を「要約を作り直す」として出す。
+  const isSummaryFailed = isUnsummarized && article.summaryState === "failed";
+  // 候補語が無い実記事ではサンプル語で埋めず、候補語ボタンを出さない（範囲選択の案内に任せる）。
+  // 同じ語のボタンを2つ並べないよう、先頭2件だけを表示する。
+  const quickTerms = article.highlightedTerms.slice(0, 2);
+  // 右サイド「用語サポート」の候補語。読み込み中・失敗時は state に残る初期値（サンプル記事）を出さない。
+  const supportTerms =
+    articleLoadState === "ready" ? article.highlightedTerms : [];
+  // 関連記事が無ければ null（サンプル記事で埋めず「関連記事はまだないよ」を出す）。
   const featuredRelatedArticle =
-    relatedArticles.find((item) => item.id !== article.id) ??
-    getFallbackRelatedArticles(resolvedArticleId)[0];
+    relatedArticles.find((item) => item.id !== article.id) ?? null;
   const previousArticleId =
     relatedArticles.length > 0
       ? relatedArticles[relatedArticles.length - 1]?.id ?? null
@@ -759,13 +1133,121 @@ export default function NewsReaderScreen({
     };
   }, []);
 
+  // 現在の DOM 選択から「解説」ボタン状態を更新する。無効な選択なら非表示にする。
+  // TermPopup 表示中は背面選択を解説候補にしない（背面 selectionchange で解説ボタンを出さない）。
+  // ポップアップ内の文字選択自体はここでは解除しない（Selection を触らない）。
+  const updateExplainSelection = React.useCallback(() => {
+    if (showTermPopup) {
+      setExplainSelection(null);
+      return;
+    }
+    setExplainSelection(readExplainSelectionFromDom());
+  }, [showTermPopup]);
+
+  // 選択・スクロール・リサイズを監視して「解説」ボタンの表示/位置を更新する。
+  // グローバルリスナーは必ず解除する（解除漏れ防止）。scroll は capture で内側スクロールも拾う。
+  React.useEffect(() => {
+    document.addEventListener("mouseup", updateExplainSelection);
+    document.addEventListener("selectionchange", updateExplainSelection);
+    window.addEventListener("scroll", updateExplainSelection, true);
+    window.addEventListener("resize", updateExplainSelection);
+    return () => {
+      document.removeEventListener("mouseup", updateExplainSelection);
+      document.removeEventListener("selectionchange", updateExplainSelection);
+      window.removeEventListener("scroll", updateExplainSelection, true);
+      window.removeEventListener("resize", updateExplainSelection);
+    };
+  }, [updateExplainSelection]);
+
+  // TermPopup を開いた瞬間だけ、背面に残る Selection を解除し旧「解説」ボタンを消す。
+  // 開いた後にユーザーがポップアップ内の解説文を選択しても解除しない（依存は showTermPopup のみ）。
+  React.useEffect(() => {
+    if (!showTermPopup) {
+      return;
+    }
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
+    setExplainSelection(null);
+  }, [showTermPopup]);
+
+  // 記事が「実際に別の記事へ」切り替わった時点で、旧記事の用語解説処理を即時無効化する。
+  // 記事Bの getArticleDetail 完了を待たず、旧 TermPopup・旧解説・選択・取得中/通知を消す。
+  // loadTermRequestIdRef を最初にインクリメントし、進行中の旧 explain_selected_term の遅延応答
+  //（成功・失敗・友情ポイント）が新記事の画面へ反映されないよう stale 化する。
+  // 初回マウントは対象外（既存の初期表示・loadArticle の初期設定を壊さない）。
+  const previousResolvedArticleIdRef = React.useRef(resolvedArticleId);
+  React.useEffect(() => {
+    if (previousResolvedArticleIdRef.current === resolvedArticleId) {
+      return;
+    }
+    previousResolvedArticleIdRef.current = resolvedArticleId;
+
+    // 旧用語解説 request と旧辞書保存 request を無効化（早い段階で更新し、旧応答を stale 化する）。
+    loadTermRequestIdRef.current += 1;
+    saveDictionaryRequestIdRef.current += 1;
+
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
+    setExplainSelection(null);
+    setShowTermPopup(false);
+    setSelectedTerm(null);
+    setSelectedDictionaryEntry(null);
+    setIsLoadingTermExplanation(false);
+    setIsSavingDictionaryEntry(false);
+    setTermNotice(null);
+    setTermNoticeKind("info");
+    explainInFlightRef.current = false;
+  }, [resolvedArticleId]);
+
+  // 「解説」ボタン押下の集約ハンドラ。
+  // 選択文字列を既存の用語解説経路へ接続する。explainSelectedTerm は直接呼ばず、
+  // selectedTerm 更新 + showTermPopup=true → loadTermExplanation → explainSelectedTerm という
+  // 既存の state 駆動フロー（記事ID・selectedText 受け渡し・取得中/成功/失敗表示・辞書保存・
+  // リクエストIDによる古い応答除外・友情ポイント）をそのまま再利用する。
+  const handleExplainButtonClick = React.useCallback(() => {
+    // 連打の同期ガード。state 反映を待たずに再入を弾く（重複 command 呼び出し防止）。
+    if (explainInFlightRef.current) {
+      return;
+    }
+    // 先に選択文字列（trim 済み）をローカル変数へ退避する。これ以降に選択を解除しても失われない。
+    const selectedText = explainSelection?.text.trim() ?? "";
+    // 上限（D21）超過の選択は送らない（通常はボタン自体を出さないが、念のため二重に弾く）。
+    if (!selectedText || isSelectedTextTooLong(selectedText)) {
+      return;
+    }
+    explainInFlightRef.current = true;
+
+    // 選択文字列を既存 selectedTerm 形式へ変換する。
+    // id は内部用の連番のみ（選択文字列全文は id にも data 属性にも入れない）。
+    // explanation の簡易説明は Tauri 外（ブラウザプレビュー）の補助説明にだけ使う（失敗時には出さない）。
+    explainSelectionSeqRef.current += 1;
+    const selectionTerm: SupportTerm = {
+      id: `selection-${explainSelectionSeqRef.current}`,
+      term: selectedText,
+      explanation: defaultTermExplanation(selectedText),
+    };
+
+    // 文字列は退避済みなので、ここでブラウザ選択を解除し「解説」ボタンを隠しても失われない。
+    if (typeof window !== "undefined") {
+      window.getSelection()?.removeAllRanges();
+    }
+    setExplainSelection(null);
+
+    // 既存経路へ接続: selectedTerm 更新 + showTermPopup=true で loadTermExplanation が走り、
+    // その中で explainSelectedTerm({ articleId: article.id, selectedText: selectedTerm.term }) が呼ばれる。
+    setSelectedTerm(selectionTerm);
+    setShowTermPopup(true);
+  }, [explainSelection]);
+
   const loadArticle = React.useCallback(async () => {
     loadArticleRequestIdRef.current += 1;
     const requestId = loadArticleRequestIdRef.current;
     const requestArticleId = resolvedArticleId;
     setIsLoadingArticle(true);
+    setArticleLoadState("loading");
     setLoadNotice(null);
-    setLoadNoticeKind("info");
 
     try {
       const detail = await getArticleDetail({ articleId: requestArticleId });
@@ -776,17 +1258,21 @@ export default function NewsReaderScreen({
       if (!detail) {
         const fallbackDetail = getFallbackArticleById(requestArticleId);
         setArticle(fallbackDetail);
-        setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
-        setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+        // 記事を開いただけでは用語解説を開かない（explain_selected_term は範囲選択＋「解説」のときだけ）。
+        setSelectedTerm(null);
+        setShowTermPopup(false);
         setLoadNotice(null);
+        setArticleLoadState("ready");
         return;
       }
 
       const mappedArticle = mapTauriArticleToUi(detail);
       setArticle(mappedArticle);
-      setSelectedTerm(mappedArticle.highlightedTerms[0] ?? null);
-      setShowTermPopup(Boolean(mappedArticle.highlightedTerms[0]));
+      // 実記事でも開いた時点では用語解説を開かない（自動解説で AI 生成・かけら・友情ポイントを消費しない）。
+      setSelectedTerm(null);
+      setShowTermPopup(false);
       setLoadNotice(null);
+      setArticleLoadState("ready");
 
       // 実データの記事を開いたら友情ポイントを加算（同一記事はセッション内で1回だけ）。
       if (!recordedOpensRef.current.has(requestArticleId)) {
@@ -808,12 +1294,13 @@ export default function NewsReaderScreen({
 
       const fallbackDetail = getFallbackArticleById(requestArticleId);
       setArticle(fallbackDetail);
-      setSelectedTerm(fallbackDetail.highlightedTerms[0] ?? null);
-      setShowTermPopup(Boolean(fallbackDetail.highlightedTerms[0]));
+      // 失敗時は本文をエラー表示に置き換えるため、サンプル記事の用語を選択状態にせず用語解説も開かない。
+      setSelectedTerm(null);
+      setShowTermPopup(false);
       setLoadNotice(
         "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
       );
-      setLoadNoticeKind("error");
+      setArticleLoadState("error");
       console.warn("Failed to load article detail:", error);
     } finally {
       if (isMountedRef.current && requestId === loadArticleRequestIdRef.current) {
@@ -839,6 +1326,7 @@ export default function NewsReaderScreen({
         return;
       }
 
+      // null はブラウザプレビュー（Tauri 外）。このときだけサンプル記事を関連記事に使う。
       if (!summaries) {
         setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
         return;
@@ -848,18 +1336,15 @@ export default function NewsReaderScreen({
         .map(mapSummaryToRelated)
         .filter((item) => item.id !== resolvedArticleId);
 
-      if (mappedArticles.length > 0) {
-        setRelatedArticles(mappedArticles);
-        return;
-      }
-
-      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+      // Tauri で関連記事が無いときもサンプル記事で埋めない（空表示にし、サンプルIDへ遷移させない）。
+      setRelatedArticles(mappedArticles);
     } catch (error) {
       if (!isMountedRef.current || requestId !== loadRelatedRequestIdRef.current) {
         return;
       }
 
-      setRelatedArticles(getFallbackRelatedArticles(resolvedArticleId));
+      // 取得失敗（Tauri）でもサンプル記事は出さず、空のまま再試行を案内する。
+      setRelatedArticles([]);
       setRelatedNotice(
         "関連記事の読み込みに失敗しちゃった。少し待ってから、もう一度試してみてね。"
       );
@@ -886,6 +1371,8 @@ export default function NewsReaderScreen({
       setIsSavingDictionaryEntry(false);
       setTermNotice(null);
       setTermNoticeKind("info");
+      // ポップアップを閉じた等でここへ来た場合も連打ガードを解除しておく（次の解説を妨げない）。
+      explainInFlightRef.current = false;
       return;
     }
 
@@ -896,7 +1383,9 @@ export default function NewsReaderScreen({
       },
       selectedTerm
     );
-    setSelectedDictionaryEntry(fallbackEntry);
+    // 取得中・失敗時は仮解説（fallbackEntry）を出さない。出すと「辞書に保存」で
+    // フロント生成の仮解説が辞書へ保存され得るため（要件定義書 §7.4.8）。
+    setSelectedDictionaryEntry(null);
     setIsLoadingTermExplanation(true);
     setTermNotice(null);
     setTermNoticeKind("info");
@@ -911,6 +1400,7 @@ export default function NewsReaderScreen({
         return;
       }
 
+      // entry=null は Tauri 外（ブラウザプレビュー）だけ。その場合に限り補助説明を表示する。
       setSelectedDictionaryEntry(entry ?? fallbackEntry);
 
       // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
@@ -936,16 +1426,24 @@ export default function NewsReaderScreen({
         return;
       }
 
-      setSelectedDictionaryEntry(fallbackEntry);
-      setTermNotice("用語解説の取得に失敗したため、補助説明を表示しています。");
+      // 失敗時は仮解説を出さず（＝辞書保存ボタンも出さず）、再選択の案内と再試行だけを出す
+      // （画面詳細設計書 §11.6 / §11.7）。文言はエラーコードで選ぶ固定文言で、生エラーは出さない。
+      // ログにも選択文字列・エラー本文を残さないよう、コードだけを出す。
+      const errorCode = readCommandErrorCode(error);
+      setSelectedDictionaryEntry(null);
+      setTermNotice(termExplainFailureMessage(errorCode));
       setTermNoticeKind("error");
-      console.warn("Failed to explain selected term:", error);
+      console.warn("Failed to explain selected term:", errorCode ?? "unknown");
     } finally {
+      // 最新requestのみローディング状態と連打ガードを解除する。
+      // 古いrequest（例: 閉じて古くなったAの遅延完了）が、実行中の新しいB/Cのガードを
+      // 誤って解除しないようにする（成功・失敗どちらの完了でも同条件）。
       if (
         isMountedRef.current &&
         requestId === loadTermRequestIdRef.current
       ) {
         setIsLoadingTermExplanation(false);
+        explainInFlightRef.current = false;
       }
     }
   }, [article.id, article.title, selectedTerm, showTermPopup]);
@@ -967,12 +1465,22 @@ export default function NewsReaderScreen({
     onNavigate?.("home");
   };
 
-  const handleOpenExternal = () => {
+  // 元記事は記事IDだけを Rust へ渡して開く（URL の検証とブラウザ起動は Rust 側）。
+  const handleOpenExternal = async () => {
     if (!article.externalUrl) {
       return;
     }
 
-    window.open(article.externalUrl, "_blank", "noopener,noreferrer");
+    try {
+      await openOriginalArticle(article.id, article.externalUrl);
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "元記事を開けなかったよ",
+        description: "ブラウザで元記事を開けなかったよ。時間をおいてもう一度試してみてね。",
+      });
+      console.warn("Failed to open original article:", error);
+    }
   };
 
   const handleToggleFavorite = React.useCallback(async () => {
@@ -1016,32 +1524,52 @@ export default function NewsReaderScreen({
   }, [article.id, article.isFavorite, toast]);
 
   const handleSaveDictionaryEntry = React.useCallback(async () => {
-    if (!selectedDictionaryEntry || selectedDictionaryEntry.isStarred) {
+    if (!selectedDictionaryEntry || selectedDictionaryEntry.savedInDictionary) {
       return;
     }
+
+    // 保存処理の世代を確定する。記事切替や別の保存で ref が進むと、この request は stale になる。
+    saveDictionaryRequestIdRef.current += 1;
+    const requestId = saveDictionaryRequestIdRef.current;
+    // 保存対象も開始時点で確定し、await 中の selectedDictionaryEntry 変更に影響されないようにする。
+    const entryToSave = selectedDictionaryEntry;
 
     setIsSavingDictionaryEntry(true);
     setTermNotice(null);
     setTermNoticeKind("info");
 
     try {
-      const savedEntry = await saveDictionaryEntry({
-        entry: {
-          ...selectedDictionaryEntry,
-          isStarred: true,
-        },
-      });
-      setSelectedDictionaryEntry(savedEntry);
+      // ★ は付けずに保存する（★ は辞書画面などの ★ 操作だけで変える）。
+      const savedEntry = await saveDictionaryEntry({ entry: entryToSave });
+      // 最新 request（＝現在の記事の保存）だけが結果を反映する。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setSelectedDictionaryEntry(savedEntry);
+      }
     } catch (error) {
-      setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
-      toast({
-        variant: "destructive",
-        title: "保存に失敗しちゃった",
-        description: "辞書の保存ができなかったよ。もう一度試してみてね。",
-      });
+      // 旧記事・旧保存の失敗通知・toast・生エラーは新記事の画面へ出さない。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setTermNotice("辞書保存に失敗しました。時間をおいてもう一度お試しください。");
+        toast({
+          variant: "destructive",
+          title: "保存に失敗しちゃった",
+          description: "辞書の保存ができなかったよ。もう一度試してみてね。",
+        });
+      }
       console.warn("Failed to save dictionary entry:", error);
     } finally {
-      setIsSavingDictionaryEntry(false);
+      // 最新 request だけが保存中表示を解除する（旧保存の finally が新保存の保存中を消さない）。
+      if (
+        isMountedRef.current &&
+        requestId === saveDictionaryRequestIdRef.current
+      ) {
+        setIsSavingDictionaryEntry(false);
+      }
     }
   }, [selectedDictionaryEntry, toast]);
 
@@ -1080,14 +1608,22 @@ export default function NewsReaderScreen({
           console.warn("Failed to record friendship event:", eventError);
         });
     } catch (error) {
+      // AI_OUTPUT_REJECTED: 実AIの出力が検証に落ち、代わりの固定文（Mock）も保存しなかった（判断台帳 D104）。
+      // 記事は要約前のまま（保存済みの要約も上書きしない）なので、もう一度試すよう案内する。
+      const isOutputRejected =
+        readCommandErrorCode(error) === "AI_OUTPUT_REJECTED";
       if (isMountedRef.current) {
         setSummaryNotice(
-          "要約生成に失敗しました。時間をおいてもう一度お試しください。"
+          isOutputRejected
+            ? "うまくまとめられなかったよ。もう一度試してね"
+            : "要約生成に失敗しました。時間をおいてもう一度お試しください。"
         );
         toast({
           variant: "destructive",
           title: "作成に失敗しちゃった",
-          description: "要約の作成ができなかったよ。もう一度試してみてね。",
+          description: isOutputRejected
+            ? "うまくまとめられなかったよ。もう一度試してね"
+            : "要約の作成ができなかったよ。もう一度試してみてね。",
         });
       }
       console.warn("Failed to generate article summary:", error);
@@ -1097,6 +1633,51 @@ export default function NewsReaderScreen({
       }
     }
   }, [article.id, toast]);
+
+  // 要約中の記事を表示している間だけ、10秒ごとに記事詳細を読み直して完了を拾う（再読み込み不要にする）。
+  // 常駐アプリのため、画面が見えていないとき・要約中でないとき・アンマウント後は問い合わせない。
+  // ウィンドウ focus 時の再取得だけだと、開いたまま待つ利用者に完了が届かないためポーリングを選ぶ。
+  // 読み直しはローカルの記事ファイルとキューのメモリ参照のみで、外部通信や AI 呼び出しは発生しない。
+  React.useEffect(() => {
+    if (!isSummaryInProgress || articleLoadState !== "ready") {
+      return;
+    }
+    const pollArticleId = article.id;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight || document.visibilityState !== "visible") {
+        return;
+      }
+      inFlight = true;
+      const requestId = loadArticleRequestIdRef.current;
+      void getArticleDetail({ articleId: pollArticleId })
+        .then((detail) => {
+          if (
+            !detail ||
+            !isMountedRef.current ||
+            requestId !== loadArticleRequestIdRef.current
+          ) {
+            return;
+          }
+          // 状態が変わったときだけ差し替え、用語解説・選択などの画面状態には触れない。
+          setArticle((currentArticle) =>
+            currentArticle.id === detail.articleId &&
+            currentArticle.summaryState !== detail.summaryState
+              ? mapTauriArticleToUi(detail)
+              : currentArticle
+          );
+        })
+        .catch((error) => {
+          console.warn("Failed to refresh article summary state:", error);
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    }, SUMMARY_PROGRESS_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [article.id, isSummaryInProgress, articleLoadState]);
 
   const openTerm = (term: SupportTerm) => {
     setSelectedTerm(term);
@@ -1157,32 +1738,54 @@ export default function NewsReaderScreen({
           </div>
 
           <div className="border-t border-border/50 p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">自動起動</span>
-              <span
-                className={`text-xs font-medium ${isAutoStart ? "text-[var(--yuuko-green)]" : "text-muted-foreground"}`}
-              >
-                {isAutoStart ? "ON" : "OFF"}
-              </span>
-              <span
-                className={`h-2 w-2 rounded-full ${isAutoStart ? "bg-[var(--yuuko-green)]" : "bg-muted-foreground"}`}
-              />
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-full text-xs"
-              onClick={() => console.log("Exit resident mode")}
-            >
-              常駐を終了する
-            </Button>
+            <AutostartStatus className="mb-2" />
+            <QuitResidentButton className="h-8 w-full text-xs" />
           </div>
         </aside>
 
         <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-6">
+          {/* TermPopup 表示中は背面の記事本文を選択不可にする（背面選択→「解説」ボタン誤表示を防ぐ）。
+              TermPopup は main 直下・このスクロール領域の外にあるため巻き込まれない。 */}
+          <div
+            className={`flex-1 overflow-y-auto p-6${
+              showTermPopup ? " select-none" : ""
+            }`}
+          >
             <Breadcrumb onNavigate={onNavigate} />
 
+            {/* 読み込み中・取得失敗のときは記事カード群（サンプル記事を含む）を出さず状態表示にする。
+                既存カードの差分を小さく保つため、内側のインデントは変えていない。 */}
+            {articleLoadState !== "ready" ? (
+              <Card className="mb-4 border-0 py-4 shadow-sm">
+                <CardContent className="p-5">
+                  {articleLoadState === "loading" ? (
+                    <div
+                      role="status"
+                      className="flex items-center gap-2 text-sm text-muted-foreground"
+                    >
+                      <Spinner className="size-4" />
+                      記事を読み込んでいるよ…
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <p role="alert" className="text-sm text-foreground">
+                        {loadNotice}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 shrink-0 self-start text-xs sm:self-auto"
+                        onClick={() => void loadArticle()}
+                        disabled={isLoadingArticle}
+                      >
+                        再試行
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ) : (
+            <>
             <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
                 <h1 className="mb-3 text-xl font-bold text-foreground">
@@ -1223,28 +1826,7 @@ export default function NewsReaderScreen({
                     <ExternalLink className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-                {loadNotice && (
-                  <Alert role="presentation" className="mt-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-                    <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
-                    <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
-                      <span role={loadNoticeKind === "error" ? "alert" : "status"}>
-                        {loadNotice}
-                      </span>
-                      {loadNoticeKind === "error" && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
-                          onClick={() => void loadArticle()}
-                          disabled={isLoadingArticle}
-                        >
-                          再試行
-                        </Button>
-                      )}
-                    </AlertDescription>
-                  </Alert>
-                )}
+                <ArticleTagList tags={article.tags ?? []} className="mt-3" />
                 {favoriteNotice ? (
                   <p className="mt-2 text-xs text-amber-700">{favoriteNotice}</p>
                 ) : null}
@@ -1258,6 +1840,7 @@ export default function NewsReaderScreen({
                     <Newspaper className="h-5 w-5 text-[var(--yuuko-green)]" />
                     <h2 className="font-semibold text-foreground">要約</h2>
                   </div>
+                  {isSummaryProcessing ? null : (
                   <Button
                     variant="outline"
                     size="sm"
@@ -1268,16 +1851,46 @@ export default function NewsReaderScreen({
                     {isGeneratingSummary ? (
                       <>
                         <Spinner className="size-4" />
-                        更新中...
+                        {isUnsummarized ? "作成中..." : "更新中..."}
                       </>
+                    ) : isSummaryWaiting ? (
+                      "今すぐ要約"
+                    ) : isSummaryFailed ? (
+                      "要約を作り直す"
+                    ) : isUnsummarized ? (
+                      "要約を作成"
                     ) : (
                       "要約を更新"
                     )}
                   </Button>
+                  )}
                 </div>
-                <p className="text-sm leading-relaxed text-foreground">
+                {isSummaryWaiting ? (
+                  <NotGeneratedText>
+                    要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。
+                  </NotGeneratedText>
+                ) : isSummaryProcessing ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Spinner className="size-4" />
+                    <span>ゆうこが要約中です。できあがったらここに表示するね。</span>
+                  </div>
+                ) : isSummaryFailed ? (
+                  <NotGeneratedText>
+                    要約の作成がうまくいかなかったよ。「要約を作り直す」でもう一度作れるよ。
+                  </NotGeneratedText>
+                ) : isUnsummarized ? (
+                  <NotGeneratedText>
+                    要約はまだ準備中だよ。「要約を作成」で作れるよ。
+                  </NotGeneratedText>
+                ) : (
+                /* 範囲選択の対象領域（ニュース要約）。この要素内の選択のみ「解説」ボタン対象。 */
+                <p
+                  data-explain-selectable="summary"
+                  className="text-sm leading-relaxed text-foreground"
+                >
                   {article.summary}
                 </p>
+                )}
                 {summaryNotice ? (
                   <p className="mt-3 text-xs text-amber-700">{summaryNotice}</p>
                 ) : null}
@@ -1292,11 +1905,20 @@ export default function NewsReaderScreen({
                     ゆうこの解説
                   </h2>
                 </div>
-                <p className="text-sm leading-relaxed text-foreground">
+                {article.yuukoExplanation ? (
+                /* 範囲選択の対象領域（ゆうこの再説明）。この要素内の選択のみ「解説」ボタン対象。 */
+                <p
+                  data-explain-selectable="explanation"
+                  className="text-sm leading-relaxed text-foreground"
+                >
                   {article.yuukoExplanation}
                 </p>
+                ) : (
+                  <NotGeneratedText>ゆうこの解説はまだ作成されていないよ。</NotGeneratedText>
+                )}
+                {quickTerms.length > 0 ? (
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {[primaryTerm, secondaryTerm].map((term) => (
+                  {quickTerms.map((term) => (
                     <button
                       key={term.id}
                       className="rounded bg-[var(--yuuko-green-light)] px-2 py-1 text-xs font-medium text-[var(--yuuko-green)]"
@@ -1306,6 +1928,7 @@ export default function NewsReaderScreen({
                     </button>
                   ))}
                 </div>
+                ) : null}
               </CardContent>
             </Card>
 
@@ -1315,7 +1938,10 @@ export default function NewsReaderScreen({
                   <Star className="h-5 w-5 fill-yellow-500 text-yellow-500" />
                   <h2 className="font-semibold text-foreground">要点</h2>
                 </div>
-                <ul className="space-y-2">
+                {article.keyPoints.length === 0 ? (
+                  <NotGeneratedText>要点はまだ作成されていないよ。</NotGeneratedText>
+                ) : (
+                <ul aria-label="要点" className="space-y-2">
                   {article.keyPoints.map((point, index) => (
                     <li
                       key={`${article.id}-point-${index}`}
@@ -1326,6 +1952,7 @@ export default function NewsReaderScreen({
                     </li>
                   ))}
                 </ul>
+                )}
               </CardContent>
             </Card>
 
@@ -1335,9 +1962,21 @@ export default function NewsReaderScreen({
                   <Gift className="h-5 w-5 text-red-500" />
                   <h2 className="font-semibold text-foreground">注目ポイント</h2>
                 </div>
-                <p className="text-sm leading-relaxed text-foreground">
-                  {article.attentionPoint}
-                </p>
+                {article.focusPoints.length > 0 ? (
+                <ul aria-label="注目ポイント" className="space-y-2">
+                  {article.focusPoints.map((point, index) => (
+                    <li
+                      key={`${article.id}-focus-${index}`}
+                      className="flex items-start gap-2 text-sm leading-relaxed text-foreground"
+                    >
+                      <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-red-400" />
+                      <span>{point}</span>
+                    </li>
+                  ))}
+                </ul>
+                ) : (
+                  <NotGeneratedText>注目ポイントはまだ作成されていないよ。</NotGeneratedText>
+                )}
               </CardContent>
             </Card>
 
@@ -1347,11 +1986,17 @@ export default function NewsReaderScreen({
                   <Heart className="h-5 w-5 fill-pink-500 text-pink-500" />
                   <h2 className="font-semibold text-foreground">ゆうこの感想</h2>
                 </div>
+                {article.yuukoThoughts ? (
                 <p className="text-sm leading-relaxed text-foreground">
                   {article.yuukoThoughts}
                 </p>
+                ) : (
+                  <NotGeneratedText>ゆうこの感想はまだ作成されていないよ。</NotGeneratedText>
+                )}
               </CardContent>
             </Card>
+            </>
+            )}
 
             <Card className="mb-4 border-0 py-3 shadow-sm">
               <CardContent className="p-4">
@@ -1383,6 +2028,8 @@ export default function NewsReaderScreen({
                     </AlertDescription>
                   </Alert>
                 )}
+                {/* 関連記事が無い（Tauri で0件・取得失敗・読み込み中）ときはサンプル記事で埋めず空表示にする。 */}
+                {featuredRelatedArticle ? (
                 <button
                   className="flex w-full items-center gap-3 text-left"
                   onClick={() => onOpenArticle?.(featuredRelatedArticle.id)}
@@ -1405,6 +2052,13 @@ export default function NewsReaderScreen({
                   ) : null}
                   <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
                 </button>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {isLoadingRelatedArticles
+                      ? "関連記事を読み込んでいるよ…"
+                      : "関連記事はまだないよ。"}
+                  </p>
+                )}
               </CardContent>
             </Card>
 
@@ -1434,6 +2088,9 @@ export default function NewsReaderScreen({
 
           {showTermPopup && selectedTerm ? (
             <TermPopup
+              // 記事ID＋用語の一意ID で key を変える。表示文字列が同じでも別ID用語へ切り替われば
+              // 再マウントし、ドラッグ位置・pointerId・capture 等の一時状態を中央初期化する。
+              key={`${resolvedArticleId}::${selectedTerm.id}`}
               term={selectedTerm.term}
               dictionaryEntry={selectedDictionaryEntry}
               isLoading={isLoadingTermExplanation}
@@ -1447,10 +2104,15 @@ export default function NewsReaderScreen({
           ) : null}
         </main>
 
-        <aside className="flex w-72 shrink-0 flex-col overflow-y-auto p-4">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="flex w-60 lg:w-72 shrink-0 flex-col overflow-y-auto p-4">
           <div className="mb-2">
             <YuukoSpeechBubbleRight
-              message={article.yuukoThoughts || fallbackSpeechBubble}
+              message={
+                articleLoadState === "ready" && article.yuukoThoughts
+                  ? article.yuukoThoughts
+                  : fallbackSpeechBubble
+              }
             />
           </div>
 
@@ -1470,8 +2132,12 @@ export default function NewsReaderScreen({
                   用語サポート
                 </span>
               </div>
+              {/* 候補語は取得完了（ready）かつ候補語がある記事でだけ出す。読み込み中・失敗時に初期値の
+                  サンプル記事の語を出さず、実記事で候補語が空なら範囲選択の案内に置き換える。 */}
+              {supportTerms.length > 0 ? (
+              <>
               <div className="space-y-2">
-                {article.highlightedTerms.map((term) => (
+                {supportTerms.map((term) => (
                   <div key={term.id} className="flex items-center justify-between">
                     <span className="text-xs text-foreground">{term.term}</span>
                     <Badge
@@ -1493,10 +2159,44 @@ export default function NewsReaderScreen({
                 すべての関連ワードを見る
                 <ChevronRight className="ml-1 h-4 w-4" />
               </Button>
+              </>
+              ) : (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  本文を選ぶと、ゆうこが解説するよ
+                </p>
+              )}
             </CardContent>
           </Card>
         </aside>
       </div>
+
+      {/* 範囲選択の右下付近に出す「解説」ボタン（position: fixed / viewport 座標）。
+          onMouseDown で preventDefault し、押下時に選択が解除されないようにする。
+          onClick で選択文字列を確定し、既存の用語解説（TermPopup）へ接続する。 */}
+      {explainSelection?.tooLong ? (
+        // 上限（D21: 200文字）を超える選択は送らず、短く選び直すよう案内する（ボタンは出さない）。
+        // 用語かフレーズかの判定は Rust 側で行うため、ここでは長さの上限だけを見る。
+        <div
+          role="status"
+          data-explain-too-long-hint="true"
+          className="pointer-events-none fixed z-50 max-w-[min(380px,calc(100vw-16px))] break-words rounded-md border border-amber-300 bg-white px-2 py-1 text-xs text-amber-700 shadow-md"
+          style={{ left: explainSelection.left, top: explainSelection.top }}
+        >
+          {SELECTION_TOO_LONG_MESSAGE}
+        </div>
+      ) : explainSelection ? (
+        <button
+          type="button"
+          aria-label="選択した用語を解説"
+          data-explain-button="true"
+          className="fixed z-50 rounded-md border border-[var(--yuuko-green)] bg-white px-2 py-1 text-xs font-medium text-[var(--yuuko-green)] shadow-md hover:bg-[var(--yuuko-green-light)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+          style={{ left: explainSelection.left, top: explainSelection.top }}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={handleExplainButtonClick}
+        >
+          解説
+        </button>
+      ) : null}
 
       <footer className="flex h-9 shrink-0 items-center justify-between border-t border-border/50 bg-white px-4">
         <div className="flex items-center gap-3">

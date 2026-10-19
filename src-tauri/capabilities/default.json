@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "メインウィンドウ用。Tauri コアの既定権限、画面内 close-to-hide 用のウィンドウを閉じる権限、アプリ定義 command の一括権限セット（permissions/main-window.toml）を与える。",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "main-window-commands"
   ]
 }

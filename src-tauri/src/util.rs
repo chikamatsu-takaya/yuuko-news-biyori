@@ -1,5 +1,8 @@
 //! クレート内共通の小さなユーティリティ。
 
+pub(crate) mod speech_cleanup;
+pub(crate) mod text_safety;
+
 /// 先頭の UTF-8 BOM (U+FEFF) を除去する。
 ///
 /// Windows のエディタで設定JSONを手編集した際に付与されることがある BOM のみを

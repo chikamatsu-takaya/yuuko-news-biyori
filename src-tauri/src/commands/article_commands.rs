@@ -1,10 +1,12 @@
 use tauri::State;
 
 use crate::domain::article::{
-    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArticleDetailDto, ArticleHistoryItemDto,
-    ArticleSummaryDto, FavoriteUpdateResult, GetArticleDetailParams, GetRecommendedArticlesParams,
-    ListArticleHistoryParams, RestoreArchivedArticleParams, RestoreArchivedArticleResult,
-    UpdateArticleFavoriteParams,
+    ArchiveMonthArticlesDto, ArchiveMonthDeleteParams, ArchiveMonthDeletePreviewDto,
+    ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRetirementSummaryDto, ArchiveSummaryDto,
+    ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, FavoriteUpdateResult,
+    GetArticleDetailParams, GetRecommendedArticlesParams, ListArchiveMonthArticlesParams,
+    ListArticleHistoryParams, OpenOriginalArticleParams, RestoreArchivedArticleParams,
+    RestoreArchivedArticleResult, UpdateArticleFavoriteParams,
 };
 use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
 use crate::error::{CommandError, CommandResult};
@@ -16,17 +18,16 @@ pub async fn get_recommended_articles(
     params: Option<GetRecommendedArticlesParams>,
 ) -> CommandResult<Vec<ArticleSummaryDto>> {
     let article_service = state.article_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     let normalized_params = params.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        article_service.get_recommended_articles(normalized_params)
+        let mut articles = article_service.get_recommended_articles(normalized_params)?;
+        // 自動要約の待機中・処理中・失敗はメモリ上の状態のため、ここで記事ファイル由来の値に重ねる。
+        auto_summary_queue.apply_to_summaries(&mut articles);
+        Ok::<_, crate::error::AppError>(articles)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join recommended-articles task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("recommended-articles", error))?
     .map_err(CommandError::from)
 }
 
@@ -36,17 +37,16 @@ pub async fn list_article_history(
     params: Option<ListArticleHistoryParams>,
 ) -> CommandResult<Vec<ArticleHistoryItemDto>> {
     let article_service = state.article_service.clone();
+    let auto_summary_queue = state.auto_summary_queue.clone();
     let normalized_params = params.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        article_service.list_article_history(normalized_params)
+        let mut items = article_service.list_article_history(normalized_params)?;
+        // 待機中・処理中・失敗はキューのメモリ上の状態のため、ここで重ねる（一覧と同じ）。
+        auto_summary_queue.apply_to_history_items(&mut items);
+        Ok::<_, crate::error::AppError>(items)
     })
     .await
-    .map_err(|error| {
-        CommandError::new(
-            "JOIN_ERROR",
-            format!("failed to join article-history task: {error}"),
-        )
-    })?
+    .map_err(|error| CommandError::join_error("article-history", error))?
     .map_err(CommandError::from)
 }
 
@@ -56,15 +56,15 @@ pub async fn get_article_detail(
     params: GetArticleDetailParams,
 ) -> CommandResult<ArticleDetailDto> {
     let article_service = state.article_service.clone();
-    tauri::async_runtime::spawn_blocking(move || article_service.get_article_detail(params))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join article-detail task: {error}"),
-            )
-        })?
-        .map_err(CommandError::from)
+    let auto_summary_queue = state.auto_summary_queue.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = article_service.get_article_detail(params)?;
+        auto_summary_queue.apply_to_detail(&mut detail);
+        Ok::<_, crate::error::AppError>(detail)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("article-detail", error))?
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -75,12 +75,21 @@ pub async fn update_article_favorite(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.update_article_favorite(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join update-article-favorite task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("update-article-favorite", error))?
+        .map_err(CommandError::from)
+}
+
+/// 記事IDだけを受け取り、保存済みの元記事 URL を検証して既定のブラウザで開く（判断台帳 D13）。
+/// URL・パスは受け取らないため、任意の URL を開く入口にはならない。失敗は固定のコードで返す。
+#[tauri::command]
+pub async fn open_original_article(
+    state: State<'_, AppState>,
+    params: OpenOriginalArticleParams,
+) -> CommandResult<()> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.open_original_article(params))
+        .await
+        .map_err(|error| CommandError::join_error("open-original-article", error))?
         .map_err(CommandError::from)
 }
 
@@ -92,12 +101,7 @@ pub async fn generate_article_summary(
     let summary_service = state.summary_service.clone();
     tauri::async_runtime::spawn_blocking(move || summary_service.generate_article_summary(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join generate-article-summary task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("generate-article-summary", error))?
         .map_err(CommandError::from)
 }
 
@@ -110,12 +114,7 @@ pub async fn get_archive_candidates(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.list_archive_candidates())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join archive-candidates task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("archive-candidates", error))?
         .map_err(CommandError::from)
 }
 
@@ -126,12 +125,7 @@ pub async fn archive_old_articles(state: State<'_, AppState>) -> CommandResult<A
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.archive_candidates())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join archive-old-articles task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("archive-old-articles", error))?
         .map_err(CommandError::from)
 }
 
@@ -144,12 +138,7 @@ pub async fn restore_archived_article(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.restore_archived_article(params))
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join restore-archived-article task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("restore-archived-article", error))?
         .map_err(CommandError::from)
 }
 
@@ -161,11 +150,65 @@ pub async fn retire_archived_markdown(
     let article_service = state.article_service.clone();
     tauri::async_runtime::spawn_blocking(move || article_service.retire_archived_markdown())
         .await
-        .map_err(|error| {
-            CommandError::new(
-                "JOIN_ERROR",
-                format!("failed to join retire-archived-markdown task: {error}"),
-            )
-        })?
+        .map_err(|error| CommandError::join_error("retire-archived-markdown", error))?
+        .map_err(CommandError::from)
+}
+
+/// 過去ニュース画面の月別アーカイブ一覧（年月・件数）を新しい月から返す read-only command。
+/// `archive_index.json` だけを読み、ZIPは開かない。
+#[tauri::command]
+pub async fn list_archive_months(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ArchiveMonthDto>> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.list_archive_months())
+        .await
+        .map_err(|error| CommandError::join_error("archive-months", error))?
+        .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、その月のアーカイブ記事一覧を記事カタログから返す read-only command。
+/// パス・ファイル名は受け取らず、ZIPも展開しない。
+#[tauri::command]
+pub async fn list_archive_month_articles(
+    state: State<'_, AppState>,
+    params: ListArchiveMonthArticlesParams,
+) -> CommandResult<ArchiveMonthArticlesDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        article_service.list_archive_month_articles(params)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("archive-month-articles", error))?
+    .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、その月のアーカイブ削除で消える件数・ZIPサイズを返す command。
+/// 削除と同じ検証（古い月か・index にあるか等）を行い、削除できない月はエラーを返す。
+#[tauri::command]
+pub async fn get_archive_month_delete_preview(
+    state: State<'_, AppState>,
+    params: ArchiveMonthDeleteParams,
+) -> CommandResult<ArchiveMonthDeletePreviewDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        article_service.get_archive_month_delete_preview(params)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("archive-month-delete-preview", error))?
+    .map_err(CommandError::from)
+}
+
+/// 年月（`YYYY-MM`）だけを受け取り、古い月の月次ZIPと index の月エントリを削除する command。
+/// パス・ファイル名は受け取らず、通常のニュース領域のMarkdownは削除しない。
+#[tauri::command]
+pub async fn delete_archive_month(
+    state: State<'_, AppState>,
+    params: ArchiveMonthDeleteParams,
+) -> CommandResult<ArchiveMonthDeleteResultDto> {
+    let article_service = state.article_service.clone();
+    tauri::async_runtime::spawn_blocking(move || article_service.delete_archive_month(params))
+        .await
+        .map_err(|error| CommandError::join_error("delete-archive-month", error))?
         .map_err(CommandError::from)
 }

@@ -47,6 +47,206 @@
   --yuuko-text-muted: #6B6B6B;
 }
 
+/*
+ * 既定テーマ（クリーム）の見本用。カスタマイズ画面のテーマ見本は `data-theme` 付きの要素の中で
+ * CSS 変数を読むため、別テーマ適用中でも既定の見本が既定の色で見えるよう、見本に使う変数だけ :root と同じ値を置く。
+ */
+[data-theme="default"] {
+  --yuuko-green: #5DBB72;
+  --yuuko-green-light: #EAF7EA;
+  --yuuko-cream: #FFFDF5;
+}
+
+/*
+ * 報酬テーマ（ランク報酬 theme_001 / theme_002）。<html data-theme="<id>"> で切り替える。
+ * 既定（クリーム）は上の :root のまま変えない。適用する ID の検証は lib/ui-theme.mjs、反映は hooks/use-ui-theme.ts。
+ * テーマを足すときは同じ変数一式を持つブロックを追加し、lib/ui-theme.mjs の UI_THEMES に ID を足す。
+ * 文字色は WCAG AA（本文 4.5:1 以上）を満たす組み合わせにする:
+ *   本文 foreground/背景 ≒ 10.8:1、muted-foreground/背景・muted ≧ 5.2:1、
+ *   primary ボタン（白文字）≧ 5.2:1、サイドバー選択中（--yuuko-green 文字/--yuuko-green-light）≧ 4.6:1。
+ * --yuuko-green 系は名前に反してアプリのアクセント色として使われているため、テーマ色で上書きする。
+ * 夜間（.dark）は報酬テーマではないため、ここには含めない。
+ */
+[data-theme="theme_001"] {
+  /* そらいろ: 明るい水色 */
+  --background: #F3F9FE;
+  --foreground: #2F3B47;
+  --card: #FFFFFF;
+  --card-foreground: #2F3B47;
+  --popover: #FFFFFF;
+  --popover-foreground: #2F3B47;
+  --primary: #2B70AD;
+  --primary-foreground: #FFFFFF;
+  --secondary: #E6F2FC;
+  --secondary-foreground: #2F3B47;
+  --muted: #EAF2F9;
+  --muted-foreground: #5B6670;
+  --accent: #E6F2FC;
+  --accent-foreground: #2F3B47;
+  --border: #D6E4F0;
+  --input: #D6E4F0;
+  --ring: #2B70AD;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #2F3B47;
+  --sidebar-primary: #2B70AD;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #E6F2FC;
+  --sidebar-accent-foreground: #2F3B47;
+  --sidebar-border: #D6E4F0;
+  --sidebar-ring: #2B70AD;
+  --yuuko-green: #2B70AD;
+  --yuuko-green-light: #E6F2FC;
+  --yuuko-cream: #F3F9FE;
+  --yuuko-cream-dark: #EAF2F9;
+  --yuuko-text: #2F3B47;
+  --yuuko-text-muted: #5B6670;
+}
+
+[data-theme="theme_002"] {
+  /* さくら: 明るい桜色 */
+  --background: #FFF7F9;
+  --foreground: #44363B;
+  --card: #FFFFFF;
+  --card-foreground: #44363B;
+  --popover: #FFFFFF;
+  --popover-foreground: #44363B;
+  --primary: #B53F61;
+  --primary-foreground: #FFFFFF;
+  --secondary: #FCEBF0;
+  --secondary-foreground: #44363B;
+  --muted: #F9EEF1;
+  --muted-foreground: #6E5A61;
+  --accent: #FCEBF0;
+  --accent-foreground: #44363B;
+  --border: #F0DCE2;
+  --input: #F0DCE2;
+  --ring: #B53F61;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #44363B;
+  --sidebar-primary: #B53F61;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #FCEBF0;
+  --sidebar-accent-foreground: #44363B;
+  --sidebar-border: #F0DCE2;
+  --sidebar-ring: #B53F61;
+  --yuuko-green: #B53F61;
+  --yuuko-green-light: #FCEBF0;
+  --yuuko-cream: #FFF7F9;
+  --yuuko-cream-dark: #F9EEF1;
+  --yuuko-text: #44363B;
+  --yuuko-text-muted: #6E5A61;
+}
+
+/*
+ * ガチャテーマ（色違いテーマ gacha_theme_001〜003・D79）。ID は Rust GACHA_MASTER の item_id と一致させる。
+ * 変数一式・WCAG AA の基準は上の報酬テーマと同じ。既定（クリーム・草色）/ そらいろ / さくら と色相が重ならないようにする。
+ * 各ブロックのコントラスト比は、白背景のカード上ではさらに高くなる（背景色の方が白より暗いため、背景基準の値を下限として記す）。
+ */
+[data-theme="gacha_theme_001"] {
+  /* ミント: 明るいミントグリーン（既定の草色より青みの強い緑）。fg/bg 10.5:1、muted-foreground/背景 5.8:1・/muted 5.5:1、白文字/primary 5.6:1、サイドバー選択中 4.8:1 */
+  --background: #F1FAF7;
+  --foreground: #2D3F3A;
+  --card: #FFFFFF;
+  --card-foreground: #2D3F3A;
+  --popover: #FFFFFF;
+  --popover-foreground: #2D3F3A;
+  --primary: #1B7565;
+  --primary-foreground: #FFFFFF;
+  --secondary: #DFF3EC;
+  --secondary-foreground: #2D3F3A;
+  --muted: #E7F4EF;
+  --muted-foreground: #53655F;
+  --accent: #DFF3EC;
+  --accent-foreground: #2D3F3A;
+  --border: #CDE8DF;
+  --input: #CDE8DF;
+  --ring: #1B7565;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #2D3F3A;
+  --sidebar-primary: #1B7565;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #DFF3EC;
+  --sidebar-accent-foreground: #2D3F3A;
+  --sidebar-border: #CDE8DF;
+  --sidebar-ring: #1B7565;
+  --yuuko-green: #1B7565;
+  --yuuko-green-light: #DFF3EC;
+  --yuuko-cream: #F1FAF7;
+  --yuuko-cream-dark: #E7F4EF;
+  --yuuko-text: #2D3F3A;
+  --yuuko-text-muted: #53655F;
+}
+
+[data-theme="gacha_theme_002"] {
+  /* ひだまり: 明るいレモン色（アクセントは日だまりのオレンジ）。fg/bg 9.9:1、muted-foreground/背景 6.2:1・/muted 5.8:1、白文字/primary 5.2:1、サイドバー選択中 4.55:1 */
+  --background: #FFFAE6;
+  --foreground: #45402F;
+  --card: #FFFFFF;
+  --card-foreground: #45402F;
+  --popover: #FFFFFF;
+  --popover-foreground: #45402F;
+  --primary: #B25000;
+  --primary-foreground: #FFFFFF;
+  --secondary: #FFEFC2;
+  --secondary-foreground: #45402F;
+  --muted: #FBF2D6;
+  --muted-foreground: #675D45;
+  --accent: #FFEFC2;
+  --accent-foreground: #45402F;
+  --border: #F0E1B0;
+  --input: #F0E1B0;
+  --ring: #B25000;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #45402F;
+  --sidebar-primary: #B25000;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #FFEFC2;
+  --sidebar-accent-foreground: #45402F;
+  --sidebar-border: #F0E1B0;
+  --sidebar-ring: #B25000;
+  --yuuko-green: #B25000;
+  --yuuko-green-light: #FFEFC2;
+  --yuuko-cream: #FFFAE6;
+  --yuuko-cream-dark: #FBF2D6;
+  --yuuko-text: #45402F;
+  --yuuko-text-muted: #675D45;
+}
+
+[data-theme="gacha_theme_003"] {
+  /* ラベンダー: 明るい薄紫。fg/bg 10.9:1、muted-foreground/背景 6.1:1・/muted 5.7:1、白文字/primary 6.2:1、サイドバー選択中 5.2:1 */
+  --background: #F8F5FE;
+  --foreground: #3A3548;
+  --card: #FFFFFF;
+  --card-foreground: #3A3548;
+  --popover: #FFFFFF;
+  --popover-foreground: #3A3548;
+  --primary: #6B4FB3;
+  --primary-foreground: #FFFFFF;
+  --secondary: #EEE8FB;
+  --secondary-foreground: #3A3548;
+  --muted: #F0ECF9;
+  --muted-foreground: #605A70;
+  --accent: #EEE8FB;
+  --accent-foreground: #3A3548;
+  --border: #DED6F2;
+  --input: #DED6F2;
+  --ring: #6B4FB3;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #3A3548;
+  --sidebar-primary: #6B4FB3;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #EEE8FB;
+  --sidebar-accent-foreground: #3A3548;
+  --sidebar-border: #DED6F2;
+  --sidebar-ring: #6B4FB3;
+  --yuuko-green: #6B4FB3;
+  --yuuko-green-light: #EEE8FB;
+  --yuuko-cream: #F8F5FE;
+  --yuuko-cream-dark: #F0ECF9;
+  --yuuko-text: #3A3548;
+  --yuuko-text-muted: #605A70;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

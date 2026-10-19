@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "@/lib/tauri/settings";
 
 export type YuukoResidentState =
@@ -47,7 +48,24 @@ export type YuukoNotificationState = {
   hasNotification: boolean;
   currentArticleId?: string;
   rewardNotification?: RewardNotificationState;
+  /**
+   * 紹介中記事の保存済み AI 要約を短く切り詰めたもの（デスクトップ通知用・Rust 側で付与）。
+   * previewArticle.summary は要約が無いと本文抜粋で補われるため、デスクトップ通知ではこちらだけを使う。
+   */
+  previewShortSummary?: string;
 };
+
+/**
+ * 報酬通知（ランクアップダイアログで確認しなかった報酬を、ゆうこが知らせる吹き出し）を表示中か。
+ * Rust の has_active_reward_notice と同基準。OK は handleYuukoClicked を通り、Rust 側で確認済みにする。
+ */
+export const isActiveRewardNotice = (
+  state: YuukoNotificationState | null | undefined
+): boolean =>
+  !!state &&
+  state.state === "RewardNotifying" &&
+  !!state.rewardNotification?.pending &&
+  state.rewardNotification.rewardIds.length > 0;
 
 export type ConfirmRankUpRewardParams = {
   rewardIds: string[];
@@ -82,12 +100,19 @@ export const confirmRankUpReward = async (
 export type NotificationReason =
   | "notified"
   | "disabled"
-  | "reward_pending"
   | "already_active"
   | "daily_limit"
   | "cooling_down"
   | "no_candidate"
-  | "outside_time_range";
+  | "outside_time_range"
+  // 全画面・プレゼン中（設計書 §5.2）/ 解除後 30〜180 秒の猶予中（§5.4）。
+  | "fullscreen"
+  | "fullscreen_grace"
+  // 会議中（既知の会議アプリ起動中かつマイク使用中）/ マイク使用中（§5.2）。候補は保留され、猶予は置かない。
+  | "meeting"
+  | "mic_in_use"
+  // PCスリープ復帰後 30〜180 秒の猶予中（§5.2 / §5.4）。fullscreen_grace と同じく通知しない。
+  | "resume_grace";
 
 export type RequestYuukoNotificationResult = {
   notified: boolean;
@@ -127,6 +152,153 @@ export const requestYuukoNotification =
 
     return invoke<RequestYuukoNotificationResult>("request_yuuko_notification");
   };
+
+// --- 常駐ゆうこ用ウィンドウ（デスクトップ通知） ---
+
+/**
+ * メインウィンドウ非表示・最小化中に、Rust の判定スレッドがゆうこ用ウィンドウへ送るイベント名。
+ * Rust 側 yuuko_desktop_notifier::YUUKO_DESKTOP_NOTIFICATION_EVENT と一致させる。
+ */
+export const YUUKO_DESKTOP_NOTIFICATION_EVENT = "yuuko-desktop-notification";
+
+/**
+ * ゆうこ用ウィンドウへ渡す最小限の表示用データ（Rust YuukoDesktopNotification と一致）。
+ * 本文・URL は持たない。title / balloonText / sourceName / summary は外部由来を含み得るため、
+ * 必ずテキストとして描画する。
+ */
+export type YuukoDesktopNotification = {
+  articleId: string;
+  title: string;
+  balloonText?: string;
+  /** 出典名（軽量プレビューで表示）。 */
+  sourceName: string;
+  /** 保存済み要約を YUUKO_PREVIEW_SUMMARY_MAX_CHARS 以内に切り詰めたもの。無ければ省略。 */
+  summary?: string;
+  /**
+   * 既に軽量プレビュー段階（PreviewVisible）か。吹き出しからやり直すと、
+   * 次のクリックが Rust 側で「確定（記事を開く）」扱いになりずれるため、段階を合わせる。
+   */
+  previewVisible: boolean;
+  /**
+   * 報酬通知（吹き出し＋OK）か。ニュース通知では省略される。
+   * 報酬通知では記事の欄（articleId / title / sourceName）は空で、文言は balloonText だけを使う。
+   */
+  reward?: boolean;
+};
+
+/**
+ * 軽量プレビューの短い要約の最大文字数（省略記号を含む）。
+ * Rust domain::yuuko::PREVIEW_SUMMARY_MAX_CHARS と一致させる（理由は Rust 側のコメント）。
+ */
+export const YUUKO_PREVIEW_SUMMARY_MAX_CHARS = 60;
+
+/**
+ * 要約を軽量プレビュー用に切り詰める（Rust short_preview_summary と同じ規則）。
+ * previewShortSummary は Rust で切り詰め済みだが、上限を超える値が来ても枠を超えないよう念のため適用する
+ * （切り詰め済みの値には何もしない）。文字数はコードポイントで数える。
+ */
+export const toShortPreviewSummary = (
+  summary: string | null | undefined
+): string | undefined => {
+  const trimmed = summary?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  const chars = Array.from(trimmed);
+  if (chars.length <= YUUKO_PREVIEW_SUMMARY_MAX_CHARS) {
+    return trimmed;
+  }
+  return `${chars
+    .slice(0, YUUKO_PREVIEW_SUMMARY_MAX_CHARS - 1)
+    .join("")
+    .trimEnd()}…`;
+};
+
+/**
+ * 通知状態から、ゆうこ用ウィンドウの表示用データを取り出す（Rust desktop_notification_from_state と同基準）。
+ *
+ * ウィンドウ初回生成時はページの購読開始より先にイベントが送られ得るため、
+ * ゆうこ用ウィンドウはマウント時に getYuukoNotificationState の結果をこれで変換して初期表示に使う。
+ * active なニュース通知・報酬通知でない、またはタイトルが無いニュースの場合は null（表示しない）。
+ */
+export const toYuukoDesktopNotification = (
+  state: YuukoNotificationState | null
+): YuukoDesktopNotification | null => {
+  if (state && isActiveRewardNotice(state)) {
+    const balloonText =
+      state.balloonText ?? state.rewardNotification?.message ?? undefined;
+    return {
+      articleId: "",
+      title: "",
+      ...(balloonText ? { balloonText } : {}),
+      sourceName: "",
+      previewVisible: false,
+      reward: true,
+    };
+  }
+  if (
+    !state ||
+    !["Appearing", "BalloonVisible", "PreviewVisible"].includes(state.state) ||
+    !state.previewArticle
+  ) {
+    return null;
+  }
+  // previewArticle.summary は本文抜粋で補われ得るため使わない（無ければ固定の一言になる）。
+  const summary = toShortPreviewSummary(state.previewShortSummary);
+  return {
+    articleId: state.currentArticleId ?? state.previewArticle.articleId,
+    title: state.previewArticle.title,
+    ...(state.balloonText ? { balloonText: state.balloonText } : {}),
+    sourceName: state.previewArticle.sourceName,
+    ...(summary ? { summary } : {}),
+    previewVisible: state.state === "PreviewVisible",
+  };
+};
+
+/**
+ * ゆうこ用ウィンドウで、Rust から届くデスクトップ通知イベントを購読する。
+ * 非Tauri（ブラウザプレビュー）では何もしない解除関数を返す。
+ */
+export const listenYuukoDesktopNotification = async (
+  handler: (notification: YuukoDesktopNotification) => void
+): Promise<() => void> => {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  return listen<YuukoDesktopNotification>(
+    YUUKO_DESKTOP_NOTIFICATION_EVENT,
+    (event) => handler(event.payload)
+  );
+};
+
+/**
+ * ゆうこ用ウィンドウの「詳しく見る」確定時に、Rust がメインウィンドウへ送るイベント名。
+ * Rust 側 yuuko_desktop_notifier::YUUKO_OPEN_ARTICLE_EVENT と一致させる。
+ */
+export const YUUKO_OPEN_ARTICLE_EVENT = "yuuko-open-article";
+
+/** メインウィンドウで開く記事（Rust が永続状態の紹介中記事から決める）。 */
+export type YuukoOpenArticleRequest = {
+  articleId: string;
+};
+
+/**
+ * メインウィンドウで「ゆうこ用ウィンドウから記事を開く」要求を購読する。
+ * 記事IDは Rust の状態由来だが、念のため空でない文字列だけを渡す。非Tauriでは何もしない。
+ */
+export const listenYuukoOpenArticle = async (
+  handler: (articleId: string) => void
+): Promise<() => void> => {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  return listen<YuukoOpenArticleRequest>(YUUKO_OPEN_ARTICLE_EVENT, (event) => {
+    const articleId = event.payload?.articleId;
+    if (typeof articleId === "string" && articleId.length > 0) {
+      handler(articleId);
+    }
+  });
+};
 
 /** 無操作タイムアウト（無視）を記録する。自動退場タイマー側から呼ぶ。非Tauriは null。 */
 export const markYuukoIgnored =

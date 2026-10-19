@@ -6,18 +6,25 @@ import NewsListScreen from "@/components/screens/NewsListScreen";
 import NewsReaderScreen from "@/components/screens/NewsReaderScreen";
 import DictionaryScreen from "@/components/screens/DictionaryScreen";
 import NewsHistoryScreen from "@/components/screens/NewsHistoryScreen";
+import PastNewsScreen from "@/components/screens/PastNewsScreen";
 import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
+import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
+import { useNewsListRevision } from "@/hooks/use-news-list-revision";
+import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
 import {
   dismissYuukoNotification,
   handleYuukoClicked,
+  isActiveRewardNotice,
+  listenYuukoOpenArticle,
   markYuukoIgnored,
   type YuukoNotificationState,
 } from "@/lib/tauri/yuuko";
+import { takePendingMainWindowArticle } from "@/lib/tauri/window";
 
 type ScreenType =
   | "home"
@@ -28,6 +35,7 @@ type ScreenType =
   | "reader"
   | "dictionary"
   | "history"
+  | "past-news"
   | "settings"
   | "customize"
   | "gacha"
@@ -35,7 +43,7 @@ type ScreenType =
 
 // 記事詳細を開いた遷移元。戻る先の画面をここで保持する（固定でホームへ戻さない）。
 // 「戻る」ボタンの表示文言は遷移元によらず「戻る」に統一し、戻り先のみこの値で制御する。
-type ReaderOrigin = "home" | "news" | "history" | "dictionary";
+type ReaderOrigin = "home" | "news" | "history" | "dictionary" | "past-news";
 
 // ニュース通知が「表示中（ユーザー操作待ち）」とみなせる active 状態。
 // reward 専用の hasNotification は使わず、Rust の has_active_notification と同基準で判定する。
@@ -46,15 +54,23 @@ const ACTIVE_NEWS_NOTIFICATION_STATES = [
 ];
 
 /**
- * アプリ内ニュース通知を表示すべきかの判定。
- * active 状態 かつ 紹介対象（previewArticle / currentArticleId）が存在する場合のみ true。
+ * アプリ内通知（ニュース・報酬）を表示すべきかの判定。
+ * ニュースは active 状態 かつ 紹介対象（previewArticle / currentArticleId）が存在する場合。
+ * 報酬通知（RewardNotifying・未確認の報酬あり）も同じ導線で表示し、閉じる/無視/OK を扱う。
  */
-const isActiveNewsNotification = (
+const isActiveYuukoNotification = (
   state: YuukoNotificationState | null
 ): boolean =>
-  !!state &&
-  ACTIVE_NEWS_NOTIFICATION_STATES.includes(state.state) &&
-  (Boolean(state.previewArticle) || Boolean(state.currentArticleId));
+  isActiveRewardNotice(state) ||
+  (!!state &&
+    ACTIVE_NEWS_NOTIFICATION_STATES.includes(state.state) &&
+    (Boolean(state.previewArticle) || Boolean(state.currentArticleId)));
+
+// 動きを抑える設定か。退場演出を出さずに即座に外すために使う。
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 export default function Page() {
   const [currentScreen, setCurrentScreen] = React.useState<ScreenType>("home");
@@ -67,6 +83,10 @@ export default function Page() {
   // 通知状態取得・候補生成は Page 側スケジューラに一本化する。最新値をここで保持し、
   // 表示が必要な画面（MainScreen 等）とアプリ内通知へ反映する。
   const [yuukoNotificationState, setYuukoNotificationState] =
+    React.useState<YuukoNotificationState | null>(null);
+  // 終端操作（閉じる/Esc/自動退場/詳しく見る）直後に退場演出を見せている通知の表示用コピー。
+  // 見た目専用で、通知状態（yuukoNotificationState）や backend 確定には使わない。
+  const [exitingNotification, setExitingNotification] =
     React.useState<YuukoNotificationState | null>(null);
 
   // メインウィンドウが表示中か。close-to-hide 等で非表示の間は候補生成を止め、
@@ -91,6 +111,10 @@ export default function Page() {
     };
   }, []);
 
+  // 定期取得（news-refreshed）後、ウィンドウが表示に戻ったときに一覧を作り直して読み直すための版番号。
+  // 一覧画面はマウント時に読み込むため、key に含めて再マウントする（画面側は変更しない）。
+  const newsListRevision = useNewsListRevision(isWindowVisible);
+
   // 終端操作（閉じる/Esc/自動退場/詳しく見る）の進行中フラグ。
   // backend 解消が完了するまでの間、scheduler が拾った同一 active 通知を再表示しないために使う。
   const terminalActionInFlightRef = React.useRef(false);
@@ -103,7 +127,12 @@ export default function Page() {
   // 残って返っても、ホーム側で処理済みニュースを再表示しないよう保持しない。
   const applyYuukoNotificationState = React.useCallback(
     (next: YuukoNotificationState | null) => {
-      setYuukoNotificationState(isActiveNewsNotification(next) ? next : null);
+      const active = isActiveYuukoNotification(next);
+      if (active) {
+        // 新しい active 通知を表示するときは、退場演出中の古い表示を残さない。
+        setExitingNotification(null);
+      }
+      setYuukoNotificationState(active ? next : null);
     },
     []
   );
@@ -116,7 +145,7 @@ export default function Page() {
       if (
         terminalActionInFlightRef.current &&
         next &&
-        isActiveNewsNotification(next)
+        isActiveYuukoNotification(next)
       ) {
         const nextArticleId =
           next.currentArticleId ?? next.previewArticle?.articleId ?? null;
@@ -136,10 +165,22 @@ export default function Page() {
   // 通知候補生成（requestYuukoNotification）を定期実行し、結果状態を Page state へ反映する。
   // 生成結果は下のアプリ内通知表示と同一導線に接続されるため「未表示消費」にならない。
   // ウィンドウ非表示中は canGenerateCandidates=false となり生成自体を行わない。
+  // ニュース閲覧画面（記事詳細）の表示中も、すでに記事を読んでいるため生成しない（§5.2）。
+  // request が Rust へ届かないので日次回数・クールタイムも消費せず、閲覧画面を離れると再開する。
+  // reader でも記事ID未指定ならホームを描画しているため、実際に記事詳細を表示中の場合だけ止める。
+  // 既に表示中の通知は閲覧画面へ移っても消さず、無視扱いにもしない（ユーザー操作か自動退場に任せる）。
   // onStateChange は handleSchedulerStateChange 経由で、終端操作中の再表示を抑止する。
+  const isReadingArticle = currentScreen === "reader" && Boolean(selectedArticleId);
+  // 初回起動の案内を表示中は、通知を操作できず枠だけ消費するため候補生成と表示を止める。
+  const [isOnboardingOpen, setIsOnboardingOpen] = React.useState(false);
   useNotificationScheduler({
     generateCandidates: true,
-    canGenerateCandidates: isWindowVisible,
+    canGenerateCandidates:
+      !isOnboardingOpen &&
+      canGenerateNotificationCandidates({
+        isWindowVisible,
+        isReadingArticle,
+      }),
     onStateChange: handleSchedulerStateChange,
   });
 
@@ -152,6 +193,8 @@ export default function Page() {
       setCurrentScreen("dictionary");
     } else if (screen === "history") {
       setCurrentScreen("history");
+    } else if (screen === "past-news") {
+      setCurrentScreen("past-news");
     } else if (screen === "settings") {
       setCurrentScreen("settings");
     } else if (screen === "customize") {
@@ -173,6 +216,46 @@ export default function Page() {
     },
     []
   );
+
+  // デスクトップ右下のゆうこ（アプリ非表示中の通知）で「詳しく見る」が確定したとき、
+  // Rust がメインを前面表示してこのイベントを送る。アプリ内通知の「詳しく見る」と同じ経路で記事詳細を開く。
+  // 通知状態の確定（handle_yuuko_clicked）は Rust 側で済んでいるため、ここでは画面遷移だけ行う。
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const openFromYuuko = (articleId: string) => {
+      // 非表示前に保持していた同じ通知は Rust 側で確定済み（非active）。前面表示の直後に
+      // 古い吹き出しを記事詳細へ重ねないよう、scheduler の拾い直しを待たずに破棄する。
+      setYuukoNotificationState(null);
+      handleOpenArticle(articleId);
+    };
+    listenYuukoOpenArticle(openFromYuuko)
+      .then((stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        // 長い非表示でメインが破棄され「詳しく見る」で作り直された場合、要求はイベントではなく
+        // Rust に預けられている（D133）。購読を始めた後に1回だけ取り出して同じ経路で開く。
+        takePendingMainWindowArticle()
+          .then((articleId) => {
+            if (!disposed && articleId) {
+              openFromYuuko(articleId);
+            }
+          })
+          .catch((error) => {
+            console.error("Failed to take pending article for main window:", error);
+          });
+      })
+      .catch((error) => {
+        console.error("Failed to listen yuuko open-article event:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleOpenArticle]);
 
   // 各一覧に渡す onOpenArticle を、遷移元を固定して生成する（ホーム/履歴/辞書で戻り先を分ける）。
   const openArticleFrom = React.useCallback(
@@ -233,11 +316,22 @@ export default function Page() {
 
   // 終端操作の開始: UI即時非表示＋終端中フラグ＋抑止対象IDを立てる。
   // 以降、backend 解消が完了するまで scheduler は同一 active 通知を採用しない。
+  // 通知状態は即座に外し、見た目だけ退場演出用のコピーで短時間残す（確定処理は待たせない）。
+  // 動きを抑える設定では演出を出さず即座に外す。
   const beginTerminalAction = (articleId: string | null) => {
     terminalActionInFlightRef.current = true;
     suppressActiveNotificationIdRef.current = articleId;
+    setExitingNotification(
+      !prefersReducedMotion() && isActiveYuukoNotification(yuukoNotificationState)
+        ? yuukoNotificationState
+        : null
+    );
     setYuukoNotificationState(null);
   };
+
+  const handleNotificationExited = React.useCallback(() => {
+    setExitingNotification(null);
+  }, []);
 
   // 終端操作の解除: backend が非active へ進んだ後に呼ぶ。
   const endTerminalAction = () => {
@@ -281,7 +375,7 @@ export default function Page() {
         const next = await dismissYuukoNotification();
         // dismiss は Waiting（非active）を返す → null 化して保持しない。
         applyYuukoNotificationState(next);
-        if (!isActiveNewsNotification(next)) {
+        if (!isActiveYuukoNotification(next)) {
           endTerminalAction();
         }
       } catch (error) {
@@ -299,7 +393,7 @@ export default function Page() {
       try {
         const next = await markYuukoIgnored();
         applyYuukoNotificationState(next);
-        if (!isActiveNewsNotification(next)) {
+        if (!isActiveYuukoNotification(next)) {
           endTerminalAction();
         }
       } catch (error) {
@@ -315,6 +409,7 @@ export default function Page() {
       if (!selectedArticleId) {
         return (
           <MainScreen
+            key={`home-${newsListRevision}`}
             onNavigate={handleNavigate}
             onOpenArticle={openArticleFrom("home")}
             yuukoNotificationState={yuukoNotificationState}
@@ -336,6 +431,7 @@ export default function Page() {
     if (currentScreen === "news") {
       return (
         <NewsListScreen
+          key={`news-${newsListRevision}`}
           onNavigate={handleNavigate}
           onOpenArticle={openArticleFrom("news")}
         />
@@ -360,6 +456,16 @@ export default function Page() {
       );
     }
 
+    // 過去ニュース（月一覧→記事一覧）。記事詳細の「戻る」で同じ月の一覧へ戻る（月の記憶は画面側で持つ）。
+    if (currentScreen === "past-news") {
+      return (
+        <PastNewsScreen
+          onNavigate={handleNavigate}
+          onOpenArticle={openArticleFrom("past-news")}
+        />
+      );
+    }
+
     if (currentScreen === "settings") {
       return <SettingsScreen onNavigate={handleNavigate} />;
     }
@@ -380,6 +486,7 @@ export default function Page() {
     // 表示件数設定（maxDailyRecommendations）に従って制限して表示する。
     return (
       <MainScreen
+        key={`home-${newsListRevision}`}
         onNavigate={handleNavigate}
         onOpenArticle={openArticleFrom("home")}
         yuukoNotificationState={yuukoNotificationState}
@@ -388,12 +495,16 @@ export default function Page() {
   };
 
   // どの画面でも通知を重ねて表示する。表示判定は active 状態 + 紹介対象の有無。
-  const activeNotification = isActiveNewsNotification(yuukoNotificationState)
+  const activeNotification = isActiveYuukoNotification(yuukoNotificationState)
     ? yuukoNotificationState
     : null;
+  // active が無い間だけ、退場演出中のコピーを同じ位置（同じ key）に描画する。
+  // 同じ要素を使い続けることで、初回クリック後の軽量プレビューのまま退場させる。
+  const displayedNotification = activeNotification ?? exitingNotification;
+  const isNotificationExiting = !activeNotification && !!exitingNotification;
   const activeNotificationArticleId =
-    activeNotification?.currentArticleId ??
-    activeNotification?.previewArticle?.articleId ??
+    displayedNotification?.currentArticleId ??
+    displayedNotification?.previewArticle?.articleId ??
     null;
 
   return (
@@ -402,26 +513,34 @@ export default function Page() {
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
           （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
           scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}
-      {isWindowVisible && activeNotification && (
+      {isWindowVisible && !isOnboardingOpen && displayedNotification && (
         <YuukoInAppNotification
           // 記事が変わったら段階(view)をリセットするため key で作り直す。
           key={activeNotificationArticleId ?? "yuuko-notification"}
           articleId={activeNotificationArticleId ?? undefined}
           // backend が PreviewVisible のときは最初から軽量プレビューで再開する。
           initialView={
-            activeNotification.state === "PreviewVisible" ? "preview" : "balloon"
+            displayedNotification.state === "PreviewVisible" ? "preview" : "balloon"
           }
-          balloonText={activeNotification.balloonText}
-          articleTitle={activeNotification.previewArticle?.title}
-          sourceName={activeNotification.previewArticle?.sourceName}
-          summary={activeNotification.previewArticle?.summary}
-          positionMode={activeNotification.positionMode}
+          balloonText={displayedNotification.balloonText}
+          articleTitle={displayedNotification.previewArticle?.title}
+          sourceName={displayedNotification.previewArticle?.sourceName}
+          summary={displayedNotification.previewArticle?.summary}
+          positionMode={displayedNotification.positionMode}
+          // 報酬通知は吹き出し＋OK。OK は handleNotificationOpen → handle_yuuko_clicked（記事は開かない）。
+          variant={
+            isActiveRewardNotice(displayedNotification) ? "reward" : "news"
+          }
           onFirstClick={handleNotificationFirstClick}
           onOpen={handleNotificationOpen}
           onClose={handleNotificationClose}
           onIgnore={handleNotificationIgnore}
+          exiting={isNotificationExiting}
+          onExited={handleNotificationExited}
         />
       )}
+      {/* 初回起動時だけ案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
+      <OnboardingOverlay onOpenChange={setIsOnboardingOpen} />
     </>
   );
 }

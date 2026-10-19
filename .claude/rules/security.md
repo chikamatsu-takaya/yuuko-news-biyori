@@ -38,7 +38,7 @@ paths:
 
 ## capability / CSP / プラグイン
 
-- Tauri capability は `src-tauri/capabilities/default.json`、CSP 等は `src-tauri/tauri.conf.json`。権限を広げる変更は最小限にし、理由を明記する。
+- Tauri capability は `src-tauri/capabilities/`（メイン: `default.json` / 常駐ゆうこ: `yuuko-window.json`）、アプリ定義 command の権限セットは `src-tauri/permissions/`、CSP 等は `src-tauri/tauri.conf.json`。アプリ定義 command はウィンドウごとの許可制（D110。手順はセキュリティ詳細設計書 §5.6.1）。権限を広げる変更は最小限にし、理由を明記する。
 - Tauri プラグイン追加時は権限とライセンスを確認する。
 
 ## git 外設定（対象外・無断で触れない）

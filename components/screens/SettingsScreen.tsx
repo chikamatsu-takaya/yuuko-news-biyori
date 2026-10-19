@@ -15,8 +15,6 @@ import {
   Lightbulb,
   RotateCcw,
   HelpCircle,
-  Trash2,
-  Download,
   Archive,
   Check,
   Info,
@@ -38,17 +36,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  getAutostartEnabled,
   getUserSettings,
+  isSettingsCorruptError,
   saveUserSettings,
+  setAutostartEnabled,
   resetUserSettings,
+  testAiProvider,
+  type AiProviderConnectionTestResult,
   type WorkTimeRangeDto,
   type UserSettingsDto,
   type ExplanationLevel,
 } from "@/lib/tauri/settings";
+import { setMainWindowUnsavedChanges } from "@/lib/tauri/window";
+import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { uiThemeLabel } from "@/lib/ui-theme.mjs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,6 +66,14 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useToast } from "@/hooks/use-toast";
+import { TimeInput } from "@/components/settings/TimeInput";
+import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
+import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
+import {
+  GENRE_OPTIONS,
+  NICKNAME_MAX_LENGTH,
+  normalizeWorkTimeRanges,
+} from "@/lib/settings-options";
 
 // Types
 type NotificationSettings = {
@@ -71,32 +84,18 @@ type NotificationSettings = {
 };
 
 
-type YuukoDisplaySettings = {
-  showResident: boolean;
-  balloonMode: string;
-  talkFrequency: string;
-  animationMode: string;
-};
-
 type SuppressionSettings = {
   suppressInMeeting: boolean;
   suppressWhenMicInUse: boolean;
   suppressWhenFullscreen: boolean;
-  suppressWhenGaming: boolean;
 };
 
 type AiSettings = {
   explanationDetail: string;
-  termExplanationLevel: string;
   autoSuggestLongSummary: boolean;
-  priorityMode: string;
   provider: string;
   providerStatus: string;
-};
-
-type DataManagementState = {
-  usedStorageGb: number;
-  maxStorageGb: number;
+  autoSummaryEnabled: boolean;
 };
 
 type UserProfileSettingsState = {
@@ -114,10 +113,8 @@ type IntegrationSettings = {
 
 type SettingsState = {
   notification: NotificationSettings;
-  yuuko: YuukoDisplaySettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
-  data: DataManagementState;
   user: UserProfileSettingsState;
   news: NewsSettingsState;
   integration: IntegrationSettings;
@@ -147,7 +144,7 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
   );
 }
 
-// Mock Data
+// 設定画面の既定値（読み込み前・プレビュー時の初期表示）。Tauri では読み込んだ保存値で上書きする。
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
@@ -158,29 +155,17 @@ const mockSettings: SettingsState = {
     frequency: "1日3回まで",
     maxPerDay: 3,
   },
-  yuuko: {
-    showResident: true,
-    balloonMode: "控えめに",
-    talkFrequency: "ふつう",
-    animationMode: "通常",
-  },
   suppression: {
     suppressInMeeting: true,
     suppressWhenMicInUse: true,
     suppressWhenFullscreen: true,
-    suppressWhenGaming: false,
   },
   ai: {
     explanationDetail: "ふつう",
-    termExplanationLevel: "中学生レベル",
     autoSuggestLongSummary: true,
-    priorityMode: "バランス重視",
     provider: "mock",
     providerStatus: "MockProviderで動作中",
-  },
-  data: {
-    usedStorageGb: 1.24,
-    maxStorageGb: 5.0,
+    autoSummaryEnabled: false,
   },
   user: {
     nickname: "",
@@ -225,25 +210,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   nickname: "",
   aiProvider: "mock",
   maxDailyRecommendations: 10,
-};
-
-const defaultWorkTimeRanges: WorkTimeRangeDto[] = [
-  { start: "09:00", end: "12:00" },
-  { start: "13:00", end: "18:00" },
-];
-
-const normalizeWorkTimeRanges = (
-  ranges?: WorkTimeRangeDto[]
-): WorkTimeRangeDto[] => {
-  if (!ranges || ranges.length === 0) {
-    return defaultWorkTimeRanges.map((range) => ({ ...range }));
-  }
-
-  if (ranges.length === 1) {
-    return [{ ...ranges[0] }];
-  }
-
-  return ranges.slice(0, 2).map((range) => ({ ...range }));
+  autoSummaryEnabled: false,
 };
 
 // 通知頻度ドロップダウンの表示文言と、永続値 notifyMaxPerDay（= notification.maxPerDay）の対応。
@@ -309,6 +276,10 @@ const mapSettingsFromDto = (
   dto: UserSettingsDto
 ): SettingsState => {
   const workTimeRanges = normalizeWorkTimeRanges(dto.workTimeRanges);
+  // OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
+  // もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
+  const providerForDisplay =
+    dto.aiProvider === "openai" ? "mock" : dto.aiProvider;
 
   return {
     ...base,
@@ -328,10 +299,11 @@ const mapSettingsFromDto = (
     },
     ai: {
       ...base.ai,
-      provider: dto.aiProvider,
-      providerStatus: dto.aiProvider,
+      provider: providerForDisplay,
+      providerStatus: providerForDisplay,
       // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
       explanationDetail: explanationLevelToLabel(dto.explanationLevel),
+      autoSummaryEnabled: dto.autoSummaryEnabled ?? false,
     },
     user: {
       ...base.user,
@@ -357,7 +329,6 @@ const buildDtoForSave = (
   const normalizedProvider =
     settingsState.ai.provider === "mock" ||
       settingsState.ai.provider === "gemini" ||
-      settingsState.ai.provider === "openai" ||
       settingsState.ai.provider === "local"
       ? settingsState.ai.provider
       : source.aiProvider;
@@ -384,7 +355,112 @@ const buildDtoForSave = (
     nickname: settingsState.user.nickname,
     aiProvider: normalizedProvider,
     maxDailyRecommendations: settingsState.news.maxRecommendations,
+    autoSummaryEnabled: settingsState.ai.autoSummaryEnabled,
   };
+};
+
+// 未保存の変更があるか（画面詳細設計書 SCR-003 §7.7「設定変更あり → 保存ボタンを有効化」）。
+// 比較は「保存したら書かれる DTO」同士で行う。保存済み DTO も一度画面状態へ写してから
+// 保存と同じ正規化（通知時間帯・解説レベル・ジャンル既定値など）を通すため、
+// 読み込んだだけで「未保存」になる誤表示を防ぐ。
+// ただし aiProvider だけは保存値そのものと比べる。選択肢から外した openai は画面上 MockProvider と
+// 表示され、保存すると mock へ書き換わるため、ファイルとずれている事実を「未保存」として示す。
+const toComparableDto = (dto: UserSettingsDto): UserSettingsDto => ({
+  ...dto,
+  // ジャンルは選択の順序に意味が無いため、付け外しで順序だけ変わっても変更なしとみなす。
+  genres: [...dto.genres].sort(),
+});
+
+const hasUnsavedSettingsChanges = (
+  settingsState: SettingsState,
+  savedDto: UserSettingsDto | null
+): boolean => {
+  const baseline = savedDto
+    ? {
+        ...buildDtoForSave(mapSettingsFromDto(mockSettings, savedDto), savedDto),
+        aiProvider: savedDto.aiProvider,
+      }
+    : buildDtoForSave(mockSettings, null);
+  const current = buildDtoForSave(settingsState, savedDto);
+  return (
+    JSON.stringify(toComparableDto(current)) !==
+    JSON.stringify(toComparableDto(baseline))
+  );
+};
+
+// AI接続テストの画面表示（固定文言のみ）。
+type AiConnectionTestView = {
+  tone: "success" | "warning";
+  message: string;
+  // Gemini で APIキー未設定のときだけ MockProvider を案内する（画面詳細設計書 SCR-003 §7.6/§7.7）。
+  recommendMock: boolean;
+};
+
+// 接続テスト結果 → 表示。Rust から受け取る status / errorKind を固定文言へ写像し、
+// APIキー・生エラー文は画面へ出さない（セキュリティ詳細設計書 §8.6）。
+// 特定 Provider 専用の分岐は持たず、未知の値・Provider未確定は安全側の「接続失敗」に倒す。
+const mapAiConnectionTestResult = (
+  result: AiProviderConnectionTestResult
+): AiConnectionTestView => {
+  if (result.status === "available") {
+    return { tone: "success", message: "利用可能です", recommendMock: false };
+  }
+  if (result.errorKind === "api_key_missing") {
+    return {
+      tone: "warning",
+      message: "APIキーが未設定です",
+      recommendMock: result.provider === "gemini",
+    };
+  }
+  // ローカル（同梱AI）の失敗は種別ごとの固定文言にする（パス・番号などは Rust 側で落としてある）。
+  const localMessage = localAiConnectionMessage(result);
+  if (localMessage) {
+    return { tone: "warning", message: localMessage, recommendMock: false };
+  }
+  if (
+    result.status === "not_implemented" ||
+    result.errorKind === "provider_not_implemented"
+  ) {
+    return {
+      tone: "warning",
+      message: "未対応のAIプロバイダーです",
+      recommendMock: false,
+    };
+  }
+  return {
+    tone: "warning",
+    message: "接続に失敗しました",
+    recommendMock: false,
+  };
+};
+
+// ローカル（同梱AI・llama-server）の接続テスト失敗の固定文言。該当しなければ null。
+const localAiConnectionMessage = (
+  result: AiProviderConnectionTestResult
+): string | null => {
+  switch (result.errorKind) {
+    case "local_ai_missing":
+      return "ローカルAIの部品が見つかりません";
+    case "local_ai_broken":
+      return "ローカルAIの部品が壊れています";
+    case "local_ai_start_failed":
+      return "ローカルAIを起動できませんでした";
+    case "local_ai_request_failed":
+      return "ローカルAIから答えを受け取れませんでした";
+    case "timeout":
+      return result.provider === "local"
+        ? "ローカルAIの準備に時間がかかりすぎました"
+        : null;
+    default:
+      return null;
+  }
+};
+
+// command 自体が reject した場合（通常は起きない）も、生エラーを出さず接続失敗として表示する。
+const aiConnectionTestFailedView: AiConnectionTestView = {
+  tone: "warning",
+  message: "接続に失敗しました",
+  recommendMock: false,
 };
 
 // Sub Components
@@ -398,7 +474,8 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between py-3 border-b border-border/50 last:border-b-0">
+    // 既定ウィンドウ（800×600）では本文列が狭く、見出しが1文字ずつ折り返すため、入力欄は次の行へ折り返す。
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 border-b border-border/50 last:border-b-0">
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
         {helpText && (
@@ -406,47 +483,6 @@ function SettingRow({
         )}
       </div>
       <div>{children}</div>
-    </div>
-  );
-}
-
-function TimeInput({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 bg-white border border-border rounded-lg px-3 py-1.5">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-12 text-sm text-center bg-transparent outline-none"
-      />
-      <div className="flex flex-col">
-        <button
-          className="text-muted-foreground hover:text-foreground text-[10px] leading-none"
-          onClick={() => {
-            const [h, m] = value.split(":").map(Number);
-            const newH = (h + 1) % 24;
-            onChange(`${String(newH).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-          }}
-        >
-          ▲
-        </button>
-        <button
-          className="text-muted-foreground hover:text-foreground text-[10px] leading-none"
-          onClick={() => {
-            const [h, m] = value.split(":").map(Number);
-            const newH = (h - 1 + 24) % 24;
-            onChange(`${String(newH).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-          }}
-        >
-          ▼
-        </button>
-      </div>
     </div>
   );
 }
@@ -459,14 +495,60 @@ export default function SettingsScreen({
   const [settings, setSettings] = React.useState<SettingsState>(mockSettings);
   const [backendSettings, setBackendSettings] =
     React.useState<UserSettingsDto | null>(null);
+  // 保存済みジャンルに合う取得元が無く、全取得元から取得している状態か（D10）。
+  // 判定は Rust 側（取得元ファイルとの照合）で行い、設定読み込み時の DTO から受け取るだけにする。
+  const [genreFilterFallback, setGenreFilterFallback] = React.useState(false);
   const [activeMenu, setActiveMenu] = React.useState("notification");
+  // 右サイドバーの「アーカイブを管理」から来たときだけ、データ管理タブの描画後にアーカイブ管理へスクロールする。
+  const [scrollToArchiveManage, setScrollToArchiveManage] =
+    React.useState(false);
+  const handleOpenArchiveManage = React.useCallback(() => {
+    setActiveMenu("data");
+    setScrollToArchiveManage(true);
+  }, []);
+  React.useEffect(() => {
+    if (!scrollToArchiveManage || activeMenu !== "data") {
+      return;
+    }
+    setScrollToArchiveManage(false);
+    document
+      .getElementById("archive-manage")
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [scrollToArchiveManage, activeMenu]);
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<"info" | "error">(
     "info"
   );
+  // 読み込み失敗が設定ファイル破損によるものか。破損時だけ「設定を初期化する」導線を出す（判断台帳 D28）。
+  const [isSettingsCorrupt, setIsSettingsCorrupt] = React.useState(false);
+  const [isTestingAi, setIsTestingAi] = React.useState(false);
+  const [aiTestView, setAiTestView] =
+    React.useState<AiConnectionTestView | null>(null);
+  const [aiTestUnavailableInPreview, setAiTestUnavailableInPreview] =
+    React.useState(false);
+  // 自動起動: OS 状態を読めなかったときは誤操作を防ぐためスイッチを無効化する。
+  const [isUpdatingAutostart, setIsUpdatingAutostart] = React.useState(false);
+  const [autostartReadFailed, setAutostartReadFailed] = React.useState(false);
+  const [autostartError, setAutostartError] = React.useState<string | null>(
+    null
+  );
+  // state 更新前の連打でも二重実行しないよう、同期的に参照できる ref でも実行中を保持する。
+  const isTestingAiRef = React.useRef(false);
+  const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
+  // データ取り込み（全置き換え）の実行中か。settings.json には書き込みロックが無いため、
+  // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
+  const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
+  const isMigrationImportingRef = React.useRef(false);
+  const handleMigrationImportingChange = React.useCallback(
+    (importing: boolean) => {
+      isMigrationImportingRef.current = importing;
+      setIsMigrationImporting(importing);
+    },
+    []
+  );
 
   const { toast } = useToast();
 
@@ -476,10 +558,48 @@ export default function SettingsScreen({
     }
   };
 
+  // 自動起動は OS の登録状態を正とする。画面表示と「キャンセル」の戻り先（backendSettings）の
+  // 両方を OS 状態へ合わせ、保存済み設定値とずれていても OS 側を表示する。
+  const applyAutostartState = React.useCallback((enabled: boolean) => {
+    setSettings((prev) => ({
+      ...prev,
+      integration: { ...prev.integration, autoStartOnPcBoot: enabled },
+    }));
+    setBackendSettings((prev) =>
+      prev ? { ...prev, autoStartOnPcBoot: enabled } : prev
+    );
+  }, []);
+
+  const refreshAutostartState = React.useCallback(async () => {
+    try {
+      const enabled = await getAutostartEnabled();
+      if (!isMountedRef.current || enabled === null) {
+        return;
+      }
+      applyAutostartState(enabled);
+      setAutostartReadFailed(false);
+      setAutostartError(null);
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 調査用に種別だけ残す（OS エラー文・レジストリパスは画面へ出さない）。
+      console.error(
+        "Failed to read autostart state via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAutostartReadFailed(true);
+      setAutostartError(
+        "自動起動の状態を確認できなかったよ。画面を開き直してみてね。"
+      );
+    }
+  }, [applyAutostartState]);
+
   const loadSettings = React.useCallback(async () => {
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
+    setIsSettingsCorrupt(false);
 
     try {
       const dto = await getUserSettings();
@@ -492,14 +612,23 @@ export default function SettingsScreen({
       }
 
       setBackendSettings(dto);
+      setGenreFilterFallback(dto.genreFilterFallback ?? false);
       setSettings((prev) => mapSettingsFromDto(prev, dto));
+      // 保存値を反映した後に OS 状態で上書きする（順序が逆だと保存値で戻ってしまう）。
+      await refreshAutostartState();
     } catch (error) {
       if (!isMountedRef.current) {
         return;
       }
       console.error("Failed to load settings from tauri command:", error);
+      // 破損時も自動では上書きしない。原因だけを固定文言で伝え、初期化はユーザー操作（確認ダイアログ経由）に任せる。
+      // 生エラー文・ファイルパスは画面へ出さない。
+      const corrupt = isSettingsCorruptError(error);
+      setIsSettingsCorrupt(corrupt);
       setLoadNotice(
-        "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
+        corrupt
+          ? "設定ファイルが壊れていて、読み込めなかったよ。「設定を初期化する」で初期状態に戻せるよ（壊れたファイルは別名でコピーを1つだけ残すよ）。"
+          : "設定の読み込みに失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
       );
       setLoadNoticeKind("error");
     } finally {
@@ -507,7 +636,7 @@ export default function SettingsScreen({
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [refreshAutostartState]);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -578,16 +707,6 @@ export default function SettingsScreen({
     });
   };
 
-  const updateYuuko = (
-    key: keyof YuukoDisplaySettings,
-    value: boolean | string
-  ) => {
-    setSettings((prev) => ({
-      ...prev,
-      yuuko: { ...prev.yuuko, [key]: value },
-    }));
-  };
-
   const updateSuppression = (
     key: keyof SuppressionSettings,
     value: boolean
@@ -626,25 +745,80 @@ export default function SettingsScreen({
     }));
   };
 
-  const updateIntegration = (
-    key: keyof IntegrationSettings,
-    value: boolean
-  ) => {
-    setSettings((prev) => ({
-      ...prev,
-      integration: { ...prev.integration, [key]: value },
-    }));
+  // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
+  // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
+  const handleToggleAutostart = async (enabled: boolean) => {
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+      return;
+    }
+    isUpdatingAutostartRef.current = true;
+    setIsUpdatingAutostart(true);
+    setAutostartError(null);
+
+    try {
+      const actual = await setAutostartEnabled(enabled);
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 非Tauri（プレビュー）では OS へ触れないため、表示だけ切り替える。
+      applyAutostartState(actual ?? enabled);
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      console.error(
+        "Failed to change autostart via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAutostartError(
+        "自動起動の設定を変更できなかったよ。もう一度試してみてね。"
+      );
+    } finally {
+      isUpdatingAutostartRef.current = false;
+      if (isMountedRef.current) {
+        setIsUpdatingAutostart(false);
+      }
+    }
+  };
+
+  // 注記の表示用に、保存済み設定から取得元フォールバックの有無だけを読む。
+  // 読めなくても保存自体は成功しているため、注記は直前の状態のまま残す。
+  const refreshGenreFilterFallback = async () => {
+    try {
+      const dto = await getUserSettings();
+      if (dto && isMountedRef.current) {
+        setGenreFilterFallback(dto.genreFilterFallback ?? false);
+      }
+    } catch (error) {
+      console.error(
+        "Failed to reload genre filter state:",
+        error instanceof Error ? error.name : typeof error
+      );
+    }
   };
 
   const handleSave = async () => {
+    // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
+    // データ取り込み中も、置き換え中の設定ファイルへ書き込まないよう止める。
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+      return;
+    }
     try {
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
-      setBackendSettings(dto);
+      // save_user_settings は DTO を返さず、受け取った値を検証してそのまま保存する。
+      // 送った DTO を新しい比較基準にして「保存済み」へ戻す（失敗時は基準を変えず未保存のまま）。
+      // 自動起動は保存中に切り替えられることがあり、OS 状態が正のため、最新の値を残す（古い DTO で上書きしない）。
+      setBackendSettings((prev) => ({
+        ...dto,
+        autoStartOnPcBoot: prev?.autoStartOnPcBoot ?? dto.autoStartOnPcBoot,
+      }));
       toast({
         title: "設定を保存したよ",
         description: "新しい設定が反映されたよ。ありがとう！",
       });
+      // 保存したジャンルでの取得元フォールバック有無だけを読み直す（他の画面状態は触らない）。
+      void refreshGenreFilterFallback();
     } catch (error) {
       console.error("Failed to save settings via tauri command:", error);
       toast({
@@ -655,25 +829,42 @@ export default function SettingsScreen({
     }
   };
 
+  // キャンセルは変更を破棄してメイン画面へ戻る（画面詳細設計書 SCR-003 §7.5 / §7.9）。
+  // 設計に確認ダイアログの指定が無いため、未保存の変更があっても確認せずに破棄する。
+  // 自動起動は OS へ即時反映済みのため戻さない（backendSettings も OS 状態に合わせてある）。
   const handleCancel = () => {
     const rollback = backendSettings
       ? mapSettingsFromDto(mockSettings, backendSettings)
       : mockSettings;
     setSettings(rollback);
+    handleNavigate("home");
   };
 
   // リセットは破壊的操作のため確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
+    // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
+    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+      return;
+    }
     try {
       const dto = await resetUserSettings();
       if (dto) {
         setBackendSettings(dto);
+        setGenreFilterFallback(dto.genreFilterFallback ?? false);
         setSettings(mapSettingsFromDto(mockSettings, dto));
+        // テーマも初期値へ戻るため、開いている画面の配色をその場で揃える。
+        applyUiTheme(dto.selectedThemeId);
+        // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
+        await refreshAutostartState();
       } else {
         // 非Tauri（プレビュー）時は表示のみ初期化する。
         setSettings(mockSettings);
       }
+      // 初期化で読める設定ファイルになったため、読み込み失敗の表示は解除する。
+      setLoadNotice(null);
+      setLoadNoticeKind("info");
+      setIsSettingsCorrupt(false);
       toast({
         title: "設定をリセットしたよ",
         description: "すべての設定が初期状態に戻ったよ。",
@@ -691,11 +882,65 @@ export default function SettingsScreen({
     }
   };
 
-  const storagePercentage =
-    (settings.data.usedStorageGb / settings.data.maxStorageGb) * 100;
+  const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
 
-  // テーマ現在値（読み取り専用表示）。未読込・空文字は安全な既定 "default" を表示する。
-  const currentThemeId = backendSettings?.selectedThemeId?.trim() || "default";
+  // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
+  // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
+  React.useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+    const report = (hasUnsaved: boolean) => {
+      setMainWindowUnsavedChanges(hasUnsaved).catch((error) => {
+        console.warn("Failed to report unsaved settings to Rust:", error);
+      });
+    };
+    report(true);
+    return () => report(false);
+  }, [hasUnsavedChanges]);
+
+  // AI接続テスト（画面詳細設計書 SCR-003 §7.5 / §7.8）。Rust 側は保存済み設定の Provider を確認するため、
+  // 画面上の未保存の選択は反映されない（UI にその旨を明記する）。失敗してもアプリは止めず警告表示のみ。
+  const handleTestAiProvider = async () => {
+    if (isTestingAiRef.current) {
+      return;
+    }
+    isTestingAiRef.current = true;
+    setIsTestingAi(true);
+    setAiTestView(null);
+    setAiTestUnavailableInPreview(false);
+
+    try {
+      const result = await testAiProvider();
+      if (!isMountedRef.current) {
+        return;
+      }
+      if (!result) {
+        setAiTestUnavailableInPreview(true);
+        return;
+      }
+      setAiTestView(mapAiConnectionTestResult(result));
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      // 調査用に種別だけ残す（生エラー文は画面へ出さない）。
+      console.error(
+        "Failed to test AI provider via tauri command:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setAiTestView(aiConnectionTestFailedView);
+    } finally {
+      isTestingAiRef.current = false;
+      if (isMountedRef.current) {
+        setIsTestingAi(false);
+      }
+    }
+  };
+
+  // テーマ現在値（読み取り専用表示）。生の ID ではなく表示名（そらいろ / さくら / クリーム）を出す。
+  // 未読込・空文字・未知の ID は既定テーマの表示名にする（保存値自体は buildDtoForSave が維持する）。
+  const currentThemeLabel = uiThemeLabel(backendSettings?.selectedThemeId);
 
   return (
     <div className="h-dvh bg-background flex flex-col overflow-hidden">
@@ -778,7 +1023,7 @@ export default function SettingsScreen({
           {/* Page Title */}
           <div className="flex items-center gap-3 mb-6">
             <Settings className="w-6 h-6 text-foreground" />
-            <h1 className="text-xl font-bold text-foreground">設定</h1>
+            <h1 className="text-xl font-bold text-foreground whitespace-nowrap shrink-0">設定</h1>
             <span className="text-sm text-muted-foreground">
               ゆうことの過ごし方を、あなた好みにカスタマイズできます。
             </span>
@@ -793,15 +1038,29 @@ export default function SettingsScreen({
                   {loadNotice}
                 </span>
                 {loadNoticeKind === "error" && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
-                    onClick={() => void loadSettings()}
-                    disabled={isLoading}
-                  >
-                    再試行
-                  </Button>
+                  <div className="flex shrink-0 gap-2 self-start sm:self-auto">
+                    {/* 破損時の初期化導線。既存のリセット確認ダイアログを開くだけで、直接は上書きしない。 */}
+                    {isSettingsCorrupt && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        onClick={() => setResetDialogOpen(true)}
+                        disabled={isLoading}
+                      >
+                        設定を初期化する
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                      onClick={() => void loadSettings()}
+                      disabled={isLoading}
+                    >
+                      再試行
+                    </Button>
+                  </div>
                 )}
               </AlertDescription>
             </Alert>
@@ -909,82 +1168,40 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* テーマは selectedThemeId を読み取り専用で表示する。テーマ変更機能はMVP対象外（設計 §7:枠のみ）。 */}
+                  {/* テーマの切り替え・適用はカスタマイズ画面が担うため、ここでは selectedThemeId の表示名を読み取り専用で出し、
+                      カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
+                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
                   <SettingRow label="現在のテーマ">
-                    <div className="flex flex-col items-end gap-0.5">
+                    <div className="flex flex-col items-end gap-1">
                       <span
                         className="text-sm text-foreground"
                         data-testid="current-theme-id"
                       >
-                        {currentThemeId}
+                        {currentThemeLabel}
                       </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        変更機能は準備中
+                      <span
+                        id="theme-customize-guide"
+                        className="text-[10px] text-muted-foreground"
+                        data-testid="theme-customize-guide"
+                      >
+                        {hasUnsavedChanges
+                          ? "テーマはカスタマイズ画面で変えられるよ。先に設定を保存してね"
+                          : "テーマはカスタマイズ画面で変えられるよ"}
                       </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 gap-1 text-xs text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+                        disabled={hasUnsavedChanges}
+                        aria-describedby="theme-customize-guide"
+                        onClick={() => handleNavigate("customize")}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        カスタマイズを開く
+                      </Button>
                     </div>
-                  </SettingRow>
-                  {/* 以下4項目は保存DTOに対応フィールドが無く永続化されないため、誤操作防止に非活性＋「準備中」。 */}
-                  <SettingRow label="常駐時のゆうこを表示する（準備中）">
-                    <Switch
-                      checked={settings.yuuko.showResident}
-                      disabled
-                      aria-disabled
-                      onCheckedChange={(checked) =>
-                        updateYuuko("showResident", checked)
-                      }
-                    />
-                  </SettingRow>
-                  <SettingRow label="吹き出しの自動表示（準備中）">
-                    <Select
-                      value={settings.yuuko.balloonMode}
-                      disabled
-                      onValueChange={(v) => updateYuuko("balloonMode", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="常に表示">常に表示</SelectItem>
-                        <SelectItem value="控えめに">控えめに</SelectItem>
-                        <SelectItem value="ほぼ表示しない">
-                          ほぼ表示しない
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="ゆうこの話しかけ頻度（準備中）">
-                    <Select
-                      value={settings.yuuko.talkFrequency}
-                      disabled
-                      onValueChange={(v) => updateYuuko("talkFrequency", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="多め">多め</SelectItem>
-                        <SelectItem value="ふつう">ふつう</SelectItem>
-                        <SelectItem value="少なめ">少なめ</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="ゆうこのアニメーション（準備中）">
-                    <Select
-                      value={settings.yuuko.animationMode}
-                      disabled
-                      onValueChange={(v) => updateYuuko("animationMode", v)}
-                    >
-                      <SelectTrigger className="w-32" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="派手">派手</SelectItem>
-                        <SelectItem value="通常">通常</SelectItem>
-                        <SelectItem value="控えめ">控えめ</SelectItem>
-                        <SelectItem value="なし">なし</SelectItem>
-                      </SelectContent>
-                    </Select>
                   </SettingRow>
                 </CardContent>
               </Card>
@@ -1000,8 +1217,11 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
+                  {/* 会議中・マイク使用中は保存DTO(suppressDuringMeeting/MicUse)へ保存し、Rust 側が通知判定のたびに
+                      Windows のマイク利用記録・会議アプリの有無で判定する（判断台帳 D65 / D68 / D69）ため操作可能。 */}
                   <SettingRow label="会議中は通知を抑制する">
                     <Switch
+                      aria-label="会議中は通知を抑制する"
                       checked={settings.suppression.suppressInMeeting}
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressInMeeting", checked)
@@ -1010,32 +1230,25 @@ export default function SettingsScreen({
                   </SettingRow>
                   <SettingRow label="マイク使用中は通知を抑制する">
                     <Switch
+                      aria-label="マイク使用中は通知を抑制する"
                       checked={settings.suppression.suppressWhenMicInUse}
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenMicInUse", checked)
                       }
                     />
                   </SettingRow>
+                  {/* フルスクリーン抑制は Rust 側で notification.suppressInFullscreen を参照して判定済み（D44）のため操作可能。 */}
                   <SettingRow label="フルスクリーン時は通知を抑制する">
                     <Switch
+                      aria-label="フルスクリーン時は通知を抑制する"
                       checked={settings.suppression.suppressWhenFullscreen}
                       onCheckedChange={(checked) =>
                         updateSuppression("suppressWhenFullscreen", checked)
                       }
                     />
                   </SettingRow>
-                  {/* suppressWhenGaming は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
-                      会議/マイク/フルスクリーンは DTO(suppressDuring*) へ保存されるため操作可能のまま。 */}
-                  <SettingRow label="ゲーム実行中は通知を抑制する（準備中）">
-                    <Switch
-                      checked={settings.suppression.suppressWhenGaming}
-                      disabled
-                      aria-disabled
-                      onCheckedChange={(checked) =>
-                        updateSuppression("suppressWhenGaming", checked)
-                      }
-                    />
-                  </SettingRow>
+                  {/* ゲーム実行中の抑制は保存先も個別判定も無いため画面から外した（判断台帳 D70。再検討の余地あり）。
+                      全画面で動くゲームはフルスクリーン抑制の対象になる。 */}
                 </CardContent>
               </Card>
             )}
@@ -1053,7 +1266,11 @@ export default function SettingsScreen({
                   <SettingRow label="AIプロバイダー">
                     <Select
                       value={settings.ai.provider}
-                      onValueChange={(v) => updateAi("provider", v)}
+                      onValueChange={(v) => {
+                        // 前回の接続テスト結果を新しいプロバイダーの結果と誤解させないため、切替時に消す。
+                        setAiTestView(null);
+                        updateAi("provider", v);
+                      }}
                     >
                       <SelectTrigger className="w-48">
                         <SelectValue />
@@ -1061,13 +1278,73 @@ export default function SettingsScreen({
                       <SelectContent>
                         <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
                         <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* openai / local は enum 上は保存できるが、実AI呼び出しは未実装（常に mock 動作）。 */}
-                        {/* MVP 未検証のため「準備中」と明示し、選んでも安全側で mock で動くことを案内する。 */}
-                        <SelectItem value="openai">OpenAI（準備中）</SelectItem>
-                        <SelectItem value="local">ローカル（準備中）</SelectItem>
+                        {/* local は同梱の llama-server（このパソコンの中で動くAI・判断台帳 D99）で生成する。 */}
+                        {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
+                        <SelectItem value="local">ローカル</SelectItem>
                       </SelectContent>
                     </Select>
                   </SettingRow>
+                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。 */}
+                  {settings.ai.provider === "mock" && (
+                    <p
+                      className="text-xs text-muted-foreground py-2"
+                      data-testid="mock-provider-note"
+                    >
+                      MockProvider は開発・デモ用です（外部AIは使いません）。
+                    </p>
+                  )}
+                  {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
+                  {settings.ai.provider === "local" && (
+                    <p
+                      className="text-xs text-muted-foreground py-2"
+                      data-testid="local-provider-note"
+                    >
+                      このパソコンの中で動くAIだよ。初めて使うときは準備に少し時間がかかるよ。
+                    </p>
+                  )}
+                  <div className="py-3 border-b border-border/50">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm text-foreground">AI接続テスト</span>
+                        <span className="text-xs text-muted-foreground">
+                          保存済みの設定でテストします（未保存の変更は反映されません）
+                        </span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleTestAiProvider()}
+                        disabled={isTestingAi}
+                        aria-busy={isTestingAi}
+                      >
+                        {isTestingAi ? "テスト中…" : "接続テスト"}
+                      </Button>
+                    </div>
+                    {/* 結果は固定文言のみ表示（APIキー・生エラー文は出さない）。 */}
+                    <div role="status" aria-live="polite" data-testid="ai-connection-test-result">
+                      {aiTestView && (
+                        <div
+                          className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
+                            aiTestView.tone === "success"
+                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green)]"
+                              : "border-amber-300 bg-amber-50 text-amber-800"
+                          }`}
+                        >
+                          <p>{aiTestView.message}</p>
+                          {aiTestView.recommendMock && (
+                            <p className="mt-1">
+                              Gemini を使うにはAPIキーの設定が必要です。キーを設定するまでは <strong>MockProvider</strong> の利用をおすすめします。
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      {aiTestUnavailableInPreview && (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          接続テストはアプリ内でのみ実行できます。
+                        </p>
+                      )}
+                    </div>
+                  </div>
                   <SettingRow label="解説の詳しさ">
                     <Select
                       value={settings.ai.explanationDetail}
@@ -1083,27 +1360,33 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* 以下3項目は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
+                  {/* 取得後の自動要約。新規インストールの初期値は有効（AIはローカル。判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
+                  {/* 実際に動くかは Rust 側が判定する（実AI＝Gemini・ローカルのときだけ）。ここでは案内だけ出す。 */}
+                  <div className="py-3 border-b border-border/50">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm text-foreground">ニュース取得後に自動で要約する</span>
+                        <span
+                          className="text-xs text-muted-foreground"
+                          data-testid="auto-summary-help"
+                        >
+                          AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）
+                        </span>
+                      </div>
+                      <Switch
+                        aria-label="ニュース取得後に自動で要約する"
+                        checked={settings.ai.autoSummaryEnabled}
+                        onCheckedChange={(checked) =>
+                          updateAi("autoSummaryEnabled", checked)
+                        }
+                      />
+                    </div>
+                  </div>
+                  {/* 長文要点説明の自動候補は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
                       AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
-                  <SettingRow label="専門用語の解説レベル（準備中）">
-                    <Select
-                      value={settings.ai.termExplanationLevel}
-                      disabled
-                      onValueChange={(v) => updateAi("termExplanationLevel", v)}
-                    >
-                      <SelectTrigger className="w-36" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="小学生レベル">小学生レベル</SelectItem>
-                        <SelectItem value="中学生レベル">中学生レベル</SelectItem>
-                        <SelectItem value="高校生レベル">高校生レベル</SelectItem>
-                        <SelectItem value="専門家レベル">専門家レベル</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
                   <SettingRow label="長文要点説明の自動候補（準備中）">
                     <Switch
+                      aria-label="長文要点説明の自動候補（準備中）"
                       checked={settings.ai.autoSuggestLongSummary}
                       disabled
                       aria-disabled
@@ -1112,26 +1395,10 @@ export default function SettingsScreen({
                       }
                     />
                   </SettingRow>
-                  <SettingRow label="AI処理の優先モード（準備中）">
-                    <Select
-                      value={settings.ai.priorityMode}
-                      disabled
-                      onValueChange={(v) => updateAi("priorityMode", v)}
-                    >
-                      <SelectTrigger className="w-36" aria-disabled>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="速度重視">速度重視</SelectItem>
-                        <SelectItem value="バランス重視">バランス重視</SelectItem>
-                        <SelectItem value="品質重視">品質重視</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
                   {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。現在、実際の外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。OpenAI・ローカルは準備中のため、選んでも現在は MockProvider で動作します。
+                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。<strong>ローカル</strong>はこのパソコンの中だけで動くAIで、APIキーは要りません（記事の内容を外部へ送りません）。
                   </p>
                 </CardContent>
               </Card>
@@ -1154,10 +1421,10 @@ export default function SettingsScreen({
                         onChange={(e) => updateUser("nickname", e.target.value)}
                         placeholder="ゆうこに呼んでほしい名前"
                         className="w-48"
-                        maxLength={32}
+                        maxLength={NICKNAME_MAX_LENGTH}
                       />
                       <span className="text-[10px] text-muted-foreground">
-                        32文字以内
+                        {NICKNAME_MAX_LENGTH}文字以内
                       </span>
                     </div>
                   </SettingRow>
@@ -1185,15 +1452,7 @@ export default function SettingsScreen({
                       <span className="text-sm text-foreground">関心のあるジャンル</span>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                      {[
-                        "IT",
-                        "AI",
-                        "開発",
-                        "セキュリティ",
-                        "クラウド",
-                        "ビジネス",
-                        "ガジェット",
-                      ].map((genre) => (
+                      {GENRE_OPTIONS.map((genre) => (
                         <div key={genre} className="flex items-center space-x-2">
                           <Checkbox
                             id={`genre-${genre}`}
@@ -1218,32 +1477,29 @@ export default function SettingsScreen({
                         </div>
                       ))}
                     </div>
+                    {genreFilterFallback && (
+                      <p
+                        role="status"
+                        className="mt-3 text-xs text-muted-foreground"
+                        data-testid="genre-filter-fallback-note"
+                      >
+                        選んだジャンルに合う取得元がないため、すべての取得元から取得しています
+                      </p>
+                    )}
                   </div>
                 </CardContent>
               </Card>
             )}
 
-            {/* Placeholder categories */}
+            {/* データ管理: データ移行（ZIPの書き出し・読み込み）とアーカイブ管理（古い月の削除。判断台帳 D26）。
+                ストレージ状況は右サイドバーで準備中のまま。 */}
             {activeMenu === "data" && (
-              <Card className="border-0 shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-muted-foreground">
-                    <Database className="w-5 h-5" />
-                    データ管理
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="py-8 flex flex-col items-center justify-center text-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                    <Settings className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                  <h3 className="text-sm font-medium text-foreground mb-1">
-                    データ管理は準備中だよ
-                  </h3>
-                  <p className="text-xs text-muted-foreground max-w-[280px]">
-                    データ管理機能は今後のアップデートで追加される予定です。現在のストレージ使用状況は、右側の「ストレージ状況」パネルで確認できるよ。
-                  </p>
-                </CardContent>
-              </Card>
+              <>
+                <DataMigrationPanel
+                  onImportingChange={handleMigrationImportingChange}
+                />
+                <ArchiveManagePanel />
+              </>
             )}
 
             {/* Integration Settings */}
@@ -1258,14 +1514,25 @@ export default function SettingsScreen({
                 <CardContent className="pt-0">
                   <SettingRow label="PC起動時の自動起動設定">
                     <Switch
+                      aria-label="PC起動時の自動起動"
                       checked={settings.integration.autoStartOnPcBoot}
+                      disabled={isUpdatingAutostart || autostartReadFailed}
                       onCheckedChange={(checked) =>
-                        updateIntegration("autoStartOnPcBoot", checked)
+                        void handleToggleAutostart(checked)
                       }
                     />
                   </SettingRow>
+                  {autostartError && (
+                    <p
+                      role="alert"
+                      data-testid="autostart-error"
+                      className="text-xs text-destructive mt-2"
+                    >
+                      {autostartError}
+                    </p>
+                  )}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 この設定は今後の自動起動機能で利用されます。現在は設定値のみ保存されます。
+                    💡 この設定は切り替えるとすぐに反映されるよ（「保存する」は不要）。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
                   </p>
                 </CardContent>
               </Card>
@@ -1274,9 +1541,11 @@ export default function SettingsScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4 overflow-y-auto">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="w-60 lg:w-72 bg-muted/30 border-l border-border flex flex-col shrink-0 p-4 gap-4 overflow-y-auto">
           {/* Yuuko's Comment Card */}
-          <Card className="border-0 shadow-sm overflow-hidden">
+          {/* shrink-0: 縦に余裕がないとき、下のゆうこ画像に押されて吹き出しが見出しだけに潰れないようにする（右列は縦スクロールで届く）。 */}
+          <Card className="border-0 shadow-sm overflow-hidden shrink-0">
             <div className="bg-[var(--yuuko-green)] px-4 py-2 flex items-center gap-2">
               <Bell className="w-4 h-4 text-white" />
               <span className="text-sm font-medium text-white">
@@ -1285,7 +1554,8 @@ export default function SettingsScreen({
             </div>
             <CardContent className="p-4">
               <div className="relative bg-white rounded-xl p-3 border border-border shadow-sm mb-3">
-                <p className="text-sm text-foreground leading-relaxed">
+                {/* 狭い右列（lg 未満）では文字を一段小さくし、<br /> で区切った行がさらに折り返さないようにする。 */}
+                <p className="text-xs lg:text-sm text-foreground leading-relaxed">
                   この設定で今日も
                   <br />
                   あなたにぴったりの
@@ -1330,49 +1600,20 @@ export default function SettingsScreen({
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                保存データの使用状況を確認できます。
+              {/* 実容量の取得は新しい command が要るため別途判断。固定の仮値は実値と誤認されるので出さない（SCR-003）。 */}
+              <p className="text-xs text-muted-foreground" data-testid="storage-status-placeholder">
+                保存データの使用状況の表示は準備中です。
               </p>
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    使用中のストレージ
-                  </span>
-                </div>
-                <div className="text-lg font-bold text-foreground mb-1">
-                  {settings.data.usedStorageGb.toFixed(2)} GB /{" "}
-                  {settings.data.maxStorageGb.toFixed(2)} GB
-                </div>
-                <Progress value={storagePercentage} className="h-2" />
-              </div>
               <div className="space-y-2">
-                {/* 未実装アクションは誤解を避けるため非活性＋「準備中」表示にする（候補4 方針整理 / SCR-003） */}
+                {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
+                {/* アーカイブ管理の本体は「データ管理」タブに置き、ここからはそこへ移動するだけにする（判断台帳 D26） */}
                 <Button
                   variant="outline"
                   className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
-                >
-                  <Trash2 className="w-4 h-4" />
-                  キャッシュを削除（準備中）
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
-                >
-                  <Download className="w-4 h-4" />
-                  辞書データをエクスポート（準備中）
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2 text-sm"
-                  disabled
-                  aria-disabled
+                  onClick={handleOpenArchiveManage}
                 >
                   <Archive className="w-4 h-4" />
-                  アーカイブを管理（準備中）
+                  アーカイブを管理
                 </Button>
                 <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
                   「準備中」の機能は今後のアップデートで対応予定です。
@@ -1387,13 +1628,25 @@ export default function SettingsScreen({
       <footer className="h-14 bg-white border-t border-border flex items-center justify-between px-6 shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-sm text-muted-foreground">設定の保存状況</span>
-          <Badge
-            variant="outline"
-            className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
-          >
-            <Check className="w-3 h-3" />
-            保存済み
-          </Badge>
+          {/* 保存済み DTO と画面の値の差分で切り替える（§7.7）。 */}
+          <span role="status" aria-live="polite" data-testid="settings-save-state">
+            {hasUnsavedChanges ? (
+              <Badge
+                variant="outline"
+                className="bg-amber-50 text-amber-800 border-amber-300 gap-1"
+              >
+                未保存の変更あり
+              </Badge>
+            ) : (
+              <Badge
+                variant="outline"
+                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
+              >
+                <Check className="w-3 h-3" />
+                保存済み
+              </Badge>
+            )}
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <Button variant="outline" onClick={handleCancel}>
@@ -1402,6 +1655,18 @@ export default function SettingsScreen({
           <Button
             className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
             onClick={handleSave}
+            // 設定ファイル破損中は Rust 側も保存を拒否するため、初期化するまで保存させない（判断台帳 D28）。
+            // 変更が無いときも押せない（§7.7「設定変更あり → 保存ボタンを有効化」）。
+            // 破損以外の読み込み失敗中も、画面の値は保存済み設定ではなく既定値なので、保存で上書きさせない（再試行で読み直す）。
+            disabled={
+              !hasUnsavedChanges ||
+              isUpdatingAutostart ||
+              isSettingsCorrupt ||
+              loadNoticeKind === "error" ||
+              // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
+              isLoading ||
+              isMigrationImporting
+            }
           >
             <Check className="w-4 h-4" />
             保存する
@@ -1415,7 +1680,10 @@ export default function SettingsScreen({
           <AlertDialogHeader>
             <AlertDialogTitle>設定を初期状態に戻しますか？</AlertDialogTitle>
             <AlertDialogDescription>
-              通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。
+              {/* 破損時は Rust 側が壊れたファイルを別名で1つだけ残してから初期化する（判断台帳 D57）。パスは出さない。 */}
+              {isSettingsCorrupt
+                ? "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。壊れた設定ファイルは、初期化の前に別名でコピーを1つだけ残します。"
+                : "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。"}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

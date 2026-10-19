@@ -84,6 +84,14 @@ impl SettingsRepository {
         }
     }
 
+    /// 破損した設定ファイルを、初期化で上書きする前に `settings.corrupt.json` へ1世代だけ複製する
+    /// （判断台帳 D57 / セキュリティ詳細設計書 §11.4）。
+    /// 元ファイルは動かさず、一時ファイル経由で差し替える。失敗時は Err を返し、呼び出し側は初期化を中止する。
+    /// 通知状態・友情ランク・報酬の保存ファイルと同じ共通処理を使う。
+    pub fn backup_corrupt_file(&self) -> Result<(), AppError> {
+        super::corrupt_json::backup_corrupt_file(&self.settings_path, "settings")
+    }
+
     fn restore_backup_if_primary_missing(&self) {
         if self.settings_path.exists() {
             return;

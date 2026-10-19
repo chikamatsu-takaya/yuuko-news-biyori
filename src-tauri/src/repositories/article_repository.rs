@@ -7,10 +7,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    ArchiveRestoreStatus, ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto,
+    display_tags, is_archive_month_deletable, is_valid_archive_month,
+    is_within_title_dedupe_window, ArchiveMonthArticlesDto, ArchiveMonthDeletePreviewDto,
+    ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRestoreStatus,
+    ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDedupeKeys,
     ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
-    ArticleSummaryDto, ArticleSummaryUpdate, FavoriteUpdateResult, FetchedArticle,
-    RestoreArchivedArticleResult,
+    ArticleSummaryDto, ArticleSummaryUpdate, ArticleTagsUpdate, FavoriteUpdateResult,
+    FetchedArticle, RestoreArchivedArticleResult, SummaryState,
 };
 use crate::error::AppError;
 use crate::paths::AppPaths;
@@ -20,8 +23,16 @@ const ARCHIVE_INDEX_VERSION: u32 = 2;
 const MAX_ARCHIVE_ZIP_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL_ENTRY_SIZE: u64 = 128 * 1024 * 1024;
-const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
-const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
+pub(crate) const RETIREMENT_ROLLBACK_DIR: &str = ".markdown-retirement.rollback";
+pub(crate) const RETIREMENT_COMMITTED_DIR: &str = ".markdown-retirement.committed";
+
+/// おすすめ再計算用の候補。`summary.recommendation_score` は保存スコア（取得時の基礎点）のまま。
+#[derive(Debug, Clone)]
+pub struct RecommendationCandidate {
+    pub summary: ArticleSummaryDto,
+    /// 鮮度係数の基点となる取得日時（RFC3339）。
+    pub fetched_at: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ArticleRepository {
@@ -45,7 +56,7 @@ impl ArticleRepository {
     }
 
     #[cfg(test)]
-    fn with_paths(
+    pub(crate) fn with_paths(
         article_news_dir: PathBuf,
         article_favorites_path: PathBuf,
         archive_dir: PathBuf,
@@ -74,17 +85,19 @@ impl ArticleRepository {
         Ok(())
     }
 
-    pub fn list_recommended(&self, limit: usize) -> Result<Vec<ArticleSummaryDto>, AppError> {
+    /// おすすめ一覧の候補を、保存スコア（基礎点）と取得日時付きで返す（並び替えはしない）。
+    /// 鮮度・既読の補正は取得のたびに現在時刻で再計算する必要があるため、
+    /// 並び順と件数の決定は ArticleService（RecommendationService）側に任せる。
+    pub fn list_recommendation_candidates(&self) -> Result<Vec<RecommendationCandidate>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let mut articles = self.load_article_records()?;
-        articles.sort_by(compare_article_records);
+        let articles = self.load_readable_article_records()?.records;
 
         Ok(articles
             .into_iter()
-            .map(|article| {
-                article.to_summary_dto(is_effectively_favorite(&article, &favorite_store))
+            .map(|article| RecommendationCandidate {
+                summary: article.to_summary_dto(is_effectively_favorite(&article, &favorite_store)),
+                fetched_at: article.fetched_at,
             })
-            .take(limit)
             .collect())
     }
 
@@ -94,7 +107,7 @@ impl ArticleRepository {
         limit: usize,
     ) -> Result<Vec<ArticleHistoryItemDto>, AppError> {
         let favorite_store = self.load_favorite_store_or_default()?;
-        let active_records = self.load_article_records()?;
+        let active_records = self.load_readable_article_records()?.records;
         let mut seen_ids = active_records
             .iter()
             .map(|article| article.article_id.clone())
@@ -173,6 +186,31 @@ impl ArticleRepository {
         let favorite_store = self.load_favorite_store_or_default()?;
         let article = self.find_article_record(article_id)?;
         Ok(article.to_detail_dto(is_effectively_favorite(&article, &favorite_store)))
+    }
+
+    /// 保存済みの AI 要約だけを返す（無ければ None）。
+    ///
+    /// 一覧・詳細 DTO の summary は要約が無いと本文抜粋（excerpt）で補われるため、
+    /// 本文を渡したくないゆうこのデスクトップ通知用に、補う前の値を取り出す。
+    pub fn get_saved_summary(&self, article_id: &str) -> Result<Option<String>, AppError> {
+        Ok(self.find_article_record(article_id)?.summary)
+    }
+
+    /// 記事ファイルに保存済みの元記事 URL を返す（検証は呼び出し側）。既読状態は進めない（読み取りのみ）。
+    pub fn get_original_url(&self, article_id: &str) -> Result<String, AppError> {
+        Ok(self.find_article_record(article_id)?.original_url)
+    }
+
+    /// 記事ファイル（front matter の `tags`）に保存済みのタグを返す。タグの無い既存記事は空。読み取りのみ。
+    /// 保存された値そのもの（未整形）を確かめるテスト用。画面へは履歴・記事詳細の DTO が `display_tags` で整形したタグを渡す。
+    #[cfg(test)]
+    pub fn get_article_tags(&self, article_id: &str) -> Result<Vec<String>, AppError> {
+        Ok(self.find_article_record(article_id)?.tags)
+    }
+
+    /// 記事が要約済み（status.summarized）かを返す。自動要約の上書き防止用で、書き込みはしない。
+    pub fn is_article_summarized(&self, article_id: &str) -> Result<bool, AppError> {
+        Ok(self.find_article_record(article_id)?.status.summarized)
     }
 
     /// 退避候補を月次ZIPへ圧縮し、`archive_index.json` を更新して archived 印を付ける（増分1・非破壊）。
@@ -703,13 +741,20 @@ impl ArticleRepository {
     ) -> Result<FavoriteUpdateResult, AppError> {
         let _write_guard = self.lock_writes()?;
         let mut article = self.find_article_record(article_id)?;
+        // JSONの読込失敗では記事を変更せず、両方の保存完了後だけ成功を返す。
+        let mut favorite_store = self.load_favorite_store_or_default()?;
+        let previous_favorite = article.favorite;
         article.favorite = is_favorite;
         self.save_article_record(&article)?;
 
-        let mut favorite_store = self.load_favorite_store_or_default()?;
         favorite_store.set(article_id, is_favorite);
         if let Err(error) = self.save_favorite_store(&favorite_store) {
-            log::warn!("Failed to persist favorite override JSON: {error}");
+            // JSONが更新できなければ先行したMarkdownも戻す。復元失敗時も成功にはしない。
+            article.favorite = previous_favorite;
+            if let Err(rollback_error) = self.save_article_record(&article) {
+                log::error!("Failed to roll back article favorite: {rollback_error}");
+            }
+            return Err(error);
         }
 
         Ok(FavoriteUpdateResult {
@@ -727,10 +772,48 @@ impl ArticleRepository {
         update: ArticleSummaryUpdate,
     ) -> Result<(), AppError> {
         let _write_guard = self.lock_writes()?;
-        let mut article = self.find_article_record(article_id)?;
+        let article = self.find_article_record(article_id)?;
+        self.save_summary_update(article, update)
+    }
+
+    /// 自動要約キュー用。まだ要約済みでないときだけ保存し、保存したら true を返す。
+    /// AI 呼び出し中に手動要約で要約済みになった記事を上書きしないよう、要約済みかの確認と保存を
+    /// 同じ書き込みロックの中で行う（確認と保存の間に別の保存が割り込まない）。
+    pub fn update_article_summary_if_unsummarized(
+        &self,
+        article_id: &str,
+        update: ArticleSummaryUpdate,
+    ) -> Result<bool, AppError> {
+        let _write_guard = self.lock_writes()?;
+        let article = self.find_article_record(article_id)?;
+        if article.status.summarized {
+            return Ok(false);
+        }
+        self.save_summary_update(article, update)?;
+        Ok(true)
+    }
+
+    /// 要約系フィールドとメタを反映して保存する。呼び出し側で書き込みロックを持つこと。
+    fn save_summary_update(
+        &self,
+        mut article: PersistedArticleRecord,
+        update: ArticleSummaryUpdate,
+    ) -> Result<(), AppError> {
         article.summary = Some(update.summary);
         article.yuuko_explanation = Some(update.yuuko_explanation);
+        article.key_points = update.key_points;
         article.focus_points = update.focus_points;
+        // タグは検証を通ったときだけ反映する（失敗時は既存のタグを残す・D11）。
+        // Mock の定型タグは、既存のタグが空のときだけ入れる（実在のタグを上書きしない）。
+        match update.tags {
+            ArticleTagsUpdate::Keep => {}
+            ArticleTagsUpdate::Replace(tags) => article.tags = tags,
+            ArticleTagsUpdate::FillIfEmpty(tags) => {
+                if article.tags.is_empty() {
+                    article.tags = tags;
+                }
+            }
+        }
         article.yuuko_comment = Some(update.yuuko_comment);
         article.status.summarized = true;
         article.summary_generated_at = Some(update.generated_at);
@@ -739,21 +822,96 @@ impl ArticleRepository {
         Ok(())
     }
 
-    /// 既存記事の article_id 集合を返す（取得時の重複排除に使う）。
+    /// 記事の既読状態を前進方向にだけ更新して保存する（詳細設計書 §11.2）。
+    /// 後退（DetailViewed→Previewed 等）・同値は保存せず false を返す。
+    /// 単一記事更新と同じ `find_article_record` を使い、保存先が破損ファイルなら上書きせず中止する。
+    pub fn advance_article_read_state(
+        &self,
+        article_id: &str,
+        target: ArticleReadState,
+    ) -> Result<bool, AppError> {
+        let _write_guard = self.lock_writes()?;
+        let mut article = self.find_article_record(article_id)?;
+        if !article.read_state.can_advance_to(&target) {
+            return Ok(false);
+        }
+        article.read_state = target;
+        self.save_article_record(&article)?;
+        Ok(true)
+    }
+
+    /// 記事詳細を返し、同じ読み込み結果で既読状態を前進させる（記事を開く処理用）。
+    /// `get_article_detail` → `advance_article_read_state` の順に呼ぶと記事ファイルを2回探して読むため、
+    /// 書き込みロックの中で1回だけ探し、詳細（前進前の状態）と前進の結果をまとめて返す。
+    /// 既読の保存は付随処理なので、その失敗は外側の Err にせず、2つ目の値で返す
+    /// （詳細の取得に失敗したときだけ外側を Err にする。従来の2回呼びと同じ扱い）。
+    pub fn get_article_detail_and_advance_read_state(
+        &self,
+        article_id: &str,
+        target: ArticleReadState,
+    ) -> Result<(ArticleDetailDto, Result<bool, AppError>), AppError> {
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let _write_guard = match self.lock_writes() {
+            Ok(guard) => guard,
+            Err(lock_error) => {
+                // ロックが壊れていても、従来どおり読み取りだけの詳細表示は成功させる。
+                let detail = self.get_article_detail(article_id)?;
+                return Ok((detail, Err(lock_error)));
+            }
+        };
+        let mut article = self.find_article_record(article_id)?;
+        let detail = article.to_detail_dto(is_effectively_favorite(&article, &favorite_store));
+        if !article.read_state.can_advance_to(&target) {
+            return Ok((detail, Ok(false)));
+        }
+        article.read_state = target;
+        let advanced = self.save_article_record(&article).map(|()| true);
+        Ok((detail, advanced))
+    }
+
+    /// 既存記事の article_id 集合を返す（保存時の上書き防止に使う）。
     pub fn existing_article_ids(&self) -> Result<HashSet<String>, AppError> {
-        let mut article_ids = self
-            .load_article_records()?
+        // ID集合は期間に依存しないため、タイトル側の基準時刻は現在時刻で足りる（結果に使わない）。
+        Ok(self.existing_dedupe_keys(Utc::now())?.into_article_ids())
+    }
+
+    /// 取得時の重複排除に使うキー集合（article_id と 出典名×正規化タイトル）を返す。
+    /// 通常Markdownとアーカイブ記事カタログ（元Markdown削除済みを含む）の両方を対象にする。
+    /// 破損記事が1件あっても取得を止めないよう寛容ローダーを使う。ただし破損ファイルの
+    /// ファイル名（= `{article_id}.md`）も既存IDとして予約し、同じIDの新規保存で上書きしない
+    /// （破損記事のタイトルは読めないため、タイトル側の判定には含めない）。
+    ///
+    /// article_id は期間なしで全件入れる。出典名×正規化タイトルは、取得日時（なければ公開日時）が
+    /// `now` から `TITLE_DEDUPE_WINDOW_DAYS` 以内の記事だけを入れる（D58）。`now` はテストで
+    /// 壁時計に依存しないよう呼び出し側から渡す。
+    pub fn existing_dedupe_keys(&self, now: DateTime<Utc>) -> Result<ArticleDedupeKeys, AppError> {
+        let loaded = self.load_readable_article_records()?;
+        let mut keys = ArticleDedupeKeys::default();
+        for article in loaded.records {
+            if is_within_title_dedupe_window(&article.fetched_at, &article.published_at_text, now) {
+                keys.insert_source_title(&article.source_name, &article.title);
+            }
+            keys.insert_id(article.article_id);
+        }
+        for path in &loaded.skipped_paths {
+            if let Some(stem) = path.file_stem() {
+                keys.insert_id(stem.to_string_lossy().into_owned());
+            }
+        }
+        for article in self
+            .load_archive_index_or_default()?
+            .archives
             .into_iter()
-            .map(|article| article.article_id)
-            .collect::<HashSet<_>>();
-        article_ids.extend(
-            self.load_archive_index_or_default()?
-                .archives
-                .into_iter()
-                .flat_map(|archive| archive.articles)
-                .map(|article| article.article_id),
-        );
-        Ok(article_ids)
+            .flat_map(|archive| archive.articles)
+        {
+            // アーカイブ済み記事は通常30日以上前なので実質タイトル側には入らないが、
+            // カタログにも取得日時・公開日時があるため同じ基準で判定する。
+            if is_within_title_dedupe_window(&article.fetched_at, &article.published_at_text, now) {
+                keys.insert_source_title(&article.source_name, &article.title);
+            }
+            keys.insert_id(article.article_id);
+        }
+        Ok(keys)
     }
 
     /// 取得済みの新規記事を保存する（内部Rust API・Tauri commandとして公開しない）。
@@ -774,6 +932,73 @@ impl ArticleRepository {
         }
 
         Ok(saved)
+    }
+
+    /// 過去ニュース画面向けに、`archive_index.json` の月別エントリを新しい月から順に返す。
+    /// ZIPは開かない。年月・ファイル名が安全な形式でないエントリは表示対象から外す。
+    /// 削除可否は `now` を基準に、削除処理と同じ月の判定（`is_archive_month_deletable`）で決める。
+    pub fn list_archive_months(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ArchiveMonthDto>, AppError> {
+        let index = self.load_archive_index_or_default()?;
+        let mut months = index
+            .archives
+            .iter()
+            .filter(|archive| match validate_archive_location(archive) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("Skipping unsafe archive index entry: {error}");
+                    false
+                }
+            })
+            .map(|archive| ArchiveMonthDto {
+                month: archive.month.clone(),
+                article_count: archive.article_count,
+                catalog_complete: archive.catalog_complete,
+                size_bytes: archive.size_bytes,
+                deletable: is_archive_month_deletable(&archive.month, now),
+            })
+            .collect::<Vec<_>>();
+        months.sort_by(|left, right| right.month.cmp(&left.month));
+        Ok(months)
+    }
+
+    /// 指定月のアーカイブ記事を、ZIPを展開せず記事カタログから返す（取得日時の新しい順）。
+    /// 年月は index 内の一致検索にだけ使い、パスの組み立てには使わない。
+    /// お気に入りは現在のお気に入りJSONを正とする（アーカイブ後の切り替えを反映するため）。
+    pub fn list_archive_month_articles(
+        &self,
+        month: &str,
+    ) -> Result<ArchiveMonthArticlesDto, AppError> {
+        if !is_valid_archive_month(month) {
+            return Err(AppError::Validation(
+                "month must be in YYYY-MM format".to_string(),
+            ));
+        }
+        let index = self.load_archive_index_or_default()?;
+        let archive = index
+            .archives
+            .iter()
+            .find(|archive| archive.month == month)
+            .ok_or_else(|| AppError::NotFound(format!("archive month not found: {month}")))?;
+        validate_archive_location(archive)?;
+
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let mut articles = archive
+            .articles
+            .iter()
+            .map(|article| {
+                article.to_history_item_dto(favorite_store.contains(&article.article_id))
+            })
+            .collect::<Vec<_>>();
+        articles.sort_by(compare_history_items);
+
+        Ok(ArchiveMonthArticlesDto {
+            month: archive.month.clone(),
+            catalog_complete: archive.catalog_complete,
+            articles,
+        })
     }
 
     /// 記事IDから月次ZIP内の1記事だけを検証・復元する。任意パスは受け取らない。
@@ -831,17 +1056,241 @@ impl ArticleRepository {
         })
     }
 
+    /// 月単位アーカイブ削除（判断台帳 D26）の事前確認。削除と同じ検証を通し、件数・サイズを返す。
+    /// 削除できない月（形式不正・新しすぎる・index にない・アーカイブにしか無いお気に入りを含む）は
+    /// 削除時と同じエラーを返すため、画面は確認ダイアログを出す前に削除可否を知れる。
+    pub fn get_archive_month_delete_preview(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeletePreviewDto, AppError> {
+        let _write_guard = self.lock_writes()?;
+        // 中断した退避がrollback領域に残っていると、ローカルに残る記事を数え損ねるため先に戻す。
+        self.recover_retirement_staging()?;
+        let plan = self.plan_archive_month_delete(month, now)?;
+        Ok(ArchiveMonthDeletePreviewDto {
+            month: plan.entry.month.clone(),
+            article_count: plan.entry.article_count,
+            size_bytes: plan.entry.size_bytes,
+            kept_article_count: plan.kept_article_count,
+        })
+    }
+
+    /// 古い月の月次ZIPと `archive_index.json` の月エントリを削除する（データ設計書 §14.8）。
+    ///
+    /// 年月は index 内の一致検索と、検証済みの `YYYY-MM.zip` の組み立てにだけ使い、他のファイルは消さない。
+    /// 通常のニュース領域に残るMarkdown（復元済み・お気に入り・退避待ち）は削除しない。
+    /// 整合性のため「記事の状態更新 → index 更新 → ZIP削除」の順で行う:
+    /// - index 更新までに失敗したら記事の状態を戻し、ZIPも index も元のまま（何も消えない）。
+    /// - index 更新後のZIP削除に失敗しても index がZIPを参照しないため不整合にはならず、
+    ///   参照されないZIPが残るだけ（`cleanup_pending: true`。同じ月が再アーカイブされると置き換わる）。
+    pub fn delete_archive_month(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeleteResultDto, AppError> {
+        let _write_guard = self.lock_writes()?;
+        // 中断した退避のMarkdownは、ZIPを消す前に通常領域へ戻す（戻さないとZIP削除で唯一の本文を失う）。
+        self.recover_retirement_staging()?;
+        let plan = self.plan_archive_month_delete(month, now)?;
+
+        // index から月が消えた後も archived のまま残ると、退避処理が「index にない月」として
+        // 失敗し続けるため、ローカルに残る archived 記事は復元済みとして扱う（Markdownは消さない）。
+        let mut saved_originals = Vec::new();
+        for record in &plan.records_to_release {
+            let mut released = record.clone();
+            released.archive_state = PersistedArchiveState::Restored;
+            released.is_archived = false;
+            released.status.archived = false;
+            if let Err(error) = self.save_article_record(&released) {
+                self.rollback_archived_records(&saved_originals);
+                return Err(error);
+            }
+            saved_originals.push(record.clone());
+        }
+
+        let mut index = plan.index;
+        index.version = ARCHIVE_INDEX_VERSION;
+        index
+            .archives
+            .retain(|entry| entry.month != plan.entry.month);
+        let payload = match serde_json::to_vec_pretty(&index) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.rollback_archived_records(&saved_originals);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = atomic_write(&self.archive_index_path, &payload, "archive index") {
+            self.rollback_archived_records(&saved_originals);
+            return Err(error);
+        }
+
+        // ファイル名は検証済みの年月からだけ作る（validate_archive_location 済み）。
+        let zip_path = self.archive_dir.join(&plan.entry.file);
+        let cleanup_pending = match std::fs::remove_file(&zip_path) {
+            Ok(()) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                log::warn!("Failed to remove deleted archive month zip: {error}");
+                true
+            }
+        };
+
+        Ok(ArchiveMonthDeleteResultDto {
+            month: plan.entry.month,
+            deleted_article_count: plan.entry.article_count,
+            kept_article_count: plan.kept_article_count,
+            cleanup_pending,
+        })
+    }
+
+    /// 月単位アーカイブ削除の検証と対象の洗い出し（書き込みはしない）。
+    fn plan_archive_month_delete(
+        &self,
+        month: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ArchiveMonthDeletePlan, AppError> {
+        if !is_valid_archive_month(month) {
+            return Err(AppError::Validation(
+                "month must be in YYYY-MM format".to_string(),
+            ));
+        }
+        if !is_archive_month_deletable(month, now) {
+            return Err(AppError::Validation(
+                "this archive month is too recent to delete".to_string(),
+            ));
+        }
+        let index = self.load_archive_index_or_default()?;
+        let entry = index
+            .archives
+            .iter()
+            .find(|archive| archive.month == month)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("archive month not found: {month}")))?;
+        validate_archive_location(&entry)?;
+
+        // 状態を書き換える可能性があるため、破損Markdownを見落とさない厳格ローダーを使う。
+        let records = self.load_article_records()?;
+        let favorite_store = self.load_favorite_store_or_default()?;
+        let catalog_ids = entry
+            .articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut local_ids = HashSet::new();
+        let mut kept_article_count = 0usize;
+        let mut records_to_release = Vec::new();
+        for record in records {
+            let in_month = format_month_label(&record.month_bucket()) == entry.month;
+            let is_archived_here =
+                in_month && record.archive_state == PersistedArchiveState::Archived;
+            if !catalog_ids.contains(record.article_id.as_str()) && !is_archived_here {
+                continue;
+            }
+            local_ids.insert(record.article_id.clone());
+            kept_article_count += 1;
+            if record.archive_state == PersistedArchiveState::Archived {
+                records_to_release.push(record);
+            }
+        }
+
+        // お気に入りはアーカイブ対象外のため通常は起きないが、ZIPにしか本文が無いお気に入りがあれば
+        // 削除で失われるので安全側で中止する。
+        if entry.articles.iter().any(|article| {
+            favorite_store.contains(&article.article_id) && !local_ids.contains(&article.article_id)
+        }) {
+            return Err(AppError::Validation(
+                "this archive month contains favorite articles".to_string(),
+            ));
+        }
+
+        Ok(ArchiveMonthDeletePlan {
+            index,
+            entry,
+            kept_article_count,
+            records_to_release,
+        })
+    }
+
+    /// 記事・お気に入り・アーカイブの書き込みロック。データ移行の取り込みが差し替え中に保持する。
+    pub(crate) fn write_lock_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write_lock)
+    }
+
     fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
         self.write_lock
             .lock()
             .map_err(|_| AppError::Archive("article write lock is poisoned".to_string()))
     }
 
+    /// 詳細表示・単一記事更新用の検索。他記事の破損で対象記事まで読めなくならないよう寛容ローダーを使う。
+    /// 更新時の保存先が破損ファイルと一致する場合は、上書きで破損ファイルを失わないよう中止する。
+    ///
+    /// 記事は必ず `{月バケット}/{article_id}.md` へ保存されるため、まず月フォルダごとにその1ファイルだけを
+    /// 探して読む（全件読み込みは記事数に比例して重いため）。直接引けないとき（ファイルが無い・破損・
+    /// 中身のIDや月が保存先と食い違う・IDがファイル名に使えない・I/Oエラー）は、従来の全件走査へ
+    /// フォールバックして結果を変えない（アーカイブ済みで元Markdownが無い記事も、全件走査で NotFound になる）。
     fn find_article_record(&self, article_id: &str) -> Result<PersistedArticleRecord, AppError> {
-        self.find_article_record_optional(article_id)?
-            .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))
+        if let Some(article) = self.find_article_record_direct(article_id) {
+            return Ok(article);
+        }
+        self.find_article_record_by_scan(article_id)
     }
 
+    /// `{月バケット}/{article_id}.md` を月フォルダの名前順に探し、最初に見つかった1ファイルだけを読む。
+    /// 正規の保存先にある記事を優先する（保存処理は常にここへ書く）。正規名でないファイルに同じ article_id が
+    /// 入っていてパス順で先に来る場合（手作業・取り込みでしか起きない）は、全件走査と違い正規ファイルを採る。
+    /// - article_id は外部入力なので、英数字・`-`・`_` だけのときに限ってファイル名へ使う（`..` や区切り文字で
+    ///   ニュースフォルダの外を指さない）。それ以外は None（全件走査で従来どおり判定する）。
+    /// - 見つけたファイルは、中身の article_id と月バケットが保存先と一致するときだけ採用する。
+    ///   一致すれば保存先＝このファイルで、破損ファイルが保存先を占めている状態ではない。
+    /// - 破損・I/Oエラーは None にして、全件走査側に従来どおりのスキップ・エラー判定を任せる。
+    fn find_article_record_direct(&self, article_id: &str) -> Option<PersistedArticleRecord> {
+        if !is_direct_lookup_article_id(article_id) {
+            return None;
+        }
+        let file_name = format!("{article_id}.md");
+        let mut month_dirs = std::fs::read_dir(&self.article_news_dir)
+            .ok()?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.file_name())
+            })
+            .collect::<Vec<_>>();
+        // 全件走査はパスを並べ替えて最初の一致を採るため、月フォルダも同じ名前順で探す。
+        month_dirs.sort();
+
+        let (month, path) = month_dirs.into_iter().find_map(|month| {
+            let path = self.article_news_dir.join(&month).join(&file_name);
+            path.is_file().then_some((month, path))
+        })?;
+        let record = self.load_article_record(&path).ok()?;
+        let is_canonical =
+            record.article_id == article_id && month.to_str() == Some(&record.month_bucket());
+        is_canonical.then_some(record)
+    }
+
+    /// 従来の全件走査による検索。直接引けなかったときのフォールバック。
+    fn find_article_record_by_scan(
+        &self,
+        article_id: &str,
+    ) -> Result<PersistedArticleRecord, AppError> {
+        let loaded = self.load_readable_article_records()?;
+        let article = loaded
+            .records
+            .into_iter()
+            .find(|article| article.article_id == article_id)
+            .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))?;
+        if loaded.skipped_paths.contains(&self.article_path(&article)) {
+            return Err(AppError::Parse(format!(
+                "article markdown path is occupied by a corrupt file: {article_id}"
+            )));
+        }
+        Ok(article)
+    }
+
+    /// アーカイブ復元用の検索。復元は保存先へ書き込むため、破損ファイルがあれば厳格ローダーで中止する。
     fn find_article_record_optional(
         &self,
         article_id: &str,
@@ -852,6 +1301,8 @@ impl ArticleRepository {
             .find(|article| article.article_id == article_id))
     }
 
+    /// 書き込み・削除・圧縮を伴う処理用の厳格ローダー。
+    /// 破損ファイルを見落としたままZIP化・退避・復元すると記事を失いうるため、1件でも読めなければ中止する。
     fn load_article_records(&self) -> Result<Vec<PersistedArticleRecord>, AppError> {
         let mut markdown_paths = Vec::new();
         collect_markdown_files(&self.article_news_dir, &mut markdown_paths)?;
@@ -863,7 +1314,39 @@ impl ArticleRepository {
             .collect()
     }
 
+    /// 一覧・詳細表示用の寛容ローダー（画面詳細設計書 §9.8）。
+    /// Front Matter破損・非UTF-8の記事は1件で全体を止めないよう警告ログを残してスキップする。
+    /// スキップしたパスは、書き込み側が破損ファイルを上書きしないための判定に使えるよう返す。
+    /// ディレクトリ走査失敗など破損以外のI/Oエラーは「一覧全体が読めない」としてそのまま返す。
+    fn load_readable_article_records(&self) -> Result<ReadableArticleRecords, AppError> {
+        let mut markdown_paths = Vec::new();
+        collect_markdown_files(&self.article_news_dir, &mut markdown_paths)?;
+        markdown_paths.sort();
+
+        let mut loaded = ReadableArticleRecords::default();
+        for path in markdown_paths {
+            match self.load_article_record(&path) {
+                Ok(record) => loaded.records.push(record),
+                Err(error) => {
+                    let Some(reason) = corrupt_article_reason(&error) else {
+                        return Err(error);
+                    };
+                    // エラー本文はYAMLの値（記事内容）を含みうるため、パスと分類だけを残す。
+                    log::warn!(
+                        "Skipping corrupt article markdown ({reason}): {}",
+                        path.display()
+                    );
+                    loaded.skipped_paths.push(path);
+                }
+            }
+        }
+
+        Ok(loaded)
+    }
+
     fn load_article_record(&self, path: &Path) -> Result<PersistedArticleRecord, AppError> {
+        #[cfg(test)]
+        tests::count_article_file_read();
         let raw = std::fs::read_to_string(path)?;
         parse_article_record(&raw, &path.display().to_string())
     }
@@ -993,6 +1476,8 @@ struct PersistedArticleRecord {
     excerpt: Option<String>,
     summary: Option<String>,
     yuuko_explanation: Option<String>,
+    /// 要点（「要点」節）。節が無い既存ファイルは空として読む（旧データ互換）。
+    key_points: Vec<String>,
     focus_points: Vec<String>,
     yuuko_comment: Option<String>,
     keyword_candidates: Vec<String>,
@@ -1048,6 +1533,7 @@ impl PersistedArticleRecord {
             excerpt: sections.excerpt,
             summary: sections.summary,
             yuuko_explanation: sections.yuuko_explanation,
+            key_points: sections.key_points,
             focus_points: sections.focus_points,
             yuuko_comment: sections.yuuko_comment,
             keyword_candidates: sections.keyword_candidates,
@@ -1090,6 +1576,7 @@ impl PersistedArticleRecord {
             excerpt: article.excerpt,
             summary: None,
             yuuko_explanation: None,
+            key_points: Vec::new(),
             focus_points: Vec::new(),
             yuuko_comment: None,
             keyword_candidates: Vec::new(),
@@ -1107,6 +1594,16 @@ impl PersistedArticleRecord {
             is_favorite,
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
+        }
+    }
+
+    /// 記事ファイルから分かる要約状態。保存済みなら Done、それ以外はキュー側で上書きされるまで None。
+    fn persisted_summary_state(&self) -> SummaryState {
+        if self.status.summarized {
+            SummaryState::Done
+        } else {
+            SummaryState::None
         }
     }
 
@@ -1123,6 +1620,8 @@ impl PersistedArticleRecord {
             read_state: self.read_state.clone(),
             is_archived: self.is_archived,
             recommendation_score: self.recommendation_score,
+            summary_state: self.persisted_summary_state(),
+            tags: display_tags(&self.tags),
         }
     }
 
@@ -1137,10 +1636,18 @@ impl PersistedArticleRecord {
             summary: self.summary.clone().or_else(|| self.excerpt.clone()),
             excerpt: self.excerpt.clone(),
             yuuko_explanation: self.yuuko_explanation.clone(),
-            focus_points: self.focus_points.clone(),
+            key_points: self.key_points.clone(),
+            focus_points: self
+                .focus_points
+                .iter()
+                .filter(|point| !is_legacy_template_focus_point(point, &self.title, &self.genre))
+                .cloned()
+                .collect(),
             yuuko_comment: self.yuuko_comment.clone(),
             is_favorite,
             keyword_candidates: self.keyword_candidates.clone(),
+            summary_state: self.persisted_summary_state(),
+            tags: display_tags(&self.tags),
         }
     }
 
@@ -1249,6 +1756,8 @@ struct ArticleBodySections {
     excerpt: Option<String>,
     summary: Option<String>,
     yuuko_explanation: Option<String>,
+    /// 要点（「要点」節）。節が無い既存ファイルは空として読む（旧データ互換）。
+    key_points: Vec<String>,
     focus_points: Vec<String>,
     yuuko_comment: Option<String>,
     keyword_candidates: Vec<String>,
@@ -1259,6 +1768,7 @@ enum ArticleBodySection {
     Excerpt,
     Summary,
     Explanation,
+    KeyPoints,
     FocusPoints,
     Comment,
     Keywords,
@@ -1270,6 +1780,7 @@ impl ArticleBodySection {
             "## 本文抜粋" => Some(Self::Excerpt),
             "## AI要約" => Some(Self::Summary),
             "## ゆうこの用語解説" => Some(Self::Explanation),
+            "## 要点" => Some(Self::KeyPoints),
             "## 注目ポイント" => Some(Self::FocusPoints),
             "## ゆうこの一言" => Some(Self::Comment),
             "## 解説対象キーワード" => Some(Self::Keywords),
@@ -1282,6 +1793,7 @@ impl ArticleBodySection {
             Self::Excerpt => "本文抜粋",
             Self::Summary => "AI要約",
             Self::Explanation => "ゆうこの用語解説",
+            Self::KeyPoints => "要点",
             Self::FocusPoints => "注目ポイント",
             Self::Comment => "ゆうこの一言",
             Self::Keywords => "解説対象キーワード",
@@ -1314,6 +1826,25 @@ fn news_dir_contains_markdown_files(dir: &Path) -> Result<bool, AppError> {
     }
 
     Ok(false)
+}
+
+/// 寛容ローダーの結果。読めた記事と、破損としてスキップした記事Markdownのパスを持つ。
+#[derive(Debug, Default)]
+struct ReadableArticleRecords {
+    records: Vec<PersistedArticleRecord>,
+    skipped_paths: Vec<PathBuf>,
+}
+
+/// 記事ファイル自体の破損（Front Matter不正・必須項目欠落・非UTF-8）ならログ用の分類を返す。
+/// 権限不足などの一時的なI/Oエラーは破損と断定できないため対象外（呼び出し側でエラーを返す）。
+fn corrupt_article_reason(error: &AppError) -> Option<&'static str> {
+    match error {
+        AppError::Parse(_) => Some("invalid front matter"),
+        AppError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData => {
+            Some("not valid UTF-8")
+        }
+        _ => None,
+    }
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
@@ -1486,6 +2017,9 @@ fn flush_body_section(
         ArticleBodySection::Comment => {
             sections.yuuko_comment = normalize_text_block(lines);
         }
+        ArticleBodySection::KeyPoints => {
+            sections.key_points = normalize_list_block(lines);
+        }
         ArticleBodySection::FocusPoints => {
             sections.focus_points = normalize_list_block(lines);
         }
@@ -1493,6 +2027,33 @@ fn flush_body_section(
             sections.keyword_candidates = normalize_list_block(lines);
         }
     }
+}
+
+/// D18 以前の要約生成は、注目ポイントを AI ではなく定型文（`{タイトル} の要点を確認する` /
+/// `{ジャンル} 分野での意味を捉える` / `元記事の背景と影響範囲を整理する`）で保存していた。
+/// 画面に定型文を出さないよう、記事詳細へ渡すときにだけ除く（記事ファイルは書き換えない。
+/// 要約を作り直すと AI の注目ポイントで上書きされる）。
+/// AI が書いた注目ポイントを誤って消さないよう、その記事のタイトル・ジャンルから作った定型文と完全一致するものだけを除く。
+fn is_legacy_template_focus_point(point: &str, title: &str, genre: &str) -> bool {
+    point == format!("{title} の要点を確認する")
+        || point == format!("{genre} 分野での意味を捉える")
+        || point == "元記事の背景と影響範囲を整理する"
+}
+
+/// 本文抜粋の中に、節の見出しと同じ行（例: `## 要点`）があると、読み込み時にそこで節が切り替わり抜粋が分断される。
+/// 書き込み時だけ、その行の先頭の `#` を全角 `＃` へ置き換えて、ただの抜粋の文として読み戻されるようにする
+/// （既存ファイルは書き換えない）。
+fn neutralize_section_heading_lines(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if ArticleBodySection::from_heading(line).is_some() {
+                line.replacen('#', "＃", 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_text_block(lines: &[String]) -> Option<String> {
@@ -1540,10 +2101,15 @@ fn serialize_article_markdown(article: &PersistedArticleRecord) -> Result<String
 fn compose_article_body(article: &PersistedArticleRecord) -> String {
     let mut sections = Vec::new();
 
+    // 抜粋は外部由来の文なので、節の見出しと同じ行だけ無害化してから書く。
+    let excerpt = article
+        .excerpt
+        .as_deref()
+        .map(neutralize_section_heading_lines);
     push_text_section(
         &mut sections,
         ArticleBodySection::Excerpt,
-        article.excerpt.as_deref(),
+        excerpt.as_deref(),
     );
     push_text_section(
         &mut sections,
@@ -1554,6 +2120,11 @@ fn compose_article_body(article: &PersistedArticleRecord) -> String {
         &mut sections,
         ArticleBodySection::Explanation,
         article.yuuko_explanation.as_deref(),
+    );
+    push_list_section(
+        &mut sections,
+        ArticleBodySection::KeyPoints,
+        &article.key_points,
     );
     push_list_section(
         &mut sections,
@@ -1592,18 +2163,6 @@ fn push_list_section(buffer: &mut Vec<String>, section: ArticleBodySection, valu
         .collect::<Vec<_>>()
         .join("\n");
     buffer.push(format!("## {}\n{}", section.heading(), items));
-}
-
-fn compare_article_records(
-    left: &PersistedArticleRecord,
-    right: &PersistedArticleRecord,
-) -> Ordering {
-    right
-        .recommendation_score
-        .partial_cmp(&left.recommendation_score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-        .then_with(|| left.article_id.cmp(&right.article_id))
 }
 
 fn compare_history_items(left: &ArticleHistoryItemDto, right: &ArticleHistoryItemDto) -> Ordering {
@@ -1661,6 +2220,27 @@ fn format_month_label(bucket: &str) -> String {
 /// アーカイブ index の createdAt 用タイムスタンプ（UTC・他サービスと同形式）。
 fn format_archive_timestamp(now: DateTime<Utc>) -> String {
     now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// 取り込むお気に入りJSONが、読み込み時と同じ型として読めるか（データ移行の取り込み用）。
+pub(crate) fn validate_imported_favorites_json(raw: &str) -> Result<(), AppError> {
+    serde_json::from_str::<ArticleFavoriteStore>(raw)?;
+    Ok(())
+}
+
+/// 取り込む `archive_index.json` が、読み込み時と同じ型・検証を通るか（データ移行の取り込み用）。
+pub(crate) fn validate_imported_archive_index_json(raw: &str) -> Result<(), AppError> {
+    serde_json::from_str::<ArchiveIndex>(crate::util::strip_utf8_bom(raw))?.validate()
+}
+
+/// 月単位アーカイブ削除の計画。index は計画時に読んだものを書き戻しに使う（ロック保持中のため変化しない）。
+struct ArchiveMonthDeletePlan {
+    index: ArchiveIndex,
+    entry: ArchiveIndexEntry,
+    /// 通常のニュース領域に残る、この月の記事数。
+    kept_article_count: usize,
+    /// index から月が消えるため、archived から restored へ切り替えるローカル記事。
+    records_to_release: Vec<PersistedArticleRecord>,
 }
 
 /// `archive/archive_index.json` の構造（データ設計書 §14.4）。
@@ -1778,6 +2358,9 @@ struct ArchiveArticleIndexEntry {
     summary: Option<String>,
     read_state: ArticleReadState,
     recommendation_score: f32,
+    /// 履歴のタグ表示・絞り込み用（整形済み）。タグ追加前に作られた索引には無いため既定値で読む。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
 }
 
 impl ArchiveArticleIndexEntry {
@@ -1793,6 +2376,7 @@ impl ArchiveArticleIndexEntry {
             summary: record.summary.clone().or_else(|| record.excerpt.clone()),
             read_state: record.read_state.clone(),
             recommendation_score: record.recommendation_score,
+            tags: display_tags(&record.tags),
         })
     }
 
@@ -1809,9 +2393,13 @@ impl ArchiveArticleIndexEntry {
             read_state: self.read_state.clone(),
             is_archived: true,
             recommendation_score: self.recommendation_score,
+            // アーカイブ索引は要約済みフラグを持たず、キューにも入らないため状態は出さない（タグ非表示）。
+            summary_state: SummaryState::None,
+            tags: self.tags.clone(),
         }
     }
 
+    // tags は比較に含めない。タグ追加前の索引（tags なし）でも、記事ファイル退避の照合を通すため。
     fn matches_record(&self, record: &PersistedArticleRecord) -> Result<bool, AppError> {
         Ok(self.article_id == record.article_id
             && self.entry_name == archive_entry_name(&record.article_id)?
@@ -1831,17 +2419,7 @@ fn legacy_archive_index_version() -> u32 {
 }
 
 fn validate_archive_location(archive: &ArchiveIndexEntry) -> Result<(), AppError> {
-    let bytes = archive.month.as_bytes();
-    let month_number = archive
-        .month
-        .get(5..7)
-        .and_then(|value| value.parse::<u8>().ok());
-    let valid_month = bytes.len() == 7
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && month_number.is_some_and(|value| (1..=12).contains(&value));
-    if !valid_month || archive.file != format!("{}.zip", archive.month) {
+    if !is_valid_archive_month(&archive.month) || archive.file != format!("{}.zip", archive.month) {
         return Err(AppError::Archive(
             "archive index contains an unsafe archive location".to_string(),
         ));
@@ -1861,6 +2439,27 @@ fn validate_month_bucket(bucket: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+/// 記事IDをそのままファイル名（`{article_id}.md`）として直接参照してよいかを返す。
+/// article_id は画面から渡る外部入力なので、パス区切り・`..`・ドライブ指定などを含みうる。
+/// 英数字・`-`・`_` だけ（データ移行の記事ファイル名と同じ規則）に限り、Windows の予約デバイス名
+/// （`CON` `NUL` `COM1` など）も除く。外れたIDは直接参照せず、全件走査で従来どおり判定する。
+fn is_direct_lookup_article_id(article_id: &str) -> bool {
+    const RESERVED_DEVICE_NAMES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let is_safe = !article_id.is_empty()
+        && article_id.len() <= 128
+        && article_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if !is_safe {
+        return false;
+    }
+    let upper = article_id.to_ascii_uppercase();
+    let is_numbered_device = upper.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.as_bytes()[3].is_ascii_digit();
+    !RESERVED_DEVICE_NAMES.contains(&upper.as_str()) && !is_numbered_device
 }
 
 fn month_bucket_from_text(value: &str) -> Option<String> {
@@ -2015,6 +2614,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "この記事では、生成AIそのものよりも、それをどう実務に組み込むかを支える企業に期待が集まっている点が大切です。".to_string(),
             ),
+            key_points: vec!["複数の生成AIスタートアップが大型の資金調達を発表した".to_string(), "法人向けの導入支援や運用最適化の分野に資金が集まっている".to_string()],
             focus_points: vec![
                 "投資対象がモデル開発だけでなく運用支援まで広がっている".to_string(),
                 "法人導入の具体策を持つ企業が評価されやすい".to_string(),
@@ -2066,6 +2666,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "単に安くするだけでなく、導入後にどう使い続けてもらうかまで含めて設計している点が重要です。".to_string(),
             ),
+            key_points: vec!["SaaS各社が中堅企業向けの新プランを発表した".to_string(), "価格の見直しと導入・運用支援をセットで提供する".to_string()],
             focus_points: vec![
                 "中堅企業向けに支援内容を明確化している".to_string(),
                 "価格だけでなく運用支援を合わせて提供している".to_string(),
@@ -2117,6 +2718,7 @@ fn seed_articles() -> Vec<PersistedArticleRecord> {
             yuuko_explanation: Some(
                 "推論は学習より身近な場面でたくさん実行されるので、電力効率の改善は実用面でとても効いてきます。".to_string(),
             ),
+            key_points: vec!["新しい計算構成でAI推論の消費電力を抑える実験結果が報告された".to_string(), "省電力と処理効率の両立が期待できる".to_string()],
             focus_points: vec![
                 "推論処理での省電力性が主な評価軸になっている".to_string(),
                 "研究段階でも実運用を意識した測定が行われている".to_string(),
@@ -2139,11 +2741,14 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::domain::article::{ArchiveRestoreStatus, ArticleHistoryFilter, ArticleReadState};
+    use crate::domain::article::{
+        ArchiveMonthDto, ArchiveRestoreStatus, ArticleHistoryFilter, ArticleReadState,
+    };
+    use crate::error::AppError;
 
     use super::{
-        archive_entry_name, month_bucket_from_text, ArticleRepository, ArticleSummaryUpdate,
-        PersistedArchiveState, PersistedArticleRecord,
+        archive_entry_name, month_bucket_from_text, parse_article_body, ArticleRepository,
+        ArticleSummaryUpdate, PersistedArchiveState, PersistedArticleRecord,
     };
 
     struct TestRepositoryContext {
@@ -2194,23 +2799,20 @@ mod tests {
         assert_eq!(files, 3);
     }
 
+    /// 件数制限と並び順は ArticleService 側の責務（article_service のテストで確認）。
     #[test]
-    fn list_recommended_respects_limit() {
+    fn list_recommendation_candidates_returns_stored_score_and_fetched_at() {
         let context = TestRepositoryContext::new();
         context.repository.initialize_default_if_missing().unwrap();
 
-        let articles = context.repository.list_recommended(2).unwrap();
-        assert_eq!(articles.len(), 2);
-    }
-
-    #[test]
-    fn list_recommended_keeps_recommendation_order() {
-        let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
-
-        let articles = context.repository.list_recommended(3).unwrap();
-        assert!(articles[0].recommendation_score >= articles[1].recommendation_score);
-        assert!(articles[1].recommendation_score >= articles[2].recommendation_score);
+        let candidates = context.repository.list_recommendation_candidates().unwrap();
+        assert_eq!(candidates.len(), 3);
+        let first = candidates
+            .iter()
+            .find(|candidate| candidate.summary.article_id == "article-001")
+            .unwrap();
+        assert!((first.summary.recommendation_score - 0.92).abs() < f32::EPSILON);
+        assert!(!first.fetched_at.is_empty());
     }
 
     #[test]
@@ -2227,6 +2829,48 @@ mod tests {
         assert_eq!(articles[0].article_id, "article-001");
         assert!(articles[0].fetched_at >= articles[1].fetched_at);
         assert!(articles[1].fetched_at >= articles[2].fetched_at);
+    }
+
+    #[test]
+    fn history_and_detail_expose_display_tags() {
+        let context = TestRepositoryContext::new();
+        let tagged = PersistedArticleRecord {
+            article_id: "article-tagged".to_string(),
+            tags: vec![
+                " AI ".to_string(),
+                "".to_string(),
+                "生成AI".to_string(),
+                "AI".to_string(),
+            ],
+            ..super::seed_articles().remove(0)
+        };
+        let untagged = PersistedArticleRecord {
+            article_id: "article-untagged".to_string(),
+            tags: Vec::new(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&tagged).unwrap();
+        context.repository.save_article_record(&untagged).unwrap();
+
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+        let tags_of = |id: &str| {
+            history
+                .iter()
+                .find(|item| item.article_id == id)
+                .map(|item| item.tags.clone())
+                .unwrap()
+        };
+        assert_eq!(tags_of("article-tagged"), vec!["AI", "生成AI"]);
+        assert!(tags_of("article-untagged").is_empty());
+
+        let detail = context
+            .repository
+            .get_article_detail("article-tagged")
+            .unwrap();
+        assert_eq!(detail.tags, vec!["AI", "生成AI"]);
     }
 
     #[test]
@@ -2517,8 +3161,10 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "archive作成後の要約".to_string(),
                     yuuko_explanation: "更新後の説明".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "更新後のコメント".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -2609,8 +3255,10 @@ mod tests {
                 ArticleSummaryUpdate {
                     summary: "計画作成後の変更".to_string(),
                     yuuko_explanation: "更新後".to_string(),
+                    key_points: Vec::new(),
                     focus_points: vec!["更新".to_string()],
                     yuuko_comment: "変更あり".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
                     generated_at: "2026-07-15T00:00:00Z".to_string(),
                     ai_provider: "mock".to_string(),
                 },
@@ -2930,6 +3578,202 @@ mod tests {
         assert_eq!(index.archives[0].articles[0].entry_name, "old-a.md");
     }
 
+    fn archive_old_article(context: &TestRepositoryContext, article_id: &str, fetched_at: &str) {
+        use chrono::{TimeZone, Utc};
+        let record = PersistedArticleRecord {
+            article_id: article_id.to_string(),
+            title: format!("{article_id} のタイトル"),
+            fetched_at: fetched_at.to_string(),
+            published_at_text: fetched_at.to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&record).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+    }
+
+    #[test]
+    fn list_archive_months_returns_newest_month_first_with_counts() {
+        let context = TestRepositoryContext::new();
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
+
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+
+        // サイズは index の sizeBytes（実際のZIPサイズ）をそのまま返す。
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let size_of = |month: &str| {
+            index
+                .archives
+                .iter()
+                .find(|entry| entry.month == month)
+                .unwrap()
+                .size_bytes
+        };
+        assert!(size_of("2026-05") > 0);
+        assert_eq!(
+            months,
+            vec![
+                ArchiveMonthDto {
+                    month: "2026-05".to_string(),
+                    article_count: 2,
+                    catalog_complete: true,
+                    size_bytes: size_of("2026-05"),
+                    deletable: true,
+                },
+                ArchiveMonthDto {
+                    month: "2026-04".to_string(),
+                    article_count: 1,
+                    catalog_complete: true,
+                    size_bytes: size_of("2026-04"),
+                    deletable: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn list_archive_months_marks_recent_months_as_not_deletable() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+
+        // 削除処理と同じ判定: 翌月1日から30日＋1日が過ぎるまでは削除できない。
+        let too_early = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let months = context.repository.list_archive_months(too_early).unwrap();
+        assert_eq!(months.len(), 1);
+        assert!(!months[0].deletable);
+
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert!(months[0].deletable);
+    }
+
+    #[test]
+    fn list_archive_month_articles_reads_catalog_without_opening_zip() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        // アーカイブ後にお気に入りへ切り替えた記事は、現在のお気に入りJSONを反映する。
+        context
+            .repository
+            .update_article_favorite("may-a", true)
+            .unwrap();
+        // ZIPと元Markdownを消してもカタログだけで一覧を返せる（ZIPを展開しない）。
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::remove_file(archive_dir.join("2026-05.zip")).unwrap();
+        std::fs::remove_dir_all(context.news_dir.join("202605")).unwrap();
+
+        let result = context
+            .repository
+            .list_archive_month_articles("2026-05")
+            .unwrap();
+
+        assert_eq!(result.month, "2026-05");
+        assert!(result.catalog_complete);
+        let ids = result
+            .articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["may-b", "may-a"]);
+        let may_a = &result.articles[1];
+        assert_eq!(may_a.title, "may-a のタイトル");
+        assert_eq!(may_a.source_name, super::seed_articles()[0].source_name);
+        assert_eq!(may_a.published_at_text, "2026-05-01T00:00:00Z");
+        assert!(may_a.is_favorite);
+        assert!(may_a.is_archived);
+        assert!(!result.articles[0].is_favorite);
+    }
+
+    #[test]
+    fn list_archive_month_articles_rejects_invalid_or_unknown_month() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+
+        for invalid in ["../2026-05", "2026-05.zip", "2026-13", "archive_index", ""] {
+            assert!(matches!(
+                context.repository.list_archive_month_articles(invalid),
+                Err(AppError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            context.repository.list_archive_month_articles("2026-04"),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn archive_month_queries_handle_legacy_and_unsafe_index_entries() {
+        let context = TestRepositoryContext::new();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("archive_index.json"),
+            r#"{
+  "archives": [
+    {
+      "month": "2026-05",
+      "file": "2026-05.zip",
+      "articleCount": 2,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    },
+    {
+      "month": "2026-06",
+      "file": "../outside.zip",
+      "articleCount": 1,
+      "createdAt": "2026-07-15T00:00:00Z",
+      "sizeBytes": 1024
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert_eq!(
+            months,
+            vec![ArchiveMonthDto {
+                month: "2026-05".to_string(),
+                article_count: 2,
+                catalog_complete: false,
+                size_bytes: 1024,
+                deletable: true,
+            }]
+        );
+
+        let legacy = context
+            .repository
+            .list_archive_month_articles("2026-05")
+            .unwrap();
+        assert!(!legacy.catalog_complete);
+        assert!(legacy.articles.is_empty());
+
+        assert!(matches!(
+            context.repository.list_archive_month_articles("2026-06"),
+            Err(AppError::Archive(_))
+        ));
+    }
+
     #[test]
     fn archive_index_reads_legacy_v1_without_article_catalog() {
         let context = TestRepositoryContext::new();
@@ -3091,6 +3935,8 @@ mod tests {
         assert_eq!(articles[0].article_id, "catalog-only");
         assert_eq!(articles[0].title, "ZIPにだけ残る記事");
         assert!(articles[0].is_archived);
+        // アーカイブ索引にもタグを残し、本文がZIPにだけある記事も履歴のタグで絞り込めるようにする。
+        assert_eq!(articles[0].tags, vec!["AI", "生成AI", "資金調達"]);
     }
 
     #[test]
@@ -3130,6 +3976,70 @@ mod tests {
 
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].title, "Markdown側で更新したタイトル");
+    }
+
+    #[test]
+    fn existing_dedupe_keys_compare_titles_only_within_window_but_ids_always() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        let archived = PersistedArticleRecord {
+            article_id: "archived-title".to_string(),
+            title: "アーカイブ\u{3000}記事".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&archived).unwrap();
+        let archive_now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(archive_now).unwrap();
+        std::fs::remove_file(context.news_dir.join("202605").join("archived-title.md")).unwrap();
+
+        let recent = PersistedArticleRecord {
+            article_id: "recent-title".to_string(),
+            title: " 通常  記事 ".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "2026-07-10T00:00:00Z".to_string(),
+            published_at_text: "2026-07-10T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&recent).unwrap();
+        let old = PersistedArticleRecord {
+            article_id: "old-title".to_string(),
+            title: "毎日の 定例コラム".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "2026-07-07T23:59:59Z".to_string(),
+            published_at_text: "2026-07-07T23:59:59Z".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&old).unwrap();
+        // 取得日時が解釈できない記事は公開日時で判定する。
+        let fallback = PersistedArticleRecord {
+            article_id: "fallback-title".to_string(),
+            title: "公開日時で 判定".to_string(),
+            source_name: "出典A".to_string(),
+            fetched_at: "不明".to_string(),
+            published_at_text: "2026-07-14T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&fallback).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let keys = context.repository.existing_dedupe_keys(now).unwrap();
+
+        // 7日以内の同一出典・正規化後同一タイトルは、URL（article_id）が違っても重複。
+        assert!(keys.is_duplicate("new-id-1", "出典A", "通常 記事"));
+        assert!(keys.is_duplicate("new-id-2", "出典A", "公開日時で 判定"));
+        // 出典が異なれば重複ではない。
+        assert!(!keys.is_duplicate("new-id-3", "出典B", "通常 記事"));
+        // 7日より前の同一タイトル（アーカイブ済み・通常Markdown）とは比べず、新規として保存できる（D58）。
+        assert!(!keys.is_duplicate("new-id-4", "出典A", "アーカイブ 記事"));
+        assert!(!keys.is_duplicate("new-id-5", "出典A", "毎日の 定例コラム"));
+        // 同一URL（article_id）は期間に関係なく重複。
+        assert!(keys.is_duplicate("archived-title", "出典B", "別"));
+        assert!(keys.is_duplicate("old-title", "出典B", "別"));
     }
 
     #[test]
@@ -3480,6 +4390,292 @@ mod tests {
         );
     }
 
+    /// Front Matter破損・非UTF-8の記事Markdownを置き、置いた中身（バイト列）を返す。
+    fn write_corrupt_markdown_files(
+        news_dir: &std::path::Path,
+        bucket: &str,
+    ) -> Vec<(PathBuf, Vec<u8>)> {
+        let dir = news_dir.join(bucket);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = vec![
+            (
+                dir.join("broken-yaml.md"),
+                b"---\narticleId: [unterminated\n---\n\nbody\n".to_vec(),
+            ),
+            (
+                dir.join("broken-utf8.md"),
+                vec![b'-', b'-', b'-', b'\n', 0xff, 0xfe, 0xfd, b'\n'],
+            ),
+        ];
+        for (path, bytes) in &files {
+            std::fs::write(path, bytes).unwrap();
+        }
+        files
+    }
+
+    fn assert_files_unchanged(files: &[(PathBuf, Vec<u8>)]) {
+        for (path, bytes) in files {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn read_apis_skip_corrupt_markdown_and_return_remaining_articles() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
+
+        let recommended = context.repository.list_recommendation_candidates().unwrap();
+        assert_eq!(recommended.len(), 3);
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+        assert_eq!(history.len(), 3);
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert_eq!(detail.article_id, "article-002");
+
+        // 単一記事の更新も他記事の破損で止まらず、破損ファイルには触れない。
+        context
+            .repository
+            .update_article_favorite("article-002", true)
+            .unwrap();
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn archive_candidates_aborts_without_changes_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "old-plain".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        assert!(context.repository.archive_candidates(now).is_err());
+
+        // 圧縮・archived印付けを行わず、破損ファイルも保持する（安全側で中止）。
+        assert!(!context
+            .root_dir
+            .join("archive")
+            .join("archive_index.json")
+            .exists());
+        let saved = context
+            .repository
+            .load_article_record(&context.news_dir.join("202605").join("old-plain.md"))
+            .unwrap();
+        assert!(!saved.is_archived);
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn retire_archived_markdown_aborts_without_deleting_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let article = PersistedArticleRecord {
+            article_id: "retire-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&article).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
+
+        assert!(context.repository.retire_archived_markdown().is_err());
+
+        assert!(context.news_dir.join("202605").join("retire-a.md").exists());
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn single_article_update_aborts_when_save_path_is_corrupt_file() {
+        let context = TestRepositoryContext::new();
+        // 読める記事Aを本来とは別の月バケット（202606）に置き、本来の保存先（202605/A.md）を破損ファイルにする。
+        let article = PersistedArticleRecord {
+            article_id: "misplaced-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let readable_dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&readable_dir).unwrap();
+        std::fs::write(
+            readable_dir.join("misplaced-a.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+        let corrupt_dir = context.news_dir.join("202605");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        let corrupt_path = corrupt_dir.join("misplaced-a.md");
+        let corrupt_bytes = b"---\narticleId: [unterminated\n---\n".to_vec();
+        std::fs::write(&corrupt_path, &corrupt_bytes).unwrap();
+        let corrupt = vec![(corrupt_path, corrupt_bytes)];
+
+        let favorite_error = context
+            .repository
+            .update_article_favorite("misplaced-a", true)
+            .unwrap_err();
+        assert!(matches!(favorite_error, crate::error::AppError::Parse(_)));
+        let summary_error = context
+            .repository
+            .update_article_summary(
+                "misplaced-a",
+                ArticleSummaryUpdate {
+                    summary: "要約".to_string(),
+                    yuuko_explanation: "説明".to_string(),
+                    key_points: Vec::new(),
+                    focus_points: vec!["注目".to_string()],
+                    yuuko_comment: "コメント".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
+                    generated_at: "2026-07-15T00:00:00Z".to_string(),
+                    ai_provider: "mock".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(summary_error, crate::error::AppError::Parse(_)));
+        let read_state_error = context
+            .repository
+            .advance_article_read_state("misplaced-a", ArticleReadState::DetailViewed)
+            .unwrap_err();
+        assert!(matches!(read_state_error, crate::error::AppError::Parse(_)));
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn restore_archived_article_aborts_when_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let article = PersistedArticleRecord {
+            article_id: "restore-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&article).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        // archive後に対象記事のMarkdownを破損内容へ差し替える。
+        let markdown_path = context.news_dir.join("202605").join("restore-a.md");
+        let corrupt_bytes = b"---\narticleId: [unterminated\n---\n".to_vec();
+        std::fs::write(&markdown_path, &corrupt_bytes).unwrap();
+
+        assert!(context
+            .repository
+            .restore_archived_article("restore-a")
+            .is_err());
+        assert_files_unchanged(&[(markdown_path, corrupt_bytes)]);
+    }
+
+    #[test]
+    fn refresh_does_not_overwrite_corrupt_markdown() {
+        use crate::domain::article::FetchedArticle;
+
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
+
+        let existing = context.repository.existing_article_ids().unwrap();
+        assert!(existing.contains("article-001"));
+        // 破損ファイル名のIDは既存扱いにし、同じIDの取得記事で上書きさせない。
+        assert!(existing.contains("broken-yaml"));
+        assert!(existing.contains("broken-utf8"));
+
+        let fetched = |article_id: &str| FetchedArticle {
+            article_id: article_id.to_string(),
+            title: "新着記事".to_string(),
+            source_name: "テストソース".to_string(),
+            original_url: "https://example.com/news".to_string(),
+            fetched_at: "2026-06-20T00:00:00Z".to_string(),
+            published_at_text: "2026-06-20T00:00:00Z".to_string(),
+            genre: "テクノロジー".to_string(),
+            tags: Vec::new(),
+            excerpt: None,
+            recommendation_score: 0.5,
+            read_state: ArticleReadState::Unread,
+        };
+        let saved = context
+            .repository
+            .save_fetched_articles(vec![
+                fetched("broken-yaml"),
+                fetched("broken-utf8"),
+                fetched("fresh-article"),
+            ])
+            .unwrap();
+
+        assert_eq!(saved, 1);
+        assert!(context
+            .news_dir
+            .join("202606")
+            .join("fresh-article.md")
+            .exists());
+        assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn advance_article_read_state_persists_forward_and_never_regresses() {
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        let read_state_of = |article_id: &str| {
+            context
+                .repository
+                .list_history(ArticleHistoryFilter::All, 10)
+                .unwrap()
+                .into_iter()
+                .find(|article| article.article_id == article_id)
+                .unwrap()
+                .read_state
+        };
+
+        // Unread → Previewed → DetailViewed は保存される。
+        assert!(context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::Previewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::Previewed);
+        assert!(context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::DetailViewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::DetailViewed);
+
+        // DetailViewed → Previewed へは後退させない（保存も行わない）。
+        assert!(!context
+            .repository
+            .advance_article_read_state("article-001", ArticleReadState::Previewed)
+            .unwrap());
+        assert_eq!(read_state_of("article-001"), ArticleReadState::DetailViewed);
+
+        // 存在しない記事は NotFound（新規ファイルを作らない）。
+        assert!(matches!(
+            context
+                .repository
+                .advance_article_read_state("article-999", ArticleReadState::Previewed),
+            Err(crate::error::AppError::NotFound(_))
+        ));
+    }
+
     #[test]
     fn update_article_favorite_persists_state_for_list_and_detail() {
         let context = TestRepositoryContext::new();
@@ -3491,12 +4687,13 @@ mod tests {
             .unwrap();
         assert!(result.is_favorite);
 
-        let articles = context.repository.list_recommended(3).unwrap();
+        let articles = context.repository.list_recommendation_candidates().unwrap();
         assert!(
             articles
                 .iter()
-                .find(|article| article.article_id == "article-001")
+                .find(|article| article.summary.article_id == "article-001")
                 .unwrap()
+                .summary
                 .is_favorite
         );
 
@@ -3515,8 +4712,10 @@ mod tests {
         let update = ArticleSummaryUpdate {
             summary: "新しいAI要約テキスト".to_string(),
             yuuko_explanation: "新しい再説明".to_string(),
+            key_points: vec!["要点A".to_string(), "要点B".to_string()],
             focus_points: vec!["観点A".to_string(), "観点B".to_string()],
             yuuko_comment: "新しい一言".to_string(),
+            tags: crate::domain::article::ArticleTagsUpdate::Keep,
             ai_provider: "gemini".to_string(),
             generated_at: "2026-06-08T00:00:00Z".to_string(),
         };
@@ -3533,22 +4732,161 @@ mod tests {
         assert_eq!(detail.summary.as_deref(), Some("新しいAI要約テキスト"));
         assert_eq!(detail.yuuko_explanation.as_deref(), Some("新しい再説明"));
         assert_eq!(detail.yuuko_comment.as_deref(), Some("新しい一言"));
+        // 要点と注目ポイントは別の節として保存され、混ざらずに読み戻せる（D18）。
+        assert_eq!(
+            detail.key_points,
+            vec!["要点A".to_string(), "要点B".to_string()]
+        );
         assert_eq!(
             detail.focus_points,
             vec!["観点A".to_string(), "観点B".to_string()]
         );
-
         // front matter のメタ情報も永続化されていることを確認。
         let record = context
             .repository
             .find_article_record("article-002")
             .unwrap();
+        let raw = std::fs::read_to_string(context.repository.article_path(&record)).unwrap();
+        assert!(raw.contains("## 要点\n- 要点A\n- 要点B"), "{raw}");
+        assert!(raw.contains("## 注目ポイント\n- 観点A\n- 観点B"), "{raw}");
         assert!(record.status.summarized);
         assert_eq!(record.ai_provider.as_deref(), Some("gemini"));
         assert_eq!(
             record.summary_generated_at.as_deref(),
             Some("2026-06-08T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn article_body_without_key_points_section_loads_as_empty_key_points() {
+        // 要点の節が無い既存の記事ファイル（D18 以前）も読み込め、要点は空・注目ポイントは従来どおり。
+        let sections = parse_article_body(
+            "## AI要約\n要約です。\n\n## 注目ポイント\n- 観点A\n- 観点B\n\n## ゆうこの一言\n一言だよ。",
+        );
+        assert!(sections.key_points.is_empty());
+        assert_eq!(
+            sections.focus_points,
+            vec!["観点A".to_string(), "観点B".to_string()]
+        );
+        assert_eq!(sections.yuuko_comment.as_deref(), Some("一言だよ。"));
+
+        // 要点の節があるときは、注目ポイントと別々に読む。
+        let sections =
+            parse_article_body("## 要点\n- 起きたこと1\n- 起きたこと2\n\n## 注目ポイント\n- 観点A");
+        assert_eq!(
+            sections.key_points,
+            vec!["起きたこと1".to_string(), "起きたこと2".to_string()]
+        );
+        assert_eq!(sections.focus_points, vec!["観点A".to_string()]);
+    }
+
+    #[test]
+    fn legacy_template_focus_points_are_not_shown_in_the_detail() {
+        // D18 以前に定型文で保存された注目ポイントは、記事詳細には出さない（ファイルには残す）。
+        let context = TestRepositoryContext::new();
+        context.repository.initialize_default_if_missing().unwrap();
+        context
+            .repository
+            .update_article_summary(
+                "article-002",
+                ArticleSummaryUpdate {
+                    summary: "要約".to_string(),
+                    yuuko_explanation: "再説明".to_string(),
+                    key_points: Vec::new(),
+                    focus_points: vec![
+                        "SaaS企業が中堅市場向け新プランを発表 の要点を確認する".to_string(),
+                        "ビジネス 分野での意味を捉える".to_string(),
+                        "元記事の背景と影響範囲を整理する".to_string(),
+                        "AIが書いた注目ポイント".to_string(),
+                    ],
+                    yuuko_comment: "一言".to_string(),
+                    tags: crate::domain::article::ArticleTagsUpdate::Keep,
+                    ai_provider: "mock".to_string(),
+                    generated_at: "2026-06-08T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert!(detail.key_points.is_empty());
+        assert_eq!(
+            detail.focus_points,
+            vec!["AIが書いた注目ポイント".to_string()]
+        );
+        let record = context
+            .repository
+            .find_article_record("article-002")
+            .unwrap();
+        assert_eq!(record.focus_points.len(), 4);
+    }
+
+    #[test]
+    fn only_exact_legacy_template_focus_points_are_hidden() {
+        let title = "SaaS企業が中堅市場向け新プランを発表";
+        let genre = "ビジネス";
+        assert!(super::is_legacy_template_focus_point(
+            &format!("{title} の要点を確認する"),
+            title,
+            genre
+        ));
+        assert!(super::is_legacy_template_focus_point(
+            &format!("{genre} 分野での意味を捉える"),
+            title,
+            genre
+        ));
+        assert!(super::is_legacy_template_focus_point(
+            "元記事の背景と影響範囲を整理する",
+            title,
+            genre
+        ));
+        // AI の文がたまたま同じ語尾で終わっても、その記事の定型文と一致しなければ残す。
+        for point in [
+            "まず導入事例 の要点を確認する",
+            "教育 分野での意味を捉える",
+            "元記事の背景と影響範囲を整理する。",
+        ] {
+            assert!(
+                !super::is_legacy_template_focus_point(point, title, genre),
+                "{point}"
+            );
+        }
+    }
+
+    #[test]
+    fn excerpt_lines_equal_to_section_headings_round_trip_as_excerpt_text() {
+        let context = TestRepositoryContext::new();
+        let excerpt = "前半の本文。\n## 要点\n  ## AI要約\n## 要点の話は続く\n後半の本文。";
+        context
+            .repository
+            .save_fetched_articles(vec![crate::domain::article::FetchedArticle {
+                article_id: "heading-excerpt".to_string(),
+                title: "見出し混入の記事".to_string(),
+                source_name: "Example News".to_string(),
+                original_url: "https://example.com/news/heading-excerpt".to_string(),
+                fetched_at: "2026-10-07T00:00:00Z".to_string(),
+                published_at_text: "2026-10-07T00:00:00Z".to_string(),
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some(excerpt.to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            }])
+            .unwrap();
+
+        // 見出しと同じ行は全角＃に置き換わり、抜粋は分断されずに読み戻される。要点の節も生まれない。
+        let detail = context
+            .repository
+            .get_article_detail("heading-excerpt")
+            .unwrap();
+        assert_eq!(
+            detail.excerpt.as_deref(),
+            Some("前半の本文。\n＃# 要点\n  ＃# AI要約\n## 要点の話は続く\n後半の本文。")
+        );
+        assert!(detail.key_points.is_empty());
+        assert!(detail.summary.is_some());
     }
 
     #[test]
@@ -3599,5 +4937,757 @@ mod tests {
             Some("202606")
         );
         assert_eq!(month_bucket_from_text("5分前"), None);
+    }
+
+    fn archive_delete_now() -> chrono::DateTime<chrono::Utc> {
+        use chrono::{TimeZone, Utc};
+        // 2026-05 / 2026-04 は削除可能、2026-07 はまだ削除できない基準時刻。
+        Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()
+    }
+
+    fn read_archive_state(
+        context: &TestRepositoryContext,
+        article_id: &str,
+    ) -> PersistedArchiveState {
+        context
+            .repository
+            .find_article_record_optional(article_id)
+            .unwrap()
+            .unwrap()
+            .archive_state
+    }
+
+    #[test]
+    fn archive_month_delete_preview_returns_count_size_and_kept_articles() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let expected_size = index.archives[0].size_bytes;
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(preview.month, "2026-05");
+        assert_eq!(preview.article_count, 2);
+        assert_eq!(preview.size_bytes, expected_size);
+        assert!(preview.size_bytes > 0);
+        // 復元済みの may-a だけがローカルに残る。
+        assert_eq!(preview.kept_article_count, 1);
+        // 事前確認では何も変更しない。
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+        assert_eq!(
+            context
+                .repository
+                .list_archive_months(archive_delete_now())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn archive_month_delete_rejects_invalid_recent_or_unknown_month() {
+        use chrono::{TimeZone, Utc};
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let index_path = context.root_dir.join("archive").join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+
+        for invalid in ["../2026-05", "2026-05.zip", "2026-13", "archive_index", ""] {
+            assert!(matches!(
+                context
+                    .repository
+                    .delete_archive_month(invalid, archive_delete_now()),
+                Err(AppError::Validation(_))
+            ));
+        }
+        // まだ追記され得る月（6/1 + 31日 = 7/2 より前）は削除できない。
+        let too_early = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-05", too_early),
+            Err(AppError::Validation(_))
+        ));
+        assert!(matches!(
+            context
+                .repository
+                .get_archive_month_delete_preview("2026-05", too_early),
+            Err(AppError::Validation(_))
+        ));
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-04", archive_delete_now()),
+            Err(AppError::NotFound(_))
+        ));
+
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+    }
+
+    #[test]
+    fn delete_archive_month_removes_only_target_zip_and_index_entry() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "april-a", "2026-04-10T00:00:00Z");
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        // 復元済みMarkdownはアーカイブ削除で消さない。
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        let unrelated_file = archive_dir.join("keep.txt");
+        std::fs::write(&unrelated_file, "keep").unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.month, "2026-05");
+        assert_eq!(result.deleted_article_count, 2);
+        assert_eq!(result.kept_article_count, 1);
+        assert!(!result.cleanup_pending);
+        assert!(!archive_dir.join("2026-05.zip").exists());
+        assert!(archive_dir.join("2026-04.zip").exists());
+        assert!(unrelated_file.exists());
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].month, "2026-04");
+
+        // 復元済みは残り、ZIPにしか無かった記事は履歴から消える。
+        let ids = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 100)
+            .unwrap()
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"may-a".to_string()));
+        assert!(!ids.contains(&"may-b".to_string()));
+        assert!(ids.contains(&"april-a".to_string()));
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Restored
+        );
+
+        // 2回目は index にないため NotFound（他の月や任意ファイルは消さない）。
+        assert!(matches!(
+            context
+                .repository
+                .delete_archive_month("2026-05", archive_delete_now()),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(archive_dir.join("2026-04.zip").exists());
+    }
+
+    #[test]
+    fn delete_archive_month_releases_unretired_markdown_so_retirement_keeps_working() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        // 退避前（archived のままローカルに残る）の記事。
+        assert_eq!(
+            read_archive_state(&context, "may-b"),
+            PersistedArchiveState::Archived
+        );
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 2);
+        for article_id in ["may-a", "may-b"] {
+            let record = context
+                .repository
+                .find_article_record_optional(article_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.archive_state, PersistedArchiveState::Restored);
+            assert!(!record.is_archived);
+            assert!(!record.status.archived);
+        }
+        // index にない月の archived 記事が残らないため、退避処理は失敗しない。
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 0);
+        // 復元済み扱いなので再アーカイブ候補にもならない。
+        assert!(context
+            .repository
+            .list_archive_candidates(archive_delete_now())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn favorites_are_never_archived_and_survive_archive_month_delete() {
+        let context = TestRepositoryContext::new();
+        // 既存の仕組み: 古いお気に入り記事は月次ZIPにも記事カタログにも入らない。
+        let old_favorite = PersistedArticleRecord {
+            article_id: "may-favorite".to_string(),
+            fetched_at: "2026-05-03T00:00:00Z".to_string(),
+            published_at_text: "2026-05-03T00:00:00Z".to_string(),
+            favorite: true,
+            is_archived: false,
+            ..super::seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_favorite)
+            .unwrap();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        assert!(index.find_article("may-favorite").is_err());
+        let zip_records = context
+            .repository
+            .load_verified_archive_records(&index.archives[0])
+            .unwrap();
+        assert!(!zip_records.contains_key("may-favorite"));
+        // アーカイブ後にお気に入りへ切り替えた記事（ローカルに残る）。
+        archive_old_article(&context, "may-b", "2026-05-02T00:00:00Z");
+        context
+            .repository
+            .update_article_favorite("may-b", true)
+            .unwrap();
+        context.repository.retire_archived_markdown().unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 1);
+        let favorites = context
+            .repository
+            .list_history(ArticleHistoryFilter::Favorite, 100)
+            .unwrap()
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect::<Vec<_>>();
+        assert!(favorites.contains(&"may-favorite".to_string()));
+        assert!(favorites.contains(&"may-b".to_string()));
+        assert_eq!(
+            read_archive_state(&context, "may-favorite"),
+            PersistedArchiveState::Active
+        );
+        // 後から外しても、index にない月の archived として残らない（退避・再アーカイブとも安全）。
+        context
+            .repository
+            .update_article_favorite("may-b", false)
+            .unwrap();
+        context.repository.retire_archived_markdown().unwrap();
+        context
+            .repository
+            .archive_candidates(archive_delete_now())
+            .unwrap();
+        assert!(context
+            .repository
+            .find_article_record_optional("may-b")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn delete_archive_month_refuses_when_favorite_exists_only_in_archive() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        context.repository.retire_archived_markdown().unwrap();
+        // 取り込み等でお気に入りJSONだけに残った、ZIPにしか本文が無い記事。
+        let favorites_path = context
+            .root_dir
+            .join("favorites")
+            .join("article_favorites.json");
+        std::fs::create_dir_all(favorites_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &favorites_path,
+            r#"{"version":1,"favorite_article_ids":["may-a"]}"#,
+        )
+        .unwrap();
+        let index_path = context.root_dir.join("archive").join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now());
+        assert!(matches!(preview, Err(AppError::Validation(_))));
+        let deleted = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now());
+        assert!(matches!(deleted, Err(AppError::Validation(_))));
+
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(context
+            .root_dir
+            .join("archive")
+            .join("2026-05.zip")
+            .exists());
+    }
+
+    #[test]
+    fn delete_archive_month_keeps_zip_index_and_markdown_when_index_write_fails() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        let index_path = archive_dir.join("archive_index.json");
+        let original_index = std::fs::read(&index_path).unwrap();
+        // 一時ファイルの位置をディレクトリで塞ぎ、index の書き込みを失敗させる。
+        let blocker = archive_dir.join("archive_index.json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now());
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&index_path).unwrap(), original_index);
+        assert!(archive_dir.join("2026-05.zip").exists());
+        // 先に restored へ切り替えた記事は archived へ戻る。
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Archived
+        );
+        // 失敗後も既存の退避・復元はそのまま動く（ZIPと index が一致している）。
+        std::fs::remove_dir_all(&blocker).unwrap();
+        let summary = context.repository.retire_archived_markdown().unwrap();
+        assert_eq!(summary.retired_article_count, 1);
+        context
+            .repository
+            .restore_archived_article("may-a")
+            .unwrap();
+    }
+
+    #[test]
+    fn delete_archive_month_reports_cleanup_pending_when_zip_cannot_be_removed() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        archive_old_article(&context, "april-a", "2026-04-01T00:00:00Z");
+        let archive_dir = context.root_dir.join("archive");
+        // ZIPの位置を消せない形（中身のあるディレクトリ）に置き換えて削除失敗を再現する。
+        std::fs::remove_file(archive_dir.join("2026-05.zip")).unwrap();
+        std::fs::create_dir_all(archive_dir.join("2026-05.zip").join("blocker")).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert!(result.cleanup_pending);
+        // index は月を参照しないため、残ったものは参照されない残骸にすぎない。
+        let months = context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].month, "2026-04");
+        assert!(context.repository.load_archive_index_or_default().is_ok());
+        assert!(context.repository.retire_archived_markdown().is_ok());
+    }
+
+    #[test]
+    fn delete_archive_month_recovers_interrupted_retirement_before_planning() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        // 退避の途中で停止した状態（Markdownがrollback領域にだけある）を再現する。
+        let source = context.news_dir.join("202605").join("may-a.md");
+        let rollback_root = context
+            .root_dir
+            .join("archive")
+            .join(super::RETIREMENT_ROLLBACK_DIR);
+        let staged = rollback_root.join("202605").join("may-a.md");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+
+        let preview = context
+            .repository
+            .get_archive_month_delete_preview("2026-05", archive_delete_now())
+            .unwrap();
+        // 先に通常領域へ戻すため、ローカルに残る記事として数えられる。
+        assert_eq!(preview.kept_article_count, 1);
+        assert!(source.exists());
+        assert!(!rollback_root.exists());
+
+        // 削除前にも同じ状態にしておき、削除でも復旧してから処理することを確認する。
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &staged).unwrap();
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert_eq!(result.kept_article_count, 1);
+        assert!(!rollback_root.exists());
+        assert_eq!(
+            read_archive_state(&context, "may-a"),
+            PersistedArchiveState::Restored
+        );
+        assert!(context.repository.retire_archived_markdown().is_ok());
+    }
+
+    #[test]
+    fn delete_archive_month_succeeds_when_zip_is_already_missing() {
+        let context = TestRepositoryContext::new();
+        archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
+        std::fs::remove_file(context.root_dir.join("archive").join("2026-05.zip")).unwrap();
+
+        let result = context
+            .repository
+            .delete_archive_month("2026-05", archive_delete_now())
+            .unwrap();
+
+        assert!(!result.cleanup_pending);
+        assert!(context
+            .repository
+            .list_archive_months(archive_delete_now())
+            .unwrap()
+            .is_empty());
+    }
+
+    // ---- ID からの直接検索（find_article_record）----
+
+    thread_local! {
+        /// このスレッドで記事Markdownを読んで解析した回数。テストは各スレッドで動くため、
+        /// 並行実行中の別テストの読み込みは数えない。
+        static ARTICLE_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// `load_article_record` から呼ばれ、記事ファイルの読み込み回数を数える（テスト時だけ）。
+    pub(super) fn count_article_file_read() {
+        ARTICLE_FILE_READS.with(|reads| reads.set(reads.get() + 1));
+    }
+
+    /// `action` の間に読んだ記事Markdownの件数を返す。
+    fn count_reads<T>(action: impl FnOnce() -> T) -> (T, usize) {
+        let before = ARTICLE_FILE_READS.with(std::cell::Cell::get);
+        let value = action();
+        let after = ARTICLE_FILE_READS.with(std::cell::Cell::get);
+        (value, after - before)
+    }
+
+    /// 月をまたいで `count` 件の記事を保存する（202601〜202606 に振り分ける）。
+    fn save_many_articles(context: &TestRepositoryContext, count: usize) {
+        for index in 0..count {
+            let month = index % 6 + 1;
+            let fetched_at = format!("2026-{month:02}-01T00:00:00Z");
+            let article = PersistedArticleRecord {
+                article_id: format!("bulk-{index:05}"),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+    }
+
+    #[test]
+    fn find_article_record_reads_only_the_target_file() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 60);
+
+        let (found, reads) = count_reads(|| context.repository.find_article_record("bulk-00031"));
+        let found = found.unwrap();
+
+        assert_eq!(found.article_id, "bulk-00031");
+        assert_eq!(found.month_bucket(), "202602");
+        assert_eq!(reads, 1, "直接検索は対象の1ファイルだけを読む");
+
+        // 従来の全件走査は全件を読む（比較用）。
+        let (_, scan_reads) = count_reads(|| {
+            context
+                .repository
+                .find_article_record_by_scan("bulk-00031")
+                .unwrap()
+        });
+        assert_eq!(scan_reads, 60);
+    }
+
+    #[test]
+    fn opening_article_reads_target_file_once_for_detail_and_read_state() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 30);
+
+        let ((detail, advanced), reads) = count_reads(|| {
+            context
+                .repository
+                .get_article_detail_and_advance_read_state(
+                    "bulk-00007",
+                    ArticleReadState::DetailViewed,
+                )
+                .unwrap()
+        });
+
+        assert_eq!(detail.article_id, "bulk-00007");
+        assert!(advanced.unwrap());
+        assert_eq!(reads, 1, "詳細と既読の前進で同じ読み込み結果を使う");
+        let saved = context
+            .repository
+            .find_article_record("bulk-00007")
+            .unwrap();
+        assert_eq!(saved.read_state, ArticleReadState::DetailViewed);
+
+        // 2回目は同じ状態なので保存せず false を返す。
+        let (_, advanced_again) = context
+            .repository
+            .get_article_detail_and_advance_read_state("bulk-00007", ArticleReadState::DetailViewed)
+            .unwrap();
+        assert!(!advanced_again.unwrap());
+    }
+
+    #[test]
+    fn find_article_record_prefers_earliest_month_for_duplicate_ids() {
+        let context = TestRepositoryContext::new();
+        for fetched_at in ["2026-06-01T00:00:00Z", "2026-05-01T00:00:00Z"] {
+            let article = PersistedArticleRecord {
+                article_id: "dup-id".to_string(),
+                title: format!("{fetched_at} の記事"),
+                fetched_at: fetched_at.to_string(),
+                published_at_text: fetched_at.to_string(),
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+
+        let direct = context.repository.find_article_record("dup-id").unwrap();
+        let scanned = context
+            .repository
+            .find_article_record_by_scan("dup-id")
+            .unwrap();
+
+        // 全件走査（パス順で最初の一致）と同じく、名前順で先の月の記事を返す。
+        assert_eq!(direct.month_bucket(), "202605");
+        assert_eq!(direct, scanned);
+    }
+
+    #[test]
+    fn find_article_record_falls_back_to_scan_for_misplaced_file() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        // ファイル名と中身の article_id が食い違う記事（手作業で置かれた等）。直接は引けない。
+        let misplaced = PersistedArticleRecord {
+            article_id: "renamed-id".to_string(),
+            fetched_at: "2026-06-01T00:00:00Z".to_string(),
+            published_at_text: "2026-06-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        std::fs::write(
+            context.news_dir.join("202606").join("other-name.md"),
+            super::serialize_article_markdown(&misplaced).unwrap(),
+        )
+        .unwrap();
+
+        let (found, reads) = count_reads(|| context.repository.find_article_record("renamed-id"));
+
+        assert_eq!(found.unwrap().article_id, "renamed-id");
+        // 直接の候補が無いので、全件走査（7件）で従来どおり見つける。
+        assert_eq!(reads, 7);
+    }
+
+    #[test]
+    fn find_article_record_falls_back_when_month_folder_does_not_match() {
+        let context = TestRepositoryContext::new();
+        // 本来 202605 の記事が 202606 フォルダに置かれている（保存先と食い違う）。
+        let article = PersistedArticleRecord {
+            article_id: "wrong-month".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        let dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("wrong-month.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+
+        assert!(context
+            .repository
+            .find_article_record_direct("wrong-month")
+            .is_none());
+        // フォールバックの全件走査で、従来どおり読める。
+        let found = context
+            .repository
+            .find_article_record("wrong-month")
+            .unwrap();
+        assert_eq!(found.month_bucket(), "202605");
+    }
+
+    #[test]
+    fn find_article_record_falls_back_when_target_file_is_corrupt() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        let corrupt_path = context.news_dir.join("202603").join("bulk-00002.md");
+        std::fs::write(&corrupt_path, b"---\narticleId: [unterminated\n---\n").unwrap();
+
+        assert!(context
+            .repository
+            .find_article_record_direct("bulk-00002")
+            .is_none());
+        // 全件走査でも破損ファイルはスキップされ、ほかに同じIDは無いので NotFound（従来どおり）。
+        let error = context
+            .repository
+            .find_article_record("bulk-00002")
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        // ほかの記事は直接読める。
+        assert!(context.repository.find_article_record("bulk-00003").is_ok());
+    }
+
+    #[test]
+    fn find_article_record_rejects_unsafe_ids_without_building_paths() {
+        let context = TestRepositoryContext::new();
+        save_many_articles(&context, 6);
+        // ニュースフォルダの外に、ID を細工すれば届きそうな記事ファイルを置く。
+        let outside = PersistedArticleRecord {
+            article_id: "outside".to_string(),
+            ..super::seed_articles().remove(0)
+        };
+        std::fs::write(
+            context.root_dir.join("outside.md"),
+            super::serialize_article_markdown(&outside).unwrap(),
+        )
+        .unwrap();
+
+        for unsafe_id in [
+            "../outside",
+            "..\\outside",
+            "202606/../../outside",
+            "..",
+            ".",
+            "",
+            "C:outside",
+            "a.b",
+            "NUL",
+            "com1",
+        ] {
+            assert!(
+                !super::is_direct_lookup_article_id(unsafe_id),
+                "{unsafe_id} は直接参照しない"
+            );
+            assert!(context
+                .repository
+                .find_article_record_direct(unsafe_id)
+                .is_none());
+            let error = context
+                .repository
+                .find_article_record(unsafe_id)
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::NotFound(_)),
+                "{unsafe_id}: {error:?}"
+            );
+        }
+        assert!(super::is_direct_lookup_article_id("article-001_x"));
+        assert!(super::is_direct_lookup_article_id("CONSOLE"));
+    }
+
+    #[test]
+    fn find_article_record_keeps_semantics_for_archived_articles() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        for article_id in ["kept-archived", "retired-archived"] {
+            let article = PersistedArticleRecord {
+                article_id: article_id.to_string(),
+                fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                favorite: false,
+                is_archived: false,
+                ..super::seed_articles().remove(0)
+            };
+            context.repository.save_article_record(&article).unwrap();
+        }
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        // archived 印の付いた記事は、元Markdownが残っている間は直接読める。
+        let (kept, reads) = count_reads(|| context.repository.find_article_record("kept-archived"));
+        assert!(kept.unwrap().is_archived);
+        assert_eq!(reads, 1);
+
+        // 元Markdownを退避（削除）した記事は ZIP と索引にだけ残り、従来どおり NotFound。
+        context.repository.retire_archived_markdown().unwrap();
+        assert!(!context
+            .news_dir
+            .join("202605")
+            .join("retired-archived.md")
+            .exists());
+        let error = context
+            .repository
+            .find_article_record("retired-archived")
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert!(matches!(
+            context
+                .repository
+                .get_article_detail("retired-archived")
+                .unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        // 復元すると、元の保存先から直接読めるようになる。
+        context
+            .repository
+            .restore_archived_article("retired-archived")
+            .unwrap();
+        let (restored, reads) =
+            count_reads(|| context.repository.find_article_record("retired-archived"));
+        assert_eq!(restored.unwrap().article_id, "retired-archived");
+        assert_eq!(reads, 1);
+    }
+
+    /// 直接検索と全件走査の所要時間を比べる計測用テスト（通常の `cargo test` では動かさない）。
+    /// 実行: `cargo test --release --manifest-path src-tauri/Cargo.toml find_article_record_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn find_article_record_timing() {
+        let context = TestRepositoryContext::new();
+        let count = 1_000;
+        save_many_articles(&context, count);
+        let target = format!("bulk-{:05}", count - 1);
+        // 書いた直後の初回はウイルス対策ソフトの検査などで遅いことがあるため、1回読んでから測る。
+        context
+            .repository
+            .find_article_record_by_scan(&target)
+            .unwrap();
+
+        let rounds = 5u32;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            context
+                .repository
+                .find_article_record_by_scan(&target)
+                .unwrap();
+        }
+        let scan = started.elapsed() / rounds;
+
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            context.repository.find_article_record(&target).unwrap();
+        }
+        let direct = started.elapsed() / rounds;
+
+        println!("N={count}: 全件走査 {scan:?} / 直接検索 {direct:?}");
+        assert!(direct < scan);
     }
 }

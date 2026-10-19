@@ -1,6 +1,6 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::dictionary::{
@@ -13,48 +13,78 @@ use crate::paths::AppPaths;
 #[derive(Debug, Clone)]
 pub struct DictionaryRepository {
     dictionary_path: PathBuf,
+    // 読み込み→変更→保存（read-modify-write）を直列化する。参照記録（解説表示時の書き込み）と
+    // メモ・お気に入り・保存・削除が同時に走っても、互いの変更を上書きで失わないようにする。
+    // 読み込み（検索・一覧）も同じロックを取る。保存中の差し替え（本体→.bak→tmp昇格）の隙間に
+    // 読むと「本体なし」に見え、空の辞書を返したり .bak の復元が書き込み側と競合したりするため。
+    // std の Mutex は再入不可なので、ロックを取る公開メソッドから別の公開メソッドを呼ばない。
+    // AI 呼び出しはロック外（Service 側で find_saved_entry が戻った後）で行う。
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl DictionaryRepository {
     pub fn new(paths: &AppPaths) -> Self {
         Self {
             dictionary_path: paths.dictionary_path.clone(),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
     #[cfg(test)]
-    fn with_path(dictionary_path: PathBuf) -> Self {
-        Self { dictionary_path }
+    pub(crate) fn with_path(dictionary_path: PathBuf) -> Self {
+        Self {
+            dictionary_path,
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
-    pub fn explain_selected_term(
+    /// 保存済み辞書を正規化済み用語の完全一致で検索する（記事解決は Service 側で済み）。
+    /// 命中なら `Some(DictionaryEntryDto)`、未命中なら `Ok(None)`、読み込み・JSON破損など
+    /// 検索失敗は `Err(AppError)`（未命中と区別）。固定サンプル解説・汎用文の生成は担当しない。
+    ///
+    /// 同じ正規化語を持つエントリが複数あるときの選択規則:
+    ///
+    /// 1. `source_article_ids` に現在の `article_id` を含むエントリを最優先。
+    /// 2. 現在の記事に紐づく候補が無ければ、記事横断候補から決定的に1件を選ぶ。
+    ///
+    /// どちらの母集団でも、`entry_timestamp_key`（更新/作成日時）降順→`dictionary_id` 昇順の
+    /// 全順序で1件に決めるため、ファイル内の格納順や逆順構築に依存しない。
+    pub fn find_saved_entry(
         &self,
         article_id: &str,
-        selected_text: &str,
-    ) -> Result<DictionaryEntryDto, AppError> {
-        let article_title = article_title_for(article_id)
-            .ok_or_else(|| AppError::NotFound(format!("article not found: {article_id}")))?;
-        let normalized_text = normalize_text(selected_text);
+        normalized_text: &str,
+    ) -> Result<Option<DictionaryEntryDto>, AppError> {
+        let store = {
+            let _guard = self.lock_writes()?;
+            self.load_store_or_default()?
+        };
 
-        if let Some(saved_entry) = self.find_saved_entry(article_id, &normalized_text)? {
-            return Ok(saved_entry);
-        }
-
-        let entry = sample_dictionary_entries()
+        let (current_article, cross_article): (Vec<_>, Vec<_>) = store
+            .entries
             .into_iter()
-            .find(|entry| {
-                entry.article_id == article_id && normalize_text(entry.key_text) == normalized_text
-            })
-            .map(|entry| entry.to_dto())
-            .unwrap_or_else(|| build_generic_entry(article_id, article_title, selected_text));
+            .filter(|entry| entry.normalized_text == normalized_text)
+            .partition(|entry| {
+                entry
+                    .source_article_ids
+                    .iter()
+                    .any(|source_article_id| source_article_id == article_id)
+            });
 
-        Ok(entry)
+        // 現在記事に紐づく候補を最優先。無ければ記事横断候補から決定的に選ぶ。
+        let pool = if current_article.is_empty() {
+            cross_article
+        } else {
+            current_article
+        };
+
+        Ok(pick_saved_entry(pool).map(|entry| entry.to_dto()))
     }
 
     pub fn save_dictionary_entry(
         &self,
         entry: DictionaryEntryDto,
     ) -> Result<DictionaryEntryDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let now_text = current_unix_timestamp_text();
 
@@ -82,7 +112,10 @@ impl DictionaryRepository {
         entry_type: Option<DictionaryEntryType>,
         starred_only: bool,
     ) -> Result<Vec<DictionaryEntryListItemDto>, AppError> {
-        let mut entries = self.load_store_or_default()?.entries;
+        let mut entries = {
+            let _guard = self.lock_writes()?;
+            self.load_store_or_default()?.entries
+        };
         entries.sort_by(|left, right| entry_timestamp_key(right).cmp(entry_timestamp_key(left)));
 
         Ok(entries
@@ -92,11 +125,28 @@ impl DictionaryRepository {
             .collect())
     }
 
+    /// 保存済み解説を再利用して表示したときに、その項目の最終参照日時と参照回数を更新する（要件 §9.3 / D20）。
+    /// 新しい項目は作らない。項目が見つからない（検索後に削除された等）場合は NotFound を返す。
+    /// 解説内容・関連記事・お気に入り・メモは変えない（明示保存の `apply_from_dto` とは別扱い）。
+    pub fn record_entry_reference(&self, entry_id: &str) -> Result<(), AppError> {
+        let _guard = self.lock_writes()?;
+        let mut store = self.load_store_or_default()?;
+        let entry = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.dictionary_id == entry_id)
+            .ok_or_else(|| AppError::NotFound(format!("dictionary entry not found: {entry_id}")))?;
+        entry.last_referenced_at = Some(current_unix_timestamp_text());
+        entry.reference_count = entry.reference_count.saturating_add(1);
+        self.save_store(&store)
+    }
+
     pub fn update_dictionary_memo(
         &self,
         entry_id: &str,
         memo: Option<String>,
     ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let entry = store
             .entries
@@ -114,6 +164,7 @@ impl DictionaryRepository {
         entry_id: &str,
         is_starred: bool,
     ) -> Result<DictionaryEntryListItemDto, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let entry = store
             .entries
@@ -127,6 +178,7 @@ impl DictionaryRepository {
     }
 
     pub fn delete_dictionary_entry(&self, entry_id: &str) -> Result<String, AppError> {
+        let _guard = self.lock_writes()?;
         let mut store = self.load_store_or_default()?;
         let before = store.entries.len();
         store
@@ -141,25 +193,18 @@ impl DictionaryRepository {
         Ok(entry_id.to_string())
     }
 
-    fn find_saved_entry(
-        &self,
-        article_id: &str,
-        normalized_text: &str,
-    ) -> Result<Option<DictionaryEntryDto>, AppError> {
-        let store = self.load_store_or_default()?;
-        Ok(store
-            .entries
-            .into_iter()
-            .find(|entry| {
-                entry.normalized_text == normalized_text
-                    && entry
-                        .source_article_ids
-                        .iter()
-                        .any(|source_article_id| source_article_id == article_id)
-            })
-            .map(|entry| entry.to_dto()))
+    /// 辞書の読み書きロック。データ移行の取り込みが差し替え中に保持する。
+    pub(crate) fn write_lock_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write_lock)
     }
 
+    fn lock_writes(&self) -> Result<MutexGuard<'_, ()>, AppError> {
+        self.write_lock
+            .lock()
+            .map_err(|_| AppError::Io(io::Error::other("dictionary write lock was poisoned")))
+    }
+
+    /// 呼び出し側で `lock_writes` を取得済みであること（.bak 復元と保存の差し替えを競合させないため）。
     fn load_store_or_default(&self) -> Result<PersistedDictionaryStore, AppError> {
         self.restore_backup_if_primary_missing();
 
@@ -167,8 +212,22 @@ impl DictionaryRepository {
             return Ok(PersistedDictionaryStore::with_current_version());
         }
 
-        let raw = std::fs::read_to_string(&self.dictionary_path)?;
-        let mut store = serde_json::from_str::<PersistedDictionaryStore>(&raw)?;
+        // 読み込み・パース失敗は「検索失敗（内部エラー）」。生のファイルパスや破損内容を
+        // 公開エラーへ載せず、詳細は調査用ログにのみ残す（未命中＝Ok(default) とは区別する）。
+        // ログにも辞書の保存先パス・本文を出さない（エラー種別・行/列の位置情報だけ残す）。
+        let raw = std::fs::read_to_string(&self.dictionary_path).map_err(|error| {
+            log::error!("Failed to read dictionary store (kind: {:?})", error.kind());
+            AppError::Io(io::Error::other("dictionary store could not be read"))
+        })?;
+        let mut store =
+            serde_json::from_str::<PersistedDictionaryStore>(&raw).map_err(|error| {
+                log::error!(
+                    "Failed to parse dictionary store (line: {}, column: {})",
+                    error.line(),
+                    error.column()
+                );
+                AppError::Parse("dictionary store is corrupted".to_string())
+            })?;
         if store.version == 0 {
             store.version = 1;
         }
@@ -238,57 +297,18 @@ impl DictionaryRepository {
     }
 }
 
-#[derive(Debug, Clone)]
-struct SampleDictionaryEntry {
-    article_id: &'static str,
-    article_title: &'static str,
-    key_text: &'static str,
-    entry_type: DictionaryEntryType,
-    short_explanation: &'static str,
-    detail_explanation: &'static str,
-}
-
-impl SampleDictionaryEntry {
-    fn to_dto(&self) -> DictionaryEntryDto {
-        DictionaryEntryDto {
-            entry_id: build_entry_id(self.article_id, self.key_text),
-            key_text: self.key_text.to_string(),
-            entry_type: self.entry_type.clone(),
-            short_explanation: self.short_explanation.to_string(),
-            detail_explanation: self.detail_explanation.to_string(),
-            related_article_id: Some(self.article_id.to_string()),
-            related_article_title: Some(self.article_title.to_string()),
-            is_starred: false,
-        }
-    }
-}
-
-fn build_entry_id(article_id: &str, selected_text: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    article_id.hash(&mut hasher);
-    normalize_text(selected_text).hash(&mut hasher);
-    format!("entry-{}-{:x}", article_id, hasher.finish())
-}
-
-fn build_generic_entry(
-    article_id: &str,
-    article_title: &str,
-    selected_text: &str,
-) -> DictionaryEntryDto {
-    DictionaryEntryDto {
-        entry_id: build_entry_id(article_id, selected_text),
-        key_text: selected_text.to_string(),
-        entry_type: DictionaryEntryType::Term,
-        short_explanation: format!(
-            "「{selected_text}」はこの記事を理解するための補助キーワードです。"
-        ),
-        detail_explanation: format!(
-            "「{selected_text}」は記事「{article_title}」の文脈で重要な用語です。現時点では記事理解のヒントになる簡易解説として返しています。"
-        ),
-        related_article_id: Some(article_id.to_string()),
-        related_article_title: Some(article_title.to_string()),
-        is_starred: false,
-    }
+/// 同じ正規化語の候補群から、格納順に依存しない決定的な規則で1件を選ぶ。
+/// 規則: 更新/作成日時（entry_timestamp_key）の降順、同値は dictionary_id 昇順で先頭。
+/// dictionary_id は一意なので全順序になり、母集団を逆順で構築しても同じエントリが選ばれる。
+fn pick_saved_entry(
+    mut entries: Vec<PersistedDictionaryEntry>,
+) -> Option<PersistedDictionaryEntry> {
+    entries.sort_by(|left, right| {
+        entry_timestamp_key(right)
+            .cmp(entry_timestamp_key(left))
+            .then_with(|| left.dictionary_id.cmp(&right.dictionary_id))
+    });
+    entries.into_iter().next()
 }
 
 fn current_unix_timestamp_text() -> String {
@@ -341,102 +361,49 @@ fn entry_timestamp_key(entry: &PersistedDictionaryEntry) -> &str {
         .unwrap_or(&entry.created_at)
 }
 
-fn article_title_for(article_id: &str) -> Option<&'static str> {
-    sample_dictionary_entries()
-        .iter()
-        .find(|entry| entry.article_id == article_id)
-        .map(|entry| entry.article_title)
-}
-
-fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
-    vec![
-        SampleDictionaryEntry {
-            article_id: "article-001",
-            article_title: "生成AIスタートアップの資金調達が再加速",
-            key_text: "生成AI",
-            entry_type: DictionaryEntryType::Term,
-            short_explanation: "文章や画像などを自動生成する AI 全般を指す言葉です。",
-            detail_explanation: "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-001",
-            article_title: "生成AIスタートアップの資金調達が再加速",
-            key_text: "資金調達",
-            entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "企業が事業拡大のために投資や融資で資金を集めることです。",
-            detail_explanation: "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-001",
-            article_title: "生成AIスタートアップの資金調達が再加速",
-            key_text: "業務自動化",
-            entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "定型業務を仕組み化して人手を減らす考え方です。",
-            detail_explanation: "業務自動化は、繰り返し作業や定型処理をシステム化して効率を上げる取り組みです。生成AIが評価されやすい背景には、この自動化効果を現場で示しやすいことがあります。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-002",
-            article_title: "国内SaaS企業、業務改善支援の新施策を発表",
-            key_text: "SaaS",
-            entry_type: DictionaryEntryType::Term,
-            short_explanation: "インターネット経由で利用するソフトウェア提供形態です。",
-            detail_explanation: "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-002",
-            article_title: "国内SaaS企業、業務改善支援の新施策を発表",
-            key_text: "導入支援",
-            entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "サービスを使い始める際の設定や定着を支える取り組みです。",
-            detail_explanation: "導入支援は、ツールの初期設定だけでなく、使い方の教育や運用への定着まで含めて支援することです。この記事では、導入後の継続活用まで見据えた支援が価値として語られています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-002",
-            article_title: "国内SaaS企業、業務改善支援の新施策を発表",
-            key_text: "業務改善",
-            entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "仕事の流れを見直して効率や成果を高めることです。",
-            detail_explanation: "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-003",
-            article_title: "量子コンピュータ研究で新たな誤り訂正手法",
-            key_text: "量子コンピュータ",
-            entry_type: DictionaryEntryType::Term,
-            short_explanation: "量子力学の性質を利用して計算する新しい計算機です。",
-            detail_explanation: "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-003",
-            article_title: "量子コンピュータ研究で新たな誤り訂正手法",
-            key_text: "誤り訂正",
-            entry_type: DictionaryEntryType::Phrase,
-            short_explanation: "計算中の誤差を検知し、補正するための仕組みです。",
-            detail_explanation: "誤り訂正は、計算途中で起こるノイズや誤差を見つけて結果を安定させる考え方です。量子コンピュータでは特に重要で、実用化に向けた大きな課題の一つです。",
-        },
-        SampleDictionaryEntry {
-            article_id: "article-003",
-            article_title: "量子コンピュータ研究で新たな誤り訂正手法",
-            key_text: "研究成果",
-            entry_type: DictionaryEntryType::KeyPoint,
-            short_explanation: "研究や実験によって得られた新しい知見や結果です。",
-            detail_explanation: "研究成果は、学術研究や実験を通じて得られた知見のことです。この記事では、新たな誤り訂正手法が今後の実装方式に影響を与える可能性がある点が重要です。",
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::domain::dictionary::{DictionaryEntryDto, DictionaryEntryType};
+    use crate::domain::dictionary::{
+        DictionaryEntryDto, DictionaryEntryType, PersistedDictionaryEntry, PersistedDictionaryStore,
+    };
 
     use super::DictionaryRepository;
+
+    // 固定の created_at / dictionary_id / source_article_ids を持つ保存済みエントリを作る。
+    // 選択規則（記事優先・記事横断の決定的選択）を格納順に依存せず検証するための土台。
+    fn persisted_entry(
+        dictionary_id: &str,
+        normalized_text: &str,
+        created_at: &str,
+        source_article_ids: &[&str],
+        short_explanation: &str,
+    ) -> PersistedDictionaryEntry {
+        PersistedDictionaryEntry {
+            version: 1,
+            dictionary_id: dictionary_id.to_string(),
+            target_text: normalized_text.to_string(),
+            normalized_text: normalized_text.to_string(),
+            entry_type: DictionaryEntryType::Term,
+            short_explanation: short_explanation.to_string(),
+            detail_explanation: format!("{short_explanation}（詳細）"),
+            created_at: created_at.to_string(),
+            last_referenced_at: None,
+            reference_count: 1,
+            source_article_ids: source_article_ids.iter().map(|id| id.to_string()).collect(),
+            favorite: false,
+            memo: None,
+            related_article_title: None,
+            related_article_id: source_article_ids.first().map(|id| id.to_string()),
+        }
+    }
 
     struct TestRepositoryContext {
         repository: DictionaryRepository,
         root_dir: PathBuf,
+        dictionary_path: PathBuf,
     }
 
     impl TestRepositoryContext {
@@ -451,11 +418,29 @@ mod tests {
             ));
             std::fs::create_dir_all(&root_dir).unwrap();
             let dictionary_path = root_dir.join("dictionary").join("entries.json");
-            let repository = DictionaryRepository::with_path(dictionary_path);
+            let repository = DictionaryRepository::with_path(dictionary_path.clone());
             Self {
                 repository,
                 root_dir,
+                dictionary_path,
             }
+        }
+
+        // 破損した辞書ストアを書き込む（検索失敗＝内部エラーの検証用）。
+        fn write_raw_store(&self, contents: &str) {
+            std::fs::create_dir_all(self.dictionary_path.parent().unwrap()).unwrap();
+            std::fs::write(&self.dictionary_path, contents).unwrap();
+        }
+
+        // 任意の永続エントリ列で辞書ストアを構築する（選択規則の格納順非依存を検証するため）。
+        fn write_store(&self, entries: Vec<PersistedDictionaryEntry>) {
+            let store = PersistedDictionaryStore {
+                version: 1,
+                entries,
+            };
+            let payload = serde_json::to_vec_pretty(&store).unwrap();
+            std::fs::create_dir_all(self.dictionary_path.parent().unwrap()).unwrap();
+            std::fs::write(&self.dictionary_path, payload).unwrap();
         }
     }
 
@@ -475,76 +460,199 @@ mod tests {
             related_article_id: Some("article-001".to_string()),
             related_article_title: Some("生成AIスタートアップの資金調達が再加速".to_string()),
             is_starred: true,
+            saved_in_dictionary: false,
         }
     }
 
     #[test]
-    fn explain_selected_term_returns_exact_match() {
+    fn find_saved_entry_returns_none_when_store_missing() {
+        // 保存済みが無い＝未命中は Ok(None)（検索失敗ではない）。ファイルも作らない。
         let context = TestRepositoryContext::new();
-        let entry = context
+        let hit = context
             .repository
-            .explain_selected_term("article-001", "生成AI")
+            .find_saved_entry("article-001", "生成ai")
             .unwrap();
 
-        assert_eq!(entry.key_text, "生成AI");
-        assert_eq!(entry.related_article_id.as_deref(), Some("article-001"));
-        assert!(!entry.is_starred);
-    }
-
-    #[test]
-    fn explain_selected_term_matches_ascii_case_insensitively() {
-        let context = TestRepositoryContext::new();
-        let entry = context
-            .repository
-            .explain_selected_term("article-002", "saas")
-            .unwrap();
-
-        assert_eq!(entry.key_text, "SaaS");
-    }
-
-    #[test]
-    fn explain_selected_term_falls_back_for_unknown_term() {
-        let context = TestRepositoryContext::new();
-        let entry = context
-            .repository
-            .explain_selected_term("article-001", "評価指標")
-            .unwrap();
-
-        assert_eq!(entry.key_text, "評価指標");
-        assert!(entry.detail_explanation.contains("記事"));
-    }
-
-    #[test]
-    fn explain_selected_term_rejects_unknown_article() {
-        let context = TestRepositoryContext::new();
-        let error = context
-            .repository
-            .explain_selected_term("article-999", "生成AI")
-            .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "not found: article not found: article-999"
+        assert!(hit.is_none());
+        assert!(
+            !context.dictionary_path.exists(),
+            "検索だけで辞書ストアを作成してはならない"
         );
     }
 
     #[test]
-    fn save_dictionary_entry_persists_and_returns_starred_entry() {
+    fn find_saved_entry_returns_saved_hit() {
         let context = TestRepositoryContext::new();
-        let saved = context
+        context
             .repository
             .save_dictionary_entry(saved_entry())
             .unwrap();
 
-        assert!(saved.is_starred);
-        assert_eq!(saved.key_text, "生成AI");
-
-        let explained = context
+        let hit = context
             .repository
-            .explain_selected_term("article-001", "生成AI")
+            .find_saved_entry("article-001", "生成ai")
+            .unwrap()
+            .expect("保存済みエントリが命中するはず");
+
+        assert_eq!(hit.short_explanation, "保存済みの短い説明");
+        assert_eq!(hit.detail_explanation, "保存済みの詳しい説明");
+        // 命中は「辞書保存済み」。保存しただけでは ★ は付かない（保存パラメータの isStarred は無視）。
+        assert!(hit.saved_in_dictionary);
+        assert!(!hit.is_starred);
+    }
+
+    #[test]
+    fn find_saved_entry_reuses_across_articles() {
+        // 保存元は article-001 だが、別記事IDで同じ正規化用語を引いても再利用する（記事横断）。
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
             .unwrap();
-        assert!(explained.is_starred);
-        assert_eq!(explained.short_explanation, "保存済みの短い説明");
+
+        let hit = context
+            .repository
+            .find_saved_entry("rss-20260728-other-7", "生成ai")
+            .unwrap()
+            .expect("記事横断でも命中するはず");
+
+        assert_eq!(hit.short_explanation, "保存済みの短い説明");
+        assert!(hit.saved_in_dictionary);
+    }
+
+    #[test]
+    fn find_saved_entry_prefers_entry_linked_to_current_article_regardless_of_order() {
+        // 同じ正規化語 "用語" の2件。記事横断側の方が新しくても、現在記事に紐づく方を最優先する。
+        let context = TestRepositoryContext::new();
+        let cross = persisted_entry(
+            "dict-cross",
+            "用語",
+            "200",
+            &["other-article"],
+            "記事横断の説明",
+        );
+        let linked = persisted_entry(
+            "dict-linked",
+            "用語",
+            "100",
+            &["article-current"],
+            "現在記事の説明",
+        );
+
+        // 紐づく方を配列末尾に置いても（ファイル順に依存せず）選ばれる。
+        context.write_store(vec![cross.clone(), linked.clone()]);
+        let hit = context
+            .repository
+            .find_saved_entry("article-current", "用語")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.short_explanation, "現在記事の説明");
+
+        // 逆順で構築しても同じエントリが選ばれる。
+        context.write_store(vec![linked, cross]);
+        let hit_reversed = context
+            .repository
+            .find_saved_entry("article-current", "用語")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit_reversed.short_explanation, "現在記事の説明");
+    }
+
+    #[test]
+    fn find_saved_entry_cross_article_choice_is_deterministic_and_order_independent() {
+        // 現在記事に紐づく候補が無い場合の決定規則:
+        //   entry_timestamp_key（更新/作成日時）降順 → dictionary_id 昇順の先頭。
+        // ここは created_at 同値なので dictionary_id 昇順先頭 "dict-a" が、格納順・逆順に関係なく選ばれる。
+        let context = TestRepositoryContext::new();
+        let entry_a = persisted_entry("dict-a", "用語", "100", &["article-x"], "A の説明");
+        let entry_b = persisted_entry("dict-b", "用語", "100", &["article-y"], "B の説明");
+
+        context.write_store(vec![entry_b.clone(), entry_a.clone()]);
+        let hit = context
+            .repository
+            .find_saved_entry("article-current", "用語")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.short_explanation, "A の説明");
+
+        context.write_store(vec![entry_a, entry_b]);
+        let hit_reversed = context
+            .repository
+            .find_saved_entry("article-current", "用語")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit_reversed.short_explanation, "A の説明");
+    }
+
+    #[test]
+    fn find_saved_entry_cross_article_prefers_newer_timestamp() {
+        // 記事横断候補は、日時が異なる場合は新しい方（entry_timestamp_key 降順）を選ぶ。
+        let context = TestRepositoryContext::new();
+        let older = persisted_entry("dict-older", "用語", "100", &["article-x"], "古い説明");
+        let newer = persisted_entry("dict-newer", "用語", "200", &["article-y"], "新しい説明");
+
+        context.write_store(vec![older, newer]);
+        let hit = context
+            .repository
+            .find_saved_entry("article-current", "用語")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.short_explanation, "新しい説明");
+    }
+
+    #[test]
+    fn find_saved_entry_does_not_persist_store() {
+        // 検索（未命中）だけでは辞書ファイルを作成・更新しない。
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .find_saved_entry("article-001", "未保存の用語")
+            .unwrap();
+
+        assert!(
+            !context.dictionary_path.exists(),
+            "検索だけで辞書ストアを作成してはならない"
+        );
+    }
+
+    #[test]
+    fn find_saved_entry_reports_corrupted_store_as_safe_internal_error() {
+        // JSON破損は「検索失敗＝内部エラー」。未命中(Ok(None))とは区別され、生の内容・パスを公開しない。
+        let context = TestRepositoryContext::new();
+        context.write_raw_store("{ this is not valid json :: 生成AIの本文 }");
+
+        let error = context
+            .repository
+            .find_saved_entry("article-001", "生成ai")
+            .unwrap_err();
+
+        let command_error = crate::error::CommandError::from(error);
+        assert_eq!(command_error.code, "PARSE_ERROR");
+        assert_eq!(command_error.message, "failed to parse stored data");
+        assert!(!command_error.message.contains("生成AIの本文"));
+        assert!(!command_error.message.contains(".json"));
+        assert!(!command_error.message.contains("this is not valid json"));
+    }
+
+    #[test]
+    fn find_saved_entry_reports_io_read_failure_as_safe_internal_error() {
+        // entries.json の位置をディレクトリにして read_to_string を失敗させる（クロスプラットフォーム）。
+        let context = TestRepositoryContext::new();
+        std::fs::create_dir_all(&context.dictionary_path).unwrap();
+
+        let error = context
+            .repository
+            .find_saved_entry("article-001", "生成ai")
+            .unwrap_err();
+
+        let command_error = crate::error::CommandError::from(error);
+        assert_eq!(command_error.code, "IO_ERROR");
+        assert_eq!(command_error.message, "failed to access local data");
+        // 公開エラーに保存先パス・拡張子・一時ディレクトリ名・OS絶対パス・生の io メッセージを含めない。
+        assert!(!command_error.message.contains(".json"));
+        assert!(!command_error.message.contains("yuuko-dictionary-tests"));
+        assert!(!command_error.message.contains(":\\"));
+        assert!(!command_error.message.contains("/tmp"));
     }
 
     #[test]
@@ -582,7 +690,32 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key_text, "生成AI");
-        assert!(entries[0].is_starred);
+        assert!(!entries[0].is_starred);
+    }
+
+    #[test]
+    fn save_dictionary_entry_does_not_change_star() {
+        // 辞書保存は ★ を付けも外しもしない（★ は update_dictionary_favorite だけで変える）。
+        let context = TestRepositoryContext::new();
+        let saved = context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+        assert!(saved.saved_in_dictionary);
+        assert!(!saved.is_starred);
+
+        context
+            .repository
+            .update_dictionary_favorite(&saved_entry().entry_id, true)
+            .unwrap();
+        let resaved = context
+            .repository
+            .save_dictionary_entry(DictionaryEntryDto {
+                is_starred: false,
+                ..saved_entry()
+            })
+            .unwrap();
+        assert!(resaved.is_starred);
     }
 
     #[test]
@@ -602,10 +735,16 @@ mod tests {
             related_article_id: Some("article-002".to_string()),
             related_article_title: Some("国内SaaS企業、業務改善支援の新施策を発表".to_string()),
             is_starred: false,
+            saved_in_dictionary: false,
         };
         context
             .repository
             .save_dictionary_entry(non_starred)
+            .unwrap();
+        // ★ は保存では付かないため、★ 操作で付ける。
+        context
+            .repository
+            .update_dictionary_favorite(&saved_entry().entry_id, true)
             .unwrap();
 
         let entries = context
@@ -711,5 +850,140 @@ mod tests {
             .delete_dictionary_entry("entry-unknown")
             .unwrap_err();
         assert!(error.to_string().contains("dictionary entry not found"));
+    }
+
+    #[test]
+    fn record_entry_reference_updates_only_reference_fields() {
+        let context = TestRepositoryContext::new();
+        let mut entry = persisted_entry("entry-a", "生成ai", "100", &["article-001"], "説明A");
+        entry.last_referenced_at = Some("200".to_string());
+        entry.reference_count = 4;
+        entry.favorite = true;
+        entry.memo = Some("メモ".to_string());
+        let other = persisted_entry("entry-b", "別の語", "100", &["article-002"], "説明B");
+        context.write_store(vec![entry, other]);
+
+        context
+            .repository
+            .record_entry_reference("entry-a")
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&context.dictionary_path).unwrap();
+        let store: PersistedDictionaryStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(store.entries.len(), 2);
+        let updated = &store.entries[0];
+        assert_eq!(updated.reference_count, 5);
+        let referenced_at: u64 = updated
+            .last_referenced_at
+            .as_deref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(referenced_at > 200);
+        // 参照記録以外の項目（作成日時・解説・お気に入り・メモ）は変えない。
+        assert_eq!(updated.created_at, "100");
+        assert_eq!(updated.short_explanation, "説明A");
+        assert!(updated.favorite);
+        assert_eq!(updated.memo.as_deref(), Some("メモ"));
+        // 他の項目には触れない。
+        assert_eq!(store.entries[1].reference_count, 1);
+        assert_eq!(store.entries[1].last_referenced_at, None);
+    }
+
+    #[test]
+    fn record_entry_reference_saturates_count() {
+        let context = TestRepositoryContext::new();
+        let mut entry = persisted_entry("entry-a", "生成ai", "100", &["article-001"], "説明A");
+        entry.reference_count = u32::MAX;
+        context.write_store(vec![entry]);
+
+        context
+            .repository
+            .record_entry_reference("entry-a")
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&context.dictionary_path).unwrap();
+        let store: PersistedDictionaryStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(store.entries[0].reference_count, u32::MAX);
+    }
+
+    #[test]
+    fn record_entry_reference_unknown_entry_is_not_found_and_creates_nothing() {
+        let context = TestRepositoryContext::new();
+        let error = context
+            .repository
+            .record_entry_reference("entry-unknown")
+            .unwrap_err();
+        assert!(error.to_string().contains("dictionary entry not found"));
+        // 存在しない項目への参照記録で辞書ストアを作成しない（新規項目を作らない）。
+        assert!(!context.dictionary_path.exists());
+    }
+
+    #[test]
+    fn reads_wait_for_write_lock_and_never_see_swap_window() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+        let backup_path = context.dictionary_path.with_extension("json.bak");
+
+        // 保存処理の差し替え途中（本体が .bak へ退避され、本体が無い状態）をロック下で再現する。
+        let guard = context.repository.lock_writes().unwrap();
+        std::fs::rename(&context.dictionary_path, &backup_path).unwrap();
+
+        let reader = context.repository.clone();
+        let list_handle =
+            std::thread::spawn(move || reader.list_dictionary_entries(None, None, false));
+        let finder = context.repository.clone();
+        let find_handle =
+            std::thread::spawn(move || finder.find_saved_entry("article-001", "生成ai"));
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // ロック中は読み込みが進まず、.bak の復元も走らない。
+        assert!(!list_handle.is_finished());
+        assert!(!find_handle.is_finished());
+        assert!(backup_path.exists());
+        assert!(!context.dictionary_path.exists());
+
+        // 書き込み側が差し替えを完了（本体を戻す）してからロックを解放する。
+        std::fs::rename(&backup_path, &context.dictionary_path).unwrap();
+        drop(guard);
+
+        let listed = list_handle.join().unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        let found = find_handle.join().unwrap().unwrap();
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn concurrent_saves_and_reads_never_return_empty_dictionary() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_dictionary_entry(saved_entry())
+            .unwrap();
+
+        let writer = context.repository.clone();
+        let writer_handle = std::thread::spawn(move || {
+            for index in 0..40 {
+                let mut entry = saved_entry();
+                entry.short_explanation = format!("更新 {index}");
+                writer.save_dictionary_entry(entry).unwrap();
+            }
+        });
+
+        let reader = context.repository.clone();
+        let reader_handle = std::thread::spawn(move || {
+            for _ in 0..40 {
+                let listed = reader.list_dictionary_entries(None, None, false).unwrap();
+                assert_eq!(listed.len(), 1);
+                let found = reader.find_saved_entry("article-001", "生成ai").unwrap();
+                assert!(found.is_some());
+            }
+        });
+
+        writer_handle.join().unwrap();
+        reader_handle.join().unwrap();
     }
 }

@@ -18,7 +18,7 @@ pub enum AiProviderConnectionStatus {
     Available,
     /// 利用不可（接続失敗・APIキー未設定など）。
     Unavailable,
-    /// 未実装（OpenAI / Local）。
+    /// 未実装（OpenAI）。
     NotImplemented,
 }
 
@@ -42,8 +42,16 @@ pub enum AiProviderConnectionErrorKind {
     FailedPrecondition,
     /// 応答が不正（2xx だが期待形式でない等）。
     InvalidResponse,
-    /// 未実装Provider（OpenAI / Local）。
+    /// 未実装Provider（OpenAI）。
     ProviderNotImplemented,
+    /// ローカルAI: 同梱の部品（llama-server・モデル）が見つからない。
+    LocalAiMissing,
+    /// ローカルAI: モデルの大きさ・SHA-256 が合わない（壊れている・差し替えられている）。
+    LocalAiBroken,
+    /// ローカルAI: llama-server を起動できなかった・起動の途中で止まった。
+    LocalAiStartFailed,
+    /// ローカルAI: 起動後の生成要求が失敗した（応答の形が不正・断られた等）。
+    LocalAiRequestFailed,
     /// 内部エラー（設定読込・クライアント生成失敗、HTTP 400 の INVALID_ARGUMENT など、アプリ側の不整合）。
     Internal,
 }
@@ -66,6 +74,37 @@ pub struct AiProviderConnectionTestResult {
     pub status: AiProviderConnectionStatus,
     pub error_kind: Option<AiProviderConnectionErrorKind>,
     pub mock_available: bool,
+}
+
+/// 同梱ローカルAI（llama-server）の失敗の固定分類（判断台帳 D99）。
+///
+/// 生のエラー文・パス・番号・合言葉は持たない。画面には種別ごとの固定文言だけを出し、
+/// 黙って Gemini / Mock へ切り替えない（失敗は失敗として返す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAiFailure {
+    /// 実行ファイルまたはモデルが無い。
+    Missing,
+    /// モデルの大きさ・SHA-256 が合わない。
+    Broken,
+    /// 起動できない・起動の途中で止まった・止められた。
+    StartFailed,
+    /// 起動の待ち、または生成の待ちが上限を超えた。
+    Timeout,
+    /// 生成要求の失敗（非2xx・応答の形が不正・出力が上限で途切れた 等）。
+    RequestFailed,
+}
+
+impl LocalAiFailure {
+    /// 接続テスト結果DTOのエラー種別へ写す（タイムアウトは既存の Timeout を使う）。
+    pub fn connection_error_kind(self) -> AiProviderConnectionErrorKind {
+        match self {
+            Self::Missing => AiProviderConnectionErrorKind::LocalAiMissing,
+            Self::Broken => AiProviderConnectionErrorKind::LocalAiBroken,
+            Self::StartFailed => AiProviderConnectionErrorKind::LocalAiStartFailed,
+            Self::Timeout => AiProviderConnectionErrorKind::Timeout,
+            Self::RequestFailed => AiProviderConnectionErrorKind::LocalAiRequestFailed,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +149,21 @@ mod tests {
         assert_eq!(result.status, AiProviderConnectionStatus::Available);
         let json = serde_json::to_string(&result).expect("serialize");
         assert!(json.contains("\"errorKind\":null"));
+    }
+
+    #[test]
+    fn local_ai_failures_map_to_fixed_snake_case_kinds() {
+        let cases = [
+            (LocalAiFailure::Missing, "local_ai_missing"),
+            (LocalAiFailure::Broken, "local_ai_broken"),
+            (LocalAiFailure::StartFailed, "local_ai_start_failed"),
+            (LocalAiFailure::Timeout, "timeout"),
+            (LocalAiFailure::RequestFailed, "local_ai_request_failed"),
+        ];
+        for (failure, expected) in cases {
+            let json = serde_json::to_string(&failure.connection_error_kind()).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
     }
 
     #[test]

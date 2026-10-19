@@ -2,6 +2,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
+// 入力値の上限（セキュリティ詳細設計書 §15.2 / §15.3）。
+// 既存の保存データを読めなくしないよう、これらの検証は保存時（validate）だけで行い、読み込み時には行わない。
+/// 呼び名の最大文字数（lib/settings-options.ts の NICKNAME_MAX_LENGTH と一致）。
+pub(crate) const NICKNAME_MAX_CHARS: usize = 32;
+/// 関心ジャンルの最大件数。画面の選択肢は7件だが、将来の追加に余裕を持たせた従来値を維持する。
+const GENRES_MAX_ITEMS: usize = 20;
+/// 関心ジャンル1件の最大文字数。選択肢は短いラベル（最長「セキュリティ」6文字）なので、呼び名と同じ32に揃える。
+const GENRE_MAX_CHARS: usize = 32;
+/// 通知を抑止するアプリの最大件数。手動管理する一覧として十分な量に絞り、判定時の走査負荷を抑える。
+const SUPPRESSED_APPS_MAX_ITEMS: usize = 50;
+/// 抑止アプリ1件の最大文字数。実行ファイルのフルパス指定を想定し、Windows の MAX_PATH（260）に合わせる。
+const SUPPRESSED_APP_MAX_CHARS: usize = 260;
+
+/// 改行・タブを含むすべての制御文字を含むかを判定する（1行のラベル・名前向け）。
+fn contains_control_char(text: &str) -> bool {
+    text.chars().any(char::is_control)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
@@ -82,6 +100,20 @@ pub struct UserSettingsDto {
     pub nickname: String,
     pub ai_provider: AiProvider,
     pub max_daily_recommendations: u32,
+    /// ニュース取得後の自動要約を有効にするか。外部AIの利用枠を使い切らないよう既定は無効。
+    /// 旧画面・旧データとの互換のため、欠落時は false とする。
+    #[serde(default)]
+    pub auto_summary_enabled: bool,
+    /// 初回起動時の案内（オンボーディング）を完了／スキップ済みか（要件定義書 §7.1.1、判断台帳 D27 / D59）。
+    /// 読み込み時は常に Some を返す。保存時は Some(true) のときだけ完了として記録し、
+    /// 未指定（設定画面など案内と無関係な保存）や false では既存値を変えない（案内を再表示させないため）。
+    #[serde(default)]
+    pub onboarding_completed: Option<bool>,
+    /// 読み取り専用。保存済みの興味ジャンルに合う取得元が無く、ニュース取得が全取得元へ
+    /// フォールバックする状態か（D10。設定画面のジャンル欄の注記用）。
+    /// 取得元ファイルから command 層で算出して載せる。保存時に送られても無視する。
+    #[serde(default, skip_deserializing)]
+    pub genre_filter_fallback: bool,
 }
 
 impl Default for UserSettingsDto {
@@ -104,6 +136,9 @@ impl Default for UserSettingsDto {
             nickname: String::new(),
             ai_provider: AiProvider::Mock,
             max_daily_recommendations: 10,
+            auto_summary_enabled: false,
+            onboarding_completed: None,
+            genre_filter_fallback: false,
         }
     }
 }
@@ -131,7 +166,7 @@ impl UserSettingsDto {
             ));
         }
 
-        if self.genres.len() > 20 {
+        if self.genres.len() > GENRES_MAX_ITEMS {
             return Err(AppError::Validation(
                 "genres must contain 20 items or fewer".to_string(),
             ));
@@ -143,9 +178,33 @@ impl UserSettingsDto {
             ));
         }
 
-        if self.nickname.chars().count() > 32 {
+        if self
+            .genres
+            .iter()
+            .any(|genre| genre.chars().count() > GENRE_MAX_CHARS)
+        {
+            return Err(AppError::Validation(
+                "each genre must be 32 characters or fewer".to_string(),
+            ));
+        }
+
+        // ジャンルは1行のラベルとして表示・保存するため、改行・タブを含む全制御文字を拒否する。
+        if self.genres.iter().any(|genre| contains_control_char(genre)) {
+            return Err(AppError::Validation(
+                "genres must not contain control characters".to_string(),
+            ));
+        }
+
+        if self.nickname.chars().count() > NICKNAME_MAX_CHARS {
             return Err(AppError::Validation(
                 "nickname must be 32 characters or fewer".to_string(),
+            ));
+        }
+
+        // 呼び名はゆうこの台詞に1行で埋め込むため、改行・タブも含めて制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
+        if contains_control_char(&self.nickname) {
+            return Err(AppError::Validation(
+                "nickname must not contain control characters".to_string(),
             ));
         }
 
@@ -190,6 +249,20 @@ impl Default for PersistedSettings {
 }
 
 impl PersistedSettings {
+    /// 新しく設定ファイルを作るとき（初回起動）と、設定の「初期化」で使う初期値（判断台帳 D103）。
+    /// AI はこのパソコンの中で動く同梱ローカルLLM（`local`）にし、ニュース取得後の自動要約を有効にする。
+    ///
+    /// `Default` とは分けている。`Default` は既存の settings.json に欄が無いときの読み込み値
+    /// （serde の `#[serde(default)]`）でもあるため、そこを変えると、欄の無い旧ファイルの利用者まで
+    /// 黙って Mock → ローカル・自動要約 OFF → ON に切り替わってしまう。既存ファイルの値（欄が無い場合を含む）は
+    /// 従来どおり `mock` / 無効として読み、新しく作る設定だけをこの初期値にする。
+    pub fn initial() -> Self {
+        let mut settings = Self::default();
+        settings.ai.provider = AiProvider::Local.as_storage().to_string();
+        settings.ai.auto_summary_enabled = true;
+        settings
+    }
+
     pub fn normalize_after_load(&mut self) {
         self.notification.normalize_after_load();
     }
@@ -223,6 +296,9 @@ impl PersistedSettings {
             nickname: self.user.nickname.clone(),
             ai_provider: AiProvider::from_storage(&self.ai.provider),
             max_daily_recommendations: self.news.max_daily_recommendations,
+            auto_summary_enabled: self.ai.auto_summary_enabled,
+            onboarding_completed: Some(self.ui.onboarding_completed),
+            genre_filter_fallback: false,
         }
     }
 
@@ -244,11 +320,17 @@ impl PersistedSettings {
             }],
         };
         self.ai.provider = dto.ai_provider.as_storage().to_string();
+        self.ai.auto_summary_enabled = dto.auto_summary_enabled;
         self.explanation.level = dto.explanation_level.as_storage().to_string();
         self.ui.theme_id = dto.selected_theme_id;
         self.ui.tone_id = dto.selected_tone_id;
         self.ui.personality_id = dto.selected_personality_id;
-        self.ui.auto_start_on_pc_boot = dto.auto_start_on_pc_boot;
+        // 案内の完了は一方向（未完了→完了）だけ反映する。false や未指定で未完了へ戻さない。
+        if dto.onboarding_completed == Some(true) {
+            self.ui.onboarding_completed = true;
+        }
+        // auto_start_on_pc_boot は OS 登録状態の写しのため、通常保存では上書きしない。
+        // 自動起動の ON/OFF は autostart command（autostart_service）からだけ変更する。
     }
 }
 
@@ -316,6 +398,43 @@ impl Default for NotificationSettings {
     }
 }
 
+impl NotificationSettings {
+    /// 通知を抑止するアプリ一覧の保存前検証（件数・1件の文字数・空値・制御文字）。
+    /// 現時点では抑止アプリを編集する入力経路（DTO / Tauri command）が無いため未配線。
+    /// 入力経路を追加するときは、保存前にこれを呼ぶ。読み込み時には呼ばない（既存データを読めなくしないため）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn validate_suppressed_apps(apps: &[String]) -> Result<(), AppError> {
+        if apps.len() > SUPPRESSED_APPS_MAX_ITEMS {
+            return Err(AppError::Validation(
+                "suppressedApps must contain 50 items or fewer".to_string(),
+            ));
+        }
+
+        if apps.iter().any(|app| app.trim().is_empty()) {
+            return Err(AppError::Validation(
+                "suppressedApps must not contain empty values".to_string(),
+            ));
+        }
+
+        if apps
+            .iter()
+            .any(|app| app.chars().count() > SUPPRESSED_APP_MAX_CHARS)
+        {
+            return Err(AppError::Validation(
+                "each suppressedApps item must be 260 characters or fewer".to_string(),
+            ));
+        }
+
+        if apps.iter().any(|app| contains_control_char(app)) {
+            return Err(AppError::Validation(
+                "suppressedApps must not contain control characters".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -370,14 +489,20 @@ pub struct AiSettings {
     pub provider: String,
     pub allow_free_tier: bool,
     pub send_minimized_text_only: bool,
+    /// ニュース取得後に未要約記事を1件ずつ自動要約するか。新しく作る設定は有効
+    /// （`PersistedSettings::initial`・判断台帳 D103）。既存ファイルで欄が無いときは従来どおり無効として読む。
+    pub auto_summary_enabled: bool,
 }
 
+/// 既存の settings.json に欄が無いときの読み込み値（旧既定のまま）。新規作成の初期値は
+/// `PersistedSettings::initial`（ローカル・自動要約有効）。
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
             provider: "mock".to_string(),
             allow_free_tier: true,
             send_minimized_text_only: true,
+            auto_summary_enabled: false,
         }
     }
 }
@@ -409,6 +534,11 @@ pub struct UiSettings {
     pub yuuko_position: String,
     pub enable_light_animation: bool,
     pub auto_start_on_pc_boot: bool,
+    /// 初回起動時の案内を完了／スキップ済みか。
+    /// 既定（= 旧 settings.json にフィールドが無い場合）は true（完了扱い）にして、
+    /// 既存ユーザーには案内を出さない。未完了（false）で始まるのは、設定ファイルが無く
+    /// 新規作成する初回起動時だけ（`SettingsService::initialize_default_if_missing`）。
+    pub onboarding_completed: bool,
 }
 
 impl Default for UiSettings {
@@ -420,25 +550,25 @@ impl Default for UiSettings {
             yuuko_position: "bottom_center".to_string(),
             enable_light_animation: true,
             auto_start_on_pc_boot: false,
+            onboarding_completed: true,
         }
     }
 }
 
+/// 時刻文字列（HH:MM）を検証する。入力値はエラー文言へ含めず固定の理由だけを返す（§16.3）。
 fn validate_time(value: &str) -> Result<(), AppError> {
     let (hour_text, minute_text) = value
         .split_once(':')
-        .ok_or_else(|| AppError::Validation(format!("invalid time format: {value}")))?;
+        .ok_or_else(|| AppError::Validation("invalid time format".to_string()))?;
     let hour: u8 = hour_text
         .parse()
-        .map_err(|_| AppError::Validation(format!("invalid hour in time: {value}")))?;
+        .map_err(|_| AppError::Validation("invalid hour in time".to_string()))?;
     let minute: u8 = minute_text
         .parse()
-        .map_err(|_| AppError::Validation(format!("invalid minute in time: {value}")))?;
+        .map_err(|_| AppError::Validation("invalid minute in time".to_string()))?;
 
     if hour > 23 || minute > 59 {
-        return Err(AppError::Validation(format!(
-            "time value out of range: {value}"
-        )));
+        return Err(AppError::Validation("time value out of range".to_string()));
     }
 
     Ok(())
@@ -464,6 +594,131 @@ mod tests {
             serde_json::from_str(legacy).expect("legacy settings should still load");
         assert_eq!(parsed.news.categories, vec!["AI".to_string()]);
         assert!(parsed.news.fetch_on_startup);
+    }
+
+    #[test]
+    fn auto_summary_is_disabled_by_default_and_for_legacy_data() {
+        assert!(!PersistedSettings::default().ai.auto_summary_enabled);
+        assert!(!UserSettingsDto::default().auto_summary_enabled);
+
+        // 旧 settings.json（ai.autoSummaryEnabled なし）は無効として読む。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ai": { "provider": "gemini" } }"#).unwrap();
+        assert!(!legacy.ai.auto_summary_enabled);
+        // 旧画面からの保存DTO（autoSummaryEnabled なし）も無効として受け取る。
+        let mut dto_json = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        dto_json
+            .as_object_mut()
+            .unwrap()
+            .remove("autoSummaryEnabled");
+        let dto: UserSettingsDto = serde_json::from_value(dto_json).unwrap();
+        assert!(!dto.auto_summary_enabled);
+    }
+
+    #[test]
+    fn initial_settings_use_local_ai_with_auto_summary_on() {
+        // 新しく作る設定（初回起動・初期化）は、ローカル・自動要約有効（判断台帳 D103）。
+        let initial = PersistedSettings::initial();
+        assert_eq!(initial.ai.provider, "local");
+        assert!(initial.ai.auto_summary_enabled);
+        assert_eq!(initial.to_dto().ai_provider, AiProvider::Local);
+        assert!(initial.to_dto().auto_summary_enabled);
+        // AI 以外は従来の既定と同じ。
+        let default = PersistedSettings::default();
+        assert_eq!(initial.news.categories, default.news.categories);
+        assert_eq!(
+            initial.ui.onboarding_completed,
+            default.ui.onboarding_completed
+        );
+    }
+
+    #[test]
+    fn existing_files_keep_their_ai_values_even_when_fields_are_missing() {
+        // 既存ファイルで欄が無いときは旧既定（mock・自動要約無効）として読み、黙って切り替えない。
+        for legacy in [
+            r#"{ "version": 1 }"#,
+            r#"{ "version": 1, "ai": {} }"#,
+            r#"{ "version": 1, "ai": { "allowFreeTier": true } }"#,
+        ] {
+            let parsed: PersistedSettings = serde_json::from_str(legacy).unwrap();
+            assert_eq!(parsed.ai.provider, "mock", "{legacy}");
+            assert!(!parsed.ai.auto_summary_enabled, "{legacy}");
+        }
+        // 保存済みの値はそのまま読む。
+        let saved: PersistedSettings = serde_json::from_str(
+            r#"{ "version": 1, "ai": { "provider": "gemini", "autoSummaryEnabled": false } }"#,
+        )
+        .unwrap();
+        assert_eq!(saved.ai.provider, "gemini");
+        assert!(!saved.ai.auto_summary_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_without_onboarding_field_are_treated_as_completed() {
+        // 既存ユーザーの settings.json（ui.onboardingCompleted なし / ui 自体なし）は完了扱い。
+        let without_field: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "themeId": "default" } }"#).unwrap();
+        assert!(without_field.ui.onboarding_completed);
+        let without_ui: PersistedSettings = serde_json::from_str(r#"{ "version": 1 }"#).unwrap();
+        assert!(without_ui.ui.onboarding_completed);
+        assert_eq!(without_ui.to_dto().onboarding_completed, Some(true));
+
+        let pending: PersistedSettings =
+            serde_json::from_str(r#"{ "ui": { "onboardingCompleted": false } }"#).unwrap();
+        assert_eq!(pending.to_dto().onboarding_completed, Some(false));
+    }
+
+    #[test]
+    fn onboarding_completion_is_only_recorded_one_way() {
+        let mut settings = PersistedSettings::default();
+        settings.ui.onboarding_completed = false;
+
+        // 案内と無関係な保存（未指定）や false では未完了のまま変えない。
+        settings.apply_from_dto(UserSettingsDto::default());
+        assert!(!settings.ui.onboarding_completed);
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(false),
+            ..UserSettingsDto::default()
+        });
+        assert!(!settings.ui.onboarding_completed);
+
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(true),
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ui.onboarding_completed);
+        let stored = serde_json::to_value(&settings).unwrap();
+        assert_eq!(stored["ui"]["onboardingCompleted"], true);
+
+        // 完了後に false を送っても未完了へ戻さない（案内を再表示しない）。
+        settings.apply_from_dto(UserSettingsDto {
+            onboarding_completed: Some(false),
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ui.onboarding_completed);
+    }
+
+    #[test]
+    fn genre_filter_fallback_is_output_only() {
+        // 画面から送られても読み取らず（保存対象ではない）、出力時は camelCase で載る。
+        let mut value = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        assert_eq!(value["genreFilterFallback"], false);
+        value["genreFilterFallback"] = serde_json::json!(true);
+        let dto: UserSettingsDto = serde_json::from_value(value).unwrap();
+        assert!(!dto.genre_filter_fallback);
+    }
+
+    #[test]
+    fn auto_summary_enabled_round_trips_through_apply_and_to_dto() {
+        let mut settings = PersistedSettings::default();
+        settings.apply_from_dto(UserSettingsDto {
+            auto_summary_enabled: true,
+            ..UserSettingsDto::default()
+        });
+        assert!(settings.ai.auto_summary_enabled);
+        assert!(settings.to_dto().auto_summary_enabled);
+        let stored = serde_json::to_value(&settings).unwrap();
+        assert_eq!(stored["ai"]["autoSummaryEnabled"], true);
     }
 
     #[test]
@@ -753,5 +1008,167 @@ mod tests {
         assert_eq!(settings.notification.work_time_ranges.len(), 1);
         assert_eq!(settings.notification.work_time_ranges[0].start, "10:00");
         assert_eq!(settings.notification.work_time_ranges[0].end, "16:00");
+    }
+
+    fn validation_message(result: Result<(), AppError>) -> String {
+        match result {
+            Err(AppError::Validation(message)) => message,
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nickname_with_any_control_char() {
+        for nickname in [
+            "ゆう\nこ",
+            "ゆう\rこ",
+            "ゆう\tこ",
+            "ゆう\u{1b}[31mこ",
+            "\u{0}",
+            "\u{7f}",
+        ] {
+            let dto = UserSettingsDto {
+                nickname: nickname.to_string(),
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, "nickname must not contain control characters");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_plain_nickname_up_to_limit() {
+        let dto = UserSettingsDto {
+            nickname: "あ".repeat(NICKNAME_MAX_CHARS),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_ok());
+
+        let dto = UserSettingsDto {
+            nickname: "あ".repeat(NICKNAME_MAX_CHARS + 1),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validate_limits_genre_length_and_count() {
+        let dto = UserSettingsDto {
+            genres: vec!["あ".repeat(GENRE_MAX_CHARS)],
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_ok());
+
+        let secret = format!("秘密{}", "あ".repeat(GENRE_MAX_CHARS));
+        let dto = UserSettingsDto {
+            genres: vec!["AI".to_string(), secret.clone()],
+            ..UserSettingsDto::default()
+        };
+        let message = validation_message(dto.validate());
+        assert_eq!(message, "each genre must be 32 characters or fewer");
+        assert!(!message.contains("秘密"));
+
+        let dto = UserSettingsDto {
+            genres: (0..=GENRES_MAX_ITEMS).map(|i| format!("g{i}")).collect(),
+            ..UserSettingsDto::default()
+        };
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validate_time_messages_exclude_input_value() {
+        // 時刻の入力値はエラー文言へ含めず、固定の理由だけを返す（§16.3）。
+        for (value, expected) in [
+            ("secret", "invalid time format"),
+            ("xx:00", "invalid hour in time"),
+            ("09:yy", "invalid minute in time"),
+            ("99:77", "time value out of range"),
+        ] {
+            let dto = UserSettingsDto {
+                notify_start_time: value.to_string(),
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, expected);
+            assert!(!message.contains(value));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_genre_with_control_char() {
+        for genre in ["A\nI", "A\tI", "A\u{1b}I"] {
+            let dto = UserSettingsDto {
+                genres: vec![genre.to_string()],
+                ..UserSettingsDto::default()
+            };
+            let message = validation_message(dto.validate());
+            assert_eq!(message, "genres must not contain control characters");
+        }
+    }
+
+    #[test]
+    fn legacy_settings_violating_new_rules_still_load() {
+        // 新しい制限より前に保存された値でも読み込み（get）は失敗させない。検証は保存時だけ。
+        let legacy = format!(
+            r#"{{
+                "version": 1,
+                "user": {{ "nickname": "ゆう\nこ" }},
+                "news": {{ "categories": ["{}"] }},
+                "notification": {{ "suppressedApps": ["{}"] }}
+            }}"#,
+            "あ".repeat(GENRE_MAX_CHARS + 1),
+            "a".repeat(SUPPRESSED_APP_MAX_CHARS + 1)
+        );
+
+        let mut settings: PersistedSettings = serde_json::from_str(&legacy).unwrap();
+        settings.normalize_after_load();
+        let dto = settings.to_dto();
+
+        assert_eq!(dto.nickname, "ゆう\nこ");
+        assert_eq!(settings.notification.suppressed_apps.len(), 1);
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn suppressed_apps_accept_values_within_limits() {
+        let apps: Vec<String> = (0..SUPPRESSED_APPS_MAX_ITEMS)
+            .map(|i| format!(r"C:\Apps\app{i}.exe"))
+            .collect();
+        assert!(NotificationSettings::validate_suppressed_apps(&apps).is_ok());
+        assert!(NotificationSettings::validate_suppressed_apps(&[
+            "a".repeat(SUPPRESSED_APP_MAX_CHARS)
+        ])
+        .is_ok());
+        assert!(NotificationSettings::validate_suppressed_apps(&[]).is_ok());
+    }
+
+    #[test]
+    fn suppressed_apps_reject_values_over_limits() {
+        let too_many: Vec<String> = (0..=SUPPRESSED_APPS_MAX_ITEMS)
+            .map(|i| format!("app{i}.exe"))
+            .collect();
+        assert_eq!(
+            validation_message(NotificationSettings::validate_suppressed_apps(&too_many)),
+            "suppressedApps must contain 50 items or fewer"
+        );
+
+        let too_long = format!("秘密{}", "a".repeat(SUPPRESSED_APP_MAX_CHARS));
+        let message =
+            validation_message(NotificationSettings::validate_suppressed_apps(&[too_long]));
+        assert_eq!(
+            message,
+            "each suppressedApps item must be 260 characters or fewer"
+        );
+        assert!(!message.contains("秘密"));
+
+        assert!(NotificationSettings::validate_suppressed_apps(&["  ".to_string()]).is_err());
+        for app in ["app\n.exe", "app\t.exe", "app\u{0}.exe"] {
+            assert_eq!(
+                validation_message(NotificationSettings::validate_suppressed_apps(&[
+                    app.to_string()
+                ])),
+                "suppressedApps must not contain control characters"
+            );
+        }
     }
 }

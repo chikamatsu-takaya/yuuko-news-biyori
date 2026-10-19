@@ -27,6 +27,9 @@ pub struct GeneratedArticleSummaryDto {
     pub article_id: String,
     pub summary: String,
     pub yuuko_explanation: String,
+    /// 要点（何が起きたか・箇条書き）。注目ポイントとは別にAIで作る（D18）。
+    pub key_points: Vec<String>,
+    /// 注目ポイント（なぜ面白いか・何を学べるか）。
     pub focus_points: Vec<String>,
     pub yuuko_comment: String,
 }
@@ -35,6 +38,8 @@ pub struct GeneratedArticleSummaryDto {
 pub struct AiRequest {
     pub prompt_id: String,
     pub input_text: String,
+    /// 実AIへは用語解説（参考文脈）でだけ送る補助情報。ほかの prompt_id では Mock の材料にだけ使う
+    /// （要点: Mock のタグ用ジャンル / 再説明・一言: Mock がそのまま返す定型文）。
     pub context: Option<String>,
 }
 
@@ -45,9 +50,122 @@ pub struct AiResponse {
     pub provider: String,
 }
 
+/// ゆうこの再説明（記事の「ゆうこの解説」）をAIへ依頼するときの prompt_id。出力は1段落の文字列。
+/// プロンプトの言い回し・長さの指示を変えても出力の契約（1つの文字列）は同じなので、版は上げない。
+pub const YUUKO_EXPLANATION_PROMPT_ID: &str = "yuuko_explanation_v1";
+
+/// ゆうこの一言（記事の「ゆうこの一言」）をAIへ依頼するときの prompt_id。出力は短い1文の文字列。
+pub const YUUKO_COMMENT_PROMPT_ID: &str = "yuuko_comment_v1";
+
+/// 用語解説をAIへ依頼するときの prompt_id（v1）。AiProviderService と DictionaryService で共有する。
+/// 単一文字列出力の既存契約に、用語解説だけの構造化出力（JSON: short/detail）契約を1つ追加する。
+pub const TERM_EXPLANATION_PROMPT_ID: &str = "term_explanation_v1";
+
+/// フレーズ（約200字までの文章）の説明をAIへ依頼するときの prompt_id（v1・判断台帳 D21）。
+/// 用語解説と同じ出力契約（JSON: short/detail・`AiTermExplanation`）を使い、検証・無害化・保存の経路も共通にする。
+/// 違うのはプロンプト（語の定義ではなく、選んだ部分をかみ砕いて説明させる）だけ。
+pub const PHRASE_EXPLANATION_PROMPT_ID: &str = "phrase_explanation_v1";
+
+/// 用語解説AI出力（`TERM_EXPLANATION_PROMPT_ID`）の構造化契約（v1）。
+/// AI の単一文字列出力を、この JSON として **厳格に** 解析して short/detail を得る。
+/// フィールドは `DictionaryEntryDto` の shortExplanation / detailExplanation に対応する。
+/// `deny_unknown_fields` により short/detail 以外の未知フィールドを含む JSON は解析失敗にする。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiTermExplanation {
+    pub short: String,
+    pub detail: String,
+}
+
+/// 記事の「要点」「注目ポイント」「タグ」をAIへ依頼するときの prompt_id（v2・判断台帳 D18 / D11）。
+/// 要点（何が起きたか）と注目ポイント（なぜ面白いか・何を学べるか）は別々の項目として作らせるが、
+/// ローカルLLMの負荷を抑えるため、AI 呼び出しは1回にまとめて JSON の配列で受け取る。
+/// v2 では同じ呼び出しで記事のタグ（3〜5個・D11）も受け取る（タグのためだけに AI を呼ばない）。
+/// タグは要点・注目ポイントとは別に検証し、タグだけが不正でも要点・要約の保存は止めない。
+pub const ARTICLE_POINTS_PROMPT_ID: &str = "article_points_v2";
+
+/// 要点の件数（下限・上限）。AI へは「3つ程度」で依頼し、2〜4件を受け付ける。
+pub const KEY_POINTS_MIN_ITEMS: usize = 2;
+pub const KEY_POINTS_MAX_ITEMS: usize = 4;
+/// 注目ポイントの件数（下限・上限）。
+pub const FOCUS_POINTS_MIN_ITEMS: usize = 1;
+pub const FOCUS_POINTS_MAX_ITEMS: usize = 3;
+/// 要点・注目ポイントの入力（1行目のタイトル＋2行目以降の本文抜粋）のうち、本文抜粋の文字数（空白を除く）が
+/// これ未満なら「短い入力」として、件数を減らして頼む（`is_short_article_points_input`）。
+/// 根拠: 2026-10-13 の評価 v2 では本文抜粋が 28〜151 字（RSS 概要・meta 説明文）の記事が 29 件中 28 件あり、
+/// 材料が 1〜2 文しかないのに要点 3 件・注目ポイント 3 件を求めたため、足りない分の創作（「15 年ぶりの 1 勝」→
+/// 「優勝」など）と要点の繰り返しが出た。本文を取れた記事は約 2,000 字なので、200 字で分ければ両者を取り違えない。
+pub const SHORT_ARTICLE_BODY_MAX_CHARS: usize = 200;
+/// 短い入力のときに頼む要点の件数（検証の下限と同じ。下限を下げると出力の契約が変わるため下げない）。
+pub const SHORT_INPUT_KEY_POINTS_ITEMS: usize = KEY_POINTS_MIN_ITEMS;
+/// 短い入力のときに頼む注目ポイントの件数（検証の下限と同じ）。
+pub const SHORT_INPUT_FOCUS_POINTS_ITEMS: usize = FOCUS_POINTS_MIN_ITEMS;
+
+/// 要点・注目ポイントの入力（`article_points_v2` の input_text）が短いか。1行目をタイトルとみなし、
+/// 2行目以降（本文抜粋）の空白以外の文字数が `SHORT_ARTICLE_BODY_MAX_CHARS` 未満なら短いとする
+/// （抜粋の無い、タイトルだけの入力も短い）。プロンプトの件数とローカルLLMの出力スキーマを切り替えるのに使う。
+pub fn is_short_article_points_input(input_text: &str) -> bool {
+    let body_chars = input_text
+        .trim()
+        .lines()
+        .skip(1)
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .count();
+    body_chars < SHORT_ARTICLE_BODY_MAX_CHARS
+}
+
+/// 要点・注目ポイント1件の文字数上限（Unicode 文字数）。1文の箇条書きなので短めにする。
+/// ローカルLLMの JSON スキーマ（maxLength）と保存前の検証で同じ値を使う。
+pub const POINT_ITEM_MAX_CHARS: usize = 100;
+/// 記事タグの件数（下限・上限）。データ設計書 §4.4 の front matter `tags` に保存する（D11）。
+pub const ARTICLE_TAGS_MIN_ITEMS: usize = 3;
+pub const ARTICLE_TAGS_MAX_ITEMS: usize = 5;
+/// 記事タグ1件の文字数上限（Unicode 文字数・trim 後）。ローカルLLMの JSON スキーマと保存前の検証で共有する。
+pub const ARTICLE_TAG_MAX_CHARS: usize = 20;
+/// 記事タグに含めない文字。カンマ・読点などの区切り文字（タグを並べて扱う側で1件が分かれて見えるのを防ぐ）と、
+/// HTML の山括弧。保存前の検証で拒否し、Mock のタグからは取り除く。
+pub const ARTICLE_TAG_FORBIDDEN_CHARS: &[char] =
+    &[',', '、', '，', '､', ';', '；', '|', '｜', '<', '>'];
+
+/// 要点・注目ポイント・タグのAI出力（`ARTICLE_POINTS_PROMPT_ID`）の構造化契約（v2）。
+/// Mock の出力と、summary_service で検証した後の値に使う。
+/// AI の生の出力は summary_service 側で、タグの型崩れが要点の解析を巻き込まないよう別の形で解析する。
+/// 件数・文字数・文字種の検証は summary_service 側で行う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiArticlePoints {
+    pub key_points: Vec<String>,
+    pub focus_points: Vec<String>,
+    /// 記事タグ（D11）。検証に落ちた・出力に無かった場合は空（保存時は既存のタグを残す）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::GenerateArticleSummaryParams;
+    use super::{
+        is_short_article_points_input, GenerateArticleSummaryParams, SHORT_ARTICLE_BODY_MAX_CHARS,
+    };
+
+    #[test]
+    fn short_article_points_input_counts_only_the_body_after_the_title() {
+        // タイトル（1行目）は数えず、本文抜粋の空白以外の文字数で決める。
+        let long_title = "長".repeat(500);
+        assert!(is_short_article_points_input(&format!(
+            "{long_title}\n短い概要。"
+        )));
+        assert!(is_short_article_points_input("タイトルだけ"));
+        let body = "あ".repeat(SHORT_ARTICLE_BODY_MAX_CHARS - 1);
+        assert!(is_short_article_points_input(&format!("タイトル\n{body}")));
+        // 空白・改行は数えない。
+        let spaced = "あ \n".repeat(SHORT_ARTICLE_BODY_MAX_CHARS - 1);
+        assert!(is_short_article_points_input(&format!(
+            "タイトル\n{spaced}"
+        )));
+        let body = "あ".repeat(SHORT_ARTICLE_BODY_MAX_CHARS);
+        assert!(!is_short_article_points_input(&format!("タイトル\n{body}")));
+    }
 
     #[test]
     fn validated_article_id_trims_whitespace() {

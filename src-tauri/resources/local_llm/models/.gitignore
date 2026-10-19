@@ -1,0 +1,4 @@
+# 同梱ローカルLLMの部品（大容量）はコミットしない。scripts/local-llm/place-bundle.mjs で置く。
+# この .gitignore だけ追跡してフォルダを存在させる（tauri-build のリソースパス検証を CI でも通す）。
+*
+!.gitignore

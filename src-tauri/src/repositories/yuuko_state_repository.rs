@@ -23,10 +23,15 @@ impl YuukoStateRepository {
             return Ok(PersistedYuukoState::default());
         }
 
-        let raw = std::fs::read_to_string(&self.state_path)?;
-        // 手編集で付くUTF-8 BOMを除去してからparseする（settings側と同方針）。
-        let state = serde_json::from_str::<PersistedYuukoState>(crate::util::strip_utf8_bom(&raw))?;
-        Ok(state)
+        // 手編集で付くUTF-8 BOMは除去してから解析する（settings側と同方針）。
+        // JSON として読めない場合は `yuuko_notification_state.corrupt.json` へ退避して既定値で作り直す
+        // （ゆうこ登場・通知挙動_詳細設計書 §16.3: 不正状態は待機中へ戻す / セキュリティ詳細設計書 §11.4）。
+        // 退避に失敗したら上書きせずエラーを返す。次回の読み込みで再試行されるため通知が止まり続けない。
+        super::corrupt_json::read_json_or_reset(&self.state_path, "yuuko-state", || {
+            let state = PersistedYuukoState::default();
+            self.save(&state)?;
+            Ok(state)
+        })
     }
 
     pub fn exists(&self) -> bool {
@@ -175,15 +180,90 @@ mod tests {
         cleanup(&path);
     }
 
+    fn cleanup_corrupt(path: &std::path::Path) {
+        cleanup(path);
+        let corrupt = path.with_extension("corrupt.json");
+        if corrupt.is_dir() {
+            let _ = std::fs::remove_dir_all(&corrupt);
+        } else {
+            let _ = std::fs::remove_file(&corrupt);
+        }
+        let _ = std::fs::remove_file(path.with_extension("corrupt.json.tmp"));
+    }
+
     #[test]
-    fn load_or_default_still_errors_on_corrupt_json() {
-        // BOM以外の破損は従来どおりエラー（黙ってデフォルトに戻さない）。settings と同方針。
+    fn load_or_default_backs_up_corrupt_json_and_resets_to_defaults() {
+        // 読めない通知状態は退避して待機中の既定値へ戻す（§16.3 / セキュリティ詳細設計書 §11.4）。
         let (repo, path) = temp_repo();
         std::fs::write(&path, b"{ not valid json").unwrap();
 
+        let loaded = repo
+            .load_or_default()
+            .expect("corrupt state should be reset");
+
+        assert_eq!(loaded.state, PersistedYuukoState::default().state);
+        assert!(loaded.introduced_article_ids.is_empty());
+        assert_eq!(
+            std::fs::read(path.with_extension("corrupt.json")).unwrap(),
+            b"{ not valid json"
+        );
+        // 作り直したファイルは次回そのまま読める。
+        let reloaded = repo.load_or_default().expect("reset state should load");
+        assert_eq!(reloaded.state, loaded.state);
+        assert!(!path.with_extension("corrupt.json.tmp").exists());
+
+        cleanup_corrupt(&path);
+    }
+
+    #[test]
+    fn load_or_default_backs_up_invalid_utf8_as_corrupt() {
+        // 不正な UTF-8（バイナリ化など）も「JSON として読めない」側で扱い、退避して作り直す。
+        let (repo, path) = temp_repo();
+        std::fs::write(&path, [0xFFu8, 0xFE, 0x00, 0x7B]).unwrap();
+
+        repo.load_or_default()
+            .expect("invalid utf-8 should be reset");
+
+        assert_eq!(
+            std::fs::read(path.with_extension("corrupt.json")).unwrap(),
+            vec![0xFFu8, 0xFE, 0x00, 0x7B]
+        );
+
+        cleanup_corrupt(&path);
+    }
+
+    #[test]
+    fn load_or_default_keeps_corrupt_file_when_backup_fails() {
+        // 退避に失敗したら上書きせず、エラーを返して元ファイルを残す（D57）。
+        let (repo, path) = temp_repo();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        std::fs::create_dir_all(path.with_extension("corrupt.json")).unwrap();
+
         let result = repo.load_or_default();
 
-        cleanup(&path);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::Io(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+        assert!(!path.with_extension("corrupt.json.tmp").exists());
+
+        // 退避できるようになれば次回の読み込みで回復する（通知が止まり続けない）。
+        let _ = std::fs::remove_dir_all(path.with_extension("corrupt.json"));
+        assert!(repo.load_or_default().is_ok());
+
+        cleanup_corrupt(&path);
+    }
+
+    #[test]
+    fn load_or_default_does_not_reset_on_io_error() {
+        // 読み込み自体の IO エラー（ここではパスがディレクトリ）は作り直さずにエラーを返す。
+        let (repo, path) = temp_repo();
+        std::fs::create_dir_all(&path).unwrap();
+
+        let result = repo.load_or_default();
+
+        assert!(matches!(result, Err(AppError::Io(_))));
+        assert!(path.is_dir());
+        assert!(!path.with_extension("corrupt.json").exists());
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

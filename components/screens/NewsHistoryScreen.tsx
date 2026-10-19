@@ -8,16 +8,36 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   listArticleHistory,
+  restoreArchivedArticle,
+  updateArticleFavorite,
   type ArticleHistoryFilter,
   type ArticleHistoryItemDto,
+  type ArticleSummaryState,
 } from "@/lib/tauri/articles";
+import { SummaryStateTag } from "@/components/news/SummaryStateTag";
+import {
+  ArticleTagList,
+  normalizeArticleTags,
+} from "@/components/news/ArticleTagList";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Home,
   Newspaper,
@@ -40,6 +60,8 @@ import {
   Share2,
   FolderOpen,
   Info,
+  Tag,
+  X,
 } from "lucide-react";
 
 // Types
@@ -58,6 +80,9 @@ interface HistoryItem {
   isArchived: boolean;
   category: NewsCategory;
   thumbnailType: "ai" | "energy" | "mobile" | "business" | "robot" | "space" | "lifestyle";
+  summaryState?: ArticleSummaryState;
+  // 記事のタグ（整形済み）。タグでの絞り込みに使う。タグの無い記事は空配列。
+  tags: string[];
 }
 
 interface NavigationItem {
@@ -88,6 +113,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "AI・テクノロジー",
     thumbnailType: "ai",
+    tags: ["AI", "開発ツール"],
   },
   {
     id: "2",
@@ -102,6 +128,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "環境・エネルギー",
     thumbnailType: "energy",
+    tags: ["再エネ"],
   },
   {
     id: "3",
@@ -116,6 +143,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "モバイル",
     thumbnailType: "mobile",
+    tags: [],
   },
   {
     id: "4",
@@ -130,6 +158,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: true,
     category: "ビジネス",
     thumbnailType: "business",
+    tags: ["半導体"],
   },
   {
     id: "5",
@@ -144,6 +173,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "AI・テクノロジー",
     thumbnailType: "robot",
+    tags: ["AI", "生成AI"],
   },
   {
     id: "6",
@@ -158,6 +188,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: true,
     category: "宇宙",
     thumbnailType: "space",
+    tags: [],
   },
   {
     id: "7",
@@ -172,6 +203,7 @@ const mockHistoryItems: HistoryItem[] = [
     isArchived: false,
     category: "ライフスタイル",
     thumbnailType: "lifestyle",
+    tags: [],
   },
 ];
 
@@ -245,6 +277,8 @@ const mapTauriHistoryItemToUi = (
     isArchived: article.isArchived,
     category: article.genre || "未分類",
     thumbnailType: toThumbnailType(article.genre),
+    summaryState: article.summaryState,
+    tags: normalizeArticleTags(article.tags),
   };
 };
 
@@ -342,22 +376,25 @@ function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
 function FilterChipButton({
   chip,
   isActive,
+  disabled,
   onClick,
 }: {
   chip: FilterChip;
   isActive: boolean;
+  disabled: boolean;
   onClick: () => void;
 }) {
   const Icon = chip.icon;
   return (
     <button
-      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border ${
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border disabled:cursor-not-allowed disabled:opacity-50 ${
         isActive
           ? "bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)]"
           : "bg-white text-muted-foreground border-border hover:border-[var(--yuuko-green)]/50"
       }`}
       onClick={onClick}
       aria-pressed={isActive}
+      disabled={disabled}
     >
       {Icon && <Icon className="w-4 h-4" aria-hidden="true" />}
       <span>{chip.label}</span>
@@ -370,10 +407,14 @@ function HistoryItemCard({
   item,
   isSelected,
   onClick,
+  selectedTag,
+  onSelectTag,
 }: {
   item: HistoryItem;
   isSelected: boolean;
   onClick: () => void;
+  selectedTag: string | null;
+  onSelectTag: (tag: string | null) => void;
 }) {
   return (
     <Card
@@ -396,6 +437,12 @@ function HistoryItemCard({
             <span>{item.datetime}</span>
           </div>
           <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
+          <ArticleTagList
+            tags={item.tags}
+            selectedTag={selectedTag}
+            onSelectTag={onSelectTag}
+            className="mt-1.5"
+          />
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
           <div className="flex items-center gap-1.5">
@@ -414,11 +461,14 @@ function HistoryItemCard({
           </div>
           <div className="flex items-center gap-1.5">
             <Star
+              role="img"
+              aria-label={item.isFavorite ? "お気に入り登録済み" : "お気に入り未登録"}
               className={`w-4 h-4 ${
                 item.isFavorite ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground/40"
               }`}
             />
           </div>
+          <SummaryStateTag state={item.summaryState} />
           {item.isArchived && (
             <Badge className="bg-gray-200 text-gray-600 border-0 text-[10px] px-1.5 py-0">
               アーカイブ済み
@@ -439,28 +489,59 @@ export default function NewsHistoryScreen({
   onOpenArticle?: (articleId: string) => void;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
+  // タグでの絞り込み（null = 絞り込みなし）。読み込み済みの履歴に対して画面側で絞り込む
+  // （履歴は既読/お気に入り等の条件ごとに最大200件を一括で受け取り、ページングしないため。キーワード検索と同じ扱い）。
+  const [selectedTag, setSelectedTag] = React.useState<string | null>(null);
   const [activeFilter, setActiveFilter] =
     React.useState<ArticleHistoryFilter>("all");
   const [historyItems, setHistoryItems] = React.useState<HistoryItem[]>([]);
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  // 更新中のお気に入りの目標状態（true=登録 / false=解除 / null=更新なし）。
+  // 処理中に選択が変わっても「登録中/解除中」の表示が要求内容とずれないよう、選択中の記事からは導かない。
+  const [favoriteUpdatingTo, setFavoriteUpdatingTo] = React.useState<boolean | null>(null);
+  // state反映前の連打も止め、古い一覧応答が解除結果を上書きしないようにする。
+  const favoriteUpdateInFlightRef = React.useRef(false);
+  const historyRequestRef = React.useRef(0);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
   const [loadNoticeKind, setLoadNoticeKind] = React.useState<
-    "info" | "error" | "empty"
+    // favorite-error / restore-error は個別操作の失敗。一覧再読込の「再試行」では解決しないため再試行ボタンを出さない。
+    "info" | "error" | "empty" | "favorite-error" | "restore-error"
   >("info");
+  // アーカイブから取り出す確認の対象記事。確認中に選択が変わっても対象をずらさないよう固定で持つ。
+  // 閉じるアニメーション中にタイトルが空にならないよう、開閉は別の state で持ち、対象は次に開くまで残す。
+  const [restoreTarget, setRestoreTarget] = React.useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [isRestoreDialogOpen, setIsRestoreDialogOpen] = React.useState(false);
+  // 復元中に画面を離れた後で、記事詳細へ遷移したり state を更新したりしないためのフラグ。
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+  const [isRestoring, setIsRestoring] = React.useState(false);
+  // state反映前の連打でも復元を二重に走らせないためのガード。
+  const restoreInFlightRef = React.useRef(false);
 
   const visibleHistoryItems = React.useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
+    const taggedItems = selectedTag
+      ? historyItems.filter((item) => item.tags.includes(selectedTag))
+      : historyItems;
     if (!normalizedQuery) {
-      return historyItems;
+      return taggedItems;
     }
 
-    return historyItems.filter((item) =>
-      [item.title, item.source, item.description, item.category].some((value) =>
+    return taggedItems.filter((item) =>
+      [item.title, item.source, item.description, item.category, ...item.tags].some((value) =>
         value.toLowerCase().includes(normalizedQuery)
       )
     );
-  }, [historyItems, searchQuery]);
+  }, [historyItems, searchQuery, selectedTag]);
 
   const selectedItem =
     visibleHistoryItems.find((item) => item.id === selectedItemId) ??
@@ -468,6 +549,8 @@ export default function NewsHistoryScreen({
     null;
 
   const loadHistoryItems = React.useCallback(async () => {
+    if (favoriteUpdateInFlightRef.current) return;
+    const requestId = ++historyRequestRef.current;
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
@@ -477,6 +560,7 @@ export default function NewsHistoryScreen({
         filter: activeFilter,
         limit: 200,
       });
+      if (requestId !== historyRequestRef.current) return;
 
       if (!articles) {
         const fallbackItems = getFallbackHistoryItems(activeFilter);
@@ -507,6 +591,7 @@ export default function NewsHistoryScreen({
           : mappedItems[0]?.id ?? null
       );
     } catch (error) {
+      if (requestId !== historyRequestRef.current) return;
       setHistoryItems([]);
       setSelectedItemId(null);
       setLoadNotice(
@@ -515,12 +600,13 @@ export default function NewsHistoryScreen({
       setLoadNoticeKind("error");
       console.warn("Failed to load article history:", error);
     } finally {
-      setIsLoading(false);
+      if (requestId === historyRequestRef.current) setIsLoading(false);
     }
   }, [activeFilter]);
 
   React.useEffect(() => {
     void loadHistoryItems();
+    return () => { historyRequestRef.current += 1; };
   }, [loadHistoryItems]);
 
   React.useEffect(() => {
@@ -541,7 +627,14 @@ export default function NewsHistoryScreen({
   };
 
   const handleOpenSelectedArticle = () => {
-    if (!selectedItem) {
+    if (!selectedItem || restoreInFlightRef.current) {
+      return;
+    }
+
+    // アーカイブ済みの記事は本文がZIP内にあるため、確認してから取り出す（確認なしに復元しない）。
+    if (selectedItem.isArchived) {
+      setRestoreTarget({ id: selectedItem.id, title: selectedItem.title });
+      setIsRestoreDialogOpen(true);
       return;
     }
 
@@ -551,6 +644,99 @@ export default function NewsHistoryScreen({
     }
 
     onNavigate?.("news");
+  };
+
+  // 確認で「アーカイブから取り出して開く」を選んだときだけ、記事IDだけを渡して1記事を復元する。
+  // 復元できた（restored / already_available）同じ記事IDのときだけ記事詳細へ進み、
+  // 失敗時は履歴画面に留まって固定文言だけを出す（パスや生のエラーは画面へ出さない）。
+  // 記事詳細から戻ると履歴画面が再マウントされ一覧を読み直すため、アーカイブ済みバッジも更新される。
+  const handleConfirmRestore = async () => {
+    const target = restoreTarget;
+    setIsRestoreDialogOpen(false);
+    if (!target || restoreInFlightRef.current) {
+      return;
+    }
+
+    restoreInFlightRef.current = true;
+    setIsRestoring(true);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
+    try {
+      const result = await restoreArchivedArticle({ articleId: target.id });
+      // 画面を離れた後に完了した場合は、遷移も表示更新もしない。
+      if (!isMountedRef.current) {
+        return;
+      }
+      const isRestored =
+        result.articleId === target.id &&
+        (result.status === "restored" || result.status === "already_available");
+      if (!isRestored) {
+        throw new Error("unexpected restore result");
+      }
+
+      if (onOpenArticle) {
+        onOpenArticle(target.id);
+      } else {
+        onNavigate?.("news");
+      }
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      setLoadNotice(
+        "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+      );
+      setLoadNoticeKind("restore-error");
+      console.warn("Failed to restore archived article:", error);
+    } finally {
+      restoreInFlightRef.current = false;
+      if (isMountedRef.current) {
+        setIsRestoring(false);
+      }
+    }
+  };
+
+  // 詳細パネルのお気に入り登録/解除。Rust の更新結果を確認してから一覧・選択中の記事へ反映する
+  // （楽観更新はしない）。失敗時は状態を変えないため、表示は自動的に変更前のままになる。
+  const handleToggleFavorite = async () => {
+    if (!selectedItem || isLoading || favoriteUpdateInFlightRef.current) {
+      return;
+    }
+
+    const nextIsFavorite = !selectedItem.isFavorite;
+    favoriteUpdateInFlightRef.current = true;
+    historyRequestRef.current += 1;
+    setFavoriteUpdatingTo(nextIsFavorite);
+    setLoadNotice(null);
+    setLoadNoticeKind("info");
+    try {
+      const result = await updateArticleFavorite({
+        articleId: selectedItem.id,
+        isFavorite: nextIsFavorite,
+      });
+      setHistoryItems((items) =>
+        // 「お気に入り」フィルタ中に解除した記事は、条件に合わなくなるので一覧から外す（従来どおり）。
+        activeFilter === "favorite" && !result.isFavorite
+          ? items.filter((item) => item.id !== result.articleId)
+          : items.map((item) =>
+              item.id === result.articleId
+                ? { ...item, isFavorite: result.isFavorite }
+                : item
+            )
+      );
+    } catch (error) {
+      // 生のエラー文言は画面へ出さず、固定文言だけを案内する。
+      setLoadNotice(
+        nextIsFavorite
+          ? "お気に入りの登録に失敗しました。もう一度お試しください。"
+          : "お気に入りの解除に失敗しました。もう一度お試しください。"
+      );
+      setLoadNoticeKind("favorite-error");
+      console.warn("Failed to update article favorite:", error);
+    } finally {
+      favoriteUpdateInFlightRef.current = false;
+      setFavoriteUpdatingTo(null);
+    }
   };
 
   const getCategoryColor = (category: NewsCategory) => {
@@ -624,13 +810,8 @@ export default function NewsHistoryScreen({
 
           {/* Auto Start */}
           <div className="mt-4 space-y-2">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">自動起動：ON</span>
-              <span className="w-2 h-2 rounded-full bg-[var(--yuuko-green)]" aria-hidden="true" />
-            </div>
-            <Button variant="outline" size="sm" className="w-full text-xs">
-              常駐を終了する
-            </Button>
+            <AutostartStatus />
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 
@@ -638,7 +819,14 @@ export default function NewsHistoryScreen({
         <main className="flex-1 min-w-0 flex flex-col p-4 overflow-hidden">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
-            <span className="hover:text-[var(--yuuko-green)] cursor-pointer">ホーム</span>
+            {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
+            <button
+              type="button"
+              className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              onClick={() => handleNavigate("home")}
+            >
+              ホーム
+            </button>
             <span aria-hidden="true">&gt;</span>
             <span className="text-foreground">ニュース履歴</span>
           </div>
@@ -674,8 +862,11 @@ export default function NewsHistoryScreen({
                 key={chip.id}
                 chip={chip}
                 isActive={activeFilter === chip.id}
+                disabled={favoriteUpdatingTo !== null}
                 onClick={() => {
-                  if (isHistoryFilter(chip.id)) {
+                  if (!favoriteUpdateInFlightRef.current && chip.id !== activeFilter && isHistoryFilter(chip.id)) {
+                    historyRequestRef.current += 1;
+                    setIsLoading(true);
                     setActiveFilter(chip.id);
                   }
                 }}
@@ -683,12 +874,47 @@ export default function NewsHistoryScreen({
             ))}
           </div>
 
+          {/* タグでの絞り込み中の表示と解除。カードや詳細のタグを押すと絞り込み、ここでいつでも解除できる。 */}
+          {selectedTag && (
+            <div
+              className="flex items-center gap-2 mb-4 min-w-0 text-xs text-muted-foreground"
+              data-testid="history-tag-filter"
+            >
+              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <span role="status" className="min-w-0 flex items-center gap-1">
+                <span className="shrink-0">タグ</span>
+                <span className="max-w-[12rem] truncate font-semibold text-foreground" title={selectedTag}>
+                  #{selectedTag}
+                </span>
+                <span className="shrink-0">で絞り込み中</span>
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0 gap-1 px-2 text-[11px]"
+                onClick={() => setSelectedTag(null)}
+                aria-label="タグの絞り込みを解除"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+                解除
+              </Button>
+            </div>
+          )}
+
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
               <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
               <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span role={loadNoticeKind === "error" ? "alert" : "status"}>
+                <span
+                  role={
+                    loadNoticeKind === "error" ||
+                    loadNoticeKind === "favorite-error" ||
+                    loadNoticeKind === "restore-error"
+                      ? "alert"
+                      : "status"
+                  }
+                >
                   {loadNotice}
                 </span>
                 {loadNoticeKind === "error" && (
@@ -721,6 +947,8 @@ export default function NewsHistoryScreen({
                   item={item}
                   isSelected={selectedItem?.id === item.id}
                   onClick={() => setSelectedItemId(item.id)}
+                  selectedTag={selectedTag}
+                  onSelectTag={setSelectedTag}
                 />
               ))
             ) : loadNotice ? null : (
@@ -736,7 +964,8 @@ export default function NewsHistoryScreen({
         </main>
 
         {/* Right Sidebar */}
-        <aside className="w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+        <aside className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
           {/* Yuuko Speech Bubble */}
           <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
             <CardContent className="p-3">
@@ -813,6 +1042,13 @@ export default function NewsHistoryScreen({
                   <span>{selectedItem.datetime}</span>
                 </div>
 
+                <ArticleTagList
+                  tags={selectedItem.tags}
+                  selectedTag={selectedTag}
+                  onSelectTag={setSelectedTag}
+                  className="mb-2"
+                />
+
                 {/* Description */}
                 <p className="text-xs text-muted-foreground leading-relaxed mb-4">
                   {selectedItem.description}
@@ -825,17 +1061,29 @@ export default function NewsHistoryScreen({
                   <Button
                     className="w-full bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white gap-2"
                     onClick={handleOpenSelectedArticle}
+                    disabled={isRestoring}
                   >
                     <RotateCcw className="w-4 h-4" aria-hidden="true" />
-                    もう一度見る
+                    {isRestoring ? "取り出し中..." : "もう一度見る"}
                   </Button>
                   <Button
                     variant="outline"
                     className="w-full gap-2"
-                    onClick={() => console.log("お気に入り解除:", selectedItem.id)}
+                    onClick={() => void handleToggleFavorite()}
+                    disabled={isLoading || favoriteUpdatingTo !== null}
                   >
-                    <Star className="w-4 h-4" aria-hidden="true" />
-                    お気に入り解除
+                    <Star
+                      className={`w-4 h-4 ${selectedItem.isFavorite ? "fill-yellow-400 text-yellow-400" : ""}`}
+                      aria-hidden="true"
+                    />
+                    {/* 現在の状態に応じて「登録」/「解除」を切り替える（ラベル自体で操作が分かるため aria-pressed は使わない） */}
+                    {favoriteUpdatingTo !== null
+                      ? favoriteUpdatingTo
+                        ? "登録中..."
+                        : "解除中..."
+                      : selectedItem.isFavorite
+                        ? "お気に入り解除"
+                        : "お気に入り登録"}
                   </Button>
                   <Button
                     variant="outline"
@@ -882,6 +1130,32 @@ export default function NewsHistoryScreen({
           <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
         </div>
       </footer>
+
+      {/* アーカイブ済み記事を開く前の確認。「取り出して開く」を選んだときだけ復元する。 */}
+      <AlertDialog
+        open={isRestoreDialogOpen}
+        onOpenChange={setIsRestoreDialogOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>アーカイブから取り出して開く</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p className="break-all">
+                  「{restoreTarget?.title}」はアーカイブに保管されています。
+                </p>
+                <p>アーカイブから取り出して、記事詳細を開きますか？</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void handleConfirmRestore()}>
+              取り出して開く
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <style jsx>{`
         @keyframes float {

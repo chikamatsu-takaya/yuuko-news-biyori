@@ -1,0 +1,1434 @@
+//! 同梱ローカルLLM（llama.cpp の `llama-server`）の部品・起動・通信（判断台帳 D99〜D102）。
+//!
+//! この層は「1回の操作」だけを持つ（部品の照合・起動引数・子プロセスの起動・127.0.0.1 への1回の要求）。
+//! いつ起動し・いつ止めるか（遅延起動・しばらく使わなければ停止・終了時停止）は
+//! `services::local_llm_service` が持つ。
+//!
+//! セキュリティ方針:
+//! - 接続先は `url_guard::local_llm_url` が組み立てる `http://127.0.0.1:<起動時に選んだ番号>` だけ（D102）。
+//!   文字列のURLを受け取らない。プロキシを通さない（`no_proxy`）・リダイレクトに従わない。
+//! - 起動ごとの合言葉（`--api-key`）で、同じパソコンのほかのプログラムが番号を当てても使えないようにする。
+//!   合言葉・プロンプト・応答本文はログへ出さない。
+//! - `--offline`（モデル等を取りに行かない）・`--no-slots`（直前の処理内容を見せる口を閉じる）で起動する。
+//! - 応答本文はメモリへ全量展開する前に受信バイト上限を適用する。
+
+use std::io::Read;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use reqwest::blocking::Client;
+use reqwest::redirect::Policy;
+use serde::ser::{SerializeMap, SerializeStruct};
+use serde::{Serialize, Serializer};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use super::http_body::declared_length_exceeds;
+use super::url_guard::{local_llm_url, LocalLlmRoute, SpawnedLocalLlmPort};
+use crate::domain::summary::{
+    ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
+    FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+    SHORT_INPUT_FOCUS_POINTS_ITEMS, SHORT_INPUT_KEY_POINTS_ITEMS,
+};
+
+/// 同梱するモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
+/// 値を変えたら `scripts/local-llm/place-bundle.mjs` が読む値と開発環境構築手順書も一緒に直す。
+pub const MODEL_FILE: &str = "stario-qwen3.5-2b-q4_k_m.gguf";
+pub const MODEL_SIZE: u64 = 1_312_164_800;
+pub const MODEL_SHA256: &str = "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35";
+
+/// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。
+/// `ggml-cpu-*.dll` は CPU の種類ごとの部品で、llama-server が起動時に合うものを選んで読む。
+/// ベンチマーク・量子化・CLI 用の DLL（`llama-cli-impl` / `llama-bench-impl` / `llama-quantize-impl` 等）と
+/// `ggml-rpc.dll`（別のパソコンへ計算を投げる部品）は同梱しない。
+/// 値の持ち主はここだけ。`scripts/local-llm/*.mjs` はこの表を読んで写す・確かめる。
+pub const RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "llama-server.exe",
+        "9d7ec1f038329210f6be353a89752ea4a762f9defa80560d37102ccce7b09a06",
+    ),
+    (
+        "llama-server-impl.dll",
+        "bd42db709e21d4ded9e4f3daee893c7f154d9372a50aba4b5c7d83926a751925",
+    ),
+    (
+        "llama-common.dll",
+        "6bb2ae768b8277fa83beeb1f4f565ddd65bb3db7cfd977254ee0735264c3d2ed",
+    ),
+    (
+        "llama.dll",
+        "d6a740f91d704897b57881cdfc2a867fbf59c0a172e025d830200c4252c4f878",
+    ),
+    (
+        "mtmd.dll",
+        "18badf1db28cd42cb4f3ffbda677bbbaa17df1769b45a17668e7a58477f581fe",
+    ),
+    (
+        "ggml.dll",
+        "ace1d47daf81a21439dad784ca6803b88b2a32629ec5bb192a5ed266c8c51e8c",
+    ),
+    (
+        "ggml-base.dll",
+        "28a14ca75b4383616c44fbfabb4000260845891905be3e243f6d48249f8f495b",
+    ),
+    (
+        "libomp.dll",
+        "a12116ba72d1d6820407cf30be23da04ce79d6bb8a71a5ee71759c5a1faa6f1c",
+    ),
+    (
+        "ggml-cpu-alderlake.dll",
+        "632e8dd4f10e6e11359574359c5c7e9a37b35f939dd99b2b5ae28cd502cc2a66",
+    ),
+    (
+        "ggml-cpu-cannonlake.dll",
+        "31acdb332de779dff7d8f5aad85fd653dc61dddde7df68ef832fa348cec0df71",
+    ),
+    (
+        "ggml-cpu-cascadelake.dll",
+        "6505c85092ae537a83943740e25314bbaf05343a0fc52931c2eddce4e8dd3663",
+    ),
+    (
+        "ggml-cpu-cooperlake.dll",
+        "36c6d387799cd30c83f0b668887e5ac6603443836359204f712a11acda9484b1",
+    ),
+    (
+        "ggml-cpu-haswell.dll",
+        "faa5d18d89bf5eb93e2bebd7cb727a1539922154fb5bec73418f7005cbad26b8",
+    ),
+    (
+        "ggml-cpu-icelake.dll",
+        "b71c0376be9515ade0eacdd83ab8163a592a165022b8934a9c0ececa596f6e2e",
+    ),
+    (
+        "ggml-cpu-ivybridge.dll",
+        "a770877528efb8d7d045a6e063ce5147e4e027c0ea8bf5294f5cb4c0c757726e",
+    ),
+    (
+        "ggml-cpu-piledriver.dll",
+        "631f72b106a93910da17987e1d61b072e2314a82ef9ba789e2e867c554c6d364",
+    ),
+    (
+        "ggml-cpu-sandybridge.dll",
+        "186756518a0337a1a1a0d53cb81e6e90d3bf1397c1adaf24d609350a25131023",
+    ),
+    (
+        "ggml-cpu-sapphirerapids.dll",
+        "2e34a276583e14580bd6c0a9852c0d0e544d1172729f891f558edf8655f4f663",
+    ),
+    (
+        "ggml-cpu-skylakex.dll",
+        "c421dec11a1cf84a617411149a99ac47d3388137c5da984fe14efeb97f3b8174",
+    ),
+    (
+        "ggml-cpu-sse42.dll",
+        "fe2480ed438f7ea26e081d67b865b3ce20b801cfe69b31a8b34fff7ad7ccef59",
+    ),
+    (
+        "ggml-cpu-x64.dll",
+        "3e7d3405834404b2cc491dcc488f877d7ff48b62c6f96ce7d0a68279f8c284d6",
+    ),
+    (
+        "ggml-cpu-zen4.dll",
+        "860ae0816ea9ae896e919282d827a7f596cbc307271d908dc01a4e7113075417",
+    ),
+];
+
+/// llama-server と同じ `runtime/` に置く Visual C++ ランタイム（判断台帳 D112）と SHA-256。
+/// `RUNTIME_FILES` の部品は MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1 を読み込むため、
+/// VC++ 再頒布可能パッケージが入っていないパソコンでも起動できるよう、実行ファイルの隣に置く
+/// （Windows は実行ファイルのフォルダの DLL を先に探す）。dumpbin で確かめたところ、ほかの CRT
+/// （msvcp140_1 / msvcp140_2 / vcruntime140_threads / concrt140 等）はどの部品も読み込まない。
+/// `api-ms-win-crt-*`（UCRT）は Windows 10 以降に標準で入っているので同梱しない。
+/// 元は Visual Studio 2022 Build Tools の再頒布用フォルダ（`VC/Redist/MSVC/14.44.35112/x64/
+/// Microsoft.VC143.CRT`、ファイルの版 14.44.35211.0）。llama.cpp の配布物とは置き元が違うため表を分け、
+/// `scripts/local-llm/place-bundle.mjs` は `--vc-crt <フォルダ>` から写す。照合は `RUNTIME_FILES` と同じ扱い。
+pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "vcruntime140.dll",
+        "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+    ),
+    (
+        "vcruntime140_1.dll",
+        "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+    ),
+    (
+        "msvcp140.dll",
+        "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    ),
+];
+
+/// 同梱物の置き場（リソースフォルダからの相対）。
+pub const BUNDLE_DIR_NAME: &str = "local_llm";
+const RUNTIME_DIR_NAME: &str = "runtime";
+const MODELS_DIR_NAME: &str = "models";
+#[cfg(windows)]
+const SERVER_EXE: &str = "llama-server.exe";
+#[cfg(not(windows))]
+const SERVER_EXE: &str = "llama-server";
+
+/// 文脈の長さ（トークン）。入力は 3000 文字未満のため、参照アプリ（8192）より小さくしてメモリを抑える。
+pub const CONTEXT_TOKENS: u32 = 4096;
+/// 使うCPUスレッドの上限。常駐アプリなので、生成中もパソコンの操作が重くならないよう抑える。
+const MAX_THREADS: usize = 4;
+/// 合言葉の付いた要求1回の応答本文の受信上限（256 KiB。Gemini の成功本文と同じ）。
+const MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024;
+/// 繰り返し（止まらずに書き続ける回）を抑える値。`build_chat_body` を参照。
+const PRESENCE_PENALTY: f64 = 1.5;
+/// 起動待ちの間の `/health` 1回の待ち上限。
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 同梱物の場所（実行ファイル・モデル）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalLlmBundle {
+    pub exe: PathBuf,
+    pub model: PathBuf,
+}
+
+impl LocalLlmBundle {
+    /// `<dir>/runtime/llama-server(.exe)` と `<dir>/models/<MODEL_FILE>`。
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            exe: dir.join(RUNTIME_DIR_NAME).join(SERVER_EXE),
+            model: dir.join(MODELS_DIR_NAME).join(MODEL_FILE),
+        }
+    }
+}
+
+/// 同梱物のフォルダを決める。
+///
+/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm`）。
+/// tauri-build はビルドし直すたびに `src-tauri/resources/local_llm` を `target/<profile>/local_llm` へ写すため、
+/// 開発中もふつうはリソースフォルダ側に揃っている。ただし同梱物を置いた後にまだビルドし直していない
+/// （写されていない）ことがあるので、開発中（debug ビルド）だけは、リソースフォルダに実行ファイルが
+/// 無ければ `src-tauri/resources/local_llm` を直接使う。配布版（release）ではこの代わりを使わない。
+/// 将来「初回にダウンロード」へ替える場合も、この関数の返す場所を差し替えるだけで済む（D101）。
+pub fn resolve_bundle_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let bundled = resource_dir.map(|dir| dir.join(BUNDLE_DIR_NAME));
+    if cfg!(debug_assertions) {
+        let has_exe = bundled
+            .as_deref()
+            .is_some_and(|dir| LocalLlmBundle::in_dir(dir).exe.is_file());
+        if !has_exe {
+            return Some(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources")
+                    .join(BUNDLE_DIR_NAME),
+            );
+        }
+    }
+    bundled
+}
+
+/// モデルの照合の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCheck {
+    Ok,
+    Missing,
+    Broken,
+}
+
+/// 大きさを見る（毎回・安い）。
+pub fn check_model_size(path: &Path, expected: u64) -> ModelCheck {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == expected => ModelCheck::Ok,
+        Ok(meta) if meta.is_file() => ModelCheck::Broken,
+        _ => ModelCheck::Missing,
+    }
+}
+
+/// SHA-256 を見る（1.3GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
+pub fn check_model_sha256(path: &Path, expected_hex: &str) -> ModelCheck {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return ModelCheck::Missing;
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buf[..read]),
+            Err(_) => return ModelCheck::Broken,
+        }
+    }
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if hex.eq_ignore_ascii_case(expected_hex) {
+        ModelCheck::Ok
+    } else {
+        ModelCheck::Broken
+    }
+}
+
+/// 実行の部品が揃っていて、すべて SHA-256 が合うか（DLL を含めて約45MB。アプリの起動中に1度だけ）。
+/// 1つでも無ければ Missing、中身が違えば Broken。
+pub fn check_runtime_files(runtime_dir: &Path, files: &[(String, String)]) -> ModelCheck {
+    for (name, sha256) in files {
+        match check_model_sha256(&runtime_dir.join(name), sha256) {
+            ModelCheck::Ok => {}
+            other => return other,
+        }
+    }
+    ModelCheck::Ok
+}
+
+/// `RUNTIME_FILES` と `VC_RUNTIME_FILES` を照合用の表へ写す（テストで差し替えられるように所有型にする）。
+/// VC++ ランタイムも同じ表に入れ、無ければ Missing・中身が違えば Broken と同じ扱いにする。
+pub fn runtime_manifest() -> Vec<(String, String)> {
+    RUNTIME_FILES
+        .iter()
+        .chain(VC_RUNTIME_FILES)
+        .map(|(name, sha256)| (name.to_string(), sha256.to_string()))
+        .collect()
+}
+
+/// 生成に使うスレッド数。論理コア数の半分（1〜4）。常駐中のほかの作業を重くしないため。
+pub fn thread_count() -> usize {
+    let logical = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2);
+    (logical / 2).clamp(1, MAX_THREADS)
+}
+
+/// 起動の引数（純粋関数）。
+/// - `--host 127.0.0.1`: 外から届かない。`--api-key`: 合言葉の無い要求を断る。
+/// - `--no-slots`: 直前に処理した内容を見せる口を閉じる。`--offline`: ネットへ出ない。
+/// - `-np 1`: 同時処理を1本にし、文脈を分割しない（要求はサービス側でも1件ずつ扱う）。
+/// - `--cache-ram 0`: 要求をまたぐプロンプトのキャッシュ（既定は最大 8GB）を切る。既定のままだと
+///   要約などの1回ごとにメモリが 45〜64MB ずつ増え続ける（実測）。要求ごとに文面が違い再利用も
+///   起きていないため、切っても速さは変わらない。
+pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Vec<String> {
+    vec![
+        "-m".to_string(),
+        model.display().to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "-c".to_string(),
+        CONTEXT_TOKENS.to_string(),
+        "-np".to_string(),
+        "1".to_string(),
+        "-t".to_string(),
+        threads.to_string(),
+        "--api-key".to_string(),
+        api_key.to_string(),
+        "--no-slots".to_string(),
+        "--offline".to_string(),
+        "--cache-ram".to_string(),
+        "0".to_string(),
+    ]
+}
+
+/// 起動ごとの合言葉（32 桁の16進）。乱数クレートを足さず、起動ごとに種が変わる標準のハッシュと時刻から作る
+/// （相手は 127.0.0.1 だけで、外から当てられないことだけが要る）。
+pub fn new_api_key() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    (0..2u64)
+        .map(|index| {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u64(index);
+            hasher.write_u128(now);
+            hasher.write_u32(std::process::id());
+            format!("{:016x}", hasher.finish())
+        })
+        .collect()
+}
+
+/// 127.0.0.1 の空き番号を選ぶ。選んでから llama-server が使うまでにほかのプログラムに取られうる
+/// （そのときは起動失敗となり、次の要求で別の番号を選び直す）。
+pub fn pick_free_port() -> Option<SpawnedLocalLlmPort> {
+    let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+    let port = listener.local_addr().ok()?.port();
+    SpawnedLocalLlmPort::new(port)
+}
+
+/// 外部プログラムをコンソール窓を出さずに起動する `Command`（Windows の `CREATE_NO_WINDOW`）。
+/// GUI アプリから llama-server を素で起動すると黒い窓が開くため。
+pub fn no_window_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// コンソール窓を出さない（Windows のプロセス作成フラグ）。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 通常より低い優先度で動かす（Windows のプロセス作成フラグ）。
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// llama-server を起動するときのプロセス作成フラグ（純粋関数）。
+/// 窓を出さないことに加え、優先度を「通常以下」にする。自動要約の生成中も前面のアプリが先に CPU を
+/// 取れるようにし、常駐アプリとして操作感を損なわないため（処理時間はほぼ変わらない）。
+/// 優先度クラスはプロセス作成時の指定なので、起動後に別の API で設定し損ねて起動を止めることはない。
+#[cfg(windows)]
+pub(crate) fn server_creation_flags() -> u32 {
+    CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
+}
+
+/// 1回の起動に渡すもの。テストの偽 llama-server も同じ値を受け取る。
+#[derive(Debug, Clone)]
+pub struct LaunchSpec {
+    pub bundle: LocalLlmBundle,
+    pub port: SpawnedLocalLlmPort,
+    pub api_key: String,
+    pub threads: usize,
+}
+
+/// 起動した llama-server（またはテストの偽物）。
+pub trait ServerProcess: Send {
+    /// 止まったか（終了・異常終了）。
+    fn has_exited(&mut self) -> bool;
+    /// 止める（止まるまで待つ）。
+    fn stop(&mut self);
+}
+
+/// llama-server の起動方法。本番は子プロセス、テストは偽の HTTP サーバーへ差し替える。
+pub trait ServerLauncher: Send + Sync + std::fmt::Debug {
+    fn launch(&self, spec: &LaunchSpec) -> std::io::Result<Box<dyn ServerProcess>>;
+}
+
+/// 本番の起動方法（`std::process::Command`。tauri-plugin-shell は使わない）。
+#[derive(Debug, Default)]
+pub struct ChildProcessLauncher;
+
+impl ServerLauncher for ChildProcessLauncher {
+    fn launch(&self, spec: &LaunchSpec) -> std::io::Result<Box<dyn ServerProcess>> {
+        let mut command = no_window_command(&spec.bundle.exe);
+        // Windows 以外では優先度を変えない（このアプリの配布対象は Windows）。
+        // creation_flags は追加ではなく上書きなので、server_creation_flags には CREATE_NO_WINDOW も含めている。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(server_creation_flags());
+        }
+        command
+            .args(server_args(
+                &spec.bundle.model,
+                spec.port.get(),
+                &spec.api_key,
+                spec.threads,
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // 同梱の DLL を実行ファイルと同じフォルダから読ませる。
+        if let Some(parent) = spec.bundle.exe.parent() {
+            command.current_dir(parent);
+        }
+        let child = command.spawn()?;
+        // アプリが異常終了しても llama-server（約2GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
+        // 入れられなくても生成はできる（通常の終了経路では shutdown が止める）ため、記録だけ残して続ける。
+        if !exit_job::attach(&child) {
+            log::warn!("could not attach llama-server to the kill-on-exit job");
+        }
+        Ok(Box::new(child))
+    }
+}
+
+/// アプリのプロセスが終わったら（異常終了・強制終了を含む）子プロセスも終わらせる仕組み。
+///
+/// Windows: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を付けたジョブを1つ作り、ハンドルはアプリが終わるまで
+/// 閉じずに持つ。プロセスが終わると OS がハンドルを閉じ、ジョブ内の llama-server も終了する。
+/// Windows 以外: 何もしない（このアプリの配布対象は Windows）。
+mod exit_job {
+    use std::process::Child;
+
+    #[cfg(windows)]
+    pub(super) mod windows {
+        use std::os::windows::io::AsRawHandle;
+        use std::process::Child;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        /// ジョブのハンドル（スレッド間で持ち回せるよう数値で持つ）。
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) struct JobHandle(usize);
+
+        /// 「閉じたら中のプロセスを終わらせる」ジョブを作る。
+        pub(crate) fn create_kill_on_close_job() -> Option<JobHandle> {
+            // SAFETY: 引数は null（既定のセキュリティ・名前なし）。戻り値は検査してから使う。
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            // SAFETY: zeroed は C の構造体として有効な初期値。
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: job は有効なハンドル、info はこの呼び出しの間生きている。
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                // SAFETY: 自分で作ったハンドルを1度だけ閉じる。
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(JobHandle(job as usize))
+        }
+
+        pub(crate) fn assign(job: JobHandle, child: &Child) -> bool {
+            // SAFETY: job は create_kill_on_close_job で作った有効なハンドル、child のハンドルは
+            // Child が生きている間有効。
+            unsafe {
+                AssignProcessToJobObject(job.0 as HANDLE, child.as_raw_handle() as HANDLE) != 0
+            }
+        }
+
+        /// テストでだけ使う（本番のジョブはアプリが終わるまで閉じない）。
+        #[cfg(test)]
+        pub(crate) fn close(job: JobHandle) {
+            // SAFETY: 自分で作ったハンドルを1度だけ閉じる。
+            unsafe { CloseHandle(job.0 as HANDLE) };
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn attach(child: &Child) -> bool {
+        use std::sync::OnceLock;
+        static JOB: OnceLock<Option<windows::JobHandle>> = OnceLock::new();
+        match JOB.get_or_init(windows::create_kill_on_close_job) {
+            Some(job) => windows::assign(*job, child),
+            None => false,
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(super) fn attach(_child: &Child) -> bool {
+        true
+    }
+}
+
+impl ServerProcess for Child {
+    fn has_exited(&mut self) -> bool {
+        !matches!(self.try_wait(), Ok(None))
+    }
+
+    fn stop(&mut self) {
+        let _ = self.kill();
+        let _ = self.wait();
+    }
+}
+
+/// 生成要求1回の失敗の種類（生のエラー文・本文・URL は持たない）。
+///
+/// 呼び出し側（`local_llm_service`）が固定の分類（`label`）と数値（状態番号・バイト数）だけをログへ残し、
+/// 呼び出し元へは従来どおり `LocalAiFailure::Timeout` / `RequestFailed` の2つにまとめて返す。
+/// 評価で原因の分からない失敗が続いたため、どの段階で落ちたかを見分けられるように分けている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatError {
+    /// 接続できなかった（llama-server が止まった・番号が閉じている等）。
+    Connect,
+    /// 接続以外の送信の失敗（応答を返さずに切られた等）。
+    Send,
+    /// 送信・受信の待ち上限を超えた。
+    Timeout,
+    /// 2xx 以外の状態番号が返った。
+    Status(u16),
+    /// 応答本文が受信上限を超えた（値は宣言値、または読み取りを打ち切ったバイト数）。
+    BodyTooLarge(u64),
+    /// 応答本文の読み取りに失敗した。
+    BodyRead,
+    /// 応答本文が JSON として読めない（値は受信したバイト数）。
+    JsonParse(usize),
+    /// `choices` が無い・空。
+    EmptyChoices,
+    /// 本文（`message.content`）が無い・空（考える段を除くと空のときを含む）。
+    EmptyContent,
+    /// 出力の上限で途切れた（`finish_reason=length`）。
+    CutAtLength,
+}
+
+impl ChatError {
+    /// ログに出す固定の分類名（英小文字。可変の情報は含めない）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Send => "send",
+            Self::Timeout => "timeout",
+            Self::Status(_) => "status",
+            Self::BodyTooLarge(_) => "body_too_large",
+            Self::BodyRead => "body_read",
+            Self::JsonParse(_) => "json_parse",
+            Self::EmptyChoices => "empty_choices",
+            Self::EmptyContent => "empty_content",
+            Self::CutAtLength => "finish_length",
+        }
+    }
+
+    /// 送信の失敗（reqwest のエラー）を分類する。生のエラー文は URL を含みうるため取り込まない。
+    fn from_send(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else if error.is_connect() {
+            Self::Connect
+        } else {
+            Self::Send
+        }
+    }
+}
+
+/// 127.0.0.1 の llama-server へ送る HTTP クライアントを作る。
+/// プロキシを通さない（パソコンのプロキシ設定に従うと、プロンプトが社内プロキシへ出うる）。
+pub fn build_http_client(timeout: Duration) -> Option<Client> {
+    Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(timeout)
+        .build()
+        .ok()
+}
+
+/// `/health` が 2xx を返すか（起動待ちの確認）。
+pub fn health_ok(client: &Client, port: SpawnedLocalLlmPort, api_key: &str) -> bool {
+    client
+        .get(local_llm_url(port, LocalLlmRoute::Health))
+        .bearer_auth(api_key)
+        .timeout(HEALTH_REQUEST_TIMEOUT)
+        .send()
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+/// 生成要求の本文（OpenAI 互換 chat completions）。
+/// 考える段は切り（`enable_thinking:false`）、ゆらぎを抑え（0.2）、出力の上限を付ける。
+/// `presence_penalty` は Qwen 公式が量子化モデルの繰り返し対策として勧める値（1.5）。
+/// 付けないと再説明（yuuko_explanation_v1）が止まらずに上限まで書き続けた（2026-10-09 の実測で 4 回中 3 回。
+/// 付けると 4 回中 0 回）。
+///
+/// `json!` ではなく構造体にしているのは、キーの順番を固定するため。`serde_json::Value` の object は
+/// （`preserve_order` 機能なしでは）キーを辞書順へ並べ替える。llama-server は JSON スキーマの
+/// `properties` の順に出力の文法を組むので、並べ替わると `detail` を先に書かせることになり、
+/// 小さいモデルの出力が崩れやすい（参照アプリの知見）。構造体のフィールドは宣言順に書き出される。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatBody<'a> {
+    messages: [ChatMessage<'a>; 1],
+    chat_template_kwargs: ChatTemplateKwargs,
+    temperature: f64,
+    presence_penalty: f64,
+    max_tokens: u32,
+    stream: bool,
+    /// 出力の形を JSON スキーマで縛るとき（用語解説）だけ付ける。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
+}
+
+/// `response_format: {"type":"json_schema","json_schema":{"name":..,"schema":..}}`。
+/// llama-server はこのスキーマから文法を作って出力を縛るため、前置きの文章やコードフェンスは出せなくなる。
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    json_schema: NamedJsonSchema,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NamedJsonSchema {
+    name: &'static str,
+    schema: ObjectSchema,
+}
+
+/// object の1フィールドの型。
+#[derive(Debug, Clone, Copy)]
+enum FieldSchema {
+    /// 文字列。
+    String,
+    /// 文字列の配列（件数の下限・上限と、1件あたりの文字数上限つき）。
+    StringList {
+        min_items: usize,
+        max_items: usize,
+        max_length: usize,
+    },
+}
+
+/// 「指定したフィールドだけを、この順に、全部必須で持つ object」の JSON スキーマ。
+/// `properties` は手で順番どおりに書き出す（map 型を通すと順番が保証されないため）。
+#[derive(Debug, Clone)]
+struct ObjectSchema {
+    fields: &'static [(&'static str, FieldSchema)],
+}
+
+impl Serialize for ObjectSchema {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Properties(&'static [(&'static str, FieldSchema)]);
+        impl Serialize for Properties {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut map = serializer.serialize_map(Some(self.0.len()))?;
+                for (name, field) in self.0 {
+                    match *field {
+                        FieldSchema::String => {
+                            map.serialize_entry(name, &StringProperty { kind: "string" })?
+                        }
+                        FieldSchema::StringList {
+                            min_items,
+                            max_items,
+                            max_length,
+                        } => map.serialize_entry(
+                            name,
+                            &StringListProperty {
+                                kind: "array",
+                                items: BoundedStringProperty {
+                                    kind: "string",
+                                    min_length: 1,
+                                    max_length,
+                                },
+                                min_items,
+                                max_items,
+                            },
+                        )?,
+                    }
+                }
+                map.end()
+            }
+        }
+        struct Required(&'static [(&'static str, FieldSchema)]);
+        impl Serialize for Required {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_seq(self.0.iter().map(|(name, _)| name))
+            }
+        }
+        let mut schema = serializer.serialize_struct("ObjectSchema", 4)?;
+        schema.serialize_field("type", "object")?;
+        schema.serialize_field("properties", &Properties(self.fields))?;
+        schema.serialize_field("required", &Required(self.fields))?;
+        schema.serialize_field("additionalProperties", &false)?;
+        schema.end()
+    }
+}
+
+#[derive(Serialize)]
+struct StringProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// 文字数の下限・上限つきの文字列（配列の要素に使う）。
+#[derive(Serialize)]
+struct BoundedStringProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "minLength")]
+    min_length: usize,
+    #[serde(rename = "maxLength")]
+    max_length: usize,
+}
+
+#[derive(Serialize)]
+struct StringListProperty {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    items: BoundedStringProperty,
+    #[serde(rename = "minItems")]
+    min_items: usize,
+    #[serde(rename = "maxItems")]
+    max_items: usize,
+}
+
+/// 用語解説（`term_explanation_v1`）の出力スキーマ: `{"short": string, "detail": string}`。
+/// 順番は short → detail（プロンプトの例と同じ）。検証（大きさ・無害化・文字数）は従来どおり辞書側で行う。
+pub fn term_explanation_response_format() -> ResponseFormat {
+    ResponseFormat {
+        kind: "json_schema",
+        json_schema: NamedJsonSchema {
+            name: "term_explanation",
+            schema: ObjectSchema {
+                fields: &[
+                    ("short", FieldSchema::String),
+                    ("detail", FieldSchema::String),
+                ],
+            },
+        },
+    }
+}
+
+/// 要点・注目ポイント・タグ（`article_points_v2`・判断台帳 D18 / D11）の出力スキーマ:
+/// `{"key_points": [string; 2..=4], "focus_points": [string; 1..=3], "tags": [string; 3..=5]}`
+/// （要点・注目ポイントの各要素は 1〜100 文字、タグは 1〜20 文字）。
+/// 順番は key_points → focus_points → tags（プロンプトの例と同じ。何が起きたかを先に書かせる）。
+/// tags も required にして、ローカルLLMには必ず書かせる（任意にすると小さいモデルは省きやすい）。
+/// 件数・文字数は文法でも縛るが、保存前の検証（件数・文字数・文字種・タグの区切り文字や重複）は
+/// summary_service 側で必ず行う。タグだけが検証に落ちた場合は、タグだけを捨てて要点・要約は保存する。
+pub fn article_points_response_format() -> ResponseFormat {
+    article_points_format(ARTICLE_POINTS_FIELDS)
+}
+
+/// 本文抜粋の短い記事（`domain::summary::is_short_article_points_input`）の要点・注目ポイント・タグの出力スキーマ:
+/// 要点ちょうど 2 件・注目ポイントちょうど 1 件（タグと文字数は通常と同じ）。
+/// 材料が 1〜2 文しかないのに件数を多く書かせると、足りない分を作る（2026-10-13 の評価 v2）ため、文法で件数を縛る。
+/// 件数は保存前の検証の範囲（要点 2〜4・注目ポイント 1〜3）の内側なので、出力の契約（prompt_id）は変わらない。
+pub fn article_points_short_input_response_format() -> ResponseFormat {
+    article_points_format(ARTICLE_POINTS_SHORT_INPUT_FIELDS)
+}
+
+fn article_points_format(fields: &'static [(&'static str, FieldSchema)]) -> ResponseFormat {
+    ResponseFormat {
+        kind: "json_schema",
+        json_schema: NamedJsonSchema {
+            name: "article_points",
+            schema: ObjectSchema { fields },
+        },
+    }
+}
+
+/// 通常の要点・注目ポイント・タグのフィールド（件数は保存前の検証と同じ範囲）。
+const ARTICLE_POINTS_FIELDS: &[(&str, FieldSchema)] = &[
+    (
+        "key_points",
+        FieldSchema::StringList {
+            min_items: KEY_POINTS_MIN_ITEMS,
+            max_items: KEY_POINTS_MAX_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    (
+        "focus_points",
+        FieldSchema::StringList {
+            min_items: FOCUS_POINTS_MIN_ITEMS,
+            max_items: FOCUS_POINTS_MAX_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    ARTICLE_TAGS_FIELD,
+];
+
+/// 短い入力の要点・注目ポイント・タグのフィールド（要点・注目ポイントの件数だけを固定する）。
+const ARTICLE_POINTS_SHORT_INPUT_FIELDS: &[(&str, FieldSchema)] = &[
+    (
+        "key_points",
+        FieldSchema::StringList {
+            min_items: SHORT_INPUT_KEY_POINTS_ITEMS,
+            max_items: SHORT_INPUT_KEY_POINTS_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    (
+        "focus_points",
+        FieldSchema::StringList {
+            min_items: SHORT_INPUT_FOCUS_POINTS_ITEMS,
+            max_items: SHORT_INPUT_FOCUS_POINTS_ITEMS,
+            max_length: POINT_ITEM_MAX_CHARS,
+        },
+    ),
+    ARTICLE_TAGS_FIELD,
+];
+
+const ARTICLE_TAGS_FIELD: (&str, FieldSchema) = (
+    "tags",
+    FieldSchema::StringList {
+        min_items: ARTICLE_TAGS_MIN_ITEMS,
+        max_items: ARTICLE_TAGS_MAX_ITEMS,
+        max_length: ARTICLE_TAG_MAX_CHARS,
+    },
+);
+
+pub fn build_chat_body(
+    prompt: &str,
+    max_tokens: u32,
+    response_format: Option<ResponseFormat>,
+) -> ChatBody<'_> {
+    ChatBody {
+        messages: [ChatMessage {
+            role: "user",
+            content: prompt,
+        }],
+        chat_template_kwargs: ChatTemplateKwargs {
+            enable_thinking: false,
+        },
+        temperature: 0.2,
+        presence_penalty: PRESENCE_PENALTY,
+        max_tokens,
+        stream: false,
+        response_format,
+    }
+}
+
+/// 生成要求を1回送り、本文を返す。上限で途切れた出力（`finish_reason=length`）は返さない。
+/// 失敗は段階ごとの `ChatError` で返す（ログは呼び出し側が分類と数値だけで残す）。
+pub fn chat(
+    client: &Client,
+    port: SpawnedLocalLlmPort,
+    api_key: &str,
+    body: &ChatBody<'_>,
+) -> Result<String, ChatError> {
+    let response = client
+        .post(local_llm_url(port, LocalLlmRoute::ChatCompletions))
+        .bearer_auth(api_key)
+        .json(body)
+        .send()
+        .map_err(|error| ChatError::from_send(&error))?;
+    if !response.status().is_success() {
+        return Err(ChatError::Status(response.status().as_u16()));
+    }
+    let declared = response.content_length();
+    if declared_length_exceeds(declared, MAX_RESPONSE_BODY_BYTES) {
+        return Err(ChatError::BodyTooLarge(declared.unwrap_or_default()));
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_RESPONSE_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            // 読み取り中のタイムアウトは io::Error として届く。
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                ChatError::Timeout
+            } else {
+                ChatError::BodyRead
+            }
+        })?;
+    if bytes.len() > MAX_RESPONSE_BODY_BYTES {
+        return Err(ChatError::BodyTooLarge(bytes.len() as u64));
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| ChatError::JsonParse(bytes.len()))?;
+    extract_content(&value)
+}
+
+/// 応答から本文を取り出す（純粋関数）。途切れた出力・空の出力は、それぞれの分類の失敗にする。
+/// 考える段の印（`<think>…</think>`）が先頭に残っていたら取り除く（HTML として検証に落ちないように）。
+pub fn extract_content(value: &Value) -> Result<String, ChatError> {
+    let choice = value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .ok_or(ChatError::EmptyChoices)?;
+    if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(ChatError::CutAtLength);
+    }
+    let content = choice
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .ok_or(ChatError::EmptyContent)?;
+    let content = strip_leading_think_block(content).trim();
+    if content.is_empty() {
+        return Err(ChatError::EmptyContent);
+    }
+    Ok(content.to_string())
+}
+
+fn strip_leading_think_block(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        if let Some(end) = rest.find("</think>") {
+            return &rest[end + "</think>".len()..];
+        }
+    }
+    content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+
+    fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("yuuko-llm-rt-{}-{name}", std::process::id()));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn bundle_paths_point_to_runtime_and_models() {
+        let bundle = LocalLlmBundle::in_dir(Path::new("res/local_llm"));
+        assert!(bundle.exe.ends_with(Path::new("runtime").join(SERVER_EXE)));
+        assert!(bundle.model.ends_with(Path::new("models").join(MODEL_FILE)));
+    }
+
+    #[test]
+    fn resolve_bundle_dir_uses_resource_dir_when_runtime_exists() {
+        let root = std::env::temp_dir().join(format!("yuuko-llm-res-{}", std::process::id()));
+        let bundle = LocalLlmBundle::in_dir(&root.join(BUNDLE_DIR_NAME));
+        std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
+        std::fs::write(&bundle.exe, b"exe").unwrap();
+        assert_eq!(
+            resolve_bundle_dir(Some(root.clone())),
+            Some(root.join(BUNDLE_DIR_NAME))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn size_check_distinguishes_missing_and_broken() {
+        let path = temp_file("size", b"abc");
+        assert_eq!(check_model_size(&path, 3), ModelCheck::Ok);
+        assert_eq!(check_model_size(&path, 4), ModelCheck::Broken);
+        assert_eq!(
+            check_model_size(&path.with_extension("none"), 3),
+            ModelCheck::Missing
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sha256_check_matches_known_value() {
+        // "abc" の SHA-256（FIPS 180-2 の例）。
+        let path = temp_file("sha", b"abc");
+        assert_eq!(
+            check_model_sha256(
+                &path,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            ),
+            ModelCheck::Ok
+        );
+        assert_eq!(
+            check_model_sha256(&path, &"0".repeat(64)),
+            ModelCheck::Broken
+        );
+        assert_eq!(
+            check_model_sha256(&path.with_extension("none"), &"0".repeat(64)),
+            ModelCheck::Missing
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn server_args_bind_loopback_and_turn_on_the_guards() {
+        let args = server_args(Path::new("m.gguf"), 1234, "key", 3);
+        let value_of = |flag: &str| {
+            let index = args.iter().position(|arg| arg == flag).unwrap();
+            args[index + 1].clone()
+        };
+        assert_eq!(value_of("--host"), "127.0.0.1");
+        assert_eq!(value_of("--port"), "1234");
+        assert_eq!(value_of("--api-key"), "key");
+        assert_eq!(value_of("-c"), CONTEXT_TOKENS.to_string());
+        assert_eq!(value_of("-t"), "3");
+        assert_eq!(value_of("-np"), "1");
+        assert!(args.iter().any(|arg| arg == "--no-slots"));
+        assert!(args.iter().any(|arg| arg == "--offline"));
+        assert_eq!(value_of("--cache-ram"), "0");
+        assert!(!args.iter().any(|arg| arg == "--mmproj"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn server_runs_below_normal_priority_without_a_window() {
+        let flags = server_creation_flags();
+        assert_eq!(
+            flags & BELOW_NORMAL_PRIORITY_CLASS,
+            BELOW_NORMAL_PRIORITY_CLASS
+        );
+        assert_eq!(flags & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
+    }
+
+    #[test]
+    fn thread_count_is_between_one_and_four() {
+        let threads = thread_count();
+        assert!((1..=MAX_THREADS).contains(&threads));
+    }
+
+    #[test]
+    fn api_key_is_long_and_changes() {
+        let key = new_api_key();
+        assert_eq!(key.len(), 32);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(key, new_api_key());
+    }
+
+    #[test]
+    fn chat_body_turns_off_thinking_and_caps_output() {
+        let body = serde_json::to_value(build_chat_body("prompt", 1024, None)).unwrap();
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "prompt");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["presence_penalty"], 1.5);
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn chat_body_without_schema_has_no_response_format() {
+        let body = serde_json::to_value(build_chat_body("prompt", 1024, None)).unwrap();
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn term_explanation_schema_keeps_key_order_and_forbids_extra_keys() {
+        let body = build_chat_body("prompt", 512, Some(term_explanation_response_format()));
+        let text = serde_json::to_string(&body).unwrap();
+        // キーの順番まで含めて固定する（辞書順に並べ替わると detail が先になる）。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"term_explanation","schema":{"type":"object","properties":{"short":{"type":"string"},"detail":{"type":"string"}},"required":["short","detail"],"additionalProperties":false}}}"#
+        ));
+        // 本文の各キーも宣言順に出る。
+        let order = [
+            "messages",
+            "chat_template_kwargs",
+            "temperature",
+            "presence_penalty",
+            "max_tokens",
+            "stream",
+            "response_format",
+        ]
+        .map(|key| text.find(&format!("\"{key}\"")).expect(key));
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["max_tokens"], 512);
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(value["temperature"], 0.2);
+    }
+
+    #[test]
+    fn article_points_schema_bounds_counts_and_lengths_in_key_order() {
+        let body = build_chat_body("prompt", 1024, Some(article_points_response_format()));
+        let text = serde_json::to_string(&body).unwrap();
+        // 要点 → 注目ポイント → タグの順に、件数（2〜4 / 1〜3 / 3〜5）と1件の文字数（1〜100 / 1〜20）を縛る。
+        // タグも required（ローカルLLMに必ず書かせる）。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":4},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":3},"tags":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20},"minItems":3,"maxItems":5}},"required":["key_points","focus_points","tags"],"additionalProperties":false}}}"#
+        ), "{text}");
+    }
+
+    #[test]
+    fn short_input_article_points_schema_fixes_the_point_counts() {
+        let body = build_chat_body(
+            "prompt",
+            1024,
+            Some(article_points_short_input_response_format()),
+        );
+        let text = serde_json::to_string(&body).unwrap();
+        // 短い入力では要点ちょうど2件・注目ポイントちょうど1件（保存前の検証の範囲 2〜4 / 1〜3 の内側）。
+        // タグ・文字数・順番は通常と同じ。
+        assert!(text.contains(
+            r#""response_format":{"type":"json_schema","json_schema":{"name":"article_points","schema":{"type":"object","properties":{"key_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":2,"maxItems":2},"focus_points":{"type":"array","items":{"type":"string","minLength":1,"maxLength":100},"minItems":1,"maxItems":1},"tags":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20},"minItems":3,"maxItems":5}},"required":["key_points","focus_points","tags"],"additionalProperties":false}}}"#
+        ), "{text}");
+    }
+
+    #[test]
+    fn extract_content_reads_first_choice_and_rejects_cut_or_empty_output() {
+        let ok =
+            json!({"choices": [{"message": {"content": "  要約だよ  "}, "finish_reason": "stop"}]});
+        assert_eq!(extract_content(&ok).as_deref(), Ok("要約だよ"));
+        let cut = json!({"choices": [{"message": {"content": "途中"}, "finish_reason": "length"}]});
+        assert_eq!(extract_content(&cut), Err(ChatError::CutAtLength));
+        let empty = json!({"choices": [{"message": {"content": "  "}}]});
+        assert_eq!(extract_content(&empty), Err(ChatError::EmptyContent));
+        let no_content = json!({"choices": [{"message": {"role": "assistant"}}]});
+        assert_eq!(extract_content(&no_content), Err(ChatError::EmptyContent));
+        let think_only = json!({"choices": [{"message": {"content": "<think>考え中</think>  "}}]});
+        assert_eq!(extract_content(&think_only), Err(ChatError::EmptyContent));
+        assert_eq!(
+            extract_content(&json!({"choices": []})),
+            Err(ChatError::EmptyChoices)
+        );
+        assert_eq!(extract_content(&json!({})), Err(ChatError::EmptyChoices));
+    }
+
+    #[test]
+    fn extract_content_strips_a_leading_think_block() {
+        let value =
+            json!({"choices": [{"message": {"content": "<think>\n\n</think>\n\n本文だよ"}}]});
+        assert_eq!(extract_content(&value).as_deref(), Ok("本文だよ"));
+    }
+
+    #[test]
+    fn chat_error_labels_are_fixed_and_distinct() {
+        let all = [
+            ChatError::Connect,
+            ChatError::Send,
+            ChatError::Timeout,
+            ChatError::Status(500),
+            ChatError::BodyTooLarge(1),
+            ChatError::BodyRead,
+            ChatError::JsonParse(1),
+            ChatError::EmptyChoices,
+            ChatError::EmptyContent,
+            ChatError::CutAtLength,
+        ];
+        let labels: Vec<&str> = all.iter().map(|error| error.label()).collect();
+        for (index, label) in labels.iter().enumerate() {
+            assert!(!labels[..index].contains(label), "{label}");
+            assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        }
+        // 状態番号・大きさは分類名へ混ぜない（ログでは別の数値として出す）。
+        assert_eq!(
+            ChatError::Status(503).label(),
+            ChatError::Status(400).label()
+        );
+    }
+
+    // --- chat() の失敗の分類（127.0.0.1 の偽 HTTP サーバー）---
+
+    /// 1回だけ接続を受け、要求を読み切ってから `raw` をそのまま返す（`None` なら何も返さずに切る）。
+    fn one_shot_server(raw: Option<Vec<u8>>, delay: Duration) -> SpawnedLocalLlmPort {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = SpawnedLocalLlmPort::new(listener.local_addr().unwrap().port()).unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request(&mut stream);
+            std::thread::sleep(delay);
+            if let Some(raw) = raw {
+                let _ = stream.write_all(&raw);
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    /// ヘッダーと Content-Length 分の本文を読む（応答を返す前に要求を受け取り切るため）。
+    fn read_request(stream: &mut std::net::TcpStream) {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => return,
+            }
+        }
+        let length = String::from_utf8_lossy(&head)
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        let _ = stream.read_exact(&mut body);
+    }
+
+    fn http_response(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn chat_against(port: SpawnedLocalLlmPort, timeout: Duration) -> Result<String, ChatError> {
+        let client = build_http_client(timeout).unwrap();
+        chat(&client, port, "key", &build_chat_body("p", 8, None))
+    }
+
+    fn chat_once(raw: Option<Vec<u8>>) -> Result<String, ChatError> {
+        chat_against(one_shot_server(raw, Duration::ZERO), Duration::from_secs(5))
+    }
+
+    #[test]
+    fn chat_returns_the_content_on_success() {
+        let body = r#"{"choices":[{"message":{"content":"できたよ"},"finish_reason":"stop"}]}"#;
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", body))).as_deref(),
+            Ok("できたよ")
+        );
+    }
+
+    #[test]
+    fn chat_classifies_connect_failures() {
+        // 空き番号を選んで閉じる＝誰も待っていない番号へ送る。
+        let port = pick_free_port().unwrap();
+        assert_eq!(
+            chat_against(port, Duration::from_secs(5)),
+            Err(ChatError::Connect)
+        );
+    }
+
+    #[test]
+    fn chat_classifies_a_dropped_connection_as_send() {
+        // 要求を受け取ってから何も返さずに切る。
+        assert_eq!(chat_once(None), Err(ChatError::Send));
+    }
+
+    #[test]
+    fn chat_classifies_timeouts() {
+        let port = one_shot_server(None, Duration::from_millis(1500));
+        assert_eq!(
+            chat_against(port, Duration::from_millis(200)),
+            Err(ChatError::Timeout)
+        );
+    }
+
+    #[test]
+    fn chat_classifies_non_success_status_with_its_number() {
+        assert_eq!(
+            chat_once(Some(http_response("503 Service Unavailable", "{}"))),
+            Err(ChatError::Status(503))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_oversized_bodies() {
+        let declared = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_RESPONSE_BODY_BYTES + 10
+        );
+        assert_eq!(
+            chat_once(Some(declared.into_bytes())),
+            Err(ChatError::BodyTooLarge(MAX_RESPONSE_BODY_BYTES as u64 + 10))
+        );
+        // 宣言なし（接続を閉じて終わる）で上限を超える。読み取りは上限＋1 バイトで打ち切る。
+        let mut undeclared = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        undeclared.extend(std::iter::repeat_n(b'a', MAX_RESPONSE_BODY_BYTES + 10));
+        assert_eq!(
+            chat_once(Some(undeclared)),
+            Err(ChatError::BodyTooLarge(MAX_RESPONSE_BODY_BYTES as u64 + 1))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_a_truncated_body_as_body_read() {
+        // 100 バイトと宣言して 4 バイトで切る。
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"ch".to_vec();
+        assert_eq!(chat_once(Some(raw)), Err(ChatError::BodyRead));
+    }
+
+    #[test]
+    fn chat_classifies_invalid_json_with_its_size() {
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", "not json"))),
+            Err(ChatError::JsonParse(8))
+        );
+    }
+
+    #[test]
+    fn chat_classifies_empty_or_cut_output() {
+        assert_eq!(
+            chat_once(Some(http_response("200 OK", r#"{"choices":[]}"#))),
+            Err(ChatError::EmptyChoices)
+        );
+        assert_eq!(
+            chat_once(Some(http_response(
+                "200 OK",
+                r#"{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}"#
+            ))),
+            Err(ChatError::EmptyContent)
+        );
+        assert_eq!(
+            chat_once(Some(http_response(
+                "200 OK",
+                r#"{"choices":[{"message":{"content":"途中"},"finish_reason":"length"}]}"#
+            ))),
+            Err(ChatError::CutAtLength)
+        );
+    }
+
+    #[test]
+    fn runtime_manifest_contains_the_server_and_excludes_tools() {
+        let names: Vec<&str> = RUNTIME_FILES.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"llama-server.exe"));
+        assert!(names.contains(&"llama-server-impl.dll"));
+        for excluded in [
+            "llama-cli-impl.dll",
+            "llama-bench-impl.dll",
+            "llama-quantize-impl.dll",
+            "ggml-rpc.dll",
+        ] {
+            assert!(!names.contains(&excluded), "{excluded}");
+        }
+        assert!(RUNTIME_FILES
+            .iter()
+            .chain(VC_RUNTIME_FILES)
+            .all(|(_, sha)| sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    /// VC++ ランタイム（D112）は llama-server が読み込む3つだけを、照合の表に含める。
+    #[test]
+    fn runtime_manifest_includes_the_vc_runtime() {
+        let vc: Vec<&str> = VC_RUNTIME_FILES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            vc,
+            ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
+        );
+        let manifest = runtime_manifest();
+        assert_eq!(manifest.len(), RUNTIME_FILES.len() + VC_RUNTIME_FILES.len());
+        for name in vc {
+            assert!(manifest.iter().any(|(n, _)| n == name), "{name}");
+            assert!(!RUNTIME_FILES.iter().any(|(n, _)| *n == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn runtime_check_reports_missing_and_tampered_files() {
+        let dir = std::env::temp_dir().join(format!("yuuko-llm-rtfiles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.dll"), b"abc").unwrap();
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string();
+        let ok = vec![("a.dll".to_string(), abc.clone())];
+        assert_eq!(check_runtime_files(&dir, &ok), ModelCheck::Ok);
+        let missing = vec![
+            ("a.dll".to_string(), abc),
+            ("b.dll".to_string(), "0".repeat(64)),
+        ];
+        assert_eq!(check_runtime_files(&dir, &missing), ModelCheck::Missing);
+        let tampered = vec![("a.dll".to_string(), "0".repeat(64))];
+        assert_eq!(check_runtime_files(&dir, &tampered), ModelCheck::Broken);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ジョブを閉じる（＝アプリのプロセスが終わったときと同じ）と、中の子プロセスが終わる。
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_exit_job_kills_the_child_process() {
+        use super::exit_job::windows::{assign, close, create_kill_on_close_job};
+        let job = create_kill_on_close_job().expect("job");
+        let mut child = no_window_command(Path::new("ping"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ping");
+        assert!(assign(job, &child));
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
+        close(job);
+        let started = std::time::Instant::now();
+        let mut exited = false;
+        while started.elapsed() < Duration::from_secs(5) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !exited {
+            let _ = child.kill();
+        }
+        assert!(exited, "child must be killed when the job closes");
+    }
+
+    #[test]
+    fn pick_free_port_returns_a_non_zero_port() {
+        let port = pick_free_port().expect("loopback port");
+        assert_ne!(port.get(), 0);
+    }
+}

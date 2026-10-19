@@ -15,12 +15,21 @@ import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
  *
  * 通知候補生成（request_yuuko_notification）・active解消（dismiss/ignore）は Page 側が担当。
  * OS通知・Tauri notification plugin は使用しない（アプリ内 React 表示のみ）。
+ *
+ * variant="reward" は報酬通知（ランクアップダイアログで確認しなかった報酬のお知らせ）。
+ * 2段階クリックは無く、吹き出し＋「OK」だけを出す。OK は onOpen（Page 側で handle_yuuko_clicked →
+ * Rust が確認済みにする）、閉じる/Esc はニュースと同じ onClose（未確認のままクールタイム）を使う。
+ * 報酬通知は自動退場しない（§9.4。OK か閉じるまで表示を続ける）。
  */
 
 // 自動退場（無操作）までの時間。設計書 §9.4：吹き出し20秒 / 軽量プレビュー30秒。
 // E2E では Playwright clock で短縮検証できるよう定数化している。
 const BALLOON_AUTO_DISMISS_MS = 20000;
 const PREVIEW_AUTO_DISMISS_MS = 30000;
+
+// 退場演出（globals.css の .yuuko-notification-leave＝0.3s）が終わらなかったときの保険。
+// 演出が止まっている環境でも退場状態のまま残らないよう、少し長めに待ってから外す。
+const LEAVE_FALLBACK_MS = 450;
 
 // プレビューに要約が無いときの、ゆうこの一言（§10.6 要約なし→タイトル＋ゆうこの一言）。
 const DEFAULT_TEASER = "気になったら「詳しく見る」でいっしょに読もう？";
@@ -51,6 +60,20 @@ type YuukoInAppNotificationProps = {
   onClose: () => void;
   /** 自動退場（無操作タイムアウト＝無視扱い）。退場後に呼ばれる。 */
   onIgnore: () => void;
+  /**
+   * 吹き出し文言と記事タイトルを3行までに収めるか（既定 false＝従来どおり全文）。
+   * 中身に合わせた固定サイズのデスクトップ用ウィンドウで、長いタイトルが上にはみ出さないようにする。
+   */
+  clampText?: boolean;
+  /**
+   * 退場中か（既定 false）。終端操作の確定は呼び出し時点で済んでおり、ここは見た目だけを扱う。
+   * true の間は退場アニメーションを出し、クリックを受け付けず、自動退場・Esc も動かさない。
+   */
+  exiting?: boolean;
+  /** 退場演出の終了（またはアンマウント）時に呼ばれる。親は表示を外す。 */
+  onExited?: () => void;
+  /** 通知の種類（既定 "news"）。"reward" は吹き出し＋OK だけの報酬通知。 */
+  variant?: "news" | "reward";
 };
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
@@ -73,6 +96,10 @@ export default function YuukoInAppNotification({
   onOpen,
   onClose,
   onIgnore,
+  clampText = false,
+  exiting = false,
+  onExited,
+  variant = "news",
 }: YuukoInAppNotificationProps) {
   // 表示段階：吹き出し → 初回クリックで軽量プレビュー（§10.2）。
   // backend が既に PreviewVisible なら最初から preview で再開する。
@@ -107,20 +134,55 @@ export default function YuukoInAppNotification({
     action();
   }, []);
 
+  // 退場演出の終了通知。animationend を基本とし、演出が走らないときはタイマーで外す。
+  // アンマウント（ウィンドウ非表示など）や退場の取り消しでも親の退場状態を残さない。
+  const onExitedRef = useRef(onExited);
+  useEffect(() => {
+    onExitedRef.current = onExited;
+  }, [onExited]);
+  const exitedRef = useRef(false);
+  const notifyExited = useCallback(() => {
+    if (exitedRef.current) {
+      return;
+    }
+    exitedRef.current = true;
+    onExitedRef.current?.();
+  }, []);
+  useEffect(() => {
+    if (!exiting) {
+      return;
+    }
+    exitedRef.current = false;
+    const timer = setTimeout(notifyExited, LEAVE_FALLBACK_MS);
+    return () => {
+      clearTimeout(timer);
+      notifyExited();
+      // 退場が取り消されて同じ通知を表示し続ける場合に備え、終端操作を再び受け付ける。
+      terminalFiredRef.current = false;
+    };
+  }, [exiting, notifyExited]);
+
   // 自動退場（無操作）。段階に応じた時間で無視扱いにする（§9.4）。
   // タイマーはアンマウント時にクリアされる（ウィンドウ非表示中は進まない）。
   // 発火時は即座に onIgnore を呼ぶ（確定は Page 側キューが直列実行する）。
+  // 退場中は確定済みのため動かさない。報酬通知は自動退場しない（§9.4。OK か閉じるまで出し続ける）。
   useEffect(() => {
+    if (exiting || variant === "reward") {
+      return;
+    }
     const timeoutMs =
       view === "preview" ? PREVIEW_AUTO_DISMISS_MS : BALLOON_AUTO_DISMISS_MS;
     const timer = setTimeout(() => {
       fireTerminal(() => onIgnoreRef.current());
     }, timeoutMs);
     return () => clearTimeout(timer);
-  }, [view, fireTerminal]);
+  }, [view, exiting, variant, fireTerminal]);
 
-  // Esc は閉じると同等（§10.6）。
+  // Esc は閉じると同等（§10.6）。退場中は確定済みのため購読しない。
   useEffect(() => {
+    if (exiting) {
+      return;
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         fireTerminal(() => onCloseRef.current());
@@ -128,15 +190,18 @@ export default function YuukoInAppNotification({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [fireTerminal]);
+  }, [exiting, fireTerminal]);
 
   // 閉じる/詳しく見るは即座に Page へ確定を委譲する（遅延なし）。
   const handleClose = () => fireTerminal(() => onCloseRef.current());
   // 「詳しく見る」/プレビュー再クリック → 記事を開く（§10.4）。
   const handleOpen = () => fireTerminal(() => onOpenRef.current());
   // 初回クリック → 軽量プレビューへ（まだ遷移しない）。クリック確定系の状態も進める（§10.3）。
-  // これは終端操作ではない（表示を継続する）。
+  // これは終端操作ではない（表示を継続する）。終端確定後（退場中）は受け付けない。
   const handleFirstClick = () => {
+    if (terminalFiredRef.current) {
+      return;
+    }
     setView("preview");
     onFirstClick?.();
   };
@@ -145,10 +210,27 @@ export default function YuukoInAppNotification({
     <div
       role="region"
       aria-label="ゆうこからのお知らせ"
+      // 退場中は確定済みのため、支援技術・フォーカス移動の対象からも外す。
+      aria-hidden={exiting || undefined}
+      inert={exiting || undefined}
       className={`pointer-events-none fixed z-50 flex flex-col gap-2 ${POSITION_CLASS[positionMode]}`}
     >
+      {/* 退場中は右下へ戻る演出（§8.4）を出し、クリックを受け付けない。 */}
       <div
-        className="pointer-events-auto flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 yuuko-notification-enter"
+        className={`flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-1 ${
+          exiting
+            ? "pointer-events-none yuuko-notification-leave"
+            : "pointer-events-auto yuuko-notification-enter"
+        }`}
+        onAnimationEnd={(event) => {
+          if (
+            exiting &&
+            event.target === event.currentTarget &&
+            event.animationName === "yuuko-notification-pop-out"
+          ) {
+            notifyExited();
+          }
+        }}
       >
         {/* 吹き出し / 軽量プレビュー（ゆうこ本体の上・近くに表示） */}
         <div className="relative rounded-2xl border border-border/50 bg-white p-3 pr-7 shadow-lg">
@@ -161,7 +243,26 @@ export default function YuukoInAppNotification({
             <X className="h-4 w-4" />
           </button>
 
-          {view === "balloon" ? (
+          {variant === "reward" ? (
+            // 報酬通知: 短い吹き出し＋OK。OK で確認済みにする（Rust 側）。閉じる・放置では未確認のまま。
+            // デスクトップの吹き出し段階のウィンドウ（固定サイズ）に収まるよう、余白は小さめにする。
+            <div className="flex flex-col gap-1">
+              <p
+                className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
+                  clampText ? "line-clamp-3" : ""
+                }`}
+              >
+                {balloonText ?? "新しいテーマが届いたよ！"}
+              </p>
+              <button
+                type="button"
+                onClick={handleOpen}
+                className="self-start rounded-full bg-primary px-3 py-0.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                OK
+              </button>
+            </div>
+          ) : view === "balloon" ? (
             // 短い吹き出し（主役はゆうこ＋短文）。初回クリックでプレビューへ。
             <button
               type="button"
@@ -169,7 +270,11 @@ export default function YuukoInAppNotification({
               onClick={handleFirstClick}
               className="block w-full text-left"
             >
-              <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
+              <p
+                className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
+                  clampText ? "line-clamp-3" : ""
+                }`}
+              >
                 {balloonText ?? "気になるニュースを見つけたよ。"}
               </p>
             </button>
@@ -183,7 +288,11 @@ export default function YuukoInAppNotification({
                 className="block w-full text-left"
               >
                 {articleTitle ? (
-                  <p className="text-sm font-semibold leading-snug text-foreground">
+                  <p
+                    className={`text-sm font-semibold leading-snug text-foreground ${
+                      clampText ? "line-clamp-3" : ""
+                    }`}
+                  >
                     {articleTitle}
                   </p>
                 ) : null}

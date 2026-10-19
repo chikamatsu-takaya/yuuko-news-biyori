@@ -35,3 +35,49 @@ atom_syndication = "0.12"
 # 月次アーカイブのZIP圧縮（データ設計書 §14）。std/既存に ZIP 作成機能が無いため追加。
 # C依存を避けるため default-features は無効化し、純Rustの deflate のみ有効化（常駐負荷・ビルド軽量化）。
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# PC起動時の自動起動（要件定義書 §7.1.6、判断台帳 D31・2026-10-05 承認）。OS ごとの登録先
+# （Windows: HKCU Run キー / macOS: LaunchAgent / Linux: autostart .desktop）を自前実装しないため。
+# MIT / Apache-2.0。常駐負荷なし（ON/OFF・状態確認の command 呼び出し時だけ OS へアクセス）。
+# React へは capability を付与せず Rust の command からだけ使う。2.6 以降は MSRV 1.90 で
+# CI の Rust 1.88 と合わないため 2.5 系に固定する。
+tauri-plugin-autostart = "~2.5.1"
+# 二重起動の防止（判断台帳 D50・2026-10-07 承認）。自動起動中に手動でもう一度起動したとき、
+# 2つ目のプロセスは終了し、既存のメイン画面を前面へ出す。OS ごとの排他（Windows: 名前付き
+# ミューテックス＋メッセージ通知）を自前実装しないため。公式プラグイン・MIT / Apache-2.0。
+# 常駐負荷は起動時の排他取得と、2つ目の起動時の通知受信のみ（ポーリングなし）。capability 不要。
+# 2.5 以降は MSRV 1.90 で CI の Rust 1.88 と合わないため 2.4 系に固定する。
+tauri-plugin-single-instance = "~2.4.1"
+# 同梱ローカルLLMのモデル照合（SHA-256。判断台帳 D99 / D100）。std に SHA-256 が無いため追加。
+# 0.10.9 は tauri 経由で既に依存ツリーにあり、新しい取得・ビルドは増えない。MIT / Apache-2.0。
+# 常駐負荷: 「ローカル」で初めて生成するときに1度だけ 1.3GB を読む（以後はアプリ終了まで再照合しない）。
+sha2 = "0.10"
+
+# 全画面アプリ・プレゼン中のゆうこ通知抑制（ゆうこ登場・通知挙動 詳細設計書 §5.2、2026-10-05 承認）。
+# SHQueryUserNotificationState を呼ぶためだけに Windows 限定で使う。tauri 経由で同じ 0.61 が
+# 既に依存ツリーにあり、追加の取得・ビルドはほぼ増えない。std には該当 API が無い。
+# MIT / Apache-2.0。常駐負荷は判定時の API 呼び出し 1 回のみ（常駐スレッド・フックなし）。
+[target.'cfg(windows)'.dependencies]
+# 元記事を既定のブラウザで開く ShellExecuteW（判断台帳 D13）も同じ Win32_UI_Shell を使う。
+# ShellExecuteW の表示方法引数（SHOW_WINDOW_CMD / SW_SHOWNORMAL）が Win32_UI_WindowsAndMessaging に
+# 定義されているため、その feature だけを追加する（新規クレート・取得物の追加なし）。
+# マイク使用中・会議中のゆうこ通知抑制（§5.2、判断台帳 D65 / D68 / D69）のため、次の 2 feature だけを追加する
+# （新規クレート・取得物の追加なし。判定は通知判定のたびに 1 回だけで、常駐スレッド・フックなし）。
+# - Win32_System_Registry: マイクの利用記録（CapabilityAccessManager\ConsentStore\microphone）を
+#   読み取り専用で列挙する RegOpenKeyExW / RegEnumKeyExW / RegGetValueW / RegCloseKey。
+# - Win32_System_Diagnostics_ToolHelp: 既知の会議アプリのプロセス有無を調べる
+#   CreateToolhelp32Snapshot / Process32FirstW / Process32NextW（CloseHandle は既定の Win32_Foundation）。
+# 同梱ローカルLLM（判断台帳 D99）の llama-server をアプリの異常終了時にも残さないため、次の 3 feature を追加する
+# （新規クレート・取得物の追加なし。llama-server の起動時に 1 回だけ使い、常駐スレッド・フックなし）。
+# - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject / AssignProcessToJobObject と
+#   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
+# - Win32_Security: CreateJobObjectW の引数型（SECURITY_ATTRIBUTES）が、この feature の下にある。
+# - Win32_System_Threading: JOBOBJECT_EXTENDED_LIMIT_INFORMATION の項目型（IO_COUNTERS）が、この feature の下にある。
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }

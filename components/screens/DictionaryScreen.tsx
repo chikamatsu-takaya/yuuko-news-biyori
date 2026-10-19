@@ -44,6 +44,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Select,
   SelectContent,
@@ -81,6 +83,8 @@ type DictionaryEntry = {
   fullDescription: string;
   lastViewedText: string;
   lastViewedRaw?: string;
+  createdAtText: string;
+  referenceCountText: string;
   relatedArticleId?: string;
   relatedArticle?: string;
   isFavorite: boolean;
@@ -103,11 +107,13 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-001-generated-ai",
     term: "生成AI",
     type: "term",
-    shortDescription: "文章や画像などを自動生成する AI 全般を指す言葉です。",
+    shortDescription: "文章や画像などを自動生成する AI 全般のことだよ。",
     fullDescription:
-      "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群です。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっています。",
+      "生成AIは、入力された指示に応じて文章・画像・音声などを自動生成する技術群だよ。この記事では、生成AIそのものの新規性よりも、業務課題の解決にどう結びついているかが注目点になっているよ。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
+    createdAtText: "2025/05/20",
+    referenceCountText: "1回",
     relatedArticleId: "article-001",
     relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: true,
@@ -118,11 +124,13 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-001-fundraising",
     term: "資金調達",
     type: "phrase",
-    shortDescription: "企業が事業拡大のために投資や融資で資金を集めることです。",
+    shortDescription: "企業が事業拡大のために投資や融資で資金を集めることだよ。",
     fullDescription:
-      "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることです。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しています。",
+      "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
     lastViewedText: "2025/05/20",
     lastViewedRaw: "1747699200",
+    createdAtText: "2025/05/20",
+    referenceCountText: "1回",
     relatedArticleId: "article-001",
     relatedArticle: "生成AIスタートアップの資金調達が再加速",
     isFavorite: false,
@@ -132,11 +140,13 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-002-saas",
     term: "SaaS",
     type: "term",
-    shortDescription: "インターネット経由で利用するソフトウェア提供形態です。",
+    shortDescription: "インターネット経由で利用するソフトウェア提供形態のことだよ。",
     fullDescription:
-      "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態です。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われています。",
+      "SaaS は Software as a Service の略で、クラウド上で提供されるソフトウェアを必要なときに利用する形態だよ。この記事では、機能そのものに加えて導入後の支援体制が差別化要因として扱われているよ。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
+    createdAtText: "2025/05/18",
+    referenceCountText: "1回",
     relatedArticleId: "article-002",
     relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
@@ -146,11 +156,13 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-002-business-improvement",
     term: "業務改善",
     type: "key_point",
-    shortDescription: "仕事の流れを見直して効率や成果を高めることです。",
+    shortDescription: "仕事の流れを見直して効率や成果を高めることだよ。",
     fullDescription:
-      "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みです。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっています。",
+      "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
     lastViewedText: "2025/05/18",
     lastViewedRaw: "1747526400",
+    createdAtText: "2025/05/18",
+    referenceCountText: "1回",
     relatedArticleId: "article-002",
     relatedArticle: "国内SaaS企業、業務改善支援の新施策を発表",
     isFavorite: false,
@@ -160,11 +172,13 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
     id: "entry-article-003-quantum",
     term: "量子コンピュータ",
     type: "term",
-    shortDescription: "量子力学の性質を利用して計算する新しい計算機です。",
+    shortDescription: "量子力学の性質を利用して計算する新しい計算機のことだよ。",
     fullDescription:
-      "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術です。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっています。",
+      "量子コンピュータは、通常のコンピュータとは異なる量子の性質を使って計算する技術だよ。この記事では高速化よりも、安定して正確に動かすための仕組みに焦点が当たっているよ。",
     lastViewedText: "2025/05/16",
     lastViewedRaw: "1747353600",
+    createdAtText: "2025/05/16",
+    referenceCountText: "1回",
     relatedArticleId: "article-003",
     relatedArticle: "量子コンピュータ研究で新たな誤り訂正手法",
     isFavorite: false,
@@ -225,11 +239,8 @@ function iconTypeFor(type: TauriDictionaryEntryType): DictionaryIconType {
   return "robot";
 }
 
-function formatLastViewedText(value?: string): string {
-  if (!value) {
-    return "未参照";
-  }
-
+// UNIX秒の文字列をローカル時刻の YYYY/MM/DD にする。数値でなければ null（NaN / Invalid Date を出さない）。
+function formatUnixSecondsDate(value: string): string | null {
   const unixSeconds = Number(value);
   if (Number.isFinite(unixSeconds) && unixSeconds > 0) {
     const date = new Date(unixSeconds * 1000);
@@ -241,7 +252,34 @@ function formatLastViewedText(value?: string): string {
     }
   }
 
-  return value;
+  return null;
+}
+
+function formatLastViewedText(value?: string): string {
+  if (!value) {
+    return "未参照";
+  }
+
+  return formatUnixSecondsDate(value) ?? value;
+}
+
+// 作成日時は最終閲覧と同じ整形にそろえる。旧データで無い・空のときは「—」。
+function formatCreatedAtText(value?: string | null): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "—";
+  }
+
+  return formatUnixSecondsDate(trimmed) ?? trimmed;
+}
+
+// 保存時に必ず1回以上になるため、0 や欠損は旧データ由来の「不明」として「—」にする。
+function formatReferenceCountText(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "—";
+  }
+
+  return `${Math.floor(value)}回`;
 }
 
 function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
@@ -253,6 +291,8 @@ function toUiEntry(entry: TauriDictionaryEntryListItemDto): DictionaryEntry {
     fullDescription: entry.detailExplanation,
     lastViewedText: formatLastViewedText(entry.lastViewedAtText),
     lastViewedRaw: entry.lastViewedAtText,
+    createdAtText: formatCreatedAtText(entry.createdAtText),
+    referenceCountText: formatReferenceCountText(entry.referenceCount),
     relatedArticleId: entry.relatedArticleId,
     relatedArticle: entry.relatedArticleTitle,
     isFavorite: entry.isStarred,
@@ -387,7 +427,8 @@ function DictionaryEntryCard({
         <EntryIcon type={entry.iconType} />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">
+            {/* フレーズ（約200字までの文章・D21）は一覧で2行に省略する（全文は詳細で表示）。 */}
+            <span className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground">
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />
@@ -541,7 +582,6 @@ export default function DictionaryScreen({
     null
   );
   const [currentPage, setCurrentPage] = React.useState(1);
-  const [isAutoStart, setIsAutoStart] = React.useState(true);
   const [entries, setEntries] = React.useState<DictionaryEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -563,7 +603,19 @@ export default function DictionaryScreen({
     setEditMemoValue("");
   }, [selectedEntryId]);
 
+  // 検索語・フィルタの連続変更で古い応答が後から届いても上書きしないよう、
+  // 最新リクエストの番号だけが結果（一覧・お知らせ・読込状態）を反映できるようにする。
+  const loadRequestIdRef = React.useRef(0);
+  // 表示中の一覧を取得したときに絞り込み条件が有効だったか。
+  // 空状態の出し分けは入力中の値ではなく、表示中データの取得条件で判定する。
+  const [loadedWithConditions, setLoadedWithConditions] =
+    React.useState(false);
+
   const loadEntries = React.useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const isLatest = () => requestId === loadRequestIdRef.current;
+    const requestHasConditions =
+      trimmedSearchQuery !== "" || activeFilter !== "all";
     setIsLoading(true);
     setLoadNotice(null);
     setLoadNoticeKind("info");
@@ -577,6 +629,11 @@ export default function DictionaryScreen({
             : undefined,
         starredOnly: activeFilter === "favorite" ? true : undefined,
       });
+
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
 
       if (!dictionaryEntries) {
         setEntries(
@@ -597,6 +654,10 @@ export default function DictionaryScreen({
         setLoadNoticeKind("empty");
       }
     } catch (error) {
+      if (!isLatest()) {
+        return;
+      }
+      setLoadedWithConditions(requestHasConditions);
       setEntries([]);
       setLoadNotice(
         "辞書一覧の取得に失敗しちゃった。少し時間を置いてから、もう一度試してみてね。"
@@ -604,7 +665,10 @@ export default function DictionaryScreen({
       setLoadNoticeKind("error");
       console.warn("Failed to load dictionary entries:", error);
     } finally {
-      setIsLoading(false);
+      // 古いリクエストが完了しても、新しいリクエストの読込中表示は解除しない。
+      if (isLatest()) {
+        setIsLoading(false);
+      }
     }
   }, [activeFilter, trimmedSearchQuery]);
 
@@ -651,6 +715,21 @@ export default function DictionaryScreen({
 
   const selectedEntry =
     sortedEntries.find((entry) => entry.id === selectedEntryId) ?? null;
+
+  // 絞り込みは list_dictionary_entries の引数（keyword / type / starredOnly）で
+  // Rust 側に任せているため、結果0件が「辞書そのものが空」か「条件に合う項目が無い」かは
+  // 一覧からは判別できない。表示中データの取得時に条件が有効なら「検索結果なし」として扱う。
+  const hasActiveConditions = loadedWithConditions;
+  // 読込失敗時は entries が空でもエラー表示（お知らせ＋再試行）を優先し、空状態は出さない。
+  const showEmptyState =
+    !isLoading && loadNoticeKind !== "error" && paginatedEntries.length === 0;
+
+  // 検索語・種別フィルタ・ページを既定値へ戻す（並び替えは絞り込み条件ではないため維持する）。
+  const handleClearConditions = () => {
+    setSearchQuery("");
+    setActiveFilter("all");
+    setCurrentPage(1);
+  };
 
   const handleNavigate = (screen: string) => {
     onNavigate?.(screen);
@@ -782,31 +861,8 @@ export default function DictionaryScreen({
           </div>
 
           <div className="border-t border-border/50 p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">自動起動：</span>
-              <button
-                type="button"
-                className={`text-xs font-medium ${
-                  isAutoStart
-                    ? "text-[var(--yuuko-green)]"
-                    : "text-muted-foreground"
-                }`}
-                onClick={() => setIsAutoStart((currentValue) => !currentValue)}
-              >
-                {isAutoStart ? "ON" : "OFF"}
-              </button>
-              {isAutoStart ? (
-                <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
-              ) : null}
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full text-xs"
-              onClick={() => console.log("Exit app")}
-            >
-              常駐を終了する
-            </Button>
+            <AutostartStatus className="mb-2" />
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 
@@ -925,12 +981,34 @@ export default function DictionaryScreen({
                   </div>
                 ) : null}
 
-                {!isLoading && paginatedEntries.length === 0 ? (
+                {showEmptyState && hasActiveConditions ? (
+                  <Card className="border-dashed border-border/60 py-0 shadow-none">
+                    <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
+                      <Search className="h-8 w-8 text-[var(--yuuko-green)]/60" />
+                      <p className="text-sm font-medium text-foreground">
+                        見つからなかったよ
+                      </p>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        検索ワードや絞り込みを変えると、見つかるかも。
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        onClick={handleClearConditions}
+                      >
+                        条件をクリア
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {showEmptyState && !hasActiveConditions ? (
                   <Card className="border-dashed border-border/60 py-0 shadow-none">
                     <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
                       <BookOpen className="h-8 w-8 text-[var(--yuuko-green)]/60" />
                       <p className="text-sm font-medium text-foreground">
-                        まだ表示できる辞書項目がありません
+                        まだ辞書に何もないよ
                       </p>
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         ニュース詳細画面で用語を保存すると、ここに一覧表示されます。
@@ -966,7 +1044,8 @@ export default function DictionaryScreen({
             </Card>
           </div>
 
-          <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
+          {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
+          <aside className="w-60 lg:w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
             <div className="relative mb-2">
               <div className="relative rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3">
                 <p className="text-xs leading-relaxed text-foreground">
@@ -1008,16 +1087,17 @@ export default function DictionaryScreen({
               <div className="space-y-3">
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-base font-bold text-foreground">
+                    {/* 右列が狭いとき（lg 未満）は「お気に入り」を次の行へ回し、見出し・ボタンの文字が1字ずつ折り返さないようにする。 */}
+                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h3 className="break-words text-base font-bold text-foreground">
                           {selectedEntry.term}
                         </h3>
                         <TypeBadge type={selectedEntry.type} />
                       </div>
                       <button
                         type="button"
-                        className="flex items-center gap-1 text-xs"
+                        className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs"
                         onClick={() =>
                           handleToggleFavorite(
                             selectedEntry.id,
@@ -1037,6 +1117,19 @@ export default function DictionaryScreen({
                         </span>
                       </button>
                     </div>
+                    <dl
+                      className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground"
+                      data-testid="dictionary-detail-meta"
+                    >
+                      <dt>作成日時</dt>
+                      <dd data-testid="dictionary-detail-created-at">
+                        {selectedEntry.createdAtText}
+                      </dd>
+                      <dt>参照回数</dt>
+                      <dd data-testid="dictionary-detail-reference-count">
+                        {selectedEntry.referenceCountText}
+                      </dd>
+                    </dl>
                   </CardContent>
                 </Card>
 
@@ -1196,8 +1289,13 @@ export default function DictionaryScreen({
           <span className="text-xs text-muted-foreground">|</span>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-[var(--yuuko-green)]" />
+            {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、この画面の表示件数を出す。 */}
             <span className="text-xs text-foreground">
-              新しいニュースが3件届いてるよ！
+              {isLoading
+                ? "読み込み中..."
+                : loadNoticeKind === "error"
+                  ? "辞書"
+                  : `辞書項目 ${sortedEntries.length}件を表示中`}
             </span>
           </div>
         </div>

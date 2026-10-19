@@ -12,6 +12,18 @@ pub const DICTIONARY_RELATIVE_PATH: &str = "dictionary/entries.json";
 pub const ARTICLE_NEWS_RELATIVE_DIR: &str = "news";
 pub const ARTICLE_FAVORITES_RELATIVE_PATH: &str = "favorites/article_favorites.json";
 pub const FRIENDSHIP_RELATIVE_PATH: &str = "user/friendship.json";
+/// 友情ポイント加算イベントの直近履歴（データ設計書 §10.3）。移行ZIPには含めない。
+pub const FRIENDSHIP_EVENTS_RELATIVE_PATH: &str = "user/friendship_events.json";
+pub const REWARDS_RELATIVE_PATH: &str = "rewards/rewards.json";
+pub const GACHA_STATE_RELATIVE_PATH: &str = "gacha/gacha_state.json";
+/// データ移行用ZIPの固定の書き出し先（データ設計書 §15.6、判断台帳 D41）。
+pub const MIGRATION_EXPORTS_RELATIVE_DIR: &str = "exports";
+/// データ移行用ZIPの取り込み元（データ設計書 §15.7）。ここに置いたZIPだけを取り込み候補にする。
+pub const MIGRATION_IMPORTS_RELATIVE_DIR: &str = "imports";
+/// 取り込み前に退避した現在のデータの置き場（1世代分のフォルダを残す。データ設計書 §15.7）。
+pub const MIGRATION_BACKUPS_RELATIVE_DIR: &str = "migration-backups";
+/// 取り込みZIPの展開先（検証用の一時フォルダ。取り込みの終わりに消す）。
+pub const MIGRATION_IMPORT_STAGING_RELATIVE_DIR: &str = ".migration-import-staging";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -21,9 +33,12 @@ pub struct AppPaths {
     pub archive_maintenance_state_path: PathBuf,
     pub dictionary_path: PathBuf,
     pub friendship_path: PathBuf,
+    pub friendship_events_path: PathBuf,
+    pub gacha_state_path: PathBuf,
     pub network_allowlist_path: PathBuf,
     pub news_refresh_state_path: PathBuf,
     pub news_sources_path: PathBuf,
+    pub rewards_path: PathBuf,
     pub settings_path: PathBuf,
     pub yuuko_state_path: PathBuf,
 }
@@ -36,9 +51,12 @@ impl AppPaths {
             app_data_dir.join(ARCHIVE_MAINTENANCE_STATE_RELATIVE_PATH);
         let dictionary_path = app_data_dir.join(DICTIONARY_RELATIVE_PATH);
         let friendship_path = app_data_dir.join(FRIENDSHIP_RELATIVE_PATH);
+        let friendship_events_path = app_data_dir.join(FRIENDSHIP_EVENTS_RELATIVE_PATH);
+        let gacha_state_path = app_data_dir.join(GACHA_STATE_RELATIVE_PATH);
         let network_allowlist_path = app_data_dir.join(NETWORK_ALLOWLIST_RELATIVE_PATH);
         let news_refresh_state_path = app_data_dir.join(NEWS_REFRESH_STATE_RELATIVE_PATH);
         let news_sources_path = app_data_dir.join(NEWS_SOURCES_RELATIVE_PATH);
+        let rewards_path = app_data_dir.join(REWARDS_RELATIVE_PATH);
         let settings_path = app_data_dir.join(SETTINGS_RELATIVE_PATH);
         let yuuko_state_path = app_data_dir.join(YUUKO_STATE_RELATIVE_PATH);
         Self {
@@ -48,9 +66,12 @@ impl AppPaths {
             archive_maintenance_state_path,
             dictionary_path,
             friendship_path,
+            friendship_events_path,
+            gacha_state_path,
             network_allowlist_path,
             news_refresh_state_path,
             news_sources_path,
+            rewards_path,
             settings_path,
             yuuko_state_path,
         }
@@ -62,9 +83,11 @@ impl AppPaths {
         ensure_parent_dir(&self.archive_maintenance_state_path)?;
         ensure_parent_dir(&self.dictionary_path)?;
         ensure_parent_dir(&self.friendship_path)?;
+        ensure_parent_dir(&self.gacha_state_path)?;
         ensure_parent_dir(&self.network_allowlist_path)?;
         ensure_parent_dir(&self.news_refresh_state_path)?;
         ensure_parent_dir(&self.news_sources_path)?;
+        ensure_parent_dir(&self.rewards_path)?;
         ensure_parent_dir(&self.settings_path)?;
         ensure_parent_dir(&self.yuuko_state_path)
     }

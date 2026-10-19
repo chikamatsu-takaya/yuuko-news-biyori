@@ -34,18 +34,18 @@
 
 ### 部分実装（仮のまま）
 
-- **解説文の生成が AI を通っていない。** `explain_selected_term` は `services/dictionary_service.rs` → `repositories/dictionary_repository.rs` で完結し、`ai_provider_service` / Gemini / MockProvider を呼ばない。応答は repository 内の固定サンプル（`sample_dictionary_entries`）に一致すればそれを、しなければ `build_generic_entry` の定型文を返す。
-- **記事IDが固定サンプル前提。** `article_title_for` は `sample_dictionary_entries` から記事タイトルを引くため、サンプルに無い記事ID（実データの記事）では `NotFound` になる。
-- `NewsReaderScreen.tsx` の解説対象は、候補語（`keywordCandidates` → `buildSupportTerms` → `highlightedTerms`）とフォールバック候補から作られる。
+- （2026-10-19 更新）解説文の生成は AI 層へ接続済み。実ニュース記事の辞書未命中時は `dictionary_service.rs` の `explain_with_ai` が `ai_provider_service`（ローカルLLM / Gemini / Mock）を呼ぶ。固定サンプル記事（article-001〜003）だけが固定解説・汎用文のまま。
+- （2026-10-19 追加・D21）選択が「用語」か「フレーズ（文章）」かを `domain/dictionary.rs` の `classify_selected_text` で決定的に判定し、フレーズは `phrase_explanation_v1` のプロンプトで説明して `phrase` 種別で返す・保存する。上限は用語・フレーズ共通の200文字のまま。判定ルールは詳細設計書 §5.3.4、プロンプトは §12.4.2。
+- （2026-10-19 更新）実ニュース記事の記事IDは `ArticleRepository` で解決する（固定サンプル前提ではない）。解説対象は本文の範囲選択＋「解説」ボタン（`NewsReaderScreen.tsx` の `readExplainSelectionFromDom` → `handleExplainButtonClick`）。
 
 ### 未実装
 
-- **本文の範囲選択から解説する導線。** `NewsReaderScreen.tsx` に `window.getSelection` 相当の選択取得はなく、事前用意の候補語を `openTerm` でクリックする方式のみ。選択文字列は `selectedTerm.term` として `selectedText` に渡している。
+- （2026-10-19 更新）本文の範囲選択から解説する導線は実装済み（上記）。
 - 用語解説・辞書保存フローの E2E。`tests/ui/app.spec.ts` の辞書関連は画面遷移と表示のスモークのみ（`ゆうこ辞書` 見出しと項目の表示確認）。Rust 側は `domain/dictionary.rs` と `repositories/dictionary_repository.rs` に単体テストがある。
 
 ### タスク資料との差異
 
-チェックリストは「Rust側 `explain_selected_term` は `selectedText` を受け取れる（バックエンド対応済み）」としており、**引数を受け取れる点は正しい**。ただし解説生成自体は上記のとおり仮実装で、MVPスコープ §5.6 の「Gemini API または MockProvider で短い解説を表示する」には未到達。範囲選択の実装時に、解説生成を AI 層へ繋ぐかを別途判断する必要がある。
+チェックリストは「Rust側 `explain_selected_term` は `selectedText` を受け取れる（バックエンド対応済み）」としており、**引数を受け取れる点は正しい**。解説生成は AI 層へ接続済み（2026-10-19 更新）。
 
 ## 処理の流れ
 
@@ -90,7 +90,7 @@ NewsReaderScreen（記事本文・候補語）
 | 辞書へ保存できない | `NewsReaderScreen.tsx` の `saveDictionaryEntry` → `dictionary_commands.rs` → `domain/dictionary.rs` の検証 |
 | 保存した用語が辞書画面に表示されない | `DictionaryScreen.tsx` の `listDictionaryEntries` → `dictionary_repository.rs` の一覧取得 |
 | 同じ用語が重複保存される | `repositories/dictionary_repository.rs` の `find_saved_entry` / `normalize_text`（正規化と一致条件） |
-| AI Provider未設定時に安全に失敗しない | まず**現状は解説が AI 層を通らない**ことを確認する。AI 層へ繋ぐ変更を入れた場合のみ `services/ai_provider_service.rs` と `.claude/rules/security.md` を参照 |
+| AI Provider未設定時に安全に失敗しない | `services/dictionary_service.rs` の `explain_with_ai` → `services/ai_provider_service.rs`（Mock fallback）と `.claude/rules/security.md` を参照 |
 
 ## 関連設計書（必要な章だけを優先）
 

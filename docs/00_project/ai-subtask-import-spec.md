@@ -250,14 +250,26 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 - **`autoStatusUpdateDisabled` 単独でも post-merge 除外は成立する**が、画面で「なぜ更新対象外か」を説明するために `taskRole="split-parent"` を併用する。
 
 **設計上の動作**：
-- 子タスク一括登録と**同じ `runTransaction` 内**で、親を再読込・再検証したうえで親へ `autoStatusUpdateDisabled=true` / `taskRole="split-parent"` / `splitChildCount=登録する子タスク数` / `updatedAt=serverTimestamp` / `updatedBy="ai-subtask-import"` を設定する（親は `transaction.update`、子は `transaction.set`。全件成功/全件失敗。詳細は §7）。
+- 子タスク一括登録と**同じ `runTransaction` 内**で、親を再読込・再検証したうえで親へ `autoStatusUpdateDisabled=true` / `taskRole="split-parent"` / `splitChildCount=登録後の子タスク総数（既存子数＋新規子数）` / `updatedAt=serverTimestamp` / `updatedBy="ai-subtask-import"` を設定する（親は `transaction.update`、子は `transaction.set`。全件成功/全件失敗。詳細は §7）。初回分割は既存子数が 0 なので `splitChildCount=新規子数` となる。
 - **親タスクの `status` は変更しない**。
 - 親タスクの `branchName` / `issuePr` も**勝手に消さない**。
 - **post-merge 処理では `autoStatusUpdateDisabled=true` のタスクを Done / Review 自動更新の対象外**にする。**初回 evaluate 時だけでなく、apply 直前の Firestore 再読込ガードでも `autoStatusUpdateDisabled===true` を確認**して更新・issuePr書き戻し・Markdown同期起動を中止する（後続PR §11-2 で実装。**一括登録 §11-6 より先に実装**。今回は実装しない）。
 - 親タスクの最終 `Done` は、**子タスクの完了状況を人が確認**して行う。
 - 子タスクは §3.3 どおり `Todo` で作成し、**個別に `branchName` を設定**する（通常の post-merge 自動更新対象）。
-- **初期MVPでは分割済み親への追加分割を禁止する**（§3.10）。一括登録時、親の `splitChildCount > 0` または `taskRole==="split-parent"` の場合は**登録を拒否**する（§7）。安全性は「UI上の禁止」だけに頼らず、**`splitChildCount` を親ドキュメントと同一トランザクションで確認・更新すること**で担保する。
-- **将来課題**：同じ親への追加分割を許可する場合は、一括登録時に**同一トランザクションで `splitChildCount` へ追加件数を加算**する設計へ変更する（削除側の「最後の子」判定も加算後の値で成立する）。後続課題として再設計する。
+- **親の分割状態の分類（正本）**：親タスクを次の4状態に分類する（`ai-subtask-import-parent.mjs` の `classifyAiSubtaskParentState`。UI候補判定・登録前検証・件数計算で共通利用し、別々に再実装しない）。まず `parentTaskId` を3分類（`classifyParentTaskIdField`）してから、分割管理フィールドを見る。
+  - **`parentTaskId` の3分類**：**親子関係の正本は `parentTaskId`**（`source` 値では判定しない）。
+    - 親なし＝未設定 / `undefined` / `null` / 空文字 / trim後に空の文字列。
+    - 子タスク＝trim後に非空の**文字列**（→ **child**）。
+    - 不整合＝`null` 以外の**非文字列**（数値 / boolean / 配列 / オブジェクト 等。→ **inconsistent**）。**空文字へ補正して分割対象にしない。**
+  - **child**：非空文字列の `parentTaskId` を持つ。子タスクを親にすると孫タスク化になるため**分割対象外**。
+  - **unsplit（完全な未分割）**：`parentTaskId` が親なし かつ `taskRole` が `"split-parent"` でなく（未設定/空文字）かつ `autoStatusUpdateDisabled` が `true` でなく（未設定/`false`）かつ `splitChildCount` が未設定/null/0。既存子数は **0**。
+  - **split-parent（整合した分割済み親）**：`parentTaskId` が親なし かつ `taskRole === "split-parent"` かつ `autoStatusUpdateDisabled === true` かつ `splitChildCount` が**正の有限安全整数**（`Number.isSafeInteger` かつ `> 0`）。既存子数は `splitChildCount`。
+  - **inconsistent（不整合）**：上記のいずれにも当てはまらない混在・型不整合状態（`null` 以外の非文字列 `parentTaskId`・非文字列 `taskRole`・`"true"`/`1` 等の `autoStatusUpdateDisabled`・管理フィールドの片方だけ設定・`splitChildCount` が 0/負/小数/文字列/NaN/Infinity・管理フィールドと `parentTaskId` の併存 など）。**追加登録は拒否**する。不正値を 0 や空文字へ**補正しない**し、実件数を検索して自動修復もしない。
+- **初回分割と追加登録**（§3.10）：**unsplit** への初回分割と、**整合した split-parent** への追加登録（既存子タスクを維持したまま子タスクを追加）だけを許可する。どちらも同じ一括登録フロー（§7）を使う。**child と inconsistent は候補・登録対象にしない**（UIの非表示だけに頼らず、登録直前の再検証でも拒否する）。
+- **追加登録では既存子タスクを変更しない**：新しく生成した子タスクだけを `transaction.set` で追加し、**既存の子タスクを削除・更新・再作成しない**。親側も `status` / `branchName` / `issuePr` / `completed` 等の既存値は変更せず、管理フィールド（`autoStatusUpdateDisabled` / `taskRole` / `splitChildCount`）のみ更新する。
+- **`splitChildCount` は登録後の現在子タスク総数**：追加登録時は、同一トランザクション内で**再取得した最新の** `splitChildCount`（整合した split-parent の正の安全整数のみを既存子数として採用）を読み、`splitChildCount = 既存子数 + 新規子数` へ更新する（初回分割は既存 0 なので新規子数と一致）。加算結果も安全整数であることを確認する（桁あふれ時は拒否）。上書きではなく総数を反映するため、削除側の「最後の子」判定（§3.7・`newCount===0`）もこの総数から正しく成立する。
+- 安全性は「UI上の表示」だけに頼らず、**同一トランザクション内で分類・`splitChildCount` を検証・更新すること**で担保する（再試行のたびに最新 `parentData` から再分類・再計算し、古い件数は使わない。同時登録・削除時はトランザクション再試行または失敗となり、件数のずれを作らない）。**不整合を検出した場合は Firestore へ何も書き込まず、内部情報を含まない固定エラー文（例：「親タスクの分割管理情報が不整合です。データを確認してください」）を返す。**
+- **多階層化（孫タスク）は対象外**：追加できるのは選択した親の直下の子タスクのみ。**子タスク（child）をさらに分割する多階層化（孫タスク）は、UIの候補判定と登録直前の再検証の両方で拒否**する。自由記述から独立タスクを AI 生成する機能も対象外（§2 の一括登録フローのみ）。
 
 **post-merge 除外の実装ポイント（後続PR §11-2・初回判定＋apply直前の二段構え）**：
 初回判定だけでは、evaluate 後〜apply の間に別処理で `autoStatusUpdateDisabled` が付与された場合を取りこぼす。**初回判定と apply 直前の両方**で確認する。
@@ -283,16 +295,20 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 - `archived !== true`
 - `completed !== true`
 - `status !== "Done"`
-- `taskRole !== "split-parent"` を基本とする（既に分割親のタスクへ**追加分割**する場合の扱いは下記）。
+- **非空の `parentTaskId` を持たない**（child＝子タスクは分割対象外・孫タスク化防止・§3.9）。
+- **分割状態が unsplit または整合した split-parent**（inconsistent は候補外・§3.9）。
 
 **status による許可範囲（確定）**：
 - **許可**：`Todo` / `Doing` / `Blocked`
 - **原則不許可**：`Review`（レビュー段階のタスクを親に分割し直すのは想定外。必要時は人が Review→Doing 等へ戻してから分割）
 - **不可**：`Done` / `completed` / `archived`
 
-**既に分割済み（`taskRole="split-parent"`）の親への追加分割**：
-- 既定はリストに出さない（重複分割の誤操作防止）。
-- 追加分割したい場合は、明示的な操作（例：「分割済みを含める」トグル）でのみ選択可能にし、選択時は既存の分割子が存在する旨を確認画面で提示する。→ 実装可否・UIは §11-3 で確定（初期は**基本非表示**）。
+**未分割（unsplit）と整合した分割済み親（split-parent）を候補にする（追加登録）**：
+- 分割済みかどうかは候補可否の条件に**しない**が、対象は **unsplit（完全な未分割）** と **整合した split-parent（`taskRole="split-parent"` かつ `autoStatusUpdateDisabled=true` かつ `splitChildCount` が正の有限安全整数）** のみ。上記の `archived` / `completed` / status 条件を満たせば、両者を同じく候補として一覧に出す。整合した分割済み親では既存子を維持したまま子タスクを追加登録できる（§3.9）。
+- **child（`parentTaskId` あり）と inconsistent（分割管理フィールドの不整合）は候補外**にする。UIの非表示だけに頼らず、登録直前の再検証でも拒否する（§7）。
+- **UI候補判定は Firestore の生データで行う（P2-2）**：`aiSubtaskEligible` / `aiSubtaskAlreadySplit`（ボタン表示可否・文言）は、**画面用モデルへ正規化する前の生データ**（`computeAiSubtaskUiFlags(rawDoc)`）から計算する。表示用の正規化（非文字列 `parentTaskId`/`taskRole` → 空文字・非有限 `splitChildCount` → 0）で型不整合が unsplit へ潰れ、候補外であるべきデータが候補に出るのを防ぐ。正規化後の値から候補可否を再計算しない。生データは候補判定・文言判定にだけ使い、DOM・画面表示へは従来どおり正規化済みモデル（エスケープ前提）を使う。**UI候補判定と登録直前検証（§7・生データ）は同じ分類（`classifyAiSubtaskParentState`）を使い、同じ結果になる。**
+- **ボタン文言の切替**：カード上の起動ボタンは、**未分割の親は「AIで分割」、整合した分割済み親は「子タスクを追加」**と表示する（動作は同一の一括登録フロー。文言のみ状態で切り替える）。
+- 操作可能な status 条件は**初回分割・追加登録で共通**（従来どおり `Todo` / `Doing` / `Blocked` のみ）。分割済みでも `Review` / `Done` / `completed` / `archived` は候補外のまま。
 
 **確認画面での明示（重要）**：
 - 選択親が **`Doing` かつ `branchName` 設定済み**の場合、分割を実行すると「**この親タスクは分割親となり、post-merge の Done/Review 自動更新の対象外になる**（`autoStatusUpdateDisabled=true` を設定）」ことを、一括登録の確認画面で明示する。
@@ -403,16 +419,15 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
   1. トランザクション**外**で上記4点を確定する（`importBatchId`・子`DocumentReference`・確定入力値・`base`）。
   2. `runTransaction` を開始する。
   3. トランザクション内で**親タスクを再読込**する（`transaction.get(parentRef)`）。
-  4. 親が次を満たすか**再検証**する：`archived !== true` / `completed !== true` / `status` が `Todo` / `Doing` / `Blocked` のいずれか（`Review` / `Done` は不可）/ **初期MVPでは `taskRole !== "split-parent"` かつ `splitChildCount` が未設定または 0**（＝分割済み親への追加分割を拒否）。
-  5. 満たさない場合は**理由付き Error を投げて全件中止**（Firestoreは無変更）。
-  6. `transaction.update(parentRef, { autoStatusUpdateDisabled:true, taskRole:"split-parent", splitChildCount:登録する子タスク数, updatedAt:serverTimestamp, updatedBy:"ai-subtask-import" })`（親の `status` / `branchName` / `issuePr` は変更しない）。
+  4. 親の**分割状態を分類**（child / unsplit / split-parent / inconsistent・§3.9）し、次を満たすか**再検証**する：`archived !== true` / `completed !== true` / `status` が `Todo` / `Doing` / `Blocked` のいずれか（`Review` / `Done` は不可）／分割状態が **unsplit（完全な未分割）または split-parent（整合した分割済み親）**。**非空の `parentTaskId` を持つ子タスク（child＝孫タスク化）と、分割管理フィールドが不整合（inconsistent）な親は拒否**する（UIの非表示に頼らず、この再検証でも拒否する）。
+  5. 満たさない場合は**理由付き Error を投げて全件中止**（Firestoreは無変更）。child・inconsistent には固定の安全なエラー文（内部情報・ID・生データ・設定値を含めない）を返す。
+  6. 手順3で再読込した親から**既存子数**を求める：unsplit は `0`、整合した split-parent は `splitChildCount`（**正の有限安全整数**のみ）。不正な `splitChildCount` を 0 として補正せず、実件数を検索して修復もしない。総数 `既存子数＋新規子数` が安全整数であることを確認し（桁あふれ時は拒否）、`transaction.update(parentRef, { autoStatusUpdateDisabled:true, taskRole:"split-parent", splitChildCount:既存子数＋新規子数, updatedAt:serverTimestamp, updatedBy:"ai-subtask-import" })` を実行する（親の `status` / `branchName` / `issuePr` は変更せず、既存子タスクにも触れない）。初回分割は既存 0 なので `splitChildCount=新規子数`。
   7. 各子を `transaction.set(childRefs[i], child)` で登録（`child` は手順1で確定した値＋`parentTaskId`＋`importBatchId`＋`order = base + 10*(i+1)`）。
   8. 親更新と全子登録は**同一トランザクション**内なので**全件成功または全件失敗**。commit 成功→再取得→`firestoreToBoardModel`→再描画。失敗→Firestore無変更・エラー表示。
 - **再試行時の不変性（重要）**：`runTransaction` は競合時に**コールバックが再実行される**ため、`importBatchId` と 子 `DocumentReference` は**トランザクション内で生成しない**（手順1で確定した同じ値を使う）。これにより再試行されても docId・batchId が変わらず、二重docや別batchIdを作らない。
 - **副作用の禁止**：トランザクションのコールバック内で**UI状態や外部変数を変更しない**（再実行で不整合になるため）。UI更新は commit 成功後にのみ行う。
 - **order の方針維持**：`order` は初期MVPでは**トランザクション外で取得**し、同時登録時の重複可能性を許容する既存方針（§3.6）を維持する。
-- **分割済み親への追加分割の拒否（初期MVP）**：手順4で `splitChildCount > 0` または `taskRole==="split-parent"` を検出したら拒否する。安全性は「UI上の禁止（§3.10）」だけに頼らず、**この同一トランザクション内の `splitChildCount` 確認**で担保する。
-- **将来課題（追加分割許可時）**：`splitChildCount` を上書きではなく**同一トランザクションで追加件数を加算**（`newTotal = 既存splitChildCount + 追加件数`）する設計へ変更する。削除側の「最後の子」判定（`newCount === 0`）も加算後の値で成立する。
+- **分割済み親への追加登録（初回分割と共通フロー）**：手順4では**整合した** split-parent を拒否しない。手順6で `splitChildCount` を上書きせず、**同一トランザクションで再読込した現在値へ新規件数を加算**（`newTotal = 既存splitChildCount + 新規件数`）して総数を反映する。**既存子タスクは削除・更新・再作成しない**（新規子の `transaction.set` と親管理フィールドの更新のみ）。削除側の「最後の子」判定（§3.7・`newCount === 0`）も加算後の総数から成立する。安全性は「UI上の表示（§3.10）」だけに頼らず、**この同一トランザクション内の分類・`splitChildCount` 検証・加算**で担保する。**再試行のたびに再読込した最新 `parentData` から再分類・再計算**し、トランザクション外で取得した古い件数は使わない。child（孫タスク化）・inconsistent（不整合）・桁あふれの場合は親更新も子登録も行わず、Firestore へ何も書き込まない。
 - `taskSyncMeta`（Markdown同期要求 `syncRevision`）は**bumpしない**（既存 `addTaskForPoc` と同様。`Todo` 新規追加はmd同期契機にしない）。
 
 ---
@@ -491,11 +506,10 @@ JSON各タスクが持てるキーは、**次の11項目だけ**とする。
 ## 10. 未決事項（残りのみ）
 本改訂で確定した項目（JSON受理項目 / システム設定値 / 検証初期値 / importBatchId形式 / 削除方針・一括取り消し / order採番 / 親自動更新なし / 分割親の post-merge 除外 / 親候補条件 / プレビュー編集範囲 / AI生成プロンプト文面 / Markdown未反映 / source表示の意味 / status=Todo固定 / source="ai-subtask-import" / 最大20件 / 文字数上限）は§3・§8へ移動済み。**残る未決事項は以下のみ**：
 
-1. **既に分割済みの親への「追加分割」を許可するか**：初期は基本非表示（§3.10）。明示トグルで許可するかは §11-3 で確定。
-2. **`ai-subtask-import` バッジの色/CSS**：意味は§3.13で確定。見た目（色・クラス名）は後続の画面実装（§11-8）で決定。
-3. **プレビューでの配列項目編集UIの具体形**：編集対象（11項目＋継承4項目）は確定（§8.2）。配列を「1行1要素のtextarea」で編集するか等の**UI詳細**は §11-5 で確定。
+1. **`ai-subtask-import` バッジの色/CSS**：意味は§3.13で確定。見た目（色・クラス名）は後続の画面実装（§11-8）で決定。
+2. **プレビューでの配列項目編集UIの具体形**：編集対象（11項目＋継承4項目）は確定（§8.2）。配列を「1行1要素のtextarea」で編集するか等の**UI詳細**は §11-5 で確定。
 
-> 明確化済み（未決ではない）：statusはJSONで受け付けない（`Todo`固定）／source値は`ai-subtask-import`／最大登録件数は20件／文字数上限は§3.4／importBatchIdは`ai-${crypto.randomUUID()}`／Markdown同期は初期MVP未反映／AI分割タスク削除は§3.7条件で可・一括取り消しは同一importBatchId単位／親タスクは自動更新しない・分割親は post-merge 自動更新の対象外／プレビュー編集範囲は§8.2で確定。
+> 明確化済み（未決ではない）：statusはJSONで受け付けない（`Todo`固定）／source値は`ai-subtask-import`／最大登録件数は20件／文字数上限は§3.4／importBatchIdは`ai-${crypto.randomUUID()}`／Markdown同期は初期MVP未反映／AI分割タスク削除は§3.7条件で可・一括取り消しは同一importBatchId単位／親タスクは自動更新しない・分割親は post-merge 自動更新の対象外／プレビュー編集範囲は§8.2で確定／**分割済み親への追加登録は許可（既存子を維持して子タスクを追加・`splitChildCount`は登録後の総数・分割済み親のボタンは「子タスクを追加」・多階層化=孫タスクは対象外／§3.9・§3.10）**。
 
 ---
 
