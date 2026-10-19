@@ -4,6 +4,7 @@ import * as React from "react";
 import Image from "next/image";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Home,
   Bell,
@@ -967,13 +968,15 @@ export default function SettingsScreen({
             </span>
           </div>
 
-          <nav className="flex-1 px-2 space-y-1 overflow-y-auto">
+          <nav aria-label="設定メニュー" className="flex-1 px-2 space-y-1 overflow-y-auto">
             {settingsMenuItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
                 label={item.label}
                 icon={item.icon}
                 isActive={activeMenu === item.id}
+                // 画面内の区分切替なので "page" ではなく "true" で選択中を伝える。
+                ariaCurrent="true"
                 onClick={() => setActiveMenu(item.id)}
               />
             ))}
@@ -1017,6 +1020,8 @@ export default function SettingsScreen({
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
             </Button>
+            {/* 他画面と同じく、常駐ごと終わらせる操作をサイドバー下部に置く（確認ダイアログ付きの共通部品）。 */}
+            <QuitResidentButton className="mt-2 w-full text-xs" />
           </div>
         </aside>
 

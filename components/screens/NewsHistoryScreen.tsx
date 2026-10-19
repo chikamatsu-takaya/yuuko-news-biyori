@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -39,13 +39,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Home,
   Newspaper,
   Clock,
-  BookOpen,
-  Sparkles,
-  Dice5,
-  Settings,
   ArrowLeft,
   Search,
   List,
@@ -80,13 +75,6 @@ interface HistoryItem {
   summaryState?: ArticleSummaryState;
   // 記事のタグ（整形済み）。タグでの絞り込みに使う。タグの無い記事は空配列。
   tags: string[];
-}
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
 }
 
 interface FilterChip {
@@ -202,16 +190,6 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnailType: "lifestyle",
     tags: [],
   },
-];
-
-const mockNavigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: true },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Dice5, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
 ];
 
 const filterChips: FilterChip[] = [
@@ -774,17 +752,11 @@ export default function NewsHistoryScreen({
           </Button>
 
           {/* Navigation */}
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="history"
+            onNavigate={handleNavigate}
+          />
 
           {/* Yuuko Comment Card */}
           <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">

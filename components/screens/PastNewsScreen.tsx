@@ -13,8 +13,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
@@ -31,14 +32,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Home,
-  Newspaper,
-  History,
   Archive,
-  BookOpen,
-  Palette,
-  Gift,
-  Settings,
   ArrowLeft,
   ChevronRight,
   Info,
@@ -51,25 +45,6 @@ import {
   type ArchiveMonthDto,
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
-
-// 過去ニュース表示中はサイドバー「過去ニュース」を選択状態にする。
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: History, isActive: false },
-  { id: "past-news", label: "過去ニュース", icon: Archive, isActive: true },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Palette, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 // 記事詳細から「戻る」で再表示したとき、同じ月の記事一覧へ戻すための記憶。
 // 画面は記事詳細の表示中にアンマウントされるため、共有ファイル（app/page.tsx）へ state を足さずに
@@ -530,17 +505,11 @@ export default function PastNewsScreen({
             ホームへ戻る
           </Button>
 
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="past-news"
+            onNavigate={handleNavigate}
+          />
 
           <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
             <CardContent className="p-3">
@@ -564,6 +533,7 @@ export default function PastNewsScreen({
 
           <div className="mt-4 space-y-2">
             <AutostartStatus />
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 

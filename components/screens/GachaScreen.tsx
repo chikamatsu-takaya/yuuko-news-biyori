@@ -21,7 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -33,13 +33,7 @@ import {
   type GachaState,
 } from "@/lib/tauri/gacha";
 import {
-  Home,
-  Newspaper,
-  Clock,
-  BookOpen,
   Sparkles,
-  Dices,
-  Settings,
   ArrowLeft,
   Bell,
   ChevronRight,
@@ -53,13 +47,6 @@ import {
 // ============================================
 // TypeScript Types
 // ============================================
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-}
 
 /** 結果モーダル・コレクション詳細で見せる 1 件（獲得済みのものだけ）。 */
 interface DisplayItem {
@@ -75,16 +62,6 @@ type LoadStatus = "loading" | "ready" | "unavailable" | "error";
 // ============================================
 // Constants
 // ============================================
-
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Dices, isActive: true },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 const KIND_LABELS: Record<GachaItemKind, string> = {
   card: "カード",
@@ -488,17 +465,11 @@ export default function GachaScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 px-3 space-y-1 overflow-y-auto"
+            activeId="gacha"
+            onNavigate={handleNavigate}
+          />
 
           {/* Yuuko's Comment */}
           <div className="p-3">

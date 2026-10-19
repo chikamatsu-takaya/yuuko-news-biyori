@@ -3,13 +3,9 @@
 import * as React from "react";
 import Image from "next/image";
 import {
-  Home,
   Newspaper,
-  Clock,
   BookOpen,
   Sparkles,
-  Gift,
-  Settings,
   ArrowLeft,
   Search,
   List,
@@ -40,7 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -60,13 +56,6 @@ import {
 } from "@/lib/tauri/dictionary";
 
 import { useToast } from "@/hooks/use-toast";
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
 
 type FilterType = "all" | TauriDictionaryEntryType | "favorite";
 type SortOption = "recent" | "name" | "favorite";
@@ -88,16 +77,6 @@ type DictionaryEntry = {
   memo?: string;
   iconType: DictionaryIconType;
 };
-
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: true },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
@@ -823,17 +802,11 @@ export default function DictionaryScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 space-y-1 overflow-y-auto px-3">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 space-y-1 overflow-y-auto px-3"
+            activeId="dictionary"
+            onNavigate={handleNavigate}
+          />
 
           <div className="p-3">
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">

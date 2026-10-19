@@ -14,17 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
-  Home,
-  Newspaper,
-  Clock,
-  BookOpen,
   Sparkles,
-  Dices,
-  Settings,
   ArrowLeft,
   Bell,
   ChevronRight,
@@ -66,24 +60,6 @@ type ThemeOption = ReturnType<typeof buildThemeOptions>[number];
 
 /** テーマ切り替えの成功表示（固定文言のみ）。失敗はトーストで出す（辞書・設定画面と同じ）。 */
 type ThemeMessage = { kind: "success"; text: string } | null;
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-}
-
-// Mock Data
-const mockNavigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: true },
-  { id: "gacha", label: "ガチャ", icon: Dices, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 // Tauri 外のプレビュー専用のサンプル値。実データと誤解されないよう「サンプル」表示と組で使う。
 const previewFriendship: FriendshipView = {
@@ -474,17 +450,11 @@ export default function CustomizeScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 px-3 space-y-1 overflow-y-auto"
+            activeId="customize"
+            onNavigate={handleNavigate}
+          />
 
           {/* Yuuko's Comment */}
           <div className="p-3">
