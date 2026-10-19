@@ -30,9 +30,15 @@
 //!   自動要約からの要求は `for_background` の窓口を通し、利用者の操作とは別に数える（summary_service）。
 //!   要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
-//!   一時ファイルへ書き切ってから tmp→bak→本体 の順に差し替える方式（article_repository の
-//!   atomic_write）のため、書きかけの .md は残らない。ただし2回の rename の間でプロセスが
-//!   強制終了されると、.bak だけが残る短い隙間がある（既存の全保存処理に共通の制約）。
+//!   一時ファイルへ書き切ってから差し替える方式（article_repository の atomic_write）のため、
+//!   書きかけの .md は残らない（差し替えの細部と隙間の扱いは article_repository 側の説明に従う）。
+//! - 設定ファイルが読めないとき（保存中の差し替え・一時的な読み取りエラー）は、無効とは扱わず
+//!   待機列を残したまま取り出しを見送り、確かめ直す（`SettingsUnavailable`）。
+//!   読めない一瞬のために待機列を捨てると、次の投入（ニュース取得後など）まで自動要約が止まるため。
+//!   読めない状態が続くときは、確かめ直す間隔を 60 秒から倍々に延ばして最長 10 分にする
+//!   （`settings_retry_interval`）。待機列は捨てない（捨てても次の投入でまた並ぶだけで、読めるように
+//!   なったときにすぐ再開できる方が分かりやすいため。メモリ上の ID の列なので保持の負荷は小さい）。
+//!   警告は「読めなくなったとき」に1回だけ、読めるようになったら info を1回だけ出す。
 //! - 取り出した記事は AI を呼ぶ前に記事ファイルで要約済みか確かめ直し、手動要約や並べ直しとの
 //!   競合で要約済みになった記事を上書きしない。AI 呼び出し中に手動要約された場合も、保存の直前に
 //!   同じ書き込みロック内で確かめ直して上書きせず、失敗ではなく完了として外す。
@@ -41,6 +47,15 @@
 //! - 上限まで失敗した記事は投入件数の上限に数えない（失敗した記事で枠が埋まり、他の記事が
 //!   自動要約されなくなるのを防ぐため）。
 //! - AI 呼び出し中はキューのロックを持たない（画面からの状態取得を待たせない）。
+//! - 手動の要約（「今すぐ要約」など）と重ねない。手動で生成中の記事は取り出さずに外し（`Skipped`）、
+//!   自動で生成中の記事も、段の合間に手動の要約が始まったら残りの段をやめる（`YieldedToManual`。
+//!   summary_service）。どちらも失敗に数えない。手動の要約が失敗した記事は、次の投入でまた並ぶ。
+//! - ローカルLLMは `-np 1` で要求を1つずつ処理するため、利用者の要求（手動の要約・用語解説・フレーズ解説・
+//!   接続テスト）の最中と、その終わりから `MANUAL_PRIORITY_GRACE`（45 秒）の間は次の記事を取り出さない。
+//!   また、llama-server の起動失敗が続いて起動を控えている間（`START_FAILURE_COOLDOWN`）も取り出さない
+//!   （取り出すと失敗の試行回数だけが進み、記事が `Failed` になるため）。どちらも `LocalLlmService::background_wait`
+//!   で判定し、止めた記事は待機列の先頭に残す。待ちは `LOCAL_LLM_RECHECK_MAX` 以下の区切りで測り直す
+//!   （設定の切り替えにも追いつくため。常時ポーリングはしない）。Gemini の設定では見ない。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +96,35 @@ const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
 /// 全画面・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
 const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待つときの、1回の待ちの上限。
+/// 起動を控える 10 分を1回で待たず、設定の切り替え（Gemini への変更など）に追いつけるようにする。
+const LOCAL_LLM_RECHECK_MAX: Duration = Duration::from_secs(60);
+
+/// 設定が読めない状態が続くときの、確かめ直す間隔の上限（60 秒から倍々に延ばす）。
+const SETTINGS_RETRY_MAX: Duration = Duration::from_secs(10 * 60);
+
+/// 同じ待ちの下限。残りがごく短いときに細かく起き直さないため。
+const LOCAL_LLM_RECHECK_MIN: Duration = Duration::from_secs(1);
+
+/// 自動要約を動かしてよいかの判定結果。設定が読めないとき（`Unknown`）は、無効（待機列を捨てる）と分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Enablement {
+    Enabled,
+    Disabled,
+    /// 設定が読めず判定できない。待機列を残して見送る。
+    Unknown,
+}
+
+impl From<bool> for Enablement {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 /// 1回の処理ステップの結果。ログとテストで使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StepOutcome {
@@ -90,6 +134,8 @@ enum StepOutcome {
     Stopped,
     /// 自動要約が無効のため、待機中の記事を捨てて何もしなかった。
     Disabled,
+    /// 設定が読めなかったため取り出さなかった（待機列は残し、失敗に数えない。後で確かめ直す）。
+    SettingsUnavailable,
     /// 全画面・マイク使用中のため取り出さなかった（記事は待機列に残し、失敗に数えない）。
     Paused,
     Succeeded(String),
@@ -97,6 +143,8 @@ enum StepOutcome {
     Skipped(String),
     /// AI 呼び出し中に手動要約などで要約済みになったため、保存せずに外した（失敗に数えない）。
     AlreadySummarized(String),
+    /// 生成の途中で同じ記事の手動要約が始まったため、残りの段をやめて外した（失敗に数えない）。
+    YieldedToManual(String),
     /// 失敗したが上限前のため、キューの最後へ戻した。
     Retrying(String),
     /// 上限に達したため、再起動まで Failed のままにする。
@@ -170,9 +218,10 @@ impl QueueCore {
 
     /// 止める判定なしで次の1件を処理する（テスト用）。
     #[cfg(test)]
-    fn process_next<E, D, S>(&self, is_enabled: E, is_done: D, summarize: S) -> StepOutcome
+    fn process_next<E, R, D, S>(&self, is_enabled: E, is_done: D, summarize: S) -> StepOutcome
     where
-        E: FnOnce() -> bool,
+        E: FnOnce() -> R,
+        R: Into<Enablement>,
         D: FnOnce(&str) -> bool,
         S: FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
     {
@@ -182,8 +231,10 @@ impl QueueCore {
     /// 次の1件を処理する。`summarize` の実行中はロックを持たない。
     /// `is_paused` が true なら取り出さずに `Paused` を返す（記事は待機列の先頭に残り、失敗に数えない）。
     /// `is_paused` は待機中の記事があるときだけ呼ぶ（取り出すものが無いのに OS へ問い合わせないため）。
-    /// `is_done` は記事ファイルで要約済みかを副作用なしに確かめる（既読状態は進めない）。
-    fn process_next_unless_paused<E, P, D, S>(
+    /// `is_done` は記事ファイルで要約済みか・手動の要約が生成中かを副作用なしに確かめる（既読状態は進めない）。
+    /// true なら AI を呼ばずに外す（`Skipped`）。
+    /// `is_enabled` が `Unknown`（設定が読めない）なら、待機列を残して `SettingsUnavailable` を返す。
+    fn process_next_unless_paused<E, R, P, D, S>(
         &self,
         is_enabled: E,
         is_paused: P,
@@ -191,7 +242,8 @@ impl QueueCore {
         summarize: S,
     ) -> StepOutcome
     where
-        E: FnOnce() -> bool,
+        E: FnOnce() -> R,
+        R: Into<Enablement>,
         P: FnOnce() -> bool,
         D: FnOnce(&str) -> bool,
         S: FnOnce(&str) -> Result<AutoSummaryOutcome, AppError>,
@@ -199,9 +251,13 @@ impl QueueCore {
         if self.stopped.load(Ordering::SeqCst) {
             return StepOutcome::Stopped;
         }
-        if !is_enabled() {
-            self.clear_pending();
-            return StepOutcome::Disabled;
+        match is_enabled().into() {
+            Enablement::Enabled => {}
+            Enablement::Disabled => {
+                self.clear_pending();
+                return StepOutcome::Disabled;
+            }
+            Enablement::Unknown => return StepOutcome::SettingsUnavailable,
         }
         {
             let state = self.lock();
@@ -249,6 +305,11 @@ impl QueueCore {
             Ok(AutoSummaryOutcome::AlreadySummarized) => {
                 state.failure_counts.remove(&article_id);
                 StepOutcome::AlreadySummarized(article_id)
+            }
+            // 生成の途中で同じ記事の手動要約が始まった。手動の結果を待たずに外す（失敗に数えない）。
+            Ok(AutoSummaryOutcome::YieldedToManual) => {
+                state.failure_counts.remove(&article_id);
+                StepOutcome::YieldedToManual(article_id)
             }
             Err(error) => {
                 // 本文は出さず、記事IDとエラー種別だけを残す。
@@ -308,6 +369,9 @@ type UserBusyCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 /// 待機列が空になったときの知らせ。本番は `LocalLlmService::release_soon`（早めの停止の予約）。
 type DrainedHook = Arc<dyn Fn() + Send + Sync>;
 
+/// ローカルLLMの都合で取り出しを待つ長さ。本番は `LocalLlmService::background_wait`。
+type LocalLlmWait = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
+
 /// 全画面（プレゼン・ゲームなど）またはマイク使用中か。会議中は「会議アプリ起動中 かつ マイク使用中」
 /// なので、マイク使用中を見れば含まれる。OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
 /// どのアプリかは扱わず、真偽値だけを使う。
@@ -328,8 +392,12 @@ pub struct AutoSummaryQueue {
     ai_ready: AiReadyCheck,
     /// 本番は `is_user_busy_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
     user_busy: UserBusyCheck,
-    /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm_release` で差し込む）。
+    /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm` で差し込む）。
     on_drained: DrainedHook,
+    /// 取り出す前に待つ長さ（ローカルLLMの設定のときだけ見る）。既定は待たない（`with_local_llm` で差し込む）。
+    local_llm_wait: LocalLlmWait,
+    /// 設定が読めない状態か。警告を状態が変わったときだけ出すために持つ（clone しても同じ値を指す）。
+    settings_unreadable: Arc<AtomicBool>,
 }
 
 impl AutoSummaryQueue {
@@ -347,13 +415,29 @@ impl AutoSummaryQueue {
             ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
             user_busy: Arc::new(is_user_busy_on_this_pc),
             on_drained: Arc::new(|| {}),
+            local_llm_wait: Arc::new(|| None),
+            settings_unreadable: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（lib.rs で、要約に使うのと同じ窓口を渡す）。
-    /// 動いていなければ何もしない。直近の手動操作があるときにいつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
-    pub fn with_local_llm_release(mut self, local_llm: LocalLlmService) -> Self {
-        self.on_drained = Arc::new(move || local_llm.release_soon());
+    /// 同梱ローカルLLMとつなぐ（lib.rs で、要約・用語解説に使うのと同じ窓口を渡す）。
+    /// - 待機列が空になったら早めの停止を頼む。動いていなければ何もしない。直近の手動操作があるときに
+    ///   いつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
+    /// - 次の記事を取り出す前に、手動の要求の最中・直後か、起動を控えている間かを尋ね、その間は待つ。
+    pub fn with_local_llm(mut self, local_llm: LocalLlmService) -> Self {
+        let release = local_llm.clone();
+        self.on_drained = Arc::new(move || release.release_soon());
+        self.local_llm_wait = Arc::new(move || local_llm.background_wait());
+        self
+    }
+
+    /// ローカルLLMの都合で待つ長さの判定を差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_local_llm_wait(
+        mut self,
+        wait: impl Fn() -> Option<Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.local_llm_wait = Arc::new(wait);
         self
     }
 
@@ -382,10 +466,10 @@ impl AutoSummaryQueue {
     }
 
     /// 未要約の記事をおすすめ順で待機列へ並べ直す。ニュース取得の完了後・起動時・設定保存後に呼ぶ。
-    /// 無効時は待機列を空にする（処理中の1件はそのまま終わらせる）。
+    /// 無効時は待機列を空にする（処理中の1件はそのまま終わらせる）。設定が読めないときは
+    /// 今の待機列を変えない（読めない一瞬のために捨てない）。
     pub fn enqueue_unsummarized(&self) {
         let Some(settings) = self.load_settings() else {
-            self.core.clear_pending();
             return;
         };
         if !is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider)) {
@@ -414,11 +498,22 @@ impl AutoSummaryQueue {
     }
 
     fn run_worker(&self) {
+        // 設定が続けて読めなかった回数（確かめ直す間隔を延ばすため）。
+        let mut settings_unavailable_streak: u32 = 0;
         while self.core.wait_for_work() {
+            // 手動の要求の最中・直後、起動を控えている間は取り出さない（記事は待機列の先頭に残る）。
+            if let Some(wait) = self.local_llm_wait() {
+                log::debug!(
+                    "auto summary is waiting {}s for the local llm",
+                    wait.as_secs()
+                );
+                self.core.wait_interval(wait);
+                continue;
+            }
             let outcome = self.core.process_next_unless_paused(
                 || self.is_enabled(),
                 || self.is_paused(),
-                |article_id| self.is_summarized(article_id),
+                |article_id| self.is_done_or_taken(article_id),
                 |article_id| {
                     self.summary_service
                         .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
@@ -427,11 +522,15 @@ impl AutoSummaryQueue {
                 },
             );
             self.notify_if_drained(&outcome);
+            if outcome != StepOutcome::SettingsUnavailable {
+                settings_unavailable_streak = 0;
+            }
             match outcome {
                 // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける
                 // （Gemini は毎分上限を守るため、ローカルは CPU を他の操作へ返すため）。
                 StepOutcome::Succeeded(_)
                 | StepOutcome::AlreadySummarized(_)
+                | StepOutcome::YieldedToManual(_)
                 | StepOutcome::Retrying(_) => self.core.wait_interval(self.item_interval()),
                 StepOutcome::Failed(article_id) => {
                     log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
@@ -440,6 +539,12 @@ impl AutoSummaryQueue {
                 StepOutcome::Paused => {
                     log::debug!("auto summary paused while the pc is busy");
                     self.core.wait_interval(PAUSE_RECHECK_INTERVAL)
+                }
+                // 設定が読めなかった。待機列は残し、少し待って確かめ直す。
+                StepOutcome::SettingsUnavailable => {
+                    settings_unavailable_streak = settings_unavailable_streak.saturating_add(1);
+                    self.core
+                        .wait_interval(settings_retry_interval(settings_unavailable_streak));
                 }
                 StepOutcome::Skipped(_)
                 | StepOutcome::Idle
@@ -464,6 +569,14 @@ impl AutoSummaryQueue {
             .load_settings()
             .map(|settings| settings.to_dto().ai_provider);
         item_interval_for(provider)
+    }
+
+    /// 次の記事を取り出す前に待つ長さ。ローカルLLMで要約する設定のときだけ尋ねる。
+    fn local_llm_wait(&self) -> Option<Duration> {
+        let provider = self
+            .load_settings()
+            .map(|settings| settings.to_dto().ai_provider);
+        local_llm_wait_for(provider, || (self.local_llm_wait)())
     }
 
     /// ローカルLLMで要約する設定のときだけ、全画面・マイク使用中なら止める。
@@ -503,6 +616,19 @@ impl AutoSummaryQueue {
         resolve_summary_state(persisted, self.core.state_of(article_id))
     }
 
+    /// 取り出した記事を AI を呼ばずに外すか。手動の要約が生成中（同じ記事を二重に生成しないため）、
+    /// または記事ファイルで要約済みなら true。
+    fn is_done_or_taken(&self, article_id: &str) -> bool {
+        if self
+            .summary_service
+            .is_manual_summary_in_progress(article_id)
+        {
+            log::info!("auto summary skipped {article_id}: a manual summary is in progress");
+            return true;
+        }
+        self.is_summarized(article_id)
+    }
+
     /// 記事ファイルで要約済みかを確かめる。読めないときは未要約として扱い、要約側の失敗として数える。
     fn is_summarized(&self, article_id: &str) -> bool {
         match self.article_service.is_article_summarized(article_id) {
@@ -514,18 +640,31 @@ impl AutoSummaryQueue {
         }
     }
 
-    /// 設定が読めないときは自動要約しない（外部AIの利用枠を守る安全側）。
-    fn is_enabled(&self) -> bool {
-        self.load_settings().is_some_and(|settings| {
-            is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider))
-        })
+    /// 設定が読めないときは取り出さない（外部AIの利用枠を守る安全側）。ただし無効とは扱わず
+    /// 待機列を残す（`Enablement::Unknown`）。
+    fn is_enabled(&self) -> Enablement {
+        match self.load_settings() {
+            Some(settings) => {
+                is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider)).into()
+            }
+            None => Enablement::Unknown,
+        }
     }
 
+    /// 設定を読む。読めないときは固定の文言だけを残す（エラー文にパス等が入り得るため出さない）。
+    /// 警告は読めなくなったときに1回だけ、読めるようになったら info を1回だけ出す（続く間は繰り返さない）。
     fn load_settings(&self) -> Option<PersistedSettings> {
         match self.settings_repository.load_or_default() {
-            Ok(settings) => Some(settings),
-            Err(error) => {
-                log::warn!("failed to load settings for auto summary: {error}");
+            Ok(settings) => {
+                if self.settings_unreadable.swap(false, Ordering::SeqCst) {
+                    log::info!("auto summary: settings are readable again");
+                }
+                Some(settings)
+            }
+            Err(_) => {
+                if !self.settings_unreadable.swap(true, Ordering::SeqCst) {
+                    log::warn!("auto summary: settings could not be read; keeping the queue");
+                }
                 None
             }
         }
@@ -564,11 +703,36 @@ fn took_an_item(outcome: &StepOutcome) -> bool {
         StepOutcome::Succeeded(_)
         | StepOutcome::Skipped(_)
         | StepOutcome::AlreadySummarized(_)
+        | StepOutcome::YieldedToManual(_)
         | StepOutcome::Retrying(_)
         | StepOutcome::Failed(_)
         | StepOutcome::Disabled => true,
-        StepOutcome::Idle | StepOutcome::Stopped | StepOutcome::Paused => false,
+        StepOutcome::Idle
+        | StepOutcome::Stopped
+        | StepOutcome::Paused
+        | StepOutcome::SettingsUnavailable => false,
     }
+}
+
+/// ローカルLLMの都合で取り出しを待つ長さ（純粋関数）。ローカルLLMの設定のときだけ `wait` を尋ね、
+/// 1回の待ちを `LOCAL_LLM_RECHECK_MIN`〜`LOCAL_LLM_RECHECK_MAX` に収める。
+fn local_llm_wait_for(
+    provider: Option<AiProvider>,
+    wait: impl FnOnce() -> Option<Duration>,
+) -> Option<Duration> {
+    if provider != Some(AiProvider::Local) {
+        return None;
+    }
+    wait().map(|remaining| remaining.clamp(LOCAL_LLM_RECHECK_MIN, LOCAL_LLM_RECHECK_MAX))
+}
+
+/// 設定が `streak` 回続けて読めなかったときに、次に確かめるまでの間隔（純粋関数）。
+/// 60 秒から倍々に延ばし、`SETTINGS_RETRY_MAX`（10 分）で止める。
+fn settings_retry_interval(streak: u32) -> Duration {
+    let doublings = streak.saturating_sub(1).min(16);
+    PAUSE_RECHECK_INTERVAL
+        .saturating_mul(1u32 << doublings)
+        .min(SETTINGS_RETRY_MAX)
 }
 
 /// 1件処理するごとに空ける間隔。ローカルは短く、それ以外（Gemini・設定を読めないとき）は長く空ける。
@@ -1303,13 +1467,19 @@ mod tests {
             StepOutcome::Succeeded("a".to_string()),
             StepOutcome::Skipped("a".to_string()),
             StepOutcome::AlreadySummarized("a".to_string()),
+            StepOutcome::YieldedToManual("a".to_string()),
             StepOutcome::Retrying("a".to_string()),
             StepOutcome::Failed("a".to_string()),
             StepOutcome::Disabled,
         ] {
             assert!(took_an_item(&outcome), "{outcome:?}");
         }
-        for outcome in [StepOutcome::Idle, StepOutcome::Stopped, StepOutcome::Paused] {
+        for outcome in [
+            StepOutcome::Idle,
+            StepOutcome::Stopped,
+            StepOutcome::Paused,
+            StepOutcome::SettingsUnavailable,
+        ] {
             assert!(!took_an_item(&outcome), "{outcome:?}");
         }
     }
@@ -1320,11 +1490,157 @@ mod tests {
         let queue = ctx
             .queue
             .clone()
-            .with_local_llm_release(LocalLlmService::unavailable());
+            .with_local_llm(LocalLlmService::unavailable());
         queue.core.replace_pending(ids(&["a"]));
         assert_eq!(
             step_and_notify(&queue, |_| Ok(SAVED)),
             StepOutcome::Succeeded("a".to_string())
         );
+    }
+
+    // --- 手動の要約・手動の要求との協調 ---
+
+    #[test]
+    fn article_being_summarized_manually_is_skipped_without_calling_ai() {
+        let ctx = queue_context_with("manual-in-flight", "local", true);
+        let queue = &ctx.queue;
+        queue.enqueue_unsummarized();
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+
+        // 「今すぐ要約」で同じ記事を生成中（まだ保存前）。キューは AI を呼ばずに外す。
+        let manual = queue
+            .summary_service
+            .mark_manual_summary_in_progress("unsummarized");
+        let outcome = queue.core.process_next_unless_paused(
+            || queue.is_enabled(),
+            || false,
+            |id| queue.is_done_or_taken(id),
+            |_| panic!("must not generate an article that is being summarized manually"),
+        );
+        assert_eq!(outcome, StepOutcome::Skipped("unsummarized".to_string()));
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::None);
+        assert!(queue.core.lock().failure_counts.is_empty());
+
+        // 手動の要約が終われば（失敗しても）、次の投入でまた並ぶ。
+        drop(manual);
+        assert!(!queue
+            .summary_service
+            .is_manual_summary_in_progress("unsummarized"));
+        queue.enqueue_unsummarized();
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+    }
+
+    #[test]
+    fn yielding_to_a_manual_summary_is_not_a_failure() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["taken", "next"]));
+
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| Ok(AutoSummaryOutcome::YieldedToManual),
+        );
+        assert_eq!(outcome, StepOutcome::YieldedToManual("taken".to_string()));
+        assert_eq!(core.state_of("taken"), SummaryState::None);
+        assert!(core.lock().failure_counts.is_empty());
+        assert!(core.failed_ids().is_empty());
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["next"]));
+    }
+
+    #[test]
+    fn local_llm_wait_is_asked_only_for_the_local_provider_and_clamped() {
+        // ローカル以外（Gemini・設定を読めない）では尋ねない。
+        for provider in [None, Some(AiProvider::Gemini), Some(AiProvider::Mock)] {
+            assert_eq!(
+                local_llm_wait_for(provider, || panic!("must not ask the local llm")),
+                None
+            );
+        }
+        let local = Some(AiProvider::Local);
+        assert_eq!(local_llm_wait_for(local, || None), None);
+        assert_eq!(
+            local_llm_wait_for(local, || Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(30))
+        );
+        // 起動を控える 10 分は 60 秒ずつに区切り、ごく短い残りは 1 秒にまとめる。
+        assert_eq!(
+            local_llm_wait_for(local, || Some(Duration::from_secs(600))),
+            Some(LOCAL_LLM_RECHECK_MAX)
+        );
+        assert_eq!(
+            local_llm_wait_for(local, || Some(Duration::from_millis(5))),
+            Some(LOCAL_LLM_RECHECK_MIN)
+        );
+    }
+
+    #[test]
+    fn queue_asks_the_local_llm_before_taking_the_next_article() {
+        let ctx = queue_context_with("llm-wait-local", "local", true);
+        let queue = ctx
+            .queue
+            .clone()
+            .with_local_llm_wait(|| Some(Duration::from_secs(20)));
+        assert_eq!(queue.local_llm_wait(), Some(Duration::from_secs(20)));
+
+        // Gemini の設定では、ローカルLLMの都合で待たない。
+        let ctx = queue_context_with("llm-wait-gemini", "gemini", true);
+        let queue = ctx
+            .queue
+            .clone()
+            .with_local_llm_wait(|| panic!("must not ask the local llm for gemini"));
+        assert_eq!(queue.local_llm_wait(), None);
+    }
+
+    #[test]
+    fn real_local_llm_wait_is_none_when_nothing_happened() {
+        // 手動の要求も起動失敗も無ければ待たない（本番の窓口をそのままつなぐ）。
+        let ctx = queue_context_with("llm-wait-real", "local", true);
+        let queue = ctx
+            .queue
+            .clone()
+            .with_local_llm(LocalLlmService::unavailable());
+        assert_eq!(queue.local_llm_wait(), None);
+    }
+
+    #[test]
+    fn settings_read_error_keeps_the_queue_and_counts_nothing() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a", "b"]));
+
+        // 設定が読めない間は取り出さず、待機列も捨てない（無効とは扱わない）。
+        let outcome = core.process_next(
+            || Enablement::Unknown,
+            not_done,
+            |_| panic!("must not summarize while settings are unreadable"),
+        );
+        assert_eq!(outcome, StepOutcome::SettingsUnavailable);
+        assert!(!took_an_item(&outcome));
+        assert_eq!(core.state_of("a"), SummaryState::Waiting);
+        assert_eq!(core.state_of("b"), SummaryState::Waiting);
+        assert!(core.lock().failure_counts.is_empty());
+
+        // 読めるようになれば、残っていた順に処理する。
+        assert_eq!(drain(&core, |_| Ok(SAVED)), ids(&["a", "b"]));
+
+        // 本当に無効なら、従来どおり待機列を捨てる。
+        core.replace_pending(ids(&["c"]));
+        assert_eq!(
+            core.process_next(|| Enablement::Disabled, not_done, |_| Ok(SAVED)),
+            StepOutcome::Disabled
+        );
+        assert!(core.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn settings_retry_interval_backs_off_to_ten_minutes() {
+        let secs = |streak| settings_retry_interval(streak).as_secs();
+        assert_eq!(secs(0), 60);
+        assert_eq!(secs(1), 60);
+        assert_eq!(secs(2), 120);
+        assert_eq!(secs(3), 240);
+        assert_eq!(secs(4), 480);
+        assert_eq!(secs(5), 600);
+        assert_eq!(secs(100), 600);
+        assert_eq!(secs(u32::MAX), 600);
     }
 }

@@ -9,6 +9,8 @@
 //!
 //! セキュリティ方針:
 //! - news_sources.json は deny-by-default（空配列）。破損時は fail-close（Err）。
+//!   ただし初回起動でファイルが無いときだけ、起動処理が同梱の既定取得元（D138）を書き出す
+//!   （services::default_news_sources）。既存の設定は上書きしない。
 //! - feed_url / 記事URL は RssClient / HtmlFetcher に渡す前に UrlGuard で再検証する。
 //! - HtmlFetcher 失敗時は本文なしで保存を継続するが、エラー件数・対象URLを結果へ含める。
 //! - 結果の errors はサニタイズ済み（対象URLと固定カテゴリのみ）。内部パスや
@@ -107,7 +109,8 @@ impl Default for NewsSourcesConfig {
 
 impl NewsSourcesConfig {
     /// 取得元設定を読み込む。
-    /// - ファイル無し: 初回扱い。空（deny-by-default）を返す。
+    /// - ファイル無し: 空（deny-by-default）を返す。既定取得元は起動時に書き出し済みのため、
+    ///   ここで同梱値へ戻すことはしない（実行中に削除された場合は取得しない＝安全側）。
     /// - 破損: **fail-close**。デフォルトへ戻さず Err を返し、取得を中止する。
     pub fn load(path: &Path) -> Result<Self, AppError> {
         if !path.exists() {
@@ -123,19 +126,6 @@ impl NewsSourcesConfig {
                 "news sources config is corrupted; refusing to fetch (fail-close)".to_string(),
             )
         })
-    }
-
-    /// 設定ファイルが無い場合のみ空のデフォルトを書き出す。
-    pub fn initialize_default_if_missing(path: &Path) -> Result<(), AppError> {
-        if path.exists() {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let payload = serde_json::to_vec_pretty(&Self::default())?;
-        std::fs::write(path, payload)?;
-        Ok(())
     }
 }
 
@@ -832,16 +822,6 @@ mod tests {
             }
             other => panic!("expected validation error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn news_sources_initialize_writes_empty_then_loads_back() {
-        let path = unique_temp_path();
-        let _ = std::fs::remove_file(&path);
-        NewsSourcesConfig::initialize_default_if_missing(&path).unwrap();
-        let loaded = NewsSourcesConfig::load(&path).unwrap();
-        assert_eq!(loaded, NewsSourcesConfig::default());
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -41,71 +41,17 @@ impl GachaRepository {
         Ok(Some(state))
     }
 
+    /// 一時ファイル→1回の rename で置き換える（`infra::atomic_file`。本体が無くなる隙間を作らない）。
     pub fn save(&self, state: &GachaState) -> Result<(), AppError> {
-        if let Some(parent) = self.state_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let temp_path = self.state_path.with_extension("json.tmp");
-        let backup_path = self.state_path.with_extension("json.bak");
-        let payload = serde_json::to_vec_pretty(state)?;
-        std::fs::write(&temp_path, payload)?;
-
-        let had_existing = self.state_path.exists();
-        if had_existing {
-            if backup_path.exists() {
-                std::fs::remove_file(&backup_path)?;
-            }
-            std::fs::rename(&self.state_path, &backup_path)?;
-        }
-
-        match std::fs::rename(&temp_path, &self.state_path) {
-            Ok(()) => {
-                if had_existing && backup_path.exists() {
-                    if let Err(error) = std::fs::remove_file(&backup_path) {
-                        log::warn!("Failed to remove gacha-state backup: {}", error.kind());
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => {
-                log::error!(
-                    "Failed to promote temporary gacha-state file: {}",
-                    error.kind()
-                );
-
-                if had_existing && backup_path.exists() {
-                    if let Err(restore_error) = std::fs::rename(&backup_path, &self.state_path) {
-                        log::error!(
-                            "Failed to restore gacha-state backup: {}",
-                            restore_error.kind()
-                        );
-                    }
-                }
-
-                if temp_path.exists() {
-                    let _ = std::fs::remove_file(&temp_path);
-                }
-
-                Err(error.into())
-            }
-        }
+        crate::infra::atomic_file::write_json_atomic(&self.state_path, state, "gacha-state")
     }
 
+    /// 旧形式の保存（本体→.bak 退避→昇格）が途中で止まって残った .bak を、本体が無いときだけ戻す。
     fn restore_backup_if_primary_missing(&self) {
-        if self.state_path.exists() {
-            return;
-        }
-
-        let backup_path = self.state_path.with_extension("json.bak");
-        if !backup_path.exists() {
-            return;
-        }
-
-        log::warn!("gacha_state.json is missing. attempting backup restore.");
-        if let Err(error) = std::fs::rename(&backup_path, &self.state_path) {
-            log::error!("Failed to restore gacha-state backup: {}", error.kind());
-        }
+        crate::infra::atomic_file::restore_legacy_backup_if_missing(
+            &self.state_path,
+            "gacha-state",
+        );
     }
 }
 

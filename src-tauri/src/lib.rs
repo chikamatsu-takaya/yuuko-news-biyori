@@ -29,12 +29,13 @@ use services::article_service::ArticleService;
 use services::auto_summary_queue::AutoSummaryQueue;
 use services::data_export_service::DataExportService;
 use services::data_import_service::{DataImportService, MigrationWriteLocks};
+use services::default_news_sources;
 use services::dictionary_service::DictionaryService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
 use services::local_llm_service::LocalLlmService;
 use services::news_scheduler::NewsScheduler;
-use services::news_service::{NewsService, NewsSourcesConfig};
+use services::news_service::NewsService;
 use services::recommendation_service::RecommendationService;
 use services::reward_service::RewardService;
 use services::settings_service::SettingsService;
@@ -89,9 +90,19 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(app_data_dir);
             paths.ensure_storage_dirs()?;
-            NetworkAllowlist::initialize_default_if_missing(&paths.network_allowlist_path)?;
+            // 取得元設定が無い初回だけ、同梱の既定取得元（D138）と対応する許可ホストを書き出す。
+            // 既存の設定ファイルは上書き・マージしない（ユーザーの編集が常に勝つ）。
+            // 書き出しに失敗しても起動は続ける。ファイルが無ければ取得側は空・deny-by-default
+            // として扱う（取得しない＝安全側）ため、次回起動で再作成を試みればよい。
+            if let Err(error) = default_news_sources::initialize_news_config_if_missing(
+                &paths.news_sources_path,
+                &paths.network_allowlist_path,
+            ) {
+                log::warn!("ニュース取得元の既定設定を作成できませんでした");
+                log::debug!("news config initialization failed: {error}");
+            }
+            // 既存の許可リストが壊れている場合は従来どおり起動を止める（既存設計・fail-close）。
             NetworkAllowlist::load(&paths.network_allowlist_path)?;
-            NewsSourcesConfig::initialize_default_if_missing(&paths.news_sources_path)?;
 
             let settings_repository = SettingsRepository::new(&paths);
             let settings_service = SettingsService::new(settings_repository);
@@ -153,12 +164,13 @@ pub fn run() {
             );
             // 自動要約キュー（設定で有効なときだけ動く）。ニュース取得後に NewsScheduler から投入する。
             // 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（直近に手動操作があれば、その操作から5分たってから止まる）。
+            // 手動の要求の最中・直後と、llama-server の起動を控えている間は、次の記事を取り出さない。
             let auto_summary_queue = AutoSummaryQueue::new(
                 article_service.clone(),
                 summary_service.clone(),
                 SettingsRepository::new(&paths),
             )
-            .with_local_llm_release(local_llm_service.clone());
+            .with_local_llm(local_llm_service.clone());
             let news_scheduler = NewsScheduler::new(
                 &paths,
                 news_service.clone(),
