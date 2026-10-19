@@ -98,7 +98,7 @@ const formatMonthLabel = (month: string): string => {
 const OLD_FORMAT_NOTE =
   "この月は古い形式で保存されているため、記事一覧を表示できません。";
 const RESTORE_ERROR_MESSAGE =
-  "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。";
+  "アーカイブから記事を取り出せなかったよ。少し時間を置いてから、もう一度試してみてね。";
 
 type NoticeKind = "info" | "error" | "restore-error";
 
