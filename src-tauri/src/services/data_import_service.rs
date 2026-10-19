@@ -397,7 +397,13 @@ fn extract_and_validate(
         let entry = archive
             .by_index_raw(index)
             .map_err(|_| rejected("not a valid zip file"))?;
-        let name = entry.name();
+        // 名前のバイト列が UTF-8 としてそのまま読めるものだけを許す（CP437 などで読み替えた名前は拒否）。
+        // zip 9 は UTF-8 フラグが無くても UTF-8 として読めればその名前を返すため、そうした名前もここを通る。
+        // その場合も、後段の is_safe_entry_path・manifest の許可リスト・manifest との完全一致で同じ名前を検査する。
+        let name = entry
+            .name()
+            .map_err(|_| rejected("an entry has an unsafe name"))?;
+        let name = name.as_ref();
         if name.as_bytes() != entry.name_raw() || !is_safe_entry_path(name) {
             return Err(rejected("an entry has an unsafe name"));
         }

@@ -633,7 +633,10 @@ mod tests {
 
     fn zip_entry_names(path: &Path) -> Vec<String> {
         let archive = ZipArchive::new(File::open(path).unwrap()).unwrap();
-        let mut names: Vec<String> = archive.file_names().map(str::to_string).collect();
+        let mut names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         names.sort();
         names
     }
@@ -760,7 +763,7 @@ mod tests {
                 assert!(
                     !text.contains(forbidden),
                     "{} contains {forbidden}",
-                    entry.name()
+                    entry.name().unwrap()
                 );
             }
         }
