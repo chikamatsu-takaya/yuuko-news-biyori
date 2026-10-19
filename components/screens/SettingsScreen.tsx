@@ -99,7 +99,6 @@ type SuppressionSettings = {
 
 type AiSettings = {
   explanationDetail: string;
-  autoSuggestLongSummary: boolean;
   provider: string;
   providerStatus: string;
   autoSummaryEnabled: boolean;
@@ -170,7 +169,6 @@ const mockSettings: SettingsState = {
   },
   ai: {
     explanationDetail: "ふつう",
-    autoSuggestLongSummary: true,
     provider: "mock",
     providerStatus: "MockProviderで動作中",
     autoSummaryEnabled: false,
@@ -1443,19 +1441,6 @@ export default function SettingsScreen({
                       />
                     </div>
                   </div>
-                  {/* 長文要点説明の自動候補は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
-                      AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
-                  <SettingRow label="長文要点説明の自動候補（準備中）">
-                    <Switch
-                      aria-label="長文要点説明の自動候補（準備中）"
-                      checked={settings.ai.autoSuggestLongSummary}
-                      disabled
-                      aria-disabled
-                      onCheckedChange={(checked) =>
-                        updateAi("autoSuggestLongSummary", checked)
-                      }
-                    />
-                  </SettingRow>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
                   {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
                   <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">

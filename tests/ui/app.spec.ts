@@ -3784,6 +3784,9 @@ test("dictionary: the フレーズ filter separates phrases from terms", async (
   const list = main.locator("[data-slot='card']");
   await expect(main.getByText("E2E用語").first()).toBeVisible();
   await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+  // 種別の絞り込みは 単語 / フレーズ だけ。旧「要点説明」はフレーズに統合した（判断台帳 D144）。
+  await expect(main.getByRole("button", { name: "要点説明", exact: true })).toHaveCount(0);
+  await expect(main.getByText("要点説明")).toHaveCount(0);
 
   await main.getByRole("button", { name: "フレーズ", exact: true }).first().click();
   await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
@@ -5235,11 +5238,10 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   await expect(page.getByRole("combobox")).toHaveCount(2);
   await expect(page.getByText("専門用語の解説レベル")).toHaveCount(0);
   await expect(page.getByText("AI処理の優先モード")).toHaveCount(0);
-  // 自動要約スイッチは DTO 保存されるため操作可能、長文要点説明は準備中で非活性。
-  await expect(page.getByRole("switch")).toHaveCount(2);
-  await expect(
-    page.getByRole("switch", { name: "長文要点説明の自動候補（準備中）" })
-  ).toBeDisabled();
+  // 自動要約スイッチは DTO 保存されるため操作可能。長文要点説明の自動候補（準備中）は
+  // D21 でフレーズ解説に統合したため置かない（判断台帳 D144）。
+  await expect(page.getByRole("switch")).toHaveCount(1);
+  await expect(page.getByText(/長文要点説明/)).toHaveCount(0);
   await expect(
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeEnabled();

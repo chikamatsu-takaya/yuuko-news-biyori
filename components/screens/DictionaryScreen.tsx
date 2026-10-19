@@ -99,7 +99,7 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
     id: "entry-article-001-fundraising",
     term: "資金調達",
-    type: "phrase",
+    type: "term",
     shortDescription: "企業が事業拡大のために投資や融資で資金を集めることだよ。",
     fullDescription:
       "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
@@ -131,7 +131,7 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
     id: "entry-article-002-business-improvement",
     term: "業務改善",
-    type: "key_point",
+    type: "term",
     shortDescription: "仕事の流れを見直して効率や成果を高めることだよ。",
     fullDescription:
       "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
@@ -174,7 +174,6 @@ const filterOptions: Array<{
   { id: "all", label: "すべて", icon: List },
   { id: "term", label: "単語", icon: Search },
   { id: "phrase", label: "フレーズ", icon: Sparkles },
-  { id: "key_point", label: "要点説明", icon: Pencil },
   { id: "favorite", label: "お気に入り", icon: Star },
 ];
 
@@ -199,18 +198,12 @@ function typeLabel(type: TauriDictionaryEntryType): string {
   if (type === "phrase") {
     return "フレーズ";
   }
-  if (type === "key_point") {
-    return "要点説明";
-  }
   return "単語";
 }
 
 function iconTypeFor(type: TauriDictionaryEntryType): DictionaryIconType {
   if (type === "phrase") {
     return "brain";
-  }
-  if (type === "key_point") {
-    return "chip";
   }
   return "robot";
 }
@@ -369,7 +362,6 @@ function TypeBadge({ type }: { type: TauriDictionaryEntryType }) {
   const colors = {
     term: "bg-[var(--yuuko-green)] text-white",
     phrase: "bg-blue-500 text-white",
-    key_point: "bg-amber-500 text-white",
   } as const;
 
   return (

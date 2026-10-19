@@ -492,7 +492,9 @@ fn build_dictionary_miss_entry(
             DictionaryEntryType::Phrase => {
                 build_generic_phrase_entry(article_id, article_title, selected_text)
             }
-            _ => build_generic_entry(article_id, article_title, selected_text),
+            DictionaryEntryType::Term => {
+                build_generic_entry(article_id, article_title, selected_text)
+            }
         })
 }
 
@@ -576,6 +578,7 @@ fn build_generic_phrase_entry(
 /// 固定サンプル記事(article-001〜003)の組み込み解説。文面はゆうこの口調（D123）で、
 /// 短い解説は用語解説プロンプトと同じ「〇〇とは、…だよ。」の形にそろえる。
 /// 辞書ストアへは書き込まず未命中時に毎回この定義から返すため、保存済み辞書の文面は変わらない。
+/// 種別は実データと同じく選択の判定（`classify_selected_text`・D21）に合わせる（D144。テストで一致を確かめる）。
 fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
     vec![
         SampleDictionaryEntry {
@@ -590,7 +593,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-001",
             article_title: "生成AIスタートアップの資金調達が再加速",
             key_text: "資金調達",
-            entry_type: DictionaryEntryType::Phrase,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "資金調達とは、企業が事業拡大のために投資や融資で資金を集めることだよ。",
             detail_explanation: "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
         },
@@ -598,7 +601,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-001",
             article_title: "生成AIスタートアップの資金調達が再加速",
             key_text: "業務自動化",
-            entry_type: DictionaryEntryType::KeyPoint,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "業務自動化とは、定型業務を仕組み化して人手を減らす考え方のことだよ。",
             detail_explanation: "業務自動化は、繰り返し作業や定型処理をシステム化して効率を上げる取り組みだよ。生成AIが評価されやすい背景には、この自動化効果を現場で示しやすいことがあるんだよ。",
         },
@@ -614,7 +617,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-002",
             article_title: "国内SaaS企業、業務改善支援の新施策を発表",
             key_text: "導入支援",
-            entry_type: DictionaryEntryType::Phrase,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "導入支援とは、サービスを使い始める際の設定や定着を支える取り組みのことだよ。",
             detail_explanation: "導入支援は、ツールの初期設定だけでなく、使い方の教育や運用への定着まで含めて支援することだよ。この記事では、導入後の継続活用まで見据えた支援が価値として語られているよ。",
         },
@@ -622,7 +625,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-002",
             article_title: "国内SaaS企業、業務改善支援の新施策を発表",
             key_text: "業務改善",
-            entry_type: DictionaryEntryType::KeyPoint,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "業務改善とは、仕事の流れを見直して効率や成果を高めることだよ。",
             detail_explanation: "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
         },
@@ -638,7 +641,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-003",
             article_title: "量子コンピュータ研究で新たな誤り訂正手法",
             key_text: "誤り訂正",
-            entry_type: DictionaryEntryType::Phrase,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "誤り訂正とは、計算中の誤差を検知し、補正するための仕組みのことだよ。",
             detail_explanation: "誤り訂正は、計算途中で起こるノイズや誤差を見つけて結果を安定させる考え方だよ。量子コンピュータでは特に重要で、実用化に向けた大きな課題の一つだね。",
         },
@@ -646,7 +649,7 @@ fn sample_dictionary_entries() -> Vec<SampleDictionaryEntry> {
             article_id: "article-003",
             article_title: "量子コンピュータ研究で新たな誤り訂正手法",
             key_text: "研究成果",
-            entry_type: DictionaryEntryType::KeyPoint,
+            entry_type: DictionaryEntryType::Term,
             short_explanation: "研究成果とは、研究や実験によって得られた新しい知見や結果のことだよ。",
             detail_explanation: "研究成果は、学術研究や実験を通じて得られた知見のことだよ。この記事では、新たな誤り訂正手法が今後の実装方式に影響を与える可能性がある点が大事だよ。",
         },
@@ -1677,6 +1680,19 @@ mod tests {
             }
             assert!(short.chars().count() <= super::TERM_EXPLANATION_SHORT_MAX_CHARS);
             assert!(detail.chars().count() <= super::TERM_EXPLANATION_DETAIL_MAX_CHARS);
+        }
+    }
+
+    #[test]
+    fn sample_entry_types_match_selection_classifier() {
+        // 固定サンプルの種別は、実際に選んだときの判定（D21）と同じにする（D144）。
+        for entry in super::sample_dictionary_entries() {
+            assert_eq!(
+                entry.entry_type,
+                crate::domain::dictionary::classify_selected_text(entry.key_text),
+                "{}",
+                entry.key_text
+            );
         }
     }
 
