@@ -195,7 +195,12 @@ test("initial display comes from the saved notification state", async ({
   ).toBeVisible();
   // 吹き出し段階ではまだ軽量プレビュー（詳しく見る）は出ない。
   await expect(region.getByRole("button", { name: "詳しく見る" })).toHaveCount(0);
-  expect(await commandCalls(page, "get_yuuko_notification_state")).toBe(1);
+  // 初期表示は保存済み状態の読み込みから来る。開発時は React StrictMode でマウント effect が
+  // 二重実行され2回呼ばれることがあるため、回数ではなく「読み込まれたこと」を確認する。
+  const initialStateCalls = await commandCalls(page, "get_yuuko_notification_state");
+  expect(initialStateCalls).toBeGreaterThanOrEqual(1);
+  // 描画のたびに読み直すような退行は検出したいので、StrictMode の2回までに抑える。
+  expect(initialStateCalls).toBeLessThanOrEqual(2);
   // 透明な背景で、ウィンドウ寸法に収まる。
   const background = await page.evaluate(
     () => getComputedStyle(document.body).backgroundColor
@@ -207,10 +212,14 @@ test("initial display comes from the saved notification state", async ({
 test("shows nothing when there is no active notification", async ({ page }) => {
   await installMocks(page, { state: null });
   await openYuukoWindow(page);
+  // 保存済み状態を読み込んだうえで何も出さないこと（StrictMode の二重実行で2回になり得る）。
   await expect
     .poll(() => commandCalls(page, "get_yuuko_notification_state"))
-    .toBe(1);
+    .toBeGreaterThanOrEqual(1);
   await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+  expect(
+    await commandCalls(page, "get_yuuko_notification_state")
+  ).toBeLessThanOrEqual(2);
 });
 
 test("event payload shows the notification and resumes the preview stage", async ({
@@ -263,6 +272,35 @@ test("balloon → first click preview → 詳しく見る confirms through handl
   expect(await commandCalls(page, "dismiss_yuuko_notification")).toBe(0);
   expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
   await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+});
+
+test("rapid clicks on 詳しく見る confirm only once", async ({ page }) => {
+  // 既に PreviewVisible の通知から始め、「詳しく見る」が次の確定クリックになる状態にする。
+  await installMocks(page, { state: activeState({ state: "PreviewVisible" }) });
+  await openYuukoWindow(page, PREVIEW_HEIGHT);
+  const region = page.getByRole("region", { name: REGION });
+  const openButton = region.getByRole("button", { name: "詳しく見る" });
+  await expect(openButton).toBeVisible();
+  expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(0);
+
+  // 同期的な連打（同一タスク内で複数回 click）を与え、確定後（退場演出中）の追加クリックも無視されることを見る。
+  // 終端確定は一度きり（terminalFiredRef）のため、遷移（handle_yuuko_clicked）は1回だけ。
+  await openButton.evaluate((button) => {
+    for (let i = 0; i < 5; i += 1) {
+      (button as HTMLButtonElement).click();
+    }
+  });
+  if (await openButton.isVisible()) {
+    await openButton.dblclick({ force: true, timeout: 1_000 }).catch(() => undefined);
+  }
+
+  await expect.poll(() => commandCalls(page, "handle_yuuko_clicked")).toBe(1);
+  // 遅れて届く呼び出しが無いこと（退場演出・キューの後も1回のまま）を確かめる。
+  await expect(page.getByRole("region", { name: REGION })).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(await commandCalls(page, "handle_yuuko_clicked")).toBe(1);
+  expect(await commandCalls(page, "dismiss_yuuko_notification")).toBe(0);
+  expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
 });
 
 const REWARD_TEXT =
