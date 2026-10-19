@@ -39,7 +39,12 @@ React だけの変更なら上2つ、保存・読み込みまで関わるなら 
 
 - `mapSettingsFromDto`（`components/screens/SettingsScreen.tsx`）— DTO → 画面状態への変換。
 - `buildDtoForSave`（同上）— 画面状態 → 保存用DTOの組み立て。
-- DTOフィールド（`lib/tauri/settings.ts`）: `workTimeRanges` / `notifyStartTime` / `notifyEndTime` / `notifyMaxPerDay` / `explanationLevel` / `aiProvider` / `selectedThemeId`。
+- DTOフィールド（`lib/tauri/settings.ts` の `UserSettingsDto`。Rust 側は `domain/settings.rs` の `UserSettingsDto`）:
+  - 通知: `workTimeRanges` / `notifyStartTime` / `notifyEndTime` / `notifyMaxPerDay` / `enableYuukoPopup` / `suppressDuringMeeting` / `suppressDuringMicUse` / `suppressDuringFullscreen`
+  - 表示・ゆうこ: `genres` / `explanationLevel` / `selectedThemeId` / `selectedToneId` / `selectedPersonalityId` / `nickname` / `maxDailyRecommendations`
+  - AI: `aiProvider`（`local` / `gemini` / `mock` 等）/ `autoSummaryEnabled`（任意。欠落時は無効扱い）
+  - その他: `autoStartOnPcBoot` / `onboardingCompleted`（任意。保存時は true のときだけ記録）/ `genreFilterFallback`（読み取り専用。保存 DTO には含めない）
+- 新規作成・初期化時の初期値（`PersistedSettings::initial`。AI はローカル・自動要約は有効。判断台帳 D103）と、既存ファイルに欄が無いときの読み込み値（`Default`。Mock・自動要約は無効）は別物。混同しない。
 - 保存 → 読み込みで往復しても値が保持されること（特に `workTimeRanges` の複数レンジ・単一レンジ）。
 - **APIキーを React 側へ露出しないこと**（DTO・戻り値・ログに含めない）。
 

@@ -89,3 +89,13 @@ Codex でも同じプロンプトをそのまま使える（共通ルールは `
 - 記事の**一覧表示**は `yuuko-home.md`、記事詳細での**用語解説**は `term-dictionary.md`。
 - 単一機能の修正は個別ai-contextを直接使う。`mvp-demo.md` は**複数機能をまたぐ横断確認のときだけ**使う。
 - 該当する入口がない領域（ニュース取得パイプライン・アーカイブ・ガチャ等）は、上記の追加判断基準に従う。
+
+## 専用の入口がまだ無い領域の最初の候補
+
+専用の `<領域>.md` を作るまでの暫定の入口。ここに挙げたファイルから調査を始め、全体を走査しない（詳しい振り分けは [`mvp-demo.md`](./mvp-demo.md) §専用ai-contextがない段階の調査開始地点）。
+
+| 領域 | 最初に読むファイル | 関連資料 |
+|---|---|---|
+| AI Provider・ローカルLLM（主経路。判断台帳 D99〜D103） | `src-tauri/src/services/ai_provider_service.rs`（ローカル / Gemini / Mock の切り替え）→ `src-tauri/src/services/local_llm_service.rs`（llama-server の起動・停止）→ `src-tauri/src/infra/local_llm_runtime.rs` | `docs/01_setup/ローカルLLM同梱配布手順.md` |
+| AI要約・自動要約 | `src-tauri/src/services/summary_service.rs` → `src-tauri/src/services/auto_summary_queue.rs`。画面側は `lib/tauri/articles.ts`（`generate_article_summary`）→ `components/screens/NewsReaderScreen.tsx` | MVPスコープ定義書 §5.3、画面詳細設計書 §6.7 |
+| ニュース取得（定期・手動） | `src-tauri/src/services/news_scheduler.rs`（起動時・日付変更時・3時間おき）→ `src-tauri/src/services/news_service.rs`。手動更新は `lib/tauri/news.ts` の `refresh_news` → `src-tauri/src/commands/news_commands.rs` | `docs/01_setup/ニュースソース設定手順.md`。取得元・allowlist の git 外設定は `AGENTS.md` §0 のとおり無断で触れない |
