@@ -42,7 +42,6 @@ import {
   Settings,
   ArrowLeft,
   Bell,
-  HelpCircle,
   ChevronRight,
   MessageCircle,
   MessageSquare,
@@ -782,13 +781,8 @@ export default function GachaScreen({
                 : "ガチャ"}
           </span>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            className="text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="ヘルプ"
-          >
-            <HelpCircle className="w-4 h-4" />
-          </button>
           <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center" aria-hidden="true">
             <PawIcon className="w-4 h-4 text-white" />
           </div>

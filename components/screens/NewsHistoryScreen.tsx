@@ -48,16 +48,13 @@ import {
   Settings,
   ArrowLeft,
   Search,
-  Filter,
   List,
   Circle,
   CheckCircle,
   Star,
   Archive,
   Bell,
-  HelpCircle,
   RotateCcw,
-  Share2,
   FolderOpen,
   Info,
   Tag,
@@ -837,7 +834,7 @@ export default function NewsHistoryScreen({
             <h1 className="text-xl font-bold text-foreground">ニュース履歴</h1>
           </div>
 
-          {/* Search */}
+          {/* Search（絞り込みは下のフィルタチップとタグで行う。処理の無い「絞り込み」ボタンは置かない） */}
           <div className="flex items-center gap-2 mb-3">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
@@ -849,10 +846,6 @@ export default function NewsHistoryScreen({
                 aria-label="ニュース履歴を検索"
               />
             </div>
-            <Button variant="outline" className="gap-2">
-              <Filter className="w-4 h-4" aria-hidden="true" />
-              絞り込み
-            </Button>
           </div>
 
           {/* Filter Chips */}
@@ -1085,22 +1078,20 @@ export default function NewsHistoryScreen({
                         ? "お気に入り解除"
                         : "お気に入り登録"}
                   </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full gap-2"
-                    onClick={() => console.log("アーカイブを展開:", selectedItem.id)}
-                  >
-                    <FolderOpen className="w-4 h-4" aria-hidden="true" />
-                    アーカイブを展開
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full gap-2"
-                    onClick={() => console.log("記事をシェア:", selectedItem.id)}
-                  >
-                    <Share2 className="w-4 h-4" aria-hidden="true" />
-                    記事をシェア
-                  </Button>
+                  {/* アーカイブ済み記事だけ、月別にたどれる過去ニュース画面への導線を出す。
+                      1記事の取り出しは「もう一度見る」の確認ダイアログで行うため、ここでは画面遷移だけにする。
+                      記事のシェアは機能が無いためボタンを置かない。 */}
+                  {selectedItem.isArchived && onNavigate && (
+                    <Button
+                      variant="outline"
+                      className="w-full gap-2"
+                      disabled={isRestoring}
+                      onClick={() => onNavigate("past-news")}
+                    >
+                      <FolderOpen className="w-4 h-4" aria-hidden="true" />
+                      過去ニュースで探す
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -1120,13 +1111,8 @@ export default function NewsHistoryScreen({
             {historyItems.length}件
           </span>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            className="hover:text-foreground transition-colors"
-            aria-label="ヘルプ"
-          >
-            <HelpCircle className="w-4 h-4" />
-          </button>
           <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
         </div>
       </footer>

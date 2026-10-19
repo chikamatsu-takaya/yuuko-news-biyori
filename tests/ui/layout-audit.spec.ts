@@ -122,7 +122,8 @@ const SCREENS: ScreenCase[] = [
     keyTargets: (page) => [
       { name: "見出し", locator: page.getByRole("heading", { name: "ニュース履歴" }).first() },
       { name: "ホームへ戻る", locator: page.getByRole("button", { name: "ホームへ戻る", exact: true }) },
-      { name: "絞り込み", locator: page.getByRole("button", { name: "絞り込み", exact: true }) },
+      // 処理の無い「絞り込み」ボタンは撤去したため、フィルタチップ「すべて」を代わりに確認する。
+      { name: "フィルタ「すべて」", locator: page.locator("main").getByRole("button", { name: "すべて", exact: true }) },
     ],
   },
   {

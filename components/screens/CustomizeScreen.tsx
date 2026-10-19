@@ -27,7 +27,6 @@ import {
   Settings,
   ArrowLeft,
   Bell,
-  HelpCircle,
   ChevronRight,
   MessageCircle,
   Palette,
@@ -841,13 +840,19 @@ export default function CustomizeScreen({
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]"></span>
-                <span className="text-xs text-foreground">新しいニュースが3件届いてるよ！</span>
+                {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みの友情ランクを出す。
+                    ブラウザプレビューのサンプル値（preview）や失敗時は数値を出さず、画面名だけにする。 */}
+                <span className="text-xs text-foreground" data-testid="customize-footer-status">
+                  {friendshipStatus === "loading"
+                    ? "読み込み中..."
+                    : friendshipStatus === "ready" && friendship !== null
+                      ? `友情ランク ${friendship.currentRank}`
+                      : "カスタマイズ"}
+                </span>
               </div>
             </div>
+            {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
             <div className="flex items-center gap-2">
-              <button className="p-1 hover:bg-muted rounded transition-colors">
-                <HelpCircle className="w-4 h-4 text-muted-foreground" />
-              </button>
               <div className="w-5 h-5 rounded-full bg-[var(--yuuko-green-light)] flex items-center justify-center">
                 <span className="text-[10px]">🐾</span>
               </div>

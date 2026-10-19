@@ -38,7 +38,8 @@ const majorScreens = [
     navName: "ニュース履歴",
     expectedHeading: "ニュース履歴",
     expectedText: "ニュース履歴",
-    criticalButtons: ["ホームへ戻る", "絞り込み"],
+    // 処理の無かった「絞り込み」ボタンは撤去したため、絞り込みはフィルタチップで確認する。
+    criticalButtons: ["ホームへ戻る", "すべて"],
   },
   {
     id: "customize",
@@ -843,6 +844,100 @@ test("past news: old-format months explain that the article list is unavailable"
   );
   // 一覧を開くボタンは出さない。
   await expect(month.getByRole("button")).toHaveCount(0);
+});
+
+// 押しても何も起きなかったボタン（console.log だけ・onClick 無し）の整理。
+// 既存機能で裏付けられるものは接続し、裏付けの無いもの（シェア・共有・ヘルプ・絞り込み）は表示しない。
+test("news history: dead share / filter / help buttons are not rendered", async ({
+  page,
+}) => {
+  await openNewsHistory(page);
+
+  await expect(page.getByRole("button", { name: "記事をシェア" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "絞り込み", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "ヘルプ" })).toHaveCount(0);
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+  // アーカイブされていない記事には過去ニュースへの導線（旧「アーカイブを展開」）を出さない。
+  await expect(page.getByRole("button", { name: "アーカイブを展開" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "過去ニュースで探す" })).toHaveCount(0);
+});
+
+test("news history: archived article offers 過去ニュースで探す which opens the past news screen", async ({
+  page,
+}) => {
+  await setArchivedHistory(page);
+  await openNewsHistory(page);
+
+  await expect(page.locator("main").getByText("アーカイブ済み", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "過去ニュースで探す" }).click();
+
+  // 画面遷移だけで、1記事の取り出し（restore_archived_article）は呼ばない。
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+});
+
+test("dictionary: dead share / filter / help buttons are not rendered and delete stays", async ({
+  page,
+}) => {
+  await openDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  await expect(page.getByRole("button", { name: "削除する" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "共有する" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "絞り込み", exact: true })).toHaveCount(0);
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+});
+
+for (const target of [
+  { navName: "カスタマイズ", heading: "ゆうこカスタマイズ" },
+  { navName: "ガチャ", heading: "ゆうこガチャ" },
+] as const) {
+  test(`${target.navName}: the footer has no dead help button`, async ({ page }) => {
+    await openScreenFromSidebar(page, target.navName, target.heading);
+    await expect(page.locator("footer")).toBeVisible();
+    await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+  });
+}
+
+test("reader: すべての関連ワードを見る expands the remaining candidate terms in place", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_KEYWORD_CANDIDATES__ = [
+      "候補語A",
+      "候補語B",
+      "候補語C",
+      "候補語D",
+      "候補語E",
+      "候補語F",
+      "候補語G",
+    ];
+  });
+  await openReaderWithoutExplain(page);
+  const aside = page.locator("aside");
+
+  // 既定では先頭5件だけ。残り2件は展開ボタンの件数で示す。
+  await expect(aside.getByText("候補語E", { exact: true })).toBeVisible();
+  await expect(aside.getByText("候補語F", { exact: true })).toHaveCount(0);
+  const expandButton = page.getByRole("button", { name: "すべての関連ワードを見る（ほか2件）" });
+  await expect(expandButton).toBeVisible();
+
+  await expandButton.click();
+  await expect(aside.getByText("候補語F", { exact: true })).toBeVisible();
+  await expect(aside.getByText("候補語G", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /すべての関連ワードを見る/ })).toHaveCount(0);
+  // ヘルプ画面は無いため、フッターに押せないヘルプボタンを置かない。
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+});
+
+test("reader: 5 or fewer candidate terms show no expand button", async ({ page }) => {
+  await openReaderWithoutExplain(page);
+  await expect(page.locator("aside").getByText("Playwright", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /すべての関連ワードを見る/ })).toHaveCount(0);
 });
 
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
@@ -1834,6 +1929,9 @@ test("customize: friendship rank and reward unlock state come from real data", a
   );
   await expect(page.getByText("350 / 1000")).toHaveCount(0);
   await expect(page.getByText("サンプル", { exact: true })).toHaveCount(0);
+  // フッターは固定の「3件届いてるよ」ではなく、取得済みの友情ランクを出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.getByTestId("customize-footer-status")).toHaveText("友情ランク 4");
 
   const rewardItems = page.getByTestId("customize-rank-reward-item");
   await expect(rewardItems).toHaveCount(2);
@@ -2010,6 +2108,8 @@ test("customize: browser preview (outside Tauri) labels the sample rank values",
   );
   await expect(page.getByTestId("customize-rank-reward-preview")).toBeVisible();
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(0);
+  // サンプル値はフッターに数値として出さない。
+  await expect(page.getByTestId("customize-footer-status")).toHaveText("カスタマイズ");
 });
 
 // カスタマイズ画面のテーマ切り替え（set_active_theme）。報酬テーマは解放済みだけ、ガチャテーマは所持済みだけ選べる。
@@ -8463,7 +8563,10 @@ async function installTauriMocks(page: Page) {
               yuukoComment: "UI確認中だよ。",
               // 同名・別IDの用語切替テスト用: フラグ時は表示文字列が同じ2候補（ID は別になる）。
               // 候補語なしテスト用: フラグ時は空（実記事で候補語が無い状態）。
-              keywordCandidates: detailWin.__E2E_EMPTY_KEYWORDS__
+              // 候補語の件数を変える検証用（「すべての関連ワードを見る」の展開）: フラグ時は指定の配列。
+              keywordCandidates: Array.isArray(detailWin.__E2E_KEYWORD_CANDIDATES__)
+                ? detailWin.__E2E_KEYWORD_CANDIDATES__
+                : detailWin.__E2E_EMPTY_KEYWORDS__
                 ? []
                 : detailWin.__E2E_SAME_NAME_TERMS__
                   ? ["同じ用語", "同じ用語"]
