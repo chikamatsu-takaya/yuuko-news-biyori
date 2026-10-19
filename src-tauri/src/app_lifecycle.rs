@@ -564,6 +564,7 @@ fn build_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWin
         .ok_or(tauri::Error::WindowNotFound)?;
     // 起動時は自動起動の判定のため非表示で作るが、作り直しは再表示の要求によるものなので表示状態で作る。
     // 位置・大きさは保存していないため、作り直すと tauri.conf.json の既定（800x600）に戻る。
+    // 最小サイズ（minWidth / minHeight）も from_config がこの設定から引き継ぐ。
     config.visible = true;
     WebviewWindowBuilder::from_config(app, &config)?
         // 起動時のメインと同じく新しいウィンドウは作らない（wry の既定も拒否だが明示する）。
@@ -921,6 +922,25 @@ mod tests {
         let found = main_window_config(&windows).expect("main の設定がある");
         assert_eq!(found.label, MAIN_WINDOW_LABEL);
         assert!(main_window_config(&windows[..1]).is_none());
+    }
+
+    #[test]
+    fn main_window_config_keeps_minimum_size() {
+        // 作り直し（build_main_window）は tauri.conf.json の main 設定を from_config に渡すため、
+        // 最小サイズが設定に入っていれば初回作成と同じく作り直し後にも効く。
+        // 最小サイズが無いと、狭めたときに左右の固定列だけが残って中央列が消える。
+        use tauri::utils::config::WindowConfig;
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let windows: Vec<WindowConfig> =
+            serde_json::from_value(conf["app"]["windows"].clone()).expect("windows");
+        let main = main_window_config(&windows).expect("main の設定がある");
+        assert_eq!(main.min_width, Some(800.0));
+        // 高さは高 DPI（1366×768 の 150% 等）でも作業領域に収まるよう、既定より低い 440 にしている。
+        assert_eq!(main.min_height, Some(440.0));
+        // 既定サイズは最小サイズ以上であること。
+        assert!(main.min_width.is_some_and(|min| main.width >= min));
+        assert!(main.min_height.is_some_and(|min| main.height >= min));
     }
 
     #[test]
