@@ -684,7 +684,7 @@ export default function NewsHistoryScreen({
         return;
       }
       setLoadNotice(
-        "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+        "アーカイブから記事を取り出せなかったよ。少し時間を置いてから、もう一度試してみてね。"
       );
       setLoadNoticeKind("restore-error");
       console.warn("Failed to restore archived article:", error);
@@ -728,8 +728,8 @@ export default function NewsHistoryScreen({
       // 生のエラー文言は画面へ出さず、固定文言だけを案内する。
       setLoadNotice(
         nextIsFavorite
-          ? "お気に入りの登録に失敗しました。もう一度お試しください。"
-          : "お気に入りの解除に失敗しました。もう一度お試しください。"
+          ? "お気に入りの登録ができなかったよ。もう一度試してみてね。"
+          : "お気に入りの解除ができなかったよ。もう一度試してみてね。"
       );
       setLoadNoticeKind("favorite-error");
       console.warn("Failed to update article favorite:", error);

@@ -463,7 +463,7 @@ test("news history favorite failure keeps the previous state and shows a fixed n
 
   // 固定文言のお知らせを出し、生エラー文言は出さない。一覧再読込の「再試行」は出さない。
   await expect(main.getByRole("alert")).toHaveText(
-    "お気に入りの登録に失敗しました。もう一度お試しください。"
+    "お気に入りの登録ができなかったよ。もう一度試してみてね。"
   );
   await expect(page.getByText("E2E raw favorite failure")).toHaveCount(0);
   await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
@@ -485,7 +485,7 @@ test("news history favorite failure keeps the previous state and shows a fixed n
   await setFavoriteFail(true);
   await page.getByRole("button", { name: "お気に入り解除" }).click();
   await expect(main.getByRole("alert")).toHaveText(
-    "お気に入りの解除に失敗しました。もう一度お試しください。"
+    "お気に入りの解除ができなかったよ。もう一度試してみてね。"
   );
   await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "お気に入り解除" })).toBeEnabled();
@@ -589,7 +589,7 @@ test("news history archived restore failure stays on history with a fixed notice
   // 固定文言だけを出し、生エラー・パスは出さない。一覧の「再試行」も出さない。
   const main = page.locator("main");
   await expect(main.getByRole("alert")).toHaveText(
-    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+    "アーカイブから記事を取り出せなかったよ。少し時間を置いてから、もう一度試してみてね。"
   );
   await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
   await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
@@ -618,7 +618,7 @@ test("news history archived restore with a mismatched article id does not naviga
   // 別IDの応答は失敗扱い: 固定文言を出し、別記事・対象記事どちらの詳細も開かない。
   const main = page.locator("main");
   await expect(main.getByRole("alert")).toHaveText(
-    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+    "アーカイブから記事を取り出せなかったよ。少し時間を置いてから、もう一度試してみてね。"
   );
   expect(await readRestoreArchivedArgs(page)).toEqual([{ articleId: "arch-1" }]);
   expect(await readRequestedArticleId(page)).toBeNull();
@@ -725,7 +725,7 @@ test("past news: restore failure stays on the month list with a fixed notice", a
 
   const main = page.locator("main");
   await expect(main.getByRole("alert")).toHaveText(
-    "アーカイブから記事を取り出せませんでした。少し時間を置いてから、もう一度お試しください。"
+    "アーカイブから記事を取り出せなかったよ。少し時間を置いてから、もう一度試してみてね。"
   );
   await expect(page.getByText(/E2E raw restore failure|internal\/secret/)).toHaveCount(0);
   expect(await readRequestedArticleId(page)).toBeNull();
@@ -1524,7 +1524,7 @@ const openReaderWithCandidatePopup = async (page: Page) => {
   await expectNoInitialTermPopup(page);
   await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "E2E用語" })).toBeVisible();
-  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
+  await expect(page.getByText("用語解説を調べているよ…")).toHaveCount(0);
 };
 
 // 関連記事（get_recommended_articles）をサンプル記事以外の rec-1 / rec-2 にして記事Aを開く。
@@ -2283,14 +2283,14 @@ test("reader: 解説 shows the loading state then the explanation on success", a
   await explainButton(page).click();
 
   // 取得中の表示が出る。
-  await expect(page.getByText("用語解説を取得しています…")).toBeVisible();
+  await expect(page.getByText("用語解説を調べているよ…")).toBeVisible();
 
   // ゲートを解放 → 成功時の解説が表示され、取得中表示は消える。
   await page.evaluate(() =>
     (window as unknown as Record<string, () => void>).__E2E_RELEASE_EXPLAIN_TERM__()
   );
   await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
-  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0);
+  await expect(page.getByText("用語解説を調べているよ…")).toHaveCount(0);
 });
 
 // 用語解説失敗時の固定文言（lib/explain-selection.mjs の termExplainFailureMessage と同じ）。
@@ -2503,7 +2503,7 @@ test("reader: current dictionary save failure is safe and can be retried", async
   await releaseSaveDictionary(page, 0, "failure");
 
   await expect(
-    page.getByText("辞書保存に失敗しました。時間をおいてもう一度お試しください。")
+    page.getByText("辞書の保存ができなかったよ。時間をおいてもう一度試してみてね。")
   ).toBeVisible();
   await expect(page.getByText("E2E save failure")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
@@ -2642,7 +2642,7 @@ test("reader: switching articles mid-request invalidates the old explanation and
     page.getByRole("heading", { name: READER_SUMMARY_TEXT })
   ).toHaveCount(0); // 記事AのTermPopup・用語見出しなし
   await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0); // 辞書保存不可
-  await expect(page.getByText("用語解説を取得しています…")).toHaveCount(0); // 取得中表示なし
+  await expect(page.getByText("用語解説を調べているよ…")).toHaveCount(0); // 取得中表示なし
   await expect(page.getByRole("button", { name: "再試行" })).toHaveCount(0); // 失敗通知・再試行なし
 
   // 記事Bの詳細を保留したまま、旧記事Aの explain_selected_term だけを完了させる。
@@ -2751,7 +2751,7 @@ test("reader: a stale dictionary save failure must not surface on the new articl
 
   // 記事Bに記事Aの保存失敗通知・toast・生エラー・内部パスが表示されない。
   await expect(
-    page.getByText("辞書保存に失敗しました。時間をおいてもう一度お試しください。")
+    page.getByText("辞書の保存ができなかったよ。時間をおいてもう一度試してみてね。")
   ).toHaveCount(0);
   await expect(page.getByText("保存に失敗しちゃった")).toHaveCount(0);
   await expect(page.getByText("E2E save failure")).toHaveCount(0);
@@ -2772,6 +2772,9 @@ test("reader: a stale dictionary save failure must not surface on the new articl
 const READER_SAMPLE_KEY_POINT = "投資対象が研究寄りから業務課題の解決寄りへ移っている";
 const READER_SAMPLE_TITLE = "生成AIスタートアップの資金調達が再加速";
 const READER_UNSUMMARIZED_TEXT = "要約はまだ準備中だよ。「要約を作成」で作れるよ。";
+
+// 記事詳細の右列にある、ゆうこの吹き出し。
+const readerYuukoBubble = (page: Page) => page.getByTestId("reader-yuuko-bubble");
 // ブラウザプレビュー用サンプル記事の候補語・関連記事タイトル。Tauri の実記事画面では出てはいけない。
 const READER_SAMPLE_TERMS = [
   "生成AI",
@@ -2834,6 +2837,8 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await page.addInitScript(() => {
     (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ =
       true;
+    // 手動の要約作成中の吹き出しを確認できるよう、生成の応答を少し遅らせる。
+    (window as unknown as Record<string, number>).__E2E_GENERATE_SUMMARY_DELAY_MS__ = 800;
   });
   await openReaderFromHome(page);
   const main = page.locator("main");
@@ -2841,6 +2846,9 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を更新" })).toHaveCount(0);
+  // 右の吹き出しも「まとめた」とは言わず、まだまとめていないことを伝える。
+  await expect(readerYuukoBubble(page)).toContainText("まだまとめていないよ");
+  await expect(readerYuukoBubble(page)).not.toContainText("まとめてみました");
   await expect(
     main.getByText("ゆうこの解説はまだ作成されていないよ。")
   ).toBeVisible();
@@ -2858,6 +2866,8 @@ test("reader summary: an unsummarized article shows the not-ready state without 
 
   // 「要約を作成」で既存の要約生成を呼び、生成結果へ切り替わる。
   await page.getByRole("button", { name: "要約を作成" }).click();
+  // 生成中は吹き出しも「まだまとめていない」ではなく、まとめている最中であることを伝える。
+  await expect(readerYuukoBubble(page)).toContainText("まとめているところだよ");
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
     "E2Eで生成された要約です。"
   );
@@ -2875,7 +2885,7 @@ test("reader summary: an unsummarized article shows the not-ready state without 
 // --- 自動要約の状態表示（判断台帳 D17） ---
 
 const READER_SUMMARY_IN_PROGRESS_TEXT =
-  "ゆうこが要約中です。できあがったらここに表示するね。";
+  "ゆうこが要約中だよ。できあがったらここに表示するね。";
 
 const setReaderSummaryState = async (page: Page, state: string) => {
   await page.addInitScript((value) => {
@@ -2884,7 +2894,7 @@ const setReaderSummaryState = async (page: Page, state: string) => {
   }, state);
 };
 
-test("reader summary: an article being summarized shows ゆうこが要約中です and picks up the summary without reload", async ({
+test("reader summary: an article being summarized shows ゆうこが要約中だよ and picks up the summary without reload", async ({
   page,
 }) => {
   // 10秒間隔の完了確認を実時間で待たないよう、時計を差し替えて進める。
@@ -2894,6 +2904,7 @@ test("reader summary: an article being summarized shows ゆうこが要約中で
   const main = page.locator("main");
 
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toBeVisible();
+  await expect(readerYuukoBubble(page)).toContainText("まとめているところだよ");
   // 処理中は手動作成ボタンを出さない。抜粋も要約として出さない。
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "今すぐ要約" })).toHaveCount(0);
@@ -2912,6 +2923,8 @@ test("reader summary: an article being summarized shows ゆうこが要約中で
   );
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+  // 要約が届いたら、吹き出しはゆうこの感想に切り替わる。
+  await expect(readerYuukoBubble(page)).toContainText("UI確認中だよ。");
 });
 
 test("reader summary: a waiting article offers 今すぐ要約 via the manual summary", async ({
@@ -2926,6 +2939,7 @@ test("reader summary: a waiting article offers 今すぐ要約 via the manual su
       "要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。"
     )
   ).toBeVisible();
+  await expect(readerYuukoBubble(page)).toContainText("順番");
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
 
@@ -2949,6 +2963,7 @@ test("reader summary: a failed article offers 要約を作り直す via the manu
       "要約の作成がうまくいかなかったよ。「要約を作り直す」でもう一度作れるよ。"
     )
   ).toBeVisible();
+  await expect(readerYuukoBubble(page)).toContainText("うまくまとめられなかったんだ");
   await expect(main.getByText(READER_SUMMARY_IN_PROGRESS_TEXT)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "要約を作成" })).toHaveCount(0);
 
@@ -3220,6 +3235,8 @@ test("reader summary: a failed article load shows an error state with 再試行 
     "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
   );
   await expect(main.getByRole("button", { name: "再試行" })).toBeVisible();
+  // 右の吹き出しも、読めなかったことを伝える（「まとめてみました」と言わない）。
+  await expect(readerYuukoBubble(page)).toContainText("うまく読めなかったみたい");
   // 失敗時も本文・右サイド「用語サポート」・関連記事のどこにもサンプルを出さず、用語解説も開かない。
   await expectNoReaderSampleContent(page);
   await expect(termPopup(page)).toHaveCount(0);
@@ -8130,7 +8147,13 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return null;
           }
-          case "generate_article_summary":
+          case "generate_article_summary": {
+            // 生成中表示の確認用: フラグ時は応答を遅らせる。
+            const generateDelayMs = (window as unknown as Record<string, unknown>)
+              .__E2E_GENERATE_SUMMARY_DELAY_MS__;
+            if (typeof generateDelayMs === "number") {
+              await new Promise((resolve) => setTimeout(resolve, generateDelayMs));
+            }
             // 失敗モード: 実AIの出力が検証に落ちた（D104）ときと同じ CommandError 形式で reject する。
             if (
               (window as unknown as Record<string, unknown>)
@@ -8149,6 +8172,7 @@ async function installTauriMocks(page: Page) {
               focusPoints: ["押し心地の確認"],
               yuukoComment: "確認できたよ。",
             };
+          }
           case "refresh_news":
             return {
               sourcesProcessed: 1,
