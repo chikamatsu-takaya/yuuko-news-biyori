@@ -25,6 +25,10 @@ import {
   Info,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -382,21 +386,32 @@ function DictionaryEntryCard({
   onClick: () => void;
   onToggleFavorite: (entryId: string, current: boolean) => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で詳細を表示）に対応する。読み上げ名は用語。
+  // カード内の★ボタンは自身で Enter/Space を処理する（activateOnEnterOrSpace が target で除外）。
+  const termId = React.useId();
   return (
     <Card
-      className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${
+      role="button"
+      tabIndex={0}
+      aria-labelledby={termId}
+      aria-current={isSelected ? "true" : undefined}
+      className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
           ? "border-2 border-[var(--yuuko-green)] bg-[var(--yuuko-green-light)]/30"
           : "border-border/50 hover:border-border"
       }`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="flex items-start gap-3 p-3">
         <EntryIcon type={entry.iconType} />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
             {/* フレーズ（約200字までの文章・D21）は一覧で2行に省略する（全文は詳細で表示）。 */}
-            <span className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground">
+            <span
+              id={termId}
+              className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground"
+            >
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />
@@ -417,6 +432,8 @@ function DictionaryEntryCard({
         <button
           type="button"
           className="shrink-0 p-1"
+          aria-label={`${entry.term}をお気に入りに登録`}
+          aria-pressed={entry.isFavorite}
           onClick={(event) => {
             event.stopPropagation();
             onToggleFavorite(entry.id, entry.isFavorite);
@@ -478,8 +495,9 @@ function Pagination({
           className="h-7 px-2"
           onClick={() => onPageChange(currentPage - 1)}
           disabled={currentPage === 1}
+          aria-label="前のページ"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4" aria-hidden="true" />
         </Button>
         {visiblePages[0] > 1 ? (
           <span className="px-1 text-muted-foreground">…</span>
@@ -508,8 +526,9 @@ function Pagination({
           className="h-7 px-2"
           onClick={() => onPageChange(currentPage + 1)}
           disabled={currentPage === totalPages}
+          aria-label="次のページ"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4" aria-hidden="true" />
         </Button>
       </div>
     </div>
@@ -1169,16 +1188,18 @@ export default function DictionaryScreen({
                           <button
                             type="button"
                             className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                            aria-label="メモを保存"
                             onClick={handleSaveMemo}
                           >
-                            <Save className="h-3 w-3" />
+                            <Save className="h-3 w-3" aria-hidden="true" />
                           </button>
                           <button
                             type="button"
                             className="rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] text-red-500 hover:underline"
+                            aria-label="メモの編集をやめる"
                             onClick={() => setIsEditingMemo(false)}
                           >
-                            <X className="h-3 w-3" />
+                            <X className="h-3 w-3" aria-hidden="true" />
                           </button>
                         </div>
                       )}

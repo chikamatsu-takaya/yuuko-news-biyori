@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
+import { shouldNotificationHandleEscape } from "@/lib/notification-escape.mjs";
 
 /**
  * 常駐ゆうこ通知（アプリ内）。
@@ -82,6 +83,11 @@ type YuukoInAppNotificationProps = {
    */
   variant?: "news" | "reward" | "message";
 };
+
+// Esc 判定で「入力欄」「ダイアログ操作中」とみなす要素。
+const EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+const DIALOG_SELECTOR =
+  '[role="dialog"], [role="alertdialog"], dialog[open], [role="listbox"], [role="menu"]';
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
 const POSITION_CLASS: Record<YuukoPositionMode, string> = {
@@ -186,12 +192,35 @@ export default function YuukoInAppNotification({
   }, [view, exiting, variant, fireTerminal]);
 
   // Esc は閉じると同等（§10.6）。退場中は確定済みのため購読しない。
+  // ただし window 全体で受けるため、入力欄・ダイアログ（用語ポップアップ・確認ダイアログ等）の上で押した
+  // Esc はその部品の取り消しとして扱い、通知を閉じない（閉じると再通知のクールタイムが付くため）。
+  // 判定は lib/notification-escape.mjs（迷ったら閉じない側）。
+  const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (exiting) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key !== "Escape") {
+        return;
+      }
+      const root = rootRef.current;
+      const active =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const focusInsideNotification = Boolean(root && active && root.contains(active));
+      const dialogOpen = Array.from(document.querySelectorAll(DIALOG_SELECTOR)).some(
+        (element) => !root?.contains(element)
+      );
+      const handle = shouldNotificationHandleEscape({
+        key: event.key,
+        defaultPrevented: event.defaultPrevented,
+        isComposing: event.isComposing,
+        focusInsideNotification,
+        focusInEditable: Boolean(active?.closest(EDITABLE_SELECTOR)),
+        focusInDialog: Boolean(active?.closest(DIALOG_SELECTOR)),
+        dialogOpen,
+      });
+      if (handle) {
         fireTerminal(() => onCloseRef.current());
       }
     };
@@ -215,6 +244,7 @@ export default function YuukoInAppNotification({
 
   return (
     <div
+      ref={rootRef}
       role="region"
       aria-label="ゆうこからのお知らせ"
       // 退場中は確定済みのため、支援技術・フォーカス移動の対象からも外す。
@@ -247,7 +277,7 @@ export default function YuukoInAppNotification({
             onClick={handleClose}
             className="absolute right-2 top-2 text-muted-foreground transition-colors hover:text-foreground"
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
 
           {variant !== "news" ? (
