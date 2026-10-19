@@ -3315,7 +3315,7 @@ mod tests {
             root_dir.join("article_favorites.json"),
             root_dir.join("archive"),
         );
-        article_repository.initialize_default_if_missing().unwrap();
+        article_repository.seed_sample_articles_for_tests();
         let service = SummaryService::new(
             AiProviderService::new(&AppPaths::new(root_dir.join("ai"))),
             article_repository.clone(),

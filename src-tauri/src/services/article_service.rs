@@ -331,9 +331,7 @@ mod tests {
         let paths = AppPaths::new(root.clone());
         paths.ensure_storage_dirs().expect("create storage dirs");
         let repository = ArticleRepository::new(&paths);
-        repository
-            .initialize_default_if_missing()
-            .expect("seed articles");
+        repository.seed_sample_articles_for_tests();
         ServiceContext {
             service: ArticleService::new(repository),
             news_dir: paths.article_news_dir.clone(),

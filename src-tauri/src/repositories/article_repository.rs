@@ -7,13 +7,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::article::{
-    display_tags, is_archive_month_deletable, is_valid_archive_month,
+    display_tags, is_archive_month_deletable, is_legacy_seed_article, is_valid_archive_month,
     is_within_title_dedupe_window, ArchiveMonthArticlesDto, ArchiveMonthDeletePreviewDto,
     ArchiveMonthDeleteResultDto, ArchiveMonthDto, ArchiveRestoreStatus,
     ArchiveRetirementSummaryDto, ArchiveSummaryDto, ArchiveZipInfoDto, ArticleDedupeKeys,
     ArticleDetailDto, ArticleHistoryFilter, ArticleHistoryItemDto, ArticleReadState,
     ArticleSummaryDto, ArticleSummaryUpdate, ArticleTagsUpdate, FavoriteUpdateResult,
-    FetchedArticle, RestoreArchivedArticleResult, SummaryState,
+    FetchedArticle, RestoreArchivedArticleResult, SummaryState, LEGACY_SEED_ARTICLES,
 };
 use crate::error::AppError;
 use crate::infra::atomic_file;
@@ -35,12 +35,48 @@ pub struct RecommendationCandidate {
     pub fetched_at: String,
 }
 
+/// 起動時の旧サンプル記事掃除（D139）の結果。辞書・ゆうこ状態の参照掃除に使う。
+#[derive(Debug, Default)]
+pub struct LegacySeedCleanup {
+    /// 記事ファイルにも過去ニュースの索引にも残っていないサンプルID（参照を外してよいID）。
+    pub article_ids_without_data: Vec<String>,
+    /// 3件とも消えたときだけ Some（参照の掃除まで成功したら、ここへ完了印を書く）。
+    done_marker_path: Option<PathBuf>,
+}
+
+impl LegacySeedCleanup {
+    /// 参照の掃除まで済んだときに呼ぶ。完了印を一時ファイル→rename で書き、以後の起動では確認を省く。
+    /// 書けなくても次回起動でもう一度確かめるだけなので、ログだけ残して続ける。
+    pub fn mark_done(&self) {
+        let Some(path) = &self.done_marker_path else {
+            return;
+        };
+        let marker = LegacySeedCleanupState {
+            version: 1,
+            completed: true,
+        };
+        if let Err(error) =
+            atomic_file::write_json_atomic(path, &marker, "legacy sample cleanup state")
+        {
+            log::warn!("Failed to save legacy sample cleanup state: {error}");
+        }
+    }
+}
+
+/// 旧サンプル記事の掃除が済んだ印（`state/legacy_seed_cleanup_state.json`）。中身は確認せず、有無だけを見る。
+#[derive(Debug, Serialize)]
+struct LegacySeedCleanupState {
+    version: u32,
+    completed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArticleRepository {
     article_favorites_path: PathBuf,
     article_news_dir: PathBuf,
     archive_dir: PathBuf,
     archive_index_path: PathBuf,
+    legacy_seed_cleanup_state_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -52,6 +88,7 @@ impl ArticleRepository {
             article_news_dir: paths.article_news_dir.clone(),
             archive_index_path: archive_dir.join("archive_index.json"),
             archive_dir,
+            legacy_seed_cleanup_state_path: paths.legacy_seed_cleanup_state_path.clone(),
             write_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -62,29 +99,182 @@ impl ArticleRepository {
         article_favorites_path: PathBuf,
         archive_dir: PathBuf,
     ) -> Self {
+        // テストでは archive と同じ親フォルダの下に、本番と同じ相対パスで印を置く。
+        let legacy_seed_cleanup_state_path = archive_dir
+            .parent()
+            .unwrap_or(&archive_dir)
+            .join(crate::paths::LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH);
         Self {
             article_favorites_path,
             article_news_dir,
             archive_index_path: archive_dir.join("archive_index.json"),
             archive_dir,
+            legacy_seed_cleanup_state_path,
             write_lock: Arc::new(Mutex::new(())),
         }
     }
 
-    pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
+    /// 起動時の記事保存先の準備。旧形式 .bak の復元・退避途中の後始末・保存先フォルダの作成を行う。
+    ///
+    /// 初回起動でもサンプル記事は書き込まない（D139）。記事は実ニュースの取得で初めて入る。
+    /// 旧版が書き込んだ架空のサンプル記事（`LEGACY_SEED_ARTICLES`）が残っていれば、ここで消し、
+    /// 他の保存データ（辞書・ゆうこ状態）の参照掃除に使う結果を返す。
+    /// 掃除が済んだ印（`state/legacy_seed_cleanup_state.json`）があれば、掃除の確認自体を省く
+    /// （新規インストールや掃除済みの環境で、起動のたびに過去ニュースの索引を読み直さないため）。
+    /// 掃除は付随処理なので、失敗しても起動は止めずに調査用ログだけ残す（次回起動で再試行される）。
+    pub fn initialize_default_if_missing(&self) -> Result<LegacySeedCleanup, AppError> {
         let _write_guard = self.lock_writes()?;
         self.restore_legacy_backups()?;
         self.recover_retirement_staging()?;
         std::fs::create_dir_all(&self.article_news_dir)?;
-        if news_dir_contains_markdown_files(&self.article_news_dir)? {
-            return Ok(());
+        match self.legacy_seed_cleanup_state_path.try_exists() {
+            Ok(true) => return Ok(LegacySeedCleanup::default()),
+            Ok(false) => {}
+            // 印の有無が分からないときは、掃除を確かめる側（冪等）に倒す。
+            Err(error) => log::warn!(
+                "Failed to check legacy sample cleanup state ({:?}); checking again",
+                error.kind()
+            ),
+        }
+        match self.remove_legacy_seed_articles_locked() {
+            Ok(cleanup) => Ok(cleanup),
+            Err(error) => {
+                log::warn!(
+                    "Failed to remove legacy sample articles; will retry on next startup: {error}"
+                );
+                Ok(LegacySeedCleanup::default())
+            }
+        }
+    }
+
+    /// 旧サンプル記事の記事ファイルを消し、お気に入りからも外す（呼び出し側で `lock_writes` を取得済みであること）。
+    ///
+    /// - 消すのは正規の保存先（`{月}/{article_id}.md`）にあり、ID・元記事URL・タイトルが
+    ///   旧サンプルと完全一致する記事だけ。読めない（破損した）ファイルや中身が違うファイルは触らない。
+    /// - 過去ニュースへ退避済み（archived）の記事ファイルは ZIP・索引と対になっているため触らない
+    ///   （ZIP から1件だけ抜く安全な経路が無いため。退避済みのサンプルは過去ニュースの月削除で消せる）。
+    /// - 何度実行しても同じ結果になる（消す対象が無ければ何もしない）。
+    /// - 3件とも記事ファイルにも過去ニュースにも無くなったときだけ、完了印を書いてよい結果を返す
+    ///   （印は参照の掃除も成功した後に `LegacySeedCleanup::mark_done` で書く）。
+    fn remove_legacy_seed_articles_locked(&self) -> Result<LegacySeedCleanup, AppError> {
+        let mut removed_count = 0usize;
+        for seed in &LEGACY_SEED_ARTICLES {
+            let Some(record) = self.find_article_record_direct(seed.article_id) else {
+                continue;
+            };
+            if record.is_archived
+                || !is_legacy_seed_article(&record.article_id, &record.original_url, &record.title)
+            {
+                continue;
+            }
+            let path = self.article_path(&record);
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed_count += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            // 月フォルダが空になったら片付ける（他の記事があれば失敗するだけなので結果は見ない）。
+            if let Some(month_dir) = path.parent() {
+                let _ = std::fs::remove_dir(month_dir);
+            }
+        }
+        if removed_count > 0 {
+            log::info!(
+                "Removed legacy sample articles written by an older version (count: {removed_count})"
+            );
         }
 
-        for article in seed_articles() {
-            self.save_article_record(&article)?;
+        let dangling_ids = self.legacy_seed_article_ids_without_data_locked()?;
+        if !dangling_ids.is_empty() {
+            let mut favorite_store = self.load_favorite_store_or_default()?;
+            let before = favorite_store.favorite_article_ids.len();
+            favorite_store
+                .favorite_article_ids
+                .retain(|article_id| !dangling_ids.contains(article_id));
+            let removed_favorites = before - favorite_store.favorite_article_ids.len();
+            if removed_favorites > 0 {
+                self.save_favorite_store(&favorite_store)?;
+                log::info!(
+                    "Removed legacy sample article references from favorites (count: {removed_favorites})"
+                );
+            }
         }
 
-        Ok(())
+        let all_gone = dangling_ids.len() == LEGACY_SEED_ARTICLES.len();
+        Ok(LegacySeedCleanup {
+            article_ids_without_data: dangling_ids,
+            done_marker_path: all_gone.then(|| self.legacy_seed_cleanup_state_path.clone()),
+        })
+    }
+
+    /// 旧サンプル記事のうち、記事ファイルにも過去ニュースの索引にも残っていない ID を返す。
+    ///
+    /// 「消した ID」ではなく「今どこにも無い ID」を毎回求めるので、途中で終了しても次回起動で追いつく。
+    /// 過去ニュース（ZIP）に残っているサンプルは履歴に出続けるため、その参照は残す。
+    /// 索引が読めない・壊れているときは判断できないので空を返す（安全側）。
+    fn legacy_seed_article_ids_without_data_locked(&self) -> Result<Vec<String>, AppError> {
+        let archive_index = match self.load_archive_index_or_default() {
+            Ok(index) => index,
+            Err(error) => {
+                log::warn!(
+                    "Skipping legacy sample reference cleanup because the archive index is unreadable: {error}"
+                );
+                return Ok(Vec::new());
+            }
+        };
+        let mut ids = Vec::new();
+        for seed in &LEGACY_SEED_ARTICLES {
+            let in_archive = archive_index
+                .archives
+                .iter()
+                .flat_map(|archive| archive.articles.iter())
+                .any(|article| article.article_id == seed.article_id);
+            if in_archive || self.article_markdown_file_exists(seed.article_id)? {
+                continue;
+            }
+            ids.push(seed.article_id.to_string());
+        }
+        Ok(ids)
+    }
+
+    /// `{月}/{article_id}.md` がどこかの月フォルダにあるか（中身は読まない。破損ファイルも「ある」とみなす）。
+    fn article_markdown_file_exists(&self, article_id: &str) -> Result<bool, AppError> {
+        if !is_direct_lookup_article_id(article_id) {
+            return Ok(false);
+        }
+        let file_name = format!("{article_id}.md");
+        // 月フォルダ外に置かれた記事も一覧には読み込まれるため、直下も確かめる。
+        if self.article_news_dir.join(&file_name).try_exists()? {
+            return Ok(true);
+        }
+        let entries = match std::fs::read_dir(&self.article_news_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() && entry.path().join(&file_name).try_exists()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// テスト用: 記事ファイルにも過去ニュースにも無い旧サンプルID（参照掃除の対象）を返す。
+    #[cfg(test)]
+    pub(crate) fn legacy_seed_article_ids_without_data(&self) -> Result<Vec<String>, AppError> {
+        let _write_guard = self.lock_writes()?;
+        self.legacy_seed_article_ids_without_data_locked()
+    }
+
+    /// テスト用: 旧版の初回起動と同じサンプル記事3件を書き込む（既存テストの記事データ・旧データの再現に使う）。
+    #[cfg(test)]
+    pub(crate) fn seed_sample_articles_for_tests(&self) {
+        let _write_guard = self.lock_writes().unwrap();
+        for article in legacy_seed_articles() {
+            self.save_article_record(&article).unwrap();
+        }
     }
 
     /// おすすめ一覧の候補を、保存スコア（基礎点）と取得日時付きで返す（並び替えはしない）。
@@ -1977,33 +2167,6 @@ impl ArticleBodySection {
     }
 }
 
-fn news_dir_contains_markdown_files(dir: &Path) -> Result<bool, AppError> {
-    if !dir.exists() {
-        return Ok(false);
-    }
-
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            if news_dir_contains_markdown_files(&path)? {
-                return Ok(true);
-            }
-            continue;
-        }
-
-        if path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("md"))
-        {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 /// 寛容ローダーの結果。読めた記事と、破損としてスキップした記事Markdownのパスを持つ。
 #[derive(Debug, Default)]
 struct ReadableArticleRecords {
@@ -2721,7 +2884,10 @@ fn atomic_write(path: &Path, payload: &[u8], label: &str) -> Result<(), AppError
     Ok(())
 }
 
-fn seed_articles() -> Vec<PersistedArticleRecord> {
+/// 旧版が初回起動時に書き込んでいたサンプル記事そのもの（テストの記事データと旧データの再現用）。
+/// 本番では書き込まない（D139）。識別子は `domain::article::LEGACY_SEED_ARTICLES` と一致させる。
+#[cfg(test)]
+fn legacy_seed_articles() -> Vec<PersistedArticleRecord> {
     vec![
         PersistedArticleRecord {
             version: 1,
@@ -2934,22 +3100,303 @@ mod tests {
     }
 
     #[test]
-    fn initialize_default_if_missing_writes_seed_markdown_files() {
+    fn initialize_default_if_missing_writes_no_articles_on_fresh_install() {
+        // D139: 初回起動でもサンプル記事を書き込まない（実ニュースを取得するまで空）。
         let context = TestRepositoryContext::new();
         context.repository.initialize_default_if_missing().unwrap();
+        context.repository.initialize_default_if_missing().unwrap();
 
-        let files = std::fs::read_dir(context.news_dir.join("202606"))
+        assert!(context.news_dir.exists());
+        let mut files = Vec::new();
+        super::collect_markdown_files(&context.news_dir, &mut files).unwrap();
+        assert!(files.is_empty(), "{files:?}");
+        assert!(context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
             .unwrap()
-            .filter_map(Result::ok)
-            .count();
-        assert_eq!(files, 3);
+            .is_empty());
+        assert!(context
+            .repository
+            .list_recommendation_candidates()
+            .unwrap()
+            .is_empty());
+        assert!(!context.root_dir.join("favorites").exists());
+    }
+
+    #[test]
+    fn legacy_seed_fixture_matches_identity_constants() {
+        // 掃除が「旧版が書いた3件」だけを正確に狙えるよう、旧データの再現用記事と識別子をそろえておく。
+        let fixtures = super::legacy_seed_articles();
+        assert_eq!(fixtures.len(), super::LEGACY_SEED_ARTICLES.len());
+        for (fixture, seed) in fixtures.iter().zip(super::LEGACY_SEED_ARTICLES.iter()) {
+            assert_eq!(fixture.article_id, seed.article_id);
+            assert_eq!(fixture.original_url, seed.original_url);
+            assert_eq!(fixture.title, seed.title);
+        }
+    }
+
+    /// 旧版の初回起動で書かれたサンプル3件と、利用者の実記事1件がある状態を作る。
+    fn legacy_install_with_user_article(context: &TestRepositoryContext) -> PersistedArticleRecord {
+        context.repository.seed_sample_articles_for_tests();
+        let user_article = PersistedArticleRecord {
+            article_id: "news_0123456789abcdef".to_string(),
+            original_url: "https://news.example.org/real".to_string(),
+            title: "実際に取得したニュース".to_string(),
+            fetched_at: "2026-06-05T00:00:00Z".to_string(),
+            published_at_text: "2026-06-05T00:00:00Z".to_string(),
+            ..super::legacy_seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&user_article)
+            .unwrap();
+        user_article
+    }
+
+    fn favorites_path(context: &TestRepositoryContext) -> PathBuf {
+        context
+            .root_dir
+            .join("favorites")
+            .join("article_favorites.json")
+    }
+
+    #[test]
+    fn startup_cleanup_removes_exactly_the_legacy_samples_and_keeps_user_articles() {
+        let context = TestRepositoryContext::new();
+        let user_article = legacy_install_with_user_article(&context);
+        // 旧サンプルと同じIDでも中身（URL）が違う記事ファイルは、推測で消さない。
+        let lookalike = PersistedArticleRecord {
+            article_id: "article-002".to_string(),
+            original_url: "https://news.example.org/other".to_string(),
+            ..super::legacy_seed_articles().remove(1)
+        };
+        context.repository.save_article_record(&lookalike).unwrap();
+        context
+            .repository
+            .update_article_favorite("article-001", true)
+            .unwrap();
+        context
+            .repository
+            .update_article_favorite(&user_article.article_id, true)
+            .unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        let ids = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap()
+            .into_iter()
+            .map(|article| article.article_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![user_article.article_id.clone(), "article-002".to_string()]
+        );
+        assert!(!context
+            .news_dir
+            .join("202606")
+            .join("article-001.md")
+            .exists());
+        assert!(!context
+            .news_dir
+            .join("202606")
+            .join("article-003.md")
+            .exists());
+        // お気に入りから消えたサンプルへの参照だけを外し、利用者のお気に入りは残す。
+        let favorites = std::fs::read_to_string(favorites_path(&context)).unwrap();
+        assert!(!favorites.contains("article-001"));
+        assert!(favorites.contains(&user_article.article_id));
+        // 同じIDの別記事が残っている article-002 は「データあり」なので、参照の掃除対象にしない。
+        assert_eq!(
+            context
+                .repository
+                .legacy_seed_article_ids_without_data()
+                .unwrap(),
+            vec!["article-001".to_string(), "article-003".to_string()]
+        );
+    }
+
+    #[test]
+    fn startup_cleanup_is_idempotent() {
+        let context = TestRepositoryContext::new();
+        let user_article = legacy_install_with_user_article(&context);
+
+        context.repository.initialize_default_if_missing().unwrap();
+        let mut first = Vec::new();
+        super::collect_markdown_files(&context.news_dir, &mut first).unwrap();
+        context.repository.initialize_default_if_missing().unwrap();
+        let mut second = Vec::new();
+        super::collect_markdown_files(&context.news_dir, &mut second).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].ends_with(format!("{}.md", user_article.article_id)));
+        // 掃除する参照が無ければお気に入りファイルを作らない。
+        assert!(!favorites_path(&context).exists());
+        assert_eq!(
+            context
+                .repository
+                .legacy_seed_article_ids_without_data()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn startup_cleanup_removes_month_folder_left_empty() {
+        let context = TestRepositoryContext::new();
+        context.repository.seed_sample_articles_for_tests();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        assert!(!context.news_dir.join("202606").exists());
+        assert!(context.news_dir.exists());
+    }
+
+    #[test]
+    fn startup_cleanup_leaves_archived_samples_and_their_references_alone() {
+        use chrono::TimeZone;
+        let context = TestRepositoryContext::new();
+        context.repository.seed_sample_articles_for_tests();
+        context
+            .repository
+            .update_article_favorite("article-002", true)
+            .unwrap();
+        // 7月半ばの保守で、お気に入りでない 2026-06 のサンプル（001・003）が過去ニュースへ退避される。
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        context.repository.retire_archived_markdown().unwrap();
+        let zip_path = context.root_dir.join("archive").join("2026-06.zip");
+        let zip_before = std::fs::read(&zip_path).unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        // 退避済みの2件は ZIP・索引ごと残り、過去ニュースから見える。お気に入りだった 002 だけ消える。
+        assert_eq!(std::fs::read(&zip_path).unwrap(), zip_before);
+        let ids = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap()
+            .into_iter()
+            .map(|article| (article.article_id, article.is_archived))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                ("article-001".to_string(), true),
+                ("article-003".to_string(), true)
+            ]
+        );
+        let favorites = std::fs::read_to_string(favorites_path(&context)).unwrap();
+        assert!(!favorites.contains("article-002"));
+        assert_eq!(
+            context
+                .repository
+                .legacy_seed_article_ids_without_data()
+                .unwrap(),
+            vec!["article-002".to_string()]
+        );
+    }
+
+    #[test]
+    fn startup_cleanup_skips_reference_cleanup_when_archive_index_is_corrupt() {
+        let context = TestRepositoryContext::new();
+        context.repository.seed_sample_articles_for_tests();
+        context
+            .repository
+            .update_article_favorite("article-001", true)
+            .unwrap();
+        let archive_dir = context.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(archive_dir.join("archive_index.json"), "{broken").unwrap();
+
+        context.repository.initialize_default_if_missing().unwrap();
+
+        // 記事ファイルの削除は索引に依存しないので進む。参照の掃除は判断できないので行わない。
+        assert!(!context.news_dir.join("202606").exists());
+        assert!(context
+            .repository
+            .legacy_seed_article_ids_without_data()
+            .unwrap()
+            .is_empty());
+        assert!(std::fs::read_to_string(favorites_path(&context))
+            .unwrap()
+            .contains("article-001"));
+        assert_eq!(
+            std::fs::read_to_string(archive_dir.join("archive_index.json")).unwrap(),
+            "{broken"
+        );
+    }
+
+    fn cleanup_marker_path(context: &TestRepositoryContext) -> PathBuf {
+        context
+            .root_dir
+            .join(crate::paths::LEGACY_SEED_CLEANUP_STATE_RELATIVE_PATH)
+    }
+
+    #[test]
+    fn cleanup_done_marker_skips_later_startup_checks() {
+        // 新規インストール: 3件とも無いので完了印を書ける。印があれば以後の起動は確認を省く。
+        let context = TestRepositoryContext::new();
+        let first = context.repository.initialize_default_if_missing().unwrap();
+        assert_eq!(first.article_ids_without_data.len(), 3);
+        assert!(!cleanup_marker_path(&context).exists());
+        first.mark_done();
+        assert!(cleanup_marker_path(&context).exists());
+
+        // 印があると掃除しない（省略されたことを、置いたサンプルが残ることで確かめる）。
+        context.repository.seed_sample_articles_for_tests();
+        let second = context.repository.initialize_default_if_missing().unwrap();
+        assert!(second.article_ids_without_data.is_empty());
+        second.mark_done();
+        assert!(context
+            .news_dir
+            .join("202606")
+            .join("article-001.md")
+            .exists());
+
+        // 印が無くなれば（データ移行の取り込み時など）再び掃除する。
+        std::fs::remove_file(cleanup_marker_path(&context)).unwrap();
+        let third = context.repository.initialize_default_if_missing().unwrap();
+        assert_eq!(third.article_ids_without_data.len(), 3);
+        assert!(!context.news_dir.join("202606").exists());
+    }
+
+    #[test]
+    fn cleanup_done_marker_is_not_written_while_samples_remain_or_index_is_unreadable() {
+        use chrono::TimeZone;
+        // 過去ニュースに退避済みのサンプルが残る間は、月削除後に参照を掃除できるよう印を書かない。
+        let context = TestRepositoryContext::new();
+        context.repository.seed_sample_articles_for_tests();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+        context
+            .repository
+            .initialize_default_if_missing()
+            .unwrap()
+            .mark_done();
+        assert!(!cleanup_marker_path(&context).exists());
+
+        // 索引が読めないときも判断できないので書かない。
+        let broken = TestRepositoryContext::new();
+        let archive_dir = broken.root_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(archive_dir.join("archive_index.json"), "{broken").unwrap();
+        broken
+            .repository
+            .initialize_default_if_missing()
+            .unwrap()
+            .mark_done();
+        assert!(!cleanup_marker_path(&broken).exists());
     }
 
     /// 件数制限と並び順は ArticleService 側の責務（article_service のテストで確認）。
     #[test]
     fn list_recommendation_candidates_returns_stored_score_and_fetched_at() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let candidates = context.repository.list_recommendation_candidates().unwrap();
         assert_eq!(candidates.len(), 3);
@@ -2964,7 +3411,7 @@ mod tests {
     #[test]
     fn list_history_returns_articles_by_fetched_at_desc() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let articles = context
             .repository
@@ -2988,12 +3435,12 @@ mod tests {
                 "生成AI".to_string(),
                 "AI".to_string(),
             ],
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let untagged = PersistedArticleRecord {
             article_id: "article-untagged".to_string(),
             tags: Vec::new(),
-            ..super::seed_articles().remove(1)
+            ..super::legacy_seed_articles().remove(1)
         };
         context.repository.save_article_record(&tagged).unwrap();
         context.repository.save_article_record(&untagged).unwrap();
@@ -3027,13 +3474,13 @@ mod tests {
             article_id: "article-b".to_string(),
             fetched_at: common_fetched_at.clone(),
             published_at_text: "5分前".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let article_a = PersistedArticleRecord {
             article_id: "article-a".to_string(),
             fetched_at: common_fetched_at,
             published_at_text: "1時間前".to_string(),
-            ..super::seed_articles().remove(1)
+            ..super::legacy_seed_articles().remove(1)
         };
         context.repository.save_article_record(&article_b).unwrap();
         context.repository.save_article_record(&article_a).unwrap();
@@ -3058,7 +3505,7 @@ mod tests {
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         // 古い・お気に入り → 除外
         let old_favorite = PersistedArticleRecord {
@@ -3066,7 +3513,7 @@ mod tests {
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             favorite: true,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         // 古い・archived → 除外
         let old_archived = PersistedArticleRecord {
@@ -3074,7 +3521,7 @@ mod tests {
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: true,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         // 最近 → 除外
         let recent = PersistedArticleRecord {
@@ -3082,7 +3529,7 @@ mod tests {
             fetched_at: "2026-07-10T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         for record in [&old_plain, &old_favorite, &old_archived, &recent] {
             context.repository.save_article_record(record).unwrap();
@@ -3108,7 +3555,7 @@ mod tests {
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3148,7 +3595,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let old_b = PersistedArticleRecord {
             article_id: "old-b".to_string(),
@@ -3156,7 +3603,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let recent = PersistedArticleRecord {
             article_id: "recent".to_string(),
@@ -3164,7 +3611,7 @@ mod tests {
             published_at_text: "2026-07-10T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         for record in [&old_a, &old_b, &recent] {
             context.repository.save_article_record(record).unwrap();
@@ -3205,7 +3652,7 @@ mod tests {
                 published_at_text: "2026-05-01T00:00:00Z".to_string(),
                 favorite: false,
                 is_archived: false,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -3253,7 +3700,7 @@ mod tests {
                 published_at_text: "2026-05-01T00:00:00Z".to_string(),
                 favorite: false,
                 is_archived: false,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -3294,7 +3741,7 @@ mod tests {
                 published_at_text: "2026-05-01T00:00:00Z".to_string(),
                 favorite: false,
                 is_archived: false,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -3333,7 +3780,7 @@ mod tests {
             article_id: "first".to_string(),
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3345,7 +3792,7 @@ mod tests {
             article_id: "missing".to_string(),
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let candidates = vec![
             super::ArchiveRetirementCandidate {
@@ -3386,7 +3833,7 @@ mod tests {
                 published_at_text: "2026-05-01T00:00:00Z".to_string(),
                 favorite: false,
                 is_archived: false,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -3429,7 +3876,7 @@ mod tests {
     }
 
     #[test]
-    fn retirement_recovery_restores_uncommitted_staging_before_startup_seed() {
+    fn retirement_recovery_restores_uncommitted_staging_on_startup() {
         let context = TestRepositoryContext::new();
         let rollback_root = context
             .root_dir
@@ -3468,7 +3915,8 @@ mod tests {
             .join("202605")
             .join("committed.md")
             .exists());
-        assert!(context.news_dir.join("202606").exists());
+        // 起動時にサンプル記事を書き込まない（D139）。
+        assert!(!context.news_dir.join("202606").exists());
     }
 
     #[test]
@@ -3483,7 +3931,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3547,7 +3995,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3586,7 +4034,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3624,7 +4072,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -3673,7 +4121,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let old_b = PersistedArticleRecord {
             article_id: "old-b".to_string(),
@@ -3681,7 +4129,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_a).unwrap();
         context.repository.save_article_record(&old_b).unwrap();
@@ -3696,7 +4144,7 @@ mod tests {
             published_at_text: "2026-05-03T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_c).unwrap();
 
@@ -3740,7 +4188,7 @@ mod tests {
             published_at_text: fetched_at.to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&record).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -3847,7 +4295,10 @@ mod tests {
         assert_eq!(ids, vec!["may-b", "may-a"]);
         let may_a = &result.articles[1];
         assert_eq!(may_a.title, "may-a のタイトル");
-        assert_eq!(may_a.source_name, super::seed_articles()[0].source_name);
+        assert_eq!(
+            may_a.source_name,
+            super::legacy_seed_articles()[0].source_name
+        );
         assert_eq!(may_a.published_at_text, "2026-05-01T00:00:00Z");
         assert!(may_a.is_favorite);
         assert!(may_a.is_archived);
@@ -3983,7 +4434,7 @@ mod tests {
             published_at_text: "2026-06-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4045,7 +4496,7 @@ mod tests {
     #[test]
     fn list_history_keeps_active_articles_when_archive_index_is_corrupt() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let archive_dir = context.root_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::write(archive_dir.join("archive_index.json"), "{broken").unwrap();
@@ -4092,7 +4543,7 @@ mod tests {
     fn dedupe_keys_quarantine_corrupt_archive_index_and_continue() {
         // 壊れた索引でもニュース取得の重複判定は止まらない。壊れた索引は別名へ退避して空として続ける。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let archive_dir = context.root_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).unwrap();
         let index_path = archive_dir.join("archive_index.json");
@@ -4120,7 +4571,7 @@ mod tests {
     fn save_fetched_articles_continues_when_archive_index_is_corrupt() {
         // 取得の保存（ロック保持中の重複判定）も、壊れた索引で失敗し続けない。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let archive_dir = context.root_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).unwrap();
         // 整合チェックで弾かれる索引（件数とカタログの不一致）も「壊れている」側で扱う。
@@ -4153,7 +4604,7 @@ mod tests {
     fn archive_index_from_newer_version_is_not_quarantined() {
         // 新しい版のアプリで保存した索引（未対応の version）は壊れていないので退避せず、エラーを返す。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let archive_dir = context.root_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).unwrap();
         let index_path = archive_dir.join("archive_index.json");
@@ -4196,7 +4647,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&may_b).unwrap();
         let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -4231,7 +4682,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&may_b).unwrap();
         let now = archive_delete_now();
@@ -4245,7 +4696,7 @@ mod tests {
     fn dedupe_keys_still_error_on_unreadable_archive_index_without_quarantine() {
         // 読み込み自体の I/O エラー（ここでは索引の位置がフォルダ）は破損と断定せず、退避もしない。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let archive_dir = context.root_dir.join("archive");
         std::fs::create_dir_all(archive_dir.join("archive_index.json")).unwrap();
 
@@ -4261,17 +4712,16 @@ mod tests {
     fn initialize_restores_legacy_backups_of_index_and_markdown() {
         // 旧バージョンの保存（本体→.bak 退避→昇格）が途中で止まって本体が無いとき、起動時に .bak から戻す。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
         archive_old_article(&context, "may-a", "2026-05-01T00:00:00Z");
         let archive_dir = context.root_dir.join("archive");
         let index_path = archive_dir.join("archive_index.json");
         let index_before = std::fs::read(&index_path).unwrap();
         std::fs::rename(&index_path, archive_dir.join("archive_index.json.bak")).unwrap();
-        let article_path = context.news_dir.join("202606").join("article-001.md");
+        let article_path = context.news_dir.join("202605").join("may-a.md");
         let article_before = std::fs::read(&article_path).unwrap();
         std::fs::rename(
             &article_path,
-            context.news_dir.join("202606").join("article-001.md.bak"),
+            context.news_dir.join("202605").join("may-a.md.bak"),
         )
         .unwrap();
 
@@ -4282,8 +4732,8 @@ mod tests {
         assert!(!archive_dir.join("archive_index.json.bak").exists());
         assert!(!context
             .news_dir
-            .join("202606")
-            .join("article-001.md.bak")
+            .join("202605")
+            .join("may-a.md.bak")
             .exists());
     }
 
@@ -4291,7 +4741,7 @@ mod tests {
     fn article_saves_leave_no_temp_or_backup_files() {
         // 保存は一時ファイル→1回の rename。保存後に .tmp・.bak が残らない。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let record = context
             .repository
             .find_article_record("article-001")
@@ -4310,7 +4760,7 @@ mod tests {
     fn writes_continue_after_write_lock_is_poisoned() {
         // ロック保持中に panic しても、以後の保存がずっと失敗し続けない。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let lock = context.repository.write_lock_handle();
         let _ = std::thread::spawn(move || {
             let _guard = lock.lock().unwrap();
@@ -4337,7 +4787,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4371,7 +4821,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4411,7 +4861,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&archived).unwrap();
         let archive_now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -4424,7 +4874,7 @@ mod tests {
             source_name: "出典A".to_string(),
             fetched_at: "2026-07-10T00:00:00Z".to_string(),
             published_at_text: "2026-07-10T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(1)
+            ..super::legacy_seed_articles().remove(1)
         };
         context.repository.save_article_record(&recent).unwrap();
         let old = PersistedArticleRecord {
@@ -4433,7 +4883,7 @@ mod tests {
             source_name: "出典A".to_string(),
             fetched_at: "2026-07-07T23:59:59Z".to_string(),
             published_at_text: "2026-07-07T23:59:59Z".to_string(),
-            ..super::seed_articles().remove(1)
+            ..super::legacy_seed_articles().remove(1)
         };
         context.repository.save_article_record(&old).unwrap();
         // 取得日時が解釈できない記事は公開日時で判定する。
@@ -4443,7 +4893,7 @@ mod tests {
             source_name: "出典A".to_string(),
             fetched_at: "不明".to_string(),
             published_at_text: "2026-07-14T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(1)
+            ..super::legacy_seed_articles().remove(1)
         };
         context.repository.save_article_record(&fallback).unwrap();
 
@@ -4473,7 +4923,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4501,7 +4951,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4517,7 +4967,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4565,7 +5015,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_a).unwrap();
         context.repository.archive_candidates(now).unwrap();
@@ -4576,7 +5026,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_b).unwrap();
         crate::infra::atomic_file::test_hooks::fail_writes_to(
@@ -4615,7 +5065,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let old_june = PersistedArticleRecord {
             article_id: "old-june".to_string(),
@@ -4623,7 +5073,7 @@ mod tests {
             published_at_text: "2026-06-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_may).unwrap();
         context.repository.save_article_record(&old_june).unwrap();
@@ -4658,7 +5108,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let old_b = PersistedArticleRecord {
             article_id: "old-b".to_string(),
@@ -4666,7 +5116,7 @@ mod tests {
             published_at_text: "2026-05-02T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&old_a).unwrap();
         context.repository.save_article_record(&old_b).unwrap();
@@ -4707,7 +5157,7 @@ mod tests {
     #[test]
     fn list_history_respects_limit() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let articles = context
             .repository
@@ -4720,7 +5170,7 @@ mod tests {
     #[test]
     fn list_history_filters_read_state() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let unread_articles = context
             .repository
@@ -4744,7 +5194,7 @@ mod tests {
     #[test]
     fn list_history_filters_favorites() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         context
             .repository
             .update_article_favorite("article-002", true)
@@ -4767,7 +5217,7 @@ mod tests {
             article_id: "article-archived".to_string(),
             fetched_at: "2026-06-05T10:00:00+09:00".to_string(),
             is_archived: true,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4787,7 +5237,7 @@ mod tests {
     #[test]
     fn get_article_detail_returns_matching_article() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let article = context
             .repository
@@ -4802,7 +5252,7 @@ mod tests {
     #[test]
     fn get_article_detail_returns_not_found_for_unknown_id() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let error = context
             .repository
@@ -4847,7 +5297,7 @@ mod tests {
     #[test]
     fn read_apis_skip_corrupt_markdown_and_return_remaining_articles() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
 
         let recommended = context.repository.list_recommendation_candidates().unwrap();
@@ -4882,7 +5332,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -4918,7 +5368,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&article).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -4939,7 +5389,7 @@ mod tests {
             article_id: "misplaced-a".to_string(),
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let readable_dir = context.news_dir.join("202606");
         std::fs::create_dir_all(&readable_dir).unwrap();
@@ -4996,7 +5446,7 @@ mod tests {
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
             favorite: false,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context.repository.save_article_record(&article).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -5018,7 +5468,7 @@ mod tests {
         use crate::domain::article::FetchedArticle;
 
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let corrupt = write_corrupt_markdown_files(&context.news_dir, "202606");
 
         let existing = context.repository.existing_article_ids().unwrap();
@@ -5061,7 +5511,7 @@ mod tests {
     #[test]
     fn advance_article_read_state_persists_forward_and_never_regresses() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         let read_state_of = |article_id: &str| {
             context
                 .repository
@@ -5104,7 +5554,7 @@ mod tests {
     #[test]
     fn update_article_favorite_persists_state_for_list_and_detail() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let result = context
             .repository
@@ -5132,7 +5582,7 @@ mod tests {
     #[test]
     fn update_article_summary_persists_into_markdown() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
 
         let update = ArticleSummaryUpdate {
             summary: "新しいAI要約テキスト".to_string(),
@@ -5209,7 +5659,7 @@ mod tests {
     fn legacy_template_focus_points_are_not_shown_in_the_detail() {
         // D18 以前に定型文で保存された注目ポイントは、記事詳細には出さない（ファイルには残す）。
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         context
             .repository
             .update_article_summary(
@@ -5317,7 +5767,7 @@ mod tests {
     #[test]
     fn update_article_favorite_removes_existing_favorite() {
         let context = TestRepositoryContext::new();
-        context.repository.initialize_default_if_missing().unwrap();
+        context.repository.seed_sample_articles_for_tests();
         context
             .repository
             .update_article_favorite("article-001", true)
@@ -5343,7 +5793,7 @@ mod tests {
             article_id: "article-custom".to_string(),
             published_at_text: "2026-07-01T10:00:00+09:00".to_string(),
             fetched_at: "2026-07-01T10:05:00+09:00".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
 
         context.repository.save_article_record(&article).unwrap();
@@ -5576,7 +6026,7 @@ mod tests {
             published_at_text: "2026-05-03T00:00:00Z".to_string(),
             favorite: true,
             is_archived: false,
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         context
             .repository
@@ -5818,7 +6268,7 @@ mod tests {
                 article_id: format!("bulk-{index:05}"),
                 fetched_at: fetched_at.clone(),
                 published_at_text: fetched_at,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -5887,7 +6337,7 @@ mod tests {
                 title: format!("{fetched_at} の記事"),
                 fetched_at: fetched_at.to_string(),
                 published_at_text: fetched_at.to_string(),
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
@@ -5912,7 +6362,7 @@ mod tests {
             article_id: "renamed-id".to_string(),
             fetched_at: "2026-06-01T00:00:00Z".to_string(),
             published_at_text: "2026-06-01T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         std::fs::write(
             context.news_dir.join("202606").join("other-name.md"),
@@ -5935,7 +6385,7 @@ mod tests {
             article_id: "wrong-month".to_string(),
             fetched_at: "2026-05-01T00:00:00Z".to_string(),
             published_at_text: "2026-05-01T00:00:00Z".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         let dir = context.news_dir.join("202606");
         std::fs::create_dir_all(&dir).unwrap();
@@ -5985,7 +6435,7 @@ mod tests {
         // ニュースフォルダの外に、ID を細工すれば届きそうな記事ファイルを置く。
         let outside = PersistedArticleRecord {
             article_id: "outside".to_string(),
-            ..super::seed_articles().remove(0)
+            ..super::legacy_seed_articles().remove(0)
         };
         std::fs::write(
             context.root_dir.join("outside.md"),
@@ -6038,7 +6488,7 @@ mod tests {
                 published_at_text: "2026-05-01T00:00:00Z".to_string(),
                 favorite: false,
                 is_archived: false,
-                ..super::seed_articles().remove(0)
+                ..super::legacy_seed_articles().remove(0)
             };
             context.repository.save_article_record(&article).unwrap();
         }
