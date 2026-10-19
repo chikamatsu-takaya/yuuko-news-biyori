@@ -3,6 +3,10 @@
 import * as React from "react";
 import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -391,20 +395,28 @@ function HistoryItemCard({
   selectedTag: string | null;
   onSelectTag: (tag: string | null) => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で開く）に対応する。読み上げ名は記事タイトル。
+  // カード内のタグボタンは自身で Enter/Space を処理する（activateOnEnterOrSpace が target で除外）。
+  const titleId = React.useId();
   return (
     <Card
-      className={`cursor-pointer transition-all py-3 px-0 ${
+      role="button"
+      tabIndex={0}
+      aria-labelledby={titleId}
+      aria-current={isSelected ? "true" : undefined}
+      className={`cursor-pointer transition-all py-3 px-0 ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
           ? "border-[var(--yuuko-green)] border-2 bg-[var(--yuuko-green-light)]/50 shadow-md"
           : "border-0 shadow-sm hover:shadow-md"
       }`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
         <HistoryThumbnail type={item.thumbnailType} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="font-semibold text-sm text-foreground truncate">{item.title}</h3>
+            <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">{item.title}</h3>
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1">
             <span>{item.source}</span>

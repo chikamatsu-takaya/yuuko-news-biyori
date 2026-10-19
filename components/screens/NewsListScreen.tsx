@@ -8,6 +8,10 @@
 
 import * as React from "react";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
@@ -156,16 +160,22 @@ function TodayArticleCard({
   article: TodayArticle;
   onClick: () => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で開く）に対応する。読み上げ名は記事タイトル。
+  const titleId = React.useId();
   return (
     <Card
-      className="cursor-pointer transition-all py-3 px-0 border-0 shadow-sm hover:shadow-md"
+      role="button"
+      tabIndex={0}
+      aria-labelledby={titleId}
+      className={`cursor-pointer transition-all py-3 px-0 border-0 shadow-sm hover:shadow-md ${CLICKABLE_CARD_FOCUS_CLASS}`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
         <TodayThumbnail type={article.thumbnailType} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="font-semibold text-sm text-foreground truncate">
+            <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">
               {article.title}
             </h3>
           </div>

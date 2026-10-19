@@ -471,6 +471,8 @@ function TermPopup({
   // 中央配置からのドラッグオフセット（px）。位置は永続化しない。
   // 閉じる/記事切替は再マウントで初期化、別用語への切替は term 変更の effect で初期化する。
   const rootRef = React.useRef<HTMLDivElement | null>(null);
+  // ダイアログの読み上げ名（用語の見出し）。
+  const headingId = React.useId();
   const [offset, setOffset] = React.useState({ x: 0, y: 0 });
   const offsetRef = React.useRef(offset);
   // ドラッグ状態（pointerId・開始座標・開始オフセット）。差分積み上げではなく開始基準で毎回算出する。
@@ -530,6 +532,22 @@ function TermPopup({
       observer?.disconnect();
     };
   }, [applyOffset, clampToMain]);
+
+  // 開いたらダイアログへフォーカスを移し、Esc で閉じられ・支援技術にも内容が伝わるようにする。
+  // 非モーダル（フォーカスは閉じ込めない）。用語の切替は key で再マウントされ、新しいダイアログへ移る。
+  React.useEffect(() => {
+    rootRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  // Esc で閉じる（閉じる×ボタンと同じ）。window の Esc（アプリ内通知の閉じる）へ伝えない。
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+  };
 
   // アンマウント時にドラッグ状態と pointer capture を確実に解除する。
   React.useEffect(() => {
@@ -636,9 +654,12 @@ function TermPopup({
   return (
     <div
       ref={rootRef}
+      role="dialog"
+      aria-labelledby={headingId}
+      tabIndex={-1}
       data-term-popup="true"
       data-term-popup-drag-surface="true"
-      className="absolute left-1/2 top-1/2 z-50 w-80 rounded-xl border border-border/50 bg-white p-4 shadow-lg"
+      className="absolute left-1/2 top-1/2 z-50 w-80 rounded-xl border border-border/50 bg-white p-4 shadow-lg outline-none"
       style={{
         transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
       }}
@@ -647,12 +668,14 @@ function TermPopup({
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
       onLostPointerCapture={endDrag}
+      onKeyDown={handleKeyDown}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
         <div data-term-popup-no-drag="true" className="min-w-0">
           {/* フレーズ（約200字までの文章・D21）でもポップアップが縦に伸びすぎないよう3行で省略し、
               全文は title で確認できるようにする（用語は短いので省略されない）。 */}
           <h4
+            id={headingId}
             className="line-clamp-3 cursor-text break-words text-sm font-semibold text-foreground"
             title={term}
           >
@@ -677,7 +700,7 @@ function TermPopup({
           className="text-muted-foreground transition-colors hover:text-foreground"
           onClick={onClose}
         >
-          <X className="h-4 w-4" />
+          <X className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
 
@@ -1037,6 +1060,14 @@ export default function NewsReaderScreen({
   // 用語解説は開いた直後には出さない。ユーザーが範囲選択して「解説」を押したとき（または
   // 候補語を明示的に押したとき）だけ開き、explain_selected_term を呼ぶ（自動解説で AI・報酬を消費しない）。
   const [showTermPopup, setShowTermPopup] = React.useState(false);
+  // 用語ポップアップを開いたボタン。利用者が閉じたときにフォーカスを戻す先（表示状態ではないので ref）。
+  const termPopupTriggerRef = React.useRef<HTMLElement | null>(null);
+  const rememberTermPopupTrigger = () => {
+    termPopupTriggerRef.current =
+      typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+  };
   // 「用語サポート」の候補語を全件表示しているか（記事を切り替えたら畳み直す）。
   const [showAllSupportTerms, setShowAllSupportTerms] = React.useState(false);
   const [selectedTerm, setSelectedTerm] = React.useState<SupportTerm | null>(
@@ -1255,6 +1286,9 @@ export default function NewsReaderScreen({
       window.getSelection()?.removeAllRanges();
     }
     setExplainSelection(null);
+
+    // 範囲選択の「解説」ボタンは開くと消えるため、閉じたときのフォーカスの戻し先にしない。
+    termPopupTriggerRef.current = null;
 
     // 既存経路へ接続: selectedTerm 更新 + showTermPopup=true で loadTermExplanation が走り、
     // その中で explainSelectedTerm({ articleId: article.id, selectedText: selectedTerm.term }) が呼ばれる。
@@ -1701,8 +1735,20 @@ export default function NewsReaderScreen({
   }, [article.id, isSummaryInProgress, articleLoadState]);
 
   const openTerm = (term: SupportTerm) => {
+    rememberTermPopupTrigger();
     setSelectedTerm(term);
     setShowTermPopup(true);
+  };
+
+  // 利用者が閉じた（×・Esc）ときは、開いたボタンへフォーカスを戻す（キーボード操作で位置を失わない）。
+  // 記事切替などで閉じる場合は戻さない。開いたボタンが消えていれば（範囲選択の「解説」など）何もしない。
+  const handleCloseTermPopup = () => {
+    setShowTermPopup(false);
+    const trigger = termPopupTriggerRef.current;
+    termPopupTriggerRef.current = null;
+    if (trigger && trigger.isConnected) {
+      trigger.focus({ preventScroll: true });
+    }
   };
 
   return (
@@ -2113,7 +2159,7 @@ export default function NewsReaderScreen({
               notice={termNotice}
               noticeKind={termNoticeKind}
               onSave={handleSaveDictionaryEntry}
-              onClose={() => setShowTermPopup(false)}
+              onClose={handleCloseTermPopup}
               onRetry={loadTermExplanation}
             />
           ) : null}
@@ -2155,12 +2201,19 @@ export default function NewsReaderScreen({
                 {visibleSupportTerms.map((term) => (
                   <div key={term.id} className="flex items-center justify-between">
                     <span className="text-xs text-foreground">{term.term}</span>
+                    {/* キーボードで開けるよう button にする（見た目は Badge のまま）。 */}
                     <Badge
+                      asChild
                       variant="outline"
-                      className="cursor-pointer border-muted-foreground/30 px-2 py-0 text-[10px] text-muted-foreground hover:border-[var(--yuuko-green)] hover:text-[var(--yuuko-green)]"
-                      onClick={() => openTerm(term)}
+                      className="cursor-pointer border-muted-foreground/30 px-2 py-0 text-[10px] text-muted-foreground hover:border-[var(--yuuko-green)] hover:text-[var(--yuuko-green)] focus-visible:outline-none"
                     >
-                      解説
+                      <button
+                        type="button"
+                        aria-label={`${term.term}を解説`}
+                        onClick={() => openTerm(term)}
+                      >
+                        解説
+                      </button>
                     </Badge>
                   </div>
                 ))}

@@ -10052,3 +10052,173 @@ async function captureScreen(page: Page, testInfo: TestInfo, name: string) {
     fullPage: false,
   });
 }
+
+// --- キーボード操作・支援技術（カードを開く・用語ポップアップ・通知の Esc） ---
+
+test("keyboard: today-news card opens the article with Enter", async ({ page }) => {
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  const card = page
+    .locator("main")
+    .getByRole("button", { name: "E2Eテスト用ニュース" })
+    .first();
+  await card.focus();
+  await expect(card).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRequestedArticleId(page)).toBe("e2e-article-1");
+});
+
+test("keyboard: news history card is selected with Space", async ({
+  page,
+}) => {
+  // 4件の履歴を出す（要約タグ用のモック）。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openNewsHistory(page);
+
+  const cards = page.locator('main [role="button"][aria-labelledby]');
+  await expect(cards.nth(1)).toBeVisible();
+  const second = cards.nth(1);
+  const title = (await second.locator("h3").innerText()).trim();
+
+  await second.focus();
+  await page.keyboard.press(" ");
+  // 一覧のカードと詳細ペインの両方にタイトルが出る（＝選択された）。
+  await expect(
+    page.getByRole("heading", { name: title, exact: true })
+  ).toHaveCount(2);
+});
+
+test("keyboard: dictionary list item opens the detail with Enter and ★ has its own name", async ({
+  page,
+}) => {
+  // 用語＋フレーズの2件を出す。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_DICTIONARY_WITH_PHRASE__ = true;
+  });
+  await openDictionary(page);
+
+  const cards = page.locator('main [role="button"][aria-labelledby]');
+  await expect(cards.nth(1)).toBeVisible();
+  const second = cards.nth(1);
+  const term = (await second.locator("span.line-clamp-2").innerText()).trim();
+
+  await second.focus();
+  await page.keyboard.press("Enter");
+  await expect(second).toHaveAttribute("aria-current", "true");
+  await expect(dictionaryDetailHeading(page)).toHaveText(term);
+
+  // 一覧の★は「<用語>をお気に入りに登録」という名前を持ち、押しても項目の選択は変わらない。
+  const first = cards.nth(0);
+  const firstStar = first.getByRole("button", { name: /をお気に入りに登録$/ });
+  await expect(firstStar).toHaveAttribute("aria-pressed", /true|false/);
+  await firstStar.focus();
+  await page.keyboard.press("Enter");
+  await expect(second).toHaveAttribute("aria-current", "true");
+  await expect(first).not.toHaveAttribute("aria-current", "true");
+});
+
+test("dictionary memo save / cancel icon buttons have accessible names", async ({
+  page,
+}) => {
+  await openDictionary(page);
+  await page
+    .locator("main aside")
+    .getByRole("button", { name: "編集", exact: true })
+    .click();
+  await expect(page.getByRole("button", { name: "メモを保存" })).toBeVisible();
+  await page.getByRole("button", { name: "メモの編集をやめる" }).click();
+  await expect(page.getByRole("button", { name: "メモを保存" })).toHaveCount(0);
+});
+
+test("term popup: opens from the 解説 button by keyboard as a dialog, Esc closes it and returns focus", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expectNoInitialTermPopup(page);
+
+  const explain = page.getByRole("button", { name: "E2E用語を解説", exact: true });
+  await explain.focus();
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "E2E用語" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(termPopup(page)).toHaveCount(0);
+  await expect(explain).toBeFocused();
+
+  // ×ボタンで閉じたときも開いたボタンへ戻る。
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
+  await expect(explain).toBeFocused();
+});
+
+test("notification Escape is ignored while typing in an input", async ({ page }) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 入力欄（ここでは検証用に追加したもの）にフォーカスがある Esc は入力側の操作として扱う。
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.setAttribute("aria-label", "E2E入力欄");
+    document.body.appendChild(input);
+    input.focus();
+  });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await expect(notification).toBeVisible();
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(0);
+});
+
+test("notification Escape is ignored while another dialog is open", async ({ page }) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 通知以外のダイアログが開いている間は、フォーカスが無くても通知を閉じない。
+  await page.evaluate(() => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-label", "E2Eダイアログ");
+    document.body.appendChild(dialog);
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await expect(notification).toBeVisible();
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(0);
+});
+
+test("notification Escape closes it when focus is inside the notification", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 他にダイアログがあっても、通知を操作中（フォーカスが通知内）なら通知を閉じる。
+  await page.evaluate(() => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-label", "E2Eダイアログ");
+    document.body.appendChild(dialog);
+  });
+  await notification.getByRole("button", { name: "通知を閉じる" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+});
