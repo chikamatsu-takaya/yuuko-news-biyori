@@ -6,6 +6,9 @@ type SidebarNavItemProps = {
   label: string;
   icon: ComponentType<{ className?: string }>;
   isActive?: boolean;
+  // 選択中の項目を支援技術へ伝える値。既定は画面ナビとして "page"。
+  // 1画面内の区分切替（設定メニュー等）では "true" を渡す。
+  ariaCurrent?: "page" | "true";
   onClick: () => void;
 };
 
@@ -13,6 +16,7 @@ export function SidebarNavItem({
   label,
   icon: Icon,
   isActive = false,
+  ariaCurrent = "page",
   onClick,
 }: SidebarNavItemProps) {
   return (
@@ -24,6 +28,7 @@ export function SidebarNavItem({
       }`}
       onClick={onClick}
       type="button"
+      aria-current={isActive ? ariaCurrent : undefined}
     >
       <Icon className={`w-5 h-5 ${isActive ? "text-[var(--yuuko-green)]" : ""}`} />
       <span>{label}</span>

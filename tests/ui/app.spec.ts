@@ -674,6 +674,26 @@ test("past news: sidebar opens the month list and a month opens its article list
   await expect(page.getByTestId("past-news-month-list")).toBeVisible();
 });
 
+test("past news: sidebar 過去ニュース while a month is open returns to the month list", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+
+  // 表示中の画面と同じ項目を押しても画面は作り直されないため、画面側で月一覧へ戻す。
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toHaveCount(0);
+});
+
 test("past news: opening an article asks first, restores by id, and back returns to the same month", async ({
   page,
 }) => {
@@ -1189,15 +1209,14 @@ test("today-news list marks the sidebar ニュースを見る item as active", a
   await openTodayNewsList(page);
 
   const nav = page.getByRole("navigation").first();
-  // SidebarNavItem は aria-current/aria-selected を持たないため、選択状態は
-  // 見た目の色ではなく構造的なクラス（font-medium）で判定する。
+  // 選択状態は aria-current="page" で判定する（SidebarNavItem が選択中の項目にだけ付ける）。
   await expect(
     nav.getByRole("button", { name: "ニュースを見る", exact: true })
-  ).toHaveClass(/font-medium/);
+  ).toHaveAttribute("aria-current", "page");
   // 非選択項目には付かない（選択状態が正しい項目にのみ適用されることを確認）。
   await expect(
     nav.getByRole("button", { name: "ゆうこ辞書", exact: true })
-  ).not.toHaveClass(/font-medium/);
+  ).not.toHaveAttribute("aria-current", /.*/);
 });
 
 // 記事詳細（NewsReaderScreen）をホームのニュースカードから開く。
@@ -5613,10 +5632,17 @@ for (const screen of sidebarAutostartScreens) {
   });
 }
 
-// ホーム・記事詳細のサイドバーも同じ共通部品に置き換えた（固定の「ON」表示をやめる）。
+// ホーム・記事詳細・ニュース一覧のサイドバーも同じ共通部品で表示する（固定の「ON」表示をやめる）。
 const sidebarAutostartOpeners = [
   { id: "home", open: openHome },
   { id: "reader", open: openReaderFromHome },
+  {
+    id: "news",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
 ] as const;
 
 for (const screen of sidebarAutostartOpeners) {
@@ -5669,6 +5695,15 @@ const quitResidentOpeners = [
       openScreenFromSidebar(page, screen.navName, screen.heading),
   })),
   { id: "reader", open: openReaderFromHome },
+  {
+    id: "news",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
+  { id: "past-news", open: openPastNews },
+  { id: "settings", open: openSettings },
 ] as const;
 
 const quitAppCalls = (page: Page) =>
@@ -5744,6 +5779,116 @@ for (const failure of [
     await expect(page.getByText("secret/path")).toHaveCount(0);
   });
 }
+
+// 左サイドバーの画面ナビは、ホーム以外の各画面で共通部品 AppSidebarNav を使い、
+// ホームと同じ項目・順序で並べる（画面詳細設計書 §3.3）。選択中の項目は aria-current="page" で示す。
+const expectedSidebarNavLabels = [
+  "ホーム",
+  "ニュースを見る",
+  "ニュース履歴",
+  "過去ニュース",
+  "ゆうこ辞書",
+  "カスタマイズ",
+  "ガチャ",
+  "設定",
+];
+
+const sidebarNavScreens = [
+  {
+    id: "news",
+    active: "ニュースを見る",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
+  { id: "reader", active: "ニュースを見る", open: openReaderFromHome },
+  {
+    id: "history",
+    active: "ニュース履歴",
+    open: (page: Page) =>
+      openScreenFromSidebar(page, "ニュース履歴", "ニュース履歴"),
+  },
+  { id: "past-news", active: "過去ニュース", open: openPastNews },
+  {
+    id: "dictionary",
+    active: "ゆうこ辞書",
+    open: (page: Page) => openScreenFromSidebar(page, "ゆうこ辞書", "ゆうこ辞書"),
+  },
+  {
+    id: "customize",
+    active: "カスタマイズ",
+    open: (page: Page) =>
+      openScreenFromSidebar(page, "カスタマイズ", "ゆうこカスタマイズ"),
+  },
+  {
+    id: "gacha",
+    active: "ガチャ",
+    open: (page: Page) => openScreenFromSidebar(page, "ガチャ", "ゆうこガチャ"),
+  },
+] as const;
+
+// 左サイドバー内の画面ナビ（記事詳細はパンくずの nav もあるため aside 内に限定する）。
+const leftSidebarNav = (page: Page) =>
+  page.locator("aside").first().getByRole("navigation");
+
+test("sidebar nav on home lists the reference items in order", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  const nav = leftSidebarNav(page);
+  await expect(nav.getByRole("button")).toHaveText(expectedSidebarNavLabels);
+  await expect(nav.locator('[aria-current="page"]')).toHaveText(["ホーム"]);
+});
+
+for (const screen of sidebarNavScreens) {
+  test(`sidebar nav on ${screen.id} matches home's items and order and marks the current screen`, async ({
+    page,
+  }) => {
+    await screen.open(page);
+
+    const nav = leftSidebarNav(page);
+    await expect(nav.getByRole("button")).toHaveText(expectedSidebarNavLabels);
+    await expect(nav.locator('[aria-current="page"]')).toHaveText([
+      screen.active,
+    ]);
+    // 常駐終了もホーム以外の全画面のサイドバーに置く。
+    await expect(
+      page
+        .locator("aside")
+        .first()
+        .getByRole("button", { name: "常駐を終了する", exact: true })
+    ).toBeVisible();
+
+    // どの画面からでも「過去ニュース」で過去ニュース画面（月一覧）へ移れる。
+    await nav.getByRole("button", { name: "過去ニュース", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "過去ニュース", exact: true })
+    ).toBeVisible();
+    await expect(
+      leftSidebarNav(page).locator('[aria-current="page"]')
+    ).toHaveText(["過去ニュース"]);
+  });
+}
+
+// 設定画面の左サイドバーは設定カテゴリ一覧（§7.3）のため画面ナビは置かないが、
+// 「ホームへ戻る」と「常駐を終了する」は他画面と同じく置く。カテゴリの選択中は aria-current="true"。
+test("settings sidebar keeps the category menu with home and quit actions", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  const aside = page.locator("aside").first();
+  await expect(
+    aside.getByRole("button", { name: "ホームへ戻る", exact: true })
+  ).toBeVisible();
+  await expect(
+    aside.getByRole("button", { name: "常駐を終了する", exact: true })
+  ).toBeVisible();
+  await expect(aside.locator('[aria-current="true"]')).toHaveCount(1);
+  await expect(aside.locator('[aria-current="page"]')).toHaveCount(0);
+});
 
 test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
   page,

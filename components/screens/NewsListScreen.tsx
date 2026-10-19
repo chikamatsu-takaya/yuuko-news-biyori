@@ -12,20 +12,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert";
 import {
-  Home,
   Newspaper,
-  History,
-  BookOpen,
-  Palette,
-  Gift,
-  Settings,
   ArrowLeft,
   Sparkles,
   Info,
@@ -57,24 +53,6 @@ type TodayArticle = {
   // 記事のタグ（表示のみ。絞り込みはニュース履歴画面で行う）。
   tags: string[];
 };
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
-
-// ニュース一覧表示中はサイドバー「ニュースを見る」を選択状態にする。
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: true },
-  { id: "history", label: "ニュース履歴", icon: History, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Palette, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 const toThumbnailType = (genre: string): TodayArticle["thumbnailType"] => {
   if (genre.includes("AI")) {
@@ -317,17 +295,11 @@ export default function NewsListScreen({
             ホームへ戻る
           </Button>
 
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="news"
+            onNavigate={handleNavigate}
+          />
 
           <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
             <CardContent className="p-3">
@@ -350,6 +322,12 @@ export default function NewsListScreen({
               </div>
             </CardContent>
           </Card>
+
+          {/* 他画面と同じく、自動起動の状態と常駐終了をサイドバー下部に置く */}
+          <div className="mt-4 space-y-2">
+            <AutostartStatus />
+            <QuitResidentButton className="w-full text-xs" />
+          </div>
         </aside>
 
         {/* Center - Today's News List */}

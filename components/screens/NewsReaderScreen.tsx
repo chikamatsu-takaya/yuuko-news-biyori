@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -25,11 +25,8 @@ import {
   Gift,
   Heart,
   History,
-  Home,
   Newspaper,
-  Palette,
   Search,
-  Settings,
   Star,
   X,
   Info,
@@ -70,13 +67,6 @@ import {
 } from "@/lib/explain-selection.mjs";
 // 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
 import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive?: boolean;
-};
 
 type SupportTerm = {
   id: string;
@@ -120,16 +110,6 @@ type RelatedArticle = {
   isNew: boolean;
   thumbnailType: "ai" | "business" | "quantum";
 };
-
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: true },
-  { id: "history", label: "ニュース履歴", icon: History },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen },
-  { id: "customize", label: "カスタマイズ", icon: Palette },
-  { id: "gacha", label: "ガチャ", icon: Gift },
-  { id: "settings", label: "設定", icon: Settings },
-];
 
 // 右サイド「用語サポート」に既定で並べる候補語の件数。超える分は「すべての関連ワードを見る」で展開する。
 const SUPPORT_TERMS_PREVIEW_LIMIT = 5;
@@ -1751,17 +1731,11 @@ export default function NewsReaderScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 space-y-1 overflow-y-auto p-3"
+            activeId="news"
+            onNavigate={handleNavigate}
+          />
 
           <div className="px-3 pb-3">
             <Card className="border border-[var(--yuuko-green)]/20 bg-white py-3">
