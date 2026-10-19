@@ -1,25 +1,46 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::domain::yuuko::PersistedYuukoState;
 use crate::error::AppError;
+use crate::infra::atomic_file;
 use crate::paths::AppPaths;
 
+/// ゆうこの通知状態（`yuuko_notification_state.json`）の読み書き。
+///
+/// ゆうこ窓の操作（閉じる・無視・クリック）、メイン画面の5分ごとの判定、デスクトップ通知スレッドが同時に
+/// 「読み→変更→保存」しうるため、呼び出し側（YuukoService）が `lock_updates` を取ってから行う
+/// （日次回数・クールタイム・「閉じた」記録を後勝ちで消さないため）。
+/// 保存は一時ファイル→1回の rename（`infra::atomic_file`）で、本体が無い瞬間・書きかけの中身は見えない。
 #[derive(Debug, Clone)]
 pub struct YuukoStateRepository {
     state_path: PathBuf,
+    update_lock: Arc<Mutex<()>>,
 }
 
 impl YuukoStateRepository {
     pub fn new(paths: &AppPaths) -> Self {
+        Self::with_path(paths.yuuko_state_path.clone())
+    }
+
+    pub(crate) fn with_path(state_path: PathBuf) -> Self {
         Self {
-            state_path: paths.yuuko_state_path.clone(),
+            update_lock: atomic_file::shared_path_lock(&state_path),
+            state_path,
         }
     }
 
-    pub fn load_or_default(&self) -> Result<PersistedYuukoState, AppError> {
-        self.restore_backup_if_primary_missing();
+    /// 通知状態の「読み→変更→保存」を直列にするロック（パスごとにプロセス全体で共有）。
+    /// 保持したまま `load_or_default` / `save` を呼ぶ（どちらも内部ではロックを取らない）。
+    pub fn lock_updates(&self) -> MutexGuard<'_, ()> {
+        atomic_file::lock_ignoring_poison(&self.update_lock, "yuuko-state")
+    }
 
-        if !self.state_path.exists() {
+    pub fn load_or_default(&self) -> Result<PersistedYuukoState, AppError> {
+        atomic_file::restore_legacy_backup_if_missing(&self.state_path, "yuuko-state");
+
+        // 「無い」ときだけ既定値。存在確認自体に失敗したとき（権限など）はエラーを返す。
+        if !self.state_path.try_exists()? {
             return Ok(PersistedYuukoState::default());
         }
 
@@ -39,64 +60,7 @@ impl YuukoStateRepository {
     }
 
     pub fn save(&self, state: &PersistedYuukoState) -> Result<(), AppError> {
-        if let Some(parent) = self.state_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let temp_path = self.state_path.with_extension("json.tmp");
-        let backup_path = self.state_path.with_extension("json.bak");
-        let payload = serde_json::to_vec_pretty(state)?;
-        std::fs::write(&temp_path, payload)?;
-
-        let had_existing = self.state_path.exists();
-        if had_existing {
-            if backup_path.exists() {
-                std::fs::remove_file(&backup_path)?;
-            }
-            std::fs::rename(&self.state_path, &backup_path)?;
-        }
-
-        match std::fs::rename(&temp_path, &self.state_path) {
-            Ok(()) => {
-                if had_existing && backup_path.exists() {
-                    if let Err(error) = std::fs::remove_file(&backup_path) {
-                        log::warn!("Failed to remove yuuko-state backup: {error}");
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => {
-                log::error!("Failed to promote temporary yuuko-state file: {error}");
-
-                if had_existing && backup_path.exists() {
-                    if let Err(restore_error) = std::fs::rename(&backup_path, &self.state_path) {
-                        log::error!("Failed to restore yuuko-state backup: {restore_error}");
-                    }
-                }
-
-                if temp_path.exists() {
-                    let _ = std::fs::remove_file(&temp_path);
-                }
-
-                Err(error.into())
-            }
-        }
-    }
-
-    fn restore_backup_if_primary_missing(&self) {
-        if self.state_path.exists() {
-            return;
-        }
-
-        let backup_path = self.state_path.with_extension("json.bak");
-        if !backup_path.exists() {
-            return;
-        }
-
-        log::warn!("yuuko-notification-state.json is missing. attempting backup restore.");
-        if let Err(error) = std::fs::rename(&backup_path, &self.state_path) {
-            log::error!("Failed to restore yuuko-state backup: {error}");
-        }
+        atomic_file::write_json_atomic(&self.state_path, state, "yuuko-state")
     }
 }
 
@@ -116,12 +80,7 @@ mod tests {
             std::process::id(),
             n
         ));
-        (
-            YuukoStateRepository {
-                state_path: path.clone(),
-            },
-            path,
-        )
+        (YuukoStateRepository::with_path(path.clone()), path)
     }
 
     fn cleanup(path: &std::path::Path) {
@@ -177,6 +136,38 @@ mod tests {
             vec!["article-001".to_string()]
         );
 
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_locked_updates_do_not_lose_writes() {
+        // ゆうこ窓・メイン画面・通知スレッドが別インスタンスから同時に更新しても、日次回数が失われない。
+        let (repo, path) = temp_repo();
+        repo.save(&PersistedYuukoState::default()).unwrap();
+
+        let threads = 4u32;
+        let rounds = 25u32;
+        let handles = (0..threads)
+            .map(|_| {
+                let repo = YuukoStateRepository::with_path(path.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..rounds {
+                        let _guard = repo.lock_updates();
+                        let mut state = repo.load_or_default().unwrap();
+                        state.daily_notification.count += 1;
+                        repo.save(&state).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let loaded = repo.load_or_default().unwrap();
+        assert_eq!(loaded.daily_notification.count, threads * rounds);
+        // 同時に書いても一時ファイル名が衝突せず、書きかけが本体へ昇格しない（破損退避も起きない）。
+        assert!(!path.with_extension("corrupt.json").exists());
         cleanup(&path);
     }
 

@@ -34,7 +34,8 @@ MVP必須シナリオの通し確認や、複数機能をまたぐ問題調査�
 通しデモで問題化しやすい箇所（調査時点の状態。断定せず着手時に最新を確認する）。
 
 - **通知・ホーム**: ゆうこ通知・軽量プレビューのフロント接続は実装済み（吹き出し→プレビュー→記事遷移、終端操作の一回きり保証、backend 操作の直列化）。ただし Playwright は Tauri command を Mock 化しており、**Rust バックエンドを含む実機確認は別途必要**。ホーム画面レイアウト（ゆうこ本体とおすすめ一覧の同時表示）は別の MVP 必須残件。→ [`yuuko-home.md`](./yuuko-home.md)
-- **用語解説・辞書**: 現在は本文の範囲選択ではなく候補語クリック方式。`explain_selected_term` は AI Provider へ未接続で固定サンプル／定型文を返し、**サンプルに無い実記事 ID では失敗し得る**。用語選択→解説→保存の通し E2E は不足。→ [`term-dictionary.md`](./term-dictionary.md)
+- **用語解説・辞書**: （2026-10-19 更新）本文の範囲選択＋「解説」ボタン方式。`explain_selected_term` は辞書未命中の実記事で AI Provider（ローカルLLM / Gemini / Mock）を呼ぶ。実記事 ID は `ArticleRepository` で解決する（固定サンプル article-001〜003 だけは固定解説）。範囲選択→解説→保存の Mock E2E はある。→ [`term-dictionary.md`](./term-dictionary.md)
+- **AI**: 主経路は同梱ローカルLLM（llama-server＋Qwen3.5-2B。判断台帳 D99〜D103。新規インストールの既定）。同梱物が無い開発環境ではローカルが使えないため、設定で Gemini（APIキー設定時）か Mock に切り替えて確認する。ローカルLLMの失敗は Mock へ黙って切り替わらず、失敗として表示される。
 - **設定**: 保存後の再読込で MVP 対象設定が保持されることを確認対象とする。DTO・repository の詳細は複製しない。→ [`settings.md`](./settings.md)
 
 ## MVP通しデモの確認順
@@ -71,7 +72,7 @@ MVP必須の通しデモ確認は手順1〜10（辞書保存まで）。加え�
 |---|---|---|---|
 | メイン画面のニュース一覧表示 | メイン画面にニュース一覧が表示される（0件など空表示も既存仕様どおり安全） | 手動＋Mock E2E | `yuuko-home.md` |
 | React / Rust の責務境界 | React 側に APIキー解決・保持・出力や直接ファイル I/O を置かず、秘密情報・外部通信・ファイル I/O は Rust 側へ委譲されている | 差分レビュー＋セキュリティ確認 | `AGENTS.md` §5＋`.claude/rules/security.md` |
-| MockProvider / Gemini 両対応 | APIキーなし（Mock）でも一連の流れが通り、Gemini でも同じ流れを見せられる | 手動＋実機 | 症状に応じた個別入口 |
+| 実AI（ローカルLLM / Gemini）と MockProvider の両対応 | 実AI（主経路は同梱ローカルLLM。Gemini は任意）で一連の流れが通り、Mock でも同じ流れを見せられる | 手動＋実機 | 症状に応じた個別入口 |
 | APIキーなしで落ちない | APIキー未設定でもアプリ全体が落ちない | 手動＋実機 | `settings.md` / `term-dictionary.md` |
 | 設定変更・再読込保持 | 保存後の再読込・再起動で MVP 対象設定が保持される | 手動＋既存テスト | `settings.md` |
 | 失敗時の安全側 | 一部機能の失敗で全体が落ちない | 手動＋実機 | 症状に応じた個別入口 |
@@ -85,7 +86,7 @@ MVP必須の通しデモ確認は手順1〜10（辞書保存まで）。加え�
     - 起動時だけ取得されない: `src-tauri/src/lib.rs` の `news_scheduler.start()` → `src-tauri/src/services/news_scheduler.rs` の `TickKind::Startup` / `news.fetch_on_startup` → `src-tauri/src/services/news_service.rs`
     - 画面からの手動更新だけ失敗する: `components/screens/MainScreen.tsx` → `lib/tauri/news.ts` の `refresh_news` → `src-tauri/src/commands/news_commands.rs` → `src-tauri/src/services/news_service.rs`
     - 取得元設定・allowlist は通常対象外。
-- AI要約・再説明・注目ポイント（§4.1 手順6）: `lib/tauri/articles.ts`（`generate_article_summary`）→ `components/screens/NewsReaderScreen.tsx` → `src-tauri/src/services/summary_service.rs`。Provider クライアント内部は必要時のみ。
+- AI要約・再説明・注目ポイント（§4.1 手順6）: `lib/tauri/articles.ts`（`generate_article_summary`）→ `components/screens/NewsReaderScreen.tsx` → `src-tauri/src/services/summary_service.rs` → `src-tauri/src/services/ai_provider_service.rs`。取得後の自動要約は `src-tauri/src/services/auto_summary_queue.rs`。ローカルLLMの起動・停止は `src-tauri/src/services/local_llm_service.rs` / `src-tauri/src/infra/local_llm_runtime.rs`、同梱物・配布は `docs/01_setup/ローカルLLM同梱配布手順.md`。Provider クライアント内部は必要時のみ。
 - 友情ポイント・ランク進捗（§4.1 手順11-12）。加算・進捗表示・ランクアップ通知は担当が別なので混同しない。
     - ポイントが増えない: `components/screens/NewsReaderScreen.tsx` の `recordFriendshipEvent` 発火条件（記事閲覧・用語解説・解説閲覧）→ `lib/tauri/yuuko.ts` の `record_friendship_event` → `src-tauri/src/commands/friendship_commands.rs` → `src-tauri/src/services/friendship_service.rs`
     - ランク進捗を取得・表示できない: `lib/tauri/yuuko.ts` の `get_friendship_state` → `src-tauri/src/commands/friendship_commands.rs` / `src-tauri/src/services/friendship_service.rs` → 進捗表示は `components/screens/MainScreen.tsx` のランクカード
