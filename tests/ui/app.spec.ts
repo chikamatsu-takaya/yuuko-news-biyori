@@ -1629,6 +1629,108 @@ test("customize: friendship load failure keeps the screen and rewards visible", 
   // 報酬側は独立して表示される（既定モック: どれも未解放）。
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
   await expect(page.getByTestId("customize-theme-option").first()).toBeVisible();
+
+  // 失敗した欄だけ「もう一度読み込む」で読み直せる。
+  const retry = page.getByTestId("customize-friendship-retry");
+  await expect(retry).toHaveText("もう一度読み込む");
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 6,
+      currentPoint: 3,
+      nextRequiredPoint: 30,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await retry.click();
+  await expect(page.getByTestId("customize-friendship-rank")).toHaveText("6");
+  await expect(page.getByTestId("customize-friendship-status")).toHaveCount(0);
+  await expect(page.getByTestId("customize-friendship-retry")).toHaveCount(0);
+});
+
+test("customize: reward and gacha load failures offer a retry that restores the theme list", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_REWARD_STATE__ = "fail";
+    win.__E2E_GACHA_LOAD_FAIL__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+
+  await expect(page.getByTestId("customize-theme-load-error")).toBeVisible();
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-load-error")).toBeVisible();
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 読めないあいだはテーマを選べない（既定を「使用中」と見せない）。
+  await expect(page.getByTestId("customize-theme-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-theme-retry")).toBeVisible();
+  await expect(page.getByTestId("customize-rank-reward-retry")).toBeVisible();
+
+  // ランク報酬欄の再試行は報酬だけを読み直す（ガチャは失敗のまま）。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const win = window as any;
+    win.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: false },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: [],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByTestId("customize-rank-reward-retry").click();
+  await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(2);
+  await expect(page.getByTestId("customize-rank-reward-retry")).toHaveCount(0);
+  await expect(page.getByTestId("customize-theme-load-error")).toHaveCount(0);
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toBeVisible();
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "クリーム" })
+  ).toHaveAttribute("aria-pressed", "true");
+
+  // テーマ欄の再試行で、残っていたガチャのテーマも読み直せる。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_GACHA_LOAD_FAIL__ = false;
+  });
+  await page.getByTestId("customize-theme-retry").click();
+  await expect(page.getByTestId("customize-gacha-theme-load-error")).toHaveCount(0);
+  await expect(page.getByTestId("customize-theme-retry")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-theme-option").filter({ hasText: "さくら色テーマ" })
+  ).toBeEnabled();
+});
+
+test("customize: nickname load failure offers a retry", async ({ page }) => {
+  await openHome(page);
+  // ホームの読み込み後に失敗させ、カスタマイズの get_user_settings だけを失敗にする。
+  await page.evaluate(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ = "IO_ERROR";
+    win.__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "カスタマイズ", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこカスタマイズ" }).first()).toBeVisible();
+  await page.getByRole("tab", { name: "呼び名" }).click();
+
+  await expect(page.getByTestId("customize-nickname")).toHaveText("呼び名を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__;
+  });
+  await page.getByTestId("customize-nickname-retry").click();
+  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
+  await expect(page.getByTestId("customize-nickname-retry")).toHaveCount(0);
 });
 
 test("customize: browser preview (outside Tauri) labels the sample rank values", async ({
@@ -1739,7 +1841,7 @@ test("customize: theme list locks unreleased themes and saves an unlocked theme"
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });
 
-test("customize: theme save failure shows a fixed message and keeps the current theme", async ({
+test("customize: theme save failure shows a toast and keeps the current theme", async ({
   page,
 }) => {
   await setupThemeState(page);
@@ -1750,9 +1852,12 @@ test("customize: theme save failure shows a fixed message and keeps the current 
 
   const sky = page.getByTestId("customize-theme-option").filter({ hasText: "そらいろ" });
   await sky.click();
-  await expect(page.getByTestId("customize-theme-message")).toHaveText(
-    "テーマを保存できなかったよ。もう一度ためしてね。"
-  );
+  // 操作の失敗は辞書・設定画面と同じくトーストで知らせる。
+  await expect(page.getByText("保存に失敗しちゃった").first()).toBeVisible();
+  await expect(
+    page.getByText("テーマを保存できなかったよ。もう一度ためしてね。").first()
+  ).toBeVisible();
+  await expect(page.getByTestId("customize-theme-message")).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
   await expect(sky).toHaveAttribute("aria-pressed", "false");
   await expect(
@@ -8597,10 +8702,13 @@ async function installTauriMocks(page: Page) {
             );
           }
           case "get_reward_state": {
-            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える。
+            // 既定は報酬マスタ 2 件・どれも未解放（ランク 1）。テストで __E2E_REWARD_STATE__ を差し替える（"fail" で失敗させる）。
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const rewardState = (window as any).__E2E_REWARD_STATE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (rewardState === "fail") {
+              throw new Error("E2E reward failure /internal/secret/path");
+            }
             return (
               rewardState ?? {
                 currentRank: 1,

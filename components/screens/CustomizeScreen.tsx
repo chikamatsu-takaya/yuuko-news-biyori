@@ -47,6 +47,7 @@ import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
 import { getRewardState, setActiveTheme, type RewardItem } from "@/lib/tauri/rewards";
 import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { useToast } from "@/hooks/use-toast";
 import { buildThemeOptions } from "@/lib/customize-themes.mjs";
 
 // Types
@@ -64,8 +65,8 @@ type FriendshipView = Pick<FriendshipState, "currentRank" | "currentPoint" | "ne
 /** テーマ一覧の 1 件（lib/customize-themes.mjs の buildThemeOptions の戻り値）。 */
 type ThemeOption = ReturnType<typeof buildThemeOptions>[number];
 
-/** テーマ切り替えの結果表示（固定文言のみ。生のエラー文は出さない）。 */
-type ThemeMessage = { kind: "success" | "error"; text: string } | null;
+/** テーマ切り替えの成功表示（固定文言のみ）。失敗はトーストで出す（辞書・設定画面と同じ）。 */
+type ThemeMessage = { kind: "success"; text: string } | null;
 
 interface NavigationItem {
   id: string;
@@ -199,6 +200,33 @@ function ThemeOptionButton({
   );
 }
 
+/**
+ * 読み込みに失敗した欄へ出す「もう一度読み込む」ボタン（ガチャ画面と同じ見た目・文言）。
+ * 同じ文言のボタンが複数の欄に同時に出ることがあるため、読み上げ用の名前（ariaLabel）で欄を区別する。
+ */
+function LoadRetryButton({
+  onRetry,
+  testId,
+  ariaLabel,
+}: {
+  onRetry: () => void;
+  testId: string;
+  ariaLabel: string;
+}) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="text-xs"
+      onClick={onRetry}
+      data-testid={testId}
+      aria-label={ariaLabel}
+    >
+      もう一度読み込む
+    </Button>
+  );
+}
+
 /** 飾り・吹き出しの「準備中」表示（D83 / D75）。 */
 function ComingSoonPanel({ title }: { title: string }) {
   return (
@@ -234,9 +262,107 @@ export default function CustomizeScreen({
   const [savingThemeId, setSavingThemeId] = React.useState<string | null>(null);
   const [themeMessage, setThemeMessage] = React.useState<ThemeMessage>(null);
 
+  const { toast } = useToast();
+
   // 友情ランク・報酬・ガチャ所持・呼び名は Rust（get_friendship_state / get_reward_state /
   // get_gacha_state / get_user_settings）が正。ここでは表示するだけ。
-  // どれかの取得に失敗しても、ほかの表示と画面全体は続ける。
+  // どれかの取得に失敗しても、ほかの表示と画面全体は続ける。失敗した欄だけ「もう一度読み込む」で読み直せる。
+  // 欄ごとに世代番号を持ち、再試行を重ねたときやアンマウント後に、古い応答で表示を上書きしない。
+  const isMountedRef = React.useRef(true);
+  const friendshipRequestRef = React.useRef(0);
+  const rewardRequestRef = React.useRef(0);
+  const gachaRequestRef = React.useRef(0);
+  const nicknameRequestRef = React.useRef(0);
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const loadFriendship = React.useCallback(async () => {
+    const requestId = ++friendshipRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== friendshipRequestRef.current;
+    setFriendshipStatus("loading");
+    try {
+      const state = await getFriendshipState();
+      if (isStale()) return;
+      if (!state) {
+        setFriendshipStatus("error");
+        return;
+      }
+      setFriendship(state);
+      setFriendshipStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      // 生のエラー文は画面へ出さず、調査用に warn で残す。
+      console.warn("Failed to load friendship state:", error);
+      setFriendshipStatus("error");
+    }
+  }, []);
+
+  const loadRewards = React.useCallback(async () => {
+    const requestId = ++rewardRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== rewardRequestRef.current;
+    setRewardStatus("loading");
+    try {
+      const state = await getRewardState();
+      if (isStale()) return;
+      if (!state) {
+        setRewardStatus("error");
+        return;
+      }
+      setRewards(state.rewards);
+      setActiveThemeId(state.activeThemeId);
+      setRewardStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load reward state:", error);
+      setRewardStatus("error");
+    }
+  }, []);
+
+  const loadGacha = React.useCallback(async () => {
+    const requestId = ++gachaRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== gachaRequestRef.current;
+    setGachaStatus("loading");
+    try {
+      const state = await getGachaState();
+      if (isStale()) return;
+      if (!state) {
+        setGachaStatus("error");
+        return;
+      }
+      setGachaItems(state.items);
+      setGachaStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load gacha state:", error);
+      setGachaStatus("error");
+    }
+  }, []);
+
+  const loadNickname = React.useCallback(async () => {
+    const requestId = ++nicknameRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== nicknameRequestRef.current;
+    setNicknameStatus("loading");
+    try {
+      const settings = await getUserSettings();
+      if (isStale()) return;
+      if (!settings) {
+        setNicknameStatus("error");
+        return;
+      }
+      setNickname(settings.nickname);
+      setNicknameStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load user settings:", error);
+      setNicknameStatus("error");
+    }
+  }, []);
+
   React.useEffect(() => {
     if (!isTauriRuntime()) {
       setFriendship(previewFriendship);
@@ -246,79 +372,17 @@ export default function CustomizeScreen({
       setNicknameStatus("preview");
       return;
     }
+    void loadFriendship();
+    void loadRewards();
+    void loadGacha();
+    void loadNickname();
+  }, [loadFriendship, loadRewards, loadGacha, loadNickname]);
 
-    let cancelled = false;
-
-    getFriendshipState()
-      .then((state) => {
-        if (cancelled) return;
-        if (!state) {
-          setFriendshipStatus("error");
-          return;
-        }
-        setFriendship(state);
-        setFriendshipStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        // 生のエラー文は画面へ出さず、調査用に warn で残す。
-        console.warn("Failed to load friendship state:", error);
-        setFriendshipStatus("error");
-      });
-
-    getRewardState()
-      .then((state) => {
-        if (cancelled) return;
-        if (!state) {
-          setRewardStatus("error");
-          return;
-        }
-        setRewards(state.rewards);
-        setActiveThemeId(state.activeThemeId);
-        setRewardStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        console.warn("Failed to load reward state:", error);
-        setRewardStatus("error");
-      });
-
-    getGachaState()
-      .then((state) => {
-        if (cancelled) return;
-        if (!state) {
-          setGachaStatus("error");
-          return;
-        }
-        setGachaItems(state.items);
-        setGachaStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        console.warn("Failed to load gacha state:", error);
-        setGachaStatus("error");
-      });
-
-    getUserSettings()
-      .then((settings) => {
-        if (cancelled) return;
-        if (!settings) {
-          setNicknameStatus("error");
-          return;
-        }
-        setNickname(settings.nickname);
-        setNicknameStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        console.warn("Failed to load user settings:", error);
-        setNicknameStatus("error");
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // テーマ欄の再試行: 失敗した方（報酬・ガチャ）だけ読み直す。
+  const retryThemeLoads = () => {
+    if (rewardStatus === "error") void loadRewards();
+    if (gachaStatus === "error") void loadGacha();
+  };
 
   const themeOptions = React.useMemo(
     () =>
@@ -355,10 +419,18 @@ export default function CustomizeScreen({
     if (option.selected) return;
     setSavingThemeId(option.id);
     setThemeMessage(null);
+    // 保存失敗は操作の失敗なので、辞書・設定画面と同じくトーストで知らせる（生のエラー文は出さない）。
+    const showSaveFailedToast = () => {
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "テーマを保存できなかったよ。もう一度ためしてね。",
+      });
+    };
     setActiveTheme(option.id)
       .then((state) => {
         if (!state) {
-          setThemeMessage({ kind: "error", text: "テーマを保存できなかったよ。もう一度ためしてね。" });
+          showSaveFailedToast();
           return;
         }
         setRewards(state.rewards);
@@ -368,7 +440,7 @@ export default function CustomizeScreen({
       })
       .catch((error: unknown) => {
         console.warn("Failed to save active theme:", error);
-        setThemeMessage({ kind: "error", text: "テーマを保存できなかったよ。もう一度ためしてね。" });
+        showSaveFailedToast();
       })
       .finally(() => {
         setSavingThemeId(null);
@@ -533,6 +605,11 @@ export default function CustomizeScreen({
                           ガチャのテーマを読み込めなかったよ。
                         </p>
                       )}
+                      {(rewardStatus === "error" || gachaStatus === "error") && (
+                        <LoadRetryButton onRetry={retryThemeLoads} testId="customize-theme-retry"
+                        ariaLabel="テーマをもう一度読み込む"
+                      />
+                      )}
                       {rewardStatus === "preview" && (
                         <p className="text-xs text-muted-foreground">
                           プレビューではテーマを切り替えられないよ。アプリで選んでね。
@@ -541,9 +618,7 @@ export default function CustomizeScreen({
                       {themeMessage !== null && (
                         <p
                           role="status"
-                          className={`text-xs ${
-                            themeMessage.kind === "error" ? "text-destructive" : "text-[var(--yuuko-green)]"
-                          }`}
+                          className="text-xs text-[var(--yuuko-green)]"
                           data-testid="customize-theme-message"
                         >
                           {themeMessage.text}
@@ -565,6 +640,11 @@ export default function CustomizeScreen({
                               ? "アプリで設定した呼び名が表示されるよ。"
                               : "読み込み中…"}
                       </div>
+                      {nicknameStatus === "error" && (
+                        <LoadRetryButton onRetry={() => void loadNickname()} testId="customize-nickname-retry"
+                        ariaLabel="呼び名をもう一度読み込む"
+                      />
+                      )}
                       <Button
                         variant="outline"
                         className="w-full text-sm"
@@ -716,7 +796,14 @@ export default function CustomizeScreen({
                   ) : rewardStatus === "loading" ? (
                     <p className="text-xs text-muted-foreground mb-2">読み込み中…</p>
                   ) : rewardStatus === "error" ? (
-                    <p className="text-xs text-muted-foreground mb-2">報酬の状態を読み込めなかったよ。</p>
+                    <div className="space-y-2 mb-2">
+                      <p className="text-xs text-muted-foreground" data-testid="customize-rank-reward-load-error">
+                        報酬の状態を読み込めなかったよ。
+                      </p>
+                      <LoadRetryButton onRetry={() => void loadRewards()} testId="customize-rank-reward-retry"
+                        ariaLabel="ランク報酬をもう一度読み込む"
+                      />
+                    </div>
                   ) : (
                   // Tauri 外のプレビュー: 従来のサンプル表示（すべて未解放）をそのまま出す。
                   <div className="flex gap-2 mb-2" data-testid="customize-rank-reward-preview">
@@ -871,9 +958,16 @@ export default function CustomizeScreen({
                     )}
                   </>
                 ) : (
-                  <p className="text-xs text-muted-foreground mb-3" data-testid="customize-friendship-status">
-                    {friendshipStatus === "error" ? "ランクを読み込めなかったよ。" : "読み込み中…"}
-                  </p>
+                  <div className="space-y-2 mb-3">
+                    <p className="text-xs text-muted-foreground" data-testid="customize-friendship-status">
+                      {friendshipStatus === "error" ? "ランクを読み込めなかったよ。" : "読み込み中…"}
+                    </p>
+                    {friendshipStatus === "error" && (
+                      <LoadRetryButton onRetry={() => void loadFriendship()} testId="customize-friendship-retry"
+                        ariaLabel="なかよしランクをもう一度読み込む"
+                      />
+                    )}
+                  </div>
                 )}
               </CardContent>
             </Card>
