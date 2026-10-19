@@ -980,7 +980,9 @@ export default function SettingsScreen({
           </nav>
 
           {/* Settings Hint Card */}
-          <div className="p-3">
+          {/* 高さの低いウィンドウ（最小 800×440）ではヒントカードが設定メニューを押し潰して高さ 0 にするため、
+              高さ 560px 以下では隠してメニューの領域を確保する（800×600 以上の見た目は変えない）。 */}
+          <div className="p-3 [@media(max-height:560px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-2">
