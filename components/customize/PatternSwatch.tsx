@@ -12,12 +12,10 @@ import { PATTERN_NONE_ID, resolveUiPatternId } from "@/lib/ui-pattern.mjs";
 export function PatternSwatch({
   patternId,
   hidden = false,
-  dimmed = false,
   className = "w-12 h-10",
 }: {
   patternId: string;
   hidden?: boolean;
-  dimmed?: boolean;
   className?: string;
 }) {
   if (hidden) {
@@ -45,9 +43,7 @@ export function PatternSwatch({
   return (
     <span
       data-pattern={resolved}
-      className={`${className} relative rounded-lg border border-border overflow-hidden bg-[var(--yuuko-cream)] shrink-0 forced-color-adjust-none ${
-        dimmed ? "opacity-50" : ""
-      }`}
+      className={`${className} relative rounded-lg border border-border overflow-hidden bg-[var(--yuuko-cream)] shrink-0 forced-color-adjust-none`}
       aria-hidden="true"
       data-testid="pattern-swatch"
     >

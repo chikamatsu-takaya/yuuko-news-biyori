@@ -111,7 +111,7 @@ pub fn run() {
             let article_repository = ArticleRepository::new(&paths);
             // 旧版が書いたサンプル記事（D139）の掃除結果。辞書・ゆうこ状態の参照掃除に使う。
             let legacy_seed_cleanup = article_repository.initialize_default_if_missing()?;
-            // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
+            // ガチャ状態は画面から取得・実行されたとき、かけらを付与するとき、メイン画面の起動時に模様の所持を確かめるときに読む。
             // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
             let gacha_service = GachaService::new(GachaRepository::new(&paths));
             // テーマの地に敷く模様。保存の正は設定 ui.patternId、所持はガチャ状態から読む（D152〜D154）。
