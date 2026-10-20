@@ -818,8 +818,9 @@ html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-la
 }
 
 /* ゲームの窓は地が暗いため、中の文字・アイコンを白にする（各画面の text-foreground などより優先させるため層の外に置く）。
-   ボタン（「詳しく見る」など）は自前の配色を保つ。 */
-.yuuko-bb-game :where(p, span, h1, h2, h3, h4, svg, a) {
+   自前の背景色を持つ部品（「詳しく見る」ボタンやバッジなど、bg-* を持つ要素）とその中身は、白地に白文字にならないよう対象外にする。
+   吹き出しの外側の親（画面やダイアログの bg-*）には反応しないよう、吹き出しの内側に限る。 */
+.yuuko-bb-game :where(p, span, h1, h2, h3, h4, svg, a):not(.yuuko-bb-game [class*="bg-"], .yuuko-bb-game [class*="bg-"] *) {
   color: #fff;
 }
 
