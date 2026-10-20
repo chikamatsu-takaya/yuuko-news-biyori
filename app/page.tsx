@@ -10,7 +10,6 @@ import PastNewsScreen from "@/components/screens/PastNewsScreen";
 import SettingsScreen from "@/components/screens/SettingsScreen";
 import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
-import OnboardingScreen from "@/components/screens/OnboardingScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
@@ -39,8 +38,7 @@ type ScreenType =
   | "past-news"
   | "settings"
   | "customize"
-  | "gacha"
-  | "onboarding";
+  | "gacha";
 
 // 記事詳細を開いた遷移元。戻る先の画面をここで保持する（固定でホームへ戻さない）。
 // 「戻る」ボタンの表示文言は遷移元によらず「戻る」に統一し、戻り先のみこの値で制御する。
@@ -174,6 +172,12 @@ export default function Page() {
   const isReadingArticle = currentScreen === "reader" && Boolean(selectedArticleId);
   // 初回起動の案内を表示中は、通知を操作できず枠だけ消費するため候補生成と表示を止める。
   const [isOnboardingOpen, setIsOnboardingOpen] = React.useState(false);
+  // ホームの「オンボーディングを見る」で、初回と同じ案内を見直し表示（replay）として重ねる要求（D146）。
+  // 旧 OnboardingScreen（選択を保存しない別画面）は廃止し、画面遷移はせず今の画面の上に開く。
+  const [isOnboardingReplayOpen, setIsOnboardingReplayOpen] = React.useState(false);
+  const closeOnboardingReplay = React.useCallback(() => {
+    setIsOnboardingReplayOpen(false);
+  }, []);
   useNotificationScheduler({
     generateCandidates: true,
     canGenerateCandidates:
@@ -203,7 +207,8 @@ export default function Page() {
     } else if (screen === "gacha") {
       setCurrentScreen("gacha");
     } else if (screen === "onboarding") {
-      setCurrentScreen("onboarding");
+      // 画面は切り替えず、案内を見直し表示で重ねる（閉じると元の画面に戻る）。
+      setIsOnboardingReplayOpen(true);
     }
   };
 
@@ -514,10 +519,6 @@ export default function Page() {
       return <GachaScreen onNavigate={handleNavigate} />;
     }
 
-    if (currentScreen === "onboarding") {
-      return <OnboardingScreen onNavigate={handleNavigate} />;
-    }
-
     // 既定は "home"（ホーム画面）。おすすめニュースは MainScreen 側で
     // 表示件数設定（maxDailyRecommendations）に従って制限して表示する。
     return (
@@ -595,8 +596,12 @@ export default function Page() {
           onIgnore={clearSummonMessage}
         />
       )}
-      {/* 初回起動時だけ案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
-      <OnboardingOverlay onOpenChange={setIsOnboardingOpen} />
+      {/* 初回起動時、または「オンボーディングを見る」で案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
+      <OnboardingOverlay
+        onOpenChange={setIsOnboardingOpen}
+        replayOpen={isOnboardingReplayOpen}
+        onReplayClose={closeOnboardingReplay}
+      />
     </>
   );
 }

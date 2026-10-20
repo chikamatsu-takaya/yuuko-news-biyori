@@ -4,6 +4,12 @@
 // 設定ファイルを新規作成した初回起動だけ Rust 側で onboardingCompleted=false になり、そのときだけ表示する。
 // 選んだ内容は既存の save_user_settings でそのまま設定として保存し、完了も同じ保存で記録する。
 // 自動起動だけは OS 登録が正のため、既存の set_autostart_enabled で反映する（設定画面と同じ経路）。
+//
+// 見直し表示（replay、D146）: ホームの「オンボーディングを見る」から同じ案内をもう一度開く。
+// - 現在の設定と自動起動の状態を読み込んで初期表示する（初回のような既定値への巻き戻しはしない）。
+// - 「保存する」は選んだ内容を保存し、onboardingCompleted は常に true のまま送る（false へ戻さない）。
+// - 「閉じる」・Esc・閉じるボタンは何も保存せずに閉じる（完了の記録が不要なため初回と違い閉じられる）。
+// - 自動起動は読み込み時の状態から変えたときだけ ON/OFF を反映する。
 import * as React from "react";
 
 import {
@@ -26,6 +32,7 @@ import {
   normalizeWorkTimeRanges,
 } from "@/lib/settings-options";
 import {
+  getAutostartEnabled,
   getUserSettings,
   saveUserSettings,
   setAutostartEnabled,
@@ -43,12 +50,23 @@ const isValidTime = (value: string) => {
   return !!match && Number(match[1]) <= 23 && Number(match[2]) <= 59;
 };
 
+type OnboardingMode = "first-run" | "replay";
+
 type OnboardingOverlayProps = {
   // 案内の表示・非表示が変わったときに呼ぶ。表示中は親側で通知候補の生成を止めるために使う。
   onOpenChange?: (open: boolean) => void;
+  // true になったら見直し表示（replay）として案内を開く。閉じたら onReplayClose で親へ戻す。
+  replayOpen?: boolean;
+  // 見直し表示を閉じたとき（保存・閉じる・読み込み失敗）に呼ぶ。親側で replayOpen を false に戻すため。
+  // 依存配列に入るため、親側では useCallback などで安定した参照を渡す。
+  onReplayClose?: () => void;
 };
 
-export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayProps) {
+export default function OnboardingOverlay({
+  onOpenChange,
+  replayOpen = false,
+  onReplayClose,
+}: OnboardingOverlayProps) {
   const { toast } = useToast();
   // 読み込んだ設定（既定値）。保存時は選択した項目だけを差し替え、他の項目はこのまま送る。
   const [baseDto, setBaseDto] = React.useState<UserSettingsDto | null>(null);
@@ -58,8 +76,12 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
   );
   const [nickname, setNickname] = React.useState("");
   const [autoStart, setAutoStart] = React.useState(false);
+  // 見直し表示で読み込んだ自動起動の状態。保存時に変更があったときだけ OS へ反映するために使う。
+  const [initialAutoStart, setInitialAutoStart] = React.useState(false);
+  const [mode, setMode] = React.useState<OnboardingMode>("first-run");
   const [isSaving, setIsSaving] = React.useState(false);
   const isOpen = baseDto !== null;
+  const isReplay = mode === "replay";
 
   React.useEffect(() => {
     onOpenChange?.(isOpen);
@@ -77,6 +99,7 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
         setGenres(dto.genres ?? []);
         setWorkTimeRanges(normalizeWorkTimeRanges(dto.workTimeRanges));
         setNickname(dto.nickname ?? "");
+        setMode("first-run");
         setBaseDto(dto);
       })
       .catch((error) => {
@@ -86,6 +109,61 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
       disposed = true;
     };
   }, []);
+
+  // 見直し表示: 現在の設定と自動起動の状態を読み込んでから開く。
+  // 読み込めない場合（ブラウザプレビュー・読み込み失敗）は開かずに親へ閉じたことを返す。
+  React.useEffect(() => {
+    if (!replayOpen) {
+      return;
+    }
+    let disposed = false;
+    const failToOpen = () => {
+      toast({
+        variant: "destructive",
+        title: "案内を開けなかったよ",
+        description: "設定を読み込めなかったみたい。少し待ってからもう一度試してね。",
+      });
+      onReplayClose?.();
+    };
+    Promise.all([
+      getUserSettings(),
+      // 自動起動の状態が読めなくても案内自体は開く（OFF 表示にして、変更しない限り反映しない）。
+      getAutostartEnabled().catch(() => null),
+    ])
+      .then(([dto, autostart]) => {
+        if (disposed) {
+          return;
+        }
+        if (!dto) {
+          failToOpen();
+          return;
+        }
+        setGenres(dto.genres ?? []);
+        setWorkTimeRanges(normalizeWorkTimeRanges(dto.workTimeRanges));
+        setNickname(dto.nickname ?? "");
+        setAutoStart(autostart === true);
+        setInitialAutoStart(autostart === true);
+        setMode("replay");
+        setBaseDto(dto);
+      })
+      .catch((error) => {
+        console.error("Failed to load settings for onboarding replay:", errorKind(error));
+        if (!disposed) {
+          failToOpen();
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [replayOpen, onReplayClose, toast]);
+
+  // 案内を閉じる共通処理。見直し表示なら親の表示要求も戻す。
+  const close = () => {
+    setBaseDto(null);
+    if (isReplay) {
+      onReplayClose?.();
+    }
+  };
 
   const toggleGenre = (genre: string, checked: boolean) => {
     setGenres((prev) =>
@@ -108,14 +186,16 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
     setIsSaving(true);
     try {
       await saveUserSettings(dto);
-      setBaseDto(null);
+      close();
       return true;
     } catch (error) {
       console.error("Failed to save onboarding settings:", errorKind(error));
       toast({
         variant: "destructive",
         title: "保存できなかったよ",
-        description: "もう一度「はじめる」か「スキップ」を押してみてね。",
+        description: isReplay
+          ? "もう一度「保存する」を押すか、「閉じる」でやめてね。"
+          : "もう一度「はじめる」か「スキップ」を押してみてね。",
       });
       return false;
     } finally {
@@ -143,22 +223,30 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
       notifyStartTime: ranges[0].start,
       notifyEndTime: ranges[ranges.length - 1].end,
       nickname,
+      // 見直し表示でも完了済みのまま保存する（案内を見直しただけで初回扱いへ戻さない）。
       onboardingCompleted: true,
     });
-    if (!saved || !autoStart) {
+    if (!saved) {
+      return;
+    }
+    // 初回は ON を選んだときだけ登録する。見直しでは読み込み時から変えたときだけ ON/OFF を反映する。
+    const shouldApplyAutostart = isReplay ? autoStart !== initialAutoStart : autoStart;
+    if (!shouldApplyAutostart) {
       return;
     }
     // 自動起動の失敗で案内の完了は取り消さない。設定画面からやり直せることだけ伝える。
     try {
-      const enabled = await setAutostartEnabled(true);
-      if (enabled === false) {
-        throw new Error("autostart was not enabled");
+      const enabled = await setAutostartEnabled(autoStart);
+      if (enabled === !autoStart) {
+        throw new Error("autostart was not applied");
       }
     } catch (error) {
-      console.error("Failed to enable autostart from onboarding:", errorKind(error));
+      console.error("Failed to apply autostart from onboarding:", errorKind(error));
       toast({
         variant: "destructive",
-        title: "自動起動をオンにできなかったよ",
+        title: autoStart
+          ? "自動起動をオンにできなかったよ"
+          : "自動起動をオフにできなかったよ",
         description: "設定画面の「起動・連携」からもう一度試してみてね。",
       });
     }
@@ -172,22 +260,36 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
     void saveAndClose({ ...baseDto, onboardingCompleted: true });
   };
 
+  // 見直し表示で保存中以外に閉じる操作（閉じるボタン・Esc）が来たら、保存せずに閉じる。
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && isReplay && !isSaving) {
+      close();
+    }
+  };
+
   return (
-    // 閉じるボタン・Esc・外側クリックでは閉じない（完了かスキップのどちらかを記録するため）。
-    <Dialog open={isOpen}>
+    // 初回は閉じるボタン・Esc・外側クリックでは閉じない（完了かスキップのどちらかを記録するため）。
+    // 見直し表示は記録が不要なので、閉じるボタン・Esc で閉じられる（外側クリックは誤操作防止で無効のまま）。
+    <Dialog open={isOpen} onOpenChange={handleDialogOpenChange}>
       <DialogContent
-        showCloseButton={false}
+        showCloseButton={isReplay}
         className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
-        onEscapeKeyDown={(event) => event.preventDefault()}
+        onEscapeKeyDown={(event) => {
+          if (!isReplay || isSaving) {
+            event.preventDefault();
+          }
+        }}
         onPointerDownOutside={(event) => event.preventDefault()}
         onInteractOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
           <DialogTitle className="text-[var(--yuuko-green)]">
-            はじめまして、ゆうこだよ！
+            {isReplay ? "ゆうこの設定、もう一度見てみよう！" : "はじめまして、ゆうこだよ！"}
           </DialogTitle>
           <DialogDescription>
-            ニュースをお届けする前に、少しだけ教えてね。あとから設定画面でいつでも変えられるよ。
+            {isReplay
+              ? "今の設定を表示しているよ。変えたいところがあれば直して「保存する」を押してね。"
+              : "ニュースをお届けする前に、少しだけ教えてね。あとから設定画面でいつでも変えられるよ。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -287,15 +389,21 @@ export default function OnboardingOverlay({ onOpenChange }: OnboardingOverlayPro
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={handleSkip} disabled={isSaving}>
-            スキップ
-          </Button>
+          {isReplay ? (
+            <Button variant="outline" onClick={close} disabled={isSaving}>
+              閉じる
+            </Button>
+          ) : (
+            <Button variant="outline" onClick={handleSkip} disabled={isSaving}>
+              スキップ
+            </Button>
+          )}
           <Button
             onClick={() => void handleStart()}
             disabled={isSaving}
             className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90"
           >
-            はじめる
+            {isReplay ? "保存する" : "はじめる"}
           </Button>
         </DialogFooter>
       </DialogContent>
