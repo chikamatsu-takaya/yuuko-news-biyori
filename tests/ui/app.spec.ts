@@ -84,20 +84,10 @@ test("home screen renders and primary controls are hittable", async ({
   await page.getByRole("button", { name: "ニュースを更新" }).click();
   await expect(page.getByText("ニュースを更新しました。")).toBeVisible();
 
-  // Tauriのclose呼び出しをmockし、共通タイトルバーの操作経路を確認する。
-  await page.getByRole("button", { name: "バックグラウンドで待機" }).click();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          Boolean(
-            (window as typeof window & {
-              __E2E_WINDOW_CLOSE_CALLED__?: boolean;
-            }).__E2E_WINDOW_CLOSE_CALLED__
-          )
-      )
-    )
-    .toBe(true);
+  // ウィンドウ操作は OS のタイトルバーに任せるため、画面内には最小化・最大化・閉じるを置かない（D147）。
+  for (const name of ["最小化", "最大化", "バックグラウンドで待機"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
   await expect(
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
@@ -8571,13 +8561,6 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return null;
           }
-          case "plugin:window|close":
-            (
-              window as typeof window & {
-                __E2E_WINDOW_CLOSE_CALLED__?: boolean;
-              }
-            ).__E2E_WINDOW_CLOSE_CALLED__ = true;
-            return null;
           case "get_recommended_articles": {
             // 一覧の読み直し回数の検証用に呼び出し回数を数える。
             const recommendedCallWindow = window as unknown as Record<string, number>;
