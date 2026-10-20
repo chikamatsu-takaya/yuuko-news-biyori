@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "メインウィンドウ用。Tauri コアの既定権限、画面内 close-to-hide 用のウィンドウを閉じる権限、アプリ定義 command の一括権限セット（permissions/main-window.toml）を与える。",
+  "description": "メインウィンドウ用。Tauri コアの既定権限と、アプリ定義 command の一括権限セット（permissions/main-window.toml）だけを与える。閉じる操作は OS のタイトルバーで行い Rust 側の close-to-hide が受けるため、ウィンドウを閉じる権限は与えない（D147）。",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "core:window:allow-close",
     "main-window-commands"
   ]
 }
