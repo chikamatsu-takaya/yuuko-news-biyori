@@ -38,12 +38,94 @@ jobs:
   rust-tests:
     name: Rust Tests
     runs-on: windows-latest
+    env:
+      # CI では差分ビルドの恩恵がなく、incremental はキャッシュを肥大化・不安定化させるため切る（D149）。
+      CARGO_INCREMENTAL: 0
+      # Windows のテストビルドは PDB が大きくキャッシュを圧迫するため、デバッグ情報を行番号のみにする。
+      # panic 時のファイル・行番号は残る。
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # PR のマージコミット（HEAD）と第1親（base 側）を比べるため 2 世代だけ取得する。
+          fetch-depth: 2
+
+      # Rust に関係する変更がない PR では重い手順をスキップする（D149）。
+      # ジョブ自体は常に起動して成功を報告するため、必須チェックが Pending のまま残らない
+      # （security-ci.yml と同じ理由で on.paths は使わない）。
+      # push（develop / main）では常に実行し、判定に失敗したときも安全側（実行する）に倒す。
+      - name: Detect Rust changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # Rust のビルド・テスト結果に影響し得るパス。このワークフロー自身の変更も含める。
+          RUST_PATH_PATTERN: '^(src-tauri/|Cargo\.(toml|lock)$|rust-toolchain(\.toml)?$|\.cargo/|\.github/workflows/test-ci\.yml$)'
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+            && files=$(git -c core.quotepath=off diff --no-renames --name-only 'HEAD^1' HEAD) \
+            && [ -n "$files" ]; then
+            # Actions の bash は -e 付きのため、grep の終了コードは || で受け取る。
+            # grep の 1 は「一致なし」。2 以上（エラー）は実行側に倒す。
+            match=0
+            grep -Eq "$RUST_PATH_PATTERN" <<<"$files" || match=$?
+            if [ "$match" -eq 1 ]; then
+              run=false
+            fi
+          fi
+          echo "Rust 手順を実行するか: ${run}"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust toolchain
+        if: steps.changes.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@1.88.0
 
+      # 依存クレートのビルド成果物とレジストリを復元する。PR は復元のみで保存しない
+      # （PR ごとのキャッシュが develop / main の共有キャッシュを追い出さないようにするため）。
+      # cargo test は check/clippy と成果物の種類が違うため、キーの用途部分を test として分ける。
+      # キーの 1.88.0 は上の dtolnay/rust-toolchain のバージョンと揃える。
+      - name: Restore Rust cache
+        id: rust-cache
+        if: steps.changes.outputs.run != 'false'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: rust-${{ runner.os }}-1.88.0-test-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-1.88.0-test-
+
       - name: Run rust tests
+        if: steps.changes.outputs.run != 'false'
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # 保存前に、毎回作り直されるワークスペース自身（app / app_lib）の成果物と incremental を消して
+      # キャッシュを依存クレート中心の小さいものに保つ。
+      - name: Prune Rust cache
+        if: steps.changes.outputs.run != 'false' && github.event_name == 'push' && steps.rust-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          target=src-tauri/target/debug
+          rm -rf "$target/incremental"
+          rm -rf "$target"/deps/app-* "$target"/deps/app_lib-* "$target"/deps/libapp_lib-* \
+            "$target"/deps/app.* "$target"/deps/app_lib.* "$target"/deps/libapp_lib.* \
+            "$target"/.fingerprint/app-* "$target"/build/app-* \
+            "$target"/app.* "$target"/app_lib.* "$target"/libapp_lib.*
+
+      # develop / main への push で、Cargo.lock に対応するキャッシュがまだ無いときだけ保存する。
+      - name: Save Rust cache
+        if: steps.changes.outputs.run != 'false' && github.event_name == 'push' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
