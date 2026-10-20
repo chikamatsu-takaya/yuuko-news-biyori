@@ -62,4 +62,7 @@ permissions = [
   "allow-mark-gacha-items-seen",
   "allow-get-pattern-state",
   "allow-set-active-pattern",
+  "allow-get-dressup-state",
+  "allow-set-active-balloon",
+  "allow-set-active-deco",
 ]

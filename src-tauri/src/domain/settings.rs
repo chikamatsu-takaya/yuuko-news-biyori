@@ -518,6 +518,12 @@ pub struct UiSettings {
     /// テーマの地に敷く模様の ID（判断台帳 D152〜D154）。欄が無い既存ファイルは "none"（模様なし）で読む。
     /// 設定画面の DTO には含めず、所持判定を通す `set_active_pattern`（カスタマイズ画面）からだけ変える。
     pub pattern_id: String,
+    /// ゆうこの吹き出しの ID（判断台帳 D155）。欄が無い既存ファイルは "balloon_default"（いつもの）で読む。
+    /// 模様と同じく設定画面の DTO には含めず、所持判定を通す `set_active_balloon`（カスタマイズ画面）からだけ変える。
+    pub balloon_id: String,
+    /// ゆうこの飾り（アクセサリー）の ID（判断台帳 D155）。欄が無い既存ファイルは "deco_none"（なし）で読む。
+    /// 変えるのは所持判定を通す `set_active_deco`（カスタマイズ画面）だけ。
+    pub deco_id: String,
     pub tone_id: String,
     pub personality_id: String,
     pub yuuko_position: String,
@@ -535,6 +541,8 @@ impl Default for UiSettings {
         Self {
             theme_id: "default".to_string(),
             pattern_id: crate::domain::pattern::PATTERN_NONE_ID.to_string(),
+            balloon_id: crate::domain::dressup::BALLOON_DEFAULT_ID.to_string(),
+            deco_id: crate::domain::dressup::DECO_NONE_ID.to_string(),
             tone_id: "gentle".to_string(),
             personality_id: "standard".to_string(),
             yuuko_position: "bottom_center".to_string(),
@@ -657,6 +665,32 @@ mod tests {
         assert_eq!(saved.ui.pattern_id, "gacha_pattern_snow");
         let raw = serde_json::to_string(&saved).unwrap();
         assert!(raw.contains("\"patternId\":\"gacha_pattern_snow\""));
+    }
+
+    #[test]
+    fn legacy_settings_without_dressup_fields_load_as_defaults() {
+        // 着せかえの欄が無い既存の settings.json は「いつもの」「なし」で読む（D155。今の見た目を変えない）。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "patternId": "pattern_dots" } }"#)
+                .unwrap();
+        assert_eq!(legacy.ui.balloon_id, "balloon_default");
+        assert_eq!(legacy.ui.deco_id, "deco_none");
+        assert_eq!(legacy.ui.pattern_id, "pattern_dots");
+        let initial = PersistedSettings::initial();
+        assert_eq!(
+            (initial.ui.balloon_id.as_str(), initial.ui.deco_id.as_str()),
+            ("balloon_default", "deco_none")
+        );
+
+        let saved: PersistedSettings = serde_json::from_str(
+            r#"{ "ui": { "balloonId": "gacha_balloon_cloud", "decoId": "gacha_deco_crown" } }"#,
+        )
+        .unwrap();
+        assert_eq!(saved.ui.balloon_id, "gacha_balloon_cloud");
+        assert_eq!(saved.ui.deco_id, "gacha_deco_crown");
+        let raw = serde_json::to_string(&saved).unwrap();
+        assert!(raw.contains("\"balloonId\":\"gacha_balloon_cloud\""));
+        assert!(raw.contains("\"decoId\":\"gacha_deco_crown\""));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 "use client";
 
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
@@ -270,7 +271,14 @@ export default function YuukoInAppNotification({
         }}
       >
         {/* 吹き出し / 軽量プレビュー（ゆうこ本体の上・近くに表示） */}
-        <div className="relative rounded-2xl border border-border/50 bg-white p-3 pr-7 shadow-lg">
+        {/* 吹き出しは着せかえ（D155）に従う（メイン画面のウィンドウだけ。常駐ゆうこウィンドウは Provider が無く「いつもの」）。
+            閉じるボタンの分の右余白（pr-7）はどの形でも残す。 */}
+        <YuukoBalloon
+          className="pr-7"
+          tail="none"
+          defaultClassName="rounded-2xl border border-border/50 bg-white p-3 shadow-lg"
+          data-testid="yuuko-notification-balloon"
+        >
           <button
             type="button"
             aria-label="通知を閉じる"
@@ -353,21 +361,17 @@ export default function YuukoInAppNotification({
               </button>
             </div>
           )}
-        </div>
+        </YuukoBalloon>
 
         {/* ゆうこ本体（画面端から登場）。読み込み失敗時は非表示にフォールバック。 */}
         <div className="self-end">
-          <Image
-            src="/assets/yuuko.png"
+          <YuukoFigure
             // 通知が出た時点で画面内に見えている主役の画像（常駐ゆうこウィンドウでは最大要素）なので、遅延読み込みしない。
             loading="eager"
             width={96}
             height={96}
-            alt="ゆうこ"
-            className="h-20 w-20 object-contain drop-shadow-md"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = "none";
-            }}
+            imageClassName="h-20 w-20 object-contain"
+            className="drop-shadow-md"
           />
         </div>
       </div>

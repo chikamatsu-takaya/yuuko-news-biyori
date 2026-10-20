@@ -13,6 +13,7 @@ import GachaScreen from "@/components/screens/GachaScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
 import PatternGround from "@/components/layout/PatternGround";
+import { YuukoDressupProvider } from "@/components/yuuko/YuukoDressupProvider";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 import { useNewsListRevision } from "@/hooks/use-news-list-revision";
 import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
@@ -554,7 +555,8 @@ export default function Page() {
     null;
 
   return (
-    <>
+    // ゆうこの着せかえ（吹き出し・飾り。D155）を各画面とアプリ内通知へ配る。保存済みの値はマウント時に 1 回読む。
+    <YuukoDressupProvider>
       {/* 画面の地に模様を1枚で敷く外枠（D152〜D154）。通知・案内は模様と無関係なので外に置く。 */}
       <PatternGround>{renderCurrentScreen()}</PatternGround>
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
@@ -604,6 +606,6 @@ export default function Page() {
         replayOpen={isOnboardingReplayOpen}
         onReplayClose={closeOnboardingReplay}
       />
-    </>
+    </YuukoDressupProvider>
   );
 }

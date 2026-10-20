@@ -8,7 +8,8 @@
  */
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -199,30 +200,25 @@ function Sparkle({ className }: { className?: string }) {
 function YuukoCharacter() {
   return (
     <div className="relative">
-      <Image
-        src="/assets/yuuko.png"
+      <YuukoFigure
         width={963}
         height={1174}
-        alt="ゆうこ"
         priority
-        className="w-auto h-[clamp(180px,34vh,380px)] drop-shadow-lg"
+        imageClassName="w-auto h-[clamp(180px,34vh,380px)]"
+        className="drop-shadow-lg"
         style={{
           animation: "float 3s ease-in-out infinite",
         }}
-        onError={(e) => {
-          const target = e.target as HTMLImageElement;
-          target.style.display = "none";
-          const fallback = target.nextElementSibling as HTMLElement;
-          if (fallback) fallback.classList.remove("hidden");
-        }}
+        data-testid="gacha-yuuko-figure"
+        fallback={
+          <div className="w-52 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
+            <div className="w-28 h-28 bg-gray-700 rounded-full flex items-center justify-center mb-2">
+              <PawIcon className="w-16 h-16 text-pink-300" />
+            </div>
+            <span className="text-white text-base font-medium">ゆうこ</span>
+          </div>
+        }
       />
-      {/* Fallback placeholder */}
-      <div className="hidden w-52 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
-        <div className="w-28 h-28 bg-gray-700 rounded-full flex items-center justify-center mb-2">
-          <PawIcon className="w-16 h-16 text-pink-300" />
-        </div>
-        <span className="text-white text-base font-medium">ゆうこ</span>
-      </div>
     </div>
   );
 }
@@ -277,7 +273,27 @@ function GachaItemDialog({
                 <PatternSwatch patternId={item.itemId} className="w-40 h-20" />
               </div>
             )}
-            {(item.kind === "theme" || item.kind === "pattern") && (
+            {item.kind === "deco" && (
+              // 飾りは小さなゆうこに重ねて見本を出す（D155）。頭の上にはみ出す飾りも切れないよう余白を取る。
+              <div
+                className="mx-auto flex w-40 justify-center rounded-lg bg-[var(--yuuko-cream)] px-2 pt-2"
+                data-testid="gacha-deco-sample"
+              >
+                <YuukoFigure decoId={item.itemId} width={96} height={117} alt="" imageClassName="h-28 w-auto" />
+              </div>
+            )}
+            {item.kind === "balloon" && (
+              // 吹き出しは短い文で形を見せる（いまの色テーマの色で出す。D155）。
+              <div
+                className="mx-auto w-48 rounded-lg bg-[var(--yuuko-cream)] p-3 pb-6"
+                data-testid="gacha-balloon-sample"
+              >
+                <YuukoBalloon balloonId={item.itemId}>
+                  <p className="text-xs leading-relaxed text-foreground">この吹き出しで話すね！</p>
+                </YuukoBalloon>
+              </div>
+            )}
+            {item.kind !== "card" && (
               <p className="text-center text-xs text-muted-foreground">
                 カスタマイズ画面で切り替えられるよ
               </p>

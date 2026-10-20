@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
 import {
   Newspaper,
   BookOpen,
@@ -61,6 +60,8 @@ import {
 
 import { useToast } from "@/hooks/use-toast";
 import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 
 type FilterType = "all" | TauriDictionaryEntryType | "favorite";
 type SortOption = "recent" | "name" | "favorite";
@@ -1025,29 +1026,37 @@ export default function DictionaryScreen({
           {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
           <aside className="w-60 lg:w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
             <div className="relative mb-2">
-              <div className="relative rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3">
+              {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はもともとの形（白地・淡いふち・下向きのしっぽ）。 */}
+              <YuukoBalloon
+                defaultClassName="rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3"
+                defaultTail={
+                  <>
+                    <div className="absolute -bottom-2 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                    <div className="absolute -bottom-3 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
+                  </>
+                }
+                data-testid="dictionary-yuuko-balloon"
+              >
                 <p className="text-xs leading-relaxed text-foreground">
                   わからない言葉は
                   <br />
                   ここで見返せるよ〜！
                 </p>
-                <div className="absolute -bottom-2 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
-                <div className="absolute -bottom-3 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
                 <PawIcon className="absolute right-2 top-2 h-4 w-4 text-[var(--yuuko-green)]/40" />
-              </div>
+              </YuukoBalloon>
             </div>
 
             <div className="mb-4 flex justify-center">
               <div className="relative">
-                <Image
-                  src="/assets/yuuko.png"
+                <YuukoFigure
                   // 右列（ゆうこ列）の先頭付近に常に表示され、画面を開いた時点で見えているため、遅延読み込みしない。
                   loading="eager"
                   width={144}
                   height={144}
-                  alt="ゆうこ"
-                  className="h-auto w-36 animate-float"
+                  imageClassName="h-auto w-36"
+                  className="animate-float"
                   style={{ animation: "float 3s ease-in-out infinite" }}
+                  data-testid="dictionary-yuuko-figure"
                 />
                 <style jsx>{`
                   @keyframes float {

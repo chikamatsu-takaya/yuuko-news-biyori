@@ -1,7 +1,8 @@
 "use client";
 
 import React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -863,32 +864,33 @@ function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] 
 function YuukoCharacter() {
   return (
     <div className="relative">
-      <Image
-        src="/assets/yuuko.png"
+      <YuukoFigure
         // 右列の先頭付近に常に表示され、画面を開いた時点で見えている（LCP 要素）ため、遅延読み込みしない。
         loading="eager"
         width={192}
         height={192}
-        alt="ゆうこ"
-        className="h-auto w-48 animate-float drop-shadow-lg"
-        onError={(event) => {
-          const target = event.target as HTMLImageElement;
-          target.style.display = "none";
-          target.nextElementSibling?.classList.remove("hidden");
-        }}
+        imageClassName="h-auto w-48"
+        className="animate-float drop-shadow-lg"
+        fallback={
+          <div className="flex h-48 w-48 items-center justify-center rounded-full bg-gradient-to-b from-gray-800 to-gray-900">
+            <PawIcon className="h-16 w-16 text-pink-300" />
+          </div>
+        }
       />
-      <div className="hidden h-48 w-48 items-center justify-center rounded-full bg-gradient-to-b from-gray-800 to-gray-900">
-        <PawIcon className="h-16 w-16 text-pink-300" />
-      </div>
     </div>
   );
 }
 
 function YuukoSpeechBubbleRight({ message }: { message: string }) {
   return (
-    <div
+    // 吹き出しは着せかえ（D155）に従う。「いつもの」はもともとの形（白地・淡いふち・左下のしっぽ）。
+    <YuukoBalloon
       data-testid="reader-yuuko-bubble"
-      className="relative max-w-[200px] rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white px-4 py-3 shadow-md"
+      className="max-w-[200px]"
+      defaultClassName="rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white px-4 py-3 shadow-md"
+      defaultTail={
+        <div className="absolute -bottom-2 left-6 h-4 w-4 rotate-[-45deg] border-b-2 border-l-2 border-[var(--yuuko-green)]/30 bg-white" />
+      }
     >
       <p className="whitespace-pre-line text-xs leading-relaxed text-foreground">
         {message}
@@ -896,8 +898,7 @@ function YuukoSpeechBubbleRight({ message }: { message: string }) {
       <div className="mt-2 flex justify-end">
         <PawIcon className="h-4 w-4 text-[var(--yuuko-green-text)]" />
       </div>
-      <div className="absolute -bottom-2 left-6 h-4 w-4 rotate-[-45deg] border-b-2 border-l-2 border-[var(--yuuko-green)]/30 bg-white" />
-    </div>
+    </YuukoBalloon>
   );
 }
 

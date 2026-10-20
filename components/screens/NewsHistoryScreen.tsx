@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   CLICKABLE_CARD_FOCUS_CLASS,
@@ -944,37 +945,39 @@ export default function NewsHistoryScreen({
         {/* Right Sidebar */}
         {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
         <aside className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
-          {/* Yuuko Speech Bubble */}
-          <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
-            <CardContent className="p-3">
-              <p className="text-xs text-foreground leading-relaxed">
-                前に読んだニュースも、
-                <br />
-                すぐ見返せるよ〜！
-                <br />
-                気になる記事を
-                <br />
-                もう一度見てみよっ♪
-              </p>
-              <div className="flex justify-end">
-                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
-              </div>
-            </CardContent>
-          </Card>
+          {/* Yuuko Speech Bubble（着せかえ D155 に従う。「いつもの」はもともとのカードの形で、しっぽは無い） */}
+          <YuukoBalloon
+            className="mb-2"
+            tail="none"
+            data-testid="history-yuuko-balloon"
+            defaultRender={(content) => (
+              <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
+                <CardContent className="p-3">{content}</CardContent>
+              </Card>
+            )}
+          >
+            <p className="text-xs text-foreground leading-relaxed">
+              前に読んだニュースも、
+              <br />
+              すぐ見返せるよ〜！
+              <br />
+              気になる記事を
+              <br />
+              もう一度見てみよっ♪
+            </p>
+            <div className="flex justify-end">
+              <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
+            </div>
+          </YuukoBalloon>
 
           {/* Yuuko Character */}
           <div className="flex justify-center mb-3">
             <div className="relative">
-              <Image
-                src="/assets/yuuko.png"
+              <YuukoFigure
                 width={160}
                 height={160}
-                alt="ゆうこ"
-                className="w-40 h-40 object-contain animate-[float_3s_ease-in-out_infinite]"
-                onError={(e) => {
-                  const target = e.target as HTMLImageElement;
-                  target.style.display = "none";
-                }}
+                imageClassName="w-40 h-40 object-contain"
+                className="animate-[float_3s_ease-in-out_infinite]"
               />
             </div>
           </div>

@@ -63,4 +63,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "mark_gacha_items_seen",
     "get_pattern_state",
     "set_active_pattern",
+    "get_dressup_state",
+    "set_active_balloon",
+    "set_active_deco",
 ];

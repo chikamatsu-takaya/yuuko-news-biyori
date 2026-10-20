@@ -1,3 +1,4 @@
+use crate::domain::dressup::{BALLOON_DEFAULT_ID, DECO_NONE_ID};
 use crate::domain::pattern::PATTERN_NONE_ID;
 use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
 use crate::domain::settings::{PersistedSettings, UserSettingsDto};
@@ -35,7 +36,8 @@ impl SettingsService {
     }
 
     /// 設定画面からの保存。適用中テーマ（`ui.themeId`）は保存済みの値を保ち、DTO の selectedThemeId では変えない。
-    /// 模様（`ui.patternId`）は DTO に含めないため、`apply_from_dto` で変わらず保存済みの値のまま残る。
+    /// 模様（`ui.patternId`）・着せかえ（`ui.balloonId` / `ui.decoId`）は DTO に含めないため、
+    /// `apply_from_dto` で変わらず保存済みの値のまま残る。
     /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
     /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
@@ -83,6 +85,46 @@ impl SettingsService {
             return Ok(());
         }
         persisted.ui.pattern_id = pattern_id.to_string();
+        self.repository.save(&persisted)
+    }
+
+    /// 保存済みの着せかえ ID（`ui.balloonId`, `ui.decoId`）をそのまま返す。選べるかの判定は呼び出し側
+    /// （DressupService）が行う。設定を読めないときは既定（いつもの・なし）に倒す（見た目だけの機能で、画面を止めない）。
+    pub fn saved_dressup_ids(&self) -> (String, String) {
+        match self.repository.load_or_default() {
+            Ok(persisted) => (persisted.ui.balloon_id, persisted.ui.deco_id),
+            Err(error) => {
+                log::warn!("設定を読めなかったため着せかえは既定として扱います: {error}");
+                (BALLOON_DEFAULT_ID.to_string(), DECO_NONE_ID.to_string())
+            }
+        }
+    }
+
+    /// 吹き出し（`ui.balloonId`）だけを更新して保存する。
+    /// 選んでよい吹き出しかの判定は呼び出し側（DressupService::set_active_balloon）で済ませてから呼ぶ。
+    pub fn set_balloon_id(&self, balloon_id: &str) -> Result<(), AppError> {
+        self.update_ui_field(balloon_id, |persisted| &mut persisted.ui.balloon_id)
+    }
+
+    /// 飾り（`ui.decoId`）だけを更新して保存する。
+    /// 選んでよい飾りかの判定は呼び出し側（DressupService::set_active_deco）で済ませてから呼ぶ。
+    pub fn set_deco_id(&self, deco_id: &str) -> Result<(), AppError> {
+        self.update_ui_field(deco_id, |persisted| &mut persisted.ui.deco_id)
+    }
+
+    /// 設定の文字列欄を 1 つだけ更新する（ロックを取り、同じ値でファイルがあれば書かない）。
+    fn update_ui_field(
+        &self,
+        value: &str,
+        field: impl FnOnce(&mut PersistedSettings) -> &mut String,
+    ) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        let target = field(&mut persisted);
+        if target == value && self.repository.exists() {
+            return Ok(());
+        }
+        *target = value.to_string();
         self.repository.save(&persisted)
     }
 
@@ -486,6 +528,46 @@ mod tests {
         // リセットは他の見た目の設定と同じく既定（模様なし）へ戻す。
         service.reset_user_settings().unwrap();
         assert_eq!(service.saved_pattern_id(), "none");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn dressup_ids_default_and_survive_settings_save_but_reset_to_defaults() {
+        // 着せかえは set_active_balloon / set_active_deco からだけ変える。設定画面の保存では消えない（D155）。
+        let (service, path) = temp_service();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            ("balloon_default".to_string(), "deco_none".to_string())
+        );
+        service.set_balloon_id("gacha_balloon_cloud").unwrap();
+        service.set_deco_id("gacha_deco_crown").unwrap();
+        service.set_pattern_id("pattern_paw").unwrap();
+
+        let dto = UserSettingsDto {
+            nickname: "テスト".to_string(),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            (
+                "gacha_balloon_cloud".to_string(),
+                "gacha_deco_crown".to_string()
+            )
+        );
+        // 片方だけ変えても、もう片方・模様は保たれる。
+        service.set_deco_id("deco_none").unwrap();
+        assert_eq!(service.saved_dressup_ids().0, "gacha_balloon_cloud");
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+
+        // リセットは他の見た目の設定と同じく既定（いつもの・なし）へ戻す。
+        service.reset_user_settings().unwrap();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            ("balloon_default".to_string(), "deco_none".to_string())
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
