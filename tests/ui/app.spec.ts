@@ -5362,7 +5362,7 @@ test("settings genre section notes the all-sources fallback only when Rust repor
   await expect(note).toBeVisible();
 });
 
-// 同梱の既定取得元（D138）のジャンルを興味ジャンルとして選べる（D141）。
+// D138 の既定取得元のジャンルを興味ジャンルとして選べる（D141）。D150 で一部の媒体を外した後も選択肢は残す。
 test("settings genre section offers the bundled source genres", async ({ page }) => {
   await openSettings(page);
   await openSettingsMenu(page, "その他");
