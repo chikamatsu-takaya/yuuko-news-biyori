@@ -515,6 +515,9 @@ impl Default for ExplanationSettings {
 #[serde(rename_all = "camelCase")]
 pub struct UiSettings {
     pub theme_id: String,
+    /// テーマの地に敷く模様の ID（判断台帳 D152〜D154）。欄が無い既存ファイルは "none"（模様なし）で読む。
+    /// 設定画面の DTO には含めず、所持判定を通す `set_active_pattern`（カスタマイズ画面）からだけ変える。
+    pub pattern_id: String,
     pub tone_id: String,
     pub personality_id: String,
     pub yuuko_position: String,
@@ -531,6 +534,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             theme_id: "default".to_string(),
+            pattern_id: crate::domain::pattern::PATTERN_NONE_ID.to_string(),
             tone_id: "gentle".to_string(),
             personality_id: "standard".to_string(),
             yuuko_position: "bottom_center".to_string(),
@@ -637,6 +641,22 @@ mod tests {
         .unwrap();
         assert_eq!(saved.ai.provider, "gemini");
         assert!(!saved.ai.auto_summary_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_without_pattern_field_load_as_none() {
+        // 模様の欄が無い既存の settings.json は「模様なし」で読む（D152〜D154。今の見た目を変えない）。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "themeId": "theme_001" } }"#).unwrap();
+        assert_eq!(legacy.ui.pattern_id, "none");
+        assert_eq!(legacy.ui.theme_id, "theme_001");
+        assert_eq!(PersistedSettings::initial().ui.pattern_id, "none");
+
+        let saved: PersistedSettings =
+            serde_json::from_str(r#"{ "ui": { "patternId": "gacha_pattern_snow" } }"#).unwrap();
+        assert_eq!(saved.ui.pattern_id, "gacha_pattern_snow");
+        let raw = serde_json::to_string(&saved).unwrap();
+        assert!(raw.contains("\"patternId\":\"gacha_pattern_snow\""));
     }
 
     #[test]

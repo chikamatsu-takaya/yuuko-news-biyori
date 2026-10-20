@@ -8,6 +8,7 @@ use crate::services::friendship_service::FriendshipService;
 use crate::services::gacha_service::GachaService;
 use crate::services::local_llm_service::LocalLlmService;
 use crate::services::news_service::NewsService;
+use crate::services::pattern_service::PatternService;
 use crate::services::reward_service::RewardService;
 use crate::services::settings_service::SettingsService;
 use crate::services::summary_service::SummaryService;
@@ -26,6 +27,8 @@ pub struct AppState {
     /// 同梱ローカルLLM。AiProviderService と同じ状態を共有し、終了時にここから止める。
     pub local_llm_service: LocalLlmService,
     pub news_service: NewsService,
+    /// テーマの地に敷く模様（設定 ui.patternId とガチャ所持から判定する）。
+    pub pattern_service: PatternService,
     pub reward_service: RewardService,
     pub settings_service: SettingsService,
     pub summary_service: SummaryService,

@@ -55,6 +55,7 @@ import {
 } from "@/lib/tauri/settings";
 import { setMainWindowUnsavedChanges } from "@/lib/tauri/window";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { refreshUiPatternFromSettings } from "@/hooks/use-ui-pattern";
 import { uiThemeLabel } from "@/lib/ui-theme.mjs";
 import {
   AlertDialog,
@@ -864,6 +865,8 @@ export default function SettingsScreen({
         setSettings(mapSettingsFromDto(mockSettings, dto));
         // テーマも初期値へ戻るため、開いている画面の配色をその場で揃える。
         applyUiTheme(dto.selectedThemeId);
+        // 模様（D152〜D154）も初期値「なし」へ戻るため、保存済みの値を読み直して画面の地を揃える。
+        void refreshUiPatternFromSettings();
         // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
         await refreshAutostartState();
       } else {

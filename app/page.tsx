@@ -12,6 +12,7 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
+import PatternGround from "@/components/layout/PatternGround";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
 import { useNewsListRevision } from "@/hooks/use-news-list-revision";
 import { canGenerateNotificationCandidates } from "@/lib/notification-candidate-gate.mjs";
@@ -554,7 +555,8 @@ export default function Page() {
 
   return (
     <>
-      {renderCurrentScreen()}
+      {/* 画面の地に模様を1枚で敷く外枠（D152〜D154）。通知・案内は模様と無関係なので外に置く。 */}
+      <PatternGround>{renderCurrentScreen()}</PatternGround>
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
           （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
           scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}

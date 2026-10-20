@@ -4,6 +4,8 @@
  * カスタマイズ画面（画面詳細設計書 §13.1・判断台帳 D83）。
  * - テーマ: 既定・ランク報酬テーマ・ガチャの色違いテーマを並べ、選べるものだけ切り替える。
  *   選べるかの判定と保存は Rust の set_active_theme が行い、ここは結果（activeThemeId）を表示・適用するだけ。
+ * - 模様: テーマの地に敷く模様（D152〜D154）。色テーマとは独立に、なし・初期の模様・ガチャで手に入れた模様から選ぶ。
+ *   選べるかの判定と保存は Rust の set_active_pattern が行い、ここは結果（activePatternId）を表示・適用するだけ。
  * - 呼び名: 現在の値を読み取り専用で出し、変更は設定画面へ案内する。
  * - 飾り・吹き出し: 「準備中」と表示する（素材ができてから追加。D75）。口調・性格は扱わない（D83）。
  */
@@ -33,6 +35,7 @@ import {
   Moon,
   Rainbow,
   Clover,
+  Grid3x3,
 } from "lucide-react";
 import Image from "next/image";
 import { getUserSettings, isTauriRuntime } from "@/lib/tauri/settings";
@@ -40,12 +43,16 @@ import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
 import { getRewardState, setActiveTheme, type RewardItem } from "@/lib/tauri/rewards";
 import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { applyUiPattern } from "@/hooks/use-ui-pattern";
+import { getPatternState, setActivePattern } from "@/lib/tauri/patterns";
+import { buildPatternOptions, uiPatternLabel } from "@/lib/ui-pattern.mjs";
+import { PatternSwatch } from "@/components/customize/PatternSwatch";
 import { useToast } from "@/hooks/use-toast";
 import { buildThemeOptions } from "@/lib/customize-themes.mjs";
 import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 
 // Types
-type CustomizeTab = "theme" | "name" | "deco" | "balloon";
+type CustomizeTab = "theme" | "pattern" | "name" | "deco" | "balloon";
 
 /**
  * 友情ランク・報酬などの読み込み状態。
@@ -58,6 +65,9 @@ type FriendshipView = Pick<FriendshipState, "currentRank" | "currentPoint" | "ne
 
 /** テーマ一覧の 1 件（lib/customize-themes.mjs の buildThemeOptions の戻り値）。 */
 type ThemeOption = ReturnType<typeof buildThemeOptions>[number];
+
+/** 模様一覧の 1 件（lib/ui-pattern.mjs の buildPatternOptions の戻り値）。 */
+type PatternOption = ReturnType<typeof buildPatternOptions>[number];
 
 /** テーマ切り替えの成功表示（固定文言のみ）。失敗はトーストで出す（辞書・設定画面と同じ）。 */
 type ThemeMessage = { kind: "success"; text: string } | null;
@@ -76,9 +86,10 @@ const mockRankRewardItems = [
   { id: "moon", name: "月", icon: Moon, color: "bg-indigo-100" },
 ];
 
-// カテゴリ（D83）: テーマ・呼び名は使える。飾り・吹き出しは「準備中」。口調・性格は置かない。
+// カテゴリ（D83）: テーマ・模様（D152〜D154）・呼び名は使える。飾り・吹き出しは「準備中」。口調・性格は置かない。
 const tabItems = [
   { id: "theme" as CustomizeTab, label: "テーマ", icon: Palette },
+  { id: "pattern" as CustomizeTab, label: "模様", icon: Grid3x3 },
   { id: "name" as CustomizeTab, label: "呼び名", icon: Tag },
   { id: "deco" as CustomizeTab, label: "飾り", icon: Sparkles },
   { id: "balloon" as CustomizeTab, label: "吹き出し", icon: MessageCircle },
@@ -178,6 +189,61 @@ function ThemeOptionButton({
 }
 
 /**
+ * 模様 1 件の選択ボタン（3 列のタイル）。見本はいまの色テーマで出す。
+ * 未所持のガチャ模様は名前と形を伏せ、ガチャで手に入ることだけを出す（ガチャのコレクションと同じ。D80）。
+ */
+function PatternOptionButton({
+  option,
+  showSelected,
+  isSaving,
+  disabled,
+  onSelect,
+}: {
+  option: PatternOption;
+  showSelected: boolean;
+  isSaving: boolean;
+  disabled: boolean;
+  onSelect: (option: PatternOption) => void;
+}) {
+  const isSelected = showSelected && option.selected;
+  return (
+    <button
+      type="button"
+      className={`relative w-full flex flex-col items-center gap-1 p-1.5 rounded-xl text-center transition-all ${
+        isSelected
+          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green-text)]"
+          : option.selectable
+            ? "bg-white border border-border hover:border-[var(--yuuko-green)]/50"
+            : "bg-muted/50 border border-border/50 opacity-70"
+      }`}
+      onClick={() => onSelect(option)}
+      disabled={!option.selectable || disabled}
+      aria-pressed={isSelected}
+      aria-label={`${option.label}${option.lockText !== null ? `（${option.lockText}）` : ""}`}
+      title={option.lockText ?? undefined}
+      data-testid="customize-pattern-option"
+    >
+      <PatternSwatch
+        patternId={option.id}
+        hidden={!option.selectable && option.source === "gacha"}
+        className="w-full h-9"
+      />
+      <span
+        className={`w-full text-[10px] leading-tight truncate ${option.selectable ? "font-medium" : "text-muted-foreground"}`}
+      >
+        {isSaving ? "保存中…" : option.label}
+      </span>
+      {isSelected && (
+        <Check
+          className="absolute top-1 right-1 w-3.5 h-3.5 text-[var(--yuuko-green-text)]"
+          aria-hidden="true"
+        />
+      )}
+    </button>
+  );
+}
+
+/**
  * 読み込みに失敗した欄へ出す「もう一度読み込む」ボタン（ガチャ画面と同じ見た目・文言）。
  * 同じ文言のボタンが複数の欄に同時に出ることがあるため、読み上げ用の名前（ariaLabel）で欄を区別する。
  */
@@ -238,6 +304,11 @@ export default function CustomizeScreen({
   const [nickname, setNickname] = React.useState("");
   const [savingThemeId, setSavingThemeId] = React.useState<string | null>(null);
   const [themeMessage, setThemeMessage] = React.useState<ThemeMessage>(null);
+  const [patternStatus, setPatternStatus] = React.useState<RankLoadStatus>("loading");
+  const [selectablePatternIds, setSelectablePatternIds] = React.useState<string[]>([]);
+  const [activePatternId, setActivePatternId] = React.useState<string | null>(null);
+  const [savingPatternId, setSavingPatternId] = React.useState<string | null>(null);
+  const [patternMessage, setPatternMessage] = React.useState<ThemeMessage>(null);
 
   const { toast } = useToast();
 
@@ -250,6 +321,7 @@ export default function CustomizeScreen({
   const rewardRequestRef = React.useRef(0);
   const gachaRequestRef = React.useRef(0);
   const nicknameRequestRef = React.useRef(0);
+  const patternRequestRef = React.useRef(0);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -320,6 +392,27 @@ export default function CustomizeScreen({
     }
   }, []);
 
+  const loadPattern = React.useCallback(async () => {
+    const requestId = ++patternRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== patternRequestRef.current;
+    setPatternStatus("loading");
+    try {
+      const state = await getPatternState();
+      if (isStale()) return;
+      if (!state) {
+        setPatternStatus("error");
+        return;
+      }
+      setSelectablePatternIds(state.selectablePatternIds);
+      setActivePatternId(state.activePatternId);
+      setPatternStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load pattern state:", error);
+      setPatternStatus("error");
+    }
+  }, []);
+
   const loadNickname = React.useCallback(async () => {
     const requestId = ++nicknameRequestRef.current;
     const isStale = () => !isMountedRef.current || requestId !== nicknameRequestRef.current;
@@ -347,13 +440,15 @@ export default function CustomizeScreen({
       setRewardStatus("preview");
       setGachaStatus("preview");
       setNicknameStatus("preview");
+      setPatternStatus("preview");
       return;
     }
     void loadFriendship();
     void loadRewards();
     void loadGacha();
     void loadNickname();
-  }, [loadFriendship, loadRewards, loadGacha, loadNickname]);
+    void loadPattern();
+  }, [loadFriendship, loadRewards, loadGacha, loadNickname, loadPattern]);
 
   // テーマ欄の再試行: 失敗した方（報酬・ガチャ）だけ読み直す。
   const retryThemeLoads = () => {
@@ -378,6 +473,23 @@ export default function CustomizeScreen({
   const unlockedThemeOptions = themeOptions.filter(
     (option) => option.source !== "default" && option.selectable
   );
+
+  // 模様一覧。選べるかは Rust の selectablePatternIds が正。読めないときは「なし」だけ選べる形で並べる
+  // （選択は canShowActivePattern で止める）。ブラウザプレビューでは初期の模様（なし・水玉・肉球）を見本として出す。
+  const patternOptions = React.useMemo(
+    () =>
+      buildPatternOptions({
+        selectablePatternIds:
+          patternStatus === "ready"
+            ? selectablePatternIds
+            : patternStatus === "preview"
+              ? ["none", "pattern_dots", "pattern_paw"]
+              : [],
+        activePatternId: patternStatus === "ready" ? activePatternId : null,
+      }),
+    [patternStatus, selectablePatternIds, activePatternId]
+  );
+  const canShowActivePattern = patternStatus === "ready";
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -421,6 +533,43 @@ export default function CustomizeScreen({
       })
       .finally(() => {
         setSavingThemeId(null);
+      });
+  };
+
+  // 模様も選んだ時点で保存する。選べるかは Rust が判定し、選べない ID は reject される（表示側のロックは補助）。
+  // 保存できたら Rust が返した activePatternId をすぐ画面へ適用する（再起動後は PatternGround が読み込んで適用する）。
+  const handleSelectPattern = (option: PatternOption) => {
+    if (!option.selectable || savingPatternId !== null || !canShowActivePattern) return;
+    if (option.selected) return;
+    setSavingPatternId(option.id);
+    setPatternMessage(null);
+    const showSaveFailedToast = () => {
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "模様を保存できなかったよ。もう一度ためしてね。",
+      });
+    };
+    setActivePattern(option.id)
+      .then((state) => {
+        if (!state) {
+          showSaveFailedToast();
+          return;
+        }
+        setSelectablePatternIds(state.selectablePatternIds);
+        setActivePatternId(state.activePatternId);
+        const applied = applyUiPattern(state.activePatternId);
+        setPatternMessage({
+          kind: "success",
+          text: applied === "none" ? "模様をなしにしたよ。" : `模様を「${uiPatternLabel(applied)}」にしたよ。`,
+        });
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to save active pattern:", error);
+        showSaveFailedToast();
+      })
+      .finally(() => {
+        setSavingPatternId(null);
       });
   };
 
@@ -593,6 +742,60 @@ export default function CustomizeScreen({
                           data-testid="customize-theme-message"
                         >
                           {themeMessage.text}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {activeTab === "pattern" && (
+                    <>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        テーマの地にうすく敷く模様だよ。色はいまのテーマに合わせるね。
+                      </p>
+                      <div className="grid grid-cols-3 gap-1.5" data-testid="customize-pattern-list">
+                        {patternOptions.map((option) => (
+                          <PatternOptionButton
+                            key={option.id}
+                            option={option}
+                            showSelected={canShowActivePattern}
+                            isSaving={savingPatternId === option.id}
+                            disabled={savingPatternId !== null || !canShowActivePattern}
+                            onSelect={handleSelectPattern}
+                          />
+                        ))}
+                      </div>
+                      {patternOptions.some((option) => option.source === "gacha" && !option.selectable) && (
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <Lock className="w-3 h-3 shrink-0" aria-hidden="true" />
+                          <span>？？？の模様はガチャで手に入るよ</span>
+                        </p>
+                      )}
+                      {patternStatus === "loading" && (
+                        <p className="text-xs text-muted-foreground">読み込み中…</p>
+                      )}
+                      {patternStatus === "error" && (
+                        <>
+                          <p className="text-xs text-muted-foreground" data-testid="customize-pattern-load-error">
+                            模様の状態を読み込めなかったよ。
+                          </p>
+                          <LoadRetryButton
+                            onRetry={() => void loadPattern()}
+                            testId="customize-pattern-retry"
+                            ariaLabel="模様をもう一度読み込む"
+                          />
+                        </>
+                      )}
+                      {patternStatus === "preview" && (
+                        <p className="text-xs text-muted-foreground">
+                          プレビューでは模様を切り替えられないよ。アプリで選んでね。
+                        </p>
+                      )}
+                      {patternMessage !== null && (
+                        <p
+                          role="status"
+                          className="text-xs text-[var(--yuuko-green-text)]"
+                          data-testid="customize-pattern-message"
+                        >
+                          {patternMessage.text}
                         </p>
                       )}
                     </>
@@ -849,6 +1052,17 @@ export default function CustomizeScreen({
                     {activeThemeOption !== null
                       ? activeThemeOption.label
                       : rewardStatus === "loading"
+                        ? "読み込み中…"
+                        : "—"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <Grid3x3 className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">模様</span>
+                  <span className="text-foreground min-w-0 truncate" data-testid="customize-current-pattern">
+                    {patternStatus === "ready"
+                      ? uiPatternLabel(activePatternId)
+                      : patternStatus === "loading"
                         ? "読み込み中…"
                         : "—"}
                   </span>

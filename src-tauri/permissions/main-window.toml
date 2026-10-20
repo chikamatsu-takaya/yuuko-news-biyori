@@ -60,4 +60,6 @@ permissions = [
   "allow-get-gacha-state",
   "allow-draw-gacha-once",
   "allow-mark-gacha-items-seen",
+  "allow-get-pattern-state",
+  "allow-set-active-pattern",
 ]

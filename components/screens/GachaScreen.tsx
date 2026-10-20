@@ -42,7 +42,9 @@ import {
   Star,
   Palette,
   Gift,
+  Grid3x3,
 } from "lucide-react";
+import { PatternSwatch } from "@/components/customize/PatternSwatch";
 
 // ============================================
 // TypeScript Types
@@ -66,6 +68,7 @@ type LoadStatus = "loading" | "ready" | "unavailable" | "error";
 const KIND_LABELS: Record<GachaItemKind, string> = {
   card: "カード",
   theme: "テーマ",
+  pattern: "模様",
   deco: "飾り",
   balloon: "吹き出し",
 };
@@ -73,6 +76,7 @@ const KIND_LABELS: Record<GachaItemKind, string> = {
 const KIND_ICONS: Record<GachaItemKind, React.ComponentType<{ className?: string }>> = {
   card: MessageCircle,
   theme: Palette,
+  pattern: Grid3x3,
   deco: Gift,
   balloon: MessageSquare,
 };
@@ -267,7 +271,13 @@ function GachaItemDialog({
                 {item.text}
               </p>
             )}
-            {item.kind === "theme" && (
+            {item.kind === "pattern" && (
+              // 模様は名前だけでは形が分からないため、いまの色テーマで見本を出す（D152〜D154）。
+              <div className="flex justify-center">
+                <PatternSwatch patternId={item.itemId} className="w-40 h-20" />
+              </div>
+            )}
+            {(item.kind === "theme" || item.kind === "pattern") && (
               <p className="text-center text-xs text-muted-foreground">
                 カスタマイズ画面で切り替えられるよ
               </p>
