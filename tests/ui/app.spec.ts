@@ -8124,6 +8124,101 @@ test("onboarding overlay completes even when autostart fails", async ({
   });
 });
 
+// D146: ホームの「オンボーディングを見る」は旧 OnboardingScreen ではなく、初回と同じ案内を見直し表示で重ねる。
+// 現在の設定を初期表示し、「閉じる」・Esc では何も保存せず、元の画面へ戻る。
+// 見直し表示は見出しだけ初回と変える（初回の「はじめまして」は出さない）。
+const onboardingReplayDialog = (page: Page) =>
+  page.getByRole("dialog", { name: "ゆうこの設定、もう一度見てみよう！" });
+const setOnboardingCompleted = (page: Page) =>
+  page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      onboardingCompleted: true,
+      genres: ["AI", "セキュリティ"],
+      nickname: "ゆうちゃん",
+    };
+  });
+
+test("onboarding replay opens the current overlay from home and closes back without saving", async ({
+  page,
+}) => {
+  await setOnboardingCompleted(page);
+  await openHome(page);
+  await page.waitForTimeout(500);
+  await expect(onboardingDialog(page)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  const dialog = onboardingReplayDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(onboardingDialog(page)).toHaveCount(0);
+  // 現在の設定を初期表示する（既定値へ巻き戻さない）。
+  await expect(dialog.getByLabel("ニックネーム")).toHaveValue("ゆうちゃん");
+  await expect(dialog.getByLabel("セキュリティ", { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel("IT", { exact: true })).not.toBeChecked();
+  // 見直し表示ではスキップの代わりに「閉じる」「保存する」を出す。
+  await expect(dialog.getByRole("button", { name: "スキップ" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "保存する" })).toBeVisible();
+
+  await dialog.getByLabel("ニックネーム").fill("保存しない名前");
+  await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
+  // Esc でも保存せずに閉じられる。開き直すと保存済みの値に戻っている。
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("ニックネーム")).toHaveValue("ゆうちゃん");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  expect(await readSavedSettingsRecord(page)).toBeUndefined();
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
+test("onboarding replay saves changes while keeping onboarding completed", async ({
+  page,
+}) => {
+  await setOnboardingCompleted(page);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_ENABLED__ = true;
+  });
+  await openHome(page);
+
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  const dialog = onboardingReplayDialog(page);
+  await expect(dialog).toBeVisible();
+  // 自動起動は OS の登録状態を初期表示する。
+  const autostartSwitch = dialog.getByRole("switch", {
+    name: "PC起動時の自動起動",
+  });
+  await expect(autostartSwitch).toHaveAttribute("aria-checked", "true");
+
+  await dialog.getByLabel("IT", { exact: true }).click();
+  await dialog.getByLabel("ニックネーム").fill("ゆうこファン");
+  await dialog.getByRole("button", { name: "保存する" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+    genres: ["AI", "セキュリティ", "IT"],
+    nickname: "ゆうこファン",
+  });
+  // 自動起動は変えていないので OS 登録は呼ばない。
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+
+  // 見直しで自動起動を OFF にしたときだけ解除する。
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  await expect(dialog).toBeVisible();
+  await autostartSwitch.click();
+  await dialog.getByRole("button", { name: "保存する" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => readAutostartSetCalls(page)).toEqual([false]);
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+  });
+});
+
 // 「元記事を開く」: Tauri 上では window.open を使わず、記事IDだけを open_original_article へ渡す。
 const spyWindowOpen = (page: Page) =>
   page.addInitScript(() => {
