@@ -4,6 +4,7 @@ import type { NotificationMode, WorkTimeRangeDto } from "@/lib/tauri/settings";
 
 // 関心のあるジャンルの選択肢。
 // 国際〜暮らしは同梱の既定取得元（D138）のジャンルに合わせて追加した（D141）。
+// D150 で国際・科学・暮らし・ビジネスの既定取得元を外したが、選択肢はそのまま残す。
 // 既定取得元のジャンル（src-tauri/src/services/default_news_sources.rs）は必ずこの中の値にする
 // （興味ジャンルの絞り込みで選べない取得元を作らないため。lib/genre-options.test.mjs で確認）。
 export const GENRE_OPTIONS = [
