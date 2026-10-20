@@ -962,7 +962,7 @@ export default function SettingsScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <Home className="w-4 h-4" />
@@ -971,7 +971,7 @@ export default function SettingsScreen({
           </div>
 
           <div className="px-4 py-2">
-            <span className="text-xs font-medium text-[var(--yuuko-green)]">
+            <span className="text-xs font-medium text-[var(--yuuko-green-text)]">
               設定メニュー
             </span>
           </div>
@@ -997,8 +997,8 @@ export default function SettingsScreen({
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-2">
-                  <Lightbulb className="w-4 h-4 text-[var(--yuuko-green)]" />
-                  <span className="text-xs font-medium text-[var(--yuuko-green)]">
+                  <Lightbulb className="w-4 h-4 text-[var(--yuuko-green-text)]" />
+                  <span className="text-xs font-medium text-[var(--yuuko-green-text)]">
                     設定のヒント
                   </span>
                 </div>
@@ -1010,7 +1010,7 @@ export default function SettingsScreen({
                   ゆうこと過ごせるよ♪
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -1046,8 +1046,8 @@ export default function SettingsScreen({
 
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm max-w-2xl">
-              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span role={loadNoticeKind === "error" ? "alert" : "status"}>
                   {loadNotice}
@@ -1059,7 +1059,7 @@ export default function SettingsScreen({
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                         onClick={() => setResetDialogOpen(true)}
                         disabled={isLoading}
                       >
@@ -1069,7 +1069,7 @@ export default function SettingsScreen({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                       onClick={() => void loadSettings()}
                       disabled={isLoading}
                     >
@@ -1094,7 +1094,7 @@ export default function SettingsScreen({
             {activeMenu === "notification" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Bell className="w-5 h-5" />
                     通知設定
                   </CardTitle>
@@ -1221,7 +1221,7 @@ export default function SettingsScreen({
             {activeMenu === "yuuko" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <YuukoDisplayMenuIcon className="w-5 h-5" />
                     ゆうこ表示設定
                   </CardTitle>
@@ -1252,7 +1252,7 @@ export default function SettingsScreen({
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="h-7 gap-1 text-xs text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+                        className="h-7 gap-1 text-xs text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
                         disabled={hasUnsavedChanges}
                         aria-describedby="theme-customize-guide"
                         onClick={() => handleNavigate("customize")}
@@ -1270,7 +1270,7 @@ export default function SettingsScreen({
             {activeMenu === "suppression" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <ShieldOff className="w-5 h-5" />
                     抑制条件設定
                   </CardTitle>
@@ -1316,7 +1316,7 @@ export default function SettingsScreen({
             {activeMenu === "ai" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Sparkles className="w-5 h-5" />
                     解説・AI設定
                   </CardTitle>
@@ -1385,7 +1385,7 @@ export default function SettingsScreen({
                         <div
                           className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
                             aiTestView.tone === "success"
-                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green)]"
+                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green-text)]"
                               : "border-amber-300 bg-amber-50 text-amber-800"
                           }`}
                         >
@@ -1454,7 +1454,7 @@ export default function SettingsScreen({
             {activeMenu === "other" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Settings className="w-5 h-5" />
                     ユーザー・ニュース設定
                   </CardTitle>
@@ -1552,7 +1552,7 @@ export default function SettingsScreen({
             {activeMenu === "integration" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Link2 className="w-5 h-5" />
                     起動・連携設定
                   </CardTitle>
@@ -1609,7 +1609,7 @@ export default function SettingsScreen({
                   ニュースをお届けするね！
                 </p>
                 <div className="absolute -bottom-2 right-4 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
-                <span className="absolute top-2 right-2 text-[var(--yuuko-green)]">
+                <span className="absolute top-2 right-2 text-[var(--yuuko-green-text)]">
                   🐾
                 </span>
               </div>
@@ -1640,7 +1640,7 @@ export default function SettingsScreen({
           {/* Data Management Card */}
           <Card className="border-0 shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green)]">
+              <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green-text)]">
                 <Database className="w-4 h-4" />
                 ストレージ状況
               </CardTitle>
@@ -1686,7 +1686,7 @@ export default function SettingsScreen({
             ) : (
               <Badge
                 variant="outline"
-                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
+                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 gap-1"
               >
                 <Check className="w-3 h-3" />
                 保存済み

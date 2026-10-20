@@ -142,7 +142,7 @@ const fallbackArticleCatalog: ReaderArticleDetail[] = [
     source: "TechCrunch Japan",
     timeAgo: "5分前",
     category: "AI・テクノロジー",
-    categoryColor: "border-[var(--yuuko-green)] text-[var(--yuuko-green)] bg-white",
+    categoryColor: "border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] bg-white",
     isFavorite: false,
     externalUrl: "https://example.com/articles/article-001",
     summary:
@@ -719,7 +719,7 @@ function TermPopup({
           {/* Alert は grid-cols-[0_1fr]（直下 svg が無いと col1 幅0）。ここは svg を直下に置かず
               独自レイアウトのため、col-span-2 で全幅を確保しないと補助説明が幅0で不可視になる。 */}
           <div className="col-span-2 flex items-start gap-2" data-term-popup-no-drag="true">
-            <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+            <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <span
                 className="block text-[10px] leading-normal text-muted-foreground"
@@ -732,7 +732,7 @@ function TermPopup({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-6 shrink-0 px-2 text-[9px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                className="h-6 shrink-0 px-2 text-[9px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                 onClick={onRetry}
                 disabled={isLoading}
               >
@@ -892,7 +892,7 @@ function YuukoSpeechBubbleRight({ message }: { message: string }) {
         {message}
       </p>
       <div className="mt-2 flex justify-end">
-        <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]" />
+        <PawIcon className="h-4 w-4 text-[var(--yuuko-green-text)]" />
       </div>
       <div className="absolute -bottom-2 left-6 h-4 w-4 rotate-[-45deg] border-b-2 border-l-2 border-[var(--yuuko-green)]/30 bg-white" />
     </div>
@@ -1766,7 +1766,7 @@ export default function NewsReaderScreen({
             <Button
               variant="outline"
               size="sm"
-              className="h-9 w-full justify-start gap-2 border-[var(--yuuko-green)] text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="h-9 w-full justify-start gap-2 border-[var(--yuuko-green-text)] text-xs text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={handleBack}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -1784,7 +1784,7 @@ export default function NewsReaderScreen({
             <Card className="border border-[var(--yuuko-green)]/20 bg-white py-3">
               <CardContent className="p-3">
                 <div className="mb-2 flex items-center gap-1.5">
-                  <span className="text-xs font-medium text-[var(--yuuko-green)]">
+                  <span className="text-xs font-medium text-[var(--yuuko-green-text)]">
                     ゆうこの一言
                   </span>
                 </div>
@@ -1898,7 +1898,7 @@ export default function NewsReaderScreen({
               <CardContent className="p-5">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
-                    <Newspaper className="h-5 w-5 text-[var(--yuuko-green)]" />
+                    <Newspaper className="h-5 w-5 text-[var(--yuuko-green-text)]" />
                     <h2 className="font-semibold text-foreground">要約</h2>
                   </div>
                   {isSummaryProcessing ? null : (
@@ -1961,7 +1961,7 @@ export default function NewsReaderScreen({
             <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
                 <div className="mb-3 flex items-center gap-2">
-                  <BookOpen className="h-5 w-5 text-[var(--yuuko-green)]" />
+                  <BookOpen className="h-5 w-5 text-[var(--yuuko-green-text)]" />
                   <h2 className="font-semibold text-foreground">
                     ゆうこの解説
                   </h2>
@@ -1982,7 +1982,7 @@ export default function NewsReaderScreen({
                   {quickTerms.map((term) => (
                     <button
                       key={term.id}
-                      className="rounded bg-[var(--yuuko-green-light)] px-2 py-1 text-xs font-medium text-[var(--yuuko-green)]"
+                      className="rounded bg-[var(--yuuko-green-light)] px-2 py-1 text-xs font-medium text-[var(--yuuko-green-text)]"
                       onClick={() => openTerm(term)}
                     >
                       {term.term}
@@ -2069,8 +2069,8 @@ export default function NewsReaderScreen({
                 </div>
                 {relatedNotice && (
                   <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-                    <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                    <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+                    <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
                     <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                       <span role={relatedNoticeKind === "error" ? "alert" : "status"}>
                         {relatedNotice}
@@ -2079,7 +2079,7 @@ export default function NewsReaderScreen({
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                          className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                           onClick={() => void loadRelatedArticles()}
                           disabled={isLoadingRelatedArticles}
                         >
@@ -2182,14 +2182,14 @@ export default function NewsReaderScreen({
           </div>
 
           <div className="absolute right-4 top-1/3 opacity-10">
-            <PawIcon className="h-6 w-6 text-[var(--yuuko-green)]" />
+            <PawIcon className="h-6 w-6 text-[var(--yuuko-green-text)]" />
           </div>
 
           <Card className="mt-auto border border-border/50 py-3">
             <CardContent className="p-4">
               <div className="mb-3 flex items-center gap-2">
-                <Search className="h-4 w-4 text-[var(--yuuko-green)]" />
-                <span className="text-sm font-medium text-[var(--yuuko-green)]">
+                <Search className="h-4 w-4 text-[var(--yuuko-green-text)]" />
+                <span className="text-sm font-medium text-[var(--yuuko-green-text)]">
                   用語サポート
                 </span>
               </div>
@@ -2205,7 +2205,7 @@ export default function NewsReaderScreen({
                     <Badge
                       asChild
                       variant="outline"
-                      className="cursor-pointer border-muted-foreground/30 px-2 py-0 text-[10px] text-muted-foreground hover:border-[var(--yuuko-green)] hover:text-[var(--yuuko-green)] focus-visible:outline-none"
+                      className="cursor-pointer border-muted-foreground/30 px-2 py-0 text-[10px] text-muted-foreground hover:border-[var(--yuuko-green-text)] hover:text-[var(--yuuko-green-text)] focus-visible:outline-none"
                     >
                       <button
                         type="button"
@@ -2223,7 +2223,7 @@ export default function NewsReaderScreen({
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="mt-3 h-8 w-full text-xs text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] hover:text-[var(--yuuko-green)]"
+                  className="mt-3 h-8 w-full text-xs text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] hover:text-[var(--yuuko-green-text)]"
                   onClick={() => setShowAllSupportTerms(true)}
                 >
                   すべての関連ワードを見る（ほか{hiddenSupportTermCount}件）
@@ -2260,7 +2260,7 @@ export default function NewsReaderScreen({
           type="button"
           aria-label="選択した用語を解説"
           data-explain-button="true"
-          className="fixed z-50 rounded-md border border-[var(--yuuko-green)] bg-white px-2 py-1 text-xs font-medium text-[var(--yuuko-green)] shadow-md hover:bg-[var(--yuuko-green-light)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+          className="fixed z-50 rounded-md border border-[var(--yuuko-green-text)] bg-white px-2 py-1 text-xs font-medium text-[var(--yuuko-green-text)] shadow-md hover:bg-[var(--yuuko-green-light)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green-text)]"
           style={{ left: explainSelection.left, top: explainSelection.top }}
           onMouseDown={(event) => event.preventDefault()}
           onClick={handleExplainButtonClick}
@@ -2285,7 +2285,7 @@ export default function NewsReaderScreen({
         </div>
         {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <PawIcon className="h-4 w-4 text-[var(--yuuko-green)]" />
+          <PawIcon className="h-4 w-4 text-[var(--yuuko-green-text)]" />
         </div>
       </footer>
 

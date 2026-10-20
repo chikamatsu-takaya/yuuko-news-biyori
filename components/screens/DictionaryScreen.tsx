@@ -60,6 +60,7 @@ import {
 } from "@/lib/tauri/dictionary";
 
 import { useToast } from "@/hooks/use-toast";
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 
 type FilterType = "all" | TauriDictionaryEntryType | "favorite";
 type SortOption = "recent" | "name" | "favorite";
@@ -357,7 +358,7 @@ function EntryIcon({ type }: { type: DictionaryIconType }) {
     <div
       className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${backgroundColors[type]}`}
     >
-      <Icon className="h-6 w-6 text-[var(--yuuko-green)]" />
+      <Icon className="h-6 w-6 text-[var(--yuuko-green-text)]" />
     </div>
   );
 }
@@ -397,7 +398,7 @@ function DictionaryEntryCard({
       aria-current={isSelected ? "true" : undefined}
       className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
-          ? "border-2 border-[var(--yuuko-green)] bg-[var(--yuuko-green-light)]/30"
+          ? "border-2 border-[var(--yuuko-green-text)] bg-[var(--yuuko-green-light)]/30"
           : "border-border/50 hover:border-border"
       }`}
       onClick={onClick}
@@ -509,7 +510,7 @@ function Pagination({
             size="sm"
             className={`h-7 w-7 p-0 ${
               currentPage === page
-                ? "bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90"
+                ? `bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 ${FORCED_COLORS_SELECTED}`
                 : ""
             }`}
             onClick={() => onPageChange(page)}
@@ -805,7 +806,7 @@ export default function DictionaryScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={handleGoHome}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -822,7 +823,7 @@ export default function DictionaryScreen({
           <div className="p-3">
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
               <CardContent className="p-3">
-                <p className="mb-2 text-xs font-medium text-[var(--yuuko-green)]">
+                <p className="mb-2 text-xs font-medium text-[var(--yuuko-green-text)]">
                   ゆうこの一言
                 </p>
                 <p className="text-[11px] leading-relaxed text-foreground">
@@ -862,7 +863,7 @@ export default function DictionaryScreen({
             </div>
 
             <div className="mb-6 flex items-center gap-2">
-              <BookOpen className="h-6 w-6 text-[var(--yuuko-green)]" />
+              <BookOpen className="h-6 w-6 text-[var(--yuuko-green-text)]" />
               <h1 className="text-xl font-bold text-foreground">ゆうこ辞書</h1>
             </div>
 
@@ -888,7 +889,7 @@ export default function DictionaryScreen({
                     type="button"
                     className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
                       isActive
-                        ? "bg-[var(--yuuko-green)] text-white"
+                        ? `bg-[var(--yuuko-green)] text-white ${FORCED_COLORS_SELECTED}`
                         : "border border-border bg-white text-muted-foreground hover:border-[var(--yuuko-green)]/50"
                     }`}
                     onClick={() => setActiveFilter(filter.id)}
@@ -902,8 +903,8 @@ export default function DictionaryScreen({
 
             {loadNotice && (
               <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-                <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-                <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+                <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
                 <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                   <span role={loadNoticeKind === "error" ? "alert" : "status"}>
                     {loadNotice}
@@ -912,7 +913,7 @@ export default function DictionaryScreen({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                       onClick={() => void loadEntries()}
                       disabled={isLoading}
                     >
@@ -971,7 +972,7 @@ export default function DictionaryScreen({
                       <Button
                         variant="outline"
                         size="sm"
-                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                         onClick={handleClearConditions}
                       >
                         条件をクリア
@@ -1113,7 +1114,7 @@ export default function DictionaryScreen({
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
                     <div className="mb-2 flex items-center gap-1.5">
-                      <BookOpen className="h-4 w-4 text-[var(--yuuko-green)]" />
+                      <BookOpen className="h-4 w-4 text-[var(--yuuko-green-text)]" />
                       <h4 className="text-sm font-semibold text-foreground">
                         やさしい説明
                       </h4>
@@ -1131,14 +1132,14 @@ export default function DictionaryScreen({
                   <CardContent className="p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5">
-                        <Newspaper className="h-4 w-4 text-[var(--yuuko-green)]" />
+                        <Newspaper className="h-4 w-4 text-[var(--yuuko-green-text)]" />
                         <h4 className="text-sm font-semibold text-foreground">
                           関連ニュース
                         </h4>
                       </div>
                       <button
                         type="button"
-                        className="flex items-center gap-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                        className="flex items-center gap-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
                         onClick={handleOpenRelatedArticle}
                         disabled={!selectedEntry.relatedArticleId}
                       >
@@ -1178,7 +1179,7 @@ export default function DictionaryScreen({
                       {!isEditingMemo ? (
                         <button
                           type="button"
-                          className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                          className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
                           onClick={handleStartEditMemo}
                         >
                           編集
@@ -1187,7 +1188,7 @@ export default function DictionaryScreen({
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                            className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
                             aria-label="メモを保存"
                             onClick={handleSaveMemo}
                           >

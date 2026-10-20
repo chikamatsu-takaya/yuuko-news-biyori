@@ -163,9 +163,11 @@ export default function YuukoWindowPage() {
   return (
     <>
       {/* ルートレイアウトが html / body に背景色を付けるため、このページでだけ透明へ戻す。
-          ウィンドウは中身に合わせた大きさなので、段階切替の一瞬にはみ出してもスクロールバーを出さない。 */}
+          ウィンドウは中身に合わせた大きさなので、段階切替の一瞬にはみ出してもスクロールバーを出さない。
+          Windows ハイコントラストでは背景が OS の色で塗られ、透明ウィンドウが不透明な四角になってしまうため、
+          このウィンドウだけ forced-color-adjust: none で配色を保つ（吹き出し・カードは自前の白背景＋濃い文字なので読める・D148）。 */}
       <style>
-        {"html, body { background: transparent !important; overflow: hidden; }"}
+        {"html, body { background: transparent !important; overflow: hidden; forced-color-adjust: none; }"}
       </style>
       {displayed && notification ? (
         // 退場はアプリ内通知の登場位置（右下）へ戻る向きにする（§7.5）。

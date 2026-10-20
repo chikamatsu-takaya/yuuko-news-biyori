@@ -42,6 +42,7 @@ import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
 import { useToast } from "@/hooks/use-toast";
 import { buildThemeOptions } from "@/lib/customize-themes.mjs";
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 
 // Types
 type CustomizeTab = "theme" | "name" | "deco" | "balloon";
@@ -88,6 +89,7 @@ const tabItems = [
 /**
  * テーマの色見本。配色を持つテーマは `data-theme` 付きの要素の中で CSS 変数を読み、そのテーマの色を出す
  * （app/globals.css の `[data-theme="<id>"]`）。配色が未登録のテーマは、適用中の色と誤解されないよう点線の枠だけ出す。
+ * 見本は色そのものが情報なので、Windows ハイコントラストでも元の色で描く（forced-color-adjust-none・D148）。
  */
 function ThemeSwatch({ option }: { option: ThemeOption }) {
   if (!option.hasPalette) {
@@ -103,7 +105,7 @@ function ThemeSwatch({ option }: { option: ThemeOption }) {
   return (
     <span
       data-theme={option.id}
-      className={`w-10 h-10 rounded-lg border border-border overflow-hidden flex shrink-0 ${
+      className={`w-10 h-10 rounded-lg border border-border overflow-hidden flex shrink-0 forced-color-adjust-none ${
         option.selectable ? "" : "opacity-50"
       }`}
       aria-hidden="true"
@@ -135,7 +137,7 @@ function ThemeOptionButton({
       type="button"
       className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
         isSelected
-          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green)]"
+          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green-text)]"
           : option.selectable
             ? "bg-white border border-border hover:border-[var(--yuuko-green)]/50"
             : "bg-muted/50 border border-border/50 opacity-70"
@@ -442,7 +444,7 @@ export default function CustomizeScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <ArrowLeft className="w-4 h-4" />
@@ -460,7 +462,7 @@ export default function CustomizeScreen({
           <div className="p-3">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   <MessageCircle className="w-3 h-3" aria-hidden="true" />
                   ゆうこの一言
                 </CardTitle>
@@ -476,7 +478,7 @@ export default function CustomizeScreen({
                   いっしょに考えよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -497,7 +499,7 @@ export default function CustomizeScreen({
               {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
               <button
                 type="button"
-                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
                 onClick={() => handleNavigate("home")}
               >
                 ホーム
@@ -508,7 +510,7 @@ export default function CustomizeScreen({
 
             {/* Title */}
             <div className="flex items-center gap-2 mb-1">
-              <Sparkles className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <Sparkles className="w-6 h-6 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <h1 className="text-xl font-bold text-foreground">ゆうこカスタマイズ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-4">
@@ -527,7 +529,7 @@ export default function CustomizeScreen({
                     aria-selected={isActive}
                     className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0 ${
                       isActive
-                        ? "bg-[var(--yuuko-green)] text-white"
+                        ? `bg-[var(--yuuko-green)] text-white ${FORCED_COLORS_SELECTED}`
                         : "bg-white text-muted-foreground hover:bg-muted border border-border"
                     }`}
                     onClick={() => handleTabChange(tab.id)}
@@ -587,7 +589,7 @@ export default function CustomizeScreen({
                       {themeMessage !== null && (
                         <p
                           role="status"
-                          className="text-xs text-[var(--yuuko-green)]"
+                          className="text-xs text-[var(--yuuko-green-text)]"
                           data-testid="customize-theme-message"
                         >
                           {themeMessage.text}
@@ -670,7 +672,7 @@ export default function CustomizeScreen({
 
                 {/* Save Note: テーマは選んだ時点で保存するため、別の保存ボタンは置かない */}
                 <div className="flex flex-wrap items-center justify-center gap-2 p-4 bg-white border-t border-border text-xs text-muted-foreground">
-                  <Check className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                  <Check className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
                   <span>テーマは選ぶとすぐに保存されるよ。</span>
                 </div>
               </Card>
@@ -682,7 +684,7 @@ export default function CustomizeScreen({
               <Card className="flex-1 min-w-[280px]">
                 <CardHeader className="p-3 pb-2">
                   <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <Gift className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    <Gift className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
                     解放済みアイテム
                   </CardTitle>
                 </CardHeader>
@@ -736,7 +738,7 @@ export default function CustomizeScreen({
                             data-testid="customize-rank-reward-item"
                           >
                             {reward.unlocked ? (
-                              <Check className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                              <Check className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                             ) : (
                               <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
                             )}
@@ -841,7 +843,7 @@ export default function CustomizeScreen({
               </CardHeader>
               <CardContent className="p-3 pt-0 space-y-2">
                 <div className="flex items-center gap-2 text-xs">
-                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                   <span className="text-muted-foreground w-12 shrink-0">テーマ</span>
                   <span className="text-foreground min-w-0 truncate" data-testid="customize-current-theme">
                     {activeThemeOption !== null
@@ -852,12 +854,12 @@ export default function CustomizeScreen({
                   </span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                   <span className="text-muted-foreground w-12 shrink-0">吹き出し</span>
                   <span className="text-muted-foreground">準備中</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                   <span className="text-muted-foreground w-12 shrink-0">呼び名</span>
                   <span className="text-foreground min-w-0 truncate">
                     {nicknameStatus === "ready"
@@ -873,7 +875,7 @@ export default function CustomizeScreen({
             {/* Yuuko's Comment */}
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/50">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   <Heart className="w-3 h-3 fill-[var(--yuuko-green)]" aria-hidden="true" />
                   ゆうこのおはなし
                 </CardTitle>
@@ -887,7 +889,7 @@ export default function CustomizeScreen({
                   ありがとう！うれしいよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -911,7 +913,7 @@ export default function CustomizeScreen({
                     <div className="flex items-baseline gap-1 mb-1">
                       <span className="text-xs text-muted-foreground">ランク</span>
                       <span
-                        className="text-3xl font-bold text-[var(--yuuko-green)]"
+                        className="text-3xl font-bold text-[var(--yuuko-green-text)]"
                         data-testid="customize-friendship-rank"
                       >
                         {friendship.currentRank}

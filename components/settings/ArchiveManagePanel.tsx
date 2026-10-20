@@ -236,7 +236,7 @@ export function ArchiveManagePanel() {
         data-testid="archive-manage-card"
       >
         <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
             <Archive className="w-5 h-5" />
             アーカイブ管理
           </CardTitle>

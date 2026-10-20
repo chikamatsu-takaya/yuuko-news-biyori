@@ -13,7 +13,7 @@ const TAG_STYLES: Partial<
   },
   processing: {
     label: "ゆうこ要約中",
-    className: "bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green)]",
+    className: "bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green-text)]",
   },
   failed: {
     label: "要約失敗",

@@ -147,7 +147,8 @@ function PawIcon({ className }: { className?: string }) {
 
 function GachaMachine() {
   return (
-    <div className="relative w-24 h-36" aria-hidden="true">
+    // 絵だけの装飾なので、Windows ハイコントラストでも元の配色のまま描く（文字を含まないため読みやすさに影響しない・D148）。
+    <div className="relative w-24 h-36 forced-color-adjust-none" aria-hidden="true">
       {/* Machine body */}
       <div className="absolute bottom-0 w-full h-24 bg-gradient-to-b from-[var(--yuuko-green)] to-emerald-600 rounded-xl shadow-lg">
         {/* Glass dome */}
@@ -250,7 +251,7 @@ function GachaItemDialog({
           <>
             <DialogHeader>
               <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--yuuko-green-light)]">
-                <KindIcon className="h-6 w-6 text-[var(--yuuko-green)]" />
+                <KindIcon className="h-6 w-6 text-[var(--yuuko-green-text)]" />
               </div>
               <p className="text-center text-xs text-muted-foreground">{heading}</p>
               <DialogTitle className="text-center">{item.name}</DialogTitle>
@@ -457,7 +458,7 @@ export default function GachaScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <ArrowLeft className="w-4 h-4" />
@@ -475,7 +476,7 @@ export default function GachaScreen({
           <div className="p-3">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   ゆうこのおはなし
                 </CardTitle>
               </CardHeader>
@@ -510,7 +511,7 @@ export default function GachaScreen({
               {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
               <button
                 type="button"
-                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
                 onClick={() => handleNavigate("home")}
               >
                 ホーム
@@ -537,7 +538,7 @@ export default function GachaScreen({
           {/* Title */}
           <div className="px-4 shrink-0">
             <div className="flex items-center gap-2 mb-1">
-              <PawIcon className="w-7 h-7 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <PawIcon className="w-7 h-7 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <h1 className="text-2xl font-bold text-foreground">ゆうこガチャ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-2">
@@ -553,8 +554,8 @@ export default function GachaScreen({
               {/* Center: Gacha Animation Area */}
               <Card className="overflow-hidden relative h-full min-h-[420px]">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
-                  {/* Background decorations */}
-                  <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
+                  {/* Background decorations（文字を含まない装飾なので、ハイコントラストでも元の配色で描く・D148） */}
+                  <div className="absolute inset-0 overflow-hidden forced-color-adjust-none" aria-hidden="true">
                     {/* Paw print pattern */}
                     <div className="absolute top-8 left-12 text-[var(--yuuko-green)]/10">
                       <PawIcon className="w-10 h-10" />
@@ -656,7 +657,7 @@ export default function GachaScreen({
                   </div>
                   {isReady && (
                     <p
-                      className="text-xs text-[var(--yuuko-green)] font-medium"
+                      className="text-xs text-[var(--yuuko-green-text)] font-medium"
                       data-testid="gacha-collection-remaining"
                     >
                       {gacha.isComplete ? "コンプリート！" : `のこり ${remainingCount}`}
@@ -704,7 +705,7 @@ export default function GachaScreen({
                           <li key={item.itemId} data-testid="gacha-collection-owned">
                             <button
                               type="button"
-                              className="relative w-full aspect-square rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 p-1 flex flex-col items-center justify-center gap-1 hover:bg-[var(--yuuko-green-light)] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+                              className="relative w-full aspect-square rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 p-1 flex flex-col items-center justify-center gap-1 hover:bg-[var(--yuuko-green-light)] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green-text)]"
                               aria-label={`${name}（${KIND_LABELS[item.kind]}）${item.isNew ? " NEW" : ""}`}
                               onClick={() => {
                                 handleOpenCollectionItem({
@@ -720,7 +721,7 @@ export default function GachaScreen({
                                   NEW
                                 </Badge>
                               )}
-                              <KindIcon className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                              <KindIcon className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
                               <span className="w-full truncate text-center text-[10px] font-medium">
                                 {name}
                               </span>
@@ -742,7 +743,7 @@ export default function GachaScreen({
         <div className="flex items-center gap-2">
           <Bell className="w-3.5 h-3.5 text-muted-foreground" aria-hidden="true" />
           <span className="text-xs text-muted-foreground">お知らせ</span>
-          <span className="text-xs text-[var(--yuuko-green)]">
+          <span className="text-xs text-[var(--yuuko-green-text)]">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" aria-hidden="true" />
             {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みのコレクション状況を出す。 */}
             {loadStatus === "loading"

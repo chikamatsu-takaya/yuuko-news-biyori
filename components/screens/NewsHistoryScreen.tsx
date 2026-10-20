@@ -42,6 +42,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 import {
   Newspaper,
   Clock,
@@ -368,7 +369,7 @@ function FilterChipButton({
     <button
       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border disabled:cursor-not-allowed disabled:opacity-50 ${
         isActive
-          ? "bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)]"
+          ? `bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)] ${FORCED_COLORS_SELECTED}`
           : "bg-white text-muted-foreground border-border hover:border-[var(--yuuko-green)]/50"
       }`}
       onClick={onClick}
@@ -406,7 +407,7 @@ function HistoryItemCard({
       aria-current={isSelected ? "true" : undefined}
       className={`cursor-pointer transition-all py-3 px-0 ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
-          ? "border-[var(--yuuko-green)] border-2 bg-[var(--yuuko-green-light)]/50 shadow-md"
+          ? "border-[var(--yuuko-green-text)] border-2 bg-[var(--yuuko-green-light)]/50 shadow-md"
           : "border-0 shadow-sm hover:shadow-md"
       }`}
       onClick={onClick}
@@ -436,7 +437,7 @@ function HistoryItemCard({
             <Badge
               className={`text-[10px] px-1.5 py-0 border-0 ${
                 item.readState === "read"
-                  ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green)]"
+                  ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green-text)]"
                   : "bg-blue-100 text-blue-600"
               }`}
             >
@@ -756,7 +757,7 @@ export default function NewsHistoryScreen({
           {/* Back Button */}
           <Button
             variant="outline"
-            className="mb-4 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
+            className="mb-4 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
             onClick={() => handleNavigate("home")}
           >
             <ArrowLeft className="w-4 h-4" />
@@ -773,7 +774,7 @@ export default function NewsHistoryScreen({
           {/* Yuuko Comment Card */}
           <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
             <CardContent className="p-3">
-              <h4 className="text-xs font-semibold text-[var(--yuuko-green)] mb-2">ゆうこの一言</h4>
+              <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">ゆうこの一言</h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
                 過去の記事も大切な
                 <br />
@@ -784,7 +785,7 @@ export default function NewsHistoryScreen({
                 見つけてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
               </div>
             </CardContent>
           </Card>
@@ -803,7 +804,7 @@ export default function NewsHistoryScreen({
             {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
             <button
               type="button"
-              className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
               onClick={() => handleNavigate("home")}
             >
               ホーム
@@ -814,7 +815,7 @@ export default function NewsHistoryScreen({
 
           {/* Title */}
           <div className="flex items-center gap-2 mb-4">
-            <Clock className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
+            <Clock className="w-6 h-6 text-[var(--yuuko-green-text)]" aria-hidden="true" />
             <h1 className="text-xl font-bold text-foreground">ニュース履歴</h1>
           </div>
 
@@ -857,7 +858,7 @@ export default function NewsHistoryScreen({
               className="flex items-center gap-2 mb-4 min-w-0 text-xs text-muted-foreground"
               data-testid="history-tag-filter"
             >
-              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <span role="status" className="min-w-0 flex items-center gap-1">
                 <span className="shrink-0">タグ</span>
                 <span className="max-w-[12rem] truncate font-semibold text-foreground" title={selectedTag}>
@@ -880,8 +881,8 @@ export default function NewsHistoryScreen({
 
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span
                   role={
@@ -898,7 +899,7 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                     onClick={() => void loadHistoryItems()}
                     disabled={isLoading}
                   >
@@ -956,7 +957,7 @@ export default function NewsHistoryScreen({
                 もう一度見てみよっ♪
               </p>
               <div className="flex justify-end">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
               </div>
             </CardContent>
           </Card>
@@ -990,7 +991,7 @@ export default function NewsHistoryScreen({
                   <Badge
                     className={`text-[10px] px-1.5 py-0 border-0 ${
                       selectedItem.readState === "read"
-                        ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green)]"
+                        ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green-text)]"
                         : "bg-blue-100 text-blue-600"
                     }`}
                   >
@@ -1089,7 +1090,7 @@ export default function NewsHistoryScreen({
           <Bell className="w-3.5 h-3.5" aria-hidden="true" />
           <span>お知らせ</span>
           <span className="mx-1" aria-hidden="true">|</span>
-          <span className="text-[var(--yuuko-green)]" aria-hidden="true">●</span>
+          <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">●</span>
           <span>
             {visibleHistoryItems.length}件を表示中 / 保存済み履歴
             {historyItems.length}件
@@ -1097,7 +1098,7 @@ export default function NewsHistoryScreen({
         </div>
         {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+          <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
         </div>
       </footer>
 
