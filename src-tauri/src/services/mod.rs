@@ -7,6 +7,7 @@ pub mod data_export_service;
 pub mod data_import_service;
 pub mod default_news_sources;
 pub mod dictionary_service;
+pub mod dressup_service;
 pub mod friendship_service;
 pub mod gacha_service;
 pub mod local_llm_service;

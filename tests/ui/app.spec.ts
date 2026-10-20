@@ -2290,6 +2290,188 @@ test("customize: pattern load failure shows a fixed message and a retry without 
   ).toHaveAttribute("aria-pressed", "true");
 });
 
+// 再読み込みせずにサイドバーで画面を移る（着せかえの反映を、同じページの中で確かめるため）。
+const switchScreenInApp = async (page: Page, navName: string, heading: string) => {
+  await page.getByRole("navigation").first().getByRole("button", { name: navName, exact: true }).click();
+  await expect(page.getByRole("heading", { name: heading }).first()).toBeVisible();
+};
+
+// ゆうこの着せかえ（D155）。既定（なし・いつもの）と所持済みのガチャ品だけ選べ、選ぶと各画面のゆうこへ反映する。
+const readDressupCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_SET_DRESSUP_CALLS__ as string[] | undefined) ?? []
+  );
+
+const setDressupState = (
+  page: Page,
+  state: {
+    activeBalloonId: string;
+    selectableBalloonIds: string[];
+    activeDecoId: string;
+    selectableDecoIds: string[];
+  }
+) =>
+  page.addInitScript((value) => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = value;
+  }, state);
+
+test("customize: deco tab lists owned decos, hides unowned ones and dresses yuuko", async ({ page }) => {
+  await setDressupState(page, {
+    activeBalloonId: "balloon_default",
+    selectableBalloonIds: ["balloon_default"],
+    activeDecoId: "deco_none",
+    selectableDecoIds: ["deco_none", "gacha_deco_santa_hat", "gacha_deco_ribbon"],
+  });
+  await openCustomize(page);
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("なし");
+  await expect(page.getByTestId("customize-current-balloon")).toHaveText("いつもの");
+  // 既定（なし）では立ち絵に何も重ねない。
+  const figure = page.getByTestId("customize-yuuko-figure");
+  await expect(figure).toHaveAttribute("data-deco", "none");
+  await expect(figure.getByTestId("yuuko-deco-layer")).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "飾り" }).click();
+  const options = page.getByTestId("customize-deco-option");
+  await expect(options).toHaveCount(11);
+  const none = options.filter({ hasText: "なし" });
+  const santa = options.filter({ hasText: "サンタ帽（冬）" });
+  const locked = options.filter({ hasText: "？？？" });
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  await expect(santa).toBeEnabled();
+  // 未所持の 8 種は名前・形を伏せて押せない。
+  await expect(locked).toHaveCount(8);
+  await expect(locked.first()).toBeDisabled();
+  await expect(locked.first()).toHaveAttribute("aria-label", "？？？（ガチャで手に入るよ）");
+  await expect(locked.first().getByTestId("dressup-swatch")).toHaveCount(0);
+  await expect(page.getByText("ちび王冠")).toHaveCount(0);
+  await expect(page.getByText("？？？の飾りはガチャで手に入るよ")).toBeVisible();
+  // 所持済みの見本は、小さなゆうこに飾りを重ねて見せる。
+  await expect(santa.getByTestId("yuuko-deco-layer")).toHaveAttribute("src", /\/assets\/accessories\/santa_hat\.svg$/);
+
+  await locked.first().click({ force: true });
+  expect(await readDressupCalls(page)).toEqual([]);
+
+  await santa.click();
+  await expect(page.getByTestId("customize-deco-message")).toHaveText("飾りを「サンタ帽（冬）」にしたよ。");
+  expect(await readDressupCalls(page)).toEqual(["deco:gacha_deco_santa_hat"]);
+  await expect(santa).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("サンタ帽（冬）");
+  // プレビューのゆうこに重なり、頭の上にはみ出す分の余白を取って切れない。
+  await expect(figure).toHaveAttribute("data-deco", "on");
+  const layer = figure.getByTestId("yuuko-deco-layer");
+  await expect(layer).toHaveAttribute("src", /santa_hat\.svg$/);
+  const [figureBox, layerBox, imageBox] = await Promise.all([
+    figure.boundingBox(),
+    layer.boundingBox(),
+    figure.getByRole("img", { name: "ゆうこ" }).boundingBox(),
+  ]);
+  expect(figureBox && layerBox && imageBox).toBeTruthy();
+  // 飾りの層は立ち絵の下端にそろい、上へ 100/779 だけ伸びる。外枠はその上端まで含む。
+  expect(Math.abs(layerBox!.y + layerBox!.height - (imageBox!.y + imageBox!.height))).toBeLessThan(1.5);
+  expect(Math.abs(layerBox!.height - (imageBox!.height * 879) / 779)).toBeLessThan(1.5);
+  expect(figureBox!.y).toBeLessThanOrEqual(imageBox!.y - (imageBox!.height * 94) / 779 + 1.5);
+
+  // 他の画面のゆうこにも反映される。
+  await switchScreenInApp(page, "ゆうこ辞書", "ゆうこ辞書");
+  await expect(page.getByTestId("dictionary-yuuko-figure").getByTestId("yuuko-deco-layer")).toHaveAttribute(
+    "src",
+    /santa_hat\.svg$/
+  );
+
+  await switchScreenInApp(page, "カスタマイズ", "カスタマイズ");
+  await page.getByRole("tab", { name: "飾り" }).click();
+  await page.getByTestId("customize-deco-option").filter({ hasText: "なし" }).click();
+  await expect(page.getByTestId("customize-deco-message")).toHaveText("飾りをはずしたよ。");
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "none");
+});
+
+test("customize: balloon tab switches the balloon shape on other screens", async ({ page }) => {
+  await setDressupState(page, {
+    activeBalloonId: "balloon_default",
+    selectableBalloonIds: ["balloon_default", "gacha_balloon_cloud"],
+    activeDecoId: "deco_none",
+    selectableDecoIds: ["deco_none"],
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "吹き出し" }).click();
+  const options = page.getByTestId("customize-balloon-option");
+  await expect(options).toHaveCount(10);
+  await expect(options.filter({ hasText: "いつもの" })).toHaveAttribute("aria-pressed", "true");
+  await expect(options.filter({ hasText: "？？？" })).toHaveCount(8);
+  await expect(page.getByText("？？？の吹き出しはガチャで手に入るよ")).toBeVisible();
+  // ステージに選んだ吹き出しの見本が出る（既定は今の形）。
+  await expect(page.getByTestId("customize-preview-balloon")).toHaveAttribute("data-balloon-shape", "default");
+
+  await options.filter({ hasText: "もこもこ雲" }).click();
+  await expect(page.getByTestId("customize-balloon-message")).toHaveText("吹き出しを「もこもこ雲」にしたよ。");
+  expect(await readDressupCalls(page)).toEqual(["balloon:gacha_balloon_cloud"]);
+  await expect(page.getByTestId("customize-current-balloon")).toHaveText("もこもこ雲");
+  await expect(page.getByTestId("customize-preview-balloon")).toHaveAttribute("data-balloon-shape", "cloud");
+
+  await switchScreenInApp(page, "ゆうこ辞書", "ゆうこ辞書");
+  const balloon = page.getByTestId("dictionary-yuuko-balloon");
+  await expect(balloon).toHaveAttribute("data-balloon-shape", "cloud");
+  await expect(balloon).toHaveClass(/yuuko-bb-cloud/);
+  await expect(balloon).toHaveAttribute("data-tail", "bottom-left");
+  await expect(balloon).toContainText("わからない言葉は");
+});
+
+test("customize: dressup load failure shows a fixed message and a retry without raw errors", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = "fail";
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "飾り" }).click();
+  await expect(page.getByTestId("customize-deco-load-error")).toHaveText("飾りの状態を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-deco-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("—");
+  // 読み込めなくてもゆうこは既定の見た目で出る。
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "none");
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = {
+      activeBalloonId: "balloon_default",
+      selectableBalloonIds: ["balloon_default"],
+      activeDecoId: "gacha_deco_crown",
+      selectableDecoIds: ["deco_none", "gacha_deco_crown"],
+    };
+  });
+  await page.getByTestId("customize-deco-retry").click();
+  await expect(page.getByTestId("customize-deco-load-error")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-deco-option").filter({ hasText: "ちび王冠" })
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "on");
+});
+
+// 既定（いつもの・なし）では、各画面のゆうこと吹き出しの見た目が今までと同じ（共通部品に置き換えても形が変わらない）。
+test("dressup defaults keep the original yuuko and balloon look on each screen", async ({ page }) => {
+  await openHome(page);
+  await openScreenFromSidebar(page, "ゆうこ辞書", "ゆうこ辞書");
+  const dictBalloon = page.getByTestId("dictionary-yuuko-balloon");
+  await expect(dictBalloon).toHaveAttribute("data-balloon-shape", "default");
+  await expect(dictBalloon).toHaveClass(/rounded-2xl/);
+  await expect(dictBalloon).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await expect(dictBalloon).toHaveCSS("border-top-width", "2px");
+  await expect(dictBalloon).not.toHaveClass(/yuuko-bb/);
+  const dictFigure = page.getByTestId("dictionary-yuuko-figure");
+  await expect(dictFigure).toHaveAttribute("data-deco", "none");
+  const image = dictFigure.getByRole("img", { name: "ゆうこ" });
+  await expect(image).toHaveAttribute("src", /\/assets\/yuuko\.png/);
+  const imageBox = await image.boundingBox();
+  expect(imageBox && Math.round(imageBox.width)).toBe(144);
+  // 余白（はみ出し用）を足していないので、外枠の高さは立ち絵と同じ。
+  const figureBox = await dictFigure.boundingBox();
+  expect(figureBox && imageBox && Math.abs(figureBox.height - imageBox.height)).toBeLessThan(1);
+
+  await openScreenFromSidebar(page, "設定", "設定");
+  const settingsBalloon = page.getByTestId("settings-yuuko-balloon");
+  await expect(settingsBalloon).toHaveAttribute("data-balloon-shape", "default");
+  await expect(settingsBalloon).toHaveClass(/rounded-xl/);
+});
+
 // カスタマイズ画面のテーマ切り替え（set_active_theme）。報酬テーマは解放済みだけ、ガチャテーマは所持済みだけ選べる。
 const setupThemeState = (page: Page) =>
   page.addInitScript(() => {
@@ -2398,7 +2580,7 @@ test("customize: theme save failure shows a toast and keeps the current theme", 
   ).toHaveAttribute("aria-pressed", "true");
 });
 
-test("customize: categories follow D83 (deco and balloon are coming soon, nickname is read-only)", async ({
+test("customize: categories follow D83 (deco and balloon are selectable, nickname is read-only)", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -2413,11 +2595,13 @@ test("customize: categories follow D83 (deco and balloon are coming soon, nickna
   await expect(page.getByRole("tab", { name: "性格" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "テーマ" })).toHaveAttribute("aria-selected", "true");
 
+  // 飾り・吹き出しは「準備中」をやめ、選べる一覧を出す（D155）。
   await page.getByRole("tab", { name: "飾り" }).click();
-  await expect(page.getByTestId("customize-coming-soon")).toContainText("準備中");
+  await expect(page.getByTestId("customize-coming-soon")).toHaveCount(0);
+  await expect(page.getByTestId("customize-deco-option")).toHaveCount(11);
   await expect(page.getByTestId("customize-theme-option")).toHaveCount(0);
   await page.getByRole("tab", { name: "吹き出し" }).click();
-  await expect(page.getByTestId("customize-coming-soon")).toContainText("吹き出し");
+  await expect(page.getByTestId("customize-balloon-option")).toHaveCount(10);
 
   await page.getByRole("tab", { name: "呼び名" }).click();
   await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
@@ -8578,6 +8762,56 @@ test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => 
   ).toBeVisible();
 });
 
+for (const { itemId, kind, name, kindLabel, sampleId } of [
+  { itemId: "gacha_deco_crown", kind: "deco", name: "ちび王冠", kindLabel: "飾り", sampleId: "gacha-deco-sample" },
+  {
+    itemId: "gacha_balloon_game",
+    kind: "balloon",
+    name: "ゲームの窓",
+    kindLabel: "吹き出し",
+    sampleId: "gacha-balloon-sample",
+  },
+]) {
+  test(`gacha draw of a ${kind} shows its kind and a sample`, async ({ page }) => {
+    await page.addInitScript(
+      ({ itemId, kind, name }) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_GACHA_OVERRIDE__ = {
+          ownedIds: ["card-001"],
+          newIds: [],
+          master: [
+            { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
+            { itemId, kind, name, text: null },
+          ],
+        };
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      },
+      { itemId, kind, name }
+    );
+    await openGacha(page);
+
+    await gachaDrawButton(page).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name })).toBeVisible();
+    await expect(dialog.getByText(`種類：${kindLabel}`)).toBeVisible();
+    const sample = dialog.getByTestId(sampleId);
+    await expect(sample).toBeVisible();
+    if (kind === "deco") {
+      await expect(sample.getByTestId("yuuko-deco-layer")).toHaveAttribute("src", /crown\.svg$/);
+    } else {
+      await expect(sample.locator("[data-balloon-shape]")).toHaveAttribute("data-balloon-shape", "game");
+      await expect(sample.locator(".yuuko-bb-game p")).toHaveCSS("color", "rgb(255, 255, 255)");
+    }
+    await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toBeVisible();
+    // 引いただけでは適用しない（ガチャ画面のゆうこは既定のまま）。
+    await expect(page.getByTestId("gacha-yuuko-figure")).toHaveAttribute("data-deco", "none");
+    await dialog.getByRole("button", { name: "とじる" }).click();
+    await expect(
+      page.getByTestId("gacha-collection-owned").getByRole("button", { name: new RegExp(`${name}（${kindLabel}）`) })
+    ).toBeVisible();
+  });
+}
+
 test("gacha disables the draw button and explains when fragments are insufficient", async ({
   page,
 }) => {
@@ -9853,6 +10087,41 @@ async function installTauriMocks(page: Page) {
             };
             themeWin.__E2E_REWARD_STATE__ = { ...base, activeThemeId: params.themeId };
             return themeWin.__E2E_REWARD_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_dressup_state":
+          case "set_active_balloon":
+          case "set_active_deco": {
+            // ゆうこの着せかえ（D155）。既定は「いつもの」「なし」だけ選べる。
+            // __E2E_DRESSUP_STATE__ で差し替え（"fail" で読み込み失敗）、切り替えの呼び出しは記録する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const dressupWin = window as any;
+            const current = dressupWin.__E2E_DRESSUP_STATE__ ?? {
+              activeBalloonId: "balloon_default",
+              selectableBalloonIds: ["balloon_default"],
+              activeDecoId: "deco_none",
+              selectableDecoIds: ["deco_none"],
+            };
+            if (cmd === "get_dressup_state") {
+              if (current === "fail") {
+                throw new Error("E2E dressup failure /internal/secret/path");
+              }
+              return current;
+            }
+            const isBalloon = cmd === "set_active_balloon";
+            const id = isBalloon ? params.balloonId : params.decoId;
+            dressupWin.__E2E_SET_DRESSUP_CALLS__ = [
+              ...(dressupWin.__E2E_SET_DRESSUP_CALLS__ || []),
+              `${isBalloon ? "balloon" : "deco"}:${id}`,
+            ];
+            const selectable = isBalloon ? current.selectableBalloonIds : current.selectableDecoIds;
+            if (!selectable.includes(id)) {
+              throw { code: "VALIDATION_ERROR", message: "E2E raw dressup failure /internal/secret/path" };
+            }
+            dressupWin.__E2E_DRESSUP_STATE__ = isBalloon
+              ? { ...current, activeBalloonId: id }
+              : { ...current, activeDecoId: id };
+            return dressupWin.__E2E_DRESSUP_STATE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "get_pattern_state":

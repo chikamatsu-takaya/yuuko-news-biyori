@@ -31,6 +31,7 @@ use services::data_export_service::DataExportService;
 use services::data_import_service::{DataImportService, MigrationWriteLocks};
 use services::default_news_sources;
 use services::dictionary_service::DictionaryService;
+use services::dressup_service::DressupService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
 use services::local_llm_service::LocalLlmService;
@@ -117,6 +118,9 @@ pub fn run() {
             // テーマの地に敷く模様。保存の正は設定 ui.patternId、所持はガチャ状態から読む（D152〜D154）。
             let pattern_service =
                 PatternService::new(settings_service.clone(), gacha_service.clone());
+            // ゆうこの着せかえ。保存の正は設定 ui.balloonId / ui.decoId、所持はガチャ状態から読む（D155）。
+            let dressup_service =
+                DressupService::new(settings_service.clone(), gacha_service.clone());
             let article_service = ArticleService::new(article_repository.clone())
                 .with_gacha_service(gacha_service.clone());
             let news_service = NewsService::new(
@@ -217,6 +221,7 @@ pub fn run() {
                 local_llm_service,
                 news_service,
                 pattern_service,
+                dressup_service,
                 reward_service,
                 settings_service,
                 summary_service,
@@ -291,7 +296,10 @@ pub fn run() {
             commands::gacha_commands::draw_gacha_once,
             commands::gacha_commands::mark_gacha_items_seen,
             commands::pattern_commands::get_pattern_state,
-            commands::pattern_commands::set_active_pattern
+            commands::pattern_commands::set_active_pattern,
+            commands::dressup_commands::get_dressup_state,
+            commands::dressup_commands::set_active_balloon,
+            commands::dressup_commands::set_active_deco
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

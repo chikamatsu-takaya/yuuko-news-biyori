@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
@@ -56,6 +57,7 @@ import {
 import { setMainWindowUnsavedChanges } from "@/lib/tauri/window";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
 import { refreshUiPatternFromSettings } from "@/hooks/use-ui-pattern";
+import { useYuukoDressup } from "@/components/yuuko/YuukoDressupProvider";
 import { uiThemeLabel } from "@/lib/ui-theme.mjs";
 import {
   AlertDialog,
@@ -561,6 +563,7 @@ export default function SettingsScreen({
   );
 
   const { toast } = useToast();
+  const { refreshDressup } = useYuukoDressup();
 
   const handleNavigate = (screen: string) => {
     if (onNavigate) {
@@ -867,6 +870,8 @@ export default function SettingsScreen({
         applyUiTheme(dto.selectedThemeId);
         // 模様（D152〜D154）も初期値「なし」へ戻るため、保存済みの値を読み直して画面の地を揃える。
         void refreshUiPatternFromSettings();
+        // 着せかえ（D155）も初期値「いつもの」「なし」へ戻るため、保存済みの値を読み直してゆうこの見た目を揃える。
+        void refreshDressup();
         // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
         await refreshAutostartState();
       } else {
@@ -1602,7 +1607,16 @@ export default function SettingsScreen({
               </span>
             </div>
             <CardContent className="p-4">
-              <div className="relative bg-white rounded-xl p-3 border border-border shadow-sm mb-3">
+              {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はもともとの形（白地・細いふち・右下のしっぽ）。 */}
+              <YuukoBalloon
+                className="mb-3"
+                tail="bottom-right"
+                defaultClassName="bg-white rounded-xl p-3 border border-border shadow-sm"
+                defaultTail={
+                  <div className="absolute -bottom-2 right-4 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                }
+                data-testid="settings-yuuko-balloon"
+              >
                 {/* 狭い右列（lg 未満）では文字を一段小さくし、<br /> で区切った行がさらに折り返さないようにする。 */}
                 <p className="text-xs lg:text-sm text-foreground leading-relaxed">
                   この設定で今日も
@@ -1611,11 +1625,10 @@ export default function SettingsScreen({
                   <br />
                   ニュースをお届けするね！
                 </p>
-                <div className="absolute -bottom-2 right-4 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
                 <span className="absolute top-2 right-2 text-[var(--yuuko-green-text)]">
                   🐾
                 </span>
-              </div>
+              </YuukoBalloon>
             </CardContent>
           </Card>
 
@@ -1627,16 +1640,11 @@ export default function SettingsScreen({
             <div className="absolute bottom-4 left-2 text-[var(--yuuko-green-light)] opacity-50">
               🐾
             </div>
-            <Image
-              src="/assets/yuuko.png"
+            <YuukoFigure
               width={963}
               height={1174}
-              alt="ゆうこ"
-              className="w-48 h-auto object-contain animate-[float_3s_ease-in-out_infinite]"
-              onError={(e) => {
-                const target = e.target as HTMLImageElement;
-                target.style.display = "none";
-              }}
+              imageClassName="w-48 h-auto object-contain"
+              className="animate-[float_3s_ease-in-out_infinite]"
             />
           </div>
 
