@@ -1,3 +1,4 @@
+use crate::domain::pattern::PATTERN_NONE_ID;
 use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
 use crate::domain::settings::{PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
@@ -34,6 +35,7 @@ impl SettingsService {
     }
 
     /// 設定画面からの保存。適用中テーマ（`ui.themeId`）は保存済みの値を保ち、DTO の selectedThemeId では変えない。
+    /// 模様（`ui.patternId`）は DTO に含めないため、`apply_from_dto` で変わらず保存済みの値のまま残る。
     /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
     /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
@@ -57,6 +59,30 @@ impl SettingsService {
             return Ok(());
         }
         persisted.ui.theme_id = theme_id.to_string();
+        self.repository.save(&persisted)
+    }
+
+    /// 保存済みの模様 ID（`ui.patternId`）をそのまま返す。選べるかの判定は呼び出し側（PatternService）が行う。
+    /// 設定を読めないときは「なし」に倒す（模様は見た目だけの機能で、画面を止めない）。
+    pub fn saved_pattern_id(&self) -> String {
+        match self.repository.load_or_default() {
+            Ok(persisted) => persisted.ui.pattern_id,
+            Err(error) => {
+                log::warn!("設定を読めなかったため模様なしとして扱います: {error}");
+                PATTERN_NONE_ID.to_string()
+            }
+        }
+    }
+
+    /// 模様（`ui.patternId`）だけを更新して保存する。
+    /// 選んでよい模様かの判定は呼び出し側（PatternService::set_active_pattern）で済ませてから呼ぶ。
+    pub fn set_pattern_id(&self, pattern_id: &str) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.ui.pattern_id == pattern_id && self.repository.exists() {
+            return Ok(());
+        }
+        persisted.ui.pattern_id = pattern_id.to_string();
         self.repository.save(&persisted)
     }
 
@@ -432,6 +458,34 @@ mod tests {
             service.get_user_settings().unwrap().selected_theme_id,
             "default"
         );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn pattern_id_defaults_to_none_and_survives_settings_save() {
+        // 模様は set_active_pattern からだけ変える。設定画面の保存では消えない。
+        let (service, path) = temp_service();
+        assert_eq!(service.saved_pattern_id(), "none");
+        service.set_pattern_id("pattern_paw").unwrap();
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+
+        let dto = UserSettingsDto {
+            nickname: "テスト".to_string(),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"patternId\": \"pattern_paw\"")
+                || raw.contains("\"patternId\":\"pattern_paw\"")
+        );
+
+        // リセットは他の見た目の設定と同じく既定（模様なし）へ戻す。
+        service.reset_user_settings().unwrap();
+        assert_eq!(service.saved_pattern_id(), "none");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));

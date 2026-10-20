@@ -61,4 +61,6 @@ pub const APP_COMMANDS: &[&str] = &[
     "get_gacha_state",
     "draw_gacha_once",
     "mark_gacha_items_seen",
+    "get_pattern_state",
+    "set_active_pattern",
 ];

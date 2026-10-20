@@ -357,10 +357,161 @@
  * 現在 forced-color-adjust: none（Tailwind の forced-color-adjust-none）を当てているのは次だけ:
  *   - app/yuuko-window/page.tsx の html/body（透明な常駐ゆうこウィンドウが不透明な四角にならないように）
  *   - components/screens/GachaScreen.tsx のガチャ機・背景装飾（文字を含まない絵）
- *   - components/screens/CustomizeScreen.tsx のテーマ色見本（色そのものが情報）
+ *   - components/screens/CustomizeScreen.tsx のテーマ色見本（色そのものが情報）と模様の見本（components/PatternSwatch.tsx）
  *   - components/ui/progress.tsx の進み具合の塗り、components/ui/switch.tsx（OS の Highlight 等で明示的に描く）
  * 塗りの色だけで選択中を示すチップ・タブは、lib/forced-colors.ts の FORCED_COLORS_SELECTED で枠を出す。
  */
+
+/*
+ * テーマの地に敷く模様（判断台帳 D152〜D154・docs/02_design/テーマ模様_素材受け入れ基準.md）。
+ * 色テーマとは独立に選び、<html data-pattern="<id>"> で切り替える（既定 "none" は今の見た目のまま）。
+ * 形は public/assets/patterns の黒1色 SVG を mask-image の型にし、色は各テーマの --yuuko-green-text、
+ * 濃さは opacity で決める（1つの SVG で全テーマに合う）。ID・濃さ・大きさは lib/ui-pattern.mjs の
+ * UI_PATTERNS と揃える（lib/ui-pattern.test.mjs で照合）。大きさ 100% = SVG の実寸で、継ぎ目が出ないよう整数 px に丸める。
+ *
+ * 敷き方: メイン画面の外枠（components/layout/PatternGround.tsx）に画面全体で1枚だけ敷く。
+ * 列ごとに別の層にすると境目で柄の並びがやり直しになり段差ができるため（ビューポート基準の fixed で1枚）。
+ * サイドバー・タイトルバー・カード・吹き出しは不透明な白のまま上に乗るので、文字の下には模様が出ない。
+ * 各画面の外側の div は地の色（--yuuko-cream）を不透明に塗っているため、模様があるときだけ透明にして、
+ * 同じ地の色を外枠（.app-ground）が受け持つ（--background と --yuuko-cream は全テーマで同じ値）。
+ * 印刷・Windows ハイコントラスト（forced-colors）では模様を出さない。
+ */
+[data-pattern="none"] {
+  --yuuko-pattern-image: none;
+  --yuuko-pattern-size: auto;
+  --yuuko-pattern-opacity: 0;
+}
+
+[data-pattern="pattern_dots"] {
+  --yuuko-pattern-image: url("/assets/patterns/dots.svg");
+  --yuuko-pattern-size: 36px 36px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="pattern_paw"] {
+  --yuuko-pattern-image: url("/assets/patterns/paw.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_sparkle"] {
+  --yuuko-pattern-image: url("/assets/patterns/sparkle.svg");
+  --yuuko-pattern-size: 60px 60px;
+  --yuuko-pattern-opacity: 0.13;
+}
+
+[data-pattern="gacha_pattern_gingham"] {
+  --yuuko-pattern-image: url("/assets/patterns/gingham.svg");
+  --yuuko-pattern-size: 32px 32px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_bone"] {
+  --yuuko-pattern-image: url("/assets/patterns/bone.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_grid"] {
+  --yuuko-pattern-image: url("/assets/patterns/grid.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.16;
+}
+
+[data-pattern="gacha_pattern_kotoba"] {
+  --yuuko-pattern-image: url("/assets/patterns/kotoba.svg");
+  --yuuko-pattern-size: 72px 72px;
+  --yuuko-pattern-opacity: 0.13;
+}
+
+[data-pattern="gacha_pattern_stripe"] {
+  --yuuko-pattern-image: url("/assets/patterns/stripe.svg");
+  --yuuko-pattern-size: 30px 30px;
+  --yuuko-pattern-opacity: 0.06;
+}
+
+[data-pattern="gacha_pattern_heart"] {
+  --yuuko-pattern-image: url("/assets/patterns/heart.svg");
+  --yuuko-pattern-size: 56px 56px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_cloud"] {
+  --yuuko-pattern-image: url("/assets/patterns/cloud.svg");
+  --yuuko-pattern-size: 72px 72px;
+  --yuuko-pattern-opacity: 0.11;
+}
+
+[data-pattern="gacha_pattern_sakura"] {
+  --yuuko-pattern-image: url("/assets/patterns/sakura.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_seigaiha"] {
+  --yuuko-pattern-image: url("/assets/patterns/seigaiha.svg");
+  --yuuko-pattern-size: 48px 24px;
+  --yuuko-pattern-opacity: 0.15;
+}
+
+[data-pattern="gacha_pattern_ginkgo"] {
+  --yuuko-pattern-image: url("/assets/patterns/ginkgo.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_snow"] {
+  --yuuko-pattern-image: url("/assets/patterns/snow.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.16;
+}
+
+/* 型抜きで塗る部品（画面全体の層・カスタマイズ画面の見本で共通）。-webkit- 付きはビルド時に自動で足される。 */
+.yuuko-pattern-fill {
+  background-color: var(--yuuko-green-text);
+  mask-image: var(--yuuko-pattern-image);
+  mask-size: var(--yuuko-pattern-size);
+  mask-repeat: repeat;
+  mask-position: 0 0;
+  opacity: var(--yuuko-pattern-opacity);
+}
+
+.app-ground {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--yuuko-cream);
+}
+
+/* 模様の層は「なし」のとき描かない（全画面の合成を増やさない）。 */
+.app-pattern-layer {
+  display: none;
+}
+
+html[data-pattern]:not([data-pattern="none"]) .app-pattern-layer {
+  display: block;
+  position: fixed;
+  inset: 0;
+  /* .app-ground（isolation: isolate）の中で、地の色の上・各画面の中身の下に描く。 */
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* 模様があるときだけ、各画面の外側の地の塗りを外して下の模様を見せる（Tailwind の utilities より優先される層外の指定）。 */
+html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-layer) {
+  background-color: transparent;
+}
+
+@media print {
+  .app-pattern-layer {
+    display: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .app-pattern-layer {
+    display: none !important;
+  }
+}
 
 /*
  * 常駐ゆうこ通知の登場/退場アニメーション（ゆうこ登場・通知挙動 詳細設計書 §8）。

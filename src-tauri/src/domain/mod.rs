@@ -6,6 +6,7 @@ pub mod friendship;
 pub mod fullscreen_suppression;
 pub mod gacha;
 pub mod notification_mode;
+pub mod pattern;
 pub mod resume_grace;
 pub mod reward;
 pub mod settings;

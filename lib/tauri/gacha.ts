@@ -7,8 +7,8 @@ import { isTauriRuntime } from "@/lib/tauri/settings";
  * Tauri 外（ブラウザでの開発表示）では null を返す。
  */
 
-/** 排出対象の種類（card: ひとことカード / theme: 色違いテーマ / deco: 飾り / balloon: 吹き出し）。 */
-export type GachaItemKind = "card" | "theme" | "deco" | "balloon";
+/** 排出対象の種類（card: ひとことカード / theme: 色違いテーマ / pattern: テーマの地の模様 / deco: 飾り / balloon: 吹き出し）。 */
+export type GachaItemKind = "card" | "theme" | "pattern" | "deco" | "balloon";
 
 /** コレクションの 1 件（ガチャマスタ順）。未所持のものは name / text が null（「？」で表示する）。 */
 export type GachaCollectionItem = {

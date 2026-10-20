@@ -36,6 +36,7 @@ use services::gacha_service::GachaService;
 use services::local_llm_service::LocalLlmService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::NewsService;
+use services::pattern_service::PatternService;
 use services::recommendation_service::RecommendationService;
 use services::reward_service::RewardService;
 use services::settings_service::SettingsService;
@@ -113,6 +114,9 @@ pub fn run() {
             // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
             // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
             let gacha_service = GachaService::new(GachaRepository::new(&paths));
+            // テーマの地に敷く模様。保存の正は設定 ui.patternId、所持はガチャ状態から読む（D152〜D154）。
+            let pattern_service =
+                PatternService::new(settings_service.clone(), gacha_service.clone());
             let article_service = ArticleService::new(article_repository.clone())
                 .with_gacha_service(gacha_service.clone());
             let news_service = NewsService::new(
@@ -212,6 +216,7 @@ pub fn run() {
                 gacha_service,
                 local_llm_service,
                 news_service,
+                pattern_service,
                 reward_service,
                 settings_service,
                 summary_service,
@@ -284,7 +289,9 @@ pub fn run() {
             commands::reward_commands::set_active_theme,
             commands::gacha_commands::get_gacha_state,
             commands::gacha_commands::draw_gacha_once,
-            commands::gacha_commands::mark_gacha_items_seen
+            commands::gacha_commands::mark_gacha_items_seen,
+            commands::pattern_commands::get_pattern_state,
+            commands::pattern_commands::set_active_pattern
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

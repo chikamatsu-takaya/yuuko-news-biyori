@@ -12,6 +12,7 @@ pub mod gacha_service;
 pub mod local_llm_service;
 pub mod news_scheduler;
 pub mod news_service;
+pub mod pattern_service;
 pub mod recommendation_service;
 pub mod reward_service;
 pub mod settings_service;

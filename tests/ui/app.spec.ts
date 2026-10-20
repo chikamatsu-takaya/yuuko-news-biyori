@@ -1029,6 +1029,84 @@ for (const { themeId, expectedTheme, background } of [
   });
 }
 
+// テーマの地に敷く模様（D152〜D154）: 保存済みの模様を <html data-pattern> へ反映し、画面の地に1枚の層で敷く。
+// 各画面の外側の地の塗りは透明になり、サイドバーなど不透明な白の部品はそのまま上に乗る。
+test("saved pattern is applied to the main window ground as one layer", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "pattern_paw");
+  const layer = page.getByTestId("app-pattern-layer");
+  await expect(layer).toHaveCount(1);
+  await expect(layer).toHaveCSS("position", "fixed");
+  await expect(layer).toHaveCSS("pointer-events", "none");
+  await expect(layer).toHaveCSS("opacity", "0.12");
+  const mask = await layer.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return { image: style.maskImage || style.webkitMaskImage, size: style.maskSize || style.webkitMaskSize };
+  });
+  expect(mask.image).toContain("/assets/patterns/paw.svg");
+  expect(mask.size).toBe("64px 64px");
+  // 層はビューポート全体を覆う1枚（列ごとに分けない）。
+  const box = await layer.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box && viewport && box.width === viewport.width && box.height === viewport.height).toBe(true);
+  // 画面の外側の地の塗りは透明にし、外枠が同じ地の色を受け持つ。サイドバーは白のまま。
+  await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.locator(".app-ground")).toHaveCSS("background-color", "rgb(255, 253, 245)");
+  await expect(page.locator("aside").first()).toHaveCSS("background-color", "rgb(255, 255, 255)");
+
+  // 他の画面へ移っても同じ層が残る。
+  await openScreenFromSidebar(page, "ニュース履歴", "ニュース履歴");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+  await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+});
+
+for (const activePatternId of ["none", "gacha_pattern_unknown", "../evil"]) {
+  test(`pattern ${activePatternId} keeps the ground plain (no layer, opaque screen background)`, async ({
+    page,
+  }) => {
+    await page.addInitScript((id: string) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_PATTERN_STATE__ = {
+        activePatternId: id,
+        selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, activePatternId);
+    await openHome(page);
+
+    await expect(page.locator("html")).toHaveAttribute("data-pattern", "none");
+    await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+    await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgb(255, 253, 245)");
+  });
+}
+
+test("pattern layer is hidden when printing", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_dots",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "pattern_dots");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+  await page.emulateMedia({ media: "print" });
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+  await page.emulateMedia({ media: "screen", forcedColors: "active" });
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+});
+
 // サイドバー「ニュースを見る」で当日ニュース一覧を開く共通操作。
 const openTodayNewsList = async (page: Page) => {
   await page
@@ -2121,6 +2199,97 @@ test("customize: browser preview (outside Tauri) labels the sample rank values",
   await expect(page.getByTestId("customize-footer-status")).toHaveText("カスタマイズ");
 });
 
+// カスタマイズ画面の模様（set_active_pattern・D152〜D154）。なし・初期の模様・所持済みのガチャ模様だけ選べる。
+const readPatternCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_SET_ACTIVE_PATTERN_CALLS__ as
+        | string[]
+        | undefined) ?? []
+  );
+
+test("customize: pattern tab lists owned patterns, hides unowned gacha ones and applies the choice", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "none",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw", "gacha_pattern_snow"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("なし");
+  await page.getByRole("tab", { name: "模様" }).click();
+
+  const options = page.getByTestId("customize-pattern-option");
+  await expect(options).toHaveCount(15);
+  const none = options.filter({ hasText: "なし" });
+  const dots = options.filter({ hasText: "水玉" });
+  const snow = options.filter({ hasText: "ゆきのひ（冬）" });
+  const locked = options.filter({ hasText: "？？？" });
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  await expect(dots).toBeEnabled();
+  await expect(snow).toBeEnabled();
+  // 未所持のガチャ模様 11 種は名前・形を伏せて押せない。
+  await expect(locked).toHaveCount(11);
+  await expect(locked.first()).toBeDisabled();
+  await expect(locked.first()).toHaveAttribute("aria-label", "？？？（ガチャで手に入るよ）");
+  await expect(locked.first().getByTestId("pattern-swatch")).toHaveCount(0);
+  await expect(page.getByText("桜ひらり（春）")).toHaveCount(0);
+  await expect(page.getByText("？？？の模様はガチャで手に入るよ")).toBeVisible();
+  // 見本はいまの色テーマで、その模様の形を出す。
+  const dotsSwatch = dots.getByTestId("pattern-swatch");
+  await expect(dotsSwatch).toHaveAttribute("data-pattern", "pattern_dots");
+
+  await locked.first().click({ force: true });
+  expect(await readPatternCalls(page)).toEqual([]);
+
+  await snow.click();
+  await expect(page.getByTestId("customize-pattern-message")).toHaveText("模様を「ゆきのひ（冬）」にしたよ。");
+  expect(await readPatternCalls(page)).toEqual(["gacha_pattern_snow"]);
+  await expect(snow).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "gacha_pattern_snow");
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("ゆきのひ（冬）");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+
+  await none.click();
+  await expect(page.getByTestId("customize-pattern-message")).toHaveText("模様をなしにしたよ。");
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "none");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+});
+
+test("customize: pattern load failure shows a fixed message and a retry without raw errors", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "模様" }).click();
+  await expect(page.getByTestId("customize-pattern-load-error")).toHaveText("模様の状態を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-pattern-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("—");
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByTestId("customize-pattern-retry").click();
+  await expect(page.getByTestId("customize-pattern-load-error")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-pattern-option").filter({ hasText: "肉球" })
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
 // カスタマイズ画面のテーマ切り替え（set_active_theme）。報酬テーマは解放済みだけ、ガチャテーマは所持済みだけ選べる。
 const setupThemeState = (page: Page) =>
   page.addInitScript(() => {
@@ -2238,7 +2407,8 @@ test("customize: categories follow D83 (deco and balloon are coming soon, nickna
   await openCustomize(page);
 
   const tabs = page.getByRole("tab");
-  await expect(tabs).toHaveText(["テーマ", "呼び名", "飾り", "吹き出し"]);
+  // 模様（D152〜D154）はテーマの次に並ぶ。
+  await expect(tabs).toHaveText(["テーマ", "模様", "呼び名", "飾り", "吹き出し"]);
   await expect(page.getByRole("tab", { name: "口調" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "性格" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "テーマ" })).toHaveAttribute("aria-selected", "true");
@@ -8381,6 +8551,33 @@ test("gacha draw shows result dialog, marks it seen, then shows complete", async
   await expect(gachaDrawButton(page)).toBeDisabled();
 });
 
+test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_GACHA_OVERRIDE__ = {
+      ownedIds: ["card-001"],
+      newIds: [],
+      master: [
+        { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
+        { itemId: "gacha_pattern_sakura", kind: "pattern", name: "桜ひらり（春）", text: null },
+      ],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openGacha(page);
+
+  await gachaDrawButton(page).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "桜ひらり（春）" })).toBeVisible();
+  await expect(dialog.getByText("種類：模様")).toBeVisible();
+  await expect(dialog.getByTestId("pattern-swatch")).toHaveAttribute("data-pattern", "gacha_pattern_sakura");
+  await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(
+    page.getByTestId("gacha-collection-owned").getByRole("button", { name: /桜ひらり（春）（模様）/ })
+  ).toBeVisible();
+});
+
 test("gacha disables the draw button and explains when fragments are insufficient", async ({
   page,
 }) => {
@@ -9658,6 +9855,33 @@ async function installTauriMocks(page: Page) {
             return themeWin.__E2E_REWARD_STATE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
+          case "get_pattern_state":
+          case "set_active_pattern": {
+            // テーマの地に敷く模様（D152〜D154）。既定は「なし」・初期の模様だけ選べる。
+            // __E2E_PATTERN_STATE__ で差し替え（"fail" で読み込み失敗）、set_active_pattern の呼び出しは記録する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const patternWin = window as any;
+            const current = patternWin.__E2E_PATTERN_STATE__ ?? {
+              activePatternId: "none",
+              selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+            };
+            if (cmd === "get_pattern_state") {
+              if (current === "fail") {
+                throw new Error("E2E pattern failure /internal/secret/path");
+              }
+              return current;
+            }
+            patternWin.__E2E_SET_ACTIVE_PATTERN_CALLS__ = [
+              ...(patternWin.__E2E_SET_ACTIVE_PATTERN_CALLS__ || []),
+              params.patternId,
+            ];
+            if (!current.selectablePatternIds.includes(params.patternId)) {
+              throw { code: "VALIDATION_ERROR", message: "E2E raw pattern failure /internal/secret/path" };
+            }
+            patternWin.__E2E_PATTERN_STATE__ = { ...current, activePatternId: params.patternId };
+            return patternWin.__E2E_PATTERN_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           case "record_friendship_event": {
             // 記事を開いただけで term_explained が記録されないことの検証用に種別を積む。
             /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -9880,7 +10104,7 @@ async function installTauriMocks(page: Page) {
             const gachaWin = window as any;
             if (!gachaWin.__E2E_GACHA__) {
               const override = gachaWin.__E2E_GACHA_OVERRIDE__ || {};
-              const master = [
+              const master = override.master ?? [
                 { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
                 { itemId: "theme-001", kind: "theme", name: "さくら色テーマ", text: null },
                 { itemId: "card-002", kind: "card", name: "おつかれカード", text: "がんばったね。ひと休みしよう？" },
