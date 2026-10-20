@@ -865,6 +865,8 @@ function YuukoCharacter() {
     <div className="relative">
       <Image
         src="/assets/yuuko.png"
+        // 右列の先頭付近に常に表示され、画面を開いた時点で見えている（LCP 要素）ため、遅延読み込みしない。
+        loading="eager"
         width={192}
         height={192}
         alt="ゆうこ"

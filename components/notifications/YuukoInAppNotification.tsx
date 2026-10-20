@@ -359,6 +359,8 @@ export default function YuukoInAppNotification({
         <div className="self-end">
           <Image
             src="/assets/yuuko.png"
+            // 通知が出た時点で画面内に見えている主役の画像（常駐ゆうこウィンドウでは最大要素）なので、遅延読み込みしない。
+            loading="eager"
             width={96}
             height={96}
             alt="ゆうこ"

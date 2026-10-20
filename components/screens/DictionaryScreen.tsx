@@ -1041,6 +1041,8 @@ export default function DictionaryScreen({
               <div className="relative">
                 <Image
                   src="/assets/yuuko.png"
+                  // 右列（ゆうこ列）の先頭付近に常に表示され、画面を開いた時点で見えているため、遅延読み込みしない。
+                  loading="eager"
                   width={144}
                   height={144}
                   alt="ゆうこ"
