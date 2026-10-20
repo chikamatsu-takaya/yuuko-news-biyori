@@ -22,7 +22,8 @@
   --destructive-foreground: oklch(0.577 0.245 27.325);
   --border: #E5E2D8;
   --input: #E5E2D8;
-  --ring: #5DBB72;
+  /* フォーカスの輪は意味を持つ線なので、文字用の濃い草色（--yuuko-green-text と同じ値）にする（D148）。 */
+  --ring: #2D7A40;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -36,10 +37,18 @@
   --sidebar-accent: #EAF7EA;
   --sidebar-accent-foreground: #3D3D3D;
   --sidebar-border: #E5E2D8;
-  --sidebar-ring: #5DBB72;
+  --sidebar-ring: #2D7A40;
   
   /* Custom Yuuko theme colors */
   --yuuko-green: #5DBB72;
+  /*
+   * 文字・細い線（枠線・フォーカス枠・意味を持つアイコン）用の草色（D148）。
+   * --yuuko-green（#5DBB72）は白地で 2.38:1 と WCAG AA に届かないため、背景・塗り・装飾だけに使い、
+   * 文字や細い線にはこちらを使う。#2D7A40 は 白 5.29:1 / クリーム背景 #FFFDF5 5.19:1 /
+   * --yuuko-green-light 4.78:1 / --yuuko-cream-dark 4.68:1（いずれも本文 4.5:1 以上）。
+   * 値は lib/theme-contrast.test.mjs で検査している。
+   */
+  --yuuko-green-text: #2D7A40;
   --yuuko-green-light: #EAF7EA;
   --yuuko-cream: #FFFDF5;
   --yuuko-cream-dark: #F4F1E7;
@@ -53,6 +62,7 @@
  */
 [data-theme="default"] {
   --yuuko-green: #5DBB72;
+  --yuuko-green-text: #2D7A40;
   --yuuko-green-light: #EAF7EA;
   --yuuko-cream: #FFFDF5;
 }
@@ -65,6 +75,7 @@
  *   本文 foreground/背景 ≒ 10.8:1、muted-foreground/背景・muted ≧ 5.2:1、
  *   primary ボタン（白文字）≧ 5.2:1、サイドバー選択中（--yuuko-green 文字/--yuuko-green-light）≧ 4.6:1。
  * --yuuko-green 系は名前に反してアプリのアクセント色として使われているため、テーマ色で上書きする。
+ * 報酬・ガチャテーマの --yuuko-green は最初から文字に使える濃さなので、--yuuko-green-text は同じ値にする。
  * 夜間（.dark）は報酬テーマではないため、ここには含めない。
  */
 [data-theme="theme_001"] {
@@ -95,6 +106,7 @@
   --sidebar-border: #D6E4F0;
   --sidebar-ring: #2B70AD;
   --yuuko-green: #2B70AD;
+  --yuuko-green-text: #2B70AD;
   --yuuko-green-light: #E6F2FC;
   --yuuko-cream: #F3F9FE;
   --yuuko-cream-dark: #EAF2F9;
@@ -130,6 +142,7 @@
   --sidebar-border: #F0DCE2;
   --sidebar-ring: #B53F61;
   --yuuko-green: #B53F61;
+  --yuuko-green-text: #B53F61;
   --yuuko-green-light: #FCEBF0;
   --yuuko-cream: #FFF7F9;
   --yuuko-cream-dark: #F9EEF1;
@@ -170,6 +183,7 @@
   --sidebar-border: #CDE8DF;
   --sidebar-ring: #1B7565;
   --yuuko-green: #1B7565;
+  --yuuko-green-text: #1B7565;
   --yuuko-green-light: #DFF3EC;
   --yuuko-cream: #F1FAF7;
   --yuuko-cream-dark: #E7F4EF;
@@ -205,6 +219,7 @@
   --sidebar-border: #F0E1B0;
   --sidebar-ring: #B25000;
   --yuuko-green: #B25000;
+  --yuuko-green-text: #B25000;
   --yuuko-green-light: #FFEFC2;
   --yuuko-cream: #FFFAE6;
   --yuuko-cream-dark: #FBF2D6;
@@ -240,6 +255,7 @@
   --sidebar-border: #DED6F2;
   --sidebar-ring: #6B4FB3;
   --yuuko-green: #6B4FB3;
+  --yuuko-green-text: #6B4FB3;
   --yuuko-green-light: #EEE8FB;
   --yuuko-cream: #F8F5FE;
   --yuuko-cream-dark: #F0ECF9;
@@ -280,6 +296,8 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.439 0 0);
+  /* 夜間は暗い背景なので、元の明るい草色のままで文字に使える（#5DBB72 / oklch(0.145 0 0) ≒ 8.3:1、/ muted 6.4:1）。 */
+  --yuuko-green-text: #5DBB72;
 }
 
 @theme inline {
@@ -332,14 +350,17 @@
   }
 }
 
-/* Prevent Windows contrast themes (forced-colors) from overriding app colors. */
-@media (forced-colors: active) {
-  :root,
-  body,
-  * {
-    forced-color-adjust: none;
-  }
-}
+/*
+ * Windows のハイコントラスト（forced-colors）では、OS の配色をそのまま使わせる（D148）。
+ * 以前は全要素に forced-color-adjust: none を当てて打ち消していたが、それではハイコントラストが効かず
+ * 文字が読めなくなる利用者がいるため撤去した。個別に打ち消しが必要な要素ができたら、その要素だけに当てる。
+ * 現在 forced-color-adjust: none（Tailwind の forced-color-adjust-none）を当てているのは次だけ:
+ *   - app/yuuko-window/page.tsx の html/body（透明な常駐ゆうこウィンドウが不透明な四角にならないように）
+ *   - components/screens/GachaScreen.tsx のガチャ機・背景装飾（文字を含まない絵）
+ *   - components/screens/CustomizeScreen.tsx のテーマ色見本（色そのものが情報）
+ *   - components/ui/progress.tsx の進み具合の塗り、components/ui/switch.tsx（OS の Highlight 等で明示的に描く）
+ * 塗りの色だけで選択中を示すチップ・タブは、lib/forced-colors.ts の FORCED_COLORS_SELECTED で枠を出す。
+ */
 
 /*
  * 常駐ゆうこ通知の登場/退場アニメーション（ゆうこ登場・通知挙動 詳細設計書 §8）。

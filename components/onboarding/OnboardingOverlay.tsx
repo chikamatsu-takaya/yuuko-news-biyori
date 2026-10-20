@@ -283,7 +283,7 @@ export default function OnboardingOverlay({
         onInteractOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle className="text-[var(--yuuko-green)]">
+          <DialogTitle className="text-[var(--yuuko-green-text)]">
             {isReplay ? "ゆうこの設定、もう一度見てみよう！" : "はじめまして、ゆうこだよ！"}
           </DialogTitle>
           <DialogDescription>

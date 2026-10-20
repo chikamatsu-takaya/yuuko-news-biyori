@@ -774,3 +774,28 @@ test("the yuuko window keeps the default theme and still shows the notification 
     .toBeGreaterThan(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "default");
 });
+
+test("Windows high contrast keeps the yuuko window transparent and the balloon readable", async ({
+  page,
+}) => {
+  // ハイコントラスト（forced-colors）でも、透明ウィンドウが不透明な四角にならないこと（D148）。
+  await page.emulateMedia({ forcedColors: "active" });
+  await installMocks(page, { state: activeState() });
+  await openYuukoWindow(page);
+
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region).toBeVisible();
+  await expect(
+    region.getByText("気になるニュースを見つけたよ。「デスクトップのE2Eニュース」")
+  ).toBeVisible();
+  const backgrounds = await page.evaluate(() => ({
+    matches: matchMedia("(forced-colors: active)").matches,
+    html: getComputedStyle(document.documentElement).backgroundColor,
+    body: getComputedStyle(document.body).backgroundColor,
+  }));
+  expect(backgrounds).toEqual({
+    matches: true,
+    html: "rgba(0, 0, 0, 0)",
+    body: "rgba(0, 0, 0, 0)",
+  });
+});

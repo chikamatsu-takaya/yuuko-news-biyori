@@ -291,7 +291,7 @@ export function DataMigrationPanel({
     <>
       <Card className="border-0 shadow-sm" data-testid="migration-export-card">
         <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
             <Download className="w-5 h-5" />
             データの書き出し
           </CardTitle>
@@ -359,7 +359,7 @@ export function DataMigrationPanel({
 
       <Card className="border-0 shadow-sm" data-testid="migration-import-card">
         <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+          <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
             <Upload className="w-5 h-5" />
             データの読み込み
           </CardTitle>

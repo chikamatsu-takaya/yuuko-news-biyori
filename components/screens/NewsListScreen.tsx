@@ -192,7 +192,7 @@ function TodayArticleCard({
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <Badge className="bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green)] border-0 text-[10px] px-1.5 py-0">
+            <Badge className="bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green-text)] border-0 text-[10px] px-1.5 py-0">
               {article.genre}
             </Badge>
             {article.isNew && (
@@ -298,7 +298,7 @@ export default function NewsListScreen({
         <aside className="w-52 bg-white border-r border-border flex flex-col p-3 flex-shrink-0">
           <Button
             variant="outline"
-            className="mb-4 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
+            className="mb-4 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
             onClick={() => handleNavigate("home")}
           >
             <ArrowLeft className="w-4 h-4" />
@@ -313,7 +313,7 @@ export default function NewsListScreen({
 
           <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
             <CardContent className="p-3">
-              <h4 className="text-xs font-semibold text-[var(--yuuko-green)] mb-2">
+              <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">
                 ゆうこの一言
               </h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -326,7 +326,7 @@ export default function NewsListScreen({
                 のぞいてみてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
                   🐾
                 </span>
               </div>
@@ -345,7 +345,7 @@ export default function NewsListScreen({
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
             <button
-              className="hover:text-[var(--yuuko-green)]"
+              className="hover:text-[var(--yuuko-green-text)]"
               onClick={() => handleNavigate("home")}
             >
               ホーム
@@ -357,7 +357,7 @@ export default function NewsListScreen({
           {/* Title + count */}
           <div className="flex items-center gap-2 mb-1">
             <Sparkles
-              className="w-6 h-6 text-[var(--yuuko-green)]"
+              className="w-6 h-6 text-[var(--yuuko-green-text)]"
               aria-hidden="true"
             />
             <h1 className="text-xl font-bold text-foreground">
@@ -380,10 +380,10 @@ export default function NewsListScreen({
               className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm"
             >
               <Info
-                className="h-4 w-4 text-[var(--yuuko-green)]"
+                className="h-4 w-4 text-[var(--yuuko-green-text)]"
                 aria-hidden="true"
               />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">
                 お知らせ
               </AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -394,7 +394,7 @@ export default function NewsListScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                     onClick={() => void loadTodayArticles()}
                     disabled={isLoading}
                   >
@@ -441,7 +441,7 @@ export default function NewsListScreen({
             ? "読み込み中..."
             : `今日取得したニュース ${articles.length}件`}
         </span>
-        <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+        <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
           🐾
         </span>
       </footer>

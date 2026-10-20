@@ -19,9 +19,10 @@ function Progress({
       )}
       {...props}
     >
+      {/* 進み具合は塗りの長さだけで示すため、ハイコントラストでも塗りを残す（OS の Highlight 色で描く・D148）。 */}
       <ProgressPrimitive.Indicator
         data-slot="progress-indicator"
-        className="bg-primary h-full w-full flex-1 transition-all"
+        className="bg-primary h-full w-full flex-1 transition-all forced-color-adjust-none forced-colors:bg-[Highlight]"
         style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
       />
     </ProgressPrimitive.Root>
