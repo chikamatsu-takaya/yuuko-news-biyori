@@ -11,10 +11,6 @@ pub(crate) const NICKNAME_MAX_CHARS: usize = 32;
 const GENRES_MAX_ITEMS: usize = 20;
 /// 関心ジャンル1件の最大文字数。選択肢は短いラベル（最長「セキュリティ」6文字）なので、呼び名と同じ32に揃える。
 const GENRE_MAX_CHARS: usize = 32;
-/// 通知を抑止するアプリの最大件数。手動管理する一覧として十分な量に絞り、判定時の走査負荷を抑える。
-const SUPPRESSED_APPS_MAX_ITEMS: usize = 50;
-/// 抑止アプリ1件の最大文字数。実行ファイルのフルパス指定を想定し、Windows の MAX_PATH（260）に合わせる。
-const SUPPRESSED_APP_MAX_CHARS: usize = 260;
 
 /// 改行・タブを含むすべての制御文字を含むかを判定する（1行のラベル・名前向け）。
 fn contains_control_char(text: &str) -> bool {
@@ -393,6 +389,10 @@ impl Default for NewsSettings {
     }
 }
 
+/// 通知設定。
+/// 旧版にあった `suppressedApps`（通知を抑止するアプリ一覧）は入力UIも判定処理も無かったため廃止した（D146）。
+/// 本構造体は `deny_unknown_fields` を付けていないので、旧 settings.json に残る `suppressedApps` は
+/// 読み込み時に無視され、次回保存時に自然に消える。会議中・全画面時の自動抑止（下記 suppress_* ）は残す。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -405,7 +405,6 @@ pub struct NotificationSettings {
     pub suppress_in_fullscreen: bool,
     pub suppress_when_mic_in_use: bool,
     pub suppress_during_meeting: bool,
-    pub suppressed_apps: Vec<String>,
 }
 
 impl Default for NotificationSettings {
@@ -418,45 +417,7 @@ impl Default for NotificationSettings {
             suppress_in_fullscreen: true,
             suppress_when_mic_in_use: true,
             suppress_during_meeting: true,
-            suppressed_apps: vec![],
         }
-    }
-}
-
-impl NotificationSettings {
-    /// 通知を抑止するアプリ一覧の保存前検証（件数・1件の文字数・空値・制御文字）。
-    /// 現時点では抑止アプリを編集する入力経路（DTO / Tauri command）が無いため未配線。
-    /// 入力経路を追加するときは、保存前にこれを呼ぶ。読み込み時には呼ばない（既存データを読めなくしないため）。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn validate_suppressed_apps(apps: &[String]) -> Result<(), AppError> {
-        if apps.len() > SUPPRESSED_APPS_MAX_ITEMS {
-            return Err(AppError::Validation(
-                "suppressedApps must contain 50 items or fewer".to_string(),
-            ));
-        }
-
-        if apps.iter().any(|app| app.trim().is_empty()) {
-            return Err(AppError::Validation(
-                "suppressedApps must not contain empty values".to_string(),
-            ));
-        }
-
-        if apps
-            .iter()
-            .any(|app| app.chars().count() > SUPPRESSED_APP_MAX_CHARS)
-        {
-            return Err(AppError::Validation(
-                "each suppressedApps item must be 260 characters or fewer".to_string(),
-            ));
-        }
-
-        if apps.iter().any(|app| contains_control_char(app)) {
-            return Err(AppError::Validation(
-                "suppressedApps must not contain control characters".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -1200,7 +1161,7 @@ mod tests {
                 "notification": {{ "suppressedApps": ["{}"] }}
             }}"#,
             "あ".repeat(GENRE_MAX_CHARS + 1),
-            "a".repeat(SUPPRESSED_APP_MAX_CHARS + 1)
+            "a".repeat(300)
         );
 
         let mut settings: PersistedSettings = serde_json::from_str(&legacy).unwrap();
@@ -1208,50 +1169,30 @@ mod tests {
         let dto = settings.to_dto();
 
         assert_eq!(dto.nickname, "ゆう\nこ");
-        assert_eq!(settings.notification.suppressed_apps.len(), 1);
         assert!(dto.validate().is_err());
     }
 
     #[test]
-    fn suppressed_apps_accept_values_within_limits() {
-        let apps: Vec<String> = (0..SUPPRESSED_APPS_MAX_ITEMS)
-            .map(|i| format!(r"C:\Apps\app{i}.exe"))
-            .collect();
-        assert!(NotificationSettings::validate_suppressed_apps(&apps).is_ok());
-        assert!(NotificationSettings::validate_suppressed_apps(&[
-            "a".repeat(SUPPRESSED_APP_MAX_CHARS)
-        ])
-        .is_ok());
-        assert!(NotificationSettings::validate_suppressed_apps(&[]).is_ok());
-    }
+    fn legacy_settings_with_suppressed_apps_still_load_and_drop_on_save() {
+        // D146 で廃止した suppressedApps を含む旧 settings.json でも読み込みに失敗せず、
+        // 他の通知設定（会議中・全画面時の自動抑止）はそのまま引き継ぐ。再保存時には出力しない。
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": false,
+                "suppressInFullscreen": false,
+                "suppressDuringMeeting": true,
+                "suppressedApps": ["C:\\Apps\\zoom.exe", "teams.exe"]
+            }
+        }"#;
 
-    #[test]
-    fn suppressed_apps_reject_values_over_limits() {
-        let too_many: Vec<String> = (0..=SUPPRESSED_APPS_MAX_ITEMS)
-            .map(|i| format!("app{i}.exe"))
-            .collect();
-        assert_eq!(
-            validation_message(NotificationSettings::validate_suppressed_apps(&too_many)),
-            "suppressedApps must contain 50 items or fewer"
-        );
+        let settings: PersistedSettings = serde_json::from_str(legacy).unwrap();
+        assert!(!settings.notification.enabled);
+        assert!(!settings.notification.suppress_in_fullscreen);
+        assert!(settings.notification.suppress_during_meeting);
 
-        let too_long = format!("秘密{}", "a".repeat(SUPPRESSED_APP_MAX_CHARS));
-        let message =
-            validation_message(NotificationSettings::validate_suppressed_apps(&[too_long]));
-        assert_eq!(
-            message,
-            "each suppressedApps item must be 260 characters or fewer"
-        );
-        assert!(!message.contains("秘密"));
-
-        assert!(NotificationSettings::validate_suppressed_apps(&["  ".to_string()]).is_err());
-        for app in ["app\n.exe", "app\t.exe", "app\u{0}.exe"] {
-            assert_eq!(
-                validation_message(NotificationSettings::validate_suppressed_apps(&[
-                    app.to_string()
-                ])),
-                "suppressedApps must not contain control characters"
-            );
-        }
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(!saved.contains("suppressedApps"));
+        assert!(saved.contains("suppressDuringMeeting"));
     }
 }
