@@ -2208,7 +2208,7 @@ mod tests {
         assert_eq!(reward.rank, 3);
         assert_eq!(
             result.state.balloon_text.as_deref(),
-            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！")
         );
         // ニュースは紹介していない（候補は残る）。通知回数は1回分消費する。
         let saved = load_state(&ctx);
@@ -2315,11 +2315,34 @@ mod tests {
         save_nickname(&ctx, "ゆう", true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
-        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
         assert_eq!(result.state.balloon_text.as_deref(), Some(expected));
         assert_eq!(result.state.reward_notification.unwrap().message, expected);
         let state = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn reward_notice_saved_with_long_text_before_d157_is_shown_shortened() {
+        // 短くする前（D157）の長い文言が yuuko_state.json に残っていても、取得時に短い文言で返して保存し直す。
+        let ctx = reward_pending_context(3);
+        save_nickname(&ctx, "ゆう", true);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        let old = "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let mut saved = load_state(&ctx);
+        saved.reward_notification.as_mut().unwrap().message = old.to_string();
+        saved.balloon_text = Some(old.to_string());
+        ctx.yuuko_state_repository.save(&saved).unwrap();
+
+        let shown = ctx.service.get_yuuko_notification_state().unwrap();
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
+        assert_eq!(shown.balloon_text.as_deref(), Some(expected));
+        assert_eq!(shown.reward_notification.unwrap().message, expected);
+        let resaved = load_state(&ctx);
+        assert_eq!(
+            resaved.reward_notification.unwrap().message,
+            "新しいテーマ「そらいろ」が届いたよ！"
+        );
     }
 
     /// 閉じた後のクールタイム・最短クールタイムを過去にして、次の判定を通せるようにする。

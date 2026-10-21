@@ -306,8 +306,7 @@ test("rapid clicks on 詳しく見る confirm only once", async ({ page }) => {
   expect(await commandCalls(page, "mark_yuuko_ignored")).toBe(0);
 });
 
-const REWARD_TEXT =
-  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+const REWARD_TEXT = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
 
 const rewardState = () => ({
   state: "RewardNotifying",
@@ -1062,7 +1061,7 @@ test("a dressed-up reward notice fits the dressed window", async ({ page }) => {
 // OK の分だけ吹き出しが高くなって上へはみ出さないこと。ニュースの吹き出しも同じ長さで確かめる。
 // 省略して見えない分も、文言の全文は DOM（読み上げ）と title（マウスを載せたとき）に残る。
 const LONG_NICKNAME = "ゆ".repeat(32);
-const LONG_REWARD_TEXT = `${LONG_NICKNAME}、新しいテーマ「とても長い名前のテーマ」が届いたよ！カスタマイズで切り替えられるよ。`;
+const LONG_REWARD_TEXT = `${LONG_NICKNAME}、新しいテーマ「とても長い名前のテーマ」が届いたよ！`;
 const LONG_SUMMON_MESSAGE = `${LONG_NICKNAME}、${SUMMON_MESSAGE}`;
 const LONG_NEWS_TEXT = `${LONG_NICKNAME}、気になるニュースを見つけたよ。「${"とても長いニュースのタイトル".repeat(8)}」`;
 
@@ -1139,7 +1138,7 @@ test("short reward text that fits in two lines is not ellipsized with the defaul
   page,
 }) => {
   // 既定の吹き出しで2行に収まる文言は省略されない（行数の上限に掛からない）。
-  // 余白の広い着せかえ（ノート・ゲームの窓）では同じ文言でも省略されうる（設計書 §9.3）。
+  // 5文字程度の呼び名での着せかえ別の確認は、末尾の typical nickname のテストで行う（設計書 §9.3）。
   await installMocks(page, { state: rewardState() });
   await openYuukoWindow(page);
   const paragraph = balloon(page).locator("p").first();
@@ -1148,4 +1147,68 @@ test("short reward text that fits in two lines is not ellipsized with the defaul
     (element) => element.scrollHeight > element.clientHeight + 1
   );
   expect(clipped).toBe(false);
+});
+
+// 報酬通知・一言は2行で省略される（D157 で文言を短くした）。5文字程度のふつうの呼び名なら、
+// 既定の吹き出しでも全10種の着せかえ吹き出しでも省略されずに全文が見えること。
+const TYPICAL_NICKNAME = "たろうくん";
+const typicalNoticeCases = [
+  { kind: "reward-one", text: `${TYPICAL_NICKNAME}、新しいテーマ「そらいろ」が届いたよ！`, extra: { reward: true } },
+  { kind: "reward-many", text: `${TYPICAL_NICKNAME}、新しいテーマが2つ届いたよ！`, extra: { reward: true } },
+  { kind: "notifications-off", text: `${TYPICAL_NICKNAME}、通知がOFFだよ。設定でONにしてね。`, extra: { message: true } },
+  { kind: "summon-failed", text: `${TYPICAL_NICKNAME}、ニュースを確認できなかったよ。また呼んでね。`, extra: { message: true } },
+] as const;
+
+async function expectNotEllipsized(page: Page, text: string, label: string) {
+  const paragraph = balloon(page).locator("p").first();
+  await expect(paragraph, label).toHaveText(text);
+  const clipped = await paragraph.evaluate(
+    (element) => element.scrollHeight > element.clientHeight + 1
+  );
+  expect(clipped, `${label} should fit in two lines`).toBe(false);
+}
+
+test("reward / summon text with a typical nickname is not ellipsized in any balloon", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await installMocks(page, { state: null });
+  // 着せかえなし（既定の吹き出し・既定の高さ）。
+  await openYuukoWindow(page);
+  for (const { kind, text, extra } of typicalNoticeCases) {
+    await emit(page, {
+      articleId: "",
+      title: "",
+      balloonText: text,
+      sourceName: "",
+      previewVisible: false,
+      ...extra,
+    });
+    await expect(balloon(page).getByRole("button", { name: "OK" }), kind).toBeVisible();
+    await expectNotEllipsized(page, text, `${kind} plain`);
+    await expectFitsInWindow(page, BALLOON_HEIGHT);
+  }
+  // 着せかえ（全10種の吹き出し×頭の飾り・着せかえ時の高さ）。
+  await openYuukoWindow(page, DRESSED_BALLOON_HEIGHT);
+  for (const { kind, text, extra } of typicalNoticeCases) {
+    for (const balloonId of ALL_BALLOON_IDS) {
+      const label = `${kind} ${balloonId}`;
+      await emit(page, {
+        articleId: "",
+        title: "",
+        balloonText: text,
+        sourceName: "",
+        previewVisible: false,
+        balloonId,
+        decoId: "gacha_deco_santa_hat",
+        ...extra,
+      });
+      await expect(balloon(page), label).toHaveAttribute(
+        "data-balloon-shape",
+        shapeOf(balloonId)
+      );
+      await expectNotEllipsized(page, text, label);
+      await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
+    }
+  }
 });
