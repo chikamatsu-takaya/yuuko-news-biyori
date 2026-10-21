@@ -45,6 +45,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 import {
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
+import {
   Newspaper,
   Clock,
   ArrowLeft,
@@ -248,13 +252,15 @@ const mapTauriHistoryItemToUi = (
     id: article.articleId,
     title: article.title,
     source: article.sourceName,
-    datetime: article.publishedAtText || article.fetchedAt,
+    // RFC3339 のまま出さず「YYYY/MM/DD HH:mm」（端末ローカル）に整える。
+    datetime: formatArticleDateTime(article.publishedAtText || article.fetchedAt),
     description:
       article.summary ??
       "概要はまだありません。記事を開くと保存済みの内容を確認できます。",
     readState,
     isFavorite: article.isFavorite,
-    isNew: readState === "unread",
+    // 未読でも公開（無ければ取得）から24時間を過ぎた記事には NEW を付けない。
+    isNew: isArticleNew(article),
     isArchived: article.isArchived,
     category: article.genre || "未分類",
     thumbnailType: toThumbnailType(article.genre),
