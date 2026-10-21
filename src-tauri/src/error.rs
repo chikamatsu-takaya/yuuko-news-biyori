@@ -80,7 +80,8 @@ pub enum AppError {
 }
 
 impl AppError {
-    fn code(&self) -> &'static str {
+    /// エラーの種類だけを表す固定コード（詳細文字列は含めない）。画面への戻り値とログで使う。
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "VALIDATION_ERROR",
             Self::Network(_) => "NETWORK_ERROR",
@@ -100,11 +101,6 @@ impl AppError {
             Self::AiOutputRejected => "AI_OUTPUT_REJECTED",
         }
     }
-}
-
-/// ログ用に、エラーの種類だけを表す固定コードを返す（詳細文字列は含めない）。
-pub fn app_error_code(error: &AppError) -> &'static str {
-    error.code()
 }
 
 impl AppError {

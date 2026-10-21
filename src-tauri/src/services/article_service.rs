@@ -167,10 +167,7 @@ impl ArticleService {
                 }
             }
             other => {
-                log::warn!(
-                    "Failed to load article detail {log_id}: {}",
-                    crate::error::app_error_code(&other)
-                );
+                log::warn!("Failed to load article detail {log_id}: {}", other.code());
                 other
             }
         }
@@ -311,8 +308,6 @@ fn age_hours_since(fetched_at: &str, now: DateTime<Utc>) -> Option<f64> {
     Some(elapsed.num_seconds() as f64 / 3600.0)
 }
 
-/// 既読の前進結果を bool にし、失敗時は調査用ログだけ残す（前進して保存できたときだけ true）。
-/// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
 /// ログへ出す記事ID。外部入力なので、制御文字を避けて先頭だけに切り詰める（Debug 表記でエスケープ）。
 fn loggable_article_id(article_id: &str) -> String {
     const MAX_CHARS: usize = 64;
@@ -320,6 +315,8 @@ fn loggable_article_id(article_id: &str) -> String {
     format!("{truncated:?}")
 }
 
+/// 既読の前進結果を bool にし、失敗時は調査用ログだけ残す（前進して保存できたときだけ true）。
+/// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
 fn read_state_advanced_or_log(article_id: &str, result: Result<bool, AppError>) -> bool {
     match result {
         Ok(advanced) => advanced,

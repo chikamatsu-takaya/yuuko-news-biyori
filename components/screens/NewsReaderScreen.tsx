@@ -1002,7 +1002,11 @@ const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
   // 複数Rangeの toString() は対象外文字列が混入し得るため state へ保持しない。
   const isSingleRange = Boolean(selection) && rangeCount === 1;
   const range = isSingleRange ? selection!.getRangeAt(0) : null;
-  const trimmedText = isSingleRange ? (selection?.toString() ?? "").trim() : "";
+  // 要点・注目ポイントの複数項目にまたがる選択は項目ごとの改行が入るため、改行（と前後の空白）を
+  // 1つの空白へ置き換えてから扱う（項目をまたいだフレーズも1つの文として解説できるようにする）。
+  const trimmedText = isSingleRange
+    ? (selection?.toString() ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim()
+    : "";
 
   const startRegion = closestSelectableRegion(range?.startContainer ?? null);
   const endRegion = closestSelectableRegion(range?.endContainer ?? null);
@@ -1058,13 +1062,19 @@ const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
   // 選択の直下に置くと、次の行の文字に「解説」ボタンが重なる（2026-10-21 実機テスト B6）。
   // そのため縦位置は、選択を含むカード内容の最後の行のすぐ下（カードの下余白）にそろえる。
   // 横位置は従来どおり選択の右端に合わせる。カードが見つからないときは選択の下端を使う。
+  // 背の高いカードの上のほうを選んだときなど、カード内容の下端が画面外ならボタンが画面下端へ
+  // 押し付けられて選択から離れ・別の文字に重なるため、従来どおり選択の下端を基準にする。
   const regionCard = startRegion?.closest('[data-slot="card-content"]') ?? null;
   let anchorBottom = anchor.bottom;
   if (regionCard) {
     const cardRect = regionCard.getBoundingClientRect();
     const paddingBottom =
       Number.parseFloat(window.getComputedStyle(regionCard).paddingBottom) || 0;
-    anchorBottom = Math.max(anchor.bottom, cardRect.bottom - paddingBottom);
+    const contentBottom = cardRect.bottom - paddingBottom;
+    const maxButtonTop = viewportHeight - EXPLAIN_BUTTON_SIZE.height - 8;
+    if (contentBottom <= maxButtonTop) {
+      anchorBottom = Math.max(anchor.bottom, contentBottom);
+    }
   }
 
   // Rust 側の上限（D21）を超える選択は command へ送らないため、ボタンの代わりに案内を出す。

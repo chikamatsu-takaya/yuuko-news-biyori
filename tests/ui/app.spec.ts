@@ -4195,6 +4195,68 @@ test("reader: the 解説 button sits below the selected text instead of over the
   expect(buttonBox!.y).toBeGreaterThanOrEqual(regionBox!.y + regionBox!.height);
 });
 
+test("reader: in a card taller than the window, the 解説 button stays next to a selection near its top", async ({
+  page,
+}) => {
+  // 要約カードの下端が画面外に出るほど長い要約にする。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "ゆうこが読みやすいように、とても長い要約文を用意しました。".repeat(80);
+  });
+  await openReaderWithoutExplain(page);
+  const region = page.locator('[data-explain-selectable="summary"]');
+  const viewport = page.viewportSize()!;
+  const regionBox = await region.boundingBox();
+  expect(regionBox).not.toBeNull();
+  // 事前条件: 要約の下端は画面外（カード下端基準だとボタンが画面下端へ押し付けられる状況）。
+  expect(regionBox!.y + regionBox!.height).toBeGreaterThan(viewport.height);
+
+  // 要約の先頭数文字だけを選ぶ。
+  const selectionBottom = await page.evaluate(() => {
+    const element = document.querySelector('[data-explain-selectable="summary"]');
+    const node = element?.firstChild;
+    if (!node) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return range.getBoundingClientRect().bottom;
+  });
+  expect(selectionBottom).not.toBeNull();
+  await expect(explainButton(page)).toBeVisible();
+  const buttonBox = await explainButton(page).boundingBox();
+  expect(buttonBox).not.toBeNull();
+  // 画面下端ではなく、選択のすぐ下（従来の選択基準）に出る。
+  expect(buttonBox!.y).toBeGreaterThanOrEqual(selectionBottom!);
+  expect(buttonBox!.y).toBeLessThan(selectionBottom! + 20);
+  expect(buttonBox!.y + buttonBox!.height).toBeLessThan(viewport.height - 40);
+});
+
+test("reader: a selection spanning several key points is sent as one line", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  const selector = '[data-explain-selectable="keyPoints"]';
+  await page.locator(selector).scrollIntoViewIfNeeded();
+  await selectContentsWithin(page, selector);
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  // 項目ごとの改行は空白1つに置き換えて送る。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__?: string })
+          .__E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__
+    )
+  ).toBe("クリックできること 表示が崩れないこと");
+});
+
 test("reader: the term popup uses readable text sizes", async ({ page }) => {
   await openReaderWithoutExplain(page);
   await selectContentsWithin(page, '[data-explain-selectable="summary"]');
