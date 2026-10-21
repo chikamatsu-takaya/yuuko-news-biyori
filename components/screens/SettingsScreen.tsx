@@ -404,8 +404,9 @@ const hasUnsavedSettingsChanges = (
 type AiConnectionTestView = {
   tone: "success" | "warning";
   message: string;
-  // Gemini で APIキー未設定のときだけ MockProvider を案内する（画面詳細設計書 SCR-003 §7.6/§7.7）。
-  recommendMock: boolean;
+  // Gemini で APIキー未設定のときだけ、キーの要らないローカルを案内する。主経路はローカル
+  // （判断台帳 D99 / D103）で、Mock は開発・デモ用のため勧めない。
+  recommendLocal: boolean;
 };
 
 // 接続テスト結果 → 表示。Rust から受け取る status / errorKind を固定文言へ写像し、
@@ -415,19 +416,27 @@ const mapAiConnectionTestResult = (
   result: AiProviderConnectionTestResult
 ): AiConnectionTestView => {
   if (result.status === "available") {
-    return { tone: "success", message: "利用可能です", recommendMock: false };
+    return {
+      tone: "success",
+      // Mock は本物のAIではないため、「AIで作れる」と誤解させない文言にする。
+      message:
+        result.provider === "mock"
+          ? "動作確認用の決まった文で動きます（本物のAIは使いません）"
+          : "このAIで要約・解説を作れます",
+      recommendLocal: false,
+    };
   }
   if (result.errorKind === "api_key_missing") {
     return {
       tone: "warning",
       message: "APIキーが未設定です",
-      recommendMock: result.provider === "gemini",
+      recommendLocal: result.provider === "gemini",
     };
   }
   // ローカル（同梱AI）の失敗は種別ごとの固定文言にする（パス・番号などは Rust 側で落としてある）。
   const localMessage = localAiConnectionMessage(result);
   if (localMessage) {
-    return { tone: "warning", message: localMessage, recommendMock: false };
+    return { tone: "warning", message: localMessage, recommendLocal: false };
   }
   if (
     result.status === "not_implemented" ||
@@ -436,13 +445,13 @@ const mapAiConnectionTestResult = (
     return {
       tone: "warning",
       message: "未対応のAIプロバイダーです",
-      recommendMock: false,
+      recommendLocal: false,
     };
   }
   return {
     tone: "warning",
     message: "接続に失敗しました",
-    recommendMock: false,
+    recommendLocal: false,
   };
 };
 
@@ -472,7 +481,7 @@ const localAiConnectionMessage = (
 const aiConnectionTestFailedView: AiConnectionTestView = {
   tone: "warning",
   message: "接続に失敗しました",
-  recommendMock: false,
+  recommendLocal: false,
 };
 
 // Sub Components
@@ -1339,25 +1348,28 @@ export default function SettingsScreen({
                         updateAi("provider", v);
                       }}
                     >
-                      <SelectTrigger className="w-48">
+                      <SelectTrigger className="w-72 max-w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
-                        <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* local は同梱の llama-server（このパソコンの中で動くAI・判断台帳 D99）で生成する。 */}
+                        {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
+                            おすすめと分かる名前にする。Gemini は任意、Mock は開発・デモ用なので最後。
+                            保存値（value）は従来のまま変えない。 */}
+                        <SelectItem value="local">ローカル（おすすめ）</SelectItem>
+                        <SelectItem value="gemini">Gemini（APIキーが必要）</SelectItem>
                         {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
-                        <SelectItem value="local">ローカル</SelectItem>
+                        <SelectItem value="mock">開発・デモ用（本物のAIは使いません）</SelectItem>
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。 */}
+                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。
+                      以前から Mock のままの利用者にも、ここでローカルへの切り替えを案内する（自動では切り替えない）。 */}
                   {settings.ai.provider === "mock" && (
                     <p
-                      className="text-xs text-muted-foreground py-2"
+                      className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-2 my-2 leading-relaxed"
                       data-testid="mock-provider-note"
                     >
-                      MockProvider は開発・デモ用です（外部AIは使いません）。
+                      いまは開発・デモ用の設定だよ。本物のAIは使わず、記事の先頭を少し抜き出した決まった文を出すだけなの。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。
                     </p>
                   )}
                   {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
@@ -1387,8 +1399,18 @@ export default function SettingsScreen({
                         {isTestingAi ? "テスト中…" : "接続テスト"}
                       </Button>
                     </div>
-                    {/* 結果は固定文言のみ表示（APIキー・生エラー文は出さない）。 */}
+                    {/* 進行中の案内と結果は固定文言のみ表示（APIキー・生エラー文は出さない）。
+                        ローカルは初回にモデルの照合とサーバー起動で30秒ほどかかるため、待っている理由を先に伝える。
+                        結果は次のテスト・プロバイダー切り替え・画面を離れるまで残す。 */}
                     <div role="status" aria-live="polite" data-testid="ai-connection-test-result">
+                      {isTestingAi && (
+                        <p
+                          className="mt-2 text-xs text-muted-foreground leading-relaxed"
+                          data-testid="ai-connection-test-progress"
+                        >
+                          テストしているよ。初めてのときは準備に30秒ほどかかるから、少し待っていてね。
+                        </p>
+                      )}
                       {aiTestView && (
                         <div
                           className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
@@ -1397,10 +1419,15 @@ export default function SettingsScreen({
                               : "border-amber-300 bg-amber-50 text-amber-800"
                           }`}
                         >
+                          <p className="font-medium">
+                            {aiTestView.tone === "success"
+                              ? "テスト結果：使えます"
+                              : "テスト結果：使えません"}
+                          </p>
                           <p>{aiTestView.message}</p>
-                          {aiTestView.recommendMock && (
+                          {aiTestView.recommendLocal && (
                             <p className="mt-1">
-                              Gemini を使うにはAPIキーの設定が必要です。キーを設定するまでは <strong>MockProvider</strong> の利用をおすすめします。
+                              Gemini を使うにはAPIキーの設定が必要です。キーを用意しない場合は、APIキーの要らない <strong>ローカル（おすすめ）</strong> を選んでください。
                             </p>
                           )}
                         </div>
@@ -1437,7 +1464,7 @@ export default function SettingsScreen({
                           className="text-xs text-muted-foreground"
                           data-testid="auto-summary-help"
                         >
-                          AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）
+                          AIの設定が開発・デモ用のときは動きません（ローカル・Gemini のときだけ、1件ずつ順番に要約します）
                         </span>
                       </div>
                       <Switch
@@ -1450,10 +1477,23 @@ export default function SettingsScreen({
                     </div>
                   </div>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
-                  {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
-                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。<strong>ローカル</strong>はこのパソコンの中だけで動くAIで、APIキーは要りません（記事の内容を外部へ送りません）。
-                  </p>
+                  {/* APIキーはこの画面で扱わず表示・保存もしない。方針（判断台帳 D99 / D103）に合わせ、
+                      ローカルを主経路・Gemini を任意・Mock を開発・デモ用として案内する。 */}
+                  <div
+                    className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50 space-y-1"
+                    data-testid="ai-provider-guide"
+                  >
+                    <p>
+                      💡 <strong>ローカル（おすすめ）</strong>：このパソコンの中で動くAIです。APIキーは要らず、記事の内容を外部へ送りません。
+                    </p>
+                    <p>
+                      <strong>Gemini</strong>：外部のAIです。APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります。キーが未設定のときは開発・デモ用の文で動きます。
+                    </p>
+                    <p>
+                      <strong>開発・デモ用</strong>：動作確認のための設定です。本物のAIは使わず、記事の先頭を少し抜き出した決まった文を出します。
+                    </p>
+                    <p>APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。</p>
+                  </div>
                 </CardContent>
               </Card>
             )}
