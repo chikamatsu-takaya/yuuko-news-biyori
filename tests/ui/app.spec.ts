@@ -1142,6 +1142,43 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
   await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
 });
 
+test.describe("article date display", () => {
+  // 日時は端末ローカル時刻で出すため、日本時間に固定して確かめる。
+  test.use({ timezoneId: "Asia/Tokyo" });
+
+  test("today-news list formats dates and shows NEW only for articles published within 24 hours", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_HISTORY_DATE_DISPLAY__ = true;
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await openHome(page);
+    await openTodayNewsList(page);
+
+    const main = page.locator("main");
+    const freshCard = main.getByRole("button", { name: "公開直後の記事" });
+    const oldCard = main.getByRole("button", { name: "4か月前に公開された記事" });
+    await expect(freshCard).toContainText("NEW");
+    await expect(freshCard).toContainText(/公開日: \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/);
+    // 取得したばかりでも4か月前に公開された記事は NEW にしない（B2）。
+    await expect(oldCard).not.toContainText("NEW");
+    // RFC3339 のままではなく、日本時間の「YYYY/MM/DD HH:mm」で出す（B1）。
+    await expect(oldCard).toContainText("公開日: 2026/06/05 15:43");
+    await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+
+    // ニュース履歴でも同じ表示にする。
+    await page
+      .getByRole("navigation")
+      .first()
+      .getByRole("button", { name: "ニュース履歴", exact: true })
+      .click();
+    await expect(main.getByText("2026/06/05 15:43").first()).toBeVisible();
+    await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+});
+
 test("today-news list shows the empty state (no crash, no cards) when nothing was acquired today", async ({
   page,
 }) => {
@@ -9216,6 +9253,29 @@ async function installTauriMocks(page: Page) {
                   title: "公開本日だが取得前日の記事",
                   fetchedAt: yesterdayIso,
                   publishedAtText: todayIso,
+                },
+              ];
+            }
+
+            // 日時表示・NEW 判定テスト用: 公開直後の未読記事と、取得は本日だが4か月前に公開された未読記事。
+            if (historyWin.__E2E_HISTORY_DATE_DISPLAY__) {
+              const now = new Date();
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "date-fresh",
+                  title: "公開直後の記事",
+                  fetchedAt: now.toISOString(),
+                  publishedAtText: new Date(
+                    now.getTime() - 60 * 60 * 1000
+                  ).toISOString(),
+                },
+                {
+                  ...articleHistoryItem,
+                  articleId: "date-old",
+                  title: "4か月前に公開された記事",
+                  fetchedAt: now.toISOString(),
+                  publishedAtText: "2026-06-05T06:43:31Z",
                 },
               ];
             }
