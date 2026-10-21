@@ -135,10 +135,10 @@ impl ArticleService {
         // 詳細設計書 §10.3: 詳細表示に成功した記事を DetailViewed へ進める。
         // 記事ファイルを2回探さないよう、詳細の取得と既読の前進はリポジトリで1回の読み込みにまとめる。
         // 既読保存は付随処理なので、失敗しても詳細表示自体は成功させる。
-        let (detail, advanced) = self.repository.get_article_detail_and_advance_read_state(
-            &article_id,
-            ArticleReadState::DetailViewed,
-        )?;
+        let (detail, advanced) = self
+            .repository
+            .get_article_detail_and_advance_read_state(&article_id, ArticleReadState::DetailViewed)
+            .map_err(|error| self.classify_article_detail_error(&article_id, error))?;
         if read_state_advanced_or_log(&article_id, advanced) {
             // 初めて詳細を開いた（既読になった）ときだけ、その日の既読数に数える（データ設計書 §12.3）。
             // DetailViewed は一方向の最終状態なので、同じ記事を二重に数えることはない。
@@ -148,6 +148,32 @@ impl ArticleService {
             }
         }
         Ok(detail)
+    }
+
+    /// 記事詳細の取得失敗を、画面が案内を出し分けられる種類へ整える。
+    /// 通常の保存先に無い（NotFound）記事がアーカイブ索引に載っていれば、起動時の整理などで
+    /// 過去ニュースへ移っただけなので ArticleArchived にする（画面は取り出しを案内できる）。
+    /// 失敗は調査用に WARN へ残す。記事ID（長さを抑えて）と種別だけで、本文・URL・パスは出さない。
+    fn classify_article_detail_error(&self, article_id: &str, error: AppError) -> AppError {
+        let log_id = loggable_article_id(article_id);
+        match error {
+            AppError::NotFound(detail) => {
+                if self.repository.is_article_in_archive(article_id) {
+                    log::warn!("Article detail is in the archive: {log_id}");
+                    AppError::ArticleArchived(article_id.to_string())
+                } else {
+                    log::warn!("Article detail not found: {log_id}");
+                    AppError::NotFound(detail)
+                }
+            }
+            other => {
+                log::warn!(
+                    "Failed to load article detail {log_id}: {}",
+                    crate::error::app_error_code(&other)
+                );
+                other
+            }
+        }
     }
 
     /// 保存済みの AI 要約だけを返す（本文抜粋で補わない）。ゆうこのデスクトップ通知用。
@@ -287,6 +313,13 @@ fn age_hours_since(fetched_at: &str, now: DateTime<Utc>) -> Option<f64> {
 
 /// 既読の前進結果を bool にし、失敗時は調査用ログだけ残す（前進して保存できたときだけ true）。
 /// ログには記事IDとエラー種別・理由のみを出し、本文は出さない。
+/// ログへ出す記事ID。外部入力なので、制御文字を避けて先頭だけに切り詰める（Debug 表記でエスケープ）。
+fn loggable_article_id(article_id: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let truncated: String = article_id.chars().take(MAX_CHARS).collect();
+    format!("{truncated:?}")
+}
+
 fn read_state_advanced_or_log(article_id: &str, result: Result<bool, AppError>) -> bool {
     match result {
         Ok(advanced) => advanced,
@@ -612,6 +645,54 @@ mod tests {
         assert_eq!(saved.daily_grant.news_read_count, 3);
         assert!(saved.daily_grant.news_granted);
         assert_eq!(saved.star_fragments, INITIAL_FRAGMENTS + NEWS_DAILY_GRANT);
+    }
+
+    #[test]
+    fn get_article_detail_reports_archived_articles_separately_from_missing_ones() {
+        let ctx = make_context();
+        // シード記事（2026-06 取得）を過去ニュースへしまい、元の記事ファイルも整理で消す（起動時の整理と同じ状態）。
+        let summary = ctx
+            .service
+            .repository
+            .archive_candidates(fixed_now())
+            .unwrap();
+        assert!(summary.archived_article_count > 0);
+        ctx.service.repository.retire_archived_markdown().unwrap();
+        assert!(!ctx.news_dir.join("202606").join("article-001.md").exists());
+
+        // しまってある記事は「見つからない」ではなく ARTICLE_ARCHIVED で返す（画面が取り出しを案内できる）。
+        let error = ctx
+            .service
+            .get_article_detail(detail_params("article-001"))
+            .unwrap_err();
+        assert!(matches!(error, AppError::ArticleArchived(_)));
+
+        // 索引にも無い記事は従来どおり NotFound。
+        let error = ctx
+            .service
+            .get_article_detail(detail_params("no-such-article"))
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        // 既存の取り出し command と同じ処理で戻せば、もう一度開ける。
+        ctx.service
+            .restore_archived_article(RestoreArchivedArticleParams {
+                article_id: "article-001".to_string(),
+            })
+            .unwrap();
+        let detail = ctx
+            .service
+            .get_article_detail(detail_params("article-001"))
+            .unwrap();
+        assert_eq!(detail.article_id, "article-001");
+    }
+
+    #[test]
+    fn loggable_article_id_is_escaped_and_truncated() {
+        assert_eq!(loggable_article_id("article-001"), "\"article-001\"");
+        let long = "a".repeat(200);
+        assert_eq!(loggable_article_id(&long).len(), 64 + 2);
+        assert!(!loggable_article_id("x\ny").contains('\n'));
     }
 
     #[test]
