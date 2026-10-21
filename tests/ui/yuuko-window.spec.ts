@@ -1057,3 +1057,95 @@ test("a dressed-up reward notice fits the dressed window", async ({ page }) => {
     await expectDecoNotClipped(page, DRESSED_BALLOON_HEIGHT, `reward ${balloonId}`);
   }
 });
+
+// 報酬通知・一言（吹き出し＋OK）の文言が3行以上に折り返す長さ（上限 32 文字の呼び名など）でも、
+// OK の分だけ吹き出しが高くなって上へはみ出さないこと。ニュースの吹き出しも同じ長さで確かめる。
+// 省略して見えない分も、文言の全文は DOM（読み上げ）と title（マウスを載せたとき）に残る。
+const LONG_NICKNAME = "ゆ".repeat(32);
+const LONG_REWARD_TEXT = `${LONG_NICKNAME}、新しいテーマ「とても長い名前のテーマ」が届いたよ！カスタマイズで切り替えられるよ。`;
+const LONG_SUMMON_MESSAGE = `${LONG_NICKNAME}、${SUMMON_MESSAGE}`;
+const LONG_NEWS_TEXT = `${LONG_NICKNAME}、気になるニュースを見つけたよ。「${"とても長いニュースのタイトル".repeat(8)}」`;
+
+const longBalloonCases = [
+  { kind: "reward", text: LONG_REWARD_TEXT, extra: { reward: true } },
+  { kind: "message", text: LONG_SUMMON_MESSAGE, extra: { message: true } },
+  // 3行に収まらないほどの長文（呼び名の上限を超えた想定外の長さ）でも高さは増えない。
+  { kind: "reward-very-long", text: LONG_REWARD_TEXT.repeat(3), extra: { reward: true } },
+  { kind: "news", text: LONG_NEWS_TEXT, extra: {} },
+] as const;
+
+/** 吹き出し文言が省略されても、全文が DOM と title に残っていること。 */
+async function expectFullTextKept(page: Page, text: string, label: string) {
+  const paragraph = balloon(page).locator("p").first();
+  await expect(paragraph, label).toHaveText(text);
+  await expect(paragraph, label).toHaveAttribute("title", text);
+}
+
+test("long reward / message / news balloon text fits the default window", async ({
+  page,
+}) => {
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page);
+  for (const { kind, text, extra } of longBalloonCases) {
+    await emit(page, {
+      articleId: kind === "news" ? "desk-long-news" : "",
+      title: kind === "news" ? "デスクトップのE2Eニュース" : "",
+      balloonText: text,
+      sourceName: "",
+      previewVisible: false,
+      ...extra,
+    });
+    if (kind !== "news") {
+      await expect(balloon(page).getByRole("button", { name: "OK" }), kind).toBeVisible();
+    }
+    await expectFitsInWindow(page, BALLOON_HEIGHT);
+    // 吹き出しの上端も切れない（中身の箱の内側にあるが、念のため直接確かめる）。
+    const balloonBox = await balloon(page).boundingBox();
+    expect(balloonBox!.y, kind).toBeGreaterThanOrEqual(0);
+    await expectFullTextKept(page, text, kind);
+  }
+});
+
+test("long reward / message / news balloon text fits the dressed window with every balloon", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page, DRESSED_BALLOON_HEIGHT);
+  for (const { kind, text, extra } of longBalloonCases) {
+    for (const balloonId of ALL_BALLOON_IDS) {
+      const label = `${kind} ${balloonId}`;
+      await emit(page, {
+        articleId: kind === "news" ? `desk-long-${balloonId}` : "",
+        title: kind === "news" ? "デスクトップのE2Eニュース" : "",
+        balloonText: text,
+        sourceName: "",
+        previewVisible: false,
+        balloonId,
+        decoId: "gacha_deco_santa_hat",
+        ...extra,
+      });
+      await expect(balloon(page), label).toHaveAttribute(
+        "data-balloon-shape",
+        shapeOf(balloonId)
+      );
+      await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
+      await expectDecoNotClipped(page, DRESSED_BALLOON_HEIGHT, label);
+    }
+  }
+});
+
+test("short reward text that fits in two lines is not ellipsized with the default balloon", async ({
+  page,
+}) => {
+  // 既定の吹き出しで2行に収まる文言は省略されない（行数の上限に掛からない）。
+  // 余白の広い着せかえ（ノート・ゲームの窓）では同じ文言でも省略されうる（設計書 §9.3）。
+  await installMocks(page, { state: rewardState() });
+  await openYuukoWindow(page);
+  const paragraph = balloon(page).locator("p").first();
+  await expect(paragraph).toHaveText(REWARD_TEXT);
+  const clipped = await paragraph.evaluate(
+    (element) => element.scrollHeight > element.clientHeight + 1
+  );
+  expect(clipped).toBe(false);
+});
