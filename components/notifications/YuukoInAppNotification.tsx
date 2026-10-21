@@ -67,8 +67,9 @@ type YuukoInAppNotificationProps = {
   /** 自動退場（無操作タイムアウト＝無視扱い）。退場後に呼ばれる。 */
   onIgnore: () => void;
   /**
-   * 吹き出し文言と記事タイトルを3行までに収めるか（既定 false＝従来どおり全文）。
-   * 中身に合わせた固定サイズのデスクトップ用ウィンドウで、長いタイトルが上にはみ出さないようにする。
+   * 吹き出し文言と記事タイトルを3行まで（OK の付く報酬通知・一言の文言は2行まで）に収めるか
+   * （既定 false＝従来どおり全文）。中身に合わせた固定サイズのデスクトップ用ウィンドウで、
+   * 長い文言が上にはみ出さないようにする。省略は見た目だけで、吹き出し文言の全文は title にも載せる。
    */
   clampText?: boolean;
   /**
@@ -291,11 +292,14 @@ export default function YuukoInAppNotification({
           {variant !== "news" ? (
             // 報酬通知: 短い吹き出し＋OK。OK で確認済みにする（Rust 側）。閉じる・放置では未確認のまま。
             // デスクトップの吹き出し段階のウィンドウ（固定サイズ）に収まるよう、余白は小さめにする。
+            // clampText では OK の分だけ行数を2行に抑える（3行＋OK だと固定高さのウィンドウから上へはみ出すため）。
+            // 省略は見た目だけで、全文は DOM に残り読み上げられる。マウスを載せれば title で全文が読める。
             <div className="flex flex-col gap-1">
               <p
                 className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
-                  clampText ? "line-clamp-3" : ""
+                  clampText ? "line-clamp-2" : ""
                 }`}
+                title={clampText ? (balloonText ?? undefined) : undefined}
               >
                 {balloonText ?? "新しいテーマが届いたよ！"}
               </p>
@@ -315,10 +319,12 @@ export default function YuukoInAppNotification({
               onClick={handleFirstClick}
               className="block w-full text-left"
             >
+              {/* 3行で省略したときも、マウスを載せれば title で全文が読める。 */}
               <p
                 className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
                   clampText ? "line-clamp-3" : ""
                 }`}
+                title={clampText ? (balloonText ?? undefined) : undefined}
               >
                 {balloonText ?? "気になるニュースを見つけたよ。"}
               </p>
