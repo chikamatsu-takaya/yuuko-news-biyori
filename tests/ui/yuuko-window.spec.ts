@@ -1135,10 +1135,11 @@ test("long reward / message / news balloon text fits the dressed window with eve
   }
 });
 
-test("short reward text that fits in two lines is not ellipsized", async ({
+test("short reward text that fits in two lines is not ellipsized with the default balloon", async ({
   page,
 }) => {
-  // 2行に収まる今までの文言は省略されない（行数の上限に掛からない）。
+  // 既定の吹き出しで2行に収まる文言は省略されない（行数の上限に掛からない）。
+  // 余白の広い着せかえ（ノート・ゲームの窓）では同じ文言でも省略されうる（設計書 §9.3）。
   await installMocks(page, { state: rewardState() });
   await openYuukoWindow(page);
   const paragraph = balloon(page).locator("p").first();
