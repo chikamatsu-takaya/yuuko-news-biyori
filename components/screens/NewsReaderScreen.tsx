@@ -381,6 +381,7 @@ const buildFallbackDictionaryEntry = (
   relatedArticleTitle: currentArticle.title,
   isStarred: false,
   savedInDictionary: false,
+  isNotice: false,
 });
 
 const mapTauriArticleToUi = (
@@ -556,6 +557,12 @@ function TermPopup({
     };
   }, [applyOffset, clampToMain]);
 
+  // 選択が言葉の途中だったため Rust が語境界まで広げて解説したときは、見出しを解説した言葉（keyText）にし、
+  // 元の選択を注記する。広げていないとき（expandedFrom なし）は従来どおり選んだ文字列を見出しにする
+  // （保存済み辞書の命中で keyText の大文字・小文字が選択と違っても見出しは変えない）。
+  const expandedFrom = dictionaryEntry?.expandedFrom ?? null;
+  const headingText = expandedFrom && dictionaryEntry ? dictionaryEntry.keyText : term;
+
   // 開いたらダイアログへフォーカスを移し、Esc で閉じられ・支援技術にも内容が伝わるようにする。
   // 非モーダル（フォーカスは閉じ込めない）。用語の切替は key で再マウントされ、新しいダイアログへ移る。
   React.useEffect(() => {
@@ -700,10 +707,18 @@ function TermPopup({
           <h4
             id={headingId}
             className="line-clamp-3 cursor-text break-words text-base font-semibold text-foreground"
-            title={term}
+            title={headingText}
           >
-            {term}
+            {headingText}
           </h4>
+          {expandedFrom ? (
+            <p
+              data-term-popup-expanded-note="true"
+              className="mt-0.5 cursor-text break-words text-xs text-muted-foreground"
+            >
+              （選んだ「{expandedFrom}」から言葉全体にしたよ）
+            </p>
+          ) : null}
           {dictionaryEntry ? (
             <div className="mt-1 flex items-center gap-2">
               <Badge variant="outline" className="text-xs">
@@ -780,30 +795,34 @@ function TermPopup({
           >
             {dictionaryEntry.detailExplanation}
           </p>
-          <div className="pt-1">
-            {/* 保存状態は savedInDictionary で判定する（★ を外した保存済み項目も「辞書保存済み」）。
-                ★ の塗りは isStarred を反映するだけで、保存操作では ★ を付けない（要件定義書 §7.4.10）。 */}
-            <Button
-              variant={dictionaryEntry.savedInDictionary ? "secondary" : "outline"}
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              disabled={isLoading || isSaving || dictionaryEntry.savedInDictionary}
-              onClick={onSave}
-            >
-              <Star
-                className={`h-4 w-4 ${
-                  dictionaryEntry.isStarred
-                    ? "fill-yellow-500 text-yellow-500"
-                    : ""
-                }`}
-              />
-              {dictionaryEntry.savedInDictionary
-                ? "辞書保存済み"
-                : isSaving
-                  ? "保存中..."
-                  : "辞書に保存"}
-            </Button>
-          </div>
+          {/* 解説の代わりの案内（isNotice。「この言葉はゆうこにも分からなかったよ。」など）は辞書へ保存しないので、
+              保存ボタンを出さない（Rust 側も保存要求を拒否する）。 */}
+          {dictionaryEntry.isNotice ? null : (
+            <div className="pt-1">
+              {/* 保存状態は savedInDictionary で判定する（★ を外した保存済み項目も「辞書保存済み」）。
+                  ★ の塗りは isStarred を反映するだけで、保存操作では ★ を付けない（要件定義書 §7.4.10）。 */}
+              <Button
+                variant={dictionaryEntry.savedInDictionary ? "secondary" : "outline"}
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                disabled={isLoading || isSaving || dictionaryEntry.savedInDictionary}
+                onClick={onSave}
+              >
+                <Star
+                  className={`h-4 w-4 ${
+                    dictionaryEntry.isStarred
+                      ? "fill-yellow-500 text-yellow-500"
+                      : ""
+                  }`}
+                />
+                {dictionaryEntry.savedInDictionary
+                  ? "辞書保存済み"
+                  : isSaving
+                    ? "保存中..."
+                    : "辞書に保存"}
+              </Button>
+            </div>
+          )}
         </div>
       ) : !isLoading && !notice ? (
         <p
@@ -1593,8 +1612,13 @@ export default function NewsReaderScreen({
       setSelectedDictionaryEntry(entry ?? fallbackEntry);
 
       // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
-      const termKey = `${article.id}::${selectedTerm.term}`;
-      if (entry && !recordedTermsRef.current.has(termKey)) {
+      // 解説の代わりの案内（isNotice。「分からなかった」「言葉の途中みたい」）では加算しない。
+      // 言葉全体に広げて解説したとき（expandedFrom あり）は、解説した言葉（keyText）で数える
+      // （「ドエンジニアリング」「フォワードデプロイ」など別の切れ端から同じ語を何度も数えない）。
+      const termKey = `${article.id}::${
+        entry?.expandedFrom ? entry.keyText : selectedTerm.term
+      }`;
+      if (entry && !entry.isNotice && !recordedTermsRef.current.has(termKey)) {
         recordedTermsRef.current.add(termKey);
         void recordFriendshipEvent("term_explained")
           .then((result) => {
@@ -1713,7 +1737,12 @@ export default function NewsReaderScreen({
   }, [article.id, article.isFavorite, toast]);
 
   const handleSaveDictionaryEntry = React.useCallback(async () => {
-    if (!selectedDictionaryEntry || selectedDictionaryEntry.savedInDictionary) {
+    // 案内（isNotice）は保存しない（ボタンも出さないが、念のためここでも止める。Rust 側も拒否する）。
+    if (
+      !selectedDictionaryEntry ||
+      selectedDictionaryEntry.savedInDictionary ||
+      selectedDictionaryEntry.isNotice
+    ) {
       return;
     }
 
@@ -1735,7 +1764,12 @@ export default function NewsReaderScreen({
         isMountedRef.current &&
         requestId === saveDictionaryRequestIdRef.current
       ) {
-        setSelectedDictionaryEntry(savedEntry);
+        // 保存結果には expandedFrom（表示専用）が無いので引き継ぎ、広げた言葉の見出しと注記を保つ。
+        setSelectedDictionaryEntry(
+          entryToSave.expandedFrom
+            ? { ...savedEntry, expandedFrom: entryToSave.expandedFrom }
+            : savedEntry
+        );
       }
     } catch (error) {
       // 旧記事・旧保存の失敗通知・toast・生エラーは新記事の画面へ出さない。

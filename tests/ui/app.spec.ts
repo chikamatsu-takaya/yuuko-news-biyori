@@ -3093,6 +3093,115 @@ test("reader: 解説 command failure shows a reselect hint and 再試行 without
   await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
 });
 
+// explain_selected_term のモック応答の一部を差し替える（案内・語境界まで広げた解説の表示検証用）。
+const setExplainOverride = (page: Page, override: Record<string, unknown>) =>
+  page.evaluate((value) => {
+    (window as unknown as Record<string, unknown>).__E2E_EXPLAIN_TERM_OVERRIDE__ = value;
+  }, override);
+
+test("reader: a notice instead of an explanation hides 辞書に保存 and adds no friendship point", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // Rust が AI の「わからない」を固定の案内に置き換えて返した場合（isNotice）。
+  await setExplainOverride(page, {
+    shortExplanation: "この言葉はゆうこにも分からなかったよ。",
+    detailExplanation: "言葉の途中だけを選んでいないか確かめてみてね。",
+    isNotice: true,
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  await expect(termPopup(page).getByText("この言葉はゆうこにも分からなかったよ。")).toBeVisible();
+  // 案内は辞書へ保存しないので、保存ボタン（保存済み表示も）を出さない。
+  await expect(termPopup(page).getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(termPopup(page).getByRole("button", { name: "辞書保存済み" })).toHaveCount(0);
+  // 案内では term_explained の友情ポイントを加算しない。
+  await page.waitForTimeout(300);
+  expect(await recordedFriendshipEvents(page)).not.toContain("term_explained");
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+});
+
+test("reader: a selection extended to the whole word shows the word as the heading", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // Rust が言葉の途中の選択を語境界まで広げて解説した場合（keyText が広げた言葉・expandedFrom が元の選択）。
+  await setExplainOverride(page, {
+    keyText: "フォワードデプロイドエンジニアリング",
+    expandedFrom: "ドエンジニアリング",
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  const popup = termPopup(page);
+  await expect(
+    popup.getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect(
+    popup.getByText("（選んだ「ドエンジニアリング」から言葉全体にしたよ）")
+  ).toBeVisible();
+  // ダイアログの読み上げ名も広げた言葉になる。
+  await expect(
+    page.getByRole("dialog", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  // 通常の解説なので保存でき、友情ポイントも加算される。保存後も見出しと注記を保つ。
+  await expect(popup.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await popup.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(popup.getByRole("button", { name: "辞書保存済み" })).toBeVisible();
+  expect((await lastSavedDictionaryEntry(page))?.keyText).toBe(
+    "フォワードデプロイドエンジニアリング"
+  );
+  await expect(
+    popup.getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect(
+    popup.getByText("（選んだ「ドエンジニアリング」から言葉全体にしたよ）")
+  ).toBeVisible();
+  expect(await recordedFriendshipEvents(page)).toContain("term_explained");
+});
+
+test("reader: different selections extended to the same word add the friendship point once", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // どちらの選択も Rust が同じ言葉へ広げて解説した場合。友情ポイントは解説した言葉（keyText）で1回だけ。
+  await setExplainOverride(page, {
+    keyText: "フォワードデプロイドエンジニアリング",
+    expandedFrom: "ドエンジニアリング",
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect
+    .poll(async () =>
+      (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+    )
+    .toBe(1);
+  await termPopup(page).getByRole("button", { name: "閉じる" }).click();
+
+  // 別の場所（候補語）から選んでも、同じ言葉に広がったなら数えない。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(
+    (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+  ).toBe(1);
+});
+
+test("reader: a regular explanation keeps the selected text as the heading without a note", async ({
+  page,
+}) => {
+  await openReaderWithCandidatePopup(page);
+  const popup = termPopup(page);
+  await expect(popup.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await expect(popup.locator('[data-term-popup-expanded-note="true"]')).toHaveCount(0);
+});
+
 test("reader: 解説 failure message is chosen by error code and the selected text is not logged", async ({
   page,
 }) => {
@@ -10439,6 +10548,12 @@ async function installTauriMocks(page: Page) {
             // 保存済み辞書の命中（★ は外した状態）を返すテスト用。
             const savedUnstarred =
               explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
+            // 応答の一部を差し替えるテスト用（案内 isNotice・語境界まで広げた expandedFrom など）。
+            const explainOverride =
+              explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__ &&
+              typeof explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__ === "object"
+                ? explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__
+                : {};
             /* eslint-enable @typescript-eslint/no-explicit-any */
             // 種別のテスト用（既定は用語）。フレーズの判定自体は Rust 側の単体テストで確かめる。
             const explainType =
@@ -10451,6 +10566,8 @@ async function installTauriMocks(page: Page) {
               type: explainType,
               isStarred: false,
               savedInDictionary: savedUnstarred,
+              isNotice: false,
+              ...explainOverride,
             };
           }
           case "save_dictionary_entry": {
