@@ -37,6 +37,7 @@ import {
   getArticleDetail,
   getRecommendedArticles,
   openOriginalArticle,
+  restoreArchivedArticle,
   updateArticleFavorite,
   type ArticleDetailDto as TauriArticleDetail,
   type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
@@ -105,7 +106,20 @@ type ReaderArticleDetail = {
 };
 
 // 記事詳細の取得状態。Tauri で実記事を読み込み中・失敗のときは、サンプル記事を見せずに状態表示へ切り替える。
-type ArticleLoadState = "loading" | "ready" | "error";
+// - archived: 起動時の整理などで過去ニュース（アーカイブ）へ移った記事。待っても直らないため、取り出しを案内する。
+// - missing: 記事が見つからない（削除・整理済み）。待っても直らないため「少し待って」と言わず、一覧へ戻る導線を出す。
+// - error: それ以外の一時的な失敗。再試行を出す。
+type ArticleLoadState = "loading" | "ready" | "error" | "archived" | "missing";
+
+// 記事詳細の取得失敗コード（Rust の AppError と一致させる）から、案内の種類を選ぶ。
+const articleLoadFailureState = (
+  code: string | null
+): Extract<ArticleLoadState, "error" | "archived" | "missing"> =>
+  code === "ARTICLE_ARCHIVED"
+    ? "archived"
+    : code === "NOT_FOUND_ERROR"
+      ? "missing"
+      : "error";
 
 type RelatedArticle = {
   id: string;
@@ -271,6 +285,10 @@ const speechBubbleMessages = {
 ちょっと待っててね。`,
   loadError: `この記事、うまく読めなかったみたい。
 もう一度試してみてね。`,
+  archived: `この記事は、過去ニュースに
+しまってあるよ。`,
+  missing: `この記事、見つからなかったんだ。
+ほかのニュースを見てみてね。`,
   summaryWaiting: `この記事は、まとめる順番を
 待っているところだよ。`,
   summaryProcessing: `いま、この記事を
@@ -664,7 +682,7 @@ function TermPopup({
       tabIndex={-1}
       data-term-popup="true"
       data-term-popup-drag-surface="true"
-      className="absolute left-1/2 top-1/2 z-50 w-80 rounded-xl border border-border/50 bg-white p-4 shadow-lg outline-none"
+      className="absolute left-1/2 top-1/2 z-50 w-96 max-w-[calc(100%-16px)] rounded-xl border border-border/50 bg-white p-4 shadow-xl outline-none"
       style={{
         transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
       }}
@@ -681,18 +699,18 @@ function TermPopup({
               全文は title で確認できるようにする（用語は短いので省略されない）。 */}
           <h4
             id={headingId}
-            className="line-clamp-3 cursor-text break-words text-sm font-semibold text-foreground"
+            className="line-clamp-3 cursor-text break-words text-base font-semibold text-foreground"
             title={term}
           >
             {term}
           </h4>
           {dictionaryEntry ? (
             <div className="mt-1 flex items-center gap-2">
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="outline" className="text-xs">
                 {dictionaryTypeLabel(dictionaryEntry.type)}
               </Badge>
               {dictionaryEntry.relatedArticleTitle ? (
-                <span className="cursor-text text-[10px] text-muted-foreground">
+                <span className="cursor-text text-xs text-muted-foreground">
                   {dictionaryEntry.relatedArticleTitle}
                 </span>
               ) : null}
@@ -712,7 +730,7 @@ function TermPopup({
       {isLoading ? (
         <div
           data-term-popup-no-drag="true"
-          className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          className="mb-3 flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
         >
           <Spinner className="size-4" />
           <span>用語解説を調べているよ…</span>
@@ -727,7 +745,7 @@ function TermPopup({
             <Info className="h-3.5 w-3.5 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <span
-                className="block text-[10px] leading-normal text-muted-foreground"
+                className="block text-sm leading-normal text-muted-foreground"
                 role={noticeKind === "error" ? "alert" : "status"}
               >
                 {notice}
@@ -737,7 +755,7 @@ function TermPopup({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-6 shrink-0 px-2 text-[9px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
+                className="h-7 shrink-0 px-2 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                 onClick={onRetry}
                 disabled={isLoading}
               >
@@ -752,13 +770,13 @@ function TermPopup({
         <div className="space-y-2">
           <p
             data-term-popup-no-drag="true"
-            className="cursor-text text-xs font-medium leading-relaxed text-foreground"
+            className="cursor-text text-sm font-medium leading-relaxed text-foreground"
           >
             {dictionaryEntry.shortExplanation}
           </p>
           <p
             data-term-popup-no-drag="true"
-            className="cursor-text text-xs leading-relaxed text-muted-foreground"
+            className="cursor-text text-sm leading-relaxed text-foreground/80"
           >
             {dictionaryEntry.detailExplanation}
           </p>
@@ -790,7 +808,7 @@ function TermPopup({
       ) : !isLoading && !notice ? (
         <p
           data-term-popup-no-drag="true"
-          className="cursor-text text-xs leading-relaxed text-muted-foreground"
+          className="cursor-text text-sm leading-relaxed text-muted-foreground"
         >
           用語解説を表示できなかったよ。
         </p>
@@ -925,12 +943,22 @@ const applyGeneratedSummary = (
 const SUMMARY_PROGRESS_POLL_INTERVAL_MS = 10_000;
 
 // 要約・再説明・要点・感想が未生成のときの固定表示（本文抜粋やサンプル記事で埋めない）。
-function NotGeneratedText({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>;
+function NotGeneratedText({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <p className={`text-sm leading-relaxed text-muted-foreground ${className}`.trim()}>
+      {children}
+    </p>
+  );
 }
 
-// 範囲選択の対象領域（ニュース要約・ゆうこの再説明）に付与するマーカー属性。
-// closest() でこの属性を持つ要素内に選択が収まっているかを判定する。
+// 範囲選択の対象領域（要約・ゆうこの解説・要点・注目ポイント・ゆうこの感想）に付与するマーカー属性。
+// closest() でこの属性を持つ要素内に選択が収まっているかを判定する（領域をまたぐ選択は対象外）。
 const EXPLAIN_SELECTABLE_ATTR = "data-explain-selectable";
 // 「解説」ボタンのおおよその表示サイズ（画面端での位置補正に使う）。
 const EXPLAIN_BUTTON_SIZE = { width: 60, height: 30 } as const;
@@ -974,7 +1002,11 @@ const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
   // 複数Rangeの toString() は対象外文字列が混入し得るため state へ保持しない。
   const isSingleRange = Boolean(selection) && rangeCount === 1;
   const range = isSingleRange ? selection!.getRangeAt(0) : null;
-  const trimmedText = isSingleRange ? (selection?.toString() ?? "").trim() : "";
+  // 要点・注目ポイントの複数項目にまたがる選択は項目ごとの改行が入るため、改行（と前後の空白）を
+  // 1つの空白へ置き換えてから扱う（項目をまたいだフレーズも1つの文として解説できるようにする）。
+  const trimmedText = isSingleRange
+    ? (selection?.toString() ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim()
+    : "";
 
   const startRegion = closestSelectableRegion(range?.startContainer ?? null);
   const endRegion = closestSelectableRegion(range?.endContainer ?? null);
@@ -1027,12 +1059,30 @@ const readExplainSelectionFromDom = (): ExplainSelectionState | null => {
     return null;
   }
 
+  // 選択の直下に置くと、次の行の文字に「解説」ボタンが重なる（2026-10-21 実機テスト B6）。
+  // そのため縦位置は、選択を含むカード内容の最後の行のすぐ下（カードの下余白）にそろえる。
+  // 横位置は従来どおり選択の右端に合わせる。カードが見つからないときは選択の下端を使う。
+  // 背の高いカードの上のほうを選んだときなど、カード内容の下端が画面外ならボタンが画面下端へ
+  // 押し付けられて選択から離れ・別の文字に重なるため、従来どおり選択の下端を基準にする。
+  const regionCard = startRegion?.closest('[data-slot="card-content"]') ?? null;
+  let anchorBottom = anchor.bottom;
+  if (regionCard) {
+    const cardRect = regionCard.getBoundingClientRect();
+    const paddingBottom =
+      Number.parseFloat(window.getComputedStyle(regionCard).paddingBottom) || 0;
+    const contentBottom = cardRect.bottom - paddingBottom;
+    const maxButtonTop = viewportHeight - EXPLAIN_BUTTON_SIZE.height - 8;
+    if (contentBottom <= maxButtonTop) {
+      anchorBottom = Math.max(anchor.bottom, contentBottom);
+    }
+  }
+
   // Rust 側の上限（D21）を超える選択は command へ送らないため、ボタンの代わりに案内を出す。
   const tooLong = isSelectedTextTooLong(trimmedText);
   const elementSize = tooLong ? EXPLAIN_TOO_LONG_HINT_SIZE : EXPLAIN_BUTTON_SIZE;
   const { left, top } = clampExplainButtonPosition({
     anchorRight: anchor.right,
-    anchorBottom: anchor.bottom,
+    anchorBottom,
     viewportWidth,
     viewportHeight,
     buttonWidth: elementSize.width,
@@ -1148,6 +1198,16 @@ export default function NewsReaderScreen({
       article.summaryState === "processing");
   // 自動要約が再試行上限まで失敗した記事。既存の手動要約を「要約を作り直す」として出す。
   const isSummaryFailed = isUnsummarized && article.summaryState === "failed";
+  // 未要約の記事で「要約を作成」（今すぐ要約・作り直しを含む）を実行中。要約欄も作成中の表示にする（実機テスト B5）。
+  const isCreatingSummary = isGeneratingSummary && isUnsummarized;
+  // 要約前で、解説・要点・注目ポイント・感想がどれもまだ無い記事。空の欄を4つ並べず、
+  // 要約欄の1行の案内にまとめる（要約ができたら各欄が並ぶ）。どれか1つでもあれば従来どおり各欄を出す。
+  const hasNoGeneratedSections =
+    isUnsummarized &&
+    !article.yuukoExplanation &&
+    article.keyPoints.length === 0 &&
+    article.focusPoints.length === 0 &&
+    !article.yuukoThoughts;
   // 右の吹き出しの代替文（ゆうこの感想が無いとき）。記事の読み込み・要約の状態と食い違わない文を選ぶ。
   // 手動の「要約を作成」実行中（isGeneratingSummary）も、自動要約の処理中と同じく「まとめているところ」を出す。
   const fallbackSpeechBubbleMessage =
@@ -1155,6 +1215,10 @@ export default function NewsReaderScreen({
       ? speechBubbleMessages.loading
       : articleLoadState === "error"
         ? speechBubbleMessages.loadError
+        : articleLoadState === "archived"
+          ? speechBubbleMessages.archived
+          : articleLoadState === "missing"
+            ? speechBubbleMessages.missing
         : isSummaryProcessing || (isGeneratingSummary && isUnsummarized)
           ? speechBubbleMessages.summaryProcessing
           : isSummaryWaiting
@@ -1175,6 +1239,13 @@ export default function NewsReaderScreen({
     ? supportTerms
     : supportTerms.slice(0, SUPPORT_TERMS_PREVIEW_LIMIT);
   const hiddenSupportTermCount = supportTerms.length - visibleSupportTerms.length;
+  // 右下「用語サポート」の使い方の案内。記事画面に本文の欄は無いため、実際に選べる欄
+  // （要約・ゆうこの解説・要点・注目ポイント・感想）と「解説」ボタンの操作に合わせる（実機テスト B6）。
+  // 要約前で選べる文が無いときは、要約ができてから選べることを伝える。
+  const termSupportHint =
+    articleLoadState === "ready" && hasNoGeneratedSections && !article.summary
+      ? "要約ができたら、文中の気になる言葉を選んでゆうこに聞けるよ。"
+      : "要約や解説・要点の気になる言葉をなぞって選ぶと「解説」ボタンが出るよ。押すと、ゆうこが説明するね。";
   // 関連記事が無ければ null（サンプル記事で埋めず「関連記事はまだないよ」を出す）。
   const featuredRelatedArticle =
     relatedArticles.find((item) => item.id !== article.id) ?? null;
@@ -1359,11 +1430,19 @@ export default function NewsReaderScreen({
       // 失敗時は本文をエラー表示に置き換えるため、サンプル記事の用語を選択状態にせず用語解説も開かない。
       setSelectedTerm(null);
       setShowTermPopup(false);
+      // アーカイブ済み・見つからないは待っても直らないため、種類ごとに案内を変える（2026-10-21 実機テスト A1）。
+      // 文言は固定で、生のエラー文言・パスは画面にもログにも出さない（ログはコードだけ）。
+      const errorCode = readCommandErrorCode(error);
+      const failureState = articleLoadFailureState(errorCode);
       setLoadNotice(
-        "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
+        failureState === "archived"
+          ? "この記事は過去ニュースにしまってあるよ。取り出して開く？"
+          : failureState === "missing"
+            ? "この記事は見つからなかったよ。整理で片付けられたのかも。ほかのニュースを見てみてね。"
+            : "記事詳細の取得に失敗しちゃった。少し待ってから、もう一度試してみてね。"
       );
-      setArticleLoadState("error");
-      console.warn("Failed to load article detail:", error);
+      setArticleLoadState(failureState);
+      console.warn("Failed to load article detail:", errorCode ?? "unknown");
     } finally {
       if (isMountedRef.current && requestId === loadArticleRequestIdRef.current) {
         setIsLoadingArticle(false);
@@ -1374,6 +1453,53 @@ export default function NewsReaderScreen({
   React.useEffect(() => {
     void loadArticle();
   }, [loadArticle]);
+
+  // 過去ニュースへ移った記事を、利用者が「取り出して開く」を押したときだけ1記事復元して開き直す。
+  // 復元は既存の restore_archived_article（記事IDだけを渡し、ZIP・パスの解決は Rust 側）を再利用する。
+  // 失敗時は画面に留まり、固定文言で過去ニュース画面からの取り出しを案内する。
+  const [isRestoringArchived, setIsRestoringArchived] = React.useState(false);
+  const [restoreArchivedFailed, setRestoreArchivedFailed] = React.useState(false);
+  const restoreArchivedInFlightRef = React.useRef(false);
+  React.useEffect(() => {
+    setRestoreArchivedFailed(false);
+  }, [resolvedArticleId]);
+  const handleRestoreArchivedArticle = React.useCallback(async () => {
+    if (restoreArchivedInFlightRef.current) {
+      return;
+    }
+    restoreArchivedInFlightRef.current = true;
+    const requestArticleId = resolvedArticleId;
+    const requestId = loadArticleRequestIdRef.current;
+    setIsRestoringArchived(true);
+    setRestoreArchivedFailed(false);
+    try {
+      const result = await restoreArchivedArticle({ articleId: requestArticleId });
+      if (!isMountedRef.current || requestId !== loadArticleRequestIdRef.current) {
+        return;
+      }
+      const isRestored =
+        result.articleId === requestArticleId &&
+        (result.status === "restored" || result.status === "already_available");
+      if (!isRestored) {
+        throw new Error("unexpected restore result");
+      }
+      void loadArticle();
+    } catch (error) {
+      if (!isMountedRef.current || requestId !== loadArticleRequestIdRef.current) {
+        return;
+      }
+      setRestoreArchivedFailed(true);
+      console.warn(
+        "Failed to restore archived article:",
+        readCommandErrorCode(error) ?? "unknown"
+      );
+    } finally {
+      restoreArchivedInFlightRef.current = false;
+      if (isMountedRef.current) {
+        setIsRestoringArchived(false);
+      }
+    }
+  }, [loadArticle, resolvedArticleId]);
 
   const loadRelatedArticles = React.useCallback(async () => {
     loadRelatedRequestIdRef.current += 1;
@@ -1834,6 +1960,77 @@ export default function NewsReaderScreen({
                       <Spinner className="size-4" />
                       記事を読み込んでいるよ…
                     </div>
+                  ) : articleLoadState === "archived" ? (
+                    // 過去ニュースへ移った記事。押したときだけ取り出す（確認を兼ねる）。戻る導線も並べる。
+                    <div className="flex flex-col gap-3">
+                      <p role="alert" className="text-sm text-foreground">
+                        {loadNotice}
+                      </p>
+                      {restoreArchivedFailed ? (
+                        <p className="text-xs text-amber-700">
+                          うまく取り出せなかったよ。「過去ニュース」の画面から取り出してみてね。
+                        </p>
+                      ) : null}
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          className="h-8 gap-1.5 text-xs"
+                          onClick={() => void handleRestoreArchivedArticle()}
+                          disabled={isRestoringArchived || isLoadingArticle}
+                        >
+                          {isRestoringArchived ? (
+                            <>
+                              <Spinner className="size-4" />
+                              取り出しているよ…
+                            </>
+                          ) : (
+                            "取り出して開く"
+                          )}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => handleNavigate("past-news")}
+                          disabled={isRestoringArchived}
+                        >
+                          過去ニュースを見る
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={handleBack}
+                          disabled={isRestoringArchived}
+                        >
+                          戻る
+                        </Button>
+                      </div>
+                    </div>
+                  ) : articleLoadState === "missing" ? (
+                    // 見つからない記事は待っても直らないため、再試行ではなく一覧へ戻る導線を出す。
+                    <div className="flex flex-col gap-3">
+                      <p role="alert" className="text-sm text-foreground">
+                        {loadNotice}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => handleNavigate("news")}
+                        >
+                          ニュース一覧へ戻る
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={handleBack}
+                        >
+                          戻る
+                        </Button>
+                      </div>
+                    </div>
                   ) : (
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <p role="alert" className="text-sm text-foreground">
@@ -1933,7 +2130,15 @@ export default function NewsReaderScreen({
                   </Button>
                   )}
                 </div>
-                {isSummaryWaiting ? (
+                {isCreatingSummary ? (
+                  <div
+                    role="status"
+                    className="flex items-center gap-2 text-sm text-muted-foreground"
+                  >
+                    <Spinner className="size-4" />
+                    <span>ゆうこが要約を作っているよ。できあがったらここに表示するね。</span>
+                  </div>
+                ) : isSummaryWaiting ? (
                   <NotGeneratedText>
                     要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。
                   </NotGeneratedText>
@@ -1959,12 +2164,22 @@ export default function NewsReaderScreen({
                   {article.summary}
                 </p>
                 )}
+                {hasNoGeneratedSections ? (
+                  <NotGeneratedText className="mt-2">
+                    {isCreatingSummary || isSummaryProcessing
+                      ? "ゆうこの解説・要点・注目ポイント・感想も、いっしょに作っているよ。"
+                      : "要約ができると、ゆうこの解説・要点・注目ポイント・感想もここに並ぶよ。"}
+                  </NotGeneratedText>
+                ) : null}
                 {summaryNotice ? (
                   <p className="mt-3 text-xs text-amber-700">{summaryNotice}</p>
                 ) : null}
               </CardContent>
             </Card>
 
+            {/* 要約前で生成済みの欄が1つも無いときは、空の4欄を出さない（要約欄の案内にまとめる）。 */}
+            {hasNoGeneratedSections ? null : (
+            <>
             <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
                 <div className="mb-3 flex items-center gap-2">
@@ -2009,7 +2224,12 @@ export default function NewsReaderScreen({
                 {article.keyPoints.length === 0 ? (
                   <NotGeneratedText>要点はまだ作成されていないよ。</NotGeneratedText>
                 ) : (
-                <ul aria-label="要点" className="space-y-2">
+                /* 範囲選択の対象領域（要点）。項目をまたいだ選択も、この一覧の中なら対象。 */
+                <ul
+                  aria-label="要点"
+                  data-explain-selectable="keyPoints"
+                  className="space-y-2"
+                >
                   {article.keyPoints.map((point, index) => (
                     <li
                       key={`${article.id}-point-${index}`}
@@ -2031,7 +2251,12 @@ export default function NewsReaderScreen({
                   <h2 className="font-semibold text-foreground">注目ポイント</h2>
                 </div>
                 {article.focusPoints.length > 0 ? (
-                <ul aria-label="注目ポイント" className="space-y-2">
+                /* 範囲選択の対象領域（注目ポイント）。 */
+                <ul
+                  aria-label="注目ポイント"
+                  data-explain-selectable="focusPoints"
+                  className="space-y-2"
+                >
                   {article.focusPoints.map((point, index) => (
                     <li
                       key={`${article.id}-focus-${index}`}
@@ -2055,7 +2280,11 @@ export default function NewsReaderScreen({
                   <h2 className="font-semibold text-foreground">ゆうこの感想</h2>
                 </div>
                 {article.yuukoThoughts ? (
-                <p className="text-sm leading-relaxed text-foreground">
+                /* 範囲選択の対象領域（ゆうこの感想）。 */
+                <p
+                  data-explain-selectable="thoughts"
+                  className="text-sm leading-relaxed text-foreground"
+                >
                   {article.yuukoThoughts}
                 </p>
                 ) : (
@@ -2063,6 +2292,8 @@ export default function NewsReaderScreen({
                 )}
               </CardContent>
             </Card>
+            </>
+            )}
             </>
             )}
 
@@ -2238,11 +2469,16 @@ export default function NewsReaderScreen({
                 </Button>
               )}
               </>
-              ) : (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  本文を選ぶと、ゆうこが解説するよ
-                </p>
-              )}
+              ) : null}
+              {/* 候補語の有無によらず、選んで聞く操作を案内する（候補語の「解説」と同じ小窓で開く）。 */}
+              <p
+                data-term-support-hint="true"
+                className={`text-xs leading-relaxed text-muted-foreground${
+                  supportTerms.length > 0 ? " mt-3 border-t border-border/50 pt-3" : ""
+                }`}
+              >
+                {termSupportHint}
+              </p>
             </CardContent>
           </Card>
         </aside>

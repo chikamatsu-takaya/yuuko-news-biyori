@@ -3546,7 +3546,14 @@ const READER_SAMPLE_RELATED_TITLES = [
   "国内SaaS企業、業務改善支援の新施策を発表",
   "量子コンピュータ研究で新たな誤り訂正手法",
 ];
-const READER_EMPTY_TERMS_HINT = "本文を選ぶと、ゆうこが解説するよ";
+// 右下「用語サポート」の使い方の案内（記事画面に本文欄は無いため、実際に選べる欄と「解説」ボタンに合わせる）。
+const READER_EMPTY_TERMS_HINT =
+  "要約や解説・要点の気になる言葉をなぞって選ぶと「解説」ボタンが出るよ。押すと、ゆうこが説明するね。";
+// 要約前で生成済みの欄が無いとき、空の4欄の代わりに要約欄へ出す1行の案内。
+const READER_SECTIONS_PENDING_TEXT =
+  "要約ができると、ゆうこの解説・要点・注目ポイント・感想もここに並ぶよ。";
+const READER_CREATING_SUMMARY_TEXT =
+  "ゆうこが要約を作っているよ。できあがったらここに表示するね。";
 
 // サンプル記事のタイトル・候補語・関連記事が画面（本文・右サイド）のどこにも出ていないことを確認する。
 const expectNoReaderSampleContent = async (page: Page) => {
@@ -3604,15 +3611,20 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   // 右の吹き出しも「まとめた」とは言わず、まだまとめていないことを伝える。
   await expect(readerYuukoBubble(page)).toContainText("まだまとめていないよ");
   await expect(readerYuukoBubble(page)).not.toContainText("まとめてみました");
+  // 要約前は空の4欄（解説・要点・注目ポイント・感想）を並べず、要約欄の1行の案内にまとめる。
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toBeVisible();
+  for (const emptyText of [
+    "ゆうこの解説はまだ作成されていないよ。",
+    "要点はまだ作成されていないよ。",
+    "注目ポイントはまだ作成されていないよ。",
+    "ゆうこの感想はまだ作成されていないよ。",
+  ]) {
+    await expect(main.getByText(emptyText)).toHaveCount(0);
+  }
+  await expect(main.getByRole("heading", { name: "要点", exact: true })).toHaveCount(0);
+  // 選べる文がまだ無いので、右下の案内も「要約ができたら」と伝える。
   await expect(
-    main.getByText("ゆうこの解説はまだ作成されていないよ。")
-  ).toBeVisible();
-  await expect(main.getByText("要点はまだ作成されていないよ。")).toBeVisible();
-  await expect(
-    main.getByText("注目ポイントはまだ作成されていないよ。")
-  ).toBeVisible();
-  await expect(
-    main.getByText("ゆうこの感想はまだ作成されていないよ。")
+    page.getByText("要約ができたら、文中の気になる言葉を選んでゆうこに聞けるよ。")
   ).toBeVisible();
   // サンプル記事の要点や、本文抜粋の流用が出ていない。
   await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
@@ -3623,6 +3635,14 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await page.getByRole("button", { name: "要約を作成" }).click();
   // 生成中は吹き出しも「まだまとめていない」ではなく、まとめている最中であることを伝える。
   await expect(readerYuukoBubble(page)).toContainText("まとめているところだよ");
+  // 要約欄も「準備中」のままにせず、作成中であることを出す（実機テスト B5）。
+  await expect(page.getByRole("button", { name: "作成中..." })).toBeVisible();
+  await expect(main.getByText(READER_CREATING_SUMMARY_TEXT)).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(
+    main.getByText("ゆうこの解説・要点・注目ポイント・感想も、いっしょに作っているよ。")
+  ).toBeVisible();
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toHaveCount(0);
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
     "E2Eで生成された要約です。"
   );
@@ -3635,6 +3655,8 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await expect(main.getByText("確認できたよ。")).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_CREATING_SUMMARY_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toHaveCount(0);
 });
 
 // --- 自動要約の状態表示（判断台帳 D17） ---
@@ -4007,6 +4029,255 @@ test("reader summary: a failed article load shows an error state with 再試行 
     main.getByRole("heading", { name: "E2Eテスト用ニュース" })
   ).toBeVisible();
   await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
+});
+
+// --- 過去ニュースへ移った記事・見つからない記事の案内（2026-10-21 実機テスト A1） ---
+
+test("reader: an archived article explains it is in past news and restores it on request", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_FAIL__ =
+      "ARTICLE_ARCHIVED";
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  // 「少し待って」「再試行」ではなく、過去ニュースにしまってあることと取り出しを案内する。
+  await expect(main.getByRole("alert")).toHaveText(
+    "この記事は過去ニュースにしまってあるよ。取り出して開く？"
+  );
+  await expect(main.getByText("少し待ってから", { exact: false })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "過去ニュースを見る" })).toBeVisible();
+  await expect(readerYuukoBubble(page)).toContainText("過去ニュースに");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 開いただけでは取り出さない（押したときだけ）。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_RESTORE_ARCHIVED_ARGS__?: unknown[] })
+          .__E2E_RESTORE_ARCHIVED_ARGS__ ?? []
+    )
+  ).toEqual([]);
+
+  // 取り出すと（既存の restore_archived_article を記事IDだけで呼ぶ）、記事を開き直して表示する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARTICLE_DETAIL_FAIL__ = false;
+  });
+  await main.getByRole("button", { name: "取り出して開く" }).click();
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_RESTORE_ARCHIVED_ARGS__?: unknown[] })
+          .__E2E_RESTORE_ARCHIVED_ARGS__
+    )
+  ).toEqual([{ articleId: "e2e-article-1" }]);
+});
+
+test("reader: a failed restore of an archived article stays put and points to past news", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_ARTICLE_DETAIL_FAIL__ = "ARTICLE_ARCHIVED";
+    win.__E2E_RESTORE_ARCHIVED_FAIL__ = true;
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await main.getByRole("button", { name: "取り出して開く" }).click();
+  await expect(
+    main.getByText("うまく取り出せなかったよ。「過去ニュース」の画面から取り出してみてね。")
+  ).toBeVisible();
+  await expect(page.getByText("/internal/secret/archive.zip")).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "取り出して開く" })).toBeEnabled();
+
+  await main.getByRole("button", { name: "過去ニュースを見る" }).click();
+  await expect(
+    page.getByRole("navigation").first().getByRole("button", { name: "過去ニュース", exact: true })
+  ).toHaveAttribute("aria-current", "page");
+});
+
+test("reader: a missing article does not ask to wait and offers a way back to the list", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_FAIL__ =
+      "NOT_FOUND_ERROR";
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByRole("alert")).toHaveText(
+    "この記事は見つからなかったよ。整理で片付けられたのかも。ほかのニュースを見てみてね。"
+  );
+  await expect(main.getByText("少し待ってから", { exact: false })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "取り出して開く" })).toHaveCount(0);
+  await expect(readerYuukoBubble(page)).toContainText("見つからなかった");
+  await expectNoReaderSampleContent(page);
+
+  await main.getByRole("button", { name: "ニュース一覧へ戻る" }).click();
+  await expect(
+    page.getByRole("navigation").first().getByRole("button", { name: "ニュースを見る", exact: true })
+  ).toHaveAttribute("aria-current", "page");
+});
+
+// --- 要約以外の生成欄での用語解説と「解説」ボタンの位置（2026-10-21 実機テスト B6） ---
+
+for (const [region, label] of [
+  ["keyPoints", "要点"],
+  ["focusPoints", "注目ポイント"],
+  ["thoughts", "ゆうこの感想"],
+] as const) {
+  test(`reader: selecting text in ${label} also offers 解説 and explains it`, async ({
+    page,
+  }) => {
+    await openReaderWithoutExplain(page);
+    const selector = `[data-explain-selectable="${region}"]`;
+    const selectedText = (
+      (await page.locator(selector).textContent()) ?? ""
+    ).trim();
+    expect(selectedText.length).toBeGreaterThan(0);
+
+    // 画面外の選択にはボタンを出さないため、利用者と同じく欄を見える位置までスクロールしてから選ぶ。
+    await page.locator(selector).scrollIntoViewIfNeeded();
+    await selectContentsWithin(page, selector);
+    await expect(explainButton(page)).toBeVisible();
+    await explainButton(page).click();
+
+    await expect(termPopup(page)).toBeVisible();
+    await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  });
+}
+
+test("reader: the 解説 button sits below the selected text instead of over the next line", async ({
+  page,
+}) => {
+  // 複数行に折り返す長めの要約で、選択の直下の行と重ならないことを確かめる。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "ゆうこが読みやすいように、長めの要約文を用意しました。".repeat(6);
+  });
+  await openReaderWithoutExplain(page);
+
+  // 1行目の先頭数文字だけを選ぶ（従来はこの直下＝2行目の文字にボタンが重なっていた）。
+  await page.evaluate(() => {
+    const element = document.querySelector('[data-explain-selectable="summary"]');
+    const node = element?.firstChild;
+    if (!node) {
+      return;
+    }
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(explainButton(page)).toBeVisible();
+  const buttonBox = await explainButton(page).boundingBox();
+  const regionBox = await page
+    .locator('[data-explain-selectable="summary"]')
+    .boundingBox();
+  expect(buttonBox).not.toBeNull();
+  expect(regionBox).not.toBeNull();
+  // 要約が2行以上あり、ボタンは要約の最後の行より下にある（どの行の文字にも重ならない）。
+  expect(regionBox!.height).toBeGreaterThan(30);
+  expect(buttonBox!.y).toBeGreaterThanOrEqual(regionBox!.y + regionBox!.height);
+});
+
+test("reader: in a card taller than the window, the 解説 button stays next to a selection near its top", async ({
+  page,
+}) => {
+  // 要約カードの下端が画面外に出るほど長い要約にする。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "ゆうこが読みやすいように、とても長い要約文を用意しました。".repeat(80);
+  });
+  await openReaderWithoutExplain(page);
+  const region = page.locator('[data-explain-selectable="summary"]');
+  const viewport = page.viewportSize()!;
+  const regionBox = await region.boundingBox();
+  expect(regionBox).not.toBeNull();
+  // 事前条件: 要約の下端は画面外（カード下端基準だとボタンが画面下端へ押し付けられる状況）。
+  expect(regionBox!.y + regionBox!.height).toBeGreaterThan(viewport.height);
+
+  // 要約の先頭数文字だけを選ぶ。
+  const selectionBottom = await page.evaluate(() => {
+    const element = document.querySelector('[data-explain-selectable="summary"]');
+    const node = element?.firstChild;
+    if (!node) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return range.getBoundingClientRect().bottom;
+  });
+  expect(selectionBottom).not.toBeNull();
+  await expect(explainButton(page)).toBeVisible();
+  const buttonBox = await explainButton(page).boundingBox();
+  expect(buttonBox).not.toBeNull();
+  // 画面下端ではなく、選択のすぐ下（従来の選択基準）に出る。
+  expect(buttonBox!.y).toBeGreaterThanOrEqual(selectionBottom!);
+  expect(buttonBox!.y).toBeLessThan(selectionBottom! + 20);
+  expect(buttonBox!.y + buttonBox!.height).toBeLessThan(viewport.height - 40);
+});
+
+test("reader: a selection spanning several key points is sent as one line", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  const selector = '[data-explain-selectable="keyPoints"]';
+  await page.locator(selector).scrollIntoViewIfNeeded();
+  await selectContentsWithin(page, selector);
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  // 項目ごとの改行は空白1つに置き換えて送る。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__?: string })
+          .__E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__
+    )
+  ).toBe("クリックできること 表示が崩れないこと");
+});
+
+test("reader: the term popup uses readable text sizes", async ({ page }) => {
+  await openReaderWithoutExplain(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(termPopup(page)).toBeVisible();
+  await expect(page.getByText("用語解説を調べているよ…")).toHaveCount(0);
+
+  // 小窓の中の文字は 12px 以上（従来は 9〜10px の文字があった）。
+  const smallestFontSize = await termPopup(page).evaluate((root) => {
+    let smallest = Number.POSITIVE_INFINITY;
+    root.querySelectorAll("*").forEach((element) => {
+      const hasText = Array.from(element.childNodes).some(
+        (child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim()
+      );
+      if (hasText) {
+        smallest = Math.min(smallest, Number.parseFloat(getComputedStyle(element).fontSize));
+      }
+    });
+    return smallest;
+  });
+  expect(smallestFontSize).toBeGreaterThanOrEqual(12);
 });
 
 test("reader: a real article with no keyword candidates shows the selection hint instead of sample terms or related articles", async ({
@@ -9373,9 +9644,13 @@ async function installTauriMocks(page: Page) {
               });
             }
             // 取得失敗モード: 本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+            // 文字列を入れたときはそのコードで reject する（ARTICLE_ARCHIVED / NOT_FOUND_ERROR の案内の検証用）。
             if (detailWin.__E2E_ARTICLE_DETAIL_FAIL__) {
               throw {
-                code: "STORAGE_ERROR",
+                code:
+                  typeof detailWin.__E2E_ARTICLE_DETAIL_FAIL__ === "string"
+                    ? detailWin.__E2E_ARTICLE_DETAIL_FAIL__
+                    : "STORAGE_ERROR",
                 message: "E2E raw detail failure /internal/secret/path",
               };
             }
