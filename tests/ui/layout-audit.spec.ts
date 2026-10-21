@@ -262,8 +262,10 @@ for (const viewport of VIEWPORTS) {
 // ホーム（MainScreen）は小柳さんの作り直し中のため対象外で、どちらの幅でも従来の w-64（256px）であることを確かめる。
 const RIGHT_COLUMN_WIDTHS: { id: string; narrow: number; wide: number }[] = [
   { id: "home", narrow: 256, wide: 256 },
-  { id: "reader", narrow: 240, wide: 288 },
+  // 記事画面は最小幅でタイトルが何行にも折り返したため、他画面より細い w-48 にしている（実機テスト B8）。
+  { id: "reader", narrow: 192, wide: 288 },
   { id: "history", narrow: 240, wide: 288 },
+  { id: "past-news", narrow: 240, wide: 288 },
   { id: "dictionary", narrow: 240, wide: 288 },
   { id: "customize", narrow: 240, wide: 256 },
   { id: "settings-1", narrow: 240, wide: 288 },
@@ -371,6 +373,121 @@ for (const id of MIN_WINDOW_SCREENS) {
       expect(box.x, target.name).toBeGreaterThanOrEqual(measured.left - 1);
       expect(box.x + box.width, target.name).toBeLessThanOrEqual(measured.centerRight + 1);
     }
+  });
+}
+
+// 起動時の大きさ（tauri.conf.json の 800×600）で、左サイドバーの画面ナビがスクロールせずに全部見えること（実機テスト B8）。
+// 高さが足りないときは「ゆうこの一言」カードを隠してメニューに場所を譲る。ホーム（小柳さん担当）と設定（別タスク）は対象外。
+const NAV_FIT_SCREENS = ["news-list", "reader", "history", "past-news", "dictionary", "customize", "gacha"] as const;
+
+for (const id of NAV_FIT_SCREENS) {
+  test(`sidebar nav ${id} @ 800x600: all items visible without scrolling`, async ({ page }, testInfo) => {
+    const screen = SCREENS.find((s) => s.id === id);
+    if (!screen) throw new Error(`unknown screen: ${id}`);
+    await page.setViewportSize({ width: 800, height: 600 });
+    await screen.open(page);
+    await page.waitForLoadState("networkidle");
+    await page.screenshot({ path: testInfo.outputPath(`nav-fit-${id}.png`) });
+
+    const nav = page.getByRole("navigation", { name: "画面ナビ" });
+    const result = await nav.evaluate((node) => {
+      const navRect = node.getBoundingClientRect();
+      const vh = document.documentElement.clientHeight;
+      const hidden = Array.from(node.querySelectorAll("button"))
+        .filter((button) => {
+          const rect = button.getBoundingClientRect();
+          return rect.top < navRect.top - 1 || rect.bottom > Math.min(navRect.bottom, vh) + 1;
+        })
+        .map((button) => (button.textContent ?? "").trim());
+      return { hidden, scrollable: node.scrollHeight > node.clientHeight + 1 };
+    });
+    expect(result.hidden).toEqual([]);
+    expect(result.scrollable).toBe(false);
+
+    // 十分な高さがあれば「ゆうこの一言」は出たまま（隠すのは低いときだけ）。
+    await page.setViewportSize({ width: 800, height: 760 });
+    await expect(page.locator("aside").first().getByText(/ゆうこの(一言|おはなし)/)).toBeVisible();
+  });
+}
+
+// 本文以外の文字（タイトルバー・サイドバー・状態表示・ボタン・タブ）はドラッグで選択されず、
+// 記事の本文（要約など）は選べるままであること（実機テスト B12）。
+test("UI chrome text is not selectable but article text stays selectable", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await SCREENS.find((s) => s.id === "reader")!.open(page);
+  await expect(page.getByText("E2E用の要約です。").first()).toBeVisible();
+  const userSelect = (locator: Locator) =>
+    locator.first().evaluate((node) => getComputedStyle(node).userSelect);
+  expect(await userSelect(page.locator("header"))).toBe("none");
+  expect(await userSelect(page.locator("footer"))).toBe("none");
+  expect(await userSelect(page.locator("aside").first())).toBe("none");
+  expect(await userSelect(page.locator("aside").first().getByText("自動起動", { exact: false }))).toBe("none");
+  expect(await userSelect(page.getByRole("button", { name: "戻る", exact: true }))).toBe("none");
+  // 本文・要約は選べる（用語解説の範囲選択に使う）。
+  expect(await userSelect(page.getByRole("heading", { name: "E2Eテスト用ニュース" }))).not.toBe("none");
+  expect(await userSelect(page.getByText("E2E用の要約です。"))).not.toBe("none");
+});
+
+// 過去ニュース画面にも、他画面と同じ右列のゆうこがいること（実機テスト B14）。
+test("past news screen has the yuuko column like other screens", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await SCREENS.find((s) => s.id === "past-news")!.open(page);
+  const column = page.getByTestId("past-news-yuuko-column");
+  await expect(column).toBeVisible();
+  await expect(column.getByAltText("ゆうこ")).toBeVisible();
+  await expect(column).toContainText("月ごとにしまってある");
+});
+
+// ニュース履歴の「過去ニュース」絞り込みは、メニューの過去ニュースと同じ記事を指すことと違い（並べ方）を案内する（B14）。
+test("history archived filter is named like the past news screen and explains the difference", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await SCREENS.find((s) => s.id === "history")!.open(page);
+  const filter = page.locator("main").getByRole("button", { name: "過去ニュース", exact: true });
+  await expect(page.locator("main").getByRole("button", { name: "アーカイブ", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("history-archived-filter-hint")).toHaveCount(0);
+  await filter.click();
+  const hint = page.getByTestId("history-archived-filter-hint");
+  await expect(hint).toContainText("過去ニュースへしまった記事");
+  await hint.getByRole("button", { name: /月ごとに見るなら/ }).click();
+  await expect(page.getByRole("heading", { name: "過去ニュース", exact: true })).toBeVisible();
+});
+
+// カスタマイズの見本: 吹き出しの見本はゆうこの頭のそばに出て、見本の下に大きな空白を残さないこと（実機テスト B10）。
+for (const viewport of VIEWPORTS) {
+  test(`customize preview balloon sits next to yuuko @ ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await SCREENS.find((s) => s.id === "customize")!.open(page);
+    await page.getByRole("tab", { name: "吹き出し", exact: true }).click();
+    const balloon = page.getByTestId("customize-preview-balloon");
+    const figure = page.getByTestId("customize-yuuko-figure");
+    await expect(balloon).toBeVisible();
+    await balloon.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`customize-balloon-${viewport.width}x${viewport.height}.png`) });
+    const b = (await balloon.boundingBox())!;
+    const f = (await figure.boundingBox())!;
+    // 吹き出しの下端がゆうこの上端の近く（頭のそば）にあり、横もゆうこと重なる範囲にある。
+    expect(Math.abs(b.y + b.height - f.y)).toBeLessThanOrEqual(48);
+    expect(b.x).toBeLessThan(f.x + f.width);
+    expect(b.x + b.width).toBeGreaterThan(f.x);
+    // ゆうこは舞台の横の中央にいる（中央寄せが二重になって左へずれ、狭い幅で切れていた）。
+    const stageBox = await figure.evaluate((node) => {
+      const r = node.closest('[data-slot="card"]')!.firstElementChild!.getBoundingClientRect();
+      return { x: r.x, width: r.width };
+    });
+    expect(Math.abs(f.x + f.width / 2 - (stageBox.x + stageBox.width / 2))).toBeLessThanOrEqual(4);
+    expect(f.x).toBeGreaterThanOrEqual(stageBox.x);
+    // 見本の舞台（ゆうこの絵がある領域）とカード下端（保存の案内）のあいだに大きな空白が無い。
+    const gap = await figure.evaluate((node) => {
+      const card = node.closest('[data-slot="card"]') as HTMLElement;
+      const note = card.lastElementChild as HTMLElement;
+      const stage = note.previousElementSibling as HTMLElement;
+      return {
+        stageToNote: note.getBoundingClientRect().top - stage.getBoundingClientRect().bottom,
+        noteToCard: card.getBoundingClientRect().bottom - note.getBoundingClientRect().bottom,
+      };
+    });
+    expect(gap.stageToNote).toBeLessThanOrEqual(1);
+    expect(gap.noteToCard).toBeLessThanOrEqual(1);
   });
 }
 

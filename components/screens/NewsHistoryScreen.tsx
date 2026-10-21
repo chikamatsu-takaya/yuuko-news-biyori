@@ -207,7 +207,10 @@ const filterChips: FilterChip[] = [
   { id: "unread", label: "未読", icon: Circle },
   { id: "read", label: "既読", icon: CheckCircle },
   { id: "favorite", label: "お気に入り", icon: Star },
-  { id: "archived", label: "アーカイブ", icon: Archive },
+  // アーカイブ済み（過去ニュースへしまった）記事の絞り込み。メニューの「過去ニュース」と同じ記事を指すことが
+  // 分かるよう、名前を「過去ニュース」にそろえる（実機テスト B14）。違いは並べ方（ここは履歴の一覧、
+  // 過去ニュース画面は月ごと）だけで、選んだときに下の案内で説明する。
+  { id: "archived", label: "過去ニュース", icon: Archive },
 ];
 
 const historyFilterIds: ArticleHistoryFilter[] = [
@@ -779,7 +782,8 @@ export default function NewsHistoryScreen({
           />
 
           {/* Yuuko Comment Card */}
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
               <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">ゆうこの一言</h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -858,6 +862,26 @@ export default function NewsHistoryScreen({
               />
             ))}
           </div>
+
+          {/* 「過去ニュース」で絞り込んだときだけ、過去ニュース画面との違い（並べ方）と移り方を案内する。 */}
+          {activeFilter === "archived" && (
+            <div
+              className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4 text-xs text-muted-foreground"
+              data-testid="history-archived-filter-hint"
+            >
+              <Info className="w-4 h-4 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <span>30日より前に過去ニュースへしまった記事を、履歴の一覧で表示しています。</span>
+              {onNavigate && (
+                <button
+                  type="button"
+                  className="text-[var(--yuuko-green-text)] underline underline-offset-2 hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)] rounded-sm"
+                  onClick={() => onNavigate("past-news")}
+                >
+                  月ごとに見るなら「過去ニュース」へ
+                </button>
+              )}
+            </div>
+          )}
 
           {/* タグでの絞り込み中の表示と解除。カードや詳細のタグを押すと絞り込み、ここでいつでも解除できる。 */}
           {selectedTag && (

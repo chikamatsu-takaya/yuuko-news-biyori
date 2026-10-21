@@ -821,7 +821,8 @@ export default function DictionaryScreen({
             onNavigate={handleNavigate}
           />
 
-          <div className="p-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
               <CardContent className="p-3">
                 <p className="mb-2 text-xs font-medium text-[var(--yuuko-green-text)]">
