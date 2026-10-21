@@ -5359,6 +5359,10 @@ test("settings storage panel shows saved data usage from the backend", async ({
   await expect(status).toContainText("1.0 MB");
   await expect(status).toContainText("辞書");
   await expect(status).toContainText("256.0 KB");
+  // 数える範囲（持ち運ぶ保存データだけ）を短く添える。
+  await expect(page.getByTestId("storage-scope-note")).toHaveText(
+    "引っ越しで持ち運ぶ保存データの合計だよ（ログ・書き出したZIP・AIモデルは含まないよ）。"
+  );
   await expect(page.getByText(/準備中/)).toHaveCount(0);
   await expect(page.getByRole("progressbar")).toHaveCount(0);
 
@@ -5457,6 +5461,22 @@ test("settings yuuko display tab shows a fixed message when the pattern cannot b
   // 吹き出し・飾りは既定（いつもの・なし）、呼び名が空なら未設定と出す。
   await expect(page.getByTestId("current-balloon")).toHaveText("いつもの");
   await expect(page.getByTestId("current-deco")).toHaveText("なし");
+});
+
+// 設定を読めなかったときは、呼び名を「まだ決めていない」と誤って出さない（レビュー対応）。
+test("settings yuuko display tab does not claim an empty nickname when settings fail to load", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ = "IO_ERROR";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-nickname")).toHaveText("読み込めなかったよ");
+  await expect(page.getByTestId("current-nickname")).not.toContainText("/internal/secret/path");
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
@@ -5803,6 +5823,35 @@ test("settings archive management deletes a month after confirming and refreshes
   expect(await readWindowValue(page, "__E2E_ARCHIVE_DELETE_CALLS__")).toEqual([
     "2026-07",
   ]);
+});
+
+// アーカイブ月を消すと保存データが減るため、ストレージ状況を読み直す（レビュー対応）。
+test("settings storage panel reloads usage after an archive month is deleted", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+  const callsBefore = (await readWindowValue(page, "__E2E_STORAGE_USAGE_CALL_COUNT__")) as number;
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = {
+      totalBytes: 512 * 1024,
+      articleBytes: 256 * 1024,
+      archiveBytes: 0,
+      dictionaryBytes: 128 * 1024,
+      otherBytes: 128 * 1024,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年7月のアーカイブ（30件）を削除したよ。"
+  );
+
+  await expect(page.getByTestId("storage-total")).toHaveText("512.0 KB");
+  expect(await readWindowValue(page, "__E2E_STORAGE_USAGE_CALL_COUNT__")).toBe(callsBefore + 1);
 });
 
 test("settings archive management still reports success when zip cleanup is pending", async ({

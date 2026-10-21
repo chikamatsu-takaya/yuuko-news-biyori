@@ -44,6 +44,7 @@ import {
   getAutostartEnabled,
   getUserSettings,
   isSettingsCorruptError,
+  isTauriRuntime,
   saveUserSettings,
   setAutostartEnabled,
   resetUserSettings,
@@ -1416,9 +1417,15 @@ export default function SettingsScreen({
                         className="text-sm text-foreground break-all text-right max-w-48"
                         data-testid="current-nickname"
                       >
-                        {backendSettings && backendSettings.nickname.trim() !== ""
-                          ? backendSettings.nickname
-                          : "まだ決めていないよ"}
+                        {backendSettings
+                          ? backendSettings.nickname.trim() !== ""
+                            ? backendSettings.nickname
+                            : "まだ決めていないよ"
+                          : isLoading
+                            ? "読み込み中…"
+                            : isTauriRuntime()
+                              ? "読み込めなかったよ"
+                              : "アプリで設定した呼び名が表示されるよ"}
                       </span>
                     </SettingRow>
                   </div>
@@ -1779,7 +1786,7 @@ export default function SettingsScreen({
                 <DataMigrationPanel
                   onImportingChange={handleMigrationImportingChange}
                 />
-                <ArchiveManagePanel />
+                <ArchiveManagePanel onDeleted={() => void loadStorageUsage()} />
               </>
             )}
 
@@ -1916,6 +1923,13 @@ export default function SettingsScreen({
                         {formatMigrationBytes(storageUsage.otherBytes)}
                       </dd>
                     </dl>
+                    {/* 数える範囲を誤解しないよう、移行ZIPと同じ「持ち運ぶ保存データ」だけだと示す。 */}
+                    <p
+                      className="text-[10px] text-muted-foreground leading-relaxed"
+                      data-testid="storage-scope-note"
+                    >
+                      引っ越しで持ち運ぶ保存データの合計だよ（ログ・書き出したZIP・AIモデルは含まないよ）。
+                    </p>
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">
