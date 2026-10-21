@@ -12,7 +12,7 @@
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -53,7 +53,12 @@ static RELEASE_TIMER: ReleaseTimer = ReleaseTimer::new();
 /// 起動時に表示したメインウィンドウを、最初のページ読み込み完了でもう一度前面へ出すか。
 /// setup 中の set_focus はイベントループ開始前・WebView 準備前のため Windows で効かないことがあり、
 /// 初回起動でエクスプローラーの裏に隠れた（実機テスト B11）。読み込み完了時に1回だけ再試行する。
-static FOCUS_MAIN_ON_FIRST_LOAD: AtomicBool = AtomicBool::new(false);
+/// 値は印を立てた（起動時に表示した）時刻。遅い PC で読み込みに時間がかかった場合は再試行しない
+/// （LAUNCH_REFOCUS_WINDOW）。
+static FOCUS_MAIN_ON_FIRST_LOAD: Mutex<Option<Instant>> = Mutex::new(None);
+/// 起動時表示から、読み込み完了での再前面化を許す時間。これを過ぎるとユーザーが別のアプリへ移っている
+/// 可能性が高く、そこからフォーカスを奪わないため再試行しない。
+const LAUNCH_REFOCUS_WINDOW: Duration = Duration::from_secs(10);
 
 /// 解放タイマーの世代管理。
 ///
@@ -326,10 +331,14 @@ pub fn handle_page_load<R: Runtime>(webview: &tauri::Webview<R>, payload: &PageL
 
 /// 起動時表示の後の最初の読み込み完了で、メインウィンドウを1回だけ前面へ出す。
 /// 自動起動のトレイ待機（表示しない起動）では印を立てないため、ここで勝手に表示・前面化はしない。
-/// 読み込み完了までにユーザーが閉じて隠していた場合も、表示中でなければ何もしない。
+/// 読み込み完了までにユーザーが閉じて隠していた場合や、表示から10秒を過ぎた場合も何もしない。
 fn focus_main_after_launch_load<R: Runtime>(window: &tauri::Window<R>) {
-    let pending = FOCUS_MAIN_ON_FIRST_LOAD.swap(false, Ordering::SeqCst);
-    if !should_focus_on_launch_load(pending, window.is_visible().unwrap_or(false)) {
+    let shown_at = FOCUS_MAIN_ON_FIRST_LOAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let elapsed = shown_at.map(|at| at.elapsed());
+    if !should_focus_on_launch_load(elapsed, window.is_visible().unwrap_or(false)) {
         return;
     }
     if let Err(error) = window.set_focus() {
@@ -337,8 +346,9 @@ fn focus_main_after_launch_load<R: Runtime>(window: &tauri::Window<R>) {
     }
 }
 
-fn should_focus_on_launch_load(pending: bool, main_visible: bool) -> bool {
-    pending && main_visible
+/// elapsed は起動時表示からの経過時間（印が無ければ None）。
+fn should_focus_on_launch_load(elapsed: Option<Duration>, main_visible: bool) -> bool {
+    main_visible && elapsed.is_some_and(|elapsed| elapsed <= LAUNCH_REFOCUS_WINDOW)
 }
 
 fn should_reset_unsaved_on_page_load(webview_label: &str, is_started: bool) -> bool {
@@ -432,7 +442,9 @@ pub fn apply_launch_visibility<R: Runtime>(
         log::warn!("起動時のメインウィンドウへフォーカスできませんでした: {error}");
     }
     // ここでのフォーカスが Windows で効かない場合に備え、最初の読み込み完了でもう一度前面へ出す。
-    FOCUS_MAIN_ON_FIRST_LOAD.store(true, Ordering::SeqCst);
+    *FOCUS_MAIN_ON_FIRST_LOAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
 }
 
 fn is_autostart_launch(args: impl IntoIterator<Item = OsString>) -> bool {
@@ -1022,11 +1034,30 @@ mod tests {
 
     #[test]
     fn launch_refocus_runs_only_when_shown_at_launch_and_still_visible() {
-        assert!(should_focus_on_launch_load(true, true));
+        let soon = Some(Duration::from_millis(800));
+        assert!(should_focus_on_launch_load(soon, true));
         // 自動起動のトレイ待機（印なし）では前面に出さない。
-        assert!(!should_focus_on_launch_load(false, true));
+        assert!(!should_focus_on_launch_load(None, true));
         // 読み込み完了までに隠された（トレイへしまわれた）なら出し直さない。
-        assert!(!should_focus_on_launch_load(true, false));
+        assert!(!should_focus_on_launch_load(soon, false));
+    }
+
+    #[test]
+    fn launch_refocus_is_skipped_after_the_window_of_ten_seconds() {
+        // 10秒ちょうどまでは再試行する。
+        assert!(should_focus_on_launch_load(
+            Some(LAUNCH_REFOCUS_WINDOW),
+            true
+        ));
+        // 遅い PC で読み込みが10秒を過ぎたら、別のアプリへ移ったユーザーからフォーカスを奪わない。
+        assert!(!should_focus_on_launch_load(
+            Some(LAUNCH_REFOCUS_WINDOW + Duration::from_millis(1)),
+            true
+        ));
+        assert!(!should_focus_on_launch_load(
+            Some(Duration::from_secs(30)),
+            true
+        ));
     }
 
     #[test]

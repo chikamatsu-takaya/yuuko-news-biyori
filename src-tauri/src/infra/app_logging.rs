@@ -80,20 +80,20 @@ pub fn log_policy(debug_build: bool) -> LogPolicy {
 /// 登録（フォルダ作成など）に失敗しても起動を止めないよう、呼び出し側でエラーを握りつぶす前提。
 pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> TauriPlugin<R> {
     match policy {
-        LogPolicy::Development { level } => tauri_plugin_log::Builder::default()
-            .timezone_strategy(LOG_TIMEZONE)
-            .level(*level)
-            .build(),
+        LogPolicy::Development { level } => {
+            with_local_time_format(tauri_plugin_log::Builder::default())
+                .level(*level)
+                .build()
+        }
         LogPolicy::Release {
             level,
             relative_dir,
             file_stem,
             max_file_bytes,
             keep_rotated_files,
-        } => tauri_plugin_log::Builder::default()
+        } => with_local_time_format(tauri_plugin_log::Builder::default())
             // 配布版はコンソールを持たないため、ファイルだけへ出す。
             .clear_targets()
-            .timezone_strategy(LOG_TIMEZONE)
             .target(
                 Target::new(TargetKind::Folder {
                     path: app_data_dir.join(relative_dir),
@@ -107,6 +107,44 @@ pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> 
             .rotation_strategy(RotationStrategy::KeepSome((*keep_rotated_files).max(1)))
             .build(),
     }
+}
+
+/// ログの時刻をローカル時刻にし、行の並びはプラグイン既定の `[日付][時刻][target][level] 本文` のまま保つ。
+/// プラグインの `timezone_strategy` は書式も差し替え、target と level の順が入れ替わる（`[level][target]`）ため、
+/// タイムゾーン（退避ファイル名の日時にも使われる）を設定した後に、従来の並びの書式を明示し直す。
+fn with_local_time_format(builder: tauri_plugin_log::Builder) -> tauri_plugin_log::Builder {
+    builder
+        .timezone_strategy(LOG_TIMEZONE)
+        .format(|out, message, record| {
+            let now = LOG_TIMEZONE.get_now();
+            let timestamp = format_log_timestamp(
+                now.year(),
+                u8::from(now.month()),
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second(),
+            );
+            out.finish(format_args!(
+                "{}",
+                format_log_line(&timestamp, record.target(), record.level(), message)
+            ))
+        })
+}
+
+/// プラグイン既定と同じ `[YYYY-MM-DD][HH:MM:SS]` の時刻部分。
+fn format_log_timestamp(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> String {
+    format!("[{year:04}-{month:02}-{day:02}][{hour:02}:{minute:02}:{second:02}]")
+}
+
+/// 1行の書式（プラグイン既定と同じ `<時刻>[target][level] 本文`）。
+fn format_log_line(
+    timestamp: &str,
+    target: &str,
+    level: log::Level,
+    message: &std::fmt::Arguments<'_>,
+) -> String {
+    format!("{timestamp}[{target}][{level}] {message}")
 }
 
 /// パニック発生箇所（ファイル:行）だけをエラーログへ残すフックを入れる。
@@ -128,6 +166,21 @@ pub fn install_panic_location_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_line_keeps_the_plugin_default_order_of_target_then_level() {
+        let timestamp = format_log_timestamp(2026, 10, 21, 9, 5, 3);
+        assert_eq!(timestamp, "[2026-10-21][09:05:03]");
+        assert_eq!(
+            format_log_line(
+                &timestamp,
+                "app_lib::app_lifecycle",
+                log::Level::Warn,
+                &format_args!("起動しました")
+            ),
+            "[2026-10-21][09:05:03][app_lib::app_lifecycle][WARN] 起動しました"
+        );
+    }
 
     #[test]
     fn development_policy_keeps_info_level() {

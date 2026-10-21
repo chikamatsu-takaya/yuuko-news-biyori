@@ -79,6 +79,12 @@ const prefersReducedMotion = () =>
 const wait = (ms: number) =>
   ms > 0 ? new Promise<void>((resolve) => window.setTimeout(resolve, ms)) : Promise.resolve();
 
+// 演出中に別画面へ移ると画面がアンマウントされ、かけらは消費済みなのに結果モーダルを出せない。
+// その結果をモジュール内に1件だけ預け、次にガチャ画面を開いたときに「前回のガチャの結果」として出す
+// （PastNewsScreen の戻り先の記憶と同じく、共有の app/page.tsx に state を足さないため）。
+// アプリを終了した場合は消えるが、獲得したものはコレクションに NEW 付きで残る。
+let resultToShowOnReturn: DisplayItem | null = null;
+
 const KIND_LABELS: Record<GachaItemKind, string> = {
   card: "カード",
   theme: "テーマ",
@@ -382,6 +388,16 @@ export default function GachaScreen({
     void loadState();
   }, [loadState]);
 
+  // 前回、演出中に画面を離れたため出せなかった結果があれば、開いたときに一度だけ出す。
+  React.useEffect(() => {
+    const pending = resultToShowOnReturn;
+    resultToShowOnReturn = null;
+    if (pending) {
+      setDialogHeading("前回のガチャの結果");
+      setDialogItem(pending);
+    }
+  }, []);
+
   const handleNavigate = (id: string) => {
     if (onNavigate) {
       onNavigate(id);
@@ -416,6 +432,15 @@ export default function GachaScreen({
         wait(prefersReducedMotion() ? 0 : DRAW_REVEAL_DELAY_MS),
       ]);
       if (!isMountedRef.current) {
+        // 演出中に別画面へ移った。消費済みの結果を見逃さないよう、次に開いたときに出す。
+        if (result?.status === "drawn" && result.item) {
+          resultToShowOnReturn = {
+            itemId: result.item.itemId,
+            kind: result.item.kind,
+            name: result.item.name,
+            text: result.item.text,
+          };
+        }
         return;
       }
       if (!result) {

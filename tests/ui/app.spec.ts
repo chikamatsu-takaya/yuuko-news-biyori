@@ -9066,6 +9066,41 @@ test("gacha draw hops yuuko briefly before the result, and skips it with reduced
   expect(await gachaDrawCallCount(page)).toBe(2);
 });
 
+// 演出中に別画面へ移っても、消費済みの結果は次にガチャ画面を開いたときに出す（演出の追加に伴う見逃し防止）。
+test("gacha result is shown on return when leaving during the hop", async ({ page }) => {
+  await openGacha(page);
+  await gachaDrawButton(page).click();
+  await expect(page.locator("[data-hopping]")).toHaveCount(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこ辞書" }).first()).toBeVisible();
+  // 演出の時間（900ms）が過ぎて抽選の結果が返るまで待ってから戻る。
+  await page.waitForTimeout(1200);
+  expect(await gachaDrawCallCount(page)).toBe(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+  // 一度出したら、もう一度開いても出さない。
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("3 / 4");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
 test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => {
   await page.addInitScript(() => {
     /* eslint-disable @typescript-eslint/no-explicit-any */
