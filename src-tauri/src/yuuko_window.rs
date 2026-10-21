@@ -139,6 +139,7 @@ pub fn show_yuuko_window<R: Runtime>(
     dressed: bool,
 ) -> tauri::Result<()> {
     let window = ensure_yuuko_window(app)?;
+    // 配置より先に記録する。配置に失敗した場合は表示しないので、この値を読む resize（表示中の初回クリック）も起きない。
     SHOWN_WITH_DRESSUP.store(dressed, Ordering::Relaxed);
     place_at_primary_work_area_bottom_right(app, &window, stage)?;
     window.show()?;

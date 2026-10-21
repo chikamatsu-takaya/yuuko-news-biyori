@@ -1015,6 +1015,27 @@ test("every balloon with a head decoration fits the dressed window and the decor
   }
 });
 
+test("a dressed-up summon message fits the dressed window", async ({ page }) => {
+  // 「ゆうこを呼ぶ」の一言（吹き出し＋OK）も、厚い吹き出し×頭の飾りで収まる。
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page, DRESSED_BALLOON_HEIGHT);
+  for (const balloonId of ["gacha_balloon_game", "gacha_balloon_cloud"]) {
+    await emit(page, {
+      articleId: "",
+      title: "",
+      balloonText: SUMMON_MESSAGE,
+      sourceName: "",
+      previewVisible: false,
+      message: true,
+      balloonId,
+      decoId: "gacha_deco_santa_hat",
+    });
+    await expect(balloon(page)).toHaveAttribute("data-balloon-shape", shapeOf(balloonId));
+    await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
+    await expectDecoNotClipped(page, DRESSED_BALLOON_HEIGHT, `message ${balloonId}`);
+  }
+});
+
 test("a dressed-up reward notice fits the dressed window", async ({ page }) => {
   // 報酬通知（吹き出し＋OK）。呼び名つきの実際の長さ（2行程度）の文言で、厚い吹き出し×頭の飾りでも収まる。
   await installMocks(page, { state: null });
