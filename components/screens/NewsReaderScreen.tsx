@@ -910,7 +910,8 @@ function YuukoCharacter() {
         loading="eager"
         width={192}
         height={192}
-        imageClassName="h-auto w-48"
+        // 狭い右列（lg 未満は w-48）に収まるよう、lg 未満では小さくする。
+        imageClassName="h-auto w-32 lg:w-48"
         className="animate-float drop-shadow-lg"
         fallback={
           <div className="flex h-48 w-48 items-center justify-center rounded-full bg-gradient-to-b from-gray-800 to-gray-900">
@@ -1947,7 +1948,8 @@ export default function NewsReaderScreen({
             onNavigate={handleNavigate}
           />
 
-          <div className="px-3 pb-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <div className="px-3 pb-3 [@media(max-height:739px)]:hidden">
             <Card className="border border-[var(--yuuko-green)]/20 bg-white py-3">
               <CardContent className="p-3">
                 <div className="mb-2 flex items-center gap-1.5">
@@ -1975,7 +1977,7 @@ export default function NewsReaderScreen({
           {/* TermPopup 表示中は背面の記事本文を選択不可にする（背面選択→「解説」ボタン誤表示を防ぐ）。
               TermPopup は main 直下・このスクロール領域の外にあるため巻き込まれない。 */}
           <div
-            className={`flex-1 overflow-y-auto p-6${
+            className={`flex-1 overflow-y-auto p-4 lg:p-6${
               showTermPopup ? " select-none" : ""
             }`}
           >
@@ -2087,7 +2089,8 @@ export default function NewsReaderScreen({
             <>
             <Card className="mb-4 border-0 py-4 shadow-sm">
               <CardContent className="p-5">
-                <h1 className="mb-3 text-xl font-bold text-foreground">
+                {/* 狭い幅では1段小さくして、タイトルが何行にも折り返さないようにする（B8）。 */}
+                <h1 className="mb-3 text-lg font-bold text-foreground lg:text-xl">
                   {article.title}
                 </h1>
                 <div className="flex flex-wrap items-center gap-3">
@@ -2437,8 +2440,10 @@ export default function NewsReaderScreen({
           ) : null}
         </main>
 
-        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
-        <aside className="flex w-60 lg:w-72 shrink-0 flex-col overflow-y-auto p-4">
+        {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。
+            記事画面は最小幅でタイトルが5行に折り返し、ゆうこの列が幅の約3分の1を取っていたため（実機テスト B8）、
+            他画面の w-60 より細い w-48 にし、ゆうこの絵も小さくする（ゆうこ・感想の吹き出し・用語サポートは残す）。 */}
+        <aside className="flex w-48 lg:w-72 shrink-0 flex-col overflow-y-auto p-4">
           <div className="mb-2">
             <YuukoSpeechBubbleRight
               message={

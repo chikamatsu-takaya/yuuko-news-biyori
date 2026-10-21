@@ -4,6 +4,10 @@
 //! - 配布ビルド: 警告とエラーだけを `<app_data>/logs/app.log` へ保存する（D29 / データ設計書 §16）。
 //!   1ファイルの上限サイズを超えたら日時付きの名前へ退避し、古い退避ファイルは自動で消す。
 //!
+//! - どちらも時刻は PC のローカル時刻（日本なら JST）で書く。プラグイン既定の UTC では、利用者の申告時刻や
+//!   画面の表示と9時間ずれて調査で取り違えやすかったため（実機テスト B13）。ローカル時刻を取れない環境では
+//!   プラグインが UTC へ戻す（MVP の対象である Windows では取れる）。
+//!
 //! ログへ秘密情報・本文・URL を出さない方針はデータ設計書 §16.4 に従い、各呼び出し側で守る
 //! （URL を含むものは debug に下げているため、配布ビルドのファイルには残らない）。
 
@@ -12,7 +16,7 @@ use std::path::Path;
 use log::LevelFilter;
 use tauri::plugin::TauriPlugin;
 use tauri::Runtime;
-use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// 配布ビルドのログ保存先（アプリデータ直下の相対フォルダ）。データ設計書 §16.2。
 pub const RELEASE_LOG_RELATIVE_DIR: &str = "logs";
@@ -23,6 +27,9 @@ pub const RELEASE_LOG_MAX_FILE_BYTES: u128 = 1024 * 1024;
 /// 配布ビルドで残す退避ファイル数。書き込み中の `app.log` と合わせて最大5世代（D29）。
 /// プラグインの `KeepSome(n)` は「書き込み中を除く退避ファイル数」を n に保つ仕様。
 pub const RELEASE_LOG_KEEP_ROTATED_FILES: usize = 4;
+
+/// ログの時刻（と退避ファイル名の日時）に使うタイムゾーン。ローカル時刻にそろえる（モジュール先頭の説明）。
+pub const LOG_TIMEZONE: TimezoneStrategy = TimezoneStrategy::UseLocal;
 
 /// 自クレートのログ target の根（`module_path!()` のクレート直下と同じ。lib 名 `app_lib`）。
 /// 配布ビルドのファイルには、この target 配下のログだけを書く。
@@ -74,7 +81,9 @@ pub fn log_policy(debug_build: bool) -> LogPolicy {
 pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> TauriPlugin<R> {
     match policy {
         LogPolicy::Development { level } => {
-            tauri_plugin_log::Builder::default().level(*level).build()
+            with_local_time_format(tauri_plugin_log::Builder::default())
+                .level(*level)
+                .build()
         }
         LogPolicy::Release {
             level,
@@ -82,7 +91,7 @@ pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> 
             file_stem,
             max_file_bytes,
             keep_rotated_files,
-        } => tauri_plugin_log::Builder::default()
+        } => with_local_time_format(tauri_plugin_log::Builder::default())
             // 配布版はコンソールを持たないため、ファイルだけへ出す。
             .clear_targets()
             .target(
@@ -98,6 +107,44 @@ pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> 
             .rotation_strategy(RotationStrategy::KeepSome((*keep_rotated_files).max(1)))
             .build(),
     }
+}
+
+/// ログの時刻をローカル時刻にし、行の並びはプラグイン既定の `[日付][時刻][target][level] 本文` のまま保つ。
+/// プラグインの `timezone_strategy` は書式も差し替え、target と level の順が入れ替わる（`[level][target]`）ため、
+/// タイムゾーン（退避ファイル名の日時にも使われる）を設定した後に、従来の並びの書式を明示し直す。
+fn with_local_time_format(builder: tauri_plugin_log::Builder) -> tauri_plugin_log::Builder {
+    builder
+        .timezone_strategy(LOG_TIMEZONE)
+        .format(|out, message, record| {
+            let now = LOG_TIMEZONE.get_now();
+            let timestamp = format_log_timestamp(
+                now.year(),
+                u8::from(now.month()),
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second(),
+            );
+            out.finish(format_args!(
+                "{}",
+                format_log_line(&timestamp, record.target(), record.level(), message)
+            ))
+        })
+}
+
+/// プラグイン既定と同じ `[YYYY-MM-DD][HH:MM:SS]` の時刻部分。
+fn format_log_timestamp(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> String {
+    format!("[{year:04}-{month:02}-{day:02}][{hour:02}:{minute:02}:{second:02}]")
+}
+
+/// 1行の書式（プラグイン既定と同じ `<時刻>[target][level] 本文`）。
+fn format_log_line(
+    timestamp: &str,
+    target: &str,
+    level: log::Level,
+    message: &std::fmt::Arguments<'_>,
+) -> String {
+    format!("{timestamp}[{target}][{level}] {message}")
 }
 
 /// パニック発生箇所（ファイル:行）だけをエラーログへ残すフックを入れる。
@@ -119,6 +166,21 @@ pub fn install_panic_location_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_line_keeps_the_plugin_default_order_of_target_then_level() {
+        let timestamp = format_log_timestamp(2026, 10, 21, 9, 5, 3);
+        assert_eq!(timestamp, "[2026-10-21][09:05:03]");
+        assert_eq!(
+            format_log_line(
+                &timestamp,
+                "app_lib::app_lifecycle",
+                log::Level::Warn,
+                &format_args!("起動しました")
+            ),
+            "[2026-10-21][09:05:03][app_lib::app_lifecycle][WARN] 起動しました"
+        );
+    }
 
     #[test]
     fn development_policy_keeps_info_level() {

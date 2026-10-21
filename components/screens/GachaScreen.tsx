@@ -66,6 +66,25 @@ type LoadStatus = "loading" | "ready" | "unavailable" | "error";
 // Constants
 // ============================================
 
+// まわしたときの演出の長さ（ゆうこが3回跳ねる。app/globals.css の .yuuko-gacha-hop と同じ長さ）。
+// 結果がすぐ出て「まわした」感じが無かったため（実機テスト B16）。要件（ガチャの演出は控えめに）に合わせて
+// 1秒未満の CSS アニメーションだけにし、動きを抑える設定では待たずにすぐ結果を出す。
+const DRAW_REVEAL_DELAY_MS = 900;
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const wait = (ms: number) =>
+  ms > 0 ? new Promise<void>((resolve) => window.setTimeout(resolve, ms)) : Promise.resolve();
+
+// 演出中に別画面へ移ると画面がアンマウントされ、かけらは消費済みなのに結果モーダルを出せない。
+// その結果をモジュール内に1件だけ預け、次にガチャ画面を開いたときに「前回のガチャの結果」として出す
+// （PastNewsScreen の戻り先の記憶と同じく、共有の app/page.tsx に state を足さないため）。
+// アプリを終了した場合は消えるが、獲得したものはコレクションに NEW 付きで残る。
+let resultToShowOnReturn: DisplayItem | null = null;
+
 const KIND_LABELS: Record<GachaItemKind, string> = {
   card: "カード",
   theme: "テーマ",
@@ -197,9 +216,10 @@ function Sparkle({ className }: { className?: string }) {
   );
 }
 
-function YuukoCharacter() {
+function YuukoCharacter({ hopping = false }: { hopping?: boolean }) {
   return (
-    <div className="relative">
+    // まわしている間だけ跳ねる（動きを抑える設定では CSS 側で付けない）。
+    <div className={`relative${hopping ? " yuuko-gacha-hop" : ""}`} data-hopping={hopping || undefined}>
       <YuukoFigure
         width={963}
         height={1174}
@@ -368,6 +388,16 @@ export default function GachaScreen({
     void loadState();
   }, [loadState]);
 
+  // 前回、演出中に画面を離れたため出せなかった結果があれば、開いたときに一度だけ出す。
+  React.useEffect(() => {
+    const pending = resultToShowOnReturn;
+    resultToShowOnReturn = null;
+    if (pending) {
+      setDialogHeading("前回のガチャの結果");
+      setDialogItem(pending);
+    }
+  }, []);
+
   const handleNavigate = (id: string) => {
     if (onNavigate) {
       onNavigate(id);
@@ -396,8 +426,21 @@ export default function GachaScreen({
     setIsDrawing(true);
     setDrawError(null);
     try {
-      const result = await drawGachaOnce();
+      // 抽選は Rust が即座に返すため、演出の分だけ結果を出すのを待つ（抽選結果そのものは変えない）。
+      const [result] = await Promise.all([
+        drawGachaOnce(),
+        wait(prefersReducedMotion() ? 0 : DRAW_REVEAL_DELAY_MS),
+      ]);
       if (!isMountedRef.current) {
+        // 演出中に別画面へ移った。消費済みの結果を見逃さないよう、次に開いたときに出す。
+        if (result?.status === "drawn" && result.item) {
+          resultToShowOnReturn = {
+            itemId: result.item.itemId,
+            kind: result.item.kind,
+            name: result.item.name,
+            text: result.item.text,
+          };
+        }
         return;
       }
       if (!result) {
@@ -498,8 +541,8 @@ export default function GachaScreen({
             onNavigate={handleNavigate}
           />
 
-          {/* Yuuko's Comment */}
-          <div className="p-3">
+          {/* Yuuko's Comment（高さが足りないときは隠して、画面ナビを全部見せる。実機テスト B8） */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
                 <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
@@ -633,7 +676,7 @@ export default function GachaScreen({
 
                   {/* Yuuko Character */}
                   <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
-                    <YuukoCharacter />
+                    <YuukoCharacter hopping={isDrawing} />
                   </div>
                 </div>
 

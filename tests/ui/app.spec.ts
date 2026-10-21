@@ -4745,9 +4745,9 @@ test("term popup: shrinking to a Tauri-like width keeps the close button reachab
   await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
-  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。Tauri 初期幅の 800px では右列が w-60 に狭まり
-  // main が約352pxあるため（D109）、左右固定領域（208px + 240px）を除いて main が約292pxになる 740px を使う。
-  await page.setViewportSize({ width: 740, height: 600 });
+  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。記事画面の右列は lg 未満で w-48（192px）のため
+  // （D109・実機テスト B8）、左右固定領域（208px + 192px）を除いて main が約290pxになる 690px を使う。
+  await page.setViewportSize({ width: 690, height: 600 });
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
 
   // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
@@ -5207,7 +5207,7 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   await expect(autoSummarySwitch).not.toBeChecked();
   await expect(autoSummarySwitch).toBeEnabled();
   await expect(page.getByTestId("auto-summary-help")).toHaveText(
-    "AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）"
+    "AIの設定が開発・デモ用のときは動きません（ローカル・Gemini のときだけ、1件ずつ順番に要約します）"
   );
 
   await autoSummarySwitch.click();
@@ -5850,7 +5850,7 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
 
   // AI: provider=Gemini, 解説の詳しさ=詳しく。
   await openSettingsMenu(page, "解説・AI設定");
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "Gemini" }).click();
   await page.getByRole("combobox").filter({ hasText: "ふつう" }).click();
   await page.getByRole("option", { name: "詳しく" }).click();
@@ -5991,7 +5991,7 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   // 解説・AI設定: Provider/解説の詳しさは操作可能。専門用語の解説レベル・優先モードは表示しない。
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
   ).toBeEnabled();
   await expect(
     page.getByRole("combobox").filter({ hasText: "ふつう" })
@@ -6007,20 +6007,27 @@ test("settings postponed controls without a DTO field are disabled or removed", 
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeEnabled();
 
-  // AIプロバイダーの選択肢: OpenAI は無く、ローカルは「準備中」を外して選べる（判断台帳 D99）。
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  // AIプロバイダーの選択肢: 主経路のローカルを先頭（おすすめ）に、Gemini、最後に開発・デモ用（Mock）。
+  // OpenAI は無く、ローカルは「準備中」を外して選べる（判断台帳 D99）。
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await expect(page.getByRole("option")).toHaveText([
-    "MockProvider（APIキー不要）",
-    "Gemini",
-    "ローカル",
+    "ローカル（おすすめ）",
+    "Gemini（APIキーが必要）",
+    "開発・デモ用（本物のAIは使いません）",
   ]);
   await page.keyboard.press("Escape");
   // 案内文も OpenAI に触れず、ローカルを「準備中」と案内しない。
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
   await expect(page.getByText(/ローカルは準備中/)).toHaveCount(0);
-  await expect(
-    page.getByText(/ローカル.*はこのパソコンの中だけで動くAIで/)
-  ).toBeVisible();
+  // 案内文は方針どおり: ローカル＝記事を外へ送らない／Gemini＝キーが必要で記事の一部を外部へ送る／
+  // 開発・デモ用＝動作確認用。Mock を推奨しない。
+  const guide = page.getByTestId("ai-provider-guide");
+  await expect(guide).toContainText("ローカル（おすすめ）：このパソコンの中で動くAIです");
+  await expect(guide).toContainText("記事の内容を外部へ送りません");
+  await expect(guide).toContainText("APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります");
+  await expect(guide).toContainText("開発・デモ用：動作確認のための設定です");
+  await expect(guide).not.toContainText("推奨します");
+  await expect(guide).not.toContainText("MockProvider");
 });
 
 // ローカルを選ぶと、初回の準備に時間がかかることを短く案内する（Mock の注記は消える）。
@@ -6030,7 +6037,7 @@ test("settings shows the local AI note when ローカル is selected", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(page.getByTestId("local-provider-note")).toHaveCount(0);
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "ローカル" }).click();
   await expect(page.getByTestId("local-provider-note")).toHaveText(
     "このパソコンの中で動くAIだよ。初めて使うときは準備に少し時間がかかるよ。"
@@ -6219,11 +6226,12 @@ test("settings shows the development note only while MockProvider is selected", 
   await openSettingsMenu(page, "解説・AI設定");
 
   const note = page.getByTestId("mock-provider-note");
+  // 以前から Mock のままの利用者にも、ローカルへの切り替えを案内する（自動では切り替えない）。
   await expect(note).toHaveText(
-    "MockProvider は開発・デモ用です（外部AIは使いません）。"
+    "いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。"
   );
 
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "Gemini" }).click();
   await expect(note).toHaveCount(0);
 });
@@ -6242,7 +6250,7 @@ test("settings treats a saved openai provider as MockProvider", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
   ).toBeVisible();
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
 
@@ -6890,7 +6898,11 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   });
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
-  await expect(page.getByText("保存済みの設定でテストします")).toBeVisible();
+  // 保存済みの AI（既定は開発・デモ用）でテストすることを名前つきで示す。
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（開発・デモ用）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(page.getByTestId("ai-connection-test-unsaved-note")).toHaveCount(0);
 
   const button = page.getByRole("button", { name: "接続テスト" });
   await button.click();
@@ -6899,13 +6911,141 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   await expect(running).toBeDisabled();
   await running.click({ force: true });
 
-  await expect(aiTestResultRegion(page)).toContainText("利用可能です");
+  // Mock の成功は「本物のAIではない」ことが分かる文言にする。
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（開発・デモ用）：使えます");
+  await expect(aiTestResultRegion(page)).toContainText("本物のAIは使いません");
   await expect(button).toBeEnabled();
   expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
   await expect(aiTestResultRegion(page)).not.toContainText("MockProvider");
 });
 
-test("settings AI connection test shows APIキー未設定 with a MockProvider recommendation for Gemini", async ({
+// ローカルの初回は約30秒かかるため、テスト中は待ち時間の案内を出し、終わったら結果を欄の下に残す。
+test("settings AI connection test explains the wait and keeps the result after it finishes", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 800;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByTestId("ai-connection-test-target")).toContainText(
+    "保存済みの設定（ローカル）でテストします"
+  );
+
+  const progress = page.getByTestId("ai-connection-test-progress");
+  await expect(progress).toHaveCount(0);
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(progress).toHaveText(
+    "テストしているよ。初めてのときは準備に30秒ほどかかるから、少し待っていてね。"
+  );
+
+  const region = aiTestResultRegion(page);
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
+  await expect(region).toContainText("このAIで要約・解説を作れます");
+  await expect(progress).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
+
+  // 終わった後も結果は残る（ボタンが元に戻るだけにしない）。
+  await page.waitForTimeout(1000);
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
+
+  // 失敗の結果も「使えません」と固定文言で残る。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AI_TEST_RESULT__ = {
+      provider: "local",
+      checkedProvider: "local",
+      status: "unavailable",
+      errorKind: "local_ai_start_failed",
+      mockAvailable: true,
+    };
+  });
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
+  await expect(region).toContainText("ローカルAIを起動できませんでした");
+  await expect(region).not.toContainText("local_ai_start_failed");
+  await page.waitForTimeout(1000);
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
+});
+
+// テスト中に AI の選択を切り替えたら、届いた結果は切り替え前の AI のものなので表示しない。
+test("settings AI connection test drops the result when the provider is switched during the test", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 1000;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(page.getByRole("button", { name: "テスト中…" })).toBeDisabled();
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  // テストが終わってボタンが戻っても、ローカルの結果は出さない。
+  await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
+  await expect(aiTestResultRegion(page)).not.toContainText("テスト結果");
+  expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
+});
+
+// 選択を変えて未保存のままだと、保存済みの AI でテストすることと、先に保存が要ることを示す。
+test("settings AI connection test names the saved provider when the selection is unsaved", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ =
+      { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  const unsavedNote = page.getByTestId("ai-connection-test-unsaved-note");
+  await expect(unsavedNote).toHaveCount(0);
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（ローカル）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(unsavedNote).toHaveText(
+    "いま選んでいる「Gemini」をテストするには、先に保存してね。"
+  );
+  // 押すと保存済みのローカルを確かめ、見出しにもその名前が出る。
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（ローカル）：使えます");
+
+  // 選択を保存済みに戻すと案内は消える。
+  await page.getByRole("combobox").filter({ hasText: "Gemini" }).click();
+  await page.getByRole("option", { name: "ローカル" }).click();
+  await expect(unsavedNote).toHaveCount(0);
+});
+
+test("settings AI connection test shows APIキー未設定 with a ローカル recommendation for Gemini", async ({
   page,
 }) => {
   await setAiTestResult(page, {
@@ -6922,7 +7062,9 @@ test("settings AI connection test shows APIキー未設定 with a MockProvider r
 
   const region = aiTestResultRegion(page);
   await expect(region).toContainText("APIキーが未設定です");
-  await expect(region).toContainText("MockProvider");
+  // 開発・デモ用（Mock）ではなく、キーの要らないローカルを案内する（判断台帳 D99 / D103）。
+  await expect(region).toContainText("ローカル（おすすめ）");
+  await expect(region).not.toContainText("MockProvider");
   // 秘密情報・生エラーを扱う欄は出さない。
   await expect(page.getByRole("textbox")).toHaveCount(0);
 });
@@ -9148,6 +9290,66 @@ test("gacha draw shows result dialog, marks it seen, then shows complete", async
   await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("コンプリート！");
   await expect(page.getByTestId("gacha-status-message")).toContainText("コンプリート");
   await expect(gachaDrawButton(page)).toBeDisabled();
+});
+
+// まわすとゆうこが少し跳ねてから結果が出る（実機テスト B16）。動きを抑える設定では跳ねずにすぐ結果を出す。
+test("gacha draw hops yuuko briefly before the result, and skips it with reduced motion", async ({
+  page,
+}) => {
+  await openGacha(page);
+  const hopper = page.locator("[data-hopping]");
+  await expect(hopper).toHaveCount(0);
+  await gachaDrawButton(page).click();
+  // 演出中は結果を出さず、ゆうこが跳ねる（CSS アニメーションが付く）。
+  await expect(hopper).toHaveCount(1);
+  expect(await hopper.evaluate((node) => getComputedStyle(node).animationName)).toBe("yuuko-gacha-hop");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(hopper).toHaveCount(0);
+  await page.getByRole("dialog").getByRole("button", { name: "とじる" }).click();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const startedAt = Date.now();
+  await gachaDrawButton(page).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // 待ち時間（900ms）を入れずに結果を出す。
+  expect(Date.now() - startedAt).toBeLessThan(800);
+  expect(await gachaDrawCallCount(page)).toBe(2);
+});
+
+// 演出中に別画面へ移っても、消費済みの結果は次にガチャ画面を開いたときに出す（演出の追加に伴う見逃し防止）。
+test("gacha result is shown on return when leaving during the hop", async ({ page }) => {
+  await openGacha(page);
+  await gachaDrawButton(page).click();
+  await expect(page.locator("[data-hopping]")).toHaveCount(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこ辞書" }).first()).toBeVisible();
+  // 演出の時間（900ms）が過ぎて抽選の結果が返るまで待ってから戻る。
+  await page.waitForTimeout(1200);
+  expect(await gachaDrawCallCount(page)).toBe(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+  // 一度出したら、もう一度開いても出さない。
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("3 / 4");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => {

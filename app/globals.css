@@ -348,6 +348,21 @@
   body {
     @apply bg-background text-foreground;
   }
+  /*
+   * 画面の枠（タイトルバー・状態表示・左サイドバー）とボタン・タブの文字は、ドラッグで選択されないようにする
+   * （実機テスト B12。アプリの部品の文字が本文と一緒に青く選ばれて散らかって見えたため）。
+   * 左サイドバーは画面ナビ（nav）を含む aside として指す（各画面・ホーム・設定で共通に効かせるため）。
+   * 本文・要約・解説・辞書の説明などの読み物と入力欄は対象外で、これまでどおり選べる（用語解説の範囲選択もそのまま）。
+   */
+  header,
+  footer,
+  nav,
+  aside:has(nav),
+  button,
+  [role="tab"],
+  [role="tablist"] {
+    user-select: none;
+  }
 }
 
 /*
@@ -552,6 +567,23 @@ html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-la
   animation: yuuko-notification-pop-out 0.3s ease-in both;
 }
 
+/* ガチャをまわしたときに、ゆうこが3回跳ねてから結果を出す（実機テスト B16。0.3s×3 = GachaScreen の DRAW_REVEAL_DELAY_MS）。
+   動きを抑える設定では付けない（画面側も待たずに結果を出す）。transform だけを動かす軽い演出。 */
+@keyframes yuuko-gacha-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  45% {
+    transform: translateY(-18px);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .yuuko-gacha-hop {
+    animation: yuuko-gacha-hop 0.3s ease-in-out 3;
+  }
+}
+
 /* 動きを抑える設定では演出を止める（軽量性・アクセシビリティ）。 */
 @media (prefers-reduced-motion: reduce) {
   .yuuko-notification-enter,
@@ -590,6 +622,13 @@ html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-la
     transform: translateY(-6px) rotate(45deg);
   }
 
+  /* 吹き出しの中に置く閉じるボタンの位置。形がふちを内側に描く（雲の丸など）ときは、その形が
+     --yuuko-bb-close-inset で内側へ下げ、ふちに重ならないようにする。既定（いつもの・他の形）は 8px。 */
+  .yuuko-bb-close {
+    top: var(--yuuko-bb-close-inset, 8px);
+    right: var(--yuuko-bb-close-inset, 8px);
+  }
+
   /* テーマ色のふち */
   .yuuko-bb-rim {
     background: #fff;
@@ -604,6 +643,8 @@ html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-la
   /* もこもこ雲: 四辺に丸を並べる。repeat: round で辺の長さに合わせて丸の間隔を整え、端で丸が切れないようにする。
      ふちは drop-shadow を 4 方向に重ねて、もこもこの形に沿わせる。しっぽは考えごとの丸。 */
   .yuuko-bb-cloud {
+    /* 閉じるボタン（.yuuko-bb-close）を、四辺の丸（22px）の内側の地へ下げる（実機テスト B15）。 */
+    --yuuko-bb-close-inset: 11px;
     --yuuko-bb-fill: var(--yuuko-green-light);
     --yuuko-bb-line: color-mix(in srgb, var(--yuuko-green-text) 45%, transparent);
     background: transparent;

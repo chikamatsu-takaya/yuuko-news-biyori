@@ -284,7 +284,9 @@ export default function YuukoInAppNotification({
             type="button"
             aria-label="通知を閉じる"
             onClick={handleClose}
-            className="absolute right-2 top-2 text-muted-foreground transition-colors hover:text-foreground"
+            // 位置は形ごとに globals.css の .yuuko-bb-close が決める（雲の丸など、内側に描くふちへ重ねないため・B15）。
+            data-testid="yuuko-notification-close"
+            className="yuuko-bb-close absolute text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
