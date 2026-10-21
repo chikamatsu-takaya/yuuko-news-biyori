@@ -4636,9 +4636,9 @@ test("term popup: shrinking to a Tauri-like width keeps the close button reachab
   await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
-  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。Tauri 初期幅の 800px では右列が w-60 に狭まり
-  // main が約352pxあるため（D109）、左右固定領域（208px + 240px）を除いて main が約292pxになる 740px を使う。
-  await page.setViewportSize({ width: 740, height: 600 });
+  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。記事画面の右列は lg 未満で w-48（192px）のため
+  // （D109・実機テスト B8）、左右固定領域（208px + 192px）を除いて main が約290pxになる 690px を使う。
+  await page.setViewportSize({ width: 690, height: 600 });
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
 
   // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
@@ -9039,6 +9039,31 @@ test("gacha draw shows result dialog, marks it seen, then shows complete", async
   await expect(page.getByTestId("gacha-collection-remaining")).toHaveText("コンプリート！");
   await expect(page.getByTestId("gacha-status-message")).toContainText("コンプリート");
   await expect(gachaDrawButton(page)).toBeDisabled();
+});
+
+// まわすとゆうこが少し跳ねてから結果が出る（実機テスト B16）。動きを抑える設定では跳ねずにすぐ結果を出す。
+test("gacha draw hops yuuko briefly before the result, and skips it with reduced motion", async ({
+  page,
+}) => {
+  await openGacha(page);
+  const hopper = page.locator("[data-hopping]");
+  await expect(hopper).toHaveCount(0);
+  await gachaDrawButton(page).click();
+  // 演出中は結果を出さず、ゆうこが跳ねる（CSS アニメーションが付く）。
+  await expect(hopper).toHaveCount(1);
+  expect(await hopper.evaluate((node) => getComputedStyle(node).animationName)).toBe("yuuko-gacha-hop");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(hopper).toHaveCount(0);
+  await page.getByRole("dialog").getByRole("button", { name: "とじる" }).click();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const startedAt = Date.now();
+  await gachaDrawButton(page).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // 待ち時間（900ms）を入れずに結果を出す。
+  expect(Date.now() - startedAt).toBeLessThan(800);
+  expect(await gachaDrawCallCount(page)).toBe(2);
 });
 
 test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => {

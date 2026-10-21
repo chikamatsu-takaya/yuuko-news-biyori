@@ -4,6 +4,10 @@
 //! - 配布ビルド: 警告とエラーだけを `<app_data>/logs/app.log` へ保存する（D29 / データ設計書 §16）。
 //!   1ファイルの上限サイズを超えたら日時付きの名前へ退避し、古い退避ファイルは自動で消す。
 //!
+//! - どちらも時刻は PC のローカル時刻（日本なら JST）で書く。プラグイン既定の UTC では、利用者の申告時刻や
+//!   画面の表示と9時間ずれて調査で取り違えやすかったため（実機テスト B13）。ローカル時刻を取れない環境では
+//!   プラグインが UTC へ戻す（MVP の対象である Windows では取れる）。
+//!
 //! ログへ秘密情報・本文・URL を出さない方針はデータ設計書 §16.4 に従い、各呼び出し側で守る
 //! （URL を含むものは debug に下げているため、配布ビルドのファイルには残らない）。
 
@@ -12,7 +16,7 @@ use std::path::Path;
 use log::LevelFilter;
 use tauri::plugin::TauriPlugin;
 use tauri::Runtime;
-use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// 配布ビルドのログ保存先（アプリデータ直下の相対フォルダ）。データ設計書 §16.2。
 pub const RELEASE_LOG_RELATIVE_DIR: &str = "logs";
@@ -23,6 +27,9 @@ pub const RELEASE_LOG_MAX_FILE_BYTES: u128 = 1024 * 1024;
 /// 配布ビルドで残す退避ファイル数。書き込み中の `app.log` と合わせて最大5世代（D29）。
 /// プラグインの `KeepSome(n)` は「書き込み中を除く退避ファイル数」を n に保つ仕様。
 pub const RELEASE_LOG_KEEP_ROTATED_FILES: usize = 4;
+
+/// ログの時刻（と退避ファイル名の日時）に使うタイムゾーン。ローカル時刻にそろえる（モジュール先頭の説明）。
+pub const LOG_TIMEZONE: TimezoneStrategy = TimezoneStrategy::UseLocal;
 
 /// 自クレートのログ target の根（`module_path!()` のクレート直下と同じ。lib 名 `app_lib`）。
 /// 配布ビルドのファイルには、この target 配下のログだけを書く。
@@ -73,9 +80,10 @@ pub fn log_policy(debug_build: bool) -> LogPolicy {
 /// 登録（フォルダ作成など）に失敗しても起動を止めないよう、呼び出し側でエラーを握りつぶす前提。
 pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> TauriPlugin<R> {
     match policy {
-        LogPolicy::Development { level } => {
-            tauri_plugin_log::Builder::default().level(*level).build()
-        }
+        LogPolicy::Development { level } => tauri_plugin_log::Builder::default()
+            .timezone_strategy(LOG_TIMEZONE)
+            .level(*level)
+            .build(),
         LogPolicy::Release {
             level,
             relative_dir,
@@ -85,6 +93,7 @@ pub fn build_log_plugin<R: Runtime>(policy: &LogPolicy, app_data_dir: &Path) -> 
         } => tauri_plugin_log::Builder::default()
             // 配布版はコンソールを持たないため、ファイルだけへ出す。
             .clear_targets()
+            .timezone_strategy(LOG_TIMEZONE)
             .target(
                 Target::new(TargetKind::Folder {
                     path: app_data_dir.join(relative_dir),

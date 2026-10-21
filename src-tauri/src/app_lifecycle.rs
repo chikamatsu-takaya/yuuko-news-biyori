@@ -50,6 +50,10 @@ static MAIN_WINDOW_UNSAVED_CHANGES: AtomicBool = AtomicBool::new(false);
 /// 作り直した画面はまだイベントを購読していないため、画面側がマウント時に1回だけ取り出す。
 static PENDING_OPEN_ARTICLE: Mutex<Option<String>> = Mutex::new(None);
 static RELEASE_TIMER: ReleaseTimer = ReleaseTimer::new();
+/// 起動時に表示したメインウィンドウを、最初のページ読み込み完了でもう一度前面へ出すか。
+/// setup 中の set_focus はイベントループ開始前・WebView 準備前のため Windows で効かないことがあり、
+/// 初回起動でエクスプローラーの裏に隠れた（実機テスト B11）。読み込み完了時に1回だけ再試行する。
+static FOCUS_MAIN_ON_FIRST_LOAD: AtomicBool = AtomicBool::new(false);
 
 /// 解放タイマーの世代管理。
 ///
@@ -315,6 +319,26 @@ pub fn handle_page_load<R: Runtime>(webview: &tauri::Webview<R>, payload: &PageL
     ) {
         MAIN_WINDOW_UNSAVED_CHANGES.store(false, Ordering::SeqCst);
     }
+    if webview.label() == MAIN_WINDOW_LABEL && matches!(payload.event(), PageLoadEvent::Finished) {
+        focus_main_after_launch_load(&webview.window());
+    }
+}
+
+/// 起動時表示の後の最初の読み込み完了で、メインウィンドウを1回だけ前面へ出す。
+/// 自動起動のトレイ待機（表示しない起動）では印を立てないため、ここで勝手に表示・前面化はしない。
+/// 読み込み完了までにユーザーが閉じて隠していた場合も、表示中でなければ何もしない。
+fn focus_main_after_launch_load<R: Runtime>(window: &tauri::Window<R>) {
+    let pending = FOCUS_MAIN_ON_FIRST_LOAD.swap(false, Ordering::SeqCst);
+    if !should_focus_on_launch_load(pending, window.is_visible().unwrap_or(false)) {
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("読み込み後のメインウィンドウへフォーカスできませんでした: {error}");
+    }
+}
+
+fn should_focus_on_launch_load(pending: bool, main_visible: bool) -> bool {
+    pending && main_visible
 }
 
 fn should_reset_unsaved_on_page_load(webview_label: &str, is_started: bool) -> bool {
@@ -407,6 +431,8 @@ pub fn apply_launch_visibility<R: Runtime>(
     if let Err(error) = window.set_focus() {
         log::warn!("起動時のメインウィンドウへフォーカスできませんでした: {error}");
     }
+    // ここでのフォーカスが Windows で効かない場合に備え、最初の読み込み完了でもう一度前面へ出す。
+    FOCUS_MAIN_ON_FIRST_LOAD.store(true, Ordering::SeqCst);
 }
 
 fn is_autostart_launch(args: impl IntoIterator<Item = OsString>) -> bool {
@@ -992,6 +1018,15 @@ mod tests {
             crate::yuuko_window::YUUKO_WINDOW_LABEL,
             true
         ));
+    }
+
+    #[test]
+    fn launch_refocus_runs_only_when_shown_at_launch_and_still_visible() {
+        assert!(should_focus_on_launch_load(true, true));
+        // 自動起動のトレイ待機（印なし）では前面に出さない。
+        assert!(!should_focus_on_launch_load(false, true));
+        // 読み込み完了までに隠された（トレイへしまわれた）なら出し直さない。
+        assert!(!should_focus_on_launch_load(true, false));
     }
 
     #[test]
