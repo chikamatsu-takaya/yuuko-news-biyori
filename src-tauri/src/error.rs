@@ -48,6 +48,11 @@ pub enum AppError {
     #[error("archive error: {0}")]
     Archive(String),
 
+    /// 記事は通常の保存先に無いが、過去ニュース（月次アーカイブZIP）にしまってある。
+    /// 画面が「待てば直る失敗」と区別し、取り出し（restore_archived_article）を案内できるよう専用コードで返す。
+    #[error("article is stored in the archive: {0}")]
+    ArticleArchived(String),
+
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
@@ -75,13 +80,15 @@ pub enum AppError {
 }
 
 impl AppError {
-    fn code(&self) -> &'static str {
+    /// エラーの種類だけを表す固定コード（詳細文字列は含めない）。画面への戻り値とログで使う。
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "VALIDATION_ERROR",
             Self::Network(_) => "NETWORK_ERROR",
             Self::NotFound(_) => "NOT_FOUND_ERROR",
             Self::Parse(_) => "PARSE_ERROR",
             Self::Archive(_) => "ARCHIVE_ERROR",
+            Self::ArticleArchived(_) => "ARTICLE_ARCHIVED",
             Self::Io(_) => "IO_ERROR",
             Self::Json(_) => "JSON_ERROR",
             Self::ImportRejected(_) => "IMPORT_ZIP_REJECTED",
@@ -109,6 +116,7 @@ impl AppError {
             Self::NotFound(_) => "requested item was not found".to_string(),
             Self::Parse(_) => "failed to parse stored data".to_string(),
             Self::Archive(_) => "archive operation failed".to_string(),
+            Self::ArticleArchived(_) => "article is stored in the archive".to_string(),
             Self::Io(_) => "failed to access local data".to_string(),
             Self::Json(_) => "failed to read or write JSON data".to_string(),
             // 弾いた理由（エントリ名など ZIP 由来の文字列を含み得る）は画面へ返さない。
@@ -236,6 +244,14 @@ mod tests {
         let error = command_error(AppError::NotFound("article article-123".to_string()));
         assert_eq!(error.code, "NOT_FOUND_ERROR");
         assert_eq!(error.message, "requested item was not found");
+        assert!(!error.message.contains("article-123"));
+    }
+
+    #[test]
+    fn article_archived_error_has_its_own_code_and_hides_identifier() {
+        let error = command_error(AppError::ArticleArchived("article-123".to_string()));
+        assert_eq!(error.code, "ARTICLE_ARCHIVED");
+        assert_eq!(error.message, "article is stored in the archive");
         assert!(!error.message.contains("article-123"));
     }
 

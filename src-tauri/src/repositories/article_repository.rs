@@ -1371,6 +1371,24 @@ impl ArticleRepository {
         })
     }
 
+    /// 記事IDがアーカイブ索引（`archive_index.json`）の記事カタログに載っているかを返す（読み取りのみ）。
+    /// 記事詳細が通常の保存先で見つからないとき、「過去ニュースにしまってある」のか「消えた」のかを
+    /// 区別するために使う。ZIP は開かない。索引が無い・読めないときは false（＝見つからない扱い）。
+    pub fn is_article_in_archive(&self, article_id: &str) -> bool {
+        match self.load_archive_index_or_default() {
+            Ok(index) => index.archives.iter().any(|archive| {
+                archive
+                    .articles
+                    .iter()
+                    .any(|article| article.article_id == article_id)
+            }),
+            Err(error) => {
+                log::warn!("Failed to read archive index while checking an article: {error}");
+                false
+            }
+        }
+    }
+
     /// 記事IDから月次ZIP内の1記事だけを検証・復元する。任意パスは受け取らない。
     pub fn restore_archived_article(
         &self,
