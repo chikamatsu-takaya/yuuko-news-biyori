@@ -320,15 +320,17 @@ impl AiProviderService {
     }
 
     /// Mock 応答。画面にそのまま表示されるため、mock / normal などの内部ラベルは文面に含めない。
+    /// 要約は種（本文抜粋＋定型文）の先頭の数文だけを短く返す（`mock_excerpt`）。種そのものを返すと
+    /// 本文抜粋（最大1500文字・URL入り）がほぼそのまま要約欄に出て、原文の大量転載に近くなるため。
     /// 再説明・感想は summary_service がゆうこの口調で組んだ定型文（context）をそのまま返す。
     /// input_text（実AI向けの要約・要点）は使わず、Mock の結果を従来の決定的な文面のままにする。
-    /// context が無いときだけ input_text を返す（従来の呼び出し方との互換）。
+    /// context が無いときだけ input_text の短い抜粋を返す（従来の呼び出し方との互換）。
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
-            "summary_v1" => request.input_text,
-            id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => {
-                request.context.unwrap_or(request.input_text)
-            }
+            "summary_v1" => mock_excerpt(&request.input_text),
+            id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => request
+                .context
+                .unwrap_or_else(|| mock_excerpt(&request.input_text)),
             // 要点・注目ポイント・タグ: 種（無害化済みのタイトル＋本文抜粋）と context の無害化済みジャンルから
             // 決定的な JSON を組む（外部通信なし）。
             id if id == ARTICLE_POINTS_PROMPT_ID => serde_json::to_string(&mock_article_points(
@@ -356,7 +358,7 @@ impl AiProviderService {
                 "detail": mock_phrase_explanation_detail(explanation_level),
             })
             .to_string(),
-            _ => request.input_text.trim().to_string(),
+            _ => mock_excerpt(&request.input_text),
         }
     }
 }
@@ -399,7 +401,10 @@ fn mock_phrase_explanation_detail(explanation_level: ExplanationLevel) -> &'stat
 /// タグはジャンル（summary_service が無害化した値）と固定の語から3件作る（`mock_article_tags`）。
 fn mock_article_points(input_text: &str, genre: &str) -> AiArticlePoints {
     fn sentences<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+        // 本文抜粋の URL（t.co の短縮URLなど）は要点に要らないので、区切る前に除く。
+        let lines = lines.map(remove_urls).collect::<Vec<_>>();
         lines
+            .iter()
             .flat_map(|line| line.split('。'))
             .map(str::trim)
             .filter(|sentence| !sentence.is_empty() && !sentence.starts_with(['#', '-', '*']))
@@ -467,6 +472,100 @@ fn mock_article_tags(genre: &str) -> Vec<String> {
         }
     }
     tags
+}
+
+/// Mock の要約（と context の無い Mock 応答）の上限文字数。実AIの要約（1〜2文・百数十文字）と同じくらいに抑え、
+/// 本文抜粋がそのまま並ばないようにする。
+const MOCK_EXCERPT_MAX_CHARS: usize = 120;
+/// Mock の要約に使う先頭の文の数。
+const MOCK_EXCERPT_MAX_SENTENCES: usize = 2;
+/// 抜粋が空になったとき（本文が URL だけ等）の固定文。出力検証の「空」に落ちて要約できなくならないようにする。
+const MOCK_EXCERPT_EMPTY_TEXT: &str = "くわしい内容は元記事で確かめてね。";
+
+/// Mock 用の短い抜粋（決定的・外部通信なし）。URL を除き、空白・改行を1つの空白にまとめ、連続した「。」を1つにする。
+/// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取る。
+/// 2文で `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは、1文目が収まれば1文目だけにし（文の途中で切らない）、
+/// 1文目も収まらないときは上限で切って「…」を付ける。
+/// 入力は無害化済みの種（`<` は全角・行頭 `#` なし・区切り行なし）。1行にまとめるので見出し・区切り行は生じないが、
+/// 記号だけが残った場合は区切り行と解釈されうるため固定文にする。
+fn mock_excerpt(text: &str) -> String {
+    let flattened = remove_urls(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars: Vec<char> = Vec::with_capacity(flattened.len());
+    for c in flattened.chars() {
+        if c == '。' && chars.last() == Some(&'。') {
+            continue;
+        }
+        chars.push(c);
+    }
+    // 文の終わり（区切り文字の直後の位置）を先頭から最大 MOCK_EXCERPT_MAX_SENTENCES 個集める。
+    let sentence_ends = chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &c)| {
+            matches!(c, '。' | '！' | '？' | '!' | '?')
+                || (c == '.' && chars.get(index + 1).is_none_or(|next| next.is_whitespace()))
+        })
+        .map(|(index, _)| index + 1)
+        .take(MOCK_EXCERPT_MAX_SENTENCES)
+        .collect::<Vec<_>>();
+    let end = if sentence_ends.len() < MOCK_EXCERPT_MAX_SENTENCES {
+        chars.len()
+    } else {
+        sentence_ends[MOCK_EXCERPT_MAX_SENTENCES - 1]
+    };
+    let end = if end > MOCK_EXCERPT_MAX_CHARS {
+        // 収まる最後の文の終わりまでにする。1文目も収まらなければ上限で切る。
+        sentence_ends
+            .iter()
+            .copied()
+            .filter(|&sentence_end| sentence_end <= MOCK_EXCERPT_MAX_CHARS)
+            .max()
+            .unwrap_or(end)
+    } else {
+        end
+    };
+    let excerpt = if end > MOCK_EXCERPT_MAX_CHARS {
+        let cut = chars[..MOCK_EXCERPT_MAX_CHARS]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        format!("{cut}…")
+    } else {
+        chars[..end].iter().collect::<String>().trim().to_string()
+    };
+    let only_marks = excerpt
+        .chars()
+        .all(|c| c.is_whitespace() || matches!(c, '-' | '*' | '_' | '=' | '…'));
+    if only_marks {
+        MOCK_EXCERPT_EMPTY_TEXT.to_string()
+    } else {
+        excerpt
+    }
+}
+
+/// 文字列から URL（`http://` / `https://` / `www.` で始まる部分）を除く。URL は空白か ASCII 以外の文字
+/// （「。」など）の手前までとみなすので、日本語の文に続けて書かれた URL でも前後の文は残る。改行は残す。
+fn remove_urls(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = ["http://", "https://", "www."]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+    {
+        kept.push_str(&rest[..start]);
+        let url = &rest[start..];
+        let end = url
+            .find(|c: char| c.is_whitespace() || !c.is_ascii())
+            .unwrap_or(url.len());
+        rest = &url[end..];
+    }
+    kept.push_str(rest);
+    kept
 }
 
 /// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
@@ -2187,6 +2286,104 @@ mod tests {
                 .unwrap();
             assert_eq!(response.text, "入力本文", "{prompt_id}");
         }
+    }
+
+    fn mock_summary(input_text: &str) -> String {
+        service()
+            .request_text(
+                AiRequest {
+                    prompt_id: "summary_v1".to_string(),
+                    input_text: input_text.to_string(),
+                    context: Some("記事タイトル".to_string()),
+                },
+                AiProvider::Mock,
+                ExplanationLevel::Normal,
+            )
+            .unwrap()
+            .text
+    }
+
+    #[test]
+    fn mock_summary_is_a_short_excerpt_of_the_first_sentences_without_urls() {
+        // 本文抜粋（最大1500文字）をそのまま要約欄に出さない（原文の大量転載に近くなるため）。
+        let excerpt = "新しい補助金の受付が始まった。対象は中小企業です。詳しくはこちら https://t.co/AbCdEf をご覧ください。"
+            .repeat(30);
+        let summary = mock_summary(&format!("{excerpt} 特に、注目ポイント。"));
+        assert_eq!(
+            summary,
+            "新しい補助金の受付が始まった。対象は中小企業です。"
+        );
+        assert!(summary.chars().count() <= MOCK_EXCERPT_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn mock_summary_removes_urls_and_cuts_long_sentences() {
+        // 英語のツイート（改行・t.co の URL 入り）でも URL を除き、上限文字数で切って「…」を付ける。
+        let tweet = "Breaking: the city council approved the new budget for public transport https://t.co/xyz\n\
+            and many residents welcomed the decision because it will extend bus routes to the suburbs and lower fares for students and seniors alike";
+        let summary = mock_summary(tweet);
+        assert!(!summary.contains("http"), "{summary}");
+        assert!(!summary.contains("t.co"), "{summary}");
+        assert!(!summary.contains('\n'));
+        assert!(summary.ends_with('…'), "{summary}");
+        assert!(summary.chars().count() <= MOCK_EXCERPT_MAX_CHARS + 1);
+        // 英語の文も「.」＋空白で区切る。
+        assert_eq!(
+            mock_summary("First sentence. Second one! Third sentence."),
+            "First sentence. Second one!"
+        );
+        // 日本語の文に続けて書かれた URL も、URL の手前までは残す。
+        assert_eq!(
+            mock_summary("詳しくはこちらhttps://example.com/a"),
+            "詳しくはこちら"
+        );
+    }
+
+    #[test]
+    fn mock_summary_falls_back_to_a_fixed_text_when_nothing_is_left() {
+        assert_eq!(
+            mock_summary("https://t.co/abc www.example.com"),
+            MOCK_EXCERPT_EMPTY_TEXT
+        );
+        assert_eq!(mock_summary("---"), MOCK_EXCERPT_EMPTY_TEXT);
+    }
+
+    #[test]
+    fn mock_summary_keeps_only_the_first_sentence_when_two_do_not_fit() {
+        // 1文目は上限内・2文目まで入れると上限を超える → 文の途中で切らず1文目だけにする。
+        let first = format!("{}。", "あ".repeat(60));
+        let second = format!("{}。", "い".repeat(80));
+        assert_eq!(mock_summary(&format!("{first}{second}")), first);
+        // 2文目の後に区切りが無く長い本文が続く場合も同じ。
+        let tail = "う".repeat(200);
+        assert_eq!(mock_summary(&format!("{first}{tail}")), first);
+        // 1文目だけで上限を超えるときは上限で切って「…」を付ける。
+        let long_first = format!("{}。", "え".repeat(200));
+        let summary = mock_summary(&long_first);
+        assert_eq!(summary, format!("{}…", "え".repeat(MOCK_EXCERPT_MAX_CHARS)));
+    }
+
+    #[test]
+    fn mock_summary_merges_repeated_periods() {
+        // 連続した「。」は1つにまとめ、空の文として数えない。
+        assert_eq!(
+            mock_summary("受付が始まった。。。対象は中小企業。。続きの文。"),
+            "受付が始まった。対象は中小企業。"
+        );
+    }
+
+    #[test]
+    fn mock_article_points_leave_out_urls() {
+        let points = mock_article_points(
+            "タイトル\n新製品を発表した https://t.co/abc。価格は据え置きだ。",
+            "テクノロジー",
+        );
+        assert_eq!(points.key_points[0], "新製品を発表した");
+        assert_eq!(points.key_points[1], "価格は据え置きだ");
+        assert!(points
+            .key_points
+            .iter()
+            .all(|point| !point.contains("http")));
     }
 
     #[test]

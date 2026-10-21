@@ -404,8 +404,30 @@ const hasUnsavedSettingsChanges = (
 type AiConnectionTestView = {
   tone: "success" | "warning";
   message: string;
-  // Gemini で APIキー未設定のときだけ MockProvider を案内する（画面詳細設計書 SCR-003 §7.6/§7.7）。
-  recommendMock: boolean;
+  // Gemini で APIキー未設定のときだけ、キーの要らないローカルを案内する。主経路はローカル
+  // （判断台帳 D99 / D103）で、Mock は開発・デモ用のため勧めない。
+  recommendLocal: boolean;
+  // どの AI を確かめた結果か（見出しに出す短い表示名）。Provider 未確定のときは null。
+  providerLabel: string | null;
+};
+
+// 接続テストの見出し・案内に出す AI の短い表示名。選択欄の表示名（「ローカル（おすすめ）」など）から
+// 補足を除いたもの。openai は選択肢に無いが、保存済みなら Rust 側は未対応として確かめるため別名にする。
+const aiProviderShortLabel = (
+  provider: string | null | undefined
+): string | null => {
+  switch (provider) {
+    case "local":
+      return "ローカル";
+    case "gemini":
+      return "Gemini";
+    case "mock":
+      return "開発・デモ用";
+    case "openai":
+      return "未対応のAI";
+    default:
+      return null;
+  }
 };
 
 // 接続テスト結果 → 表示。Rust から受け取る status / errorKind を固定文言へ写像し、
@@ -413,21 +435,36 @@ type AiConnectionTestView = {
 // 特定 Provider 専用の分岐は持たず、未知の値・Provider未確定は安全側の「接続失敗」に倒す。
 const mapAiConnectionTestResult = (
   result: AiProviderConnectionTestResult
-): AiConnectionTestView => {
+): AiConnectionTestView => ({
+  ...mapAiConnectionTestStatus(result),
+  providerLabel: aiProviderShortLabel(result.checkedProvider),
+});
+
+const mapAiConnectionTestStatus = (
+  result: AiProviderConnectionTestResult
+): Omit<AiConnectionTestView, "providerLabel"> => {
   if (result.status === "available") {
-    return { tone: "success", message: "利用可能です", recommendMock: false };
+    return {
+      tone: "success",
+      // Mock は本物のAIではないため、「AIで作れる」と誤解させない文言にする。
+      message:
+        result.provider === "mock"
+          ? "動作確認用の決まった文で動きます（本物のAIは使いません）"
+          : "このAIで要約・解説を作れます",
+      recommendLocal: false,
+    };
   }
   if (result.errorKind === "api_key_missing") {
     return {
       tone: "warning",
       message: "APIキーが未設定です",
-      recommendMock: result.provider === "gemini",
+      recommendLocal: result.provider === "gemini",
     };
   }
   // ローカル（同梱AI）の失敗は種別ごとの固定文言にする（パス・番号などは Rust 側で落としてある）。
   const localMessage = localAiConnectionMessage(result);
   if (localMessage) {
-    return { tone: "warning", message: localMessage, recommendMock: false };
+    return { tone: "warning", message: localMessage, recommendLocal: false };
   }
   if (
     result.status === "not_implemented" ||
@@ -436,13 +473,13 @@ const mapAiConnectionTestResult = (
     return {
       tone: "warning",
       message: "未対応のAIプロバイダーです",
-      recommendMock: false,
+      recommendLocal: false,
     };
   }
   return {
     tone: "warning",
     message: "接続に失敗しました",
-    recommendMock: false,
+    recommendLocal: false,
   };
 };
 
@@ -469,11 +506,15 @@ const localAiConnectionMessage = (
 };
 
 // command 自体が reject した場合（通常は起きない）も、生エラーを出さず接続失敗として表示する。
-const aiConnectionTestFailedView: AiConnectionTestView = {
+// どの AI かはテスト開始時の保存済み Provider から付ける。
+const aiConnectionTestFailedView = (
+  providerLabel: string | null
+): AiConnectionTestView => ({
   tone: "warning",
   message: "接続に失敗しました",
-  recommendMock: false,
-};
+  recommendLocal: false,
+  providerLabel,
+});
 
 // Sub Components
 function SettingRow({
@@ -548,6 +589,12 @@ export default function SettingsScreen({
   );
   // state 更新前の連打でも二重実行しないよう、同期的に参照できる ref でも実行中を保持する。
   const isTestingAiRef = React.useRef(false);
+  // 実行中の接続テスト。開始時の保存済み Provider と通し番号を覚え、テスト中に選択を切り替えたら
+  // 番号を進めて、届いた結果を捨てる（切り替え後の AI の結果と誤解させないため）。
+  const aiTestRunRef = React.useRef<{ id: number; savedProvider: string | null }>({
+    id: 0,
+    savedProvider: null,
+  });
   const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
   // データ取り込み（全置き換え）の実行中か。settings.json には書き込みロックが無いため、
@@ -900,6 +947,13 @@ export default function SettingsScreen({
   };
 
   const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
+  // 接続テストは保存済みの Provider を確かめる。保存済みの openai は画面上 mock と表示するため、比較も同じ扱いにする。
+  const savedAiProvider = backendSettings?.aiProvider ?? null;
+  const savedAiProviderLabel = aiProviderShortLabel(savedAiProvider);
+  const isAiProviderSelectionUnsaved =
+    savedAiProvider !== null &&
+    settings.ai.provider !==
+      (savedAiProvider === "openai" ? "mock" : savedAiProvider);
 
   // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
   // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
@@ -923,13 +977,17 @@ export default function SettingsScreen({
       return;
     }
     isTestingAiRef.current = true;
+    const runId = aiTestRunRef.current.id + 1;
+    const savedProvider = backendSettings?.aiProvider ?? null;
+    aiTestRunRef.current = { id: runId, savedProvider };
+    const isStale = () => aiTestRunRef.current.id !== runId;
     setIsTestingAi(true);
     setAiTestView(null);
     setAiTestUnavailableInPreview(false);
 
     try {
       const result = await testAiProvider();
-      if (!isMountedRef.current) {
+      if (!isMountedRef.current || isStale()) {
         return;
       }
       if (!result) {
@@ -938,15 +996,17 @@ export default function SettingsScreen({
       }
       setAiTestView(mapAiConnectionTestResult(result));
     } catch (error) {
-      if (!isMountedRef.current) {
-        return;
-      }
       // 調査用に種別だけ残す（生エラー文は画面へ出さない）。
       console.error(
         "Failed to test AI provider via tauri command:",
         error instanceof Error ? error.name : typeof error
       );
-      setAiTestView(aiConnectionTestFailedView);
+      if (!isMountedRef.current || isStale()) {
+        return;
+      }
+      setAiTestView(
+        aiConnectionTestFailedView(aiProviderShortLabel(savedProvider))
+      );
     } finally {
       isTestingAiRef.current = false;
       if (isMountedRef.current) {
@@ -1335,29 +1395,38 @@ export default function SettingsScreen({
                       value={settings.ai.provider}
                       onValueChange={(v) => {
                         // 前回の接続テスト結果を新しいプロバイダーの結果と誤解させないため、切替時に消す。
+                        // テスト中なら、届く結果も捨てる（通し番号を進める）。
+                        aiTestRunRef.current = {
+                          ...aiTestRunRef.current,
+                          id: aiTestRunRef.current.id + 1,
+                        };
                         setAiTestView(null);
+                        setAiTestUnavailableInPreview(false);
                         updateAi("provider", v);
                       }}
                     >
-                      <SelectTrigger className="w-48">
+                      <SelectTrigger className="w-72 max-w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
-                        <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* local は同梱の llama-server（このパソコンの中で動くAI・判断台帳 D99）で生成する。 */}
+                        {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
+                            おすすめと分かる名前にする。Gemini は任意、Mock は開発・デモ用なので最後。
+                            保存値（value）は従来のまま変えない。 */}
+                        <SelectItem value="local">ローカル（おすすめ）</SelectItem>
+                        <SelectItem value="gemini">Gemini（APIキーが必要）</SelectItem>
                         {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
-                        <SelectItem value="local">ローカル</SelectItem>
+                        <SelectItem value="mock">開発・デモ用（本物のAIは使いません）</SelectItem>
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。 */}
+                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。
+                      以前から Mock のままの利用者にも、ここでローカルへの切り替えを案内する（自動では切り替えない）。 */}
                   {settings.ai.provider === "mock" && (
                     <p
-                      className="text-xs text-muted-foreground py-2"
+                      className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-2 my-2 leading-relaxed"
                       data-testid="mock-provider-note"
                     >
-                      MockProvider は開発・デモ用です（外部AIは使いません）。
+                      いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。
                     </p>
                   )}
                   {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
@@ -1373,9 +1442,23 @@ export default function SettingsScreen({
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-0.5">
                         <span className="text-sm text-foreground">AI接続テスト</span>
-                        <span className="text-xs text-muted-foreground">
-                          保存済みの設定でテストします（未保存の変更は反映されません）
+                        <span
+                          className="text-xs text-muted-foreground"
+                          data-testid="ai-connection-test-target"
+                        >
+                          {savedAiProviderLabel
+                            ? `保存済みの設定（${savedAiProviderLabel}）でテストします（未保存の変更は反映されません）`
+                            : "保存済みの設定でテストします（未保存の変更は反映されません）"}
                         </span>
+                        {/* 選択を変えて保存していないときは、押しても選んだ AI ではなく保存済みの AI を確かめることを伝える。 */}
+                        {isAiProviderSelectionUnsaved && (
+                          <span
+                            className="text-xs text-amber-800"
+                            data-testid="ai-connection-test-unsaved-note"
+                          >
+                            いま選んでいる「{aiProviderShortLabel(settings.ai.provider)}」をテストするには、先に保存してね。
+                          </span>
+                        )}
                       </div>
                       <Button
                         variant="outline"
@@ -1387,8 +1470,18 @@ export default function SettingsScreen({
                         {isTestingAi ? "テスト中…" : "接続テスト"}
                       </Button>
                     </div>
-                    {/* 結果は固定文言のみ表示（APIキー・生エラー文は出さない）。 */}
+                    {/* 進行中の案内と結果は固定文言のみ表示（APIキー・生エラー文は出さない）。
+                        ローカルは初回にモデルの照合とサーバー起動で30秒ほどかかるため、待っている理由を先に伝える。
+                        結果は次のテスト・プロバイダー切り替え・画面を離れるまで残す。 */}
                     <div role="status" aria-live="polite" data-testid="ai-connection-test-result">
+                      {isTestingAi && (
+                        <p
+                          className="mt-2 text-xs text-muted-foreground leading-relaxed"
+                          data-testid="ai-connection-test-progress"
+                        >
+                          テストしているよ。初めてのときは準備に30秒ほどかかるから、少し待っていてね。
+                        </p>
+                      )}
                       {aiTestView && (
                         <div
                           className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
@@ -1397,10 +1490,15 @@ export default function SettingsScreen({
                               : "border-amber-300 bg-amber-50 text-amber-800"
                           }`}
                         >
+                          <p className="font-medium">
+                            {`テスト結果${aiTestView.providerLabel ? `（${aiTestView.providerLabel}）` : ""}：${
+                              aiTestView.tone === "success" ? "使えます" : "使えません"
+                            }`}
+                          </p>
                           <p>{aiTestView.message}</p>
-                          {aiTestView.recommendMock && (
+                          {aiTestView.recommendLocal && (
                             <p className="mt-1">
-                              Gemini を使うにはAPIキーの設定が必要です。キーを設定するまでは <strong>MockProvider</strong> の利用をおすすめします。
+                              Gemini を使うにはAPIキーの設定が必要です。キーを用意しない場合は、APIキーの要らない <strong>ローカル（おすすめ）</strong> を選んでください。
                             </p>
                           )}
                         </div>
@@ -1437,7 +1535,7 @@ export default function SettingsScreen({
                           className="text-xs text-muted-foreground"
                           data-testid="auto-summary-help"
                         >
-                          AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）
+                          AIの設定が開発・デモ用のときは動きません（ローカル・Gemini のときだけ、1件ずつ順番に要約します）
                         </span>
                       </div>
                       <Switch
@@ -1450,10 +1548,23 @@ export default function SettingsScreen({
                     </div>
                   </div>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
-                  {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
-                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。<strong>ローカル</strong>はこのパソコンの中だけで動くAIで、APIキーは要りません（記事の内容を外部へ送りません）。
-                  </p>
+                  {/* APIキーはこの画面で扱わず表示・保存もしない。方針（判断台帳 D99 / D103）に合わせ、
+                      ローカルを主経路・Gemini を任意・Mock を開発・デモ用として案内する。 */}
+                  <div
+                    className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50 space-y-1"
+                    data-testid="ai-provider-guide"
+                  >
+                    <p>
+                      💡 <strong>ローカル（おすすめ）</strong>：このパソコンの中で動くAIです。APIキーは要らず、記事の内容を外部へ送りません。
+                    </p>
+                    <p>
+                      <strong>Gemini</strong>：外部のAIです。APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります。キーが未設定のときは開発・デモ用の文で動きます。
+                    </p>
+                    <p>
+                      <strong>開発・デモ用</strong>：動作確認のための設定です。本物のAIは使いません。要約は記事の先頭を少し抜き出したもの、解説・ゆうこの一言などは決まった文です。
+                    </p>
+                    <p>APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。</p>
+                  </div>
                 </CardContent>
               </Card>
             )}
