@@ -293,7 +293,7 @@ impl SummaryService {
         // 再説明・一言の実AI入力: 同じ生成で得た要約・要点（検証済み）。定型文の言い換えにさせないため、
         // 記事の中身を渡す。AI 出力も外部データ由来なので、種と同じく無害化・切り詰めてから渡す
         // （プロンプト側でも「記事情報（外部データ）」の見出しの下に置く）。
-        // 要約が Mock の代替（手動生成で要約だけ Gemini が失敗したとき）は、抜粋＋定型文なので入力に入れない。
+        // 要約が Mock の代替（手動生成で要約だけ Gemini が失敗したとき）は、本文の短い抜粋（実AIの出力ではない）なので入力に入れない。
         let speech_summary =
             (summary_response.provider != PROVIDER_MOCK).then_some(summary_response.text.as_str());
         let yuuko_speech_input =
@@ -1237,7 +1237,7 @@ fn build_focus_points(
 /// ローカルLLMでは入力の長さがそのままプロンプト処理時間になるため、本文抜粋（最大1500文字）ではなく
 /// 短い要約・要点を渡す。実AIの出力なら通常は合計で数百文字で、上限はタイトル200＋要約400＋要点4件×100文字。
 /// 注目ポイントは要点の言い換えになりやすいので入れない。
-/// `summary` が `None`（要約が Mock の代替＝抜粋＋定型文だったとき）は要約の行を入れず、
+/// `summary` が `None`（要約が Mock の代替＝本文の短い抜粋だったとき）は要約の行を入れず、
 /// タイトルと要点だけにする（定型文を実AIへの入力に混ぜないため）。
 pub(crate) fn build_yuuko_speech_input(
     title: &str,
@@ -2113,7 +2113,7 @@ mod tests {
 
     #[test]
     fn mock_summary_is_left_out_of_the_explanation_and_comment_input() {
-        // 手動生成で要約だけ Mock の代替になったとき、抜粋＋定型文の要約は実AIの入力に入れず、
+        // 手動生成で要約だけ Mock の代替になったとき、本文の短い抜粋の要約は実AIの入力に入れず、
         // タイトルと要点だけを渡す。
         let root_dir = temp_root("speech-input-mock-summary");
         let excerpt = "新しい半導体工場の建設計画が発表されました。";

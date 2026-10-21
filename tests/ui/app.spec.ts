@@ -6119,7 +6119,7 @@ test("settings shows the development note only while MockProvider is selected", 
   const note = page.getByTestId("mock-provider-note");
   // 以前から Mock のままの利用者にも、ローカルへの切り替えを案内する（自動では切り替えない）。
   await expect(note).toHaveText(
-    "いまは開発・デモ用の設定だよ。本物のAIは使わず、記事の先頭を少し抜き出した決まった文を出すだけなの。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。"
+    "いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。"
   );
 
   await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
@@ -6789,7 +6789,11 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   });
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
-  await expect(page.getByText("保存済みの設定でテストします")).toBeVisible();
+  // 保存済みの AI（既定は開発・デモ用）でテストすることを名前つきで示す。
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（開発・デモ用）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(page.getByTestId("ai-connection-test-unsaved-note")).toHaveCount(0);
 
   const button = page.getByRole("button", { name: "接続テスト" });
   await button.click();
@@ -6799,7 +6803,7 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   await running.click({ force: true });
 
   // Mock の成功は「本物のAIではない」ことが分かる文言にする。
-  await expect(aiTestResultRegion(page)).toContainText("テスト結果：使えます");
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（開発・デモ用）：使えます");
   await expect(aiTestResultRegion(page)).toContainText("本物のAIは使いません");
   await expect(button).toBeEnabled();
   expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
@@ -6811,8 +6815,9 @@ test("settings AI connection test explains the wait and keeps the result after i
   page,
 }) => {
   await page.addInitScript(() => {
-    (window as unknown as Record<string, unknown>).__E2E_AI_TEST_DELAY_MS__ =
-      800;
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 800;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
   });
   await setAiTestResult(page, {
     provider: "local",
@@ -6823,6 +6828,9 @@ test("settings AI connection test explains the wait and keeps the result after i
   });
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByTestId("ai-connection-test-target")).toContainText(
+    "保存済みの設定（ローカル）でテストします"
+  );
 
   const progress = page.getByTestId("ai-connection-test-progress");
   await expect(progress).toHaveCount(0);
@@ -6832,14 +6840,14 @@ test("settings AI connection test explains the wait and keeps the result after i
   );
 
   const region = aiTestResultRegion(page);
-  await expect(region).toContainText("テスト結果：使えます");
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
   await expect(region).toContainText("このAIで要約・解説を作れます");
   await expect(progress).toHaveCount(0);
   await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
 
   // 終わった後も結果は残る（ボタンが元に戻るだけにしない）。
   await page.waitForTimeout(1000);
-  await expect(region).toContainText("テスト結果：使えます");
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
 
   // 失敗の結果も「使えません」と固定文言で残る。
   await page.evaluate(() => {
@@ -6852,11 +6860,80 @@ test("settings AI connection test explains the wait and keeps the result after i
     };
   });
   await page.getByRole("button", { name: "接続テスト" }).click();
-  await expect(region).toContainText("テスト結果：使えません");
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
   await expect(region).toContainText("ローカルAIを起動できませんでした");
   await expect(region).not.toContainText("local_ai_start_failed");
   await page.waitForTimeout(1000);
-  await expect(region).toContainText("テスト結果：使えません");
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
+});
+
+// テスト中に AI の選択を切り替えたら、届いた結果は切り替え前の AI のものなので表示しない。
+test("settings AI connection test drops the result when the provider is switched during the test", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 1000;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(page.getByRole("button", { name: "テスト中…" })).toBeDisabled();
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  // テストが終わってボタンが戻っても、ローカルの結果は出さない。
+  await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
+  await expect(aiTestResultRegion(page)).not.toContainText("テスト結果");
+  expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
+});
+
+// 選択を変えて未保存のままだと、保存済みの AI でテストすることと、先に保存が要ることを示す。
+test("settings AI connection test names the saved provider when the selection is unsaved", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ =
+      { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  const unsavedNote = page.getByTestId("ai-connection-test-unsaved-note");
+  await expect(unsavedNote).toHaveCount(0);
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（ローカル）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(unsavedNote).toHaveText(
+    "いま選んでいる「Gemini」をテストするには、先に保存してね。"
+  );
+  // 押すと保存済みのローカルを確かめ、見出しにもその名前が出る。
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（ローカル）：使えます");
+
+  // 選択を保存済みに戻すと案内は消える。
+  await page.getByRole("combobox").filter({ hasText: "Gemini" }).click();
+  await page.getByRole("option", { name: "ローカル" }).click();
+  await expect(unsavedNote).toHaveCount(0);
 });
 
 test("settings AI connection test shows APIキー未設定 with a ローカル recommendation for Gemini", async ({

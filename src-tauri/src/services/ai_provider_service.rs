@@ -482,9 +482,10 @@ const MOCK_EXCERPT_MAX_SENTENCES: usize = 2;
 /// 抜粋が空になったとき（本文が URL だけ等）の固定文。出力検証の「空」に落ちて要約できなくならないようにする。
 const MOCK_EXCERPT_EMPTY_TEXT: &str = "くわしい内容は元記事で確かめてね。";
 
-/// Mock 用の短い抜粋（決定的・外部通信なし）。URL を除き、空白・改行を1つの空白にまとめ、
-/// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取り、
-/// `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは切って「…」を付ける。
+/// Mock 用の短い抜粋（決定的・外部通信なし）。URL を除き、空白・改行を1つの空白にまとめ、連続した「。」を1つにする。
+/// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取る。
+/// 2文で `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは、1文目が収まれば1文目だけにし（文の途中で切らない）、
+/// 1文目も収まらないときは上限で切って「…」を付ける。
 /// 入力は無害化済みの種（`<` は全角・行頭 `#` なし・区切り行なし）。1行にまとめるので見出し・区切り行は生じないが、
 /// 記号だけが残った場合は区切り行と解釈されうるため固定文にする。
 fn mock_excerpt(text: &str) -> String {
@@ -492,20 +493,40 @@ fn mock_excerpt(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let chars = flattened.chars().collect::<Vec<_>>();
-    let mut end = chars.len();
-    let mut sentences = 0;
-    for (index, &c) in chars.iter().enumerate() {
-        let ends_sentence = matches!(c, '。' | '！' | '？' | '!' | '?')
-            || (c == '.' && chars.get(index + 1).is_none_or(|next| next.is_whitespace()));
-        if ends_sentence {
-            sentences += 1;
-            if sentences >= MOCK_EXCERPT_MAX_SENTENCES {
-                end = index + 1;
-                break;
-            }
+    let mut chars: Vec<char> = Vec::with_capacity(flattened.len());
+    for c in flattened.chars() {
+        if c == '。' && chars.last() == Some(&'。') {
+            continue;
         }
+        chars.push(c);
     }
+    // 文の終わり（区切り文字の直後の位置）を先頭から最大 MOCK_EXCERPT_MAX_SENTENCES 個集める。
+    let sentence_ends = chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &c)| {
+            matches!(c, '。' | '！' | '？' | '!' | '?')
+                || (c == '.' && chars.get(index + 1).is_none_or(|next| next.is_whitespace()))
+        })
+        .map(|(index, _)| index + 1)
+        .take(MOCK_EXCERPT_MAX_SENTENCES)
+        .collect::<Vec<_>>();
+    let end = if sentence_ends.len() < MOCK_EXCERPT_MAX_SENTENCES {
+        chars.len()
+    } else {
+        sentence_ends[MOCK_EXCERPT_MAX_SENTENCES - 1]
+    };
+    let end = if end > MOCK_EXCERPT_MAX_CHARS {
+        // 収まる最後の文の終わりまでにする。1文目も収まらなければ上限で切る。
+        sentence_ends
+            .iter()
+            .copied()
+            .filter(|&sentence_end| sentence_end <= MOCK_EXCERPT_MAX_CHARS)
+            .max()
+            .unwrap_or(end)
+    } else {
+        end
+    };
     let excerpt = if end > MOCK_EXCERPT_MAX_CHARS {
         let cut = chars[..MOCK_EXCERPT_MAX_CHARS]
             .iter()
@@ -2325,6 +2346,30 @@ mod tests {
             MOCK_EXCERPT_EMPTY_TEXT
         );
         assert_eq!(mock_summary("---"), MOCK_EXCERPT_EMPTY_TEXT);
+    }
+
+    #[test]
+    fn mock_summary_keeps_only_the_first_sentence_when_two_do_not_fit() {
+        // 1文目は上限内・2文目まで入れると上限を超える → 文の途中で切らず1文目だけにする。
+        let first = format!("{}。", "あ".repeat(60));
+        let second = format!("{}。", "い".repeat(80));
+        assert_eq!(mock_summary(&format!("{first}{second}")), first);
+        // 2文目の後に区切りが無く長い本文が続く場合も同じ。
+        let tail = "う".repeat(200);
+        assert_eq!(mock_summary(&format!("{first}{tail}")), first);
+        // 1文目だけで上限を超えるときは上限で切って「…」を付ける。
+        let long_first = format!("{}。", "え".repeat(200));
+        let summary = mock_summary(&long_first);
+        assert_eq!(summary, format!("{}…", "え".repeat(MOCK_EXCERPT_MAX_CHARS)));
+    }
+
+    #[test]
+    fn mock_summary_merges_repeated_periods() {
+        // 連続した「。」は1つにまとめ、空の文として数えない。
+        assert_eq!(
+            mock_summary("受付が始まった。。。対象は中小企業。。続きの文。"),
+            "受付が始まった。対象は中小企業。"
+        );
     }
 
     #[test]
