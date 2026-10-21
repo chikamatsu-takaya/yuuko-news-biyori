@@ -7,6 +7,8 @@
 //! 静的に作ると、未使用時も WebView を常駐させて負荷が増えるうえ、トレイ初期化に失敗して
 //! 通常終了へ戻ったときに「非表示のゆうこウィンドウだけが残りプロセスが終わらない」状態になるため。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindow,
@@ -26,6 +28,20 @@ const YUUKO_WINDOW_BALLOON_LOGICAL_HEIGHT: f64 = 196.0;
 /// 収まる最小限。出典・要約を表示するため 272 から広げた（いずれもページ側で行数を抑えるため、
 /// これ以上長くても高さは増えない）。tests/ui/yuuko-window.spec.ts で最長ケースが収まることを確認している。
 const YUUKO_WINDOW_PREVIEW_LOGICAL_HEIGHT: f64 = 298.0;
+/// 着せかえ（ガチャの吹き出し・飾り。判断台帳 D156）を付けているときに、吹き出し段階で足す高さ（論理px）。
+/// 頭の上へはみ出す飾り（最大で立ち絵の上に約 12px の余白を取る）と、ふち・余白が厚い吹き出し
+/// （ゲームの窓・もこもこ雲など）の分。既定（いつもの・なし）では足さず、今までの大きさのままにする
+/// （透明部分がクリックを奪う範囲を、着せかえを付けた人の分だけに限る）。
+/// tests/ui/yuuko-window.spec.ts で、全部の吹き出し×はみ出しが最大の飾りでも収まることを確認している。
+const DRESSUP_EXTRA_BALLOON_LOGICAL_HEIGHT: f64 = 20.0;
+/// 着せかえを付けているときに、軽量プレビュー段階で足す高さ（論理px）。ノートの吹き出しは罫線に合わせて
+/// 行の高さが広がるため、吹き出し段階より多めに足す。
+const DRESSUP_EXTRA_PREVIEW_LOGICAL_HEIGHT: f64 = 26.0;
+
+/// 表示中の通知が着せかえを付けているか。表示（[`show_yuuko_window`]）のときに記録し、
+/// 初回クリックで軽量プレビューへ大きさを変える（[`resize_yuuko_window`]）ときにも同じ前提で大きさを決める
+/// （ページは表示時に受け取った着せかえで描き続けるため、途中で設定が変わっても表示と大きさを揃える）。
+static SHOWN_WITH_DRESSUP: AtomicBool = AtomicBool::new(false);
 
 /// ゆうこ用ウィンドウの表示段階。段階ごとに中身に合わせた大きさへ切り替える。
 ///
@@ -40,17 +56,22 @@ pub enum YuukoWindowStage {
 }
 
 impl YuukoWindowStage {
-    fn logical_size(self) -> (f64, f64) {
-        match self {
+    /// 段階ごとの大きさ。着せかえを付けているとき（dressed）だけ高さを足す（幅は変えない）。
+    fn logical_size(self, dressed: bool) -> (f64, f64) {
+        let (height, extra) = match self {
             Self::Balloon => (
-                YUUKO_WINDOW_LOGICAL_WIDTH,
                 YUUKO_WINDOW_BALLOON_LOGICAL_HEIGHT,
+                DRESSUP_EXTRA_BALLOON_LOGICAL_HEIGHT,
             ),
             Self::Preview => (
-                YUUKO_WINDOW_LOGICAL_WIDTH,
                 YUUKO_WINDOW_PREVIEW_LOGICAL_HEIGHT,
+                DRESSUP_EXTRA_PREVIEW_LOGICAL_HEIGHT,
             ),
-        }
+        };
+        (
+            YUUKO_WINDOW_LOGICAL_WIDTH,
+            if dressed { height + extra } else { height },
+        )
     }
 }
 
@@ -111,11 +132,15 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
 /// ゆうこ用ウィンドウを段階に合った大きさでプライマリモニタ作業領域の右下へ配置してから表示する。
 ///
 /// 配置先を決められない場合は、意図しない位置に出すより表示しない方が安全なため、表示せずにエラーを返す。
+/// dressed は、渡した通知が着せかえ（既定以外の吹き出し・飾り）を付けているか（付けていれば少し高くする）。
 pub fn show_yuuko_window<R: Runtime>(
     app: &AppHandle<R>,
     stage: YuukoWindowStage,
+    dressed: bool,
 ) -> tauri::Result<()> {
     let window = ensure_yuuko_window(app)?;
+    // 配置より先に記録する。配置に失敗した場合は表示しないので、この値を読む resize（表示中の初回クリック）も起きない。
+    SHOWN_WITH_DRESSUP.store(dressed, Ordering::Relaxed);
     place_at_primary_work_area_bottom_right(app, &window, stage)?;
     window.show()?;
     log::info!("ゆうこ用ウィンドウを表示しました");
@@ -171,7 +196,8 @@ fn place_at_primary_work_area_bottom_right<R: Runtime>(
 
     // 作業領域は物理pxで返るため、ウィンドウ寸法と余白もプライマリモニタの倍率で物理pxへ揃える。
     let scale_factor = monitor.scale_factor();
-    let (logical_width, logical_height) = stage.logical_size();
+    let (logical_width, logical_height) =
+        stage.logical_size(SHOWN_WITH_DRESSUP.load(Ordering::Relaxed));
     let window_size = PhysicalSize::new(
         to_physical(logical_width, scale_factor),
         to_physical(logical_height, scale_factor),
@@ -293,6 +319,22 @@ mod tests {
         let (x, y) = bottom_right_position(work_area, 480, 540, 24);
         assert!(x >= 0 && x + 480 <= 2560);
         assert!(y >= 0 && y + 540 <= 1400);
+    }
+
+    #[test]
+    fn dressup_only_adds_height_and_default_keeps_the_original_size() {
+        // 既定（着せかえなし）は今までと同じ大きさ。
+        assert_eq!(
+            YuukoWindowStage::Balloon.logical_size(false),
+            (312.0, 196.0)
+        );
+        assert_eq!(
+            YuukoWindowStage::Preview.logical_size(false),
+            (312.0, 298.0)
+        );
+        // 着せかえを付けているときは高さだけを足す（tests/ui/yuuko-window.spec.ts の寸法と揃える）。
+        assert_eq!(YuukoWindowStage::Balloon.logical_size(true), (312.0, 216.0));
+        assert_eq!(YuukoWindowStage::Preview.logical_size(true), (312.0, 324.0));
     }
 
     #[test]

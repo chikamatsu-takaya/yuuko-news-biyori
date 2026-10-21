@@ -78,6 +78,32 @@ pub fn effective_id(slot: DressupSlot, saved_id: &str, owned_gacha_ids: &[String
     }
 }
 
+/// その時点で適用する吹き出し・飾りの ID（既定・所持済みのものだけ。それ以外は既定に倒した値）。
+///
+/// 常駐ゆうこウィンドウには get_dressup_state を許可しないため（判断台帳 D156・案2）、Rust がゆうこ通知の
+/// データ（YuukoDesktopNotification・ゆうこ用ウィンドウのマウント時の通知状態）にこの値を載せて渡す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveDressupIds {
+    pub balloon_id: String,
+    pub deco_id: String,
+}
+
+impl ActiveDressupIds {
+    /// 既定（吹き出し「いつもの」・飾り「なし」）か。
+    pub fn is_default(&self) -> bool {
+        self.balloon_id == BALLOON_DEFAULT_ID && self.deco_id == DECO_NONE_ID
+    }
+}
+
+impl Default for ActiveDressupIds {
+    fn default() -> Self {
+        Self {
+            balloon_id: BALLOON_DEFAULT_ID.to_string(),
+            deco_id: DECO_NONE_ID.to_string(),
+        }
+    }
+}
+
 /// `get_dressup_state` / `set_active_balloon` / `set_active_deco` の戻り値。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

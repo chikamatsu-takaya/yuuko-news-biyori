@@ -14,18 +14,31 @@ use crate::yuuko_window::YUUKO_WINDOW_LABEL;
 /// ゆうこ用ウィンドウからの呼び出し（マウント時の初期表示）に限り、トレイ「ゆうこを呼ぶ」で預けた一言
 /// （紹介できるものが無いとき・判断台帳 D140）を1回だけ取り出して summon_message に詰める。
 /// 初回生成直後のページはイベントを取りこぼすため。表示中の通知があればそちらを優先し、一言は捨てる。
+///
+/// 同じくゆうこ用ウィンドウからの呼び出しに限り、その時点で適用する着せかえ（吹き出し・飾りの ID。
+/// 未所持・未知は既定に倒した値）を balloon_id / deco_id に詰める（判断台帳 D156・案2）。
+/// ゆうこ用ウィンドウには get_dressup_state を許可しないため、通知のデータで渡す。
 #[tauri::command]
 pub async fn get_yuuko_notification_state(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> CommandResult<YuukoNotificationState> {
+    let is_yuuko_window = window.label() == YUUKO_WINDOW_LABEL;
     let yuuko_service = state.yuuko_service.clone();
-    let mut response =
-        tauri::async_runtime::spawn_blocking(move || yuuko_service.get_yuuko_notification_state())
-            .await
-            .map_err(|error| CommandError::join_error("yuuko-notification-state", error))?
-            .map_err(CommandError::from)?;
-    if window.label() == YUUKO_WINDOW_LABEL {
+    let dressup_service = state.dressup_service.clone();
+    let mut response = tauri::async_runtime::spawn_blocking(move || {
+        let mut response = yuuko_service.get_yuuko_notification_state()?;
+        if is_yuuko_window {
+            let dressup = dressup_service.active_dressup_ids();
+            response.balloon_id = Some(dressup.balloon_id);
+            response.deco_id = Some(dressup.deco_id);
+        }
+        Ok::<_, crate::error::AppError>(response)
+    })
+    .await
+    .map_err(|error| CommandError::join_error("yuuko-notification-state", error))?
+    .map_err(CommandError::from)?;
+    if is_yuuko_window {
         let message = yuuko_desktop_notifier::take_pending_summon_message();
         if !is_displayable_notification(&response) {
             response.summon_message = message;

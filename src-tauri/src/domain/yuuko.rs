@@ -178,6 +178,17 @@ pub struct YuukoNotificationState {
     /// それ以外（メイン画面からの取得・通常の通知判定）では常に None（送らない）。固定文言だけを入れる。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summon_message: Option<String>,
+    /// その時点で適用する吹き出しの ID（着せかえ。判断台帳 D156）。永続化しない。
+    ///
+    /// 常駐ゆうこウィンドウには get_dressup_state を許可しないため、ゆうこ用ウィンドウのマウント時の
+    /// 状態取得に限って Rust が詰める（未所持・未知は既定 `balloon_default` に倒した値）。
+    /// メイン画面からの取得・通常の通知判定では常に None（送らない。メインは get_dressup_state で読む）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon_id: Option<String>,
+    /// その時点で適用する飾りの ID（未所持・未知は既定 `deco_none`）。balloon_id と同じく
+    /// ゆうこ用ウィンドウのマウント時の状態取得でだけ詰める。永続化しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deco_id: Option<String>,
 }
 
 /// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
@@ -286,6 +297,8 @@ impl PersistedYuukoState {
             reward_notification: self.reward_notification.clone(),
             preview_short_summary: None,
             summon_message: None,
+            balloon_id: None,
+            deco_id: None,
         }
     }
 

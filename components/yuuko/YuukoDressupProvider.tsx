@@ -2,9 +2,10 @@
 
 /**
  * ゆうこの着せかえ（吹き出し・飾り。判断台帳 D155）を画面全体へ配る文脈。
- * メイン画面のウィンドウ（app/page.tsx）だけが Provider を置き、マウント時に保存済みの着せかえを 1 回読む。
- * 各画面の YuukoFigure / YuukoBalloon はここから適用中の ID を読む。Provider の外（常駐ゆうこウィンドウ）は
- * get_dressup_state を許可していないため読まず、既定（いつもの・なし）のまま描く。
+ * メイン画面のウィンドウ（app/page.tsx）は YuukoDressupProvider を置き、マウント時に保存済みの着せかえを 1 回読む。
+ * 常駐ゆうこウィンドウは get_dressup_state を許可していないため読まず、Rust がゆうこ通知のデータに載せた ID を
+ * YuukoDressupStaticProvider で配る（判断台帳 D156）。どちらの Provider も無いところは既定（いつもの・なし）で描く。
+ * 各画面の YuukoFigure / YuukoBalloon はここから適用中の ID を読む。
  * 未知の ID は Rust 側と、念のためここ（lib/yuuko-dressup.mjs）でも既定へ倒す。
  */
 
@@ -65,6 +66,34 @@ export function YuukoDressupProvider({ children }: { children: React.ReactNode }
     [balloonId, decoId, applyDressupState, refreshDressup]
   );
 
+  return <YuukoDressupContext.Provider value={value}>{children}</YuukoDressupContext.Provider>;
+}
+
+/**
+ * 受け取った ID をそのまま配る Provider（常駐ゆうこウィンドウ用・判断台帳 D156）。command は呼ばない。
+ * 値は外部（通知のデータ）から来るため、既知の ID か確かめてから配る。無い・未知なら既定（いつもの・なし）。
+ * 切り替え・読み直しは常駐ウィンドウでは行わないため何もしない。
+ */
+export function YuukoDressupStaticProvider({
+  balloonId,
+  decoId,
+  children,
+}: {
+  balloonId?: unknown;
+  decoId?: unknown;
+  children: React.ReactNode;
+}) {
+  const resolvedBalloonId = resolveBalloonId(balloonId);
+  const resolvedDecoId = resolveDecoId(decoId);
+  const value = React.useMemo(
+    () => ({
+      balloonId: resolvedBalloonId,
+      decoId: resolvedDecoId,
+      applyDressupState: noop,
+      refreshDressup: async () => {},
+    }),
+    [resolvedBalloonId, resolvedDecoId]
+  );
   return <YuukoDressupContext.Provider value={value}>{children}</YuukoDressupContext.Provider>;
 }
 
