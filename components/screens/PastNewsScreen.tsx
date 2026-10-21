@@ -45,6 +45,7 @@ import {
   type ArchiveMonthDto,
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
+import { formatArticleDateTime } from "@/lib/article-date-display.mjs";
 
 // 記事詳細から「戻る」で再表示したとき、同じ月の記事一覧へ戻すための記憶。
 // 画面は記事詳細の表示中にアンマウントされるため、共有ファイル（app/page.tsx）へ state を足さずに
@@ -263,7 +264,9 @@ function PastNewsArticleList({
             </span>
             <span className="mt-1 block text-xs text-muted-foreground">
               {article.sourceName}
-              {article.publishedAtText ? ` ・ 公開日: ${article.publishedAtText}` : ""}
+              {article.publishedAtText
+                ? ` ・ 公開日: ${formatArticleDateTime(article.publishedAtText)}`
+                : ""}
             </span>
           </button>
         </li>
