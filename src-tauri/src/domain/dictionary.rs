@@ -237,6 +237,106 @@ fn has_clause_punctuation(text: &str) -> bool {
     })
 }
 
+/// 選択した用語が、記事の中で言葉の途中から始まる・途中で終わっていないかの判定結果
+/// （`resolve_selection_boundary`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionBoundary {
+    /// 言葉全体を選んでいる（または記事の文の中に見つからず判断できない）。選んだままで解説する。
+    Whole,
+    /// 言葉の途中だったので、前後の語境界まで広げた言葉。こちらを解説する。
+    Expanded(String),
+    /// 言葉の途中だが、広げ先が1つに決まらない・長すぎる。解説せずに選び直しを案内する。
+    Fragment,
+}
+
+/// 選択した用語が、記事の文（画面に出ている要約・要点・抜粋など）の中で言葉の途中を切り取っていないかを調べ、
+/// 途中なら前後の語境界まで広げる（純粋関数・決定的。AI は使わない）。
+///
+/// 2026-10-21 の実機テスト（A4）で、「フォワードデプロイドエンジニアリング」の途中から選択がずれた
+/// 「ドエンジニアリング」を、ローカルAIが存在しない語としてもっともらしく解説した。小さいモデルは
+/// 語の切れ端でも定義を作ってしまうため、AI を呼ぶ前に機械的に直す。
+///
+/// 「途中」とみなすのは、選択の最初の文字の直前（最後の文字の直後）に、同じ文字種の文字が続いているとき。
+/// 文字種はカタカナ（長音「ー」・半角カナを含む）と英数字（全角を含む）だけを見る。
+/// 漢字・ひらがなは見ない: 漢字の連なりは「日本銀行総裁」のように複数の語の複合が多く、
+/// 「日本銀行」を選んだのを広げると正しい選択を壊すため。ひらがなは助詞・送り仮名と区別できない。
+/// 中黒「・」や空白は語の区切りとみなす（「フォワード・デプロイド」の一部を選ぶのは正当な選択）。
+///
+/// - 選択が `texts` のどこかで前後とも語境界に当たって現れていれば、正しい選択とみなして `Whole`。
+/// - どこにも現れない（画面の表示と保存文の違い・段落をまたいだ選択など）ときも、判断できないので `Whole`
+///   （従来どおり解説する。文脈に無い語の扱いはプロンプト側の「分からないときは作らない」に任せる）。
+/// - すべての出現が言葉の途中で、広げた結果が1つに決まり、用語の長さ（`TERM_SELECTION_MAX_CHARS`）に
+///   収まるなら `Expanded`。広げた結果が複数ある・長すぎるなら `Fragment`。
+pub fn resolve_selection_boundary(selected_text: &str, texts: &[&str]) -> SelectionBoundary {
+    let selected = selected_text.trim();
+    let (Some(first), Some(last)) = (selected.chars().next(), selected.chars().next_back()) else {
+        return SelectionBoundary::Whole;
+    };
+    let first_class = word_char_class(first);
+    let last_class = word_char_class(last);
+    let mut expansions: Vec<String> = Vec::new();
+    for text in texts {
+        for (start, _) in text.match_indices(selected) {
+            let end = start + selected.len();
+            let new_start = first_class.map_or(start, |class| {
+                text[..start]
+                    .char_indices()
+                    .rev()
+                    .take_while(|(_, c)| word_char_class(*c) == Some(class))
+                    .last()
+                    .map_or(start, |(index, _)| index)
+            });
+            let new_end = last_class.map_or(end, |class| {
+                end + text[end..]
+                    .chars()
+                    .take_while(|c| word_char_class(*c) == Some(class))
+                    .map(char::len_utf8)
+                    .sum::<usize>()
+            });
+            if new_start == start && new_end == end {
+                return SelectionBoundary::Whole;
+            }
+            let expanded = text[new_start..new_end].to_string();
+            if !expansions.contains(&expanded) {
+                expansions.push(expanded);
+            }
+        }
+    }
+    match expansions.as_slice() {
+        [] => SelectionBoundary::Whole,
+        [expanded]
+            if expanded.chars().count() <= TERM_SELECTION_MAX_CHARS
+                && classify_selected_text(expanded) == DictionaryEntryType::Term =>
+        {
+            SelectionBoundary::Expanded(expanded.clone())
+        }
+        _ => SelectionBoundary::Fragment,
+    }
+}
+
+/// 語境界の判定に使う文字種（`resolve_selection_boundary`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordCharClass {
+    Katakana,
+    LatinOrDigit,
+}
+
+/// カタカナ（長音・踊り字・半角カナを含む。中黒は含まない）と英数字（全角を含む）だけを返す。
+fn word_char_class(c: char) -> Option<WordCharClass> {
+    match c {
+        '\u{30A1}'..='\u{30FA}' | 'ー' | 'ヽ' | 'ヾ' | '\u{FF66}'..='\u{FF9F}' => {
+            Some(WordCharClass::Katakana)
+        }
+        'a'..='z'
+        | 'A'..='Z'
+        | '0'..='9'
+        | '\u{FF10}'..='\u{FF19}'
+        | '\u{FF21}'..='\u{FF3A}'
+        | '\u{FF41}'..='\u{FF5A}' => Some(WordCharClass::LatinOrDigit),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainSelectedTermParams {
@@ -552,10 +652,10 @@ pub fn normalize_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_selected_text, DeleteDictionaryEntryParams, DictionaryEntryDto,
-        DictionaryEntryType, ExplainSelectedTermParams, ListDictionaryEntriesParams,
-        PersistedDictionaryEntry, SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams,
-        UpdateDictionaryMemoParams,
+        classify_selected_text, resolve_selection_boundary, DeleteDictionaryEntryParams,
+        DictionaryEntryDto, DictionaryEntryType, ExplainSelectedTermParams,
+        ListDictionaryEntriesParams, PersistedDictionaryEntry, SaveDictionaryEntryParams,
+        SelectionBoundary, UpdateDictionaryFavoriteParams, UpdateDictionaryMemoParams,
     };
 
     #[test]
@@ -1088,6 +1188,132 @@ mod tests {
         assert_eq!(
             params.validated_entry().unwrap().entry_type,
             DictionaryEntryType::Term
+        );
+    }
+
+    // --- 選択の語境界（resolve_selection_boundary） ---
+
+    const FDE_SUMMARY: &str =
+        "米企業がFDE（フォワードデプロイドエンジニアリング）の担当者を増やしている。";
+
+    fn expanded(word: &str) -> SelectionBoundary {
+        SelectionBoundary::Expanded(word.to_string())
+    }
+
+    #[test]
+    fn boundary_extends_a_katakana_selection_cut_in_the_middle() {
+        // 実機テスト A4 の例: 「フォワードデプロイド」の途中から選択がずれた。
+        assert_eq!(
+            resolve_selection_boundary("ドエンジニアリング", &[FDE_SUMMARY]),
+            expanded("フォワードデプロイドエンジニアリング")
+        );
+        // 終わりが途中で切れた選択も広げる。
+        assert_eq!(
+            resolve_selection_boundary("フォワードデプロイ", &[FDE_SUMMARY]),
+            expanded("フォワードデプロイドエンジニアリング")
+        );
+        // 両側とも途中。
+        assert_eq!(
+            resolve_selection_boundary("ワードデプ", &[FDE_SUMMARY]),
+            expanded("フォワードデプロイドエンジニアリング")
+        );
+    }
+
+    #[test]
+    fn boundary_extends_latin_words_cut_in_the_middle() {
+        let text = "OpenAIはChatGPTの新版を出した。";
+        assert_eq!(
+            resolve_selection_boundary("hatGPT", &[text]),
+            expanded("ChatGPT")
+        );
+        assert_eq!(
+            resolve_selection_boundary("Ｃｈａｔ", &["新しいＣｈａｔＧＰＴの話"]),
+            expanded("ＣｈａｔＧＰＴ")
+        );
+    }
+
+    #[test]
+    fn boundary_keeps_whole_words_unchanged() {
+        for (selected, text) in [
+            ("フォワードデプロイドエンジニアリング", FDE_SUMMARY),
+            ("FDE", FDE_SUMMARY),
+            ("担当者", FDE_SUMMARY),
+            // 文字種が変わるところは語境界（英字→カタカナ、カタカナ→漢字・ひらがな）。
+            ("AI", "生成AIエージェントを使う"),
+            ("エージェント", "生成AIエージェントを使う"),
+            ("データ", "データを集める"),
+            // 中黒・空白は語の区切り。
+            ("デプロイド", "フォワード・デプロイド・エンジニア"),
+            ("Bank", "Bank of Japan"),
+        ] {
+            assert_eq!(
+                resolve_selection_boundary(selected, &[text]),
+                SelectionBoundary::Whole,
+                "{selected}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_does_not_extend_kanji_or_hiragana_runs() {
+        // 漢字の連なりは複合語が多いので広げない（「日本銀行」は正しい選択）。
+        assert_eq!(
+            resolve_selection_boundary("日本銀行", &["日本銀行総裁が会見した"]),
+            SelectionBoundary::Whole
+        );
+        assert_eq!(
+            resolve_selection_boundary("務省", &["外務省が発表した"]),
+            SelectionBoundary::Whole
+        );
+        assert_eq!(
+            resolve_selection_boundary("かりやすい", &["わかりやすい説明"]),
+            SelectionBoundary::Whole
+        );
+    }
+
+    #[test]
+    fn boundary_prefers_whole_when_any_occurrence_is_standalone() {
+        // 1か所でも言葉全体として出ていれば、選んだままにする（部分語の正しい選択を壊さない）。
+        let texts = ["データセンターを増やす", "データの量が多い"];
+        assert_eq!(
+            resolve_selection_boundary("データ", &texts),
+            SelectionBoundary::Whole
+        );
+        // 言葉全体として出ていなければ、複合語へ広げる。
+        assert_eq!(
+            resolve_selection_boundary("センター", &texts),
+            expanded("データセンター")
+        );
+    }
+
+    #[test]
+    fn boundary_is_whole_when_the_selection_is_not_found() {
+        assert_eq!(
+            resolve_selection_boundary("ドエンジニアリング", &["別の記事の文"]),
+            SelectionBoundary::Whole
+        );
+        assert_eq!(
+            resolve_selection_boundary("ドエンジニアリング", &[]),
+            SelectionBoundary::Whole
+        );
+        assert_eq!(
+            resolve_selection_boundary("  ", &[FDE_SUMMARY]),
+            SelectionBoundary::Whole
+        );
+    }
+
+    #[test]
+    fn boundary_is_fragment_when_extensions_disagree_or_are_too_long() {
+        // 広げ先が2つに分かれる。
+        assert_eq!(
+            resolve_selection_boundary("ンター", &["データセンターとコールセンター"]),
+            SelectionBoundary::Fragment
+        );
+        // 広げると用語の長さ（30字）を超える。
+        let long = format!("ア{}イ", "ウ".repeat(40));
+        assert_eq!(
+            resolve_selection_boundary("ウウウ", &[long.as_str()]),
+            SelectionBoundary::Fragment
         );
     }
 }

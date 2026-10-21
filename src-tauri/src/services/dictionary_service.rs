@@ -2,10 +2,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::domain::article::ArticleDetailDto;
 use crate::domain::dictionary::{
-    classify_selected_text, normalize_text, DeleteDictionaryEntryParams, DictionaryEntryDto,
-    DictionaryEntryListItemDto, DictionaryEntryType, ExplainSelectedTermParams,
-    ListDictionaryEntriesParams, SaveDictionaryEntryParams, UpdateDictionaryFavoriteParams,
+    classify_selected_text, normalize_text, resolve_selection_boundary,
+    DeleteDictionaryEntryParams, DictionaryEntryDto, DictionaryEntryListItemDto,
+    DictionaryEntryType, ExplainSelectedTermParams, ListDictionaryEntriesParams,
+    SaveDictionaryEntryParams, SelectionBoundary, UpdateDictionaryFavoriteParams,
     UpdateDictionaryMemoParams,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel};
@@ -18,7 +20,8 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::{
-    phrase_explanation_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
+    phrase_explanation_fixed_prompt_texts, term_explanation_says_unknown,
+    yuuko_speech_fixed_prompt_texts, AiProviderService,
 };
 use crate::util::speech_cleanup::{
     casualize_polite_endings, clean_yuuko_speech, strip_prompt_echo_sentences,
@@ -96,29 +99,45 @@ impl DictionaryService {
         let (article_id, selected_text) = params.validated_inputs()?;
         let resolved = self.resolve_article(&article_id)?;
 
-        let normalized_text = normalize_text(&selected_text);
         // 保存済み辞書の完全一致（記事優先→記事横断の決定的選択）。AI より先に判定し、命中なら AI を呼ばない。
-        if let Some(saved_entry) = self
-            .repository
-            .find_saved_entry(&article_id, &normalized_text)?
-        {
-            // 参照記録は付随処理。失敗しても解説は返す（ログに選択語・本文・保存先パスは出さない）。
-            if let Err(error) = self
-                .repository
-                .record_entry_reference(&saved_entry.entry_id)
-            {
-                log::warn!(
-                    "Failed to record dictionary entry reference (kind: {})",
-                    reference_error_kind(&error)
-                );
-            }
+        if let Some(saved_entry) = self.find_saved_entry(&article_id, &selected_text)? {
             return Ok(saved_entry);
         }
 
         match resolved {
             // 実ニュース記事の未命中: 既存 AI 経路で生成（AI 呼び出しはここだけ・1回）。
-            ResolvedArticle::Real { title, excerpt } => {
-                self.explain_with_ai(&article_id, &title, excerpt.as_deref(), &selected_text)
+            ResolvedArticle::Real {
+                title,
+                excerpt,
+                display_texts,
+            } => {
+                // 用語の選択が言葉の途中を切り取っていれば、AI を呼ぶ前に語境界まで広げる
+                // （広げ先が決まらなければ選び直しを案内する）。フレーズは文の一部を選ぶものなので見ない。
+                let mut target_text = selected_text;
+                if classify_selected_text(&target_text) == DictionaryEntryType::Term {
+                    let texts = display_texts.iter().map(String::as_str).collect::<Vec<_>>();
+                    match resolve_selection_boundary(&target_text, &texts) {
+                        SelectionBoundary::Whole => {}
+                        SelectionBoundary::Expanded(word) => {
+                            // 選択語・広げた語はログへ出さない（固定文だけ）。
+                            log::info!("selected term was extended to the word boundary");
+                            if let Some(saved_entry) = self.find_saved_entry(&article_id, &word)? {
+                                return Ok(saved_entry);
+                            }
+                            target_text = word;
+                        }
+                        SelectionBoundary::Fragment => {
+                            log::info!("selected term was cut in the middle of a word");
+                            return Ok(build_term_notice_entry(
+                                &article_id,
+                                &title,
+                                &target_text,
+                                TermNotice::CutInWord,
+                            ));
+                        }
+                    }
+                }
+                self.explain_with_ai(&article_id, &title, excerpt.as_deref(), &target_text)
             }
             // 固定サンプル記事の未命中: 従来どおり固定サンプル解説/汎用文（AI 不使用）。
             ResolvedArticle::FixedSample { title } => Ok(build_dictionary_miss_entry(
@@ -128,6 +147,31 @@ impl DictionaryService {
                 classify_selected_text(&selected_text),
             )),
         }
+    }
+
+    /// 保存済み辞書の完全一致を探し、命中したら参照記録を付けて返す。
+    fn find_saved_entry(
+        &self,
+        article_id: &str,
+        text: &str,
+    ) -> Result<Option<DictionaryEntryDto>, AppError> {
+        let Some(saved_entry) = self
+            .repository
+            .find_saved_entry(article_id, &normalize_text(text))?
+        else {
+            return Ok(None);
+        };
+        // 参照記録は付随処理。失敗しても解説は返す（ログに選択語・本文・保存先パスは出さない）。
+        if let Err(error) = self
+            .repository
+            .record_entry_reference(&saved_entry.entry_id)
+        {
+            log::warn!(
+                "Failed to record dictionary entry reference (kind: {})",
+                reference_error_kind(&error)
+            );
+        }
+        Ok(Some(saved_entry))
     }
 
     /// 記事を解決する。
@@ -146,6 +190,7 @@ impl DictionaryService {
 
         match self.article_repository.get_article_detail(article_id) {
             Ok(article) => Ok(ResolvedArticle::Real {
+                display_texts: article_display_texts(&article),
                 title: article.title,
                 excerpt: article.excerpt,
             }),
@@ -186,6 +231,16 @@ impl DictionaryService {
             .generate_term_explanation(request, provider, explanation_level)?;
         // フレーズも用語と同じ契約（JSON short/detail）・同じ検証と無害化を通す。
         let mut parsed = parse_ai_term_explanation(&response.text)?;
+        // 用語で AI が「わからない」と答えたら、作り話の代わりに固定の案内を返す（Gemini・ローカル共通）。
+        if entry_type == DictionaryEntryType::Term && term_explanation_says_unknown(&parsed.short) {
+            log::info!("AI term explanation answered unknown");
+            return Ok(build_term_notice_entry(
+                article_id,
+                article_title,
+                selected_text,
+                TermNotice::Unknown,
+            ));
+        }
         // フレーズの説明はゆうこが話す数文の説明なので、実AI（Mock 以外）の出力には再説明・一言と同じ
         // 後処理（ト書き・挨拶の除去、です・ます調の言い換え、繰り返しの除去）をかける。用語の経路は変えない。
         if entry_type == DictionaryEntryType::Phrase && response.provider != PROVIDER_MOCK {
@@ -260,6 +315,8 @@ enum ResolvedArticle {
     Real {
         title: String,
         excerpt: Option<String>,
+        /// 画面に出る記事の文（タイトル・要約・抜粋・要点など）。選択の語境界の判定だけに使い、AI へは送らない。
+        display_texts: Vec<String>,
     },
     /// 固定サンプル記事（active Markdown 不在時の組み込みタイトルフォールバック）。従来の固定解説を返す。
     FixedSample { title: String },
@@ -272,6 +329,67 @@ const TERM_EXPLANATION_CONTEXT_MAX_CHARS: usize = 500;
 /// AI へ渡す記事タイトルの文字数上限（AI context 専用・chars 単位）。AIへ渡す入力の可変部分を有界化する。
 /// DTO の related_article_title・ArticleRepository/保存済みタイトル・画面表示タイトルには影響させない。
 const TERM_EXPLANATION_TITLE_MAX_CHARS: usize = 300;
+
+/// 記事画面に出る文（選択の元になり得る文）を集める。選択の語境界の判定（`resolve_selection_boundary`）
+/// だけに使い、AI へは送らない（AI の参考文脈は従来どおり `build_ai_context` のタイトル＋抜粋だけ）。
+fn article_display_texts(article: &ArticleDetailDto) -> Vec<String> {
+    [
+        Some(&article.title),
+        article.summary.as_ref(),
+        article.excerpt.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(article.key_points.iter())
+    .chain(article.focus_points.iter())
+    .chain(article.yuuko_explanation.iter())
+    .chain(article.yuuko_comment.iter())
+    .chain(article.keyword_candidates.iter())
+    .filter(|text| !text.trim().is_empty())
+    .cloned()
+    .collect()
+}
+
+/// 用語解説の代わりに返す固定の案内の種類（`build_term_notice_entry`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TermNotice {
+    /// 選択が言葉の途中を切り取っていて、正しい言葉に広げられなかった。
+    CutInWord,
+    /// AI が「わからない」と答えた（知らない言葉・言葉の切れ端）。
+    Unknown,
+}
+
+/// 言葉の途中の選択で、広げ先が決まらなかったときに返す案内（AI は呼ばない）。
+const CUT_IN_WORD_SHORT: &str = "選んだ範囲が言葉の途中みたい。言葉全体を選んでみてね。";
+const CUT_IN_WORD_DETAIL: &str = "言葉のはじめから終わりまでを選び直すと、ゆうこが解説できるよ。";
+/// AI が「わからない」と答えたときに返す案内。
+const UNKNOWN_TERM_SHORT: &str = "この言葉はゆうこにも分からなかったよ。";
+const UNKNOWN_TERM_DETAIL: &str = "言葉の途中だけを選んでいないか確かめてみてね。前後の言葉とあわせて選び直すと、解説できるかもしれないよ。";
+
+/// 解説の代わりの固定の案内を、画面がそのまま表示できる DTO で返す（画面を変えずに案内を出すため）。
+/// 選択語は文面に埋め込まない（見出しには画面が選択語を出す）。
+fn build_term_notice_entry(
+    article_id: &str,
+    article_title: &str,
+    selected_text: &str,
+    notice: TermNotice,
+) -> DictionaryEntryDto {
+    let (short, detail) = match notice {
+        TermNotice::CutInWord => (CUT_IN_WORD_SHORT, CUT_IN_WORD_DETAIL),
+        TermNotice::Unknown => (UNKNOWN_TERM_SHORT, UNKNOWN_TERM_DETAIL),
+    };
+    DictionaryEntryDto {
+        entry_id: build_entry_id(article_id, selected_text),
+        key_text: selected_text.to_string(),
+        entry_type: DictionaryEntryType::Term,
+        short_explanation: short.to_string(),
+        detail_explanation: detail.to_string(),
+        related_article_id: Some(article_id.to_string()),
+        related_article_title: Some(article_title.to_string()),
+        is_starred: false,
+        saved_in_dictionary: false,
+    }
+}
 
 /// AI へ渡す参考文脈（外部データ）を組み立てる（副作用なし）。タイトルと抜粋のみで、記事本文全文は渡さない。
 /// タイトルは AI送信専用上限(TERM_EXPLANATION_TITLE_MAX_CHARS)、抜粋は AI送信専用上限
@@ -2274,5 +2392,181 @@ mod tests {
         assert_eq!(store["entries"].as_array().unwrap().len(), 1);
         assert_eq!(store["entries"][0]["lastReferencedAt"], "1000");
         assert_eq!(store["entries"][0]["referenceCount"], 1);
+    }
+
+    // --- 言葉の途中の選択・「わからない」の応答（2026-10-21 実機テスト A4） ---
+
+    /// 抜粋に指定の文を持つ実ニュース記事1件の Service を組む（抜粋は画面に出る文の1つ）。
+    fn build_service_with_excerpt(excerpt: &str) -> TestContext {
+        let root_dir = temp_root("boundary");
+        let ai = Arc::new(FakeAi::new());
+        let mut article = real_news_article(REAL_ARTICLE_ID, REAL_ARTICLE_TITLE);
+        article.excerpt = Some(excerpt.to_string());
+        let service = service_with_articles(&root_dir, ai.clone(), vec![article]);
+        TestContext {
+            service,
+            root_dir,
+            ai,
+        }
+    }
+
+    const FDE_EXCERPT: &str =
+        "米企業でFDE（フォワードデプロイドエンジニアリング）の担当者が増えている。";
+
+    #[test]
+    fn explain_extends_a_selection_cut_in_the_middle_of_a_word_before_calling_ai() {
+        let context = build_service_with_excerpt(FDE_EXCERPT);
+        let entry = explain(&context, REAL_ARTICLE_ID, "ドエンジニアリング");
+
+        // AI へは語境界まで広げた言葉を送り、返す項目もその言葉で作る（辞書へもその言葉で保存される）。
+        assert_eq!(context.ai.call_count(), 1);
+        let request = context.ai.last_request().unwrap();
+        assert_eq!(request.input_text, "フォワードデプロイドエンジニアリング");
+        assert_eq!(request.prompt_id, super::TERM_EXPLANATION_PROMPT_ID);
+        assert_eq!(entry.key_text, "フォワードデプロイドエンジニアリング");
+        assert_eq!(entry.entry_type, DictionaryEntryType::Term);
+        assert_eq!(entry.short_explanation, "AIの短い解説です。");
+    }
+
+    #[test]
+    fn explain_keeps_whole_word_selections_unchanged() {
+        let context = build_service_with_excerpt(FDE_EXCERPT);
+        for selected in ["フォワードデプロイドエンジニアリング", "FDE", "担当者"]
+        {
+            let entry = explain(&context, REAL_ARTICLE_ID, selected);
+            assert_eq!(context.ai.last_request().unwrap().input_text, selected);
+            assert_eq!(entry.key_text, selected);
+        }
+        assert_eq!(context.ai.call_count(), 3);
+    }
+
+    #[test]
+    fn explain_selection_not_in_the_article_is_sent_unchanged() {
+        // 記事の文に見つからない選択は判断できないので、従来どおりそのまま解説する。
+        let context = build_service_with_excerpt(FDE_EXCERPT);
+        explain(&context, REAL_ARTICLE_ID, "ロボエンジニア");
+        assert_eq!(
+            context.ai.last_request().unwrap().input_text,
+            "ロボエンジニア"
+        );
+    }
+
+    #[test]
+    fn explain_returns_cut_in_word_notice_without_ai_when_the_word_is_ambiguous() {
+        let context = build_service_with_excerpt("データセンターとコールセンターを増やす。");
+        let entry = explain(&context, REAL_ARTICLE_ID, "ンター");
+
+        assert_eq!(context.ai.call_count(), 0);
+        assert_eq!(entry.key_text, "ンター");
+        assert_eq!(entry.short_explanation, super::CUT_IN_WORD_SHORT);
+        assert_eq!(entry.detail_explanation, super::CUT_IN_WORD_DETAIL);
+        assert!(!entry.saved_in_dictionary);
+    }
+
+    #[test]
+    fn explain_extended_word_reuses_the_saved_entry_without_ai() {
+        let context = build_service_with_excerpt(FDE_EXCERPT);
+        let explained = explain(
+            &context,
+            REAL_ARTICLE_ID,
+            "フォワードデプロイドエンジニアリング",
+        );
+        context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams { entry: explained })
+            .unwrap();
+        assert_eq!(context.ai.call_count(), 1);
+
+        let reused = explain(&context, REAL_ARTICLE_ID, "ドエンジニアリング");
+        assert_eq!(context.ai.call_count(), 1);
+        assert!(reused.saved_in_dictionary);
+        assert_eq!(reused.key_text, "フォワードデプロイドエンジニアリング");
+    }
+
+    #[test]
+    fn explain_unknown_answer_returns_fixed_notice_instead_of_the_ai_text() {
+        let context = build_service();
+        for short in [
+            "わからない",
+            "わからないよ。",
+            "ドエンジニアリングとは、わからないよ。",
+        ] {
+            context.ai.set_response_text(
+                &serde_json::json!({"short": short, "detail": "わからない"}).to_string(),
+            );
+            let entry = explain(&context, REAL_ARTICLE_ID, "ドエンジニアリング");
+            assert_eq!(
+                entry.short_explanation,
+                super::UNKNOWN_TERM_SHORT,
+                "{short}"
+            );
+            assert_eq!(entry.detail_explanation, super::UNKNOWN_TERM_DETAIL);
+            assert_eq!(entry.key_text, "ドエンジニアリング");
+            assert_eq!(entry.entry_type, DictionaryEntryType::Term);
+        }
+    }
+
+    #[test]
+    fn explain_keeps_explanations_that_only_mention_not_knowing() {
+        // 説明の一部に「わからない」が出るだけの解説は、そのまま表示する。
+        let context = build_service();
+        let short = "需要とは、先のことはわからないけれど、買いたい気持ちの量のことだよ。";
+        context.ai.set_response_text(
+            &serde_json::json!({"short": short, "detail": "説明だよ。"}).to_string(),
+        );
+        let entry = explain(&context, REAL_ARTICLE_ID, "需要");
+        assert_eq!(entry.short_explanation, short);
+    }
+
+    #[test]
+    fn explain_phrase_is_not_turned_into_the_unknown_notice() {
+        // 「わからない」の印は用語のプロンプトだけで頼む。フレーズの説明は従来どおり表示する。
+        let context = build_service();
+        context
+            .ai
+            .set_response_text(r#"{"short":"わからない","detail":"わからない"}"#);
+        let entry = explain(
+            &context,
+            REAL_ARTICLE_ID,
+            "金利の上昇が続くと、住宅ローンの返済額が増える。",
+        );
+        assert_eq!(entry.entry_type, DictionaryEntryType::Phrase);
+        assert_eq!(entry.short_explanation, "わからない");
+    }
+
+    #[test]
+    fn article_display_texts_include_every_text_shown_on_the_reader() {
+        use crate::domain::article::{ArticleDetailDto, SummaryState};
+        let article = ArticleDetailDto {
+            article_id: REAL_ARTICLE_ID.to_string(),
+            title: "題".to_string(),
+            source_name: "Example".to_string(),
+            original_url: "https://example.com".to_string(),
+            published_at_text: String::new(),
+            genre: String::new(),
+            summary: Some("要約".to_string()),
+            excerpt: Some("抜粋".to_string()),
+            yuuko_explanation: Some("再説明".to_string()),
+            key_points: vec!["要点".to_string()],
+            focus_points: vec!["注目".to_string(), " ".to_string()],
+            yuuko_comment: Some("感想".to_string()),
+            is_favorite: false,
+            keyword_candidates: vec!["候補".to_string()],
+            summary_state: SummaryState::None,
+            tags: Vec::new(),
+        };
+        assert_eq!(
+            super::article_display_texts(&article),
+            [
+                "題",
+                "要約",
+                "抜粋",
+                "要点",
+                "注目",
+                "再説明",
+                "感想",
+                "候補"
+            ]
+        );
     }
 }

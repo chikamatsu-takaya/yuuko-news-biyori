@@ -819,7 +819,8 @@ fn build_term_explanation_prompt(
          参考文脈に選択語が出てこない場合は、記事のタイトルや分野からどの分野の言葉かを判断し、\
          その分野での一般的な意味を説明してください。\
          意味に自信がない場合は、分かる範囲の一般的な説明にとどめ、\
-         具体的な数値・日付・名前・出来事を作らないでください。\n\
+         具体的な数値・日付・名前・出来事を作らないでください。\
+         {TERM_UNKNOWN_INSTRUCTION}\n\
          short: 選択語の名前で始まる「〇〇とは、…」の形の1文で、一般的な定義を書いてください\
          （{TERM_SHORT_PROMPT_MAX_CHARS}文字以内）。\n\
          detail: short の定義を補う説明を{detail_length}で書いてください。{level_instruction}\n\
@@ -950,7 +951,69 @@ const TERM_EXPLANATION_REMINDER_HEADING: &str = YUUKO_SPEECH_REMINDER_HEADING;
 const TERM_EXPLANATION_REMINDER: &str = "上の選択語そのものの意味を説明してください。\
 short は〇〇の部分を選択語の名前にした「〇〇とは、…」の1文の定義にしてください。\
 記事の内容の要約は書かず、分からないことは作らないでください。\
+知らない言葉や言葉の切れ端のときは、short と detail を「わからない」としてください。\
 short と detail はどちらも、ゆうこの話し方（〜だよ・〜だね）で書いてください。JSON だけを返してください。";
+
+/// 「分からない」と答えさせる固定指示（用語解説の固定指示の中に置く。Gemini・ローカル共通）。
+///
+/// 2026-10-21 の実機テスト（A4）で、言葉の切れ端「ドエンジニアリング」を、ローカルAIが
+/// 「専門的なエンジニアリングを指す」と存在しない語として解説した。小さいモデルは「〇〇とは、…」の形を
+/// 頼まれると、知らない語でも定義を作ってしまうため、作らずに決まった印（`TERM_UNKNOWN_MARKER`）を
+/// 返す逃げ道を用意する。印は `term_explanation_says_unknown` で見分け、画面には固定文言を出す
+/// （`dictionary_service`）。言葉の途中の選択は、AI を呼ぶ前に `resolve_selection_boundary` で直す。
+///
+/// 実測（2026-10-21・同梱 Qwen3.5-2B・normal・12 語）: 2B は言葉の切れ端（「ラウドサービス」など）にも
+/// 印を返さず定義を作った（0 / 12。印の JSON 例を足しても 0 件）。一般的な語の解説は崩れなかった。
+/// そのため主な対策は AI を呼ぶ前の語境界の補正で、この指示は Gemini や今後のモデルのための逃げ道として置く
+/// （印を返したときに作り話を表示しない・作り直しで名前を言わせない、という受け皿を用意しておく）。
+const TERM_UNKNOWN_INSTRUCTION: &str = "選択語が言葉の途中で切れていて一つの言葉になっていない場合や、\
+知らない言葉で意味を作るしかない場合は、説明を作らずに、short と detail の両方を「わからない」とだけ書いてください。";
+
+/// 「分からない」の印（プロンプトで頼む文字列）。見分けは表記の揺れ（`UNKNOWN_ANSWERS`）を含めて行う。
+const TERM_UNKNOWN_MARKER: &str = "わからない";
+
+/// 「分からない」の印とみなす short の本体（主語「〇〇とは」・句読点・引用符・空白・語尾を除いた後）。
+const UNKNOWN_ANSWERS: [&str; 6] = [
+    TERM_UNKNOWN_MARKER,
+    "分からない",
+    "わかりません",
+    "分かりません",
+    "不明",
+    "わからないです",
+];
+
+/// 用語解説の short が「分からない」の印か（プロンプトの `TERM_UNKNOWN_INSTRUCTION` への応答）。
+///
+/// 「わからない」「わからないよ。」「「わからない」」「ドエンジニアリングとは、わからないよ。」のように、
+/// 印だけ（主語の「〇〇とは」・句読点・語尾を除いて）の short を印とみなす。
+/// 「〜かはわからないけれど、…」のように説明が続くものは印とみなさない（説明として表示する）。
+pub(crate) fn term_explanation_says_unknown(short: &str) -> bool {
+    let chars = normalize_term_notation(short);
+    // 「〇〇とは、」の前置きを外す（主語の判定と同じ規則。読点を含む長い前置きは外さない）。
+    let body = match definition_subject(&chars) {
+        Some(_) => {
+            let position = chars
+                .windows(2)
+                .position(|pair| pair == ['と', 'は'])
+                .unwrap_or(0);
+            &chars[position + 2..]
+        }
+        None => &chars[..],
+    };
+    let text: String = body
+        .iter()
+        .filter(|c| {
+            !(is_opening_quote(**c)
+                || is_closing_quote(**c)
+                || matches!(c, '、' | ',' | '。' | '.' | '!' | '?' | '…' | '〜' | '~'))
+        })
+        .collect();
+    let text = ["だよね", "だよ", "だね", "よ", "ね"]
+        .iter()
+        .find_map(|ending| text.strip_suffix(ending))
+        .unwrap_or(&text);
+    UNKNOWN_ANSWERS.contains(&text)
+}
 
 /// 用語解説レベル別の指示本文。simple → normal → detailed で「情報量・説明範囲」が段階的に
 /// 増えるよう、曖昧な形容詞（簡潔に／詳しく）だけに頼らず具体的な指示にする。
@@ -1001,9 +1064,14 @@ const TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET: std::time::Duration =
 
 /// 「別の語を定義した」ときの作り直しで、末尾の念押しの後ろに足す固定の注意書き。
 /// 利用者の入力（選択語・参考文脈）は含めない（外部データは区切りの中だけに置く構造を保つ）。
+///
+/// 選択語の名前を言わせるだけだと、知らない語・言葉の切れ端でも定義を作らせてしまう（2026-10-21 の
+/// 実機テスト A4: 作り直しで「ドエンジニアリングとは、…」と存在しない語を解説した）。そのため、
+/// 意味を知らないときは名前を出して作らずに「わからない」と答える逃げ道を最後に添える。
 const TERM_SUBJECT_RETRY_NOTE: &str = "前の回答は、選択語とは別の言葉を説明していました。\
 short の最初の文は、必ず選択語そのものの名前で始めてください。\
-参考文脈に出てくるほかの言葉や、記事の主題の言葉を説明しないでください。";
+参考文脈に出てくるほかの言葉や、記事の主題の言葉を説明しないでください。\
+選択語の意味を知らないときは、意味を作らずに、short と detail を「わからない」としてください。";
 
 /// `とは` の前を主語とみなす最大の長さ（文字数）。これより長いものは定義の主語ではないとみなす。
 const TERM_SUBJECT_MAX_CHARS: usize = 40;
@@ -1076,7 +1144,12 @@ where
     log::info!("local term explanation named another subject; retrying once");
     match generate(retry_prompt) {
         Ok((retried, _)) if !term_explanation_defines_other_subject(selected_term, &retried) => {
-            log::info!("local term explanation retry named the selected term");
+            // 「わからない」は作り話より安全なので、1回目（別の語の定義）より優先して返す。
+            if term_output_says_unknown(&retried) {
+                log::info!("local term explanation retry answered unknown");
+            } else {
+                log::info!("local term explanation retry named the selected term");
+            }
             Ok(retried)
         }
         Ok(_) => {
@@ -1092,6 +1165,19 @@ where
     }
 }
 
+/// 用語解説の出力（JSON `{short, detail}`）の short が「わからない」の印か（ログの書き分け用）。
+fn term_output_says_unknown(output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("short")?
+                .as_str()
+                .map(term_explanation_says_unknown)
+        })
+        .unwrap_or(false)
+}
+
 /// 用語解説の出力（JSON `{short, detail}`）の short が、選択語ではなく別の語を定義しているか。
 ///
 /// true になるのは次のどちらか:
@@ -1102,6 +1188,7 @@ where
 /// ひらがな・カタカナ、空白と中黒、前後の「」『』や引用符、語の直後の読み・言い換えの括弧
 /// （例: 「証拠金（しょうこきん）とは」）。
 /// JSON として読めない・short が無いときは判定しない（false。解析の失敗は従来どおり dictionary_service が扱う）。
+/// short が「わからない」の印（`term_explanation_says_unknown`）のときも false（作り直して名前を言わせない）。
 fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
         return false;
@@ -1109,6 +1196,10 @@ fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> 
     let Some(short) = value.get("short").and_then(serde_json::Value::as_str) else {
         return false;
     };
+    // 「わからない」の印は別の語の定義ではない。作り直して名前を言わせると、作り話を後押しする。
+    if term_explanation_says_unknown(short) {
+        return false;
+    }
     // 選択語の後ろの括弧書き（「X（旧Twitter）」の「（旧Twitter）」）も、short 側の主語と同じように外して比べる。
     let mut term = strip_quotes(&normalize_term_notation(selected_term));
     strip_trailing_parenthetical(&mut term);
@@ -2521,6 +2612,89 @@ mod tests {
         assert_eq!(fake.prompts.len(), 1);
     }
 
+    // --- 「わからない」の印（2026-10-21 実機テスト A4） ---
+
+    #[test]
+    fn unknown_answer_is_detected_with_notation_variants() {
+        for short in [
+            "わからない",
+            "わからないよ。",
+            "分からないよ！",
+            "「わからない」",
+            "わからないです。",
+            "わかりません。",
+            "不明",
+            " わからない だよ ",
+            "ドエンジニアリングとは、わからないよ。",
+            "「ドエンジニアリング」とは、わからない。",
+        ] {
+            assert!(term_explanation_says_unknown(short), "{short}");
+        }
+    }
+
+    #[test]
+    fn explanations_that_mention_not_knowing_are_not_the_unknown_answer() {
+        for short in [
+            "需要とは、先のことはわからないけれど、買いたい気持ちの量のことだよ。",
+            "証拠金とは、取引の担保だよ。",
+            "わからないことを調べる方法だよ。",
+            "不明瞭とは、はっきりしないことだよ。",
+            "",
+        ] {
+            assert!(!term_explanation_says_unknown(short), "{short}");
+        }
+    }
+
+    #[test]
+    fn unknown_answer_is_not_treated_as_another_subject() {
+        // 「わからない」を別の語の定義とみなして作り直すと、名前を言わせて作り話を後押しする。
+        for short in ["わからない", "わからないよ。"] {
+            assert!(!defines_other("ドエンジニアリング", short), "{short}");
+        }
+        let unknown = term_output("わからない");
+        let mut fake = FakeTermGenerator::new(vec![Ok(unknown.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(unknown));
+        assert_eq!(fake.prompts, vec!["FIRST_PROMPT"]);
+    }
+
+    #[test]
+    fn subject_retry_prefers_an_unknown_answer_over_another_subject() {
+        // 作り直しで「わからない」と答えたら、1回目（別の語の定義）より安全なのでそちらを返す。
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let unknown = term_output("わからない");
+        let mut fake = FakeTermGenerator::new(vec![Ok(wrong), Ok(unknown.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(unknown));
+        assert_eq!(fake.prompts.len(), 2);
+    }
+
+    #[test]
+    fn term_prompt_and_retry_note_offer_the_unknown_answer() {
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let prompt = term_explanation_prompt_for(level);
+            assert!(prompt.contains(TERM_UNKNOWN_INSTRUCTION));
+            assert!(prompt.contains(&format!("「{TERM_UNKNOWN_MARKER}」")));
+            // 固定指示（防御指示より前）と末尾の念押しの両方にある。
+            let defense = prompt.find("厳守事項").unwrap();
+            assert!(prompt.find(TERM_UNKNOWN_INSTRUCTION).unwrap() < defense);
+            assert!(TERM_EXPLANATION_REMINDER.contains(TERM_UNKNOWN_MARKER));
+        }
+        assert!(TERM_SUBJECT_RETRY_NOTE.contains(&format!("「{TERM_UNKNOWN_MARKER}」")));
+        // フレーズの説明には「わからない」を頼まない（判定もしない）。
+        let phrase = build_phrase_explanation_prompt(
+            &AiRequest {
+                prompt_id: PHRASE_EXPLANATION_PROMPT_ID.to_string(),
+                input_text: "選んだ文章".to_string(),
+                context: None,
+            },
+            ExplanationLevel::Normal,
+        );
+        assert!(!phrase.contains(TERM_UNKNOWN_MARKER));
+    }
+
     #[test]
     fn subject_retry_prompt_keeps_only_the_title_and_adds_a_fixed_note() {
         let request = AiRequest {
@@ -2764,6 +2938,72 @@ mod tests {
             serde_json::from_str::<AiTermExplanation>(response.text.trim())
                 .expect("strict term explanation JSON");
         }
+        local.shutdown();
+    }
+
+    /// 実モデルで、言葉の切れ端・知らない語に「わからない」と答え、一般的な語は従来どおり解説するかを
+    /// 見る（手動実行のみ・結果は目視。2026-10-21 実機テスト A4 の確認用）。作り直しの経路も含めて通す。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_local_llm_term_unknown -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires the real llama-server and model placed by scripts/local-llm/place-bundle.mjs"]
+    fn real_local_llm_term_unknown_answers() {
+        use crate::domain::summary::AiTermExplanation;
+        use std::time::Instant;
+        let dir = std::env::var_os("YUUKO_LOCAL_LLM_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources")
+                    .join("local_llm")
+            });
+        let local = LocalLlmService::new(Some(dir));
+        let service = service().with_local_llm(local.clone());
+        let fde = "タイトル: 米テック企業、FDE職の採用を拡大\n\
+            抜粋: 米企業でFDE（フォワードデプロイドエンジニアリング）の担当者が増えている。\
+            顧客の現場に入り込んでAIを導入する役割だ。";
+        let subsidy = "タイトル: 中小企業のデジタル化に新補助金\n\
+            抜粋: 政府は来年度から、中小企業のデジタル化を支援する新しい補助金制度を始めると発表した。";
+        let mut unknown_count = 0;
+        let cases = [
+            ("ドエンジニアリング", fde),
+            ("ォワードデプロイ", fde),
+            ("ラウドサービス", subsidy),
+            ("フォワードデプロイドエンジニアリング", fde),
+            ("FDE", fde),
+            ("エンジニアリング", fde),
+            ("補助金", subsidy),
+            ("クラウドサービス", subsidy),
+            ("デジタル化", subsidy),
+            ("データセンター", subsidy),
+            ("証拠金", subsidy),
+            ("中小企業", subsidy),
+        ];
+        for (term, context) in cases {
+            let started = Instant::now();
+            let response = service
+                .request_text(
+                    AiRequest {
+                        prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
+                        input_text: term.to_string(),
+                        context: Some(context.to_string()),
+                    },
+                    AiProvider::Local,
+                    ExplanationLevel::Normal,
+                )
+                .expect("local generation");
+            let parsed = serde_json::from_str::<AiTermExplanation>(response.text.trim())
+                .expect("strict term explanation JSON");
+            let unknown = term_explanation_says_unknown(&parsed.short);
+            unknown_count += usize::from(unknown);
+            eprintln!(
+                "[{}] {term}: {:.1}s\n  short: {}\n  detail: {}\n",
+                if unknown { "UNKNOWN" } else { "explained" },
+                started.elapsed().as_secs_f32(),
+                parsed.short,
+                parsed.detail
+            );
+        }
+        eprintln!("unknown answers: {unknown_count} / {}", cases.len());
         local.shutdown();
     }
 
