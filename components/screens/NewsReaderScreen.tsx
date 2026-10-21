@@ -68,6 +68,10 @@ import {
 } from "@/lib/explain-selection.mjs";
 // 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
 import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
+import {
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
 
 type SupportTerm = {
   id: string;
@@ -377,7 +381,7 @@ const mapTauriArticleToUi = (
     id: article.articleId,
     title: article.title,
     source: article.sourceName,
-    timeAgo: article.publishedAtText,
+    timeAgo: formatArticleDateTime(article.publishedAtText),
     category: article.genre,
     categoryColor: toCategoryColor(article.genre),
     isFavorite: article.isFavorite,
@@ -400,8 +404,8 @@ const mapSummaryToRelated = (
   id: article.articleId,
   title: article.title,
   source: article.sourceName,
-  timeAgo: article.publishedAtText,
-  isNew: article.readState === "unread",
+  timeAgo: formatArticleDateTime(article.publishedAtText),
+  isNew: isArticleNew(article),
   thumbnailType: toThumbnailType(article.genre),
 });
 

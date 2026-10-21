@@ -41,6 +41,10 @@ import {
   ArticleTagList,
   normalizeArticleTags,
 } from "@/components/news/ArticleTagList";
+import {
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
 
 // 当日ニュースカードの表示モデル（履歴とは別目的のため独自に持つ）。
 type TodayArticle = {
@@ -104,12 +108,14 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   title: article.title,
   source: article.sourceName,
   // 表示は媒体の公開日時テキストを優先し、無ければ取得日時を出す（判定は fetchedAt のみで行う）。
-  datetime: article.publishedAtText || article.fetchedAt,
+  // RFC3339 のまま出さず「YYYY/MM/DD HH:mm」（端末ローカル）に整える。
+  datetime: formatArticleDateTime(article.publishedAtText || article.fetchedAt),
   description:
     article.summary ??
     "概要はまだありません。記事を開くと保存済みの内容を確認できます。",
   genre: article.genre || "未分類",
-  isNew: article.readState === "unread",
+  // 未読でも公開（無ければ取得）から24時間を過ぎた記事には NEW を付けない。
+  isNew: isArticleNew(article),
   isFavorite: article.isFavorite,
   thumbnailType: toThumbnailType(article.genre),
   summaryState: article.summaryState,
