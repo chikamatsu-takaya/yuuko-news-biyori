@@ -7357,8 +7357,7 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
 });
 
 // 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
-const REWARD_NOTICE_TEXT =
-  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+const REWARD_NOTICE_TEXT = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
 
 async function enableRewardNotice(page: Page) {
   await page.addInitScript((text: string) => {
@@ -7714,8 +7713,7 @@ test("yuuko-summoned OFF message is shown even while notifications are disabled"
   const region = page.getByRole("region", { name: NOTIFICATION_REGION });
   await expect(region).toHaveCount(0);
 
-  const message =
-    "通知がOFFになっているよ。設定でONにすると、ニュースを紹介できるよ。";
+  const message = "通知がOFFだよ。設定でONにしてね。";
   await expect
     .poll(() => emitYuukoSummoned(page, { message }))
     .toBeGreaterThan(0);
