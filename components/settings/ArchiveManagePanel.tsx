@@ -7,7 +7,7 @@
  * - 削除できる時期かどうか（deletable）は Rust が返す値に従い、画面では判定しない。まだの月はボタンを非活性にする。
  * - 削除は、事前確認（get_archive_month_delete_preview）で件数・容量を示し「元に戻せない」確認を経てから実行する。
  *   アーカイブにしか無いお気に入りを含む月などは事前確認がエラーになるため、エラーコードから固定文言を出す。
- * - 削除後は一覧を読み直す。
+ * - 削除後は一覧を読み直し、onDeleted で呼び出し元へ知らせる（設定画面のストレージ状況の読み直し用）。
  *
  * ZIPの特定・検証・削除はすべて Rust 側。ここは年月（YYYY-MM）だけを渡し、パス・Rust のエラー文は表示しない。
  */
@@ -55,7 +55,12 @@ const errorCodeOf = (error: unknown) =>
     ? (error as { code?: unknown }).code
     : undefined;
 
-export function ArchiveManagePanel() {
+export function ArchiveManagePanel({
+  onDeleted,
+}: {
+  /** 月の削除が成功したときに呼ぶ（保存データの大きさが変わったことを呼び出し元へ知らせる）。 */
+  onDeleted?: () => void;
+} = {}) {
   const [months, setMonths] = React.useState<ArchiveMonthDto[]>([]);
   const [listState, setListState] = React.useState<
     "idle" | "loaded" | "preview" | "error"
@@ -205,6 +210,7 @@ export function ArchiveManagePanel() {
         kind: "success",
         text: `${label}のアーカイブ（${result.deletedArticleCount}件）を削除したよ。${pendingNote}`,
       });
+      onDeleted?.();
       await fetchMonths();
     } catch (error) {
       if (!isMountedRef.current) {

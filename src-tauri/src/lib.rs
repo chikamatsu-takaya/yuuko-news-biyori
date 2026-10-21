@@ -267,6 +267,7 @@ pub fn run() {
             commands::app_commands::take_pending_main_window_article,
             commands::data_export_commands::export_migration_data,
             commands::data_export_commands::open_migration_folder,
+            commands::data_export_commands::get_storage_usage,
             commands::data_import_commands::list_migration_imports,
             commands::data_import_commands::import_migration_data,
             commands::news_commands::refresh_news,
