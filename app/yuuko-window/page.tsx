@@ -12,10 +12,13 @@
  * このウィンドウから呼べる command は、通知用の 4 つ（状態取得・クリック・閉じる・無反応）と
  * テーマ ID の取得（get_ui_theme_id）だけ（src-tauri/capabilities/yuuko-window.json、判断台帳 D110・D114）。
  * それ以外の command は Tauri が実行時に拒否するため、ここから新たに呼ぶ場合は許可の判断が要る。
+ * 着せかえ（吹き出し・飾り）は command で読まず、Rust が通知のデータ（イベント・マウント時の状態取得）に
+ * 載せた ID を、既知の ID か確かめてから使う（判断台帳 D156。YuukoDressupStaticProvider）。
  */
 
 import React from "react";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
+import { YuukoDressupStaticProvider } from "@/components/yuuko/YuukoDressupProvider";
 import { refreshUiThemeFromSettings } from "@/hooks/use-ui-theme";
 import {
   dismissYuukoNotification,
@@ -178,48 +181,54 @@ export default function YuukoWindowPage() {
             leaving ? "yuuko-notification-leave" : ""
           }`}
         >
-          <YuukoInAppNotification
-            key={displayed.seq}
-            articleId={notification.articleId}
-            initialView={notification.previewVisible ? "preview" : "balloon"}
-            // 外部由来を含み得るため、文字列のまま渡してテキストとして描画させる。
-            balloonText={notification.balloonText}
-            articleTitle={notification.title}
-            // 出典・短い要約（Rust で切り詰め済み）も外部由来のためテキストとして描画させる。
-            // 要約が無い記事では YuukoInAppNotification が固定の一言を出す。
-            sourceName={notification.sourceName}
-            summary={notification.summary}
-            positionMode="RightBottom"
-            // 報酬通知は吹き出し＋OK。OK も handle_yuuko_clicked を通り、Rust が確認済みにしてウィンドウを隠す。
-            // 一言（「ゆうこを呼ぶ」で紹介できるものが無いとき）も吹き出し＋OK。
-            variant={
-              notification.reward
-                ? "reward"
-                : notification.message
-                  ? "message"
-                  : "news"
-            }
-            // ウィンドウは段階ごとの固定サイズ（Rust 側）なので、長文で上へはみ出さないよう行数を抑える。
-            clampText
-            onFirstClick={() => {
-              void enqueue(handleYuukoClicked);
-            }}
-            // 一言は OK・閉じる・自動退場のどれも dismiss を通す。表示中の通知が無いため Rust は状態を変えず
-            // （クールタイムも付かない）、ウィンドウだけを隠す（このウィンドウにはウィンドウ操作の権限が無い）。
-            onOpen={() =>
-              finish(
-                notification.message
-                  ? dismissYuukoNotification
-                  : handleYuukoClicked
-              )
-            }
-            onClose={() => finish(dismissYuukoNotification)}
-            onIgnore={() =>
-              finish(
-                notification.message ? dismissYuukoNotification : markYuukoIgnored
-              )
-            }
-          />
+          {/* 着せかえは通知ごとに Rust が載せた値（無い・未知なら既定）。 */}
+          <YuukoDressupStaticProvider
+            balloonId={notification.balloonId}
+            decoId={notification.decoId}
+          >
+            <YuukoInAppNotification
+              key={displayed.seq}
+              articleId={notification.articleId}
+              initialView={notification.previewVisible ? "preview" : "balloon"}
+              // 外部由来を含み得るため、文字列のまま渡してテキストとして描画させる。
+              balloonText={notification.balloonText}
+              articleTitle={notification.title}
+              // 出典・短い要約（Rust で切り詰め済み）も外部由来のためテキストとして描画させる。
+              // 要約が無い記事では YuukoInAppNotification が固定の一言を出す。
+              sourceName={notification.sourceName}
+              summary={notification.summary}
+              positionMode="RightBottom"
+              // 報酬通知は吹き出し＋OK。OK も handle_yuuko_clicked を通り、Rust が確認済みにしてウィンドウを隠す。
+              // 一言（「ゆうこを呼ぶ」で紹介できるものが無いとき）も吹き出し＋OK。
+              variant={
+                notification.reward
+                  ? "reward"
+                  : notification.message
+                    ? "message"
+                    : "news"
+              }
+              // ウィンドウは段階ごとの固定サイズ（Rust 側）なので、長文で上へはみ出さないよう行数を抑える。
+              clampText
+              onFirstClick={() => {
+                void enqueue(handleYuukoClicked);
+              }}
+              // 一言は OK・閉じる・自動退場のどれも dismiss を通す。表示中の通知が無いため Rust は状態を変えず
+              // （クールタイムも付かない）、ウィンドウだけを隠す（このウィンドウにはウィンドウ操作の権限が無い）。
+              onOpen={() =>
+                finish(
+                  notification.message
+                    ? dismissYuukoNotification
+                    : handleYuukoClicked
+                )
+              }
+              onClose={() => finish(dismissYuukoNotification)}
+              onIgnore={() =>
+                finish(
+                  notification.message ? dismissYuukoNotification : markYuukoIgnored
+                )
+              }
+            />
+          </YuukoDressupStaticProvider>
         </div>
       ) : null}
     </>

@@ -12,6 +12,9 @@ import { expect, test, type Page } from "@playwright/test";
 const WINDOW_WIDTH = 312;
 const BALLOON_HEIGHT = 196;
 const PREVIEW_HEIGHT = 298;
+// 着せかえ（既定以外の吹き出し・飾り）を付けているときの高さ（yuuko_window.rs の DRESSUP_EXTRA_* を足した値・D156）。
+const DRESSED_BALLOON_HEIGHT = 216;
+const DRESSED_PREVIEW_HEIGHT = 324;
 
 const REGION = "ゆうこからのお知らせ";
 
@@ -798,4 +801,238 @@ test("Windows high contrast keeps the yuuko window transparent and the balloon r
     html: "rgba(0, 0, 0, 0)",
     body: "rgba(0, 0, 0, 0)",
   });
+});
+
+// --- 着せかえ（吹き出し・飾り。判断台帳 D156） ---
+// 常駐ゆうこウィンドウは get_dressup_state を呼べないため、Rust が通知のデータ（イベント・マウント時の状態取得）に
+// その時点で有効な balloonId / decoId を載せる。ページは既知の ID か確かめてから共通部品で描く。
+
+const balloon = (page: Page) =>
+  page.getByRole("region", { name: REGION }).getByTestId("yuuko-notification-balloon");
+const decoLayer = (page: Page) =>
+  page.getByRole("region", { name: REGION }).getByTestId("yuuko-deco-layer");
+
+/** 既定（いつもの・なし）の見た目が、着せかえ導入前と同じクラスのままか。 */
+async function expectDefaultDressup(page: Page) {
+  await expect(balloon(page)).toHaveAttribute("data-balloon-shape", "default");
+  await expect(balloon(page)).toHaveClass(
+    /rounded-2xl border border-border\/50 bg-white p-3 shadow-lg/
+  );
+  await expect(balloon(page)).not.toHaveClass(/yuuko-bb/);
+  await expect(decoLayer(page)).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: REGION }).locator("[data-deco]")
+  ).toHaveAttribute("data-deco", "none");
+}
+
+test("dressup from the saved state is applied on the initial display", async ({
+  page,
+}) => {
+  await installMocks(page, {
+    state: activeState({
+      balloonId: "gacha_balloon_cloud",
+      decoId: "gacha_deco_crown",
+    }),
+  });
+  await openYuukoWindow(page, DRESSED_BALLOON_HEIGHT);
+  await expect(balloon(page)).toHaveAttribute("data-balloon-shape", "cloud");
+  await expect(balloon(page)).toHaveClass(/yuuko-bb yuuko-bb-cloud/);
+  await expect(decoLayer(page)).toHaveAttribute("src", /crown\.svg/);
+  // 着せかえのために、このウィンドウで許可されていない command を呼ばない（D156・案2）。
+  expect(await commandCalls(page, "get_dressup_state")).toBe(0);
+  await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
+});
+
+test("dressup in the event payload changes the look, and a payload without it stays default", async ({
+  page,
+}) => {
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page);
+
+  await emit(page, {
+    articleId: "desk-article-2",
+    title: "着せかえのニュース",
+    balloonText: "着せかえの吹き出し",
+    previewVisible: false,
+    balloonId: "gacha_balloon_seal",
+    decoId: "gacha_deco_round_sunglasses",
+  });
+  const region = page.getByRole("region", { name: REGION });
+  await expect(region.getByText("着せかえの吹き出し")).toBeVisible();
+  await expect(balloon(page)).toHaveAttribute("data-balloon-shape", "seal");
+  // しっぽは描かない（従来どおり tail="none"。閉じるボタンの分の右余白は残す）。
+  await expect(balloon(page)).toHaveAttribute("data-tail", "none");
+  await expect(balloon(page)).toHaveClass(/pr-7/);
+  await expect(decoLayer(page)).toHaveAttribute("src", /round_sunglasses\.svg/);
+
+  // 着せかえを載せない通知は既定のまま描く。
+  await emit(page, {
+    articleId: "desk-article-3",
+    title: "既定のニュース",
+    balloonText: "既定の吹き出し",
+    previewVisible: false,
+  });
+  await expect(region.getByText("既定の吹き出し")).toBeVisible();
+  await expectDefaultDressup(page);
+  expect(await commandCalls(page, "get_dressup_state")).toBe(0);
+});
+
+test("unknown dressup ids fall back to the default look", async ({ page }) => {
+  await installMocks(page, {
+    state: activeState({
+      balloonId: "yuuko-bb-game evil",
+      decoId: "../../secret",
+    }),
+  });
+  await openYuukoWindow(page);
+  await expect(page.getByRole("region", { name: REGION })).toBeVisible();
+  await expectDefaultDressup(page);
+  await expect(page.locator("[class*='evil']")).toHaveCount(0);
+
+  // 文字列以外・部位違いの既定 ID も既定。
+  await emit(page, {
+    articleId: "desk-article-2",
+    title: "不正な着せかえ",
+    balloonText: "不正な着せかえの吹き出し",
+    previewVisible: false,
+    balloonId: 42,
+    decoId: "balloon_default",
+  });
+  await expect(
+    page.getByRole("region", { name: REGION }).getByText("不正な着せかえの吹き出し")
+  ).toBeVisible();
+  await expectDefaultDressup(page);
+});
+
+test("the game window balloon keeps white text, and its blinking stops with reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installMocks(page, {
+    state: activeState({ balloonId: "gacha_balloon_game" }),
+  });
+  await openYuukoWindow(page);
+  await expect(balloon(page)).toHaveAttribute("data-balloon-shape", "game");
+  await expect(
+    balloon(page).getByText("気になるニュースを見つけたよ。「デスクトップのE2Eニュース」")
+  ).toHaveCSS("color", "rgb(255, 255, 255)");
+  const blink = await balloon(page).evaluate(
+    (element) => getComputedStyle(element, "::after").animationName
+  );
+  expect(blink).toBe("none");
+
+  // 軽量プレビューの「詳しく見る」（自前の背景色を持つボタン）は白地に白文字にならない。
+  await balloon(page).getByRole("button", { name: "ニュースをプレビュー" }).click();
+  const open = balloon(page).getByRole("button", { name: "詳しく見る" });
+  await expect(open).toBeVisible();
+  const colors = await open.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, background: style.backgroundColor };
+  });
+  expect(colors.color).not.toBe(colors.background);
+});
+
+test("Windows high contrast outlines a dressed-up balloon and keeps the window transparent", async ({
+  page,
+}) => {
+  await page.emulateMedia({ forcedColors: "active" });
+  await installMocks(page, {
+    state: activeState({ balloonId: "gacha_balloon_cloud", decoId: "gacha_deco_ribbon" }),
+  });
+  await openYuukoWindow(page);
+  await expect(balloon(page)).toHaveAttribute("data-balloon-shape", "cloud");
+  const outline = await balloon(page).evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { width: style.outlineWidth, style: style.outlineStyle };
+  });
+  expect(outline).toEqual({ width: "2px", style: "solid" });
+  const body = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  expect(body).toBe("rgba(0, 0, 0, 0)");
+});
+
+// 頭の上へはみ出す飾り（はみ出しが最大のサンタ帽）とすべての吹き出しで、長文でもウィンドウの寸法に収まり、
+// 飾りが上で切れないこと。着せかえを付けているときだけ Rust がウィンドウを少し高くする（既定は今までの大きさ）。
+const ALL_BALLOON_IDS = [
+  "balloon_default",
+  "gacha_balloon_rim",
+  "gacha_balloon_cloud",
+  "gacha_balloon_note",
+  "gacha_balloon_sticky",
+  "gacha_balloon_dash",
+  "gacha_balloon_airmail",
+  "gacha_balloon_pixel",
+  "gacha_balloon_game",
+  "gacha_balloon_seal",
+];
+
+const shapeOf = (balloonId: string) =>
+  balloonId === "balloon_default" ? "default" : balloonId.replace("gacha_balloon_", "");
+
+/** 飾りの層（絵の上端）がウィンドウの上で切れず、吹き出しにも食い込まないこと。 */
+async function expectDecoNotClipped(page: Page, height: number, label: string) {
+  const deco = await decoLayer(page).boundingBox();
+  expect(deco, label).not.toBeNull();
+  expect(deco!.y, label).toBeGreaterThanOrEqual(0);
+  expect(deco!.y + deco!.height, label).toBeLessThanOrEqual(height);
+  // はみ出す分の余白が立ち絵の上に取られ、吹き出しの下端より下から描かれる。
+  const balloonBox = await balloon(page).boundingBox();
+  expect(balloonBox!.y + balloonBox!.height, label).toBeLessThanOrEqual(deco!.y + 1);
+}
+
+test("every balloon with a head decoration fits the dressed window and the decoration is not clipped", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const longTitle = "とても長いニュースのタイトル".repeat(8);
+  const longText = `${"ゆ".repeat(32)}、気になるニュースを見つけたよ。「${longTitle}」`;
+  const longSummary = "保存済みのとても長い要約です。".repeat(4);
+  await installMocks(page, { state: null });
+
+  for (const [stage, height] of [
+    ["balloon", DRESSED_BALLOON_HEIGHT],
+    ["preview", DRESSED_PREVIEW_HEIGHT],
+  ] as const) {
+    await openYuukoWindow(page, height);
+    for (const balloonId of ALL_BALLOON_IDS) {
+      const label = `${stage} ${balloonId}`;
+      await emit(page, {
+        articleId: `desk-${balloonId}`,
+        title: longTitle,
+        balloonText: longText,
+        sourceName: "とても長い出典名".repeat(10),
+        summary: longSummary,
+        previewVisible: stage === "preview",
+        balloonId,
+        decoId: "gacha_deco_santa_hat",
+      });
+      await expect(balloon(page), label).toHaveAttribute(
+        "data-balloon-shape",
+        shapeOf(balloonId)
+      );
+      await expectFitsInWindow(page, height);
+      await expectDecoNotClipped(page, height, label);
+    }
+  }
+});
+
+test("a dressed-up reward notice fits the dressed window", async ({ page }) => {
+  // 報酬通知（吹き出し＋OK）。呼び名つきの実際の長さ（2行程度）の文言で、厚い吹き出し×頭の飾りでも収まる。
+  await installMocks(page, { state: null });
+  await openYuukoWindow(page, DRESSED_BALLOON_HEIGHT);
+  for (const balloonId of ["gacha_balloon_game", "gacha_balloon_cloud", "gacha_balloon_note"]) {
+    await emit(page, {
+      articleId: "",
+      title: "",
+      balloonText: `${"ゆ".repeat(12)}、新しいテーマ「そらいろ」が届いたよ！`,
+      sourceName: "",
+      previewVisible: false,
+      reward: true,
+      balloonId,
+      decoId: "gacha_deco_santa_hat",
+    });
+    await expect(balloon(page)).toHaveAttribute("data-balloon-shape", shapeOf(balloonId));
+    await expect(balloon(page).getByRole("button", { name: "OK" })).toBeVisible();
+    await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
+    await expectDecoNotClipped(page, DRESSED_BALLOON_HEIGHT, `reward ${balloonId}`);
+  }
 });

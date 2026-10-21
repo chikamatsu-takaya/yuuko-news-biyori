@@ -58,6 +58,13 @@ export type YuukoNotificationState = {
    * ゆうこ用ウィンドウのマウント時の状態取得にだけ、Rust が1回だけ詰めて返す（初回生成直後はイベントを取りこぼすため）。
    */
   summonMessage?: string;
+  /**
+   * その時点で適用する吹き出し・飾りの ID（着せかえ・判断台帳 D156）。
+   * ゆうこ用ウィンドウのマウント時の状態取得にだけ Rust が詰める（未所持・未知は既定に倒した値）。
+   * ゆうこ用ウィンドウには get_dressup_state を許可しないため、通知のデータで受け取る。
+   */
+  balloonId?: string;
+  decoId?: string;
 };
 
 /**
@@ -194,6 +201,12 @@ export type YuukoDesktopNotification = {
    * 記事の欄は空で、文言は balloonText だけを使う。ニュース・報酬通知では省略される。
    */
   message?: boolean;
+  /**
+   * その時点で適用する吹き出し・飾りの ID（着せかえ・判断台帳 D156。Rust が既定に倒した値を毎回載せる）。
+   * 表示側は lib/yuuko-dressup.mjs で既知の ID か確かめてから使い、無い・未知なら既定（いつもの・なし）にする。
+   */
+  balloonId?: string;
+  decoId?: string;
 };
 
 /**
@@ -234,6 +247,11 @@ export const toShortPreviewSummary = (
 export const toYuukoDesktopNotification = (
   state: YuukoNotificationState | null
 ): YuukoDesktopNotification | null => {
+  // 着せかえの ID はそのまま引き継ぐ（既知の ID かの確認は表示側で行う）。
+  const dressup = {
+    ...(typeof state?.balloonId === "string" ? { balloonId: state.balloonId } : {}),
+    ...(typeof state?.decoId === "string" ? { decoId: state.decoId } : {}),
+  };
   if (state && isActiveRewardNotice(state)) {
     const balloonText =
       state.balloonText ?? state.rewardNotification?.message ?? undefined;
@@ -244,6 +262,7 @@ export const toYuukoDesktopNotification = (
       sourceName: "",
       previewVisible: false,
       reward: true,
+      ...dressup,
     };
   }
   if (
@@ -260,6 +279,7 @@ export const toYuukoDesktopNotification = (
         sourceName: "",
         previewVisible: false,
         message: true,
+        ...dressup,
       };
     }
     return null;
@@ -273,6 +293,7 @@ export const toYuukoDesktopNotification = (
     sourceName: state.previewArticle.sourceName,
     ...(summary ? { summary } : {}),
     previewVisible: state.state === "PreviewVisible",
+    ...dressup,
   };
 };
 

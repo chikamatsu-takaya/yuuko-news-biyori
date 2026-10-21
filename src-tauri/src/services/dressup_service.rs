@@ -8,7 +8,7 @@
 //! ガチャ状態はロックを取って読み終えてから設定を保存し、両方のロックを入れ子にしない。
 //! 所持は増えるだけなので、判定後に設定を保存しても判定が覆ることはない。
 
-use crate::domain::dressup::{is_selectable, DressupSlot, DressupStateDto};
+use crate::domain::dressup::{is_selectable, ActiveDressupIds, DressupSlot, DressupStateDto};
 use crate::error::AppError;
 use crate::services::gacha_service::GachaService;
 use crate::services::settings_service::SettingsService;
@@ -41,6 +41,16 @@ impl DressupService {
             });
         let (balloon_id, deco_id) = self.settings_service.saved_dressup_ids();
         DressupStateDto::new(&balloon_id, &deco_id, &owned)
+    }
+
+    /// 適用中の吹き出し・飾りの ID だけを返す（常駐ゆうこウィンドウへ通知データで渡す用。判断台帳 D156）。
+    /// 解決は get_dressup_state と同じ（未所持・未知は既定、ガチャ状態を読めなければ既定）。
+    pub fn active_dressup_ids(&self) -> ActiveDressupIds {
+        let state = self.get_dressup_state();
+        ActiveDressupIds {
+            balloon_id: state.active_balloon_id,
+            deco_id: state.active_deco_id,
+        }
     }
 
     /// 吹き出しを切り替えて設定 `ui.balloonId` に保存し、更新後の状態を返す（カスタマイズ画面）。
@@ -214,6 +224,32 @@ mod tests {
         assert_eq!(
             ctx.service.get_dressup_state().active_balloon_id,
             "gacha_balloon_game"
+        );
+    }
+
+    #[test]
+    fn active_dressup_ids_falls_back_to_defaults_like_get_dressup_state() {
+        let ctx = ctx();
+        assert_eq!(
+            ctx.service.active_dressup_ids(),
+            ActiveDressupIds::default()
+        );
+        // 未所持・未知の ID は既定に倒す。
+        ctx.settings.set_balloon_id("gacha_balloon_seal").unwrap();
+        ctx.settings.set_deco_id("mystery").unwrap();
+        assert_eq!(
+            ctx.service.active_dressup_ids(),
+            ActiveDressupIds::default()
+        );
+        // 所持済みならそのまま渡す。
+        own(&ctx, &["gacha_balloon_seal", "gacha_deco_crown"]);
+        ctx.settings.set_deco_id("gacha_deco_crown").unwrap();
+        assert_eq!(
+            ctx.service.active_dressup_ids(),
+            ActiveDressupIds {
+                balloon_id: "gacha_balloon_seal".to_string(),
+                deco_id: "gacha_deco_crown".to_string(),
+            }
         );
     }
 }
