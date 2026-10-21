@@ -18,6 +18,12 @@ export type DictionaryEntryDto = {
   // 「辞書保存済み」表示は ★（isStarred）ではなくこれで判定する（画面詳細設計書 §11.4）。
   // 保存時の入力としては Rust 側で参照しない。
   savedInDictionary: boolean;
+  // 解説の代わりの固定の案内（「この言葉はゆうこにも分からなかったよ。」など）か。
+  // true のときは「辞書に保存」を出さず、友情ポイントも加算しない（Rust 側も保存要求を拒否する）。
+  isNotice?: boolean;
+  // 選択が言葉の途中だったため語境界まで広げて解説したとき、元の選択文字列（keyText が広げた言葉）。
+  // 表示専用で、辞書には保存されない。
+  expandedFrom?: string;
 };
 
 export type DictionaryEntryListItemDto = {

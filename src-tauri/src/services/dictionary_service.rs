@@ -113,7 +113,7 @@ impl DictionaryService {
             } => {
                 // 用語の選択が言葉の途中を切り取っていれば、AI を呼ぶ前に語境界まで広げる
                 // （広げ先が決まらなければ選び直しを案内する）。フレーズは文の一部を選ぶものなので見ない。
-                let mut target_text = selected_text;
+                let target_text = selected_text;
                 if classify_selected_text(&target_text) == DictionaryEntryType::Term {
                     let texts = display_texts.iter().map(String::as_str).collect::<Vec<_>>();
                     match resolve_selection_boundary(&target_text, &texts) {
@@ -121,10 +121,20 @@ impl DictionaryService {
                         SelectionBoundary::Expanded(word) => {
                             // 選択語・広げた語はログへ出さない（固定文だけ）。
                             log::info!("selected term was extended to the word boundary");
-                            if let Some(saved_entry) = self.find_saved_entry(&article_id, &word)? {
-                                return Ok(saved_entry);
-                            }
-                            target_text = word;
+                            // 返す項目には元の選択を添え、画面の見出しを広げた言葉にできるようにする。
+                            let entry = match self.find_saved_entry(&article_id, &word)? {
+                                Some(saved_entry) => saved_entry,
+                                None => self.explain_with_ai(
+                                    &article_id,
+                                    &title,
+                                    excerpt.as_deref(),
+                                    &word,
+                                )?,
+                            };
+                            return Ok(DictionaryEntryDto {
+                                expanded_from: Some(target_text),
+                                ..entry
+                            });
                         }
                         SelectionBoundary::Fragment => {
                             log::info!("selected term was cut in the middle of a word");
@@ -161,6 +171,11 @@ impl DictionaryService {
         else {
             return Ok(None);
         };
+        // 案内の文面が保存されていても（保存の拒否より前の開発版のデータなど）再利用しない。
+        if is_notice_text(&saved_entry.short_explanation) {
+            log::info!("saved dictionary entry was a notice; not reused");
+            return Ok(None);
+        }
         // 参照記録は付随処理。失敗しても解説は返す（ログに選択語・本文・保存先パスは出さない）。
         if let Err(error) = self
             .repository
@@ -269,6 +284,14 @@ impl DictionaryService {
         params: SaveDictionaryEntryParams,
     ) -> Result<DictionaryEntryDto, AppError> {
         let entry = params.validated_entry()?;
+        // 解説の代わりの案内は辞書へ保存しない（保存すると次回から案内が再利用され、AI に聞き直せなくなる）。
+        // 印（is_notice）が欠けた要求でも、案内の固定文面なら拒否する。
+        if entry.is_notice || is_notice_text(&entry.short_explanation) {
+            log::info!("refused to save a notice entry to the dictionary");
+            return Err(AppError::Validation(
+                "notice entries cannot be saved to the dictionary".to_string(),
+            ));
+        }
         self.repository.save_dictionary_entry(entry)
     }
 
@@ -367,7 +390,7 @@ const UNKNOWN_TERM_SHORT: &str = "この言葉はゆうこにも分からなか�
 const UNKNOWN_TERM_DETAIL: &str = "言葉の途中だけを選んでいないか確かめてみてね。前後の言葉とあわせて選び直すと、解説できるかもしれないよ。";
 
 /// 解説の代わりの固定の案内を、画面がそのまま表示できる DTO で返す（画面を変えずに案内を出すため）。
-/// 選択語は文面に埋め込まない（見出しには画面が選択語を出す）。
+/// 選択語は文面に埋め込まない（見出しには画面が選択語を出す）。`is_notice` を立て、保存・友情ポイントの対象外にする。
 fn build_term_notice_entry(
     article_id: &str,
     article_title: &str,
@@ -388,7 +411,14 @@ fn build_term_notice_entry(
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
         saved_in_dictionary: false,
+        is_notice: true,
+        expanded_from: None,
     }
+}
+
+/// 解説の代わりの案内の固定文面か（保存の拒否・保存済み辞書の再利用の除外に使う）。
+fn is_notice_text(short_explanation: &str) -> bool {
+    [CUT_IN_WORD_SHORT, UNKNOWN_TERM_SHORT].contains(&short_explanation.trim())
 }
 
 /// AI へ渡す参考文脈（外部データ）を組み立てる（副作用なし）。タイトルと抜粋のみで、記事本文全文は渡さない。
@@ -575,6 +605,8 @@ fn build_ai_entry(
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
         saved_in_dictionary: false,
+        is_notice: false,
+        expanded_from: None,
     }
 }
 
@@ -638,6 +670,8 @@ impl SampleDictionaryEntry {
             related_article_title: Some(self.article_title.to_string()),
             is_starred: false,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         }
     }
 }
@@ -668,6 +702,8 @@ fn build_generic_entry(
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
         saved_in_dictionary: false,
+        is_notice: false,
+        expanded_from: None,
     }
 }
 
@@ -690,6 +726,8 @@ fn build_generic_phrase_entry(
         related_article_title: Some(article_title.to_string()),
         is_starred: false,
         saved_in_dictionary: false,
+        is_notice: false,
+        expanded_from: None,
     }
 }
 
@@ -902,6 +940,8 @@ mod tests {
             related_article_title: Some(REAL_ARTICLE_TITLE.to_string()),
             is_starred: true,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         }
     }
 
@@ -2426,6 +2466,9 @@ mod tests {
         assert_eq!(entry.key_text, "フォワードデプロイドエンジニアリング");
         assert_eq!(entry.entry_type, DictionaryEntryType::Term);
         assert_eq!(entry.short_explanation, "AIの短い解説です。");
+        // 画面が見出しを広げた言葉にし、元の選択を注記できるよう、元の選択を添える。通常の解説なので案内ではない。
+        assert_eq!(entry.expanded_from.as_deref(), Some("ドエンジニアリング"));
+        assert!(!entry.is_notice);
     }
 
     #[test]
@@ -2436,6 +2479,8 @@ mod tests {
             let entry = explain(&context, REAL_ARTICLE_ID, selected);
             assert_eq!(context.ai.last_request().unwrap().input_text, selected);
             assert_eq!(entry.key_text, selected);
+            assert_eq!(entry.expanded_from, None);
+            assert!(!entry.is_notice);
         }
         assert_eq!(context.ai.call_count(), 3);
     }
@@ -2461,6 +2506,8 @@ mod tests {
         assert_eq!(entry.short_explanation, super::CUT_IN_WORD_SHORT);
         assert_eq!(entry.detail_explanation, super::CUT_IN_WORD_DETAIL);
         assert!(!entry.saved_in_dictionary);
+        assert!(entry.is_notice);
+        assert_eq!(entry.expanded_from, None);
     }
 
     #[test]
@@ -2481,6 +2528,7 @@ mod tests {
         assert_eq!(context.ai.call_count(), 1);
         assert!(reused.saved_in_dictionary);
         assert_eq!(reused.key_text, "フォワードデプロイドエンジニアリング");
+        assert_eq!(reused.expanded_from.as_deref(), Some("ドエンジニアリング"));
     }
 
     #[test]
@@ -2503,6 +2551,7 @@ mod tests {
             assert_eq!(entry.detail_explanation, super::UNKNOWN_TERM_DETAIL);
             assert_eq!(entry.key_text, "ドエンジニアリング");
             assert_eq!(entry.entry_type, DictionaryEntryType::Term);
+            assert!(entry.is_notice);
         }
     }
 
@@ -2568,5 +2617,98 @@ mod tests {
                 "候補"
             ]
         );
+    }
+
+    // --- 案内（is_notice）の保存拒否・再利用の除外 ---
+
+    fn dictionary_store_exists(context: &TestContext) -> bool {
+        context
+            .root_dir
+            .join("dictionary")
+            .join("entries.json")
+            .exists()
+    }
+
+    #[test]
+    fn save_refuses_notice_entries_and_does_not_create_the_store() {
+        let context = build_service_with_excerpt("データセンターとコールセンターを増やす。");
+        let notice = explain(&context, REAL_ARTICLE_ID, "ンター");
+        assert!(notice.is_notice);
+
+        let error = context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams {
+                entry: notice.clone(),
+            })
+            .unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+        // 印が欠けた要求（旧画面など）でも、案内の固定文面なら拒否する。
+        let unmarked = DictionaryEntryDto {
+            is_notice: false,
+            ..notice
+        };
+        assert!(matches!(
+            context
+                .service
+                .save_dictionary_entry(SaveDictionaryEntryParams { entry: unmarked }),
+            Err(AppError::Validation(_))
+        ));
+        assert!(!dictionary_store_exists(&context));
+    }
+
+    #[test]
+    fn unknown_notice_is_not_saved_and_the_next_explain_asks_ai_again() {
+        let context = build_service();
+        context
+            .ai
+            .set_response_text(r#"{"short":"わからない","detail":"わからない"}"#);
+        let notice = explain(&context, REAL_ARTICLE_ID, "謎の語");
+        assert!(notice.is_notice);
+        assert!(context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams { entry: notice })
+            .is_err());
+
+        // 案内は辞書に入っていないので、次は AI に聞き直す。
+        context
+            .ai
+            .set_response_text(r#"{"short":"謎の語とは、説明だよ。","detail":"詳しい説明だよ。"}"#);
+        let entry = explain(&context, REAL_ARTICLE_ID, "謎の語");
+        assert_eq!(context.ai.call_count(), 2);
+        assert!(!entry.is_notice);
+        assert_eq!(entry.short_explanation, "謎の語とは、説明だよ。");
+    }
+
+    #[test]
+    fn saved_entry_with_notice_text_is_not_reused() {
+        // 保存の拒否より前に保存された案内（開発版のデータなど）は再利用せず、AI に聞き直す。
+        let context = build_service();
+        let mut stored = saved_entry();
+        stored.key_text = "謎の語".to_string();
+        stored.short_explanation = super::UNKNOWN_TERM_SHORT.to_string();
+        context
+            .service
+            .repository
+            .save_dictionary_entry(stored)
+            .unwrap();
+
+        let entry = explain(&context, REAL_ARTICLE_ID, "謎の語");
+        assert_eq!(context.ai.call_count(), 1);
+        assert!(!entry.saved_in_dictionary);
+        assert_eq!(entry.short_explanation, "AIの短い解説です。");
+    }
+
+    #[test]
+    fn regular_ai_entries_are_not_notices_and_can_be_saved() {
+        let context = build_service();
+        let entry = explain(&context, REAL_ARTICLE_ID, "新しい概念");
+        assert!(!entry.is_notice);
+        assert_eq!(entry.expanded_from, None);
+        let saved = context
+            .service
+            .save_dictionary_entry(SaveDictionaryEntryParams { entry })
+            .unwrap();
+        assert!(saved.saved_in_dictionary);
+        assert!(!saved.is_notice);
     }
 }

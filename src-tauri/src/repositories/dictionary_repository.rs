@@ -451,6 +451,8 @@ mod tests {
             related_article_title: Some("生成AIスタートアップの資金調達が再加速".to_string()),
             is_starred: true,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         }
     }
 
@@ -726,6 +728,8 @@ mod tests {
             related_article_title: Some("国内SaaS企業、業務改善支援の新施策を発表".to_string()),
             is_starred: false,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         };
         context
             .repository

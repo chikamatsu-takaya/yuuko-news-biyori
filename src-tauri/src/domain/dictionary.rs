@@ -35,6 +35,15 @@ pub struct DictionaryEntryDto {
     /// 保存パラメータとして受け取るときは参照しない（保存側で決まる値のため、欠けていても既定 false で受ける）。
     #[serde(default)]
     pub saved_in_dictionary: bool,
+    /// 解説の代わりの固定の案内（「この言葉はゆうこにも分からなかったよ。」「選んだ範囲が言葉の途中みたい…」）か。
+    /// 案内は辞書へ保存しない（保存要求は拒否する）。画面は「辞書に保存」を出さず、友情ポイントも加算しない。
+    /// 旧画面・保存済みの項目では欠けているので既定 false で受ける。
+    #[serde(default)]
+    pub is_notice: bool,
+    /// 選んだ文字列が言葉の途中だったため語境界まで広げて解説したとき、元の選択文字列（広げていなければ None）。
+    /// このとき `key_text` は広げた言葉で、画面の見出しはそちらにする。辞書へは保存しない（表示専用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,6 +628,8 @@ impl PersistedDictionaryEntry {
             is_starred: self.favorite,
             // 永続化済みの項目から作る DTO なので常に「辞書保存済み」。
             saved_in_dictionary: true,
+            is_notice: false,
+            expanded_from: None,
         }
     }
 
@@ -770,6 +781,8 @@ mod tests {
                 related_article_title: Some(" 記事タイトル ".to_string()),
                 is_starred: true,
                 saved_in_dictionary: false,
+                is_notice: false,
+                expanded_from: None,
             },
         };
 
@@ -795,6 +808,8 @@ mod tests {
                 related_article_title: None,
                 is_starred: false,
                 saved_in_dictionary: false,
+                is_notice: false,
+                expanded_from: None,
             },
         };
 
@@ -1314,6 +1329,35 @@ mod tests {
         assert_eq!(
             resolve_selection_boundary("ウウウ", &[long.as_str()]),
             SelectionBoundary::Fragment
+        );
+    }
+
+    #[test]
+    fn entry_dto_new_fields_are_compatible_with_old_payloads() {
+        // 旧画面の保存要求（isNotice / expandedFrom なし）も受け取れる。
+        let old: DictionaryEntryDto = serde_json::from_value(serde_json::json!({
+            "entryId": "entry-1",
+            "keyText": "生成AI",
+            "type": "term",
+            "shortExplanation": "短い説明",
+            "detailExplanation": "詳しい説明",
+            "isStarred": false
+        }))
+        .unwrap();
+        assert!(!old.is_notice);
+        assert_eq!(old.expanded_from, None);
+
+        // 返すときは isNotice を常に含め、expandedFrom は広げたときだけ含める。
+        let value = serde_json::to_value(&old).unwrap();
+        assert_eq!(value["isNotice"], false);
+        assert!(value.get("expandedFrom").is_none());
+        let expanded = DictionaryEntryDto {
+            expanded_from: Some("成AI".to_string()),
+            ..old
+        };
+        assert_eq!(
+            serde_json::to_value(&expanded).unwrap()["expandedFrom"],
+            "成AI"
         );
     }
 }
