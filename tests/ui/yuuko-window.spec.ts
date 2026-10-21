@@ -1173,7 +1173,7 @@ async function expectNotEllipsized(page: Page, text: string, label: string) {
 test("reward / summon text with a typical nickname is not ellipsized in any balloon", async ({
   page,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000); // 5つの文 × 11通りの吹き出しを順に表示するため長めにする
   await installMocks(page, { state: null });
   // 着せかえなし（既定の吹き出し・既定の高さ）。
   await openYuukoWindow(page);
