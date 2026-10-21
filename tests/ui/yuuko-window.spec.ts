@@ -1156,7 +1156,9 @@ const typicalNoticeCases = [
   { kind: "reward-one", text: `${TYPICAL_NICKNAME}、新しいテーマ「そらいろ」が届いたよ！`, extra: { reward: true } },
   { kind: "reward-many", text: `${TYPICAL_NICKNAME}、新しいテーマが2つ届いたよ！`, extra: { reward: true } },
   { kind: "notifications-off", text: `${TYPICAL_NICKNAME}、通知がOFFだよ。設定でONにしてね。`, extra: { message: true } },
-  { kind: "summon-failed", text: `${TYPICAL_NICKNAME}、ニュースを確認できなかったよ。また呼んでね。`, extra: { message: true } },
+  // 確認失敗の一言は呼び名を付けずに出す（summon_yuuko が失敗したときの文言。設計書 §9.3）。
+  { kind: "summon-failed", text: "ニュースを確認できなかったよ。また呼んでね。", extra: { message: true } },
+  { kind: "summon-no-article", text: `${TYPICAL_NICKNAME}、いま紹介できるニュースがないみたい。`, extra: { message: true } },
 ] as const;
 
 async function expectNotEllipsized(page: Page, text: string, label: string) {
