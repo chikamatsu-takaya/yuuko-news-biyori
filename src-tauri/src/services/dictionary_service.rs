@@ -353,7 +353,9 @@ const TERM_EXPLANATION_CONTEXT_MAX_CHARS: usize = 500;
 /// DTO の related_article_title・ArticleRepository/保存済みタイトル・画面表示タイトルには影響させない。
 const TERM_EXPLANATION_TITLE_MAX_CHARS: usize = 300;
 
-/// 記事画面に出る文（選択の元になり得る文）を集める。選択の語境界の判定（`resolve_selection_boundary`）
+/// 記事画面に出る文（選択の元になり得る文）を集める。選択できる欄（要約・再説明・要点・注目ポイント・感想。
+/// 画面の `data-explain-selectable`）に加え、候補語・タグ・タイトル・抜粋も入れる（単独で出ている語を
+/// 見つけやすくし、部分語の正しい選択を広げないため）。選択の語境界の判定（`resolve_selection_boundary`）
 /// だけに使い、AI へは送らない（AI の参考文脈は従来どおり `build_ai_context` のタイトル＋抜粋だけ）。
 fn article_display_texts(article: &ArticleDetailDto) -> Vec<String> {
     [
@@ -368,6 +370,7 @@ fn article_display_texts(article: &ArticleDetailDto) -> Vec<String> {
     .chain(article.yuuko_explanation.iter())
     .chain(article.yuuko_comment.iter())
     .chain(article.keyword_candidates.iter())
+    .chain(article.tags.iter())
     .filter(|text| !text.trim().is_empty())
     .cloned()
     .collect()
@@ -2602,7 +2605,7 @@ mod tests {
             is_favorite: false,
             keyword_candidates: vec!["候補".to_string()],
             summary_state: SummaryState::None,
-            tags: Vec::new(),
+            tags: vec!["タグ".to_string()],
         };
         assert_eq!(
             super::article_display_texts(&article),
@@ -2614,7 +2617,8 @@ mod tests {
                 "注目",
                 "再説明",
                 "感想",
-                "候補"
+                "候補",
+                "タグ"
             ]
         );
     }

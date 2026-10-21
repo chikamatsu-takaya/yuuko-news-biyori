@@ -381,6 +381,7 @@ const buildFallbackDictionaryEntry = (
   relatedArticleTitle: currentArticle.title,
   isStarred: false,
   savedInDictionary: false,
+  isNotice: false,
 });
 
 const mapTauriArticleToUi = (
@@ -1611,7 +1612,11 @@ export default function NewsReaderScreen({
 
       // 実際に用語解説（Tauri）が取得できた時だけ友情ポイントを加算（同一用語は1回だけ）。
       // 解説の代わりの案内（isNotice。「分からなかった」「言葉の途中みたい」）では加算しない。
-      const termKey = `${article.id}::${selectedTerm.term}`;
+      // 言葉全体に広げて解説したとき（expandedFrom あり）は、解説した言葉（keyText）で数える
+      // （「ドエンジニアリング」「フォワードデプロイ」など別の切れ端から同じ語を何度も数えない）。
+      const termKey = `${article.id}::${
+        entry?.expandedFrom ? entry.keyText : selectedTerm.term
+      }`;
       if (entry && !entry.isNotice && !recordedTermsRef.current.has(termKey)) {
         recordedTermsRef.current.add(termKey);
         void recordFriendshipEvent("term_explained")

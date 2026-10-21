@@ -3161,6 +3161,38 @@ test("reader: a selection extended to the whole word shows the word as the headi
   expect(await recordedFriendshipEvents(page)).toContain("term_explained");
 });
 
+test("reader: different selections extended to the same word add the friendship point once", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // どちらの選択も Rust が同じ言葉へ広げて解説した場合。友情ポイントは解説した言葉（keyText）で1回だけ。
+  await setExplainOverride(page, {
+    keyText: "フォワードデプロイドエンジニアリング",
+    expandedFrom: "ドエンジニアリング",
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect
+    .poll(async () =>
+      (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+    )
+    .toBe(1);
+  await termPopup(page).getByRole("button", { name: "閉じる" }).click();
+
+  // 別の場所（候補語）から選んでも、同じ言葉に広がったなら数えない。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(
+    (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+  ).toBe(1);
+});
+
 test("reader: a regular explanation keeps the selected text as the heading without a note", async ({
   page,
 }) => {
@@ -10332,6 +10364,7 @@ async function installTauriMocks(page: Page) {
               type: explainType,
               isStarred: false,
               savedInDictionary: savedUnstarred,
+              isNotice: false,
               ...explainOverride,
             };
           }

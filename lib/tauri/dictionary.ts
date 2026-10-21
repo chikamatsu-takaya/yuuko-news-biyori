@@ -20,7 +20,7 @@ export type DictionaryEntryDto = {
   savedInDictionary: boolean;
   // 解説の代わりの固定の案内（「この言葉はゆうこにも分からなかったよ。」など）か。
   // true のときは「辞書に保存」を出さず、友情ポイントも加算しない（Rust 側も保存要求を拒否する）。
-  isNotice?: boolean;
+  isNotice: boolean;
   // 選択が言葉の途中だったため語境界まで広げて解説したとき、元の選択文字列（keyText が広げた言葉）。
   // 表示専用で、辞書には保存されない。
   expandedFrom?: string;
