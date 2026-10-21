@@ -698,7 +698,8 @@ export default function CustomizeScreen({
           />
 
           {/* Yuuko's Comment */}
-          <div className="p-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
                 <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
@@ -935,8 +936,10 @@ export default function CustomizeScreen({
               </Card>
 
               {/* Yuuko Preview */}
-              <Card className="flex-1 min-w-[280px] overflow-hidden">
-                <div className="relative h-80 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
+              {/* 左の一覧カードと高さがそろって伸びたとき、見本の下に空白が残らないよう、舞台（flex-1）が伸びる。
+                  カード既定の上下余白・すき間は付けない（実機テスト B10）。 */}
+              <Card className="flex-1 min-w-[280px] overflow-hidden gap-0 py-0">
+                <div className="relative flex-1 min-h-[336px] bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Room Background Elements */}
                   <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
                     {/* Window */}
@@ -958,25 +961,28 @@ export default function CustomizeScreen({
                     <div className="absolute bottom-20 right-16 text-[var(--yuuko-green)]/10 text-xl">🐾</div>
                   </div>
 
-                  {/* 吹き出しタブでは、選んだ吹き出しの見本をゆうこのそばに出す（D155）。 */}
-                  {activeTab === "balloon" && (
-                    <div className="absolute top-3 left-3 max-w-[190px]">
-                      <YuukoBalloon
-                        tail="bottom-right"
-                        defaultClassName="rounded-2xl border border-border/50 bg-white px-4 py-3 shadow-md"
-                        data-testid="customize-preview-balloon"
-                      >
-                        <p className="text-xs text-foreground leading-relaxed">
-                          この吹き出しで
-                          <br />
-                          おしゃべりするね！
-                        </p>
-                      </YuukoBalloon>
-                    </div>
-                  )}
-
                   {/* Yuuko Character（適用中の飾りを重ねる。D155） */}
-                  <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
+                  <div className="absolute bottom-6 left-1/2 w-[180px] -translate-x-1/2">
+                    {/* 吹き出しタブでは、選んだ吹き出しの見本をゆうこの頭の上に出し、しっぽを頭へ向ける（D155）。
+                        舞台の隅に置くとゆうこから離れて見えたため、ゆうこの絵を基準に置く（実機テスト B10）。 */}
+                    {activeTab === "balloon" && (
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-max max-w-[190px]">
+                        <YuukoBalloon
+                          tail="bottom-left"
+                          defaultClassName="rounded-2xl border border-border/50 bg-white px-4 py-3 shadow-md"
+                          defaultTail={
+                            <div className="absolute -bottom-1.5 left-8 h-3 w-3 rotate-45 border-b border-r border-border/50 bg-white" />
+                          }
+                          data-testid="customize-preview-balloon"
+                        >
+                          <p className="text-xs text-foreground leading-relaxed">
+                            この吹き出しで
+                            <br />
+                            おしゃべりするね！
+                          </p>
+                        </YuukoBalloon>
+                      </div>
+                    )}
                     <YuukoFigure
                       width={963}
                       height={1174}
@@ -1302,9 +1308,11 @@ export default function CustomizeScreen({
 
       {/* Float animation keyframes */}
       <style jsx global>{`
+        /* 横の中央寄せは外側の入れ物（-translate-x-1/2）が行う。ここでも -50% ずらすと二重になり、
+           ゆうこが左へずれて狭い幅では切れていた（実機テスト B10）。 */
         @keyframes float {
-          0%, 100% { transform: translateY(0) translateX(-50%); }
-          50% { transform: translateY(-8px) translateX(-50%); }
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-8px); }
         }
       `}</style>
     </div>

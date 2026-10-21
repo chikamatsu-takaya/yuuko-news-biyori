@@ -842,6 +842,42 @@ test("dressup from the saved state is applied on the initial display", async ({
   await expectFitsInWindow(page, DRESSED_BALLOON_HEIGHT);
 });
 
+// 閉じるボタン（×）は、どの吹き出しの形でもふちに重ならない（実機テスト B15。もこもこ雲の丸に重なっていた）。
+// 雲は四辺に直径 22px の丸を並べてふちを内側に描くため、×を丸の半径（11px）以上内側へ下げる。
+// ほかの形はふちを枠線・外側の影で描くため、従来どおり 8px 内側でふちに重ならない。
+const BALLOON_CLOSE_MIN_INSET: Record<string, number> = { cloud: 11 };
+for (const balloonId of [
+  "balloon_default",
+  "gacha_balloon_rim",
+  "gacha_balloon_cloud",
+  "gacha_balloon_note",
+  "gacha_balloon_sticky",
+  "gacha_balloon_dash",
+  "gacha_balloon_airmail",
+  "gacha_balloon_pixel",
+  "gacha_balloon_game",
+  "gacha_balloon_seal",
+]) {
+  test(`close button stays inside the ${balloonId} balloon without touching its edge`, async ({ page }, testInfo) => {
+    const dressed = balloonId !== "balloon_default";
+    // 登場演出（拡大・移動）の途中で測らないよう、動きを抑える設定で開く。
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await installMocks(page, { state: activeState(dressed ? { balloonId } : {}) });
+    await openYuukoWindow(page, dressed ? DRESSED_BALLOON_HEIGHT : BALLOON_HEIGHT);
+    const shape = (await balloon(page).getAttribute("data-balloon-shape")) ?? "default";
+    const close = page.getByRole("region", { name: REGION }).getByRole("button", { name: "通知を閉じる" });
+    await expect(close).toBeVisible();
+    const b = (await balloon(page).boundingBox())!;
+    const c = (await close.boundingBox())!;
+    const minInset = BALLOON_CLOSE_MIN_INSET[shape] ?? 8;
+    expect(c.y - b.y, `${shape}: top inset`).toBeGreaterThanOrEqual(minInset - 0.5);
+    expect(b.x + b.width - (c.x + c.width), `${shape}: right inset`).toBeGreaterThanOrEqual(minInset - 0.5);
+    if (shape === "cloud") {
+      await page.screenshot({ path: testInfo.outputPath("yuuko-window-cloud-close.png") });
+    }
+  });
+}
+
 test("dressup in the event payload changes the look, and a payload without it stays default", async ({
   page,
 }) => {

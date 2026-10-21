@@ -6,6 +6,7 @@
 // - 記事を開くときは、ニュース履歴画面（#303）と同じく確認してからアーカイブを1記事だけ取り出す。
 //   復元の確認ロジックは NewsHistoryScreen と同じ流れを最小限で複製している（共通化は履歴画面の変更を伴うため見送り）。
 // - 古い形式（catalogComplete=false）の月は記事一覧を持たないため、開けない旨だけを案内する。
+// - 右列には他画面（ニュース履歴など）と同じくゆうこを置く。この画面だけゆうこがいなかったため（実機テスト B14）。
 
 import * as React from "react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,6 +17,8 @@ import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import {
   Alert,
   AlertDescription,
@@ -514,7 +517,8 @@ export default function PastNewsScreen({
             onNavigate={handleNavigate}
           />
 
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
               <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">
                 ゆうこの一言
@@ -648,6 +652,41 @@ export default function PastNewsScreen({
             )}
           </div>
         </main>
+
+        {/* Right Sidebar: ニュース履歴と同じゆうこ列。lg 未満（既定ウィンドウ 800px 等）は w-60 に狭める（D109）。 */}
+        <aside
+          className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto"
+          data-testid="past-news-yuuko-column"
+        >
+          {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はニュース履歴と同じカードの形。 */}
+          <YuukoBalloon
+            className="mb-2"
+            tail="none"
+            data-testid="past-news-yuuko-balloon"
+            defaultRender={(content) => (
+              <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
+                <CardContent className="p-3">{content}</CardContent>
+              </Card>
+            )}
+          >
+            <p className="text-xs text-foreground leading-relaxed">
+              {selectedMonth
+                ? "開きたい記事を選んでね。しまってある記事は、取り出してから見せるよ〜！"
+                : "30日より前のニュースは、月ごとにしまってあるよ。見たい月を選んでねっ♪"}
+            </p>
+            <div className="flex justify-end">
+              <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
+            </div>
+          </YuukoBalloon>
+
+          <div className="flex justify-center">
+            <YuukoFigure
+              width={160}
+              height={160}
+              imageClassName="w-40 h-40 object-contain"
+            />
+          </div>
+        </aside>
       </div>
 
       {/* Status Bar */}

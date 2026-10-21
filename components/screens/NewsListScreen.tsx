@@ -317,7 +317,8 @@ export default function NewsListScreen({
             onNavigate={handleNavigate}
           />
 
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
               <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">
                 ゆうこの一言
