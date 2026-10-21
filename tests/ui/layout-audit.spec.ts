@@ -587,6 +587,13 @@ async function installLayoutMocks(page: Page) {
         autoSummaryEnabled: false,
       }),
       get_autostart_enabled: () => false,
+      get_storage_usage: () => ({
+        totalBytes: 3.5 * 1024 * 1024,
+        articleBytes: 2 * 1024 * 1024,
+        archiveBytes: 1024 * 1024,
+        dictionaryBytes: 256 * 1024,
+        otherBytes: 256 * 1024,
+      }),
       list_migration_imports: () => [
         {
           fileName: "yuuko_transfer_tr_20261001090000.zip",

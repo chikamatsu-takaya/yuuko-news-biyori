@@ -32,6 +32,7 @@ permissions = [
   "allow-take-pending-main-window-article",
   "allow-export-migration-data",
   "allow-open-migration-folder",
+  "allow-get-storage-usage",
   "allow-list-migration-imports",
   "allow-import-migration-data",
   "allow-refresh-news",

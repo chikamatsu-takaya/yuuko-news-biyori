@@ -5235,17 +5235,119 @@ test("settings reports unsaved changes to Rust and clears them after save", asyn
   await expect.poll(readReports).toEqual([true, false]);
 });
 
-// ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
-test("settings storage panel shows 準備中 instead of dummy usage values", async ({
+// ストレージ状況は Rust（get_storage_usage）が返す保存データの大きさを区分ごとに出す（実機テスト B9）。
+// 「準備中」の文言は出さず、読めないときも固定の仮値・生エラー・パスは出さない（SCR-003）。
+test("settings storage panel shows saved data usage from the backend", async ({
   page,
 }) => {
   await openSettings(page);
 
-  await expect(page.getByTestId("storage-status-placeholder")).toHaveText(
-    "保存データの使用状況の表示は準備中です。"
-  );
-  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
+  const status = page.getByTestId("storage-status");
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+  await expect(status).toContainText("記事");
+  await expect(status).toContainText("2.0 MB");
+  await expect(status).toContainText("アーカイブ");
+  await expect(status).toContainText("1.0 MB");
+  await expect(status).toContainText("辞書");
+  await expect(status).toContainText("256.0 KB");
+  await expect(page.getByText(/準備中/)).toHaveCount(0);
   await expect(page.getByRole("progressbar")).toHaveCount(0);
+
+  // 「最新にする」で読み直す（常時ポーリングはしない）。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = {
+      totalBytes: 2048,
+      articleBytes: 1024,
+      archiveBytes: 0,
+      dictionaryBytes: 512,
+      otherBytes: 512,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "最新にする" }).click();
+  await expect(page.getByTestId("storage-total")).toHaveText("2.0 KB");
+});
+
+test("settings storage panel shows a fixed message when usage cannot be read", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+
+  const status = page.getByTestId("storage-status");
+  await expect(status).toContainText("使用量を読み込めなかったよ。");
+  await expect(status).not.toContainText("/internal/secret/path");
+  await expect(page.getByTestId("storage-total")).toHaveCount(0);
+  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
+
+  // 読めるようになったら「もう一度読み込む」で表示できる。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    delete (window as any).__E2E_STORAGE_USAGE__;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "もう一度読み込む" }).click();
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+});
+
+// ゆうこ表示タブは、今の着せかえ（テーマ・模様・吹き出し・飾り）と呼び名を読み取り専用で一覧にする（実機テスト B9）。
+// 変更はカスタマイズ画面（呼び名は「その他」）で行い、ここには入力部品を置かない。
+test("settings yuuko display tab lists the current dressup and nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    (window as any).__E2E_DRESSUP_STATE__ = {
+      activeBalloonId: "gacha_balloon_cloud",
+      selectableBalloonIds: ["balloon_default", "gacha_balloon_cloud"],
+      activeDecoId: "gacha_deco_ribbon",
+      selectableDecoIds: ["deco_none", "gacha_deco_ribbon"],
+    };
+    (window as any).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      selectedThemeId: "theme_002",
+      nickname: "みどり",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-theme-id")).toHaveText("さくら");
+  await expect(page.getByTestId("current-pattern")).toHaveText("肉球");
+  await expect(page.getByTestId("current-balloon")).toHaveText("もこもこ雲");
+  await expect(page.getByTestId("current-deco")).toHaveText("リボン");
+  await expect(page.getByTestId("current-nickname")).toHaveText("みどり");
+  const summary = page.getByTestId("yuuko-dressup-summary");
+  await expect(summary.getByRole("textbox")).toHaveCount(0);
+  await expect(summary.getByRole("combobox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "カスタマイズを開く" })).toBeEnabled();
+});
+
+test("settings yuuko display tab shows a fixed message when the pattern cannot be read", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-pattern")).toHaveText("読み込めなかったよ");
+  await expect(page.getByTestId("current-pattern")).not.toContainText("/internal/secret/path");
+  // 吹き出し・飾りは既定（いつもの・なし）、呼び名が空なら未設定と出す。
+  await expect(page.getByTestId("current-balloon")).toHaveText("いつもの");
+  await expect(page.getByTestId("current-deco")).toHaveText("なし");
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
@@ -5253,7 +5355,7 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
 test("settings data panel has no dictionary export or cache delete item", async ({ page }) => {
   await openSettings(page);
 
-  await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
+  await expect(page.getByTestId("storage-status")).toBeVisible();
   await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
   await expect(page.getByText(/キャッシュを削除/)).toHaveCount(0);
   await expect(page.getByText("アーカイブを管理（準備中）")).toHaveCount(0);
@@ -5712,7 +5814,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   // テーマ変更は「準備中」ではなく、カスタマイズ画面への案内を出す。
   await expect(page.getByText("変更機能は準備中")).toHaveCount(0);
   await expect(page.getByTestId("theme-customize-guide")).toHaveText(
-    "テーマはカスタマイズ画面で変えられるよ"
+    "着せかえはカスタマイズ画面で変えられるよ（呼び名は「その他」で変えられるよ）"
   );
 
   // その他メニュー: genres が反映される。
@@ -10020,6 +10122,25 @@ async function installTauriMocks(page: Page) {
               archiveCount: 1,
               totalBytes: 2048,
             };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_storage_usage": {
+            // 設定画面「ストレージ状況」。__E2E_STORAGE_USAGE__ で差し替え（"fail" で読み込み失敗）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const storageWin = window as any;
+            storageWin.__E2E_STORAGE_USAGE_CALL_COUNT__ =
+              (storageWin.__E2E_STORAGE_USAGE_CALL_COUNT__ || 0) + 1;
+            const usage = storageWin.__E2E_STORAGE_USAGE__ ?? {
+              totalBytes: 3 * 1024 * 1024 + 512 * 1024,
+              articleBytes: 2 * 1024 * 1024,
+              archiveBytes: 1024 * 1024,
+              dictionaryBytes: 256 * 1024,
+              otherBytes: 256 * 1024,
+            };
+            if (usage === "fail") {
+              throw { code: "IO_ERROR", message: "E2E raw storage failure /internal/secret/path" };
+            }
+            return usage;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "list_migration_imports": {

@@ -59,6 +59,11 @@ import { applyUiTheme } from "@/hooks/use-ui-theme";
 import { refreshUiPatternFromSettings } from "@/hooks/use-ui-pattern";
 import { useYuukoDressup } from "@/components/yuuko/YuukoDressupProvider";
 import { uiThemeLabel } from "@/lib/ui-theme.mjs";
+import { PATTERN_NONE_ID, uiPatternLabel } from "@/lib/ui-pattern.mjs";
+import { balloonLabel, decoLabel } from "@/lib/yuuko-dressup.mjs";
+import { getPatternState } from "@/lib/tauri/patterns";
+import { getStorageUsage, type StorageUsage } from "@/lib/tauri/migration";
+import { formatMigrationBytes } from "@/lib/migration-display.mjs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -601,16 +606,87 @@ export default function SettingsScreen({
   // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
   const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
   const isMigrationImportingRef = React.useRef(false);
+  // 右サイドバー「ストレージ状況」: 保存データの大きさ（Rust の get_storage_usage）。
+  // 画面を開いたときと「最新にする」・データ取り込みの後にだけ読む（常時ポーリングはしない）。
+  // preview は Tauri 外（ブラウザでの開発表示）で、実データが無いことを示す。
+  const [storageUsage, setStorageUsage] = React.useState<StorageUsage | null>(
+    null
+  );
+  const [storageStatus, setStorageStatus] = React.useState<
+    "loading" | "ready" | "error" | "preview"
+  >("loading");
+  const storageRequestRef = React.useRef(0);
+  const loadStorageUsage = React.useCallback(async () => {
+    const requestId = ++storageRequestRef.current;
+    const isStale = () =>
+      !isMountedRef.current || requestId !== storageRequestRef.current;
+    setStorageStatus("loading");
+    try {
+      const usage = await getStorageUsage();
+      if (isStale()) return;
+      setStorageUsage(usage);
+      setStorageStatus(usage === null ? "preview" : "ready");
+    } catch (error) {
+      if (isStale()) return;
+      // 生のエラー文・パスは画面へ出さず、調査用に種別だけ残す。
+      console.warn(
+        "Failed to load storage usage:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setStorageStatus("error");
+    }
+  }, []);
+  React.useEffect(() => {
+    void loadStorageUsage();
+  }, [loadStorageUsage]);
+
   const handleMigrationImportingChange = React.useCallback(
     (importing: boolean) => {
+      const finished = isMigrationImportingRef.current && !importing;
       isMigrationImportingRef.current = importing;
       setIsMigrationImporting(importing);
+      // 取り込みで保存データが置き換わったので、使用量を読み直す。
+      if (finished) {
+        void loadStorageUsage();
+      }
     },
-    []
+    [loadStorageUsage]
   );
 
+  // ゆうこ表示タブ: 適用中の模様（Rust の get_pattern_state）。吹き出し・飾りは YuukoDressupProvider が
+  // 読み込み済みの値を使い、テーマ・呼び名は保存済み設定（backendSettings）から出すため、追加で読むのは模様だけ。
+  // タブを開いたときにだけ読む。
+  const [patternLabel, setPatternLabel] = React.useState<string | null>(null);
+  const [patternLoadFailed, setPatternLoadFailed] = React.useState(false);
+
   const { toast } = useToast();
-  const { refreshDressup } = useYuukoDressup();
+  const { refreshDressup, balloonId, decoId } = useYuukoDressup();
+
+  React.useEffect(() => {
+    if (activeMenu !== "yuuko") {
+      return;
+    }
+    let cancelled = false;
+    setPatternLoadFailed(false);
+    getPatternState()
+      .then((state) => {
+        if (cancelled) return;
+        // Tauri 外（preview）は模様を敷かない（data-pattern は "none" のまま）ため「なし」を出す。
+        setPatternLabel(uiPatternLabel(state?.activePatternId ?? PATTERN_NONE_ID));
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn(
+          "Failed to load pattern state:",
+          error instanceof Error ? error.name : typeof error
+        );
+        setPatternLabel(null);
+        setPatternLoadFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMenu]);
 
   const handleNavigate = (screen: string) => {
     if (onNavigate) {
@@ -1295,41 +1371,81 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* テーマの切り替え・適用はカスタマイズ画面が担うため、ここでは selectedThemeId の表示名を読み取り専用で出し、
-                      カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。 */}
+                  {/* 着せかえ（テーマ・模様・吹き出し・飾り）の切り替えはカスタマイズ画面が担うため、ここでは今の値を
+                      読み取り専用で一覧にし、カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。
+                      表示名は ID から引き、生の ID・未知の ID は出さない（各 *Label が既定へ倒す）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
-                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
-                  <SettingRow label="現在のテーマ">
-                    <div className="flex flex-col items-end gap-1">
+                  {/* 呼び名は保存済みの値を出す（変更は「その他」タブ。保存先は同じ settings.json の nickname）。 */}
+                  <div data-testid="yuuko-dressup-summary">
+                    <SettingRow label="テーマ">
                       <span
                         className="text-sm text-foreground"
                         data-testid="current-theme-id"
                       >
                         {currentThemeLabel}
                       </span>
+                    </SettingRow>
+                    <SettingRow label="模様">
                       <span
-                        id="theme-customize-guide"
-                        className="text-[10px] text-muted-foreground"
-                        data-testid="theme-customize-guide"
+                        className="text-sm text-foreground"
+                        data-testid="current-pattern"
                       >
-                        {hasUnsavedChanges
-                          ? "テーマはカスタマイズ画面で変えられるよ。先に設定を保存してね"
-                          : "テーマはカスタマイズ画面で変えられるよ"}
+                        {patternLoadFailed
+                          ? "読み込めなかったよ"
+                          : patternLabel ?? "読み込み中…"}
                       </span>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 gap-1 text-xs text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
-                        disabled={hasUnsavedChanges}
-                        aria-describedby="theme-customize-guide"
-                        onClick={() => handleNavigate("customize")}
+                    </SettingRow>
+                    <SettingRow label="吹き出し">
+                      <span
+                        className="text-sm text-foreground"
+                        data-testid="current-balloon"
                       >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        カスタマイズを開く
-                      </Button>
-                    </div>
-                  </SettingRow>
+                        {balloonLabel(balloonId)}
+                      </span>
+                    </SettingRow>
+                    <SettingRow label="飾り">
+                      <span
+                        className="text-sm text-foreground"
+                        data-testid="current-deco"
+                      >
+                        {decoLabel(decoId)}
+                      </span>
+                    </SettingRow>
+                    <SettingRow label="呼び名">
+                      <span
+                        className="text-sm text-foreground break-all text-right max-w-48"
+                        data-testid="current-nickname"
+                      >
+                        {backendSettings && backendSettings.nickname.trim() !== ""
+                          ? backendSettings.nickname
+                          : "まだ決めていないよ"}
+                      </span>
+                    </SettingRow>
+                  </div>
+                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
+                  <div className="flex flex-col items-end gap-1 pt-3">
+                    <span
+                      id="theme-customize-guide"
+                      className="text-[10px] text-muted-foreground"
+                      data-testid="theme-customize-guide"
+                    >
+                      {hasUnsavedChanges
+                        ? "着せかえはカスタマイズ画面で変えられるよ。先に設定を保存してね"
+                        : "着せかえはカスタマイズ画面で変えられるよ（呼び名は「その他」で変えられるよ）"}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 text-xs text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+                      disabled={hasUnsavedChanges}
+                      aria-describedby="theme-customize-guide"
+                      onClick={() => handleNavigate("customize")}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      カスタマイズを開く
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -1657,7 +1773,7 @@ export default function SettingsScreen({
             )}
 
             {/* データ管理: データ移行（ZIPの書き出し・読み込み）とアーカイブ管理（古い月の削除。判断台帳 D26）。
-                ストレージ状況は右サイドバーで準備中のまま。 */}
+                ストレージ状況（使用量）は右サイドバーに出す。 */}
             {activeMenu === "data" && (
               <>
                 <DataMigrationPanel
@@ -1768,10 +1884,61 @@ export default function SettingsScreen({
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* 実容量の取得は新しい command が要るため別途判断。固定の仮値は実値と誤認されるので出さない（SCR-003）。 */}
-              <p className="text-xs text-muted-foreground" data-testid="storage-status-placeholder">
-                保存データの使用状況の表示は準備中です。
-              </p>
+              {/* 実容量は Rust（get_storage_usage）が保存データの区分ごとの合計だけを返す。パスは扱わない。
+                  読めないときに固定の仮値は出さない（実値と誤認されるため。SCR-003）。 */}
+              <div data-testid="storage-status" aria-live="polite">
+                {storageStatus === "ready" && storageUsage ? (
+                  <div className="space-y-1.5">
+                    <p className="text-sm text-foreground">
+                      合計{" "}
+                      <span
+                        className="font-medium"
+                        data-testid="storage-total"
+                      >
+                        {formatMigrationBytes(storageUsage.totalBytes)}
+                      </span>
+                    </p>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                      <dt>記事</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.articleBytes)}
+                      </dd>
+                      <dt>アーカイブ</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.archiveBytes)}
+                      </dd>
+                      <dt>辞書</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.dictionaryBytes)}
+                      </dd>
+                      <dt>設定など</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.otherBytes)}
+                      </dd>
+                    </dl>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {storageStatus === "error"
+                      ? "使用量を読み込めなかったよ。"
+                      : storageStatus === "preview"
+                        ? "アプリで開くと使用量が表示されるよ。"
+                        : "読み込み中…"}
+                  </p>
+                )}
+                {storageStatus !== "preview" && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 mt-1 px-2 gap-1 text-xs text-muted-foreground"
+                    disabled={storageStatus === "loading"}
+                    onClick={() => void loadStorageUsage()}
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                    {storageStatus === "error" ? "もう一度読み込む" : "最新にする"}
+                  </Button>
+                )}
+              </div>
               <div className="space-y-2">
                 {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
                 {/* アーカイブ管理の本体は「データ管理」タブに置き、ここからはそこへ移動するだけにする（判断台帳 D26） */}
@@ -1783,9 +1950,6 @@ export default function SettingsScreen({
                   <Archive className="w-4 h-4" />
                   アーカイブを管理
                 </Button>
-                <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
-                  「準備中」の機能は今後のアップデートで対応予定です。
-                </p>
               </div>
             </CardContent>
           </Card>

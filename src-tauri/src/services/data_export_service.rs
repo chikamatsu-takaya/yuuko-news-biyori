@@ -24,7 +24,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::domain::data_export::{
     MigrationExportResultDto, MigrationFolderKind, MigrationManifest, MigrationManifestFile,
-    MIGRATION_MANIFEST_VERSION,
+    StorageUsageDto, MIGRATION_MANIFEST_VERSION,
 };
 use crate::error::{AppError, OpenMigrationFolderError};
 use crate::infra::external_browser::{self, BrowserOpenError};
@@ -129,6 +129,17 @@ impl DataExportService {
 
         let plan = plan_migration_files(&self.app_data_dir)?;
         write_export(&exports_dir, &plan, now)
+    }
+
+    /// 保存データの大きさを区分ごとに数える（設定画面の「ストレージ状況」）。
+    ///
+    /// 移行ZIPと同じ許可リスト（`plan_migration_files`）で対象を決め、各ファイルのメタデータだけを読む
+    /// （中身は読まない）。画面を開いたときに1回呼ぶだけなので、常駐中の負荷にはならない。
+    /// 数えている途中で消えたファイル（アーカイブ保守・取り込みと重なった場合）は 0 として飛ばす。
+    /// ロックは取らない（読むだけで、書き出し・取り込みを待たせないため。値は目安として扱う）。
+    pub fn storage_usage(&self) -> Result<StorageUsageDto, AppError> {
+        let plan = plan_migration_files(&self.app_data_dir)?;
+        Ok(sum_storage_usage(&plan))
     }
 
     /// 書き出しと取り込みで共有するロック（取り込み側の `DataImportService` に渡す）。
@@ -255,6 +266,28 @@ pub(crate) fn plan_migration_files(root: &Path) -> Result<Vec<PlannedFile>, AppE
 
     plan.sort_by(|left, right| left.entry_name.cmp(&right.entry_name));
     Ok(plan)
+}
+
+/// 計画したファイルの大きさを区分ごとに合計する。リンクは辿らず、通常ファイルとして読めたものだけを数える。
+fn sum_storage_usage(plan: &[PlannedFile]) -> StorageUsageDto {
+    let mut usage = StorageUsageDto::default();
+    for planned in plan {
+        let size = match std::fs::symlink_metadata(&planned.source) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+            _ => continue,
+        };
+        let bucket = match planned.kind {
+            ExportFileKind::Article => &mut usage.article_bytes,
+            ExportFileKind::ArchiveZip => &mut usage.archive_bytes,
+            ExportFileKind::Other if planned.entry_name == DICTIONARY_RELATIVE_PATH => {
+                &mut usage.dictionary_bytes
+            }
+            ExportFileKind::Other => &mut usage.other_bytes,
+        };
+        *bucket = bucket.saturating_add(size);
+        usage.total_bytes = usage.total_bytes.saturating_add(size);
+    }
+    usage
 }
 
 /// 計画したファイルを一時ファイルへ書き、検証できたら最終名へ変える。失敗時は一時ファイルを消す。
@@ -1121,6 +1154,48 @@ mod tests {
         assert!(service.is_migration_running());
         drop(guard);
         assert!(!service.is_migration_running());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// 保存データの大きさは移行ZIPと同じ許可リストだけを区分ごとに数え、対象外（取得元設定・ログ・キャッシュ・
+    /// 秘密情報らしいファイル・破損退避）は数えない。
+    #[test]
+    fn storage_usage_counts_only_allowlisted_files_by_category() {
+        let root = temp_dir("storage-usage");
+        seed_app_data(&root);
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        let usage = service.storage_usage().unwrap();
+
+        let body = "---\n---\nbody".len() as u64;
+        assert_eq!(usage.article_bytes, body * 3);
+        assert_eq!(usage.archive_bytes, "zip-bytes".len() as u64);
+        assert_eq!(usage.dictionary_bytes, "[]".len() as u64);
+        let other = [
+            r#"{"aiProvider":"mock"}"#,
+            "[]",
+            "{}",
+            "{}",
+            r#"{"starFragments":43}"#,
+            "{}",
+        ]
+        .iter()
+        .map(|contents| contents.len() as u64)
+        .sum::<u64>();
+        assert_eq!(usage.other_bytes, other);
+        assert_eq!(
+            usage.total_bytes,
+            usage.article_bytes + usage.archive_bytes + usage.dictionary_bytes + usage.other_bytes
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// まだ何も保存していない（フォルダが無い）ときは失敗にせず 0 を返す。
+    #[test]
+    fn storage_usage_is_zero_for_empty_app_data() {
+        let root = temp_dir("storage-usage-empty");
+        let service = DataExportService::with_app_data_dir(root.clone());
+
+        assert_eq!(service.storage_usage().unwrap(), StorageUsageDto::default());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

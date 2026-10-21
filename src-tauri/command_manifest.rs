@@ -33,6 +33,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "take_pending_main_window_article",
     "export_migration_data",
     "open_migration_folder",
+    "get_storage_usage",
     "list_migration_imports",
     "import_migration_data",
     "refresh_news",
