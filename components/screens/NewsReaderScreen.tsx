@@ -35,6 +35,7 @@ import {
 import {
   generateArticleSummary,
   getArticleDetail,
+  getAutoSummaryStatus,
   getRecommendedArticles,
   openOriginalArticle,
   restoreArchivedArticle,
@@ -43,7 +44,11 @@ import {
   type GeneratedArticleSummaryDto as TauriGeneratedArticleSummary,
   type ArticleSummaryDto as TauriArticleSummary,
   type ArticleSummaryState,
+  type AutoSummaryStatusKind,
 } from "@/lib/tauri/articles";
+import { listenNewsRefreshed } from "@/lib/tauri/news";
+// 自動要約が進まない理由の一言（DOM非依存・node --test 済み。判断台帳 D158）。
+import { autoSummaryReasonText } from "@/lib/auto-summary-status.mjs";
 import {
   explainSelectedTerm,
   saveDictionaryEntry,
@@ -1187,6 +1192,17 @@ export default function NewsReaderScreen({
     newRank: number;
   }>({ open: false, newRank: 0 });
   const isMountedRef = React.useRef(true);
+  // 自動要約の状態の種類（get_auto_summary_status）。どの記事・要約状態のときに取得したか（key）と組で持つ。
+  const [autoSummaryStatus, setAutoSummaryStatus] = React.useState<{
+    key: string;
+    kind: AutoSummaryStatusKind;
+  } | null>(null);
+  // 古い応答で新しい状態を上書きしないための連番。
+  const autoSummaryStatusRequestIdRef = React.useRef(0);
+  // 状態の読み直し（下の効果が持つ load）。順番待ちの読み直し（10秒ごと）から、一言を出している間だけ呼ぶ。
+  const reloadAutoSummaryStatusRef = React.useRef<(() => void) | null>(null);
+  // 順番待ちの記事で「お休み」「待ち」の一言を出しているか。出している間だけ状態も読み直す（再開したら消すため）。
+  const isShowingWaitingReasonRef = React.useRef(false);
   // 同一記事の open / 同一用語の解説で重複加算しないためのセッション内ガード。
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
@@ -1218,8 +1234,28 @@ export default function NewsReaderScreen({
       article.summaryState === "processing");
   // 自動要約が再試行上限まで失敗した記事。既存の手動要約を「要約を作り直す」として出す。
   const isSummaryFailed = isUnsummarized && article.summaryState === "failed";
+  // 「なぜ自動で要約されないか」の一言を出す対象（判断台帳 D158）。順番待ちの記事（待機列が止まっている理由）と、
+  // 待機列に無い未要約の記事（自動要約そのものが動かない理由）だけ。処理中・失敗・要約済みでは出さない。
+  const autoSummaryReasonState: "waiting" | "none" | null = isSummaryWaiting
+    ? "waiting"
+    : isUnsummarized && article.summaryState === "none"
+      ? "none"
+      : null;
   // 未要約の記事で「要約を作成」（今すぐ要約・作り直しを含む）を実行中。要約欄も作成中の表示にする（実機テスト B5）。
   const isCreatingSummary = isGeneratingSummary && isUnsummarized;
+  // 取得した状態は、取得したときの記事・要約状態と合うときだけ使う（記事を切り替えた直後に前の記事の理由を出さない）。
+  const autoSummaryStatusKey = autoSummaryReasonState
+    ? `${article.id}:${autoSummaryReasonState}`
+    : null;
+  const autoSummaryReason =
+    autoSummaryReasonState &&
+    !isCreatingSummary &&
+    autoSummaryStatus?.key === autoSummaryStatusKey
+      ? autoSummaryReasonText(autoSummaryStatus.kind, autoSummaryReasonState)
+      : null;
+  // 順番待ちの記事の一言は、一時停止・ローカルAI待ちのときだけ出る（autoSummaryReasonText の出し分け）。
+  const isShowingWaitingReason =
+    autoSummaryReasonState === "waiting" && autoSummaryReason !== null;
   // 要約前で、解説・要点・注目ポイント・感想がどれもまだ無い記事。空の欄を4つ並べず、
   // 要約欄の1行の案内にまとめる（要約ができたら各欄が並ぶ）。どれか1つでもあれば従来どおり各欄を出す。
   const hasNoGeneratedSections =
@@ -1857,6 +1893,71 @@ export default function NewsReaderScreen({
     }
   }, [article.id, toast]);
 
+  React.useEffect(() => {
+    isShowingWaitingReasonRef.current = isShowingWaitingReason;
+  }, [isShowingWaitingReason]);
+
+  // 「なぜ自動で要約されないか」の状態を Rust から読む（判断台帳 D158）。対象の記事を表示したとき・
+  // ウィンドウへ戻ったとき・ニュース取得の完了時に読み直す。定期的に読むのは、順番待ちの記事で
+  // 「お休み」「待ち」の一言を出している間だけで、既存の順番待ちの読み直し（10秒ごと）に合わせる
+  // （ゲームから戻った直後に出した一言が、キューの再開後も残り続けないようにするため）。
+  // 一言を出していないときは定期的には読まない（常駐負荷を増やさないため）。
+  // 読み取りは設定ファイルとキューのメモリ参照だけで、OS 問い合わせ・外部通信・AI 呼び出しは発生しない。
+  // 失敗しても記事の表示には影響させず、一言を出さないだけにする。
+  React.useEffect(() => {
+    if (!autoSummaryStatusKey || articleLoadState !== "ready") {
+      return;
+    }
+    const key = autoSummaryStatusKey;
+    let disposed = false;
+    const load = () => {
+      const requestId = ++autoSummaryStatusRequestIdRef.current;
+      void getAutoSummaryStatus()
+        .then((status) => {
+          if (disposed || requestId !== autoSummaryStatusRequestIdRef.current) {
+            return;
+          }
+          setAutoSummaryStatus(status ? { key, kind: status.kind } : null);
+        })
+        .catch((error) => {
+          console.warn("Failed to load auto summary status:", error);
+          if (!disposed && requestId === autoSummaryStatusRequestIdRef.current) {
+            setAutoSummaryStatus(null);
+          }
+        });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        load();
+      }
+    };
+    load();
+    reloadAutoSummaryStatusRef.current = load;
+    window.addEventListener("focus", load);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    let unlistenNewsRefreshed: (() => void) | null = null;
+    void listenNewsRefreshed(load)
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenNewsRefreshed = unlisten;
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to listen for news refresh:", error);
+      });
+    return () => {
+      disposed = true;
+      if (reloadAutoSummaryStatusRef.current === load) {
+        reloadAutoSummaryStatusRef.current = null;
+      }
+      window.removeEventListener("focus", load);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      unlistenNewsRefreshed?.();
+    };
+  }, [autoSummaryStatusKey, articleLoadState]);
+
   // 要約中の記事を表示している間だけ、10秒ごとに記事詳細を読み直して完了を拾う（再読み込み不要にする）。
   // 常駐アプリのため、画面が見えていないとき・要約中でないとき・アンマウント後は問い合わせない。
   // ウィンドウ focus 時の再取得だけだと、開いたまま待つ利用者に完了が届かないためポーリングを選ぶ。
@@ -1872,6 +1973,10 @@ export default function NewsReaderScreen({
         return;
       }
       inFlight = true;
+      // 順番待ちで休んでいる理由を出している間だけ、自動要約の状態も同じ間隔で読み直す（再開したら一言を消す）。
+      if (isShowingWaitingReasonRef.current) {
+        reloadAutoSummaryStatusRef.current?.();
+      }
       const requestId = loadArticleRequestIdRef.current;
       void getArticleDetail({ articleId: pollArticleId })
         .then((detail) => {
@@ -2201,6 +2306,16 @@ export default function NewsReaderScreen({
                   {article.summary}
                 </p>
                 )}
+                {autoSummaryReason ? (
+                  /* 自動要約が進まない理由（ゲーム・発表中で休んでいる・設定で無効など。D158）。固定文言だけを出す。 */
+                  <p
+                    role="status"
+                    data-testid="auto-summary-reason"
+                    className="mt-2 text-xs leading-relaxed text-muted-foreground"
+                  >
+                    {autoSummaryReason}
+                  </p>
+                ) : null}
                 {hasNoGeneratedSections ? (
                   <NotGeneratedText className="mt-2">
                     {isCreatingSummary || isSummaryProcessing

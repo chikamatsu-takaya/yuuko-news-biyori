@@ -129,14 +129,13 @@ impl YuukoService {
             tracker.reset();
             return FullscreenGate::Allowed;
         }
-        let busy = match self.fullscreen_detector.detect() {
-            FullscreenStatus::Busy => true,
-            FullscreenStatus::Free => false,
-            FullscreenStatus::Unknown => {
-                log::warn!("全画面状態を取得できなかったため、全画面による通知抑制を行いません");
-                false
-            }
-        };
+        // 通知はどの種類の全画面（ふつうの全画面・Direct3D 全画面・プレゼン）でも抑制する。
+        // 自動要約の一時停止（D3D 全画面・プレゼンだけ）とは条件が違う（判断台帳 D158）。
+        let status = self.fullscreen_detector.detect();
+        if status == FullscreenStatus::Unknown {
+            log::warn!("全画面状態を取得できなかったため、全画面による通知抑制を行いません");
+        }
+        let busy = status.suppresses_notifications();
         tracker.observe(now, busy, grace_from_seed(time_seed()))
     }
 
@@ -817,6 +816,7 @@ mod tests {
     use super::*;
     use crate::domain::article::{ArticleHistoryFilter, ArticleReadState, GetArticleDetailParams};
     use crate::domain::settings::{PersistedSettings, WorkTimeRange};
+    use crate::infra::fullscreen_detector::FullscreenKind;
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
     use crate::repositories::friendship_repository::FriendshipRepository;
@@ -1422,13 +1422,40 @@ mod tests {
         assert!(state.introduced_article_ids.is_empty());
     }
 
+    /// D158 で自動要約の一時停止をゲーム・発表だけにしても、ゆうこ通知の抑制は変えない。
+    /// ふつうの全画面（QUNS_BUSY）・Direct3D 全画面・プレゼンモードのどれでも fullscreen で抑制する。
+    #[test]
+    fn request_is_suppressed_for_every_fullscreen_kind() {
+        for kind in [
+            FullscreenKind::App,
+            FullscreenKind::Game,
+            FullscreenKind::Presentation,
+        ] {
+            let ctx = make_context();
+            ctx.article_repository.seed_sample_articles_for_tests();
+            save_notification_settings(&ctx, true, 3, all_day_ranges());
+            ctx.fullscreen.set(FullscreenStatus::Busy(kind));
+
+            let result = ctx.service.request_yuuko_notification().unwrap();
+            assert!(!result.notified, "{kind:?} must suppress notifications");
+            assert_eq!(result.reason, "fullscreen", "{kind:?}");
+            assert_nothing_consumed(&ctx);
+            assert_eq!(
+                ctx.service.fullscreen_gate_for_redisplay(),
+                FullscreenGate::Suppressed,
+                "{kind:?} must block redisplay"
+            );
+        }
+    }
+
     /// 11. 全画面中は fullscreen で抑制し、解除後は猶予（30〜180秒）を置いてから同じ候補を出す。
     #[test]
     fn request_holds_candidate_while_fullscreen_and_notifies_after_grace() {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let suppressed = ctx.service.request_yuuko_notification().unwrap();
         assert!(!suppressed.notified);
@@ -1540,7 +1567,8 @@ mod tests {
             .record_notifier_heartbeat(std::time::Duration::from_secs(5 * 60));
         assert!(ctx.service.resume_grace_remaining().is_some());
 
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         let fullscreen = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(fullscreen.reason, "fullscreen");
 
@@ -1565,7 +1593,8 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         ctx.yuuko_state_repository.save(&active_state).unwrap();
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(result.reason, "already_active");
@@ -1603,7 +1632,8 @@ mod tests {
         settings.notification.work_time_ranges = all_day_ranges();
         settings.notification.suppress_in_fullscreen = false;
         ctx.settings_repository.save(&settings).unwrap();
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
 
@@ -1630,7 +1660,8 @@ mod tests {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 0, all_day_ranges());
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
 
@@ -1745,7 +1776,8 @@ mod tests {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         ctx.meeting.set(true, true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -2442,7 +2474,8 @@ mod tests {
         settings.notification.suppress_when_mic_in_use = true;
         ctx.settings_repository.save(&settings).unwrap();
         ctx.meeting.set(true, true);
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         let before = load_state(&ctx);
         assert_eq!(
             ctx.service.request_yuuko_notification().unwrap().reason,

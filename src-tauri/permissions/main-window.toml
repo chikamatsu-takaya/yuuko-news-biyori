@@ -16,6 +16,7 @@ permissions = [
   "allow-update-article-favorite",
   "allow-open-original-article",
   "allow-generate-article-summary",
+  "allow-get-auto-summary-status",
   "allow-get-archive-candidates",
   "allow-archive-old-articles",
   "allow-restore-archived-article",

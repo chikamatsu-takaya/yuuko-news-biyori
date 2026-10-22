@@ -238,6 +238,34 @@ export const generateArticleSummary = async (
   });
 };
 
+// 自動要約の今の状態の種類（Rust の AutoSummaryStatusKind と一致させる。判断台帳 D158）。
+// 記事画面で「なぜ自動で要約されないか」を一言出すためだけに使う。キー・本文・アプリ名は含まない。
+export type AutoSummaryStatusKind =
+  | "running"
+  | "idle"
+  | "pausedGameOrPresentation"
+  | "pausedMicInUse"
+  | "waitingForLocalAi"
+  | "disabledInSettings"
+  | "notRealAi"
+  | "localAiNotReady"
+  | "geminiNotReady"
+  | "unknown";
+
+export type AutoSummaryStatusDto = {
+  kind: AutoSummaryStatusKind;
+};
+
+// 引数なしの読み取り専用 command。OS 問い合わせ・AI 呼び出しはしない（設定とキューのメモリ参照だけ）。
+export const getAutoSummaryStatus =
+  async (): Promise<AutoSummaryStatusDto | null> => {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+
+    return invoke<AutoSummaryStatusDto>("get_auto_summary_status");
+  };
+
 export const restoreArchivedArticle = async (
   params: RestoreArchivedArticleParams
 ): Promise<RestoreArchivedArticleResult> => {

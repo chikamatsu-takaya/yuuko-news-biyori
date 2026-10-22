@@ -17,6 +17,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "update_article_favorite",
     "open_original_article",
     "generate_article_summary",
+    "get_auto_summary_status",
     "get_archive_candidates",
     "archive_old_articles",
     "restore_archived_article",
