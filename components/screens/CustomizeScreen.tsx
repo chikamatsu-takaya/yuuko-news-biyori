@@ -6,7 +6,8 @@
  *   選べるかの判定と保存は Rust の set_active_theme が行い、ここは結果（activeThemeId）を表示・適用するだけ。
  * - 模様: テーマの地に敷く模様（D152〜D154）。色テーマとは独立に、なし・初期の模様・ガチャで手に入れた模様から選ぶ。
  *   選べるかの判定と保存は Rust の set_active_pattern が行い、ここは結果（activePatternId）を表示・適用するだけ。
- * - 呼び名: 現在の値を読み取り専用で出し、変更は設定画面へ案内する。
+ * - 呼び名: 入力して確定（Enter・ボタン）したら、呼び名だけを書く Rust の set_nickname で保存する（D161）。
+ *   検証（32文字・制御文字なし）は Rust が正。ゆうこの吹き出しは次に表示するときから新しい呼び名になる。
  * - 飾り・吹き出し: ゆうこの着せかえ（D155）。既定（なし・いつもの）とガチャで手に入れたものから選ぶ。
  *   選べるかの判定と保存は Rust の set_active_deco / set_active_balloon が行い、ここは結果を表示し、
  *   各画面のゆうこへ反映する（YuukoDressupProvider）だけ。口調・性格は扱わない（D83）。
@@ -39,7 +40,7 @@ import {
   Clover,
   Grid3x3,
 } from "lucide-react";
-import { getUserSettings, isTauriRuntime } from "@/lib/tauri/settings";
+import { getUserSettings, isTauriRuntime, setNickname as saveNickname } from "@/lib/tauri/settings";
 import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
 import { getRewardState, setActiveTheme, type RewardItem } from "@/lib/tauri/rewards";
 import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
@@ -49,6 +50,7 @@ import { getPatternState, setActivePattern } from "@/lib/tauri/patterns";
 import { buildPatternOptions, uiPatternLabel } from "@/lib/ui-pattern.mjs";
 import { PatternSwatch } from "@/components/customize/PatternSwatch";
 import { DressupPanel, type DressupLoadStatus, type DressupSlot } from "@/components/customize/DressupPanel";
+import { NICKNAME_INVALID_TEXT, NicknamePanel, type NicknameMessage } from "@/components/customize/NicknamePanel";
 import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
 import { useYuukoDressup } from "@/components/yuuko/YuukoDressupProvider";
@@ -300,6 +302,8 @@ export default function CustomizeScreen({
   const [gachaItems, setGachaItems] = React.useState<GachaCollectionItem[]>([]);
   const [nicknameStatus, setNicknameStatus] = React.useState<RankLoadStatus>("loading");
   const [nickname, setNickname] = React.useState("");
+  const [isSavingNickname, setIsSavingNickname] = React.useState(false);
+  const [nicknameMessage, setNicknameMessage] = React.useState<NicknameMessage>(null);
   const [savingThemeId, setSavingThemeId] = React.useState<string | null>(null);
   const [themeMessage, setThemeMessage] = React.useState<ThemeMessage>(null);
   const [patternStatus, setPatternStatus] = React.useState<RankLoadStatus>("loading");
@@ -663,6 +667,46 @@ export default function CustomizeScreen({
       });
   };
 
+  // 呼び名は確定した時点で保存する（D161）。保存するのは呼び名だけで、ほかの設定には触れない（set_nickname）。
+  // 検証は Rust が正で、不正な入力は VALIDATION_ERROR で reject される（何も保存されない）。
+  const handleSaveNickname = (draft: string) => {
+    if (isSavingNickname || nicknameStatus !== "ready") return;
+    setIsSavingNickname(true);
+    setNicknameMessage(null);
+    saveNickname(draft)
+      .then((saved) => {
+        if (saved === null) {
+          throw new Error("set_nickname is unavailable");
+        }
+        // 古い読み込みの応答で、保存した値を上書きしないよう世代を進める。
+        nicknameRequestRef.current += 1;
+        setNickname(saved);
+        setNicknameMessage({
+          kind: "success",
+          text: saved !== "" ? `呼び名を「${saved}」にしたよ。` : "呼び名をなしにしたよ。",
+        });
+      })
+      .catch((error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          (error as { code?: unknown }).code === "VALIDATION_ERROR"
+        ) {
+          setNicknameMessage({ kind: "invalid", text: NICKNAME_INVALID_TEXT });
+          return;
+        }
+        console.warn("Failed to save nickname:", error);
+        toast({
+          variant: "destructive",
+          title: "保存に失敗しちゃった",
+          description: "呼び名を保存できなかったよ。もう一度ためしてね。",
+        });
+      })
+      .finally(() => {
+        setIsSavingNickname(false);
+      });
+  };
+
   // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける）。
   const isMaxRank = friendship !== null && friendship.nextRequiredPoint <= 0;
   const progressPercent =
@@ -892,33 +936,21 @@ export default function CustomizeScreen({
                     </>
                   )}
                   {activeTab === "name" && (
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">ゆうこがあなたを呼ぶときの名前だよ。</p>
-                      <div className="rounded-lg border border-border bg-white px-3 py-2 text-sm break-all" data-testid="customize-nickname">
-                        {nicknameStatus === "ready"
-                          ? nickname.trim() !== ""
-                            ? nickname
-                            : "まだ決めていないよ"
-                          : nicknameStatus === "error"
-                            ? "呼び名を読み込めなかったよ。"
-                            : nicknameStatus === "preview"
-                              ? "アプリで設定した呼び名が表示されるよ。"
-                              : "読み込み中…"}
-                      </div>
-                      {nicknameStatus === "error" && (
-                        <LoadRetryButton onRetry={() => void loadNickname()} testId="customize-nickname-retry"
-                        ariaLabel="呼び名をもう一度読み込む"
-                      />
-                      )}
-                      <Button
-                        variant="outline"
-                        className="w-full text-sm"
-                        onClick={() => handleNavigate("settings")}
-                      >
-                        設定で変える
-                        <ChevronRight className="w-4 h-4 ml-1" aria-hidden="true" />
-                      </Button>
-                    </div>
+                    <NicknamePanel
+                      status={nicknameStatus}
+                      nickname={nickname}
+                      isSaving={isSavingNickname}
+                      message={nicknameMessage}
+                      onSave={handleSaveNickname}
+                      onInvalid={() => setNicknameMessage({ kind: "invalid", text: NICKNAME_INVALID_TEXT })}
+                      retryButton={
+                        <LoadRetryButton
+                          onRetry={() => void loadNickname()}
+                          testId="customize-nickname-retry"
+                          ariaLabel="呼び名をもう一度読み込む"
+                        />
+                      }
+                    />
                   )}
                   {(activeTab === "deco" || activeTab === "balloon") && (
                     <DressupPanel

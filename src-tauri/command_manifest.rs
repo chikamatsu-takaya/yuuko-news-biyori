@@ -47,6 +47,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "get_user_settings",
     "get_ui_theme_id",
     "save_user_settings",
+    "set_nickname",
     "reset_user_settings",
     "test_ai_provider",
     "get_yuuko_notification_state",

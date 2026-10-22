@@ -1,7 +1,7 @@
 use crate::domain::dressup::{BALLOON_DEFAULT_ID, DECO_NONE_ID};
 use crate::domain::pattern::PATTERN_NONE_ID;
 use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
-use crate::domain::settings::{PersistedSettings, UserSettingsDto};
+use crate::domain::settings::{validate_nickname, PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
 
@@ -50,6 +50,24 @@ impl SettingsService {
         persisted.ui.theme_id = current_theme_id;
         self.repository.save(&persisted)?;
         Ok(())
+    }
+
+    /// 呼び名（`user.nickname`）だけを更新して保存し、保存した呼び名を返す（カスタマイズ画面の `set_nickname`。判断台帳 D161）。
+    /// 設定全体を上書きする `save_user_settings` を使わないのは、ほかの欄（通知・AI など）を
+    /// 呼び出し側が持っている古い値で上書きしないため。前後の空白は除き、空なら呼び名なしとして保存する。
+    /// 検証は `save_user_settings` と同じ `validate_nickname`（32文字・制御文字なし）。不正なら何も保存しない。
+    /// 設定ファイルが壊れているときは読み込みで失敗し、上書きしない（初期化は設定画面の操作に任せる）。
+    pub fn set_nickname(&self, nickname: &str) -> Result<String, AppError> {
+        let nickname = nickname.trim();
+        validate_nickname(nickname)?;
+
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.user.nickname != nickname || !self.repository.exists() {
+            persisted.user.nickname = nickname.to_string();
+            self.repository.save(&persisted)?;
+        }
+        Ok(persisted.user.nickname)
     }
 
     /// 適用中テーマ（`ui.themeId`）だけを更新して保存する。
@@ -193,7 +211,7 @@ impl SettingsService {
 mod tests {
     use super::*;
     use crate::domain::settings::AiProvider;
-    use crate::domain::settings::{NotificationSettings, WorkTimeRange};
+    use crate::domain::settings::{NotificationSettings, WorkTimeRange, NICKNAME_MAX_CHARS};
     use crate::repositories::settings_repository::SettingsRepository;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -211,6 +229,62 @@ mod tests {
             SettingsService::new(SettingsRepository::with_path(path.clone())),
             path,
         )
+    }
+
+    #[test]
+    fn set_nickname_saves_only_the_nickname() {
+        let (service, path) = temp_service();
+        let mut dto = service.get_user_settings().unwrap();
+        dto.notify_max_per_day = 7;
+        dto.genres = vec!["AI".to_string()];
+        service.save_user_settings(dto).unwrap();
+
+        let saved = service.set_nickname("  ゆう<さん>  ").unwrap();
+        // 前後の空白だけ除き、`<` などは入力どおり保存する（台詞へ差し込む直前に無害化する）。
+        assert_eq!(saved, "ゆう<さん>");
+
+        let reloaded = service.get_user_settings().unwrap();
+        assert_eq!(reloaded.nickname, "ゆう<さん>");
+        // ほかの欄は変わらない。
+        assert_eq!(reloaded.notify_max_per_day, 7);
+        assert_eq!(reloaded.genres, vec!["AI".to_string()]);
+
+        // 空にすると呼び名なしとして保存する。
+        assert_eq!(service.set_nickname("   ").unwrap(), "");
+        assert_eq!(service.get_user_settings().unwrap().nickname, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_rejects_invalid_input_without_saving() {
+        let (service, path) = temp_service();
+        service.set_nickname("ゆう").unwrap();
+
+        for invalid in [
+            "あ".repeat(NICKNAME_MAX_CHARS + 1),
+            "ゆう\nこ".to_string(),
+            "ゆう\tこ".to_string(),
+            "ゆう\u{1b}こ".to_string(),
+        ] {
+            let error = service.set_nickname(&invalid).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)), "{invalid:?}");
+            // 不正な入力では何も保存しない。
+            assert_eq!(service.get_user_settings().unwrap().nickname, "ゆう");
+        }
+        // 上限ちょうどは受け付ける。前後の空白は除いてから数える。
+        let max = "あ".repeat(NICKNAME_MAX_CHARS);
+        assert_eq!(service.set_nickname(&max).unwrap(), max);
+        assert_eq!(service.set_nickname(&format!(" {max} ")).unwrap(), max);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_does_not_overwrite_corrupt_settings_file() {
+        let (service, path) = temp_service();
+        std::fs::write(&path, "{ broken json").unwrap();
+        assert!(service.set_nickname("ゆう").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken json");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
