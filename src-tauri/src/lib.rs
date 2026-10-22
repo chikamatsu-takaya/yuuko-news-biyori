@@ -282,6 +282,7 @@ pub fn run() {
             commands::settings_commands::get_user_settings,
             commands::settings_commands::get_ui_theme_id,
             commands::settings_commands::save_user_settings,
+            commands::settings_commands::set_nickname,
             commands::settings_commands::reset_user_settings,
             commands::settings_commands::test_ai_provider,
             commands::yuuko_commands::get_yuuko_notification_state,

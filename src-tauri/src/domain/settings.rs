@@ -17,6 +17,24 @@ fn contains_control_char(text: &str) -> bool {
     text.chars().any(char::is_control)
 }
 
+/// 呼び名の保存時の検証（設定画面・初回案内の `save_user_settings` と、カスタマイズ画面の `set_nickname` で共用）。
+/// 32文字（char 数）を超えるもの・制御文字（改行・タブを含む）を含むものを拒否する。
+/// 呼び名はゆうこの台詞に1行で埋め込むため制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
+/// `<` などは拒否せず入力どおり保存し、台詞へ差し込む直前に `display_nickname` で無害化する。
+pub(crate) fn validate_nickname(nickname: &str) -> Result<(), AppError> {
+    if nickname.chars().count() > NICKNAME_MAX_CHARS {
+        return Err(AppError::Validation(
+            "nickname must be 32 characters or fewer".to_string(),
+        ));
+    }
+    if contains_control_char(nickname) {
+        return Err(AppError::Validation(
+            "nickname must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
@@ -146,7 +164,17 @@ impl Default for UserSettingsDto {
 }
 
 impl UserSettingsDto {
+    /// 呼び名を含む全項目の検証（テスト用）。本番の保存は `SettingsService::save_user_settings` が
+    /// `validate_except_nickname` と、呼び名を変えるときだけの `validate_nickname` を組み合わせて行う。
+    #[cfg(test)]
     pub fn validate(&self) -> Result<(), AppError> {
+        self.validate_except_nickname()?;
+        validate_nickname(&self.nickname)
+    }
+
+    /// 呼び名以外の検証。設定画面の保存は呼び名を読み込んだ値のまま書き戻すため、
+    /// 呼び名が保存済みと同じときは呼び名の検証を省けるよう分けている（`SettingsService::save_user_settings`）。
+    pub fn validate_except_nickname(&self) -> Result<(), AppError> {
         validate_time(&self.notify_start_time)?;
         validate_time(&self.notify_end_time)?;
         if let Some(ranges) = &self.work_time_ranges {
@@ -203,19 +231,6 @@ impl UserSettingsDto {
         if self.genres.iter().any(|genre| contains_control_char(genre)) {
             return Err(AppError::Validation(
                 "genres must not contain control characters".to_string(),
-            ));
-        }
-
-        if self.nickname.chars().count() > NICKNAME_MAX_CHARS {
-            return Err(AppError::Validation(
-                "nickname must be 32 characters or fewer".to_string(),
-            ));
-        }
-
-        // 呼び名はゆうこの台詞に1行で埋め込むため、改行・タブも含めて制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
-        if contains_control_char(&self.nickname) {
-            return Err(AppError::Validation(
-                "nickname must not contain control characters".to_string(),
             ));
         }
 

@@ -47,6 +47,7 @@ permissions = [
   "allow-get-user-settings",
   "allow-get-ui-theme-id",
   "allow-save-user-settings",
+  "allow-set-nickname",
   "allow-reset-user-settings",
   "allow-test-ai-provider",
   "allow-get-yuuko-notification-state",

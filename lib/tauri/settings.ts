@@ -96,6 +96,19 @@ export const saveUserSettings = async (
   return invoke<CommandOk>("save_user_settings", { params: { settings } });
 };
 
+/**
+ * 呼び名だけを保存し、保存した呼び名（前後の空白を除いたもの）を返す（カスタマイズ画面。判断台帳 D161）。
+ * 設定全体を上書きする saveUserSettings と違い、ほかの欄に触れない。検証（32文字・制御文字なし）は
+ * Rust 側が行い、不正な入力は reject される（何も保存しない）。非Tauri では null。
+ */
+export const setNickname = async (nickname: string): Promise<string | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<string>("set_nickname", { params: { nickname } });
+};
+
 // AI接続テスト結果（Rust: domain/ai_connection.rs の AiProviderConnectionTestResult と一致させる）。
 // 状態・エラー種別は固定値のみで、APIキー・生エラー文・URL等は含まれない（セキュリティ詳細設計書 §8.6）。
 export type AiProviderConnectionStatus =

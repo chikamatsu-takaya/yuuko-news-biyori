@@ -16,7 +16,6 @@ import {
   Settings,
   Lightbulb,
   RotateCcw,
-  HelpCircle,
   Archive,
   Check,
   Info,
@@ -38,7 +37,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   getAutostartEnabled,
@@ -80,10 +78,10 @@ import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
+import { ImmediateApplyNote } from "@/components/settings/ImmediateApplyNote";
 import {
   DEFAULT_NOTIFICATION_MODE,
   GENRE_OPTIONS,
-  NICKNAME_MAX_LENGTH,
   NOTIFICATION_MODE_OPTIONS,
   normalizeNotificationMode,
   normalizeWorkTimeRanges,
@@ -95,7 +93,7 @@ type NotificationSettings = {
   // 通知モード（時間帯内ランダム / ランダム / 定時 / 通知しない。D143）。
   mode: NotificationMode;
   workTimeRanges: WorkTimeRangeDto[];
-  frequency: string;
+  // 1日の最大通知件数（= notifyMaxPerDay / notification.maxPerDay）。スライダーだけで変える（判断台帳 D159）。
   maxPerDay: number;
 };
 
@@ -113,10 +111,6 @@ type AiSettings = {
   autoSummaryEnabled: boolean;
 };
 
-type UserProfileSettingsState = {
-  nickname: string;
-};
-
 type NewsSettingsState = {
   genres: string[];
   maxRecommendations: number;
@@ -130,7 +124,6 @@ type SettingsState = {
   notification: NotificationSettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
-  user: UserProfileSettingsState;
   news: NewsSettingsState;
   integration: IntegrationSettings;
 };
@@ -168,7 +161,6 @@ const mockSettings: SettingsState = {
       { start: "09:00", end: "12:00" },
       { start: "13:00", end: "18:00" },
     ],
-    frequency: "1日3回まで",
     maxPerDay: 3,
   },
   suppression: {
@@ -181,9 +173,6 @@ const mockSettings: SettingsState = {
     provider: "mock",
     providerStatus: "MockProviderで動作中",
     autoSummaryEnabled: false,
-  },
-  user: {
-    nickname: "",
   },
   news: {
     genres: ["AI", "IT"],
@@ -229,37 +218,11 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   autoSummaryEnabled: false,
 };
 
-// 通知頻度ドロップダウンの表示文言と、永続値 notifyMaxPerDay（= notification.maxPerDay）の対応。
-// 通知頻度は notifyMaxPerDay として保存・復元する（独立フィールドは増やさない）。
-// 「制限なし」は Rust 側の検証上限（0〜20）に合わせて 20 として扱う。
-const UNLIMITED_MAX_PER_DAY = 20;
-
-const frequencyToMaxPerDay = (frequency: string): number => {
-  switch (frequency) {
-    case "1日1回まで":
-      return 1;
-    case "1日5回まで":
-      return 5;
-    case "制限なし":
-      return UNLIMITED_MAX_PER_DAY;
-    case "1日3回まで":
-    default:
-      return 3;
-  }
-};
-
-const maxPerDayToFrequency = (maxPerDay: number): string => {
-  if (maxPerDay <= 1) {
-    return "1日1回まで";
-  }
-  if (maxPerDay <= 3) {
-    return "1日3回まで";
-  }
-  if (maxPerDay <= 5) {
-    return "1日5回まで";
-  }
-  return "制限なし";
-};
+// 1日の最大通知件数スライダーの範囲（Rust の検証は 0〜20）。0 は「自動では声をかけない」になるが、
+// 止めたいときは「ニュース通知を受け取る」・通知のタイミング「通知しない」があるため、スライダーは 1 から（判断台帳 D159）。
+// 手編集などで 0 が保存されていても書き換えず、その旨を表示する（触らなければ 0 のまま保存される）。
+const MAX_PER_DAY_MIN = 1;
+const MAX_PER_DAY_MAX = 20;
 
 // 解説レベル（DTO: simple/normal/detailed）と「解説の詳しさ」ドロップダウン表示の対応。
 // UI 表示ラベルを explanationLevel として保存・復元する（独立フィールドは増やさない）。
@@ -304,9 +267,10 @@ const mapSettingsFromDto = (
       enabled: dto.enableYuukoPopup,
       mode: normalizeNotificationMode(dto.notificationMode),
       workTimeRanges,
-      // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3（=「1日3回まで」）。
-      maxPerDay: dto.notifyMaxPerDay,
-      frequency: maxPerDayToFrequency(dto.notifyMaxPerDay),
+      // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3。
+      // 手編集などで上限（20）を超えていると Rust の検証で保存が毎回失敗するため、20 に丸めて表示・保存する
+      //（未保存の判定も丸めた値同士で比べるため、読み込んだだけでは「未保存」にならない）。
+      maxPerDay: Math.min(MAX_PER_DAY_MAX, dto.notifyMaxPerDay),
     },
     suppression: {
       ...base.suppression,
@@ -321,10 +285,6 @@ const mapSettingsFromDto = (
       // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
       explanationDetail: explanationLevelToLabel(dto.explanationLevel),
       autoSummaryEnabled: dto.autoSummaryEnabled ?? false,
-    },
-    user: {
-      ...base.user,
-      nickname: dto.nickname || "",
     },
     news: {
       ...base.news,
@@ -370,7 +330,8 @@ const buildDtoForSave = (
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
     selectedPersonalityId: source.selectedPersonalityId,
-    nickname: settingsState.user.nickname,
+    // 呼び名はカスタマイズ画面（set_nickname）で変えるため、設定画面では読み込んだ値をそのまま書き戻す（D161）。
+    nickname: source.nickname,
     aiProvider: normalizedProvider,
     maxDailyRecommendations: settingsState.news.maxRecommendations,
     autoSummaryEnabled: settingsState.ai.autoSummaryEnabled,
@@ -525,11 +486,9 @@ const aiConnectionTestFailedView = (
 // Sub Components
 function SettingRow({
   label,
-  helpText,
   children,
 }: {
   label: string;
-  helpText?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -537,9 +496,6 @@ function SettingRow({
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 border-b border-border/50 last:border-b-0">
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
-        {helpText && (
-          <HelpCircle className="w-4 h-4 text-muted-foreground cursor-help" />
-        )}
       </div>
       <div>{children}</div>
     </div>
@@ -793,29 +749,9 @@ export default function SettingsScreen({
     }));
   };
 
-  // 通知頻度ドロップダウン: 表示文言と保存値(maxPerDay)を常に同期させる。
-  // これにより保存・再読み込みで選択値が維持される（maxPerDay として永続化）。
-  const updateNotificationFrequency = (frequency: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      notification: {
-        ...prev.notification,
-        frequency,
-        maxPerDay: frequencyToMaxPerDay(frequency),
-      },
-    }));
-  };
-
-  // 1日の最大通知件数スライダー: maxPerDay を更新し、頻度ドロップダウン表示も追従させる。
+  // 1日の最大通知件数スライダー: notifyMaxPerDay（notification.maxPerDay）だけを更新する（D159）。
   const updateNotificationMaxPerDay = (maxPerDay: number) => {
-    setSettings((prev) => ({
-      ...prev,
-      notification: {
-        ...prev.notification,
-        maxPerDay,
-        frequency: maxPerDayToFrequency(maxPerDay),
-      },
-    }));
+    updateNotification("maxPerDay", maxPerDay);
   };
 
   const updateNotificationRange = (
@@ -858,13 +794,6 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       ai: { ...prev.ai, [key]: value },
-    }));
-  };
-
-  const updateUser = (key: keyof UserProfileSettingsState, value: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      user: { ...prev.user, [key]: value },
     }));
   };
 
@@ -1325,37 +1254,37 @@ export default function SettingsScreen({
                       </div>
                     </SettingRow>
                   )}
-                  <SettingRow label="通知頻度">
-                    <Select
-                      value={settings.notification.frequency}
-                      onValueChange={(v) => updateNotificationFrequency(v)}
-                    >
-                      <SelectTrigger className="w-36">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1日1回まで">1日1回まで</SelectItem>
-                        <SelectItem value="1日3回まで">1日3回まで</SelectItem>
-                        <SelectItem value="1日5回まで">1日5回まで</SelectItem>
-                        <SelectItem value="制限なし">制限なし</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="1日の最大通知件数" helpText>
-                    <div className="flex items-center gap-3">
-                      <Slider
-                        value={[settings.notification.maxPerDay]}
-                        onValueChange={(v) =>
-                          updateNotificationMaxPerDay(v[0])
-                        }
-                        min={1}
-                        max={20}
-                        step={1}
-                        className="w-32"
-                      />
-                      <span className="text-sm text-foreground w-8">
-                        {settings.notification.maxPerDay}件
-                      </span>
+                  <SettingRow label="1日の最大通知件数">
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex items-center gap-3">
+                        <Slider
+                          data-testid="notify-max-per-day-slider"
+                          value={[
+                            Math.max(MAX_PER_DAY_MIN, settings.notification.maxPerDay),
+                          ]}
+                          onValueChange={(v) =>
+                            updateNotificationMaxPerDay(v[0])
+                          }
+                          min={MAX_PER_DAY_MIN}
+                          max={MAX_PER_DAY_MAX}
+                          step={1}
+                          className="w-32"
+                        />
+                        <span
+                          className="text-sm text-foreground w-10"
+                          data-testid="notify-max-per-day-value"
+                        >
+                          {settings.notification.maxPerDay}件
+                        </span>
+                      </div>
+                      <p
+                        className="max-w-xs text-right text-xs text-muted-foreground"
+                        data-testid="notify-max-per-day-help"
+                      >
+                        {settings.notification.maxPerDay < MAX_PER_DAY_MIN
+                          ? "いまは0件（自動では声をかけない）になっているよ。スライダーで1〜20件に変えられるよ。"
+                          : `自動で声をかけるのは1日${MAX_PER_DAY_MIN}〜${MAX_PER_DAY_MAX}件までで選べるよ。止めたいときは「ニュース通知を受け取る」をオフにしてね。`}
+                      </p>
                     </div>
                   </SettingRow>
                 </CardContent>
@@ -1376,7 +1305,7 @@ export default function SettingsScreen({
                       読み取り専用で一覧にし、カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。
                       表示名は ID から引き、生の ID・未知の ID は出さない（各 *Label が既定へ倒す）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
-                  {/* 呼び名は保存済みの値を出す（変更は「その他」タブ。保存先は同じ settings.json の nickname）。 */}
+                  {/* 呼び名は保存済みの値を出す（変更はカスタマイズ画面の「呼び名」タブ。保存先は同じ settings.json の nickname。D161）。 */}
                   <div data-testid="yuuko-dressup-summary">
                     <SettingRow label="テーマ">
                       <span
@@ -1437,8 +1366,8 @@ export default function SettingsScreen({
                       data-testid="theme-customize-guide"
                     >
                       {hasUnsavedChanges
-                        ? "着せかえはカスタマイズ画面で変えられるよ。先に設定を保存してね"
-                        : "着せかえはカスタマイズ画面で変えられるよ（呼び名は「その他」で変えられるよ）"}
+                        ? "着せかえと呼び名はカスタマイズ画面で変えられるよ。先に設定を保存してね"
+                        : "着せかえと呼び名はカスタマイズ画面で変えられるよ"}
                     </span>
                     <Button
                       type="button"
@@ -1702,21 +1631,6 @@ export default function SettingsScreen({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <SettingRow label="ニックネーム">
-                    <div className="flex flex-col items-end gap-1">
-                      <Input
-                        value={settings.user.nickname}
-                        onChange={(e) => updateUser("nickname", e.target.value)}
-                        placeholder="ゆうこに呼んでほしい名前"
-                        className="w-48"
-                        maxLength={NICKNAME_MAX_LENGTH}
-                      />
-                      <span className="text-[10px] text-muted-foreground">
-                        {NICKNAME_MAX_LENGTH}文字以内
-                      </span>
-                    </div>
-                  </SettingRow>
-
                   <SettingRow label="ホームに表示するおすすめ記事数">
                     <div className="flex items-center gap-3">
                       <Slider
@@ -1783,6 +1697,9 @@ export default function SettingsScreen({
                 ストレージ状況（使用量）は右サイドバーに出す。 */}
             {activeMenu === "data" && (
               <>
+                <ImmediateApplyNote testId="data-immediate-note">
+                  書き出し・読み込み・アーカイブの削除は、ボタンを押して確かめた時点で行うよ。
+                </ImmediateApplyNote>
                 <DataMigrationPanel
                   onImportingChange={handleMigrationImportingChange}
                 />
@@ -1819,9 +1736,10 @@ export default function SettingsScreen({
                       {autostartError}
                     </p>
                   )}
-                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 この設定は切り替えるとすぐに反映されるよ（「保存する」は不要）。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
-                  </p>
+                  {/* すぐ反映される欄の注記は D160 でデータ管理・初期化とそろえる。 */}
+                  <ImmediateApplyNote className="mt-4" testId="integration-immediate-note">
+                    スイッチを切り替えた時点でPCに登録・解除するよ。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
+                  </ImmediateApplyNote>
                 </CardContent>
               </Card>
             )}
@@ -2031,6 +1949,9 @@ export default function SettingsScreen({
                 ? "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。壊れた設定ファイルは、初期化の前に別名でコピーを1つだけ残します。"
                 : "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。"}
             </AlertDialogDescription>
+            <ImmediateApplyNote testId="reset-immediate-note">
+              「初期状態に戻す」を押した時点で戻すよ。画面の未保存の変更も消えるよ。
+            </ImmediateApplyNote>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>キャンセル</AlertDialogCancel>
