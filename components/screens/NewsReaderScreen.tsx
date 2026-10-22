@@ -1199,6 +1199,10 @@ export default function NewsReaderScreen({
   } | null>(null);
   // 古い応答で新しい状態を上書きしないための連番。
   const autoSummaryStatusRequestIdRef = React.useRef(0);
+  // 状態の読み直し（下の効果が持つ load）。順番待ちの読み直し（10秒ごと）から、一言を出している間だけ呼ぶ。
+  const reloadAutoSummaryStatusRef = React.useRef<(() => void) | null>(null);
+  // 順番待ちの記事で「お休み」「待ち」の一言を出しているか。出している間だけ状態も読み直す（再開したら消すため）。
+  const isShowingWaitingReasonRef = React.useRef(false);
   // 同一記事の open / 同一用語の解説で重複加算しないためのセッション内ガード。
   const recordedOpensRef = React.useRef<Set<string>>(new Set());
   const recordedTermsRef = React.useRef<Set<string>>(new Set());
@@ -1249,6 +1253,9 @@ export default function NewsReaderScreen({
     autoSummaryStatus?.key === autoSummaryStatusKey
       ? autoSummaryReasonText(autoSummaryStatus.kind, autoSummaryReasonState)
       : null;
+  // 順番待ちの記事の一言は、一時停止・ローカルAI待ちのときだけ出る（autoSummaryReasonText の出し分け）。
+  const isShowingWaitingReason =
+    autoSummaryReasonState === "waiting" && autoSummaryReason !== null;
   // 要約前で、解説・要点・注目ポイント・感想がどれもまだ無い記事。空の欄を4つ並べず、
   // 要約欄の1行の案内にまとめる（要約ができたら各欄が並ぶ）。どれか1つでもあれば従来どおり各欄を出す。
   const hasNoGeneratedSections =
@@ -1886,8 +1893,15 @@ export default function NewsReaderScreen({
     }
   }, [article.id, toast]);
 
+  React.useEffect(() => {
+    isShowingWaitingReasonRef.current = isShowingWaitingReason;
+  }, [isShowingWaitingReason]);
+
   // 「なぜ自動で要約されないか」の状態を Rust から読む（判断台帳 D158）。対象の記事を表示したとき・
-  // ウィンドウへ戻ったとき・ニュース取得の完了時だけ読み直し、定期的には問い合わせない（常駐負荷を増やさないため）。
+  // ウィンドウへ戻ったとき・ニュース取得の完了時に読み直す。定期的に読むのは、順番待ちの記事で
+  // 「お休み」「待ち」の一言を出している間だけで、既存の順番待ちの読み直し（10秒ごと）に合わせる
+  // （ゲームから戻った直後に出した一言が、キューの再開後も残り続けないようにするため）。
+  // 一言を出していないときは定期的には読まない（常駐負荷を増やさないため）。
   // 読み取りは設定ファイルとキューのメモリ参照だけで、OS 問い合わせ・外部通信・AI 呼び出しは発生しない。
   // 失敗しても記事の表示には影響させず、一言を出さないだけにする。
   React.useEffect(() => {
@@ -1918,6 +1932,7 @@ export default function NewsReaderScreen({
       }
     };
     load();
+    reloadAutoSummaryStatusRef.current = load;
     window.addEventListener("focus", load);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     let unlistenNewsRefreshed: (() => void) | null = null;
@@ -1934,6 +1949,9 @@ export default function NewsReaderScreen({
       });
     return () => {
       disposed = true;
+      if (reloadAutoSummaryStatusRef.current === load) {
+        reloadAutoSummaryStatusRef.current = null;
+      }
       window.removeEventListener("focus", load);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       unlistenNewsRefreshed?.();
@@ -1955,6 +1973,10 @@ export default function NewsReaderScreen({
         return;
       }
       inFlight = true;
+      // 順番待ちで休んでいる理由を出している間だけ、自動要約の状態も同じ間隔で読み直す（再開したら一言を消す）。
+      if (isShowingWaitingReasonRef.current) {
+        reloadAutoSummaryStatusRef.current?.();
+      }
       const requestId = loadArticleRequestIdRef.current;
       void getArticleDetail({ articleId: pollArticleId })
         .then((detail) => {

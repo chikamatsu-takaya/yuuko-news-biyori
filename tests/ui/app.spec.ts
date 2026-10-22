@@ -3900,7 +3900,7 @@ test("reader summary: an unsummarized article outside the queue explains why aut
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
 });
 
-test("reader summary: no reason is shown while auto summary runs, for unrelated pauses, or when the status cannot be read", async ({
+test("reader summary: no reason is shown for a pause unrelated to an article outside the queue", async ({
   page,
 }) => {
   // 待機列に無い記事に、一時停止の理由は出さない（その記事は止まっている列に入っていない）。
@@ -3920,14 +3920,63 @@ test("reader summary: no reason is shown while auto summary runs, for unrelated 
     )
     .toBeGreaterThan(0);
   await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+});
 
-  // 状態を読めなくても、記事の表示と手動の要約はそのまま使える（一言を出さないだけ）。
+test("reader summary: a shown pause reason disappears when the status can no longer be read", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  // まず一時停止の一言が出ている。
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    AUTO_SUMMARY_PAUSED_GAME_TEXT
+  );
+
+  // 状態を読めなくなったら、古い一言を残さず消す。記事の表示と手動の要約はそのまま使える。
   await page.evaluate(() => {
     (window as unknown as Record<string, boolean>).__E2E_AUTO_SUMMARY_STATUS_FAIL__ = true;
     window.dispatchEvent(new Event("focus"));
   });
   await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(
+    main.getByText("要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。")
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toBeVisible();
+});
+
+test("reader summary: a pause reason is rechecked with the waiting poll and disappears when the queue resumes", async ({
+  page,
+}) => {
+  // 10秒ごとの順番待ちの読み直しを実時間で待たないよう、時計を差し替えて進める。
+  await page.clock.install();
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    AUTO_SUMMARY_PAUSED_GAME_TEXT
+  );
+
+  // キューが再開した（focus・取得完了のイベントは来ない）→ 次の読み直しで一言が消える。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = "running";
+  });
+  await page.clock.runFor(11_000);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+
+  // 一言を出していない間は、順番待ちの読み直しが続いても状態は読み直さない。
+  const callsAfterResume = await page.evaluate(
+    () => (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__
+  );
+  await page.clock.runFor(31_000);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__
+    )
+  ).toBe(callsAfterResume);
 });
 
 test("reader summary: a summarized article does not ask for the auto summary status", async ({
