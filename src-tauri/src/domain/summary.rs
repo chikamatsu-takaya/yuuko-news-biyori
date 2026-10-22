@@ -34,6 +34,39 @@ pub struct GeneratedArticleSummaryDto {
     pub yuuko_comment: String,
 }
 
+/// 自動要約の今の状態の種類（`get_auto_summary_status` の戻り値。判断台帳 D158）。
+/// 利用者に「なぜ自動で要約されないか」を伝えるためだけの分類で、キー・本文・パス・アプリ名は持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoSummaryStatusKind {
+    /// 待機列の記事を順に要約している（または次の1件までの間隔を空けている）。
+    Running,
+    /// 待機列が空（要約する記事が無い・起動直後でまだ並べていない）。
+    Idle,
+    /// ゲーム（Direct3D 全画面）・発表（プレゼンモード）中のため、ローカルLLMの自動要約を休んでいる。
+    PausedGameOrPresentation,
+    /// マイク使用中（会議中を含む）のため、ローカルLLMの自動要約を休んでいる。
+    PausedMicInUse,
+    /// 手動の要求を優先している・ローカルLLMの起動を控えている間のため待っている。
+    WaitingForLocalAi,
+    /// 設定で自動要約が無効。
+    DisabledInSettings,
+    /// AI の設定が実AI（Gemini・ローカル）ではない（Mock など）。
+    NotRealAi,
+    /// ローカルAIの同梱物が無い・壊れているなど、ローカルAIの準備ができていない。
+    LocalAiNotReady,
+    /// Gemini の APIキーが設定されていない（キーの値は扱わない）。
+    GeminiNotReady,
+    /// 設定が一時的に読めず判定できない。
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoSummaryStatusDto {
+    pub kind: AutoSummaryStatusKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiRequest {
     pub prompt_id: String,
