@@ -16,6 +16,18 @@
 // - 反映後の Markdown を再 parse して、件数・見出し・タイトルが変わらないことを検証する。
 //   1つでも安全条件を満たさなければ safeAutoMerge=false にする（CI は自動マージしない）。
 //
+// safeAutoMerge の判定方針（D145: Firestore を正本とする）:
+// - 「Firestore にだけあり Markdown に無いタスク」（manual-poc＝画面 / auto-dev で追加したもの、
+//   および Markdown 側に対応ブロックが無い md-import）は、この同期では Markdown へ一切書き込まない。
+//   正本は Firestore なので、Markdown（バックアップ / AI 参照用スナップショット）に載っていないこと自体は
+//   データ破壊ではない。よって件数を報告するだけで safeAutoMerge を false にしない。
+//   （以前は manualCandidates>0 で常に false になり、manual-poc が1件でもあると自動マージされなかった。）
+// - 次は従来どおり unsafe（warnings に積む）:
+//   既存 Markdown の値を守るための警告（不正値・曖昧な対応付け）／ Markdown 側の重複 ID ／
+//   manual-poc の ID が Markdown タスクの ID と衝突 ／ 再 parse 不一致（件数・見出し・タイトルの変化）／
+//   md-import の対応 Markdown タスク欠落が MISSING_MARKDOWN_NOTICE_LIMIT 件を超える（Markdown 側の
+//   大量削除・見出し改名の疑い）。
+//
 // 想定コマンド:
 //   node task-management/sync-firestore-to-markdown.mjs --dry-run --out task-management/tmp/firestore-to-markdown-dry-run.json
 //   node task-management/sync-firestore-to-markdown.mjs --apply  --out task-management/tmp/firestore-to-markdown-apply-result.json
@@ -56,6 +68,12 @@ const EXCLUDED_SECTION_KEYWORDS = [
   "完了ログ",
   "作業テンプレート",
 ];
+
+// md-import なのに Markdown 側の対応タスクが無い件数の許容上限。
+// 少数なら「Markdown 側でタイトル / 見出しを直した・タスクを消した」等の個別ずれとして notices で報告し、
+// 自動マージは止めない（この同期はそのタスクを書き込まない＝Markdown を壊さないため）。
+// 上限を超えたら Markdown 側の大量削除・見出し改名の疑いとして unsafe にする。
+export const MISSING_MARKDOWN_NOTICE_LIMIT = 3;
 
 // CLI として直接実行されたときだけ main() を走らせる（テスト等で computeSync を import しても
 // 副作用〔Firestore 接続・ファイル書き込み〕を起こさないため。post-merge-firestore-status.mjs と同方針）。
@@ -189,7 +207,9 @@ function parseArgs(argv) {
 
 /**
  * Firestore タスクを既存 Markdown に反映した結果を計算する（Markdown は書き換えない）。
- * 返却: { newContent, changes, manualCandidates, skipped, warnings, changedTaskCount, ... }
+ * 返却: { newContent, changes, manualCandidates, skipped, warnings, notices, changedTaskCount, ... }
+ * - warnings: 1件でもあれば safeAutoMerge=false（人手レビュー）。
+ * - manualCandidates / notices: 報告のみ。Markdown へ書き込まないため safeAutoMerge には影響しない（D145）。
  */
 export function computeSync(originalContent, firestoreTasks) {
   // 改行コードを保持する（CRLF / LF を変えない）。
@@ -217,6 +237,8 @@ export function computeSync(originalContent, firestoreTasks) {
   const manualCandidates = [];
   const skipped = [];
   const warnings = [];
+  // 安全判定に影響しない報告（Markdown を変更しない個別ずれ）。
+  const notices = [];
 
   // 行編集（in-place）と ブロック splice を分けて収集する。
   const lineEdits = new Map(); // index -> 新しい行文字列
@@ -235,15 +257,28 @@ export function computeSync(originalContent, firestoreTasks) {
       continue;
     }
 
-    // source の扱い: md-import のみ反映対象。manual-poc は manualCandidates。
+    // source の扱い: md-import のみ反映対象。manual-poc は manualCandidates（報告のみ）。
     // それ以外（空・未設定・不明）は安全側で skip。
     const source = typeof data.source === "string" ? data.source.trim() : "";
     if (source === "manual-poc") {
+      // manual-poc の ID は Firestore 自動採番のため、通常 Markdown の決定的 ID（md-...）とは衝突しない。
+      // 衝突した場合は「同じタスクが Markdown 管理と画面追加の両方にある」曖昧な状態なので unsafe にする。
+      if (blocksById.has(doc.id) || duplicateIds.has(doc.id)) {
+        warnings.push({
+          type: "manual-poc-id-collision",
+          id: doc.id,
+          title: strOrEmpty(data.title),
+          message:
+            "source=manual-poc のタスク ID が Markdown タスクの ID と一致しています（どちらが正か判断できません）。",
+        });
+        continue;
+      }
+      // Firestore のみのタスク。Markdown へは書き込まないので安全判定には影響させない（D145）。
       manualCandidates.push({
         id: doc.id,
         title: strOrEmpty(data.title),
         source,
-        reason: "source is manual-poc（今回は自動取り込みしない）",
+        reason: "source is manual-poc（Firestore のみのタスク。Markdown へは書き込まない）",
       });
       continue;
     }
@@ -268,19 +303,21 @@ export function computeSync(originalContent, firestoreTasks) {
     }
     const block = blocksById.get(doc.id);
     if (!block) {
-      // source=md-import なのに対応 Markdown タスクが無い = 同期取りこぼしの疑い。
-      // skip しつつ warnings にも入れて safeAutoMerge=false にする（人手レビューへ寄せる）。
+      // source=md-import なのに対応 Markdown タスクが無い。主な原因は、Markdown 側でタイトル・見出しを
+      // 直した（決定的 ID が変わる）か、Markdown からタスクを消したのに Firestore 側に残っていること。
+      // この同期はそのタスクを Markdown へ書き込まない（他タスクの差分にも影響しない）ので、少数なら
+      // notices で ID・タイトルを報告するだけにする。件数が多いときは後段で unsafe にする。
       skipped.push({
         id: doc.id,
         title: strOrEmpty(data.title),
         reason: "対応する Markdown タスクが見つからない",
       });
-      warnings.push({
+      notices.push({
         type: "md-import-missing-markdown",
         id: doc.id,
         title: strOrEmpty(data.title),
         message:
-          "source=md-import なのに対応する Markdown タスクが見つかりません（同期取りこぼしの疑い）。",
+          "source=md-import ですが対応する Markdown タスクがありません（Markdown 側で改名・削除された可能性）。Markdown へは書き込まず、Firestore のタスクはそのまま残します。",
       });
       continue;
     }
@@ -306,6 +343,16 @@ export function computeSync(originalContent, firestoreTasks) {
         fields: taskResult.fields,
       });
     }
+  }
+
+  // 対応 Markdown タスクの欠落が多すぎる場合は、Markdown 側の大量削除・見出し改名の疑いとして unsafe にする。
+  const missingMarkdownCount = notices.filter((n) => n.type === "md-import-missing-markdown").length;
+  if (missingMarkdownCount > MISSING_MARKDOWN_NOTICE_LIMIT) {
+    warnings.push({
+      type: "md-import-missing-markdown-bulk",
+      count: missingMarkdownCount,
+      message: `source=md-import なのに対応する Markdown タスクが無いものが ${missingMarkdownCount} 件あります（上限 ${MISSING_MARKDOWN_NOTICE_LIMIT} 件）。Markdown 側の大量削除・見出し改名の疑いがあるため自動マージしません。`,
+    });
   }
 
   // 行編集を適用 → ブロック splice を「後ろから」適用（インデックスのずれ防止）。
@@ -342,8 +389,8 @@ export function computeSync(originalContent, firestoreTasks) {
 
   // safeAutoMerge: すべての安全条件を満たすときだけ true。
   // 削除・見出し変更・タイトル変更は構造上発生しない（属性更新のみ）。
-  const safeAutoMerge =
-    warnings.length === 0 && manualCandidates.length === 0 && reparse.ok;
+  // manualCandidates / notices は Markdown を変更しない報告なので条件に含めない（D145・冒頭コメント参照）。
+  const safeAutoMerge = warnings.length === 0 && reparse.ok;
 
   return {
     newContent,
@@ -351,6 +398,7 @@ export function computeSync(originalContent, firestoreTasks) {
     manualCandidates,
     skipped,
     warnings,
+    notices,
     changedTaskCount,
     counts: { toUpdate, toComplete, toReopen },
     safeAutoMerge,
@@ -1185,6 +1233,7 @@ function buildReport(mode, input, result, backupPath) {
       manualCandidates: result.manualCandidates.length,
       skipped: result.skipped.length,
       warnings: result.warnings.length,
+      notices: result.notices.length,
     },
     firestoreTaskCount: result.firestoreTaskCount,
     markdownTaskCount: result.markdownTaskCount,
@@ -1192,6 +1241,7 @@ function buildReport(mode, input, result, backupPath) {
     manualCandidates: result.manualCandidates,
     skipped: result.skipped,
     warnings: result.warnings,
+    notices: result.notices,
   };
 }
 
@@ -1208,6 +1258,7 @@ function printSummary(mode, input, report, backupPath) {
   console.log(`manualCandidates: ${report.summary.manualCandidates}`);
   console.log(`skipped: ${report.summary.skipped}`);
   console.log(`warnings: ${report.summary.warnings}`);
+  console.log(`notices: ${report.summary.notices}`);
   console.log(`safeAutoMerge: ${report.safeAutoMerge}`);
   if (mode === "apply") {
     console.log(`applied: ${report.applied}`);
@@ -1220,9 +1271,26 @@ function printSummary(mode, input, report, backupPath) {
     console.log("");
     console.log("warnings:");
     for (const w of report.warnings) {
-      console.log(`- [${w.type}] ${w.message}`);
+      console.log(`- [${w.type}]${formatTarget(w)} ${w.message}`);
     }
   }
+
+  // notices は自動マージを止めないが、Markdown 側のずれを人が直せるよう ID・タイトルまで出す。
+  if (report.notices.length > 0) {
+    console.log("");
+    console.log("notices（自動マージは止めない）:");
+    for (const n of report.notices) {
+      console.log(`- [${n.type}]${formatTarget(n)} ${n.message}`);
+    }
+  }
+}
+
+// ログ用の対象表示（ID・タイトル）。タスク名は Firestore 由来の短い文字列のみで、秘密情報は含まない。
+function formatTarget(entry) {
+  if (!entry.id) {
+    return "";
+  }
+  return entry.title ? ` ${entry.id}「${entry.title}」` : ` ${entry.id}`;
 }
 
 /**
