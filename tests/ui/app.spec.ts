@@ -2206,7 +2206,7 @@ test("customize: nickname load failure offers a retry", async ({ page }) => {
     delete (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__;
   });
   await page.getByTestId("customize-nickname-retry").click();
-  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
   await expect(page.getByTestId("customize-nickname-retry")).toHaveCount(0);
 });
 
@@ -2617,7 +2617,7 @@ test("customize: theme save failure shows a toast and keeps the current theme", 
   ).toHaveAttribute("aria-pressed", "true");
 });
 
-test("customize: categories follow D83 (deco and balloon are selectable, nickname is read-only)", async ({
+test("customize: categories follow D83 (deco, balloon and nickname are editable here)", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -2640,11 +2640,115 @@ test("customize: categories follow D83 (deco and balloon are selectable, nicknam
   await page.getByRole("tab", { name: "吹き出し" }).click();
   await expect(page.getByTestId("customize-balloon-option")).toHaveCount(10);
 
+  // 呼び名はこの画面で変える（D161）。設定画面へ送る案内は置かない。
   await page.getByRole("tab", { name: "呼び名" }).click();
-  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
-  await expect(page.locator("main").getByRole("textbox")).toHaveCount(0);
-  await page.getByRole("button", { name: "設定で変える" }).click();
-  await expect(page.getByRole("heading", { name: "設定" }).first()).toBeVisible();
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
+  await expect(page.getByTestId("customize-nickname-input")).toHaveValue("ゆう");
+  await expect(page.getByRole("button", { name: "設定で変える" })).toHaveCount(0);
+});
+
+test("customize: nickname is saved on Enter or the button, only via set_nickname (D161)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "呼び名" }).click();
+
+  const input = page.getByTestId("customize-nickname-input");
+  const save = page.getByTestId("customize-nickname-save");
+  await expect(input).toHaveAttribute("maxlength", "32");
+  // 変えていないあいだは押せない。
+  await expect(save).toBeDisabled();
+
+  // Enter で確定すると呼び名だけを保存する（設定全体の save_user_settings は呼ばない）。
+  await input.fill("  みどり  ");
+  await expect(save).toBeEnabled();
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText("呼び名を「みどり」にしたよ。");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: みどり");
+  await expect(input).toHaveValue("みどり");
+  await expect(save).toBeDisabled();
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__)
+  ).toEqual(["  みどり  "]);
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SAVED_USER_SETTINGS__)
+  ).toBeUndefined();
+  // 右の「いまの設定」も新しい呼び名になる。
+  await expect(page.getByText("みどり", { exact: true })).toBeVisible();
+
+  // 入力を変えると前回の「〜にしたよ」は消える（書きかけの結果に見えないように）。
+  await input.fill("あお");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveCount(0);
+
+  // フォーカスが外れただけでは保存しない。
+  await page.getByTestId("customize-nickname").click();
+  expect(
+    await page.evaluate(
+      () => ((window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__ as string[]).length
+    )
+  ).toBe(1);
+
+  // ボタンでも確定できる。空にすると呼び名なし。
+  await input.fill("");
+  await save.click();
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText("呼び名をなしにしたよ。");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: まだ決めていないよ");
+
+  // 設定画面の「ゆうこ表示」にも保存した値が出る。
+  await input.fill("ゆう<b>");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう<b>");
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await page.getByRole("button", { name: "ゆうこ表示", exact: true }).click();
+  await expect(page.getByTestId("current-nickname")).toHaveText("ゆう<b>");
+});
+
+test("customize: invalid nickname is rejected without saving, and save failure keeps the old value", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  const input = page.getByTestId("customize-nickname-input");
+
+  // 貼り付けなどで入ったタブ文字は、送る前に止めて理由を出す。
+  await input.fill("ゆう	こ");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText(
+    "この呼び名は使えないよ。32文字以内にして、改行・タブなどの見えない文字は取り除いてね。"
+  );
+  await expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__)
+  ).toBeUndefined();
+
+  // 33文字（maxlength は UTF-16 単位のため、Rust の上限超えは Rust 側の検証で拒否される）。
+  await input.evaluate((element: HTMLInputElement) => element.removeAttribute("maxlength"));
+  await input.fill("あ".repeat(33));
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText(
+    "この呼び名は使えないよ。32文字以内にして、改行・タブなどの見えない文字は取り除いてね。"
+  );
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
+
+  // 保存そのものの失敗はトーストで伝え、生エラー文・パスは出さない。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_FAIL__ = true;
+  });
+  await input.fill("みどり");
+  await input.press("Enter");
+  await expect(page.getByText("呼び名を保存できなかったよ。もう一度ためしてね。").first()).toBeVisible();
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
 });
 
 // ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
@@ -5110,21 +5214,44 @@ const readSavedSettings = (page: Page) =>
       ).__E2E_SAVED_USER_SETTINGS__
   );
 
-test("settings save persists the notification frequency dropdown selection", async ({
+// 1日の最大通知件数スライダー（D159。通知頻度ドロップダウンは廃止）を、キー操作で目的の件数へ動かす。
+const notifyMaxPerDaySlider = (page: Page) =>
+  page.getByTestId("notify-max-per-day-slider").getByRole("slider");
+
+const setNotifyMaxPerDay = async (page: Page, value: number) => {
+  const slider = notifyMaxPerDaySlider(page);
+  const current = Number(await slider.getAttribute("aria-valuenow"));
+  await slider.focus();
+  const diff = value - current;
+  for (let i = 0; i < Math.abs(diff); i += 1) {
+    await slider.press(diff > 0 ? "ArrowRight" : "ArrowLeft");
+  }
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText(`${value}件`);
+};
+
+test("settings: notification frequency dropdown is gone and the slider alone sets notifyMaxPerDay (D159)", async ({
   page,
 }) => {
   await openSettings(page);
 
-  // 通知頻度を「1日3回まで」（既定）から「1日5回まで」へ変更する。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  // 同じ値を書き換えていた「通知頻度」ドロップダウンは無い。
+  await expect(page.getByText("通知頻度", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("combobox").filter({ hasText: "1日3回まで" })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "制限なし" })).toHaveCount(0);
+  // 範囲は 1〜20。0 は選べない（止めたいときは通知のスイッチを使う）ことを説明する。
+  const slider = notifyMaxPerDaySlider(page);
+  await expect(slider).toHaveAttribute("aria-valuemin", "1");
+  await expect(slider).toHaveAttribute("aria-valuemax", "20");
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
+  await expect(page.getByTestId("notify-max-per-day-help")).toContainText("1〜20件");
 
-  // 保存する。
+  // スライダーを 3 → 4 にすると、その値がそのまま notifyMaxPerDay として保存される
+  //（以前はドロップダウンが「1日5回まで」と食い違って見えていた）。
+  await setNotifyMaxPerDay(page, 4);
   await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = await readSavedSettings(page);
-  // 通知頻度が notifyMaxPerDay として保存される（=5）。
-  expect(saved?.notifyMaxPerDay).toBe(5);
+  expect(saved?.notifyMaxPerDay).toBe(4);
   // 既存の通知時間帯（午前/午後2枠）は壊れない。
   expect(saved?.workTimeRanges).toEqual([
     { start: "09:00", end: "12:00" },
@@ -5132,37 +5259,65 @@ test("settings save persists the notification frequency dropdown selection", asy
   ]);
   expect(saved?.notifyStartTime).toBe("09:00");
   expect(saved?.notifyEndTime).toBe("18:00");
+
+  // 上限まで動かすと 20 で保存される（「制限なし」と言いながら 20 件だった表示は無くなった）。
+  await setNotifyMaxPerDay(page, 20);
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect.poll(async () => (await readSavedSettings(page))?.notifyMaxPerDay).toBe(20);
 });
 
-test("settings reload restores the saved notification frequency (not the default)", async ({
+test("settings reload restores the saved notification max per day on the slider", async ({
   page,
 }) => {
-  // 保存値として notifyMaxPerDay=5 を返させる。
   await page.addInitScript(() => {
     // @ts-expect-error: E2E override
-    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 5 };
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 7 };
   });
 
   await openSettings(page);
 
-  // 既定の「1日3回まで」ではなく、保存値に対応する「1日5回まで」が表示される。
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toHaveCount(0);
+  await expect(notifyMaxPerDaySlider(page)).toHaveAttribute("aria-valuenow", "7");
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("7件");
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
-test("settings shows the default frequency 1日3回まで when there is no saved value", async ({
+test("settings rounds a hand-edited notifyMaxPerDay above 20 down to 20 so saving does not fail", async ({
   page,
 }) => {
-  // 既定（notifyMaxPerDay=3）のまま開く。
+  // Rust の検証は 0〜20。21 以上のままだと、ほかの設定の保存まで毎回検証エラーになる。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 25 };
+  });
+
   await openSettings(page);
 
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("20件");
+  await expect(notifyMaxPerDaySlider(page)).toHaveAttribute("aria-valuenow", "20");
+  // 読み込んだだけでは未保存にしない。
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  // ほかの設定を保存すると、件数は 20 で保存される。
+  await page.getByRole("switch").first().click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  expect((await readSavedSettings(page))?.notifyMaxPerDay).toBe(20);
+});
+
+test("settings keeps a saved notifyMaxPerDay of 0 untouched and explains it", async ({
+  page,
+}) => {
+  // Rust は 0（自動では声をかけない）も受け付ける。手編集などで 0 のときは書き換えずに説明する。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 0 };
+  });
+
+  await openSettings(page);
+
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("0件");
+  await expect(page.getByTestId("notify-max-per-day-help")).toContainText("いまは0件");
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
 // 設定メニュー（左サイドバー）を切り替える。
@@ -5953,9 +6108,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   await expect(page.getByRole("switch")).not.toBeChecked();
   await expect(page.getByRole("textbox").first()).toHaveValue("10:00");
   await expect(page.getByRole("textbox").nth(1)).toHaveValue("16:00");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("5件");
 
   // 解説・AI設定メニュー: aiProvider / explanationLevel が反映される。
   await openSettingsMenu(page, "解説・AI設定");
@@ -5972,12 +6125,108 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   // テーマ変更は「準備中」ではなく、カスタマイズ画面への案内を出す。
   await expect(page.getByText("変更機能は準備中")).toHaveCount(0);
   await expect(page.getByTestId("theme-customize-guide")).toHaveText(
-    "着せかえはカスタマイズ画面で変えられるよ（呼び名は「その他」で変えられるよ）"
+    "着せかえと呼び名はカスタマイズ画面で変えられるよ"
   );
 
   // その他メニュー: genres が反映される。
   await openSettingsMenu(page, "その他");
   await expect(page.getByRole("checkbox", { name: "IT" })).toBeChecked();
+});
+
+// 呼び名はカスタマイズ画面で変える（D161）。設定「その他」に入力欄は無く、保存では読み込んだ呼び名をそのまま書き戻す。
+test("settings other tab has no nickname field and saving keeps the stored nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      nickname: "みどり",
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByText("ニックネーム", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("呼び名", { exact: true })).toHaveCount(0);
+  await expect(page.getByPlaceholder("ゆうこに呼んでほしい名前")).toHaveCount(0);
+  await expect(page.locator("main").getByRole("textbox")).toHaveCount(0);
+
+  await page.getByRole("checkbox", { name: "IT" }).click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
+  expect(saved?.nickname).toBe("みどり");
+});
+
+// 設定画面 → カスタマイズで呼び名を変える → 設定画面に戻ってほかの設定を保存しても、呼び名は新しい値のまま（D161）。
+test("settings save after changing the nickname in customize keeps the new nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      nickname: "ゆう",
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("ゆう");
+
+  // 設定画面の案内（「カスタマイズを開く」）からカスタマイズ画面へ移り、呼び名を変える。
+  await page.getByRole("button", { name: "カスタマイズを開く" }).click();
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  const input = page.getByTestId("customize-nickname-input");
+  await input.fill("みどり");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: みどり");
+
+  // 設定画面へ戻り、ほかの設定（通知の件数）だけを変えて保存する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await setNotifyMaxPerDay(page, 6);
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
+  expect(saved?.notifyMaxPerDay).toBe(6);
+  // 古い呼び名（ゆう）で戻さない。
+  expect(saved?.nickname).toBe("みどり");
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("みどり");
+});
+
+// 「保存する」を待たずに反映される欄には、同じ文言・見た目の注記をそろえて付ける（D160）。
+test("settings marks the immediately-applied sections with the same note", async ({ page }) => {
+  await openSettings(page);
+  const lead = "すぐ反映されるよ（「保存する」は不要）。";
+
+  // 「保存する」で反映する通知タブには付けない。
+  await expect(page.getByText(lead)).toHaveCount(0);
+
+  await openSettingsMenu(page, "起動・連携");
+  await expect(page.getByTestId("integration-immediate-note")).toContainText(lead);
+
+  await openSettingsMenu(page, "データ管理");
+  await expect(page.getByTestId("data-immediate-note")).toContainText(lead);
+
+  for (const label of ["ゆうこ表示", "抑制条件", "解説・AI設定", "その他"]) {
+    await openSettingsMenu(page, label);
+    await expect(page.locator("main").getByText(lead)).toHaveCount(0);
+  }
+
+  await page.getByRole("button", { name: "設定を初期状態に戻す" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog.getByTestId("reset-immediate-note")).toContainText(lead);
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+
+  // 見た目（クラス）もそろっている。
+  await openSettingsMenu(page, "起動・連携");
+  const integrationClass = await page.getByTestId("integration-immediate-note").getAttribute("class");
+  await openSettingsMenu(page, "データ管理");
+  const dataClass = await page.getByTestId("data-immediate-note").getAttribute("class");
+  const withoutMargin = (value: string | null) =>
+    (value ?? "").split(/\s+/).filter((name) => name !== "" && name !== "mt-4").join(" ");
+  expect(withoutMargin(dataClass)).toBe(withoutMargin(integrationClass));
 });
 
 // MVP対象設定の編集 → 保存DTO確認、selectedThemeId が保存で失われないこと。
@@ -5994,9 +6243,8 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
 
   await openSettings(page);
 
-  // 通知頻度 1日5回まで / 通知ON→OFF。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  // 1日の最大通知件数 5 / 通知ON→OFF。
+  await setNotifyMaxPerDay(page, 5);
   await page.getByRole("switch").click();
 
   // AI: provider=Gemini, 解説の詳しさ=詳しく。
@@ -6072,9 +6320,7 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
   await expect(timeInputs.nth(1)).toHaveValue("12:00");
   await expect(timeInputs.nth(2)).toHaveValue("13:00");
   await expect(timeInputs.nth(3)).toHaveValue("18:00");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible(); // notifyMaxPerDay=5
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("5件"); // notifyMaxPerDay=5
 
   // 解説・AI設定メニュー: aiProvider / explanationLevel。
   await openSettingsMenu(page, "解説・AI設定");
@@ -6210,14 +6456,12 @@ test("settings shows unsaved changes and returns to 保存済み after saving", 
   await expect(saveState).toHaveText("保存済み");
   await expect(saveButton).toBeDisabled();
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(saveState).toHaveText("未保存の変更あり");
   await expect(saveButton).toBeEnabled();
 
   // 元の値へ戻せば変更なしに戻る（保存と同じ正規化で比較している）。
-  await page.getByRole("combobox").filter({ hasText: "1日5回まで" }).click();
-  await page.getByRole("option", { name: "1日3回まで" }).click();
+  await setNotifyMaxPerDay(page, 3);
   await expect(saveState).toHaveText("保存済み");
   await expect(saveButton).toBeDisabled();
 
@@ -6229,8 +6473,7 @@ test("settings shows unsaved changes and returns to 保存済み after saving", 
   await expect(saveState).toHaveText("保存済み");
 
   await openSettingsMenu(page, "通知");
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(saveState).toHaveText("未保存の変更あり");
 
   await saveButton.click();
@@ -6326,8 +6569,7 @@ test("settings cancel discards unsaved changes and returns to the main screen", 
 }) => {
   await openSettings(page);
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(page.getByTestId("settings-save-state")).toHaveText(
     "未保存の変更あり"
   );
@@ -6345,9 +6587,7 @@ test("settings cancel discards unsaved changes and returns to the main screen", 
     .first()
     .getByRole("button", { name: "設定", exact: true })
     .click();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
@@ -6358,8 +6598,7 @@ test("settings save failure keeps the unsaved state", async ({ page }) => {
   });
   await openSettings(page);
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await page.getByRole("button", { name: "保存する" }).click();
 
   await expect(page.getByText("保存に失敗しちゃった").first()).toBeVisible();
@@ -6873,8 +7112,7 @@ test("settings corrupt file shows the reset path and resets to defaults after co
     );
 
   // 初期化前に画面上の値を変えておき、初期化で既定値へ戻ることを確認できるようにする。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
 
   // ボタンは確認ダイアログを開くだけで、キャンセルすれば初期化しない（自動で上書きしない）。
   await resetButton.click();
@@ -6899,9 +7137,7 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   // 初期化結果がそのまま保存済みの基準になるため、変更するまでは保存ボタンは押せない。
   await expect(saveButton).toBeDisabled();
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
   await page.getByRole("switch").click();
   await expect(saveButton).toBeEnabled();
 
@@ -10296,6 +10532,29 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
+          // 呼び名だけの保存（カスタマイズ画面。D161）。Rust の set_nickname と同じく前後の空白を除き、
+          // 32文字（コードポイント数）超・制御文字は VALIDATION_ERROR で拒否して何も保存しない。
+          case "set_nickname": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const nicknameWin = window as any;
+            nicknameWin.__E2E_SET_NICKNAME_CALLS__ = [
+              ...(nicknameWin.__E2E_SET_NICKNAME_CALLS__ || []),
+              params.nickname,
+            ];
+            if (nicknameWin.__E2E_SET_NICKNAME_FAIL__) {
+              throw { code: "IO_ERROR", message: "E2E nickname save failure /internal/secret/path" };
+            }
+            const trimmed = String(params.nickname).trim();
+            if ([...trimmed].length > 32 || /[\u0000-\u001f\u007f-\u009f]/.test(trimmed)) {
+              throw { code: "VALIDATION_ERROR", message: "validation error: nickname" };
+            }
+            nicknameWin.__E2E_USER_SETTINGS_OVERRIDE__ = {
+              ...(nicknameWin.__E2E_USER_SETTINGS_OVERRIDE__ || {}),
+              nickname: trimmed,
+            };
+            return trimmed;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           // 自動起動（OS 登録状態）。既定は OFF。失敗時の文言に生エラーが出ないことも確認できるよう識別子を含める。
           case "get_autostart_enabled": {
             /* eslint-disable @typescript-eslint/no-explicit-any */

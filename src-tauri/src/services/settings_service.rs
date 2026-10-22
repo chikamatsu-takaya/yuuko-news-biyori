@@ -1,7 +1,7 @@
 use crate::domain::dressup::{BALLOON_DEFAULT_ID, DECO_NONE_ID};
 use crate::domain::pattern::PATTERN_NONE_ID;
 use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
-use crate::domain::settings::{PersistedSettings, UserSettingsDto};
+use crate::domain::settings::{validate_nickname, PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
 
@@ -40,16 +40,41 @@ impl SettingsService {
     /// `apply_from_dto` で変わらず保存済みの値のまま残る。
     /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
     /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
+    ///
+    /// 呼び名は、保存済みの値と同じときは検証しない。呼び名の入力欄はカスタマイズ画面だけにあり（D161）、
+    /// 設定画面は読み込んだ値を書き戻すだけなので、検証の導入前に保存された呼び名（改行入り・33文字以上など）が
+    /// 残っていても、ほかの設定の保存まで失敗させないため。変える場合（初回案内など）は従来どおり検証する。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
-        dto.validate()?;
+        dto.validate_except_nickname()?;
 
         let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
+        if dto.nickname != persisted.user.nickname {
+            validate_nickname(&dto.nickname)?;
+        }
         let current_theme_id = persisted.ui.theme_id.clone();
         persisted.apply_from_dto(dto);
         persisted.ui.theme_id = current_theme_id;
         self.repository.save(&persisted)?;
         Ok(())
+    }
+
+    /// 呼び名（`user.nickname`）だけを更新して保存し、保存した呼び名を返す（カスタマイズ画面の `set_nickname`。判断台帳 D161）。
+    /// 設定全体を上書きする `save_user_settings` を使わないのは、ほかの欄（通知・AI など）を
+    /// 呼び出し側が持っている古い値で上書きしないため。前後の空白は除き、空なら呼び名なしとして保存する。
+    /// 検証は `save_user_settings` と同じ `validate_nickname`（32文字・制御文字なし）。不正なら何も保存しない。
+    /// 設定ファイルが壊れているときは読み込みで失敗し、上書きしない（初期化は設定画面の操作に任せる）。
+    pub fn set_nickname(&self, nickname: &str) -> Result<String, AppError> {
+        let nickname = nickname.trim();
+        validate_nickname(nickname)?;
+
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.user.nickname != nickname || !self.repository.exists() {
+            persisted.user.nickname = nickname.to_string();
+            self.repository.save(&persisted)?;
+        }
+        Ok(persisted.user.nickname)
     }
 
     /// 適用中テーマ（`ui.themeId`）だけを更新して保存する。
@@ -193,7 +218,7 @@ impl SettingsService {
 mod tests {
     use super::*;
     use crate::domain::settings::AiProvider;
-    use crate::domain::settings::{NotificationSettings, WorkTimeRange};
+    use crate::domain::settings::{NotificationSettings, WorkTimeRange, NICKNAME_MAX_CHARS};
     use crate::repositories::settings_repository::SettingsRepository;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -211,6 +236,89 @@ mod tests {
             SettingsService::new(SettingsRepository::with_path(path.clone())),
             path,
         )
+    }
+
+    #[test]
+    fn save_user_settings_keeps_a_legacy_invalid_nickname_when_unchanged() {
+        let (service, path) = temp_service();
+        // 検証の導入前・手編集で、今の検証に通らない呼び名が保存されている。
+        for legacy in ["ゆう\nこ".to_string(), "あ".repeat(NICKNAME_MAX_CHARS + 1)] {
+            let json = serde_json::json!({ "version": 1, "user": { "nickname": legacy } });
+            std::fs::write(&path, json.to_string()).unwrap();
+
+            // 設定画面は呼び名を読み込んだまま書き戻す。ほかの設定の保存は失敗させない。
+            let mut dto = service.get_user_settings().unwrap();
+            dto.notify_max_per_day = 9;
+            service.save_user_settings(dto).unwrap();
+            let reloaded = service.get_user_settings().unwrap();
+            assert_eq!(reloaded.notify_max_per_day, 9);
+            assert_eq!(reloaded.nickname, legacy);
+
+            // 呼び名を不正な値へ変える保存は従来どおり拒否し、何も保存しない。
+            let mut changed = service.get_user_settings().unwrap();
+            changed.nickname = "ゆう\tこ".to_string();
+            changed.notify_max_per_day = 4;
+            let error = service.save_user_settings(changed).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)));
+            assert_eq!(service.get_user_settings().unwrap().notify_max_per_day, 9);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_saves_only_the_nickname() {
+        let (service, path) = temp_service();
+        let mut dto = service.get_user_settings().unwrap();
+        dto.notify_max_per_day = 7;
+        dto.genres = vec!["AI".to_string()];
+        service.save_user_settings(dto).unwrap();
+
+        let saved = service.set_nickname("  ゆう<さん>  ").unwrap();
+        // 前後の空白だけ除き、`<` などは入力どおり保存する（台詞へ差し込む直前に無害化する）。
+        assert_eq!(saved, "ゆう<さん>");
+
+        let reloaded = service.get_user_settings().unwrap();
+        assert_eq!(reloaded.nickname, "ゆう<さん>");
+        // ほかの欄は変わらない。
+        assert_eq!(reloaded.notify_max_per_day, 7);
+        assert_eq!(reloaded.genres, vec!["AI".to_string()]);
+
+        // 空にすると呼び名なしとして保存する。
+        assert_eq!(service.set_nickname("   ").unwrap(), "");
+        assert_eq!(service.get_user_settings().unwrap().nickname, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_rejects_invalid_input_without_saving() {
+        let (service, path) = temp_service();
+        service.set_nickname("ゆう").unwrap();
+
+        for invalid in [
+            "あ".repeat(NICKNAME_MAX_CHARS + 1),
+            "ゆう\nこ".to_string(),
+            "ゆう\tこ".to_string(),
+            "ゆう\u{1b}こ".to_string(),
+        ] {
+            let error = service.set_nickname(&invalid).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)), "{invalid:?}");
+            // 不正な入力では何も保存しない。
+            assert_eq!(service.get_user_settings().unwrap().nickname, "ゆう");
+        }
+        // 上限ちょうどは受け付ける。前後の空白は除いてから数える。
+        let max = "あ".repeat(NICKNAME_MAX_CHARS);
+        assert_eq!(service.set_nickname(&max).unwrap(), max);
+        assert_eq!(service.set_nickname(&format!(" {max} ")).unwrap(), max);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_does_not_overwrite_corrupt_settings_file() {
+        let (service, path) = temp_service();
+        std::fs::write(&path, "{ broken json").unwrap();
+        assert!(service.set_nickname("ゆう").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken json");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
