@@ -2679,8 +2679,11 @@ test("customize: nickname is saved on Enter or the button, only via set_nickname
   // 右の「いまの設定」も新しい呼び名になる。
   await expect(page.getByText("みどり", { exact: true })).toBeVisible();
 
-  // フォーカスが外れただけでは保存しない。
+  // 入力を変えると前回の「〜にしたよ」は消える（書きかけの結果に見えないように）。
   await input.fill("あお");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveCount(0);
+
+  // フォーカスが外れただけでは保存しない。
   await page.getByTestId("customize-nickname").click();
   expect(
     await page.evaluate(
@@ -5278,6 +5281,29 @@ test("settings reload restores the saved notification max per day on the slider"
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
+test("settings rounds a hand-edited notifyMaxPerDay above 20 down to 20 so saving does not fail", async ({
+  page,
+}) => {
+  // Rust の検証は 0〜20。21 以上のままだと、ほかの設定の保存まで毎回検証エラーになる。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 25 };
+  });
+
+  await openSettings(page);
+
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("20件");
+  await expect(notifyMaxPerDaySlider(page)).toHaveAttribute("aria-valuenow", "20");
+  // 読み込んだだけでは未保存にしない。
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  // ほかの設定を保存すると、件数は 20 で保存される。
+  await page.getByRole("switch").first().click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  expect((await readSavedSettings(page))?.notifyMaxPerDay).toBe(20);
+});
+
 test("settings keeps a saved notifyMaxPerDay of 0 untouched and explains it", async ({
   page,
 }) => {
@@ -6128,6 +6154,45 @@ test("settings other tab has no nickname field and saving keeps the stored nickn
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
   const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
   expect(saved?.nickname).toBe("みどり");
+});
+
+// 設定画面 → カスタマイズで呼び名を変える → 設定画面に戻ってほかの設定を保存しても、呼び名は新しい値のまま（D161）。
+test("settings save after changing the nickname in customize keeps the new nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      nickname: "ゆう",
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("ゆう");
+
+  // 設定画面の案内（「カスタマイズを開く」）からカスタマイズ画面へ移り、呼び名を変える。
+  await page.getByRole("button", { name: "カスタマイズを開く" }).click();
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  const input = page.getByTestId("customize-nickname-input");
+  await input.fill("みどり");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: みどり");
+
+  // 設定画面へ戻り、ほかの設定（通知の件数）だけを変えて保存する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await setNotifyMaxPerDay(page, 6);
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
+  expect(saved?.notifyMaxPerDay).toBe(6);
+  // 古い呼び名（ゆう）で戻さない。
+  expect(saved?.nickname).toBe("みどり");
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("みどり");
 });
 
 // 「保存する」を待たずに反映される欄には、同じ文言・見た目の注記をそろえて付ける（D160）。

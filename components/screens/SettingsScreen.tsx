@@ -268,7 +268,9 @@ const mapSettingsFromDto = (
       mode: normalizeNotificationMode(dto.notificationMode),
       workTimeRanges,
       // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3。
-      maxPerDay: dto.notifyMaxPerDay,
+      // 手編集などで上限（20）を超えていると Rust の検証で保存が毎回失敗するため、20 に丸めて表示・保存する
+      //（未保存の判定も丸めた値同士で比べるため、読み込んだだけでは「未保存」にならない）。
+      maxPerDay: Math.min(MAX_PER_DAY_MAX, dto.notifyMaxPerDay),
     },
     suppression: {
       ...base.suppression,

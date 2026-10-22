@@ -40,11 +40,18 @@ impl SettingsService {
     /// `apply_from_dto` で変わらず保存済みの値のまま残る。
     /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
     /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
+    ///
+    /// 呼び名は、保存済みの値と同じときは検証しない。呼び名の入力欄はカスタマイズ画面だけにあり（D161）、
+    /// 設定画面は読み込んだ値を書き戻すだけなので、検証の導入前に保存された呼び名（改行入り・33文字以上など）が
+    /// 残っていても、ほかの設定の保存まで失敗させないため。変える場合（初回案内など）は従来どおり検証する。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
-        dto.validate()?;
+        dto.validate_except_nickname()?;
 
         let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
+        if dto.nickname != persisted.user.nickname {
+            validate_nickname(&dto.nickname)?;
+        }
         let current_theme_id = persisted.ui.theme_id.clone();
         persisted.apply_from_dto(dto);
         persisted.ui.theme_id = current_theme_id;
@@ -229,6 +236,33 @@ mod tests {
             SettingsService::new(SettingsRepository::with_path(path.clone())),
             path,
         )
+    }
+
+    #[test]
+    fn save_user_settings_keeps_a_legacy_invalid_nickname_when_unchanged() {
+        let (service, path) = temp_service();
+        // 検証の導入前・手編集で、今の検証に通らない呼び名が保存されている。
+        for legacy in ["ゆう\nこ".to_string(), "あ".repeat(NICKNAME_MAX_CHARS + 1)] {
+            let json = serde_json::json!({ "version": 1, "user": { "nickname": legacy } });
+            std::fs::write(&path, json.to_string()).unwrap();
+
+            // 設定画面は呼び名を読み込んだまま書き戻す。ほかの設定の保存は失敗させない。
+            let mut dto = service.get_user_settings().unwrap();
+            dto.notify_max_per_day = 9;
+            service.save_user_settings(dto).unwrap();
+            let reloaded = service.get_user_settings().unwrap();
+            assert_eq!(reloaded.notify_max_per_day, 9);
+            assert_eq!(reloaded.nickname, legacy);
+
+            // 呼び名を不正な値へ変える保存は従来どおり拒否し、何も保存しない。
+            let mut changed = service.get_user_settings().unwrap();
+            changed.nickname = "ゆう\tこ".to_string();
+            changed.notify_max_per_day = 4;
+            let error = service.save_user_settings(changed).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)));
+            assert_eq!(service.get_user_settings().unwrap().notify_max_per_day, 9);
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

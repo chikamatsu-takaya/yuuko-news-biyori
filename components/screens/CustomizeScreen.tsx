@@ -943,6 +943,7 @@ export default function CustomizeScreen({
                       message={nicknameMessage}
                       onSave={handleSaveNickname}
                       onInvalid={() => setNicknameMessage({ kind: "invalid", text: NICKNAME_INVALID_TEXT })}
+                      onEdit={() => setNicknameMessage(null)}
                       retryButton={
                         <LoadRetryButton
                           onRetry={() => void loadNickname()}

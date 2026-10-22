@@ -33,6 +33,7 @@ export function NicknamePanel({
   message,
   onSave,
   onInvalid,
+  onEdit,
   retryButton,
 }: {
   status: NicknameLoadStatus;
@@ -43,6 +44,8 @@ export function NicknamePanel({
   onSave: (nickname: string) => void;
   /** 送る前に入力の問題が分かったとき（制御文字）。 */
   onInvalid: () => void;
+  /** 入力を変えたとき（前回の結果表示を消すため）。 */
+  onEdit: () => void;
   /** 読み込みに失敗したときの再試行ボタン（画面側の共通部品を差し込む）。 */
   retryButton?: React.ReactNode;
 }) {
@@ -78,7 +81,11 @@ export function NicknamePanel({
         <Input
           id="customize-nickname-input"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            // 前回の「〜にしたよ」や入力の問題の表示が、書きかけの内容の結果に見えないよう消す。
+            if (message !== null) onEdit();
+          }}
           placeholder={isReady ? "ゆうこに呼んでほしい名前" : undefined}
           maxLength={NICKNAME_MAX_LENGTH}
           disabled={!isReady || isSaving}
