@@ -20,8 +20,9 @@ use crate::domain::summary::{
     ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
     PHRASE_EXPLANATION_PROMPT_ID, POINT_ITEM_MAX_CHARS, SHORT_INPUT_FOCUS_POINTS_ITEMS,
-    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID,
-    TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
+    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_INPUT_KEY_POINTS_LABEL, SUMMARY_PROMPT_ID,
+    SUMMARY_RETRY_PROMPT_ID, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
+    YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
@@ -822,7 +823,9 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     let instruction = match request.prompt_id.as_str() {
         // 要約（v2・D167）。材料はタイトル・本文抜粋と、同じ生成で先に作った要点（summary_service の
         // build_summary_input。どれも無害化・切り詰め済みで、記事情報の見出しの下に置く）。
-        SUMMARY_PROMPT_ID => summary_instruction(level),
+        SUMMARY_PROMPT_ID => {
+            summary_instruction(level, summary_input_has_key_points(&request.input_text))
+        }
         // 旧版（v1）。海外記事の試作評価が当時の要約と比べるためだけに、テストのビルドに残す。
         #[cfg(test)]
         crate::domain::summary::LEGACY_SUMMARY_PROMPT_ID => legacy_summary_instruction(level),
@@ -834,7 +837,7 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
                 "{}
 {SUMMARY_RETRY_INSTRUCTION}
 {}",
-                summary_instruction(level),
+                summary_instruction(level, summary_input_has_key_points(&request.input_text)),
                 summary_retry_reason_lines(request.context.as_deref().unwrap_or(""))
             )
         }
@@ -886,14 +889,34 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     prompt
 }
 
-/// 要約（`summary_v2`・D167）の指示（固定文）。解説レベルの言い回しだけが変わる。
+/// 要約（`summary_v2`・D167）の指示（固定文）。解説レベルの言い回しと、入力に要点があるかだけで変わる。
 /// v1（本文抜粋だけから要約）では、小さいモデルが中心の出来事を落としたり、誰が何をしたかを取り違えたりした
 /// 一方、要点（事実の箇条書き）は正確だったため、先に作った要点を軸に組み立てさせる。
 /// 要点も AI の出力なので、要点・本文抜粋のどちらにもない事実は足させない。
-fn summary_instruction(level: &str) -> String {
-    format!(
-        "次の記事情報のタイトル・本文抜粋・要点をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。         要点に書かれた事実を軸にまとめ、要点と本文抜粋にない事実は足さないでください。         誰が何をしたのか（主語と目的語の関係）は要点・本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
-    )
+/// 入力に要点が無いとき（要点が Mock の代替だったとき・作り直し）は、無い材料を指示で挙げない
+/// （小さいモデルが無い要点を探して材料にない文を作らないように）。
+fn summary_instruction(level: &str, with_key_points: bool) -> String {
+    if with_key_points {
+        format!(
+            "次の記事情報のタイトル・本文抜粋・要点をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。\
+             要点に書かれた事実を軸にまとめ、要点と本文抜粋にない事実は足さないでください。\
+             誰が何をしたのか（主語と目的語の関係）は要点・本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
+        )
+    } else {
+        format!(
+            "次の記事情報のタイトル・本文抜粋をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。\
+             本文抜粋にない事実は足さないでください。\
+             誰が何をしたのか（主語と目的語の関係）は本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
+        )
+    }
+}
+
+/// 要約の入力に要点があるか（`SUMMARY_INPUT_KEY_POINTS_LABEL` だけの行があるか）。外部由来の文の行頭の見出しは
+/// summary_service が全角コロンにしているので、この行は summary_service が置いた見出しだけになる。
+fn summary_input_has_key_points(input_text: &str) -> bool {
+    input_text
+        .lines()
+        .any(|line| line.trim_end() == SUMMARY_INPUT_KEY_POINTS_LABEL)
 }
 
 /// 旧版の要約（`summary_v1`）の指示。テストのビルドにだけ残す（`LEGACY_SUMMARY_PROMPT_ID`）。
@@ -937,7 +960,7 @@ fn summary_retry_reason_lines(reasons: &str) -> String {
 pub(crate) fn summary_fixed_prompt_texts() -> Vec<String> {
     let mut texts: Vec<String> = ["やさしく簡潔に", "分かりやすく", "詳しく"]
         .into_iter()
-        .map(summary_instruction)
+        .flat_map(|level| [true, false].map(|with| summary_instruction(level, with)))
         .collect();
     texts.extend(
         [
@@ -1768,6 +1791,62 @@ mod tests {
     }
 
     #[test]
+    fn summary_v2_instruction_mentions_key_points_only_when_the_input_has_them() {
+        let level_prompt = |prompt_id: &str, input: &str| {
+            build_prompt(
+                &AiRequest {
+                    prompt_id: prompt_id.to_string(),
+                    input_text: input.to_string(),
+                    context: Some("「2兆」は記事情報にない数字。".to_string()),
+                },
+                ExplanationLevel::Normal,
+            )
+        };
+        let instruction_part = |prompt: &str| {
+            prompt[..prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap()].to_string()
+        };
+        let with_points = "タイトル: 題\n本文抜粋:\n抜粋の文。\n要点:\n・要点の文";
+        // 要点が無い入力（Mock の要点・作り直し）と、本文に全角コロンの「要点：」がある入力（偽の見出しは
+        // summary_service が全角にする）では、指示が要点に触れない。
+        let without_points = [
+            "タイトル: 題\n本文抜粋:\n抜粋の文。",
+            "タイトル: 題\n本文抜粋:\n要点：抜粋の文。",
+        ];
+        for prompt_id in [SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID] {
+            let prompt = instruction_part(&level_prompt(prompt_id, with_points));
+            assert!(prompt.contains("要点に書かれた事実を軸に"), "{prompt_id}");
+            for input in without_points {
+                let prompt = instruction_part(&level_prompt(prompt_id, input));
+                assert!(!prompt.contains("要点"), "{prompt_id}: {prompt}");
+                assert!(
+                    prompt.contains("本文抜粋にない事実は足さない"),
+                    "{prompt_id}"
+                );
+                assert!(prompt.contains("主語と目的語の関係"), "{prompt_id}");
+            }
+        }
+        // 固定指示の写しの点検には、要点あり・なしの両方の指示が入る。
+        let fixed = summary_fixed_prompt_texts();
+        assert!(fixed.contains(&summary_instruction("分かりやすく", true)));
+        assert!(fixed.contains(&summary_instruction("分かりやすく", false)));
+    }
+
+    #[test]
+    fn summary_instructions_have_no_runs_of_spaces() {
+        // 行末の `\` が抜けると、続く行の字下げの空白が指示文に入る。
+        for level in ["やさしく簡潔に", "分かりやすく", "詳しく"] {
+            for with_points in [true, false] {
+                let instruction = summary_instruction(level, with_points);
+                assert!(!instruction.contains("  "), "{instruction}");
+                assert!(!instruction.contains('\n'), "{instruction}");
+            }
+        }
+        for text in summary_fixed_prompt_texts() {
+            assert!(!text.contains("  "), "{text}");
+        }
+    }
+
+    #[test]
     fn summary_v2_mock_uses_the_mock_seed_in_the_context() {
         // 実AIの入力（見出し付きの材料）ではなく、context の種（本文抜粋＋定型文）から Mock の要約を作る。
         let response = service()
@@ -2092,7 +2171,7 @@ mod tests {
 
         let heading = prompt.find(ARTICLE_DATA_HEADING).unwrap();
         let retry = prompt.find(SUMMARY_RETRY_INSTRUCTION).unwrap();
-        assert!(prompt.starts_with(&summary_instruction("分かりやすく")));
+        assert!(prompt.starts_with(&summary_instruction("分かりやすく", false)));
         assert!(retry < heading);
         assert!(prompt[..heading].contains(&format!("- {}\n", "あ".repeat(120))));
         assert!(prompt[..heading].contains("「1＜b>」は記事情報にない数字だった。"));
@@ -2103,7 +2182,7 @@ mod tests {
         // 固定指示の一覧（写しの点検用）には、作り直しの固定文と各解説レベルの指示が入る。
         let fixed = summary_fixed_prompt_texts();
         assert!(fixed.contains(&SUMMARY_RETRY_INSTRUCTION.to_string()));
-        assert!(fixed.contains(&summary_instruction("詳しく")));
+        assert!(fixed.contains(&summary_instruction("詳しく", true)));
     }
 
     #[test]

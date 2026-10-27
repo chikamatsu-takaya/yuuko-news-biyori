@@ -89,6 +89,14 @@ pub struct AiResponse {
 /// 版を上げた。出力の契約（1つの文字列）は v1 と同じ。
 pub const SUMMARY_PROMPT_ID: &str = "summary_v2";
 
+/// 要約（`SUMMARY_PROMPT_ID`）の入力の行の見出し。summary_service が入力を組み、ai_provider_service が
+/// 入力に要点があるか（`SUMMARY_INPUT_KEY_POINTS_LABEL` だけの行があるか）で指示の文を選ぶ（D167）。
+/// 外部由来の文（タイトル・本文抜粋・要点）の行頭にこれらの見出しがあると偽の区切りになるため、
+/// summary_service が行頭の見出しのコロンを全角にしてから入れる。
+pub const SUMMARY_INPUT_TITLE_LABEL: &str = "タイトル:";
+pub const SUMMARY_INPUT_EXCERPT_LABEL: &str = "本文抜粋:";
+pub const SUMMARY_INPUT_KEY_POINTS_LABEL: &str = "要点:";
+
 /// 旧版の要約（本文抜粋と定型文の種だけから要約させる）。アプリでは使わない。
 /// 海外記事の試作評価（D165・`overseas_summary_eval`）が当時の要約と比べるために、テストのビルドにだけ残す。
 #[cfg(test)]

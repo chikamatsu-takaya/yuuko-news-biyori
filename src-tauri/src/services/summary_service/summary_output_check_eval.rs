@@ -189,9 +189,12 @@ fn generate(out_dir: &Path) {
             // アプリと同じ作り直しの判断を、取得手段に記録を挟んで呼ぶ。
             let retry = RefCell::new(None::<Value>);
             let check_started = Instant::now();
+            // 作り直しはアプリと同じく要点を外した入力から（D167）。
+            let retry_input =
+                build_summary_input(&seed_article.title, seed_article.excerpt.as_deref(), None);
             let adopted = check_and_retry_summary(
                 first.clone(),
-                &input,
+                &retry_input,
                 &seed,
                 AiProvider::Local,
                 level,

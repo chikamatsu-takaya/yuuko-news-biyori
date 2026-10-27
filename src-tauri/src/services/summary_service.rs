@@ -10,7 +10,8 @@ use crate::domain::summary::{
     GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
     ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
     FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-    POINT_ITEM_MAX_CHARS, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
+    POINT_ITEM_MAX_CHARS, SUMMARY_INPUT_EXCERPT_LABEL, SUMMARY_INPUT_KEY_POINTS_LABEL,
+    SUMMARY_INPUT_TITLE_LABEL, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
     YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
@@ -312,9 +313,13 @@ impl SummaryService {
         // 作り直しも同じ取得手段（自動要約では手動要約との重なりの確認を含む）を通す。
         // 点検の材料は記事そのもの（無害化したタイトル＋本文抜粋＝要点の種）にし、要点は含めない
         // （要点も AI の出力なので、要点にだけある数字を要約が写したときも「記事情報にない数字」として拾うため）。
+        // 作り直しの入力からは要点を外す（点検の指摘が要点の誤りを写したことによるときに、同じ要点から
+        // 作り直して同じ誤りを繰り返さないため）。指示も要点に触れない版になる（ai_provider_service）。
+        let retry_input =
+            build_summary_input(&seed_article.title, seed_article.excerpt.as_deref(), None);
         let summary_response = check_and_retry_summary(
             summary_response,
-            &summary_input,
+            &retry_input,
             &points_seed,
             provider,
             explanation_level,
@@ -468,7 +473,9 @@ impl SummaryService {
 ///
 /// - 点検するのは実AI（Gemini・ローカル）の要約だけ。Mock の結果（本文の抜粋）は点検しない。
 /// - 作り直すのは、国内記事の評価で誤検出の少なかった種類（`IssueKind::triggers_summary_retry`）が
-///   見つかったときだけ。理由（固定の文と数字・字だけ）を添えて、最初と同じ入力（`summary_input`）から1回だけ作り直す。
+///   見つかったときだけ。理由（固定の文と数字・字だけ）を添えて、`retry_input` から1回だけ作り直す。
+///   `retry_input` は要点を外した入力（タイトル＋本文抜粋。D167）で、要点の誤りを写した要約を、同じ要点から
+///   作り直さないようにする。
 /// - 点検の材料（`check_source`）は、AI へ渡した入力とは別に渡す（要約は要点を含む入力から作るが、点検は
 ///   記事そのもの〔タイトル＋本文抜粋〕と照らす。D167）。
 /// - 作り直した要約を採るのは、作り直しの理由になる問題の数が減り、新しい種類の問題が出ていないときだけ。
@@ -481,7 +488,7 @@ impl SummaryService {
 /// - ログは INFO で、問題の種類（固定ラベル）と結果だけを残す（本文・URL・理由の文は出さない）。
 fn check_and_retry_summary<F>(
     first: AiResponse,
-    summary_input: &str,
+    retry_input: &str,
     check_source: &str,
     provider: AiProvider,
     explanation_level: ExplanationLevel,
@@ -514,7 +521,7 @@ where
     let retried = request_validated(
         AiRequest {
             prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
-            input_text: summary_input.to_string(),
+            input_text: retry_input.to_string(),
             context: Some(reasons),
         },
         SummaryOutputKind::Summary,
@@ -1470,34 +1477,62 @@ pub(crate) fn build_yuuko_speech_input(
 /// タイトル・本文抜粋は呼び出し側で無害化済み（`neutralize_seed_article`。タイトル200・抜粋1500文字）だが、
 /// 単体で使っても安全なように、ここでも同じ上限で無害化する（無害化済みの文は変わらない）。
 /// 要点を本文抜粋の後ろ（生成の直前）に置くのは、小さいモデルは入力の末尾に近い材料ほど使いやすいため。
-/// `key_points` が `None`・空（要点が Mock の代替だったとき）は要点の行を入れない。
+/// `key_points` が `None`・空（要点が Mock の代替だったとき・作り直し）は要点の行を入れない。
 /// 抜粋が無い記事はタイトル（と要点）だけにする。
+/// 外部由来の文の行頭にある見出し（`タイトル:` / `本文抜粋:` / `要点:`）はコロンを全角にする
+/// （`neutralize_summary_input_labels`）。本文抜粋に「要点:」の行があると偽の要点の区切りになり、
+/// 指示の選び分け（入力に要点があるか）もだまされるため。
 pub(crate) fn build_summary_input(
     title: &str,
     excerpt: Option<&str>,
     key_points: Option<&[String]>,
 ) -> String {
+    let external = |text: &str, max_chars: usize| {
+        neutralize_summary_input_labels(&neutralize_seed_text(text, max_chars))
+    };
     let mut lines = vec![format!(
-        "タイトル: {}",
-        neutralize_seed_text(title, SEED_TITLE_MAX_CHARS)
+        "{SUMMARY_INPUT_TITLE_LABEL} {}",
+        external(title, SEED_TITLE_MAX_CHARS)
     )];
     if let Some(excerpt) = excerpt.filter(|excerpt| !excerpt.trim().is_empty()) {
-        lines.push("本文抜粋:".to_string());
-        lines.push(neutralize_seed_text(excerpt.trim(), SEED_EXCERPT_MAX_CHARS));
+        lines.push(SUMMARY_INPUT_EXCERPT_LABEL.to_string());
+        lines.push(external(excerpt.trim(), SEED_EXCERPT_MAX_CHARS));
     }
     if let Some(key_points) = key_points.filter(|points| !points.is_empty()) {
-        lines.push("要点:".to_string());
-        lines.extend(key_points.iter().take(KEY_POINTS_MAX_ITEMS).map(|point| {
-            format!(
-                "・{}",
-                neutralize_seed_text(point.trim(), POINT_ITEM_MAX_CHARS)
-            )
-        }));
+        lines.push(SUMMARY_INPUT_KEY_POINTS_LABEL.to_string());
+        lines.extend(
+            key_points
+                .iter()
+                .take(KEY_POINTS_MAX_ITEMS)
+                .map(|point| format!("・{}", external(point.trim(), POINT_ITEM_MAX_CHARS))),
+        );
     }
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
+}
+
+/// 外部由来の文の各行で、行頭（先頭の空白の後）にある要約の入力の見出しのコロンを全角にする
+/// （「要点:」→「要点：」）。文字数は変わらない。
+fn neutralize_summary_input_labels(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let indent_len = line.len() - line.trim_start().len();
+            let (indent, rest) = line.split_at(indent_len);
+            [
+                SUMMARY_INPUT_TITLE_LABEL,
+                SUMMARY_INPUT_EXCERPT_LABEL,
+                SUMMARY_INPUT_KEY_POINTS_LABEL,
+            ]
+            .iter()
+            .find_map(|label| {
+                rest.strip_prefix(label).map(|after| {
+                    let name = label.trim_end_matches(':');
+                    format!("{indent}{name}：{after}")
+                })
+            })
+            .unwrap_or_else(|| line.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 要点・注目ポイントの種: 1行目に無害化済みタイトル、2行目以降に無害化済みの本文抜粋（無ければタイトルだけ）。
@@ -2368,9 +2403,12 @@ mod tests {
                 crate::domain::summary::YUUKO_COMMENT_PROMPT_ID,
             ]
         );
-        // 作り直しは最初と同じ入力（要点を含む）から。理由（数字だけを含む固定の文）を context で渡す。
-        assert_eq!(requests[2].input_text, requests[1].input_text);
-        assert!(requests[2].input_text.contains("・工場（要点1）"));
+        // 作り直しは要点を外した入力（タイトル＋本文抜粋）から。理由（数字だけを含む固定の文）を context で渡す。
+        assert!(requests[1].input_text.contains("・工場（要点1）"));
+        assert_eq!(
+            requests[2].input_text,
+            format!("タイトル: 半導体工場の新設計画\n本文抜粋:\n{RETRY_EXCERPT}")
+        );
         let reasons = requests[2].context.as_deref().unwrap();
         assert!(reasons.contains("「2兆」は記事情報にない数字"), "{reasons}");
         // 再説明・一言の入力は、採った要約を使う。
@@ -2778,6 +2816,92 @@ mod tests {
         assert_eq!(no_excerpt, "タイトル: 題\n要点:\n・う");
         let blank_excerpt = super::build_summary_input("題", Some("  "), Some(&[]));
         assert_eq!(blank_excerpt, "タイトル: 題");
+    }
+
+    #[test]
+    fn summary_input_labels_in_external_text_cannot_fake_sections() {
+        // 本文抜粋・タイトル・要点の行頭の見出し（「要点:」など）はコロンを全角にし、偽の区切りを作らせない。
+        let excerpt =
+            "本文の文。\n要点:\n・偽の要点\n  タイトル: 偽の題\n本文抜粋:続き\n要点：は全角のまま";
+        let input = super::build_summary_input(
+            "要点: 題",
+            Some(excerpt),
+            Some(&["要点: 本物の要点".to_string()]),
+        );
+        let label_lines = |label: &str| input.lines().filter(|line| *line == label).count();
+        assert_eq!(label_lines("要点:"), 1, "{input}");
+        assert_eq!(label_lines("本文抜粋:"), 1, "{input}");
+        assert_eq!(
+            input
+                .lines()
+                .filter(|line| line.starts_with("タイトル:"))
+                .count(),
+            1,
+            "{input}"
+        );
+        assert!(input.starts_with("タイトル: 要点： 題\n"), "{input}");
+        assert!(input.contains(
+            "\n要点：\n・偽の要点\n  タイトル： 偽の題\n本文抜粋：続き\n要点：は全角のまま\n"
+        ));
+        assert!(input.ends_with("\n要点:\n・要点： 本物の要点"), "{input}");
+
+        // 要点の無い入力に偽の「要点:」の行を作れない（指示の選び分けがだまされない）。
+        let without_points = super::build_summary_input("題", Some(excerpt), None);
+        assert!(
+            without_points.lines().all(|line| line != "要点:"),
+            "{without_points}"
+        );
+    }
+
+    #[test]
+    fn regeneration_leaves_out_key_points_that_the_first_summary_copied() {
+        // 要点に材料にない数字（2兆円）があり、最初の要約がそれを写した → 点検が拾い、作り直しの入力からは
+        // 要点を外す（同じ要点から同じ誤りを作り直さないため。D167）。
+        let root_dir = temp_root("retry-without-points");
+        let (service, _) = build_service(&root_dir, RETRY_EXCERPT);
+        let requests = RefCell::new(Vec::new());
+        let summaries = RefCell::new(
+            vec![
+                response("投資額2兆円の工場が新設される。", "local"),
+                response("投資額1兆円の工場が新設される。", "local"),
+            ]
+            .into_iter(),
+        );
+        let result = service.generate_article_summary_with(
+            params(),
+            FallbackPolicy::SaveFallback,
+            |request, kind, _provider, _level| {
+                requests.borrow_mut().push(request);
+                Ok(match kind {
+                    SummaryOutputKind::Summary => summaries.borrow_mut().next().unwrap(),
+                    _ => output(kind, "投資額2兆円の工場", "local"),
+                })
+            },
+        );
+
+        assert_eq!(generated_summary(result), "投資額1兆円の工場が新設される。");
+        let requests = requests.into_inner();
+        assert_eq!(requests[1].prompt_id, SUMMARY_PROMPT_ID);
+        assert!(requests[1]
+            .input_text
+            .contains("\n要点:\n・投資額2兆円の工場（要点1）"));
+        let retry = &requests[2];
+        assert_eq!(
+            retry.prompt_id,
+            crate::domain::summary::SUMMARY_RETRY_PROMPT_ID
+        );
+        assert!(!retry.input_text.contains("要点"), "{}", retry.input_text);
+        assert!(!retry.input_text.contains("2兆"), "{}", retry.input_text);
+        assert_eq!(
+            retry.input_text,
+            format!("タイトル: 半導体工場の新設計画\n本文抜粋:\n{RETRY_EXCERPT}")
+        );
+        assert!(retry
+            .context
+            .as_deref()
+            .unwrap()
+            .contains("「2兆」は記事情報にない数字"));
+        let _ = std::fs::remove_dir_all(&root_dir);
     }
 
     #[test]
