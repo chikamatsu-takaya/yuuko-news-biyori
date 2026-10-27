@@ -236,7 +236,12 @@ impl AiProviderService {
                 })
                 .map_err(|failure| {
                     // 本文・プロンプトは出さず、固定の分類だけを残す。
-                    log::warn!("local AI request failed ({failure:?})");
+                    // アプリ終了で llama-server を止めたための中断は失敗ではないので WARN にしない。
+                    if self.local_llm.is_shut_down() {
+                        log::info!("local AI request interrupted by app exit ({failure:?})");
+                    } else {
+                        log::warn!("local AI request failed ({failure:?})");
+                    }
                     AppError::LocalAi(failure)
                 });
         }

@@ -141,7 +141,7 @@ impl From<bool> for Enablement {
 enum StepOutcome {
     /// 取り出す記事が無い、または処理中の記事がある（同時に2件は処理しない）。
     Idle,
-    /// 終了要求済みのため取り出さなかった。
+    /// 終了要求済みのため取り出さなかった。または、処理中に終了要求が来て AI の呼び出しが中断された（失敗に数えない）。
     Stopped,
     /// 自動要約が無効のため、待機中の記事を捨てて何もしなかった。
     Disabled,
@@ -321,6 +321,14 @@ impl QueueCore {
             Ok(AutoSummaryOutcome::YieldedToManual) => {
                 state.failure_counts.remove(&article_id);
                 StepOutcome::YieldedToManual(article_id)
+            }
+            // アプリ終了の要求後の失敗は、終了でローカルLLM（llama-server）を止めたこと・優先待ちを
+            // 打ち切ったことによる中断とみなし、失敗に数えない（再試行回数・失敗記録を進めず、WARN にもしない）。
+            // 記事は待機列の先頭へ戻す（終了中なので取り出されない）。
+            Err(error) if self.stopped.load(Ordering::SeqCst) => {
+                log::info!("auto summary for {article_id} interrupted by app exit: {error}");
+                state.pending.push_front(article_id);
+                StepOutcome::Stopped
             }
             Err(error) => {
                 // 本文は出さず、記事IDとエラー種別だけを残す。
@@ -1020,6 +1028,7 @@ fn resolve_summary_state(persisted: SummaryState, queued: SummaryState) -> Summa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ai_connection::LocalAiFailure;
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
 
@@ -1538,6 +1547,44 @@ mod tests {
             ),
             StepOutcome::Stopped
         );
+    }
+
+    #[test]
+    fn failure_after_stop_request_is_not_counted_as_a_failure() {
+        // アプリ終了で llama-server を止めたために進行中の要求が失敗した場合を模す。
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a", "b"]));
+
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| {
+                core.request_stop();
+                Err(AppError::LocalAi(LocalAiFailure::RequestFailed))
+            },
+        );
+
+        assert_eq!(outcome, StepOutcome::Stopped);
+        let state = core.lock();
+        assert!(state.failure_counts.is_empty());
+        assert!(state.failed.is_empty());
+        assert!(state.processing.is_none());
+        assert_eq!(state.pending, VecDeque::from(ids(&["a", "b"])));
+    }
+
+    #[test]
+    fn failure_without_stop_request_is_still_counted() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a"]));
+
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| Err(AppError::LocalAi(LocalAiFailure::RequestFailed)),
+        );
+
+        assert_eq!(outcome, StepOutcome::Retrying("a".to_string()));
+        assert_eq!(core.lock().failure_counts.get("a"), Some(&1));
     }
 
     #[test]
