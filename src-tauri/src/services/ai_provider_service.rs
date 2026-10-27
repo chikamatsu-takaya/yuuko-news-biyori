@@ -31,6 +31,7 @@ use crate::infra::local_llm_runtime::{
 };
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
+use crate::util::url_text::remove_urls;
 
 use super::local_llm_service::LocalLlmService;
 
@@ -395,6 +396,7 @@ fn mock_phrase_explanation_detail(explanation_level: ExplanationLevel) -> &'stat
 
 /// 要点・注目ポイントの Mock（決定的）。種は summary_service が無害化した「1行目=タイトル、2行目以降=本文抜粋」。
 /// 要点は本文抜粋（無ければタイトル）を「。」・改行で区切った先頭の文から作り、足りなければ定型文で2件にする。
+/// URL と、日本語を含まない文（本文抜粋に混ざった英語のツイート文など）は要点にしない。
 /// 種は無害化済み（`<` は全角・制御文字なし・行頭 `#` と区切り行なし）だが、「。」で区切った途中から
 /// `#` や `-` で始まる断片はできうるため、Mock でも出力検証に落ちないよう取り除く。
 /// 画面にそのまま出るため、mock などの内部ラベルは文面に含めない。
@@ -408,6 +410,8 @@ fn mock_article_points(input_text: &str, genre: &str) -> AiArticlePoints {
             .flat_map(|line| line.split('。'))
             .map(str::trim)
             .filter(|sentence| !sentence.is_empty() && !sentence.starts_with(['#', '-', '*']))
+            // 英語のツイート文など日本語を含まない文は要点にしない（足りなければ定型文で補う）。
+            .filter(|sentence| contains_japanese(sentence))
             .take(3)
             .map(|sentence| {
                 sentence
@@ -482,17 +486,26 @@ const MOCK_EXCERPT_MAX_SENTENCES: usize = 2;
 /// 抜粋が空になったとき（本文が URL だけ等）の固定文。出力検証の「空」に落ちて要約できなくならないようにする。
 const MOCK_EXCERPT_EMPTY_TEXT: &str = "くわしい内容は元記事で確かめてね。";
 
-/// Mock 用の短い抜粋（決定的・外部通信なし）。URL を除き、空白・改行を1つの空白にまとめ、連続した「。」を1つにする。
+/// Mock 用の短い抜粋（決定的・外部通信なし）。URL と日本語を含まない行（英語のツイート文など）を除き、空白・改行を1つの空白にまとめ、連続した「。」を1つにする。
 /// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取る。
 /// 2文で `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは、1文目が収まれば1文目だけにし（文の途中で切らない）、
 /// 1文目も収まらないときは上限で切って「…」を付ける。
 /// 入力は無害化済みの種（`<` は全角・行頭 `#` なし・区切り行なし）。1行にまとめるので見出し・区切り行は生じないが、
 /// 記号だけが残った場合は区切り行と解釈されうるため固定文にする。
 fn mock_excerpt(text: &str) -> String {
-    let flattened = remove_urls(text)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let without_urls = remove_urls(text);
+    // 日本語を含まない行（本文抜粋に混ざった英語のツイート文など）は除く。どの行も日本語を含まない
+    // （英語だけの記事）ときは、要約が固定文だけにならないよう従来どおり全行を使う。
+    let japanese_lines = without_urls
+        .lines()
+        .filter(|line| contains_japanese(line))
+        .collect::<Vec<_>>();
+    let source = if japanese_lines.is_empty() {
+        without_urls.clone()
+    } else {
+        japanese_lines.join("\n")
+    };
+    let flattened = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars: Vec<char> = Vec::with_capacity(flattened.len());
     for c in flattened.chars() {
         if c == '。' && chars.last() == Some(&'。') {
@@ -547,25 +560,21 @@ fn mock_excerpt(text: &str) -> String {
     }
 }
 
-/// 文字列から URL（`http://` / `https://` / `www.` で始まる部分）を除く。URL は空白か ASCII 以外の文字
-/// （「。」など）の手前までとみなすので、日本語の文に続けて書かれた URL でも前後の文は残る。改行は残す。
-fn remove_urls(text: &str) -> String {
-    let mut kept = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = ["http://", "https://", "www."]
-        .iter()
-        .filter_map(|marker| rest.find(marker))
-        .min()
-    {
-        kept.push_str(&rest[..start]);
-        let url = &rest[start..];
-        let end = url
-            .find(|c: char| c.is_whitespace() || !c.is_ascii())
-            .unwrap_or(url.len());
-        rest = &url[end..];
-    }
-    kept.push_str(rest);
-    kept
+/// 日本語（ひらがな・カタカナ・漢字・半角カナ）を1文字でも含むか。Mock の要約・要点から、
+/// 本文抜粋に混ざった英語のツイート文（「We are excited to announce… — Deno (@deno_land) October 9, 2026」）など
+/// 日本語を含まない文を除くために使う。記号・数字・全角の句読点・長音だけでは日本語とみなさない。
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{3041}'..='\u{309F}'   // ひらがな
+            | '\u{30A1}'..='\u{30FA}' // カタカナ（中点・長音は含めない）
+            | '\u{3400}'..='\u{4DBF}' // 漢字（拡張A）
+            | '\u{4E00}'..='\u{9FFF}' // 漢字
+            | '\u{F900}'..='\u{FAFF}' // 互換漢字
+            | '\u{FF66}'..='\u{FF9D}' // 半角カナ
+            | '々'
+        )
+    })
 }
 
 /// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
@@ -2483,6 +2492,49 @@ mod tests {
             .key_points
             .iter()
             .all(|point| !point.contains("http")));
+    }
+
+    #[test]
+    fn mock_article_points_leave_out_sentences_without_japanese() {
+        // 本文抜粋に混ざった英語のツイート文（URL は除いた後に残る部分）は要点にしない。
+        let points = mock_article_points(
+            "Deno が Cloudflare に参加\nDeno が Cloudflare に加わると発表した。\nWe are excited to announce that Deno is joining Cloudflare! https://t.co/hC5HOUbtt4 — Deno (@deno_land) October 9, 2026\n今後も開発は続く。",
+            "テクノロジー",
+        );
+        assert_eq!(
+            points.key_points,
+            vec![
+                "Deno が Cloudflare に加わると発表した".to_string(),
+                "今後も開発は続く".to_string(),
+            ]
+        );
+        // 日本語の文が無ければ定型文で2件にそろえる。
+        let points = mock_article_points(
+            "Deno joins Cloudflare\nWe are excited to announce that Deno is joining Cloudflare!",
+            "テクノロジー",
+        );
+        assert_eq!(
+            points.key_points,
+            vec![
+                "「Deno joins Cloudflare」についてのニュース。".to_string(),
+                "詳しくは元記事で確かめられる。".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mock_summary_leaves_out_lines_without_japanese() {
+        assert_eq!(
+            mock_summary(
+                "Deno が Cloudflare に加わると発表した。\nWe are excited to announce that Deno is joining Cloudflare! — Deno (@deno_land) October 9, 2026\n今後も開発は続く。"
+            ),
+            "Deno が Cloudflare に加わると発表した。 今後も開発は続く。"
+        );
+        // どの行も日本語を含まない（英語だけの記事）ときは従来どおり全行から作る。
+        assert_eq!(
+            mock_summary("Deno is joining Cloudflare. It ships soon."),
+            "Deno is joining Cloudflare. It ships soon."
+        );
     }
 
     #[test]

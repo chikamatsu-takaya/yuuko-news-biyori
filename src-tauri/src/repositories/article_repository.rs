@@ -18,6 +18,7 @@ use crate::domain::article::{
 use crate::error::AppError;
 use crate::infra::atomic_file;
 use crate::paths::AppPaths;
+use crate::util::url_text::excerpt_without_urls;
 
 const FRONT_MATTER_DELIMITER: &str = "---";
 const ARCHIVE_INDEX_VERSION: u32 = 2;
@@ -1967,6 +1968,14 @@ impl PersistedArticleRecord {
         }
     }
 
+    /// 画面（一覧・履歴・ホーム・詳細）へ返す本文抜粋。RSS の本文由来の抜粋には t.co の短縮URLなどが
+    /// そのまま入ることがあるため、URL を除いてから返す（`excerpt_without_urls`）。保存済みの Markdown は変えず
+    /// 返すときに除くので、既存の記事にも効く。詳細 DTO の抜粋は要約・要点の種や用語解説の文脈にも使われ、
+    /// URL は AI にとっても雑音（小さいモデルが URL を写し取りうる）なので、同じく除いた値を渡す。
+    fn display_excerpt(&self) -> Option<String> {
+        self.excerpt.as_deref().and_then(excerpt_without_urls)
+    }
+
     fn to_summary_dto(&self, is_favorite: bool) -> ArticleSummaryDto {
         ArticleSummaryDto {
             article_id: self.article_id.clone(),
@@ -1974,7 +1983,7 @@ impl PersistedArticleRecord {
             source_name: self.source_name.clone(),
             published_at_text: self.published_at_text.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.excerpt.clone()),
+            summary: self.summary.clone().or_else(|| self.display_excerpt()),
             is_favorite,
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
@@ -1999,7 +2008,7 @@ impl PersistedArticleRecord {
             published_at_text: self.published_at_text.clone(),
             fetched_at: self.fetched_at.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.excerpt.clone()),
+            summary: self.summary.clone().or_else(|| self.display_excerpt()),
             is_favorite,
             read_state: self.read_state.clone(),
             is_archived: self.is_archived,
@@ -2017,8 +2026,8 @@ impl PersistedArticleRecord {
             original_url: self.original_url.clone(),
             published_at_text: self.published_at_text.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.excerpt.clone()),
-            excerpt: self.excerpt.clone(),
+            summary: self.summary.clone().or_else(|| self.display_excerpt()),
+            excerpt: self.display_excerpt(),
             yuuko_explanation: self.yuuko_explanation.clone(),
             key_points: self.key_points.clone(),
             focus_points: self
@@ -2745,7 +2754,9 @@ impl ArchiveArticleIndexEntry {
             published_at_text: self.published_at_text.clone(),
             fetched_at: self.fetched_at.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone(),
+            // 索引の summary は「要約、無ければ本文抜粋」の保存時の値（照合に使うため保存値は変えない）。
+            // 抜粋のときに URL が残らないよう、返すときに除く（要約に URL が無ければ変わらない）。
+            summary: self.summary.as_deref().and_then(excerpt_without_urls),
             is_favorite,
             read_state: self.read_state.clone(),
             is_archived: true,
@@ -5780,6 +5791,92 @@ mod tests {
         );
         assert!(detail.key_points.is_empty());
         assert!(detail.summary.is_some());
+    }
+
+    fn fetched_article_with_url_excerpt() -> crate::domain::article::FetchedArticle {
+        crate::domain::article::FetchedArticle {
+            article_id: "url-excerpt".to_string(),
+            title: "Deno が Cloudflare に参加".to_string(),
+            source_name: "Example News".to_string(),
+            original_url: "https://example.com/news/url-excerpt".to_string(),
+            fetched_at: "2026-10-07T00:00:00Z".to_string(),
+            published_at_text: "2026-10-07T00:00:00Z".to_string(),
+            genre: "テクノロジー".to_string(),
+            tags: Vec::new(),
+            excerpt: Some(
+                "Deno が Cloudflare に加わる（https://example.com/a）。\nDeno is joining Cloudflare! https://t.co/hC5HOUbtt4 — Deno (@deno_land)\nhttps://t.co/only"
+                    .to_string(),
+            ),
+            recommendation_score: 0.5,
+            read_state: ArticleReadState::Unread,
+        }
+    }
+
+    const URL_EXCERPT_FOR_DISPLAY: &str =
+        "Deno が Cloudflare に加わる。\nDeno is joining Cloudflare! — Deno (@deno_land)";
+
+    #[test]
+    fn excerpt_urls_are_removed_from_dtos_but_kept_in_saved_markdown() {
+        let context = TestRepositoryContext::new();
+        context
+            .repository
+            .save_fetched_articles(vec![fetched_article_with_url_excerpt()])
+            .unwrap();
+
+        // 詳細（抜粋・要約欄の補い）・一覧（おすすめ候補）・履歴のどれにも URL を出さない。
+        let detail = context
+            .repository
+            .get_article_detail("url-excerpt")
+            .unwrap();
+        assert_eq!(detail.excerpt.as_deref(), Some(URL_EXCERPT_FOR_DISPLAY));
+        assert_eq!(detail.summary.as_deref(), Some(URL_EXCERPT_FOR_DISPLAY));
+        let candidates = context.repository.list_recommendation_candidates().unwrap();
+        assert_eq!(
+            candidates[0].summary.summary.as_deref(),
+            Some(URL_EXCERPT_FOR_DISPLAY)
+        );
+        let history = context
+            .repository
+            .list_history(ArticleHistoryFilter::All, 10)
+            .unwrap();
+        assert_eq!(history[0].summary.as_deref(), Some(URL_EXCERPT_FOR_DISPLAY));
+
+        // 保存済みの値は変えない（表示時に除くので、既存の記事にも同じように効く）。
+        let record = context
+            .repository
+            .find_article_record("url-excerpt")
+            .unwrap();
+        assert!(record.excerpt.as_deref().unwrap().contains("https://t.co/"));
+    }
+
+    #[test]
+    fn archived_history_items_remove_excerpt_urls_without_changing_the_index() {
+        let record = PersistedArticleRecord::from_fetched(fetched_article_with_url_excerpt());
+        let entry = super::ArchiveArticleIndexEntry::from_record(&record).unwrap();
+        // 索引の値は保存時のまま（記事ファイルとの照合に使うため）。
+        assert!(entry.summary.as_deref().unwrap().contains("https://t.co/"));
+        assert!(entry.matches_record(&record).unwrap());
+        assert_eq!(
+            entry.to_history_item_dto(false).summary.as_deref(),
+            Some(URL_EXCERPT_FOR_DISPLAY)
+        );
+    }
+
+    #[test]
+    fn excerpt_with_only_urls_is_shown_as_no_excerpt() {
+        let context = TestRepositoryContext::new();
+        let mut article = fetched_article_with_url_excerpt();
+        article.excerpt = Some("https://t.co/abc".to_string());
+        context
+            .repository
+            .save_fetched_articles(vec![article])
+            .unwrap();
+        let detail = context
+            .repository
+            .get_article_detail("url-excerpt")
+            .unwrap();
+        assert_eq!(detail.excerpt, None);
+        assert_eq!(detail.summary, None);
     }
 
     #[test]
