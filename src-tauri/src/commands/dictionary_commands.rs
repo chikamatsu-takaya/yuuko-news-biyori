@@ -20,12 +20,20 @@ pub async fn explain_selected_term(
         let entry = dictionary_service.explain_selected_term(params)?;
         // 用語解説を表示できたら、流れ星のかけらを付与する（データ設計書 §12.4。辞書保存と合わせて
         // 1日の上限あり）。辞書サービスの処理を終えてから呼び、付与の失敗は解説の表示を止めない。
-        log_grant_failure("term_explained", gacha_service.grant_for_term_action());
+        // 解説の代わりの案内（分からなかった・言葉の途中）は付与しない（友情ポイントと同じ扱い）。
+        if earns_fragment_for_explanation(&entry) {
+            log_grant_failure("term_explained", gacha_service.grant_for_term_action());
+        }
         Ok::<_, crate::error::AppError>(entry)
     })
     .await
     .map_err(|error| CommandError::join_error("explain-selected-term", error))?
     .map_err(CommandError::from)
+}
+
+/// 用語解説の結果で流れ星のかけらを付与するか（純粋関数）。案内（`is_notice`）は解説ではないので付与しない。
+fn earns_fragment_for_explanation(entry: &DictionaryEntryDto) -> bool {
+    !entry.is_notice
 }
 
 #[tauri::command]
@@ -97,4 +105,36 @@ pub async fn delete_dictionary_entry(
         .await
         .map_err(|error| CommandError::join_error("delete-dictionary-entry", error))?
         .map_err(CommandError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::dictionary::DictionaryEntryType;
+
+    fn entry(is_notice: bool) -> DictionaryEntryDto {
+        DictionaryEntryDto {
+            entry_id: "entry".to_string(),
+            key_text: "言葉".to_string(),
+            entry_type: DictionaryEntryType::Term,
+            short_explanation: "短い説明".to_string(),
+            detail_explanation: "詳しい説明".to_string(),
+            related_article_id: None,
+            related_article_title: None,
+            is_starred: false,
+            saved_in_dictionary: false,
+            is_notice,
+            expanded_from: None,
+        }
+    }
+
+    #[test]
+    fn explanation_earns_a_fragment() {
+        assert!(earns_fragment_for_explanation(&entry(false)));
+    }
+
+    #[test]
+    fn notice_does_not_earn_a_fragment() {
+        assert!(!earns_fragment_for_explanation(&entry(true)));
+    }
 }

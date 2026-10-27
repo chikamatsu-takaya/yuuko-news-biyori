@@ -677,12 +677,7 @@ pub(crate) fn request_exit<R: Runtime>(app: &AppHandle<R>, source: ExitSource) {
         ExitSource::TrayMenu => log::info!("トレイメニューからアプリ終了が要求されました"),
         ExitSource::InAppButton => log::info!("画面内のボタンからアプリ終了が要求されました"),
     }
-    // 自動要約は新しい記事を取り出さないようにする。処理中の1件は待たない
-    // （記事の保存は一時ファイル→本体への1回の rename〔infra::atomic_file〕のため、強制終了されても
-    // 書きかけの .md は残らず、本体が無くなる隙間も無い。残りうるのは使われない一時ファイルだけ）。
-    if let Some(state) = app.try_state::<crate::state::AppState>() {
-        state.auto_summary_queue.request_stop();
-    }
+    // 自動要約の終了要求と llama-server の停止は stop_side_processes で行う。
     stop_side_processes(app);
     app.exit(0);
 }
@@ -691,6 +686,12 @@ pub(crate) fn request_exit<R: Runtime>(app: &AppHandle<R>, source: ExitSource) {
 /// 何度呼んでもよい（止めた後は起動しない）。
 pub(crate) fn stop_side_processes<R: Runtime>(app: &AppHandle<R>) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
+        // 自動要約は新しい記事を取り出さないようにする。処理中の1件は待たない
+        // （記事の保存は一時ファイル→本体への1回の rename〔infra::atomic_file〕のため、強制終了されても
+        // 書きかけの .md は残らず、本体が無くなる隙間も無い。残りうるのは使われない一時ファイルだけ）。
+        // llama-server を止める前に終了要求を立てる＝止めたために処理中の要求が失敗しても、
+        // キューはそれを終了による中断とみなし、失敗に数えない（auto_summary_queue）。
+        state.auto_summary_queue.request_stop();
         state.local_llm_service.shutdown();
     }
 }
