@@ -3538,3 +3538,11 @@ mod local_llm_quality_eval;
 /// 海外（英語）記事の日本語要約の試作評価ハーネス（D163・D164。`#[ignore]`・手動実行専用）。
 #[cfg(test)]
 mod overseas_summary_eval;
+
+/// 海外記事の要約・訳の機械点検（D165 の試作。数字・簡体字・指示の写し・長さ。テストビルド専用）。
+#[cfg(test)]
+mod overseas_output_check;
+
+/// 海外記事の多段の要約（抽出 → 用語の訳 → 組み立て → 点検）の試作評価ハーネス（D165。`#[ignore]`・手動実行専用）。
+#[cfg(test)]
+mod overseas_multistep_eval;
