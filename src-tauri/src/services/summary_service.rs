@@ -281,8 +281,9 @@ impl SummaryService {
             &summary_seed,
             provider,
             explanation_level,
+            fallback_policy,
             &request_validated,
-        );
+        )?;
 
         // 要点・注目ポイント・タグ（D18 / D11）。ローカルLLMの負荷を抑えるため、1回の呼び出しで受け取る
         // （タグのためだけに AI を呼ばない）。
@@ -453,16 +454,19 @@ impl SummaryService {
 /// - 作り直した要約を採るのは、作り直しの理由になる問題の数が減り、新しい種類の問題が出ていないときだけ。
 ///   作り直しが失敗した・検証に落ちた・Mock に切り替わった・良くならなかったときは、最初の要約を使う
 ///   （最初の要約は保存前の検証を通っているので、作り直しで悪化させない）。
-/// - 自動要約で、作り直しの前に手動要約が始まった・アプリが終わるときは、取得手段がエラーを返す。
-///   ここでは最初の要約を返し、次の段の呼び出しで同じ確認が止める（`generate_auto_summary_with`）。
+/// - 自動要約で、作り直しの前に手動要約が始まった・アプリが終わるときは、取得手段が停止のエラー
+///   （`AppError::Validation`）を返す。握りつぶさずにそのまま返し、自動要約を止める（`generate_auto_summary_with`）。
+/// - 自動要約（RejectFallback）で作り直しが Mock に切り替わったときは、その時点でエラーを返して止める
+///   （`reject_fallback_early`。最初の段と同じく、Mock になったら残りの AI 呼び出しをしない）。手動は最初の要約を使う。
 /// - ログは INFO で、問題の種類（固定ラベル）と結果だけを残す（本文・URL・理由の文は出さない）。
 fn check_and_retry_summary<F>(
     first: AiResponse,
     summary_seed: &str,
     provider: AiProvider,
     explanation_level: ExplanationLevel,
+    fallback_policy: FallbackPolicy,
     request_validated: &F,
-) -> AiResponse
+) -> Result<AiResponse, AppError>
 where
     F: Fn(
         AiRequest,
@@ -472,14 +476,14 @@ where
     ) -> Result<AiResponse, AppError>,
 {
     if first.provider == PROVIDER_MOCK {
-        return first;
+        return Ok(first);
     }
     let fixed_texts = summary_fixed_prompt_texts();
     let fixed_refs: Vec<&str> = fixed_texts.iter().map(String::as_str).collect();
     let first_report = check_japanese_summary(summary_seed, &first.text, None, &fixed_refs);
     let first_kinds = first_report.kinds_where(IssueKind::triggers_summary_retry);
     if first_kinds.is_empty() {
-        return first;
+        return Ok(first);
     }
     let reasons = retry_reasons(&first_report);
     log::info!(
@@ -498,18 +502,25 @@ where
     );
     let retried = match retried {
         Ok(retried) if retried.provider != PROVIDER_MOCK => retried,
-        Ok(_) => {
+        Ok(retried) => {
+            // 自動要約はここで止める（記事は未要約のまま・キューの再試行に回る）。手動は最初の要約を使う。
+            reject_fallback_early_with_label(fallback_policy, "summary regeneration", &retried)?;
             log::info!(
                 "the summary regeneration fell back to the mock provider; kept the first summary"
             );
-            return first;
+            return Ok(first);
+        }
+        // 手動要約との重なり・アプリの終了による停止（自動要約の取得手段が返す）は、握りつぶさずに返す。
+        Err(error @ AppError::Validation(_)) => {
+            log::info!("the summary regeneration was stopped; the summary was not regenerated");
+            return Err(error);
         }
         Err(error) => {
             log::info!(
                 "the summary regeneration failed ({}); kept the first summary",
                 error_label(&error)
             );
-            return first;
+            return Ok(first);
         }
     };
     let retried_report = check_japanese_summary(summary_seed, &retried.text, None, &fixed_refs);
@@ -519,14 +530,32 @@ where
             "adopted the regenerated summary (remaining issues: {})",
             issue_labels(&retried_kinds)
         );
-        retried
+        Ok(retried)
     } else {
         log::info!(
             "kept the first summary because the regenerated one was not better ({})",
             issue_labels(&retried_kinds)
         );
-        first
+        Ok(first)
     }
+}
+
+/// 自動要約で作り直しが Mock に切り替わったときのエラー（`reject_fallback_early` と同じエラー）。
+/// ログには記事IDの代わりに段の名前だけを出す（この関数は記事IDを持たない）。
+fn reject_fallback_early_with_label(
+    fallback_policy: FallbackPolicy,
+    stage: &str,
+    response: &AiResponse,
+) -> Result<(), AppError> {
+    if fallback_policy == FallbackPolicy::RejectFallback && response.provider == PROVIDER_MOCK {
+        log::warn!(
+            "auto summary {stage} fell back to the mock provider; the remaining AI calls were skipped and nothing was saved"
+        );
+        return Err(AppError::Network(
+            "real AI output was unavailable; fallback output was not saved".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// 作り直しのプロンプトに添える理由（1行1件・重複なし）。作り直しの理由になる種類だけを入れる。
@@ -576,7 +605,6 @@ fn error_label(error: &AppError) -> &'static str {
     match error {
         AppError::AiOutputRejected => "output_rejected",
         AppError::LocalAi(_) => "local_ai_failed",
-        AppError::Validation(_) => "stopped",
         _ => "other",
     }
 }
@@ -2318,10 +2346,14 @@ mod tests {
         let (service, _) = build_service(&root_dir, RETRY_EXCERPT);
         let guard = RefCell::new(None);
         let calls = RefCell::new(0);
+        let waits = RefCell::new(0);
         let outcome = service
             .generate_auto_summary_with(
                 params(),
-                |_provider| true,
+                |_provider| {
+                    *waits.borrow_mut() += 1;
+                    true
+                },
                 |_request, kind, _provider, _level| {
                     *calls.borrow_mut() += 1;
                     // 最初の要約を返した直後に、利用者が同じ記事の手動要約を始める。
@@ -2331,10 +2363,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome, super::AutoSummaryOutcome::YieldedToManual);
-        // 作り直しも、その後の段も呼ばない。
+        // 作り直しも、その後の段も呼ばない。作り直しの停止をそのまま返すので、要点の段の待ちにも進まない
+        // （待ちは最初の要約と作り直しの2回だけ）。
         assert_eq!(*calls.borrow(), 1);
+        assert_eq!(*waits.borrow(), 2);
         drop(guard);
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_stops_when_the_app_exits_before_the_regeneration() {
+        let root_dir = temp_root("retry-exit");
+        let (service, repository) = build_service(&root_dir, RETRY_EXCERPT);
+        let waits = RefCell::new(0);
+        let calls = RefCell::new(0);
+        let result = service.generate_auto_summary_with(
+            params(),
+            // 作り直しの前の待ちでアプリの終了に起こされる。
+            |_provider| {
+                *waits.borrow_mut() += 1;
+                *waits.borrow() == 1
+            },
+            |_request, kind, _provider, _level| {
+                *calls.borrow_mut() += 1;
+                Ok(output(kind, "投資額2兆円の工場が新設される。", "local"))
+            },
+        );
+        assert!(matches!(result, Err(AppError::Validation(_))), "{result:?}");
+        assert_eq!(*calls.borrow(), 1);
+        assert_eq!(*waits.borrow(), 2);
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn auto_summary_stops_when_the_regeneration_falls_back_to_mock() {
+        let root_dir = temp_root("retry-auto-mock");
+        let (service, repository) = build_service(&root_dir, RETRY_EXCERPT);
+        let requests = RefCell::new(Vec::new());
+        let result = service.generate_auto_summary_with(
+            params(),
+            |_provider| true,
+            |request, kind, _provider, _level| {
+                let retry = request.prompt_id == crate::domain::summary::SUMMARY_RETRY_PROMPT_ID;
+                requests.borrow_mut().push(request.prompt_id);
+                Ok(if retry {
+                    output(kind, "工場が新設される。", "mock")
+                } else {
+                    output(kind, "投資額2兆円の工場が新設される。", "gemini")
+                })
+            },
+        );
+        // Mock の結果は保存せず、要点以降の AI 呼び出しもしない（D56）。
+        assert!(matches!(result, Err(AppError::Network(_))), "{result:?}");
+        assert_eq!(requests.borrow().len(), 2);
+        assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn regeneration_with_a_new_kind_of_issue_is_not_better_even_with_fewer_issues() {
+        let source = "対象は28校。";
+        let check =
+            |text: &str| super::output_check::check_japanese_summary(source, text, None, &[]);
+        // 最初: 材料にない数字が2つ。
+        let first = check("対象は35校と40校。");
+        assert_eq!(first.issues.len(), 2);
+        // 作り直し: 数字はないが、簡体字が1つ（件数は減るが、最初になかった種類）。
+        let new_kind = check("対象の学校で电池を使う。");
+        assert_eq!(new_kind.issues.len(), 1);
+        assert!(!super::is_retry_better(&first, &new_kind));
+        // 同じ種類で件数が減ったときは採る。
+        let fewer = check("対象は28校と40校。");
+        assert!(super::is_retry_better(&first, &fewer));
+        // 件数が同じなら採らない。
+        assert!(!super::is_retry_better(
+            &first,
+            &check("対象は36校と41校。")
+        ));
     }
 
     #[test]

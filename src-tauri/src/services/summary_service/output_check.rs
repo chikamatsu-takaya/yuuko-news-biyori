@@ -241,7 +241,10 @@ pub(super) struct FoundNumber {
 }
 
 /// 日本語の数字の単位（「2500万」「10億」「1.5兆」「67百万」「3千」）。長いものから照合する。
-const JAPANESE_MULTIPLIERS: [(&str, f64); 7] = [
+/// 「千億」「百億」「十億」は「千」より前に照合する（「3千億」を 3000 × 1億ではなく 3 × 千億と読むため）。
+const JAPANESE_MULTIPLIERS: [(&str, f64); 9] = [
+    ("千億", 100_000_000_000.0),
+    ("百億", 10_000_000_000.0),
     ("百万", 1_000_000.0),
     ("千万", 10_000_000.0),
     ("十億", 1_000_000_000.0),
@@ -549,6 +552,14 @@ pub(super) fn contains_value(values: &[f64], target: f64) -> bool {
 }
 
 fn same_value(a: f64, b: f64) -> bool {
+    // 先に完全一致を見る（inf 同士は差が NaN になり、下の式では一致しないため）。
+    // 片方だけが inf のときは、下の式が inf <= inf で一致にしてしまうので、不一致とする。
+    if a == b {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
 }
 
@@ -765,6 +776,10 @@ mod tests {
         assert_eq!(values("33万2,150人"), vec![332_150.0]);
         assert_eq!(values("1億2000万人"), vec![1.2e8]);
         assert_eq!(values("3千人"), vec![3000.0]);
+        assert_eq!(values("5千億円"), vec![5e11]);
+        assert_eq!(values("2百億円"), vec![2e10]);
+        assert_eq!(values("1兆3千億円"), vec![1.3e12]);
+        assert_eq!(values("1兆3000億円"), vec![1.3e12]);
         assert_eq!(values("6700万人と250 万ドル"), vec![6.7e7, 2.5e6]);
         // 単位の前より大きい単位は続きにしない（「5万 3億」は別の数）。
         assert_eq!(values("5万と3億"), vec![5e4, 3e8]);
@@ -778,6 +793,24 @@ mod tests {
         // 日付の数は続きにしない。
         assert_eq!(values("80 万人、2026 年"), vec![8e5, 2026.0]);
         assert_eq!(values("約80万 2026年に"), vec![8e5, 2026.0]);
+    }
+
+    #[test]
+    fn thousand_and_hundred_oku_match_their_arabic_forms() {
+        let report = check(
+            "投資額は1兆3千億円、うち5千億円を国内に充てる。",
+            "投資額は1兆3000億円で、国内に5000億円。",
+        );
+        assert!(report.passed(), "{report:?}");
+        let reverse = check("投資額は1兆3000億円。", "投資額は1兆3千億円。");
+        assert!(reverse.passed(), "{reverse:?}");
+    }
+
+    #[test]
+    fn same_value_accepts_equal_infinities() {
+        assert!(same_value(f64::INFINITY, f64::INFINITY));
+        assert!(!same_value(f64::INFINITY, 1e300));
+        assert!(same_value(1.23e12, 1.23e12));
     }
 
     #[test]

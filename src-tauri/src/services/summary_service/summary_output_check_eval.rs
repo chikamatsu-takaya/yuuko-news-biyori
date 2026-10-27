@@ -35,7 +35,7 @@ use super::local_llm_quality_eval::{
 use super::output_check::{check_japanese_summary, japanese_numbers, CheckReport, IssueKind};
 use super::{
     build_focus_points, build_summary_seed, check_and_retry_summary, neutralize_seed_article,
-    request_validated_text_via, SummaryOutputKind,
+    request_validated_text_via, FallbackPolicy, SummaryOutputKind,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
 use crate::domain::summary::{AiRequest, SUMMARY_RETRY_PROMPT_ID};
@@ -161,6 +161,7 @@ fn generate(out_dir: &Path) {
                 &seed,
                 AiProvider::Local,
                 level,
+                FallbackPolicy::SaveFallback,
                 &|request: AiRequest, kind, provider, level| {
                     assert_eq!(request.prompt_id, SUMMARY_RETRY_PROMPT_ID);
                     let reasons = request.context.clone();
@@ -180,7 +181,9 @@ fn generate(out_dir: &Path) {
                     retry.replace(Some(stage));
                     result
                 },
-            );
+            )
+            // 手動の経路（SaveFallback）と同じ扱い。停止のエラーはこの評価では起きない。
+            .unwrap_or_else(|_| first.clone());
             let retry = retry.into_inner();
             let retry_ms = retry.as_ref().and_then(|stage| stage["ms"].as_u64());
             // 点検そのものの時間（作り直しの生成時間を除く）。
