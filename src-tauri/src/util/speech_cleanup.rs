@@ -351,6 +351,19 @@ pub(crate) fn strip_foreign_script_sentences(
     (kept, ForeignScriptOutcome::StrippedSentences)
 }
 
+/// 出力（`text`）に含まれる、日本語に無い簡体字（`SIMPLIFIED_ONLY_HANZI`）のうち、入力（`input`）に無い字
+/// （重複なし・出た順）。要約の機械点検（summary_service の `output_check`）が、作り直しの理由に使う。
+/// 入力にもある字は記事の固有名詞などとみなして数えない（`strip_foreign_script_sentences` と同じ扱い）。
+pub(crate) fn simplified_only_hanzi_not_in(text: &str, input: &str) -> Vec<char> {
+    let mut found = Vec::new();
+    for c in text.chars() {
+        if SIMPLIFIED_ONLY_HANZI.contains(c) && !input.contains(c) && !found.contains(&c) {
+            found.push(c);
+        }
+    }
+    found
+}
+
 /// 出力に含まれる英単語（ASCII の英字の連なり。2文字以上）のうち、入力（`input`）に無いものの数。
 /// 入力に無い英単語（実測の「excited」「weather」）は混入の可能性が高いが、固有名詞の表記ゆれ
 /// （「Superbase」）や一般的な略語もあるため、消さずに数えてログに残すだけにする（呼び出し側）。

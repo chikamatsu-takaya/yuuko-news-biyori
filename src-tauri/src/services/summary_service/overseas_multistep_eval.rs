@@ -38,7 +38,8 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::overseas_output_check::{check_english_numbers, check_overseas_output, CheckReport};
+use super::output_check::CheckReport;
+use super::overseas_output_check::{check_english_numbers, check_overseas_output};
 use super::overseas_summary_eval::{
     build_overseas_summary_prompt_v2, summary_length_rule, ARTICLE_DATA_DEFENSE_INSTRUCTION,
     ARTICLE_DATA_HEADING,

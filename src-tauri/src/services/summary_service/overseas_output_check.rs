@@ -16,60 +16,14 @@
 //! - **長さ**: 文字数の上限（空白を除く）。空の出力も問題にする。
 //! - **日本語でない**: かなの割合が低すぎる（英語のまま返した）出力。
 //!
-//! 国内記事の要約へ流用するときは、数字の照合の「要旨の数字」を日本語の抜粋の数字に替えれば同じ形で使える
-//! （簡体字・写し・長さ・日本語らしさの点検は言語に依存しない）。
+//! D166 で、言語に依存しない部分（日本語の数字の読み取り・簡体字・写し・注記・長さ・日本語らしさ）を
+//! 国内記事の要約と共通の [`super::output_check`] へ移した。ここには英語の要旨の数字の読み取りと、
+//! 海外の試作のプロンプトに合わせた語の一覧だけを残す。
 
-use crate::util::speech_cleanup::strip_prompt_echo_sentences;
-
-/// 点検で見つかった問題の1件。`reason` は作り直しのプロンプトにそのまま添える日本語の説明。
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct CheckIssue {
-    pub kind: IssueKind,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum IssueKind {
-    /// 要旨のどの数字とも合わない数字。
-    UnknownNumber,
-    /// 要旨の数字と 10 のべき乗倍ずれた数字（単位の換算の誤り）。
-    ScaleMismatch,
-    SimplifiedChinese,
-    PromptEcho,
-    /// 「要旨には数字が書かれていない」のような、記事の内容ではなく材料についての注記。
-    MetaComment,
-    TooLong,
-    Empty,
-    NotJapanese,
-}
-
-impl IssueKind {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::UnknownNumber => "unknown_number",
-            Self::ScaleMismatch => "scale_mismatch",
-            Self::SimplifiedChinese => "simplified_chinese",
-            Self::PromptEcho => "prompt_echo",
-            Self::MetaComment => "meta_comment",
-            Self::TooLong => "too_long",
-            Self::Empty => "empty",
-            Self::NotJapanese => "not_japanese",
-        }
-    }
-}
-
-/// 点検の結果。`issues` が空なら合格。`source_number_kept` は要旨の数字のうち要約に残った割合（参考値）。
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct CheckReport {
-    pub issues: Vec<CheckIssue>,
-    pub source_number_kept: Option<f64>,
-}
-
-impl CheckReport {
-    pub(super) fn passed(&self) -> bool {
-        self.issues.is_empty()
-    }
-}
+use super::output_check::{
+    check_output, contains_value, english_multiplier, parse_number_at, to_halfwidth, CheckIssue,
+    CheckOptions, CheckReport, FoundNumber, IssueKind, SourceNumbers,
+};
 
 /// 要約（または要旨の訳）を、元の英語の要旨と突き合わせて点検する。
 ///
@@ -81,36 +35,25 @@ pub(super) fn check_overseas_output(
     max_chars: usize,
     fixed_prompt_texts: &[&str],
 ) -> CheckReport {
-    let mut issues = Vec::new();
-    let body_chars = output.chars().filter(|c| !c.is_whitespace()).count();
-    if body_chars == 0 {
-        issues.push(issue(IssueKind::Empty, "要約が空だった。".to_string()));
-        return CheckReport {
-            issues,
-            source_number_kept: None,
-        };
-    }
-    let (number_issues, kept) = check_numbers(source, output);
-    issues.extend(number_issues);
-    issues.extend(check_simplified_chinese(output));
-    issues.extend(check_prompt_echo(output, fixed_prompt_texts));
-    issues.extend(check_meta_comment(output));
-    if body_chars > max_chars {
-        issues.push(issue(
-            IssueKind::TooLong,
-            format!("要約が{body_chars}文字で、上限の{max_chars}文字を超えていた。"),
-        ));
-    }
-    if !looks_japanese(output) {
-        issues.push(issue(
-            IssueKind::NotJapanese,
-            "要約が日本語になっていなかった。".to_string(),
-        ));
-    }
-    CheckReport {
-        issues,
-        source_number_kept: kept,
-    }
+    let listed: Vec<Vec<f64>> = english_numbers(source)
+        .into_iter()
+        .map(|found| found.values)
+        .collect();
+    check_output(
+        &SourceNumbers {
+            allowed: english_number_values(source),
+            listed,
+        },
+        output,
+        &CheckOptions {
+            input_text: source,
+            max_chars: Some(max_chars),
+            echo_markers: &PROMPT_ECHO_MARKERS,
+            meta_markers: &META_COMMENT_MARKERS,
+            fixed_prompt_texts,
+            scale_hint: "million は百万、billion は十億として換算する。",
+        },
+    )
 }
 
 /// 英語どうし（要旨と、要旨から抜き出した事実）の数字の照合。抽出段の点検に使う。
@@ -124,29 +67,18 @@ pub(super) fn check_english_numbers(source: &str, extracted: &str) -> Vec<CheckI
             .iter()
             .any(|value| contains_value(&allowed, *value))
         {
-            issues.push(issue(
-                IssueKind::UnknownNumber,
-                format!("「{}」は要旨にない数字だった。", found.text),
-            ));
+            issues.push(CheckIssue {
+                kind: IssueKind::UnknownNumber,
+                reason: format!("「{}」は要旨にない数字だった。", found.text),
+            });
         }
     }
     issues
 }
 
-fn issue(kind: IssueKind, reason: String) -> CheckIssue {
-    CheckIssue { kind, reason }
-}
-
 // ---------------------------------------------------------------------------
-// 数字
+// 英語の数字
 // ---------------------------------------------------------------------------
-
-/// 文中で見つけた1つの数字。`values` はその数字が表しうる値（単位を掛けた値・掛けない値）。
-#[derive(Debug, Clone, PartialEq)]
-struct FoundNumber {
-    text: String,
-    values: Vec<f64>,
-}
 
 /// 英単語の数（要旨の "three years" と要約の「3年」を突き合わせるため）。序数も同じ値として扱う。
 const ENGLISH_NUMBER_WORDS: [(&str, f64); 40] = [
@@ -191,17 +123,6 @@ const ENGLISH_NUMBER_WORDS: [(&str, f64); 40] = [
     ("billions", 1_000_000_000.0),
     ("half", 2.0),
 ];
-
-/// 英語の数字の後ろに付く倍率（"2.5M"・"3 billion"・"10K"）。
-fn english_multiplier(word: &str) -> Option<f64> {
-    match word {
-        "k" | "thousand" => Some(1_000.0),
-        "m" | "mn" | "million" | "millions" => Some(1_000_000.0),
-        "b" | "bn" | "billion" | "billions" => Some(1_000_000_000.0),
-        "t" | "trillion" => Some(1_000_000_000_000.0),
-        _ => None,
-    }
-}
 
 /// 英文の数字（算用数字）を取り出す。直後の倍率（M・million など）があれば、掛けた値も候補に入れる。
 fn english_numbers(text: &str) -> Vec<FoundNumber> {
@@ -280,239 +201,6 @@ fn english_number_values(source: &str) -> Vec<f64> {
     values
 }
 
-/// 日本語の数字の単位（「2500万」「10億」「1.5兆」「67百万」）。長いものから照合する。
-const JAPANESE_MULTIPLIERS: [(&str, f64); 6] = [
-    ("百万", 1_000_000.0),
-    ("千万", 10_000_000.0),
-    ("十億", 1_000_000_000.0),
-    ("万", 10_000.0),
-    ("億", 100_000_000.0),
-    ("兆", 1_000_000_000_000.0),
-];
-
-/// 日本語の要約の数字（算用数字。全角も可）を取り出す。直後の「万・億・百万」などや M・billion を掛けた値にする。
-/// 「1億2000万」のような続きの数は、足し合わせた値にする。
-fn japanese_numbers(text: &str) -> Vec<FoundNumber> {
-    let chars: Vec<char> = text.chars().map(to_halfwidth).collect();
-    let mut found = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let Some((value, end)) = parse_number_at(&chars, index) else {
-            index += 1;
-            continue;
-        };
-        // 小さいモデルは「250 万ドル」のように数字と単位の間に空白を入れることがある（第2弾の1回目で誤検出した）。
-        let mut unit_start = end;
-        while unit_start < chars.len() && chars[unit_start] == ' ' {
-            unit_start += 1;
-        }
-        let rest: String = chars[unit_start..].iter().take(3).collect();
-        let mut total = value;
-        let mut cursor = end;
-        if let Some((unit, multiplier)) = JAPANESE_MULTIPLIERS
-            .iter()
-            .find(|(unit, _)| rest.starts_with(unit))
-        {
-            total = value * multiplier;
-            cursor = unit_start + unit.chars().count();
-            // 「1億2000万」: 億のすぐ後ろの数を足す。
-            if let Some((next_value, next_end)) = parse_number_at(&chars, cursor) {
-                let next_rest: String = chars[next_end..].iter().take(1).collect();
-                if *multiplier >= 100_000_000.0 && next_rest == "万" {
-                    total += next_value * 10_000.0;
-                    cursor = next_end + 1;
-                }
-            }
-        } else {
-            let mut word_start = end;
-            while word_start < chars.len() && chars[word_start] == ' ' {
-                word_start += 1;
-            }
-            let word: String = chars[word_start..]
-                .iter()
-                .take_while(|c| c.is_ascii_alphabetic())
-                .collect::<String>()
-                .to_ascii_lowercase();
-            if let Some(multiplier) = english_multiplier(&word) {
-                total = value * multiplier;
-                cursor = word_start + word.len();
-            }
-        }
-        found.push(FoundNumber {
-            text: chars[index..cursor].iter().collect(),
-            values: vec![total],
-        });
-        index = cursor.max(end);
-    }
-    found
-}
-
-/// `chars[start..]` が数字で始まるとき、その値と終わりの位置を返す（3桁区切りのカンマ・小数点を含める）。
-/// 英字の直後の数字（"GPT4" の 4 など）も数字として扱う（名前の中の数字は要旨にも同じ形で出るため照合で通る）。
-fn parse_number_at(chars: &[char], start: usize) -> Option<(f64, usize)> {
-    if !chars.get(start)?.is_ascii_digit() {
-        return None;
-    }
-    // 数字の途中から読み始めない。
-    if start > 0 && (chars[start - 1].is_ascii_digit() || is_decimal_point_before(chars, start)) {
-        return None;
-    }
-    let mut end = start;
-    let mut digits = String::new();
-    while end < chars.len() {
-        let c = chars[end];
-        if c.is_ascii_digit() {
-            digits.push(c);
-            end += 1;
-        } else if c == ','
-            && chars.get(end + 1).is_some_and(char::is_ascii_digit)
-            && chars.get(end + 2).is_some_and(char::is_ascii_digit)
-            && chars.get(end + 3).is_some_and(char::is_ascii_digit)
-            && !chars.get(end + 4).is_some_and(char::is_ascii_digit)
-        {
-            end += 1;
-        } else if c == '.'
-            && !digits.contains('.')
-            && chars.get(end + 1).is_some_and(char::is_ascii_digit)
-        {
-            digits.push('.');
-            end += 1;
-        } else {
-            break;
-        }
-    }
-    digits.parse().ok().map(|value| (value, end))
-}
-
-fn is_decimal_point_before(chars: &[char], start: usize) -> bool {
-    start >= 2 && chars[start - 1] == '.' && chars[start - 2].is_ascii_digit()
-}
-
-fn to_halfwidth(c: char) -> char {
-    match c {
-        '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c),
-        '．' => '.',
-        '，' => ',',
-        _ => c,
-    }
-}
-
-fn contains_value(values: &[f64], target: f64) -> bool {
-    values.iter().any(|value| same_value(*value, target))
-}
-
-fn same_value(a: f64, b: f64) -> bool {
-    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
-}
-
-/// `a` が `b` の 10 のべき乗倍（10〜10^9 倍、または 1/10〜1/10^9）か。
-fn differs_by_power_of_ten(a: f64, b: f64) -> bool {
-    if a == 0.0 || b == 0.0 {
-        return false;
-    }
-    let ratio = (a / b).abs().log10();
-    let rounded = ratio.round();
-    rounded != 0.0 && rounded.abs() <= 9.0 && (ratio - rounded).abs() < 1e-9
-}
-
-/// 要約の数字を要旨と照合する。戻り値の2つ目は、要旨の算用数字のうち要約に残った割合（要旨に数字がなければ None）。
-fn check_numbers(source: &str, output: &str) -> (Vec<CheckIssue>, Option<f64>) {
-    let allowed = english_number_values(source);
-    let output_numbers = japanese_numbers(output);
-    let mut issues = Vec::new();
-    for found in &output_numbers {
-        let value = found.values[0];
-        if contains_value(&allowed, value) {
-            continue;
-        }
-        if let Some(near) = allowed
-            .iter()
-            .find(|candidate| differs_by_power_of_ten(value, **candidate))
-        {
-            issues.push(issue(
-                IssueKind::ScaleMismatch,
-                format!(
-                    "「{}」は要旨の数字（{}）と桁が合わなかった。million は百万、billion は十億として換算する。",
-                    found.text,
-                    format_value(*near)
-                ),
-            ));
-        } else {
-            issues.push(issue(
-                IssueKind::UnknownNumber,
-                format!(
-                    "「{}」は材料にない数字だった。材料にない数字は書かない。",
-                    found.text
-                ),
-            ));
-        }
-    }
-    let source_numbers = english_numbers(source);
-    let kept = (!source_numbers.is_empty()).then(|| {
-        let output_values: Vec<f64> = output_numbers.iter().map(|found| found.values[0]).collect();
-        let kept = source_numbers
-            .iter()
-            .filter(|found| {
-                found
-                    .values
-                    .iter()
-                    .any(|v| contains_value(&output_values, *v))
-            })
-            .count();
-        kept as f64 / source_numbers.len() as f64
-    });
-    (issues, kept)
-}
-
-fn format_value(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 簡体字
-// ---------------------------------------------------------------------------
-
-/// 日本語では使わない簡体字（日本語の新字体と同じ形の字は入れない）。第1弾で混入した「经」「网」「络」を含む。
-const SIMPLIFIED_ONLY_CHARS: &str = "们这说对时间发现实问题过还进动开关样为门导变让认识语设计论应该专业产术态检测总结读书长网络经种么吗呢个东车亿无处务员华际级线统组织构选择带帮层节视频览载输类显页风险复杂简单观欢环习练运营资讯气电脑软确报图标记录质达并从两讨训评价值证验优势战释执链获码别愿";
-
-/// 中国語にしかない2字の並び（字だけでは日本語と区別できないもの）。第1弾の「及其」を含む。
-/// 「相干」「良率」は字は日本語にもあるが、語としては中国語（日本語は「コヒーレント」「歩留まり」。第2弾の1回目で混入）。
-const SIMPLIFIED_ONLY_BIGRAMS: [&str; 7] = ["及其", "以及", "我们", "他们", "一个", "相干", "良率"];
-
-fn check_simplified_chinese(output: &str) -> Vec<CheckIssue> {
-    let mut hits: Vec<String> = output
-        .chars()
-        .filter(|c| SIMPLIFIED_ONLY_CHARS.contains(*c))
-        .map(String::from)
-        .collect();
-    hits.extend(
-        SIMPLIFIED_ONLY_BIGRAMS
-            .iter()
-            .filter(|bigram| output.contains(**bigram))
-            .map(|bigram| bigram.to_string()),
-    );
-    hits.sort_unstable();
-    hits.dedup();
-    if hits.is_empty() {
-        return Vec::new();
-    }
-    vec![issue(
-        IssueKind::SimplifiedChinese,
-        format!(
-            "中国語の字（{}）が混ざっていた。日本語の字だけで書く。",
-            hits.join("・")
-        ),
-    )]
-}
-
-// ---------------------------------------------------------------------------
-// 指示の写し・日本語らしさ
-// ---------------------------------------------------------------------------
-
 /// プロンプトの見出し・きまりの語。要約の本文に出るのは写しのときだけ。
 const PROMPT_ECHO_MARKERS: [&str; 12] = [
     "きまり",
@@ -529,28 +217,6 @@ const PROMPT_ECHO_MARKERS: [&str; 12] = [
     "文字以内",
 ];
 
-fn check_prompt_echo(output: &str, fixed_prompt_texts: &[&str]) -> Vec<CheckIssue> {
-    let mut hits: Vec<&str> = PROMPT_ECHO_MARKERS
-        .iter()
-        .copied()
-        .filter(|marker| output.contains(marker))
-        .collect();
-    let (_, removed) = strip_prompt_echo_sentences(output, fixed_prompt_texts);
-    if removed > 0 {
-        hits.push("指示の文");
-    }
-    if hits.is_empty() {
-        return Vec::new();
-    }
-    vec![issue(
-        IssueKind::PromptEcho,
-        format!(
-            "指示の写し（{}）が混ざっていた。要約の本文だけを書く。",
-            hits.join("・")
-        ),
-    )]
-}
-
 /// 材料・要旨そのものについての注記の言い回し（第2弾の1回目で「抽象書には具体的な数字…が明記されていなかった」
 /// 「提供された事実の一覧には…」が出た）。記事の本文に出ることはまれな言い回しに絞る。
 const META_COMMENT_MARKERS: [&str; 8] = [
@@ -564,47 +230,9 @@ const META_COMMENT_MARKERS: [&str; 8] = [
     "要旨には",
 ];
 
-fn check_meta_comment(output: &str) -> Vec<CheckIssue> {
-    let hits: Vec<&str> = META_COMMENT_MARKERS
-        .iter()
-        .copied()
-        .filter(|marker| output.contains(marker))
-        .collect();
-    if hits.is_empty() {
-        return Vec::new();
-    }
-    vec![issue(
-        IssueKind::MetaComment,
-        format!(
-            "記事の内容ではない注記（{}）が混ざっていた。書かれていないことには触れず、記事の内容だけを書く。",
-            hits.join("・")
-        ),
-    )]
-}
-
-/// かなが本文（空白・記号・数字を除く）の 10% 以上あれば日本語とみなす（固有名詞の英字が多い要約でも通る下限）。
-fn looks_japanese(output: &str) -> bool {
-    let letters: Vec<char> = output
-        .chars()
-        .filter(|c| c.is_alphabetic() || is_kana(*c) || is_cjk(*c))
-        .collect();
-    if letters.is_empty() {
-        return false;
-    }
-    let kana = letters.iter().filter(|c| is_kana(**c)).count();
-    kana * 100 >= letters.len() * 10
-}
-
-fn is_kana(c: char) -> bool {
-    ('\u{3041}'..='\u{30ff}').contains(&c)
-}
-
-fn is_cjk(c: char) -> bool {
-    ('\u{4e00}'..='\u{9fff}').contains(&c)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::output_check::japanese_numbers;
     use super::*;
 
     fn kinds(report: &CheckReport) -> Vec<IssueKind> {
