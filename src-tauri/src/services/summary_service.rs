@@ -3534,3 +3534,7 @@ mod tests {
 /// 同梱ローカルLLMの品質評価ハーネス（`#[ignore]`・手動実行専用）。
 #[cfg(test)]
 mod local_llm_quality_eval;
+
+/// 海外（英語）記事の日本語要約の試作評価ハーネス（D163・D164。`#[ignore]`・手動実行専用）。
+#[cfg(test)]
+mod overseas_summary_eval;
