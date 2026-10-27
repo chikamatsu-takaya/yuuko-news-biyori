@@ -61,6 +61,7 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::output_check::{check_japanese_summary, IssueKind};
 use super::{
     clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
     FallbackPolicy, SummaryGeneration, SummaryOutputKind, SummaryService,
@@ -81,6 +82,7 @@ use crate::paths::{AppPaths, NETWORK_ALLOWLIST_RELATIVE_PATH, NEWS_SOURCES_RELAT
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::ai_provider_service::summary_fixed_prompt_texts;
 use crate::services::ai_provider_service::AiProviderService;
 use crate::services::dictionary_service::{DictionaryService, TermExplanationAi};
 use crate::services::local_llm_service::LocalLlmService;
@@ -163,7 +165,7 @@ fn local_llm_quality_eval() {
     local.shutdown();
 }
 
-fn bundle_dir() -> PathBuf {
+pub(super) fn bundle_dir() -> PathBuf {
     std::env::var_os(BUNDLE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -431,7 +433,7 @@ fn article_record(
     })
 }
 
-fn write_json(path: &Path, value: &Value) {
+pub(super) fn write_json(path: &Path, value: &Value) {
     std::fs::write(
         path,
         serde_json::to_string_pretty(value).expect("serialize json"),
@@ -441,7 +443,7 @@ fn write_json(path: &Path, value: &Value) {
 
 /// 保存済みの `articles.json` の記事を一時データフォルダへ取り込み（既にある記事は飛ばす）、
 /// `<RUN>/articles.json` として複写する。別の回で同じ記事を評価するため。
-fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
+pub(super) fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
     let text = std::fs::read_to_string(articles_file).expect("read saved articles.json");
     let records: Vec<Value> = serde_json::from_str(&text).expect("parse saved articles.json");
     let repository = ArticleRepository::new(paths);
@@ -484,7 +486,7 @@ fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
     }
 }
 
-fn load_article_ids(out_dir: &Path) -> Vec<String> {
+pub(super) fn load_article_ids(out_dir: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(out_dir.join("articles.json"))
         .expect("articles.json (run the fetch phase first)");
     let records: Vec<Value> = serde_json::from_str(&text).expect("parse articles.json");
@@ -495,7 +497,10 @@ fn load_article_ids(out_dir: &Path) -> Vec<String> {
 }
 
 /// 追記先の JSONL に記録済みのキー（記事ID など）を読む。途中で止めても続きから再開できるようにする。
-fn recorded_keys(path: &Path, key: impl Fn(&Value) -> Option<String>) -> HashSet<String> {
+pub(super) fn recorded_keys(
+    path: &Path,
+    key: impl Fn(&Value) -> Option<String>,
+) -> HashSet<String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -504,7 +509,7 @@ fn recorded_keys(path: &Path, key: impl Fn(&Value) -> Option<String>) -> HashSet
         .collect()
 }
 
-fn append_line(path: &Path, value: &Value) {
+pub(super) fn append_line(path: &Path, value: &Value) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -513,7 +518,7 @@ fn append_line(path: &Path, value: &Value) {
     writeln!(file, "{value}").expect("append jsonl");
 }
 
-fn error_label(error: &AppError) -> String {
+pub(super) fn error_label(error: &AppError) -> String {
     format!("{error:?}")
 }
 
@@ -584,6 +589,8 @@ fn record_stage(
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
     let input_text = request.input_text.clone();
+    // 要約の作り直し（D166 の summary_retry_v1）を最初の要約と分けて数えるため。
+    let prompt_id = request.prompt_id.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
     let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
     // 再説明・一言の入力は同じ生成の AI 出力（要約・要点）だけなので、確認用に残す。
@@ -599,6 +606,7 @@ fn record_stage(
     let elapsed_ms = started.elapsed().as_millis();
     let mut stage = json!({
         "kind": kind.label(),
+        "promptId": prompt_id,
         "ms": elapsed_ms,
         "inputChars": input_chars,
         "speechInput": speech_input,
@@ -632,9 +640,44 @@ fn record_stage(
     let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
+        // 機械点検（D166）の結果。要約は作り直しの判断と同じ点検、要点・注目ポイントは記録だけ（作り直さない）。
+        let checked = match kind {
+            SummaryOutputKind::Summary => Some(response.text.clone()),
+            SummaryOutputKind::Points => validate_article_points(&response.text).ok().map(|v| {
+                [v.points.key_points, v.points.focus_points].concat().join(
+                    "
+",
+                )
+            }),
+            _ => None,
+        };
+        if let Some(checked) = checked {
+            stage["check"] = check_json(&input_text, &checked);
+        }
     }
     stages.borrow_mut().push(stage);
     selected
+}
+
+/// 要約の機械点検（`output_check`）の結果を記録用の JSON にする（すべての種類・作り直しの対象かどうか）。
+pub(super) fn check_json(source: &str, output: &str) -> Value {
+    let fixed = summary_fixed_prompt_texts();
+    let fixed_refs: Vec<&str> = fixed.iter().map(String::as_str).collect();
+    let report = check_japanese_summary(source, output, None, &fixed_refs);
+    json!({
+        "issues": report.issues.iter().map(|issue| json!({
+            "kind": issue.kind.label(),
+            "retry": issue.kind.triggers_summary_retry(),
+            "reason": issue.reason,
+        })).collect::<Vec<_>>(),
+        "retryKinds": report
+            .kinds_where(IssueKind::triggers_summary_retry)
+            .iter()
+            .map(|kind| kind.label())
+            .collect::<Vec<_>>(),
+        "sourceNumberKept": report.source_number_kept,
+        "chars": output.chars().filter(|c| !c.is_whitespace()).count(),
+    })
 }
 
 #[derive(Debug, Deserialize)]

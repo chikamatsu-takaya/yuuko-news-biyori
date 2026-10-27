@@ -83,6 +83,11 @@ pub struct AiResponse {
     pub provider: String,
 }
 
+/// 要約の機械点検で問題が見つかったとき、理由を添えて要約を1回だけ作り直すときの prompt_id（判断台帳 D166）。
+/// 入力は最初の要約と同じ種、context は summary_service の点検が作った理由（固定の文と数字・字だけ）。
+/// 出力の契約は `summary_v1` と同じ（1つの文字列）。
+pub const SUMMARY_RETRY_PROMPT_ID: &str = "summary_retry_v1";
+
 /// ゆうこの再説明（記事の「ゆうこの解説」）をAIへ依頼するときの prompt_id。出力は1段落の文字列。
 /// プロンプトの言い回し・長さの指示を変えても出力の契約（1つの文字列）は同じなので、版は上げない。
 pub const YUUKO_EXPLANATION_PROMPT_ID: &str = "yuuko_explanation_v1";

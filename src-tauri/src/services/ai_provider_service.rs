@@ -20,8 +20,8 @@ use crate::domain::summary::{
     ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
     PHRASE_EXPLANATION_PROMPT_ID, POINT_ITEM_MAX_CHARS, SHORT_INPUT_FOCUS_POINTS_ITEMS,
-    SHORT_INPUT_KEY_POINTS_ITEMS, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
-    YUUKO_EXPLANATION_PROMPT_ID,
+    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_RETRY_PROMPT_ID, TERM_EXPLANATION_PROMPT_ID,
+    YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
@@ -333,7 +333,7 @@ impl AiProviderService {
     /// context が無いときだけ input_text の短い抜粋を返す（従来の呼び出し方との互換）。
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
-            "summary_v1" => mock_excerpt(&request.input_text),
+            "summary_v1" | SUMMARY_RETRY_PROMPT_ID => mock_excerpt(&request.input_text),
             id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => request
                 .context
                 .unwrap_or_else(|| mock_excerpt(&request.input_text)),
@@ -811,9 +811,19 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         SpeechTone::Normal => String::new(),
     };
     let instruction = match request.prompt_id.as_str() {
-        "summary_v1" => format!(
-            "次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}"
-        ),
+        "summary_v1" => summary_instruction(level),
+        // 機械点検で問題が見つかった要約の作り直し（D166）。最初の要約と同じ指示に、点検の理由を添える。
+        // 理由は summary_service の点検が作った文（固定の文と、数字・単位・字だけ）で、記事の文は入らない。
+        // それでも出力由来の文字を含むので、行数・長さを絞り、無害化してから固定指示の側に置く。
+        SUMMARY_RETRY_PROMPT_ID => {
+            format!(
+                "{}
+{SUMMARY_RETRY_INSTRUCTION}
+{}",
+                summary_instruction(level),
+                summary_retry_reason_lines(request.context.as_deref().unwrap_or(""))
+            )
+        }
         // 再説明は画面の1段落に収まる長さにする（解説レベルで文の数と上限だけを変える）。
         id if id == YUUKO_EXPLANATION_PROMPT_ID => {
             let length = match explanation_level {
@@ -860,6 +870,59 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         }
     }
     prompt
+}
+
+/// 要約（`summary_v1`）の指示（固定文）。解説レベルの言い回しだけが変わる。
+fn summary_instruction(level: &str) -> String {
+    format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}")
+}
+
+/// 要約の作り直し（`summary_retry_v1`・D166）で、点検の理由の前に置く固定文。
+/// 部分の修正ではなく記事情報からの書き直しを頼む（小さいモデルには「この語を直せ」より
+/// 「この問題を避けて書け」の方が通りやすかった。D165 の試作）。
+const SUMMARY_RETRY_INSTRUCTION: &str =
+    "前に書いた要約には次の問題がありました。同じ問題が出ないように、記事情報から要約を書き直してください。";
+
+/// 作り直しのプロンプトに入れる理由の行数・1行の文字数の上限。
+const SUMMARY_RETRY_MAX_REASONS: usize = 5;
+const SUMMARY_RETRY_REASON_MAX_CHARS: usize = 120;
+
+/// 点検の理由（context。1行1件）を、行数・長さを絞り、HTML・制御文字・行頭の見出し記号を無害化した
+/// 「- 理由」の行にする。
+fn summary_retry_reason_lines(reasons: &str) -> String {
+    reasons
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(SUMMARY_RETRY_MAX_REASONS)
+        .map(|line| {
+            let line = line.trim_start_matches(['#', '-', ' ']);
+            let cut: String = line.chars().take(SUMMARY_RETRY_REASON_MAX_CHARS).collect();
+            format!("- {}", neutralize_html_and_control(&cut))
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
+/// 要約・要約の作り直しのプロンプトに入る固定指示の文（記事を含まない）。要約の出力にこれらの写しが
+/// 混ざっていないかを、summary_service の機械点検が確かめるために使う（D166）。
+pub(crate) fn summary_fixed_prompt_texts() -> Vec<String> {
+    let mut texts: Vec<String> = ["やさしく簡潔に", "分かりやすく", "詳しく"]
+        .into_iter()
+        .map(summary_instruction)
+        .collect();
+    texts.extend(
+        [
+            FACTS_ONLY_RULE,
+            ARTICLE_DATA_DEFENSE_INSTRUCTION,
+            SUMMARY_RETRY_INSTRUCTION,
+        ]
+        .map(str::to_string),
+    );
+    texts
 }
 
 /// 再説明・一言のプロンプトに入る固定指示の文（利用者の入力・記事を含まない）。出力にこれらの写しが
@@ -1926,6 +1989,36 @@ mod tests {
         assert!(prompt.contains("生成AIの新機能が発表された"));
         // context は送信プロンプトに含めない（最小化）。
         assert!(!prompt.contains("送信されないはず"));
+    }
+
+    #[test]
+    fn summary_retry_prompt_adds_bounded_reasons_before_the_article_data() {
+        // D166: 点検の理由（context）は固定指示の側（記事情報の見出しより前）に、無害化・行数を絞って置く。
+        let reasons = (1..=7)
+            .map(|n| format!("「{n}<b>」は記事情報にない数字だった。"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = AiRequest {
+            prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
+            input_text: "投資額は1兆円。".to_string(),
+            context: Some(format!("# {}\n\n{}", "あ".repeat(200), reasons)),
+        };
+        let prompt = build_prompt(&request, ExplanationLevel::Normal);
+
+        let heading = prompt.find(ARTICLE_DATA_HEADING).unwrap();
+        let retry = prompt.find(SUMMARY_RETRY_INSTRUCTION).unwrap();
+        assert!(prompt.starts_with(&summary_instruction("分かりやすく")));
+        assert!(retry < heading);
+        assert!(prompt[..heading].contains(&format!("- {}\n", "あ".repeat(120))));
+        assert!(prompt[..heading].contains("「1＜b>」は記事情報にない数字だった。"));
+        assert!(prompt[..heading].contains("「4＜b>」"));
+        assert!(!prompt.contains("「5＜b>」"));
+        assert!(!prompt.contains('<'));
+        assert!(prompt[heading..].contains("投資額は1兆円。"));
+        // 固定指示の一覧（写しの点検用）には、作り直しの固定文と各解説レベルの指示が入る。
+        let fixed = summary_fixed_prompt_texts();
+        assert!(fixed.contains(&SUMMARY_RETRY_INSTRUCTION.to_string()));
+        assert!(fixed.contains(&summary_instruction("詳しく")));
     }
 
     #[test]
