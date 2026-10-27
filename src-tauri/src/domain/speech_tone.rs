@@ -509,7 +509,11 @@ mod tests {
             assert_eq!(SpeechTone::for_request(prompt_id, &heavy), SpeechTone::Calm);
         }
         // 要約・要点・用語解説は中立な文体なので、口調を切り替えない。
-        for prompt_id in ["summary_v1", "article_points_v2", "term_explanation_v1"] {
+        for prompt_id in [
+            crate::domain::summary::SUMMARY_PROMPT_ID,
+            "article_points_v2",
+            "term_explanation_v1",
+        ] {
             assert_eq!(
                 SpeechTone::for_request(prompt_id, &heavy),
                 SpeechTone::Normal

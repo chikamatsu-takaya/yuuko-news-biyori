@@ -589,7 +589,7 @@ fn record_stage(
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
     let input_text = request.input_text.clone();
-    // 要約の作り直し（D166 の summary_retry_v1）を最初の要約と分けて数えるため。
+    // 要約の作り直し（D166 の summary_retry_v2）を最初の要約と分けて数えるため。
     let prompt_id = request.prompt_id.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
     let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);

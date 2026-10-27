@@ -83,10 +83,29 @@ pub struct AiResponse {
     pub provider: String,
 }
 
+/// 記事の「AI要約」をAIへ依頼するときの prompt_id（v2・判断台帳 D167）。
+/// v2 では先に要点（`ARTICLE_POINTS_PROMPT_ID` の検証済み `key_points`）を作り、無害化したタイトル・本文抜粋と
+/// その要点を材料に要約させる（v1 は本文抜粋と定型文の種だけから要約させていた）。入力の形と指示が変わるため
+/// 版を上げた。出力の契約（1つの文字列）は v1 と同じ。
+pub const SUMMARY_PROMPT_ID: &str = "summary_v2";
+
+/// 要約（`SUMMARY_PROMPT_ID`）の入力の行の見出し。summary_service が入力を組み、ai_provider_service が
+/// 入力に要点があるか（`SUMMARY_INPUT_KEY_POINTS_LABEL` だけの行があるか）で指示の文を選ぶ（D167）。
+/// 外部由来の文（タイトル・本文抜粋・要点）の行頭にこれらの見出しがあると偽の区切りになるため、
+/// summary_service が行頭の見出しのコロンを全角にしてから入れる。
+pub const SUMMARY_INPUT_TITLE_LABEL: &str = "タイトル:";
+pub const SUMMARY_INPUT_EXCERPT_LABEL: &str = "本文抜粋:";
+pub const SUMMARY_INPUT_KEY_POINTS_LABEL: &str = "要点:";
+
+/// 旧版の要約（本文抜粋と定型文の種だけから要約させる）。アプリでは使わない。
+/// 海外記事の試作評価（D165・`overseas_summary_eval`）が当時の要約と比べるために、テストのビルドにだけ残す。
+#[cfg(test)]
+pub const LEGACY_SUMMARY_PROMPT_ID: &str = "summary_v1";
+
 /// 要約の機械点検で問題が見つかったとき、理由を添えて要約を1回だけ作り直すときの prompt_id（判断台帳 D166）。
-/// 入力は最初の要約と同じ種、context は summary_service の点検が作った理由（固定の文と数字・字だけ）。
-/// 出力の契約は `summary_v1` と同じ（1つの文字列）。
-pub const SUMMARY_RETRY_PROMPT_ID: &str = "summary_retry_v1";
+/// 入力は最初の要約と同じ（`SUMMARY_PROMPT_ID` の入力）、context は summary_service の点検が作った理由
+/// （固定の文と数字・字だけ）。v2 は要約の v2 の指示に理由を足す（D167）。出力の契約は要約と同じ（1つの文字列）。
+pub const SUMMARY_RETRY_PROMPT_ID: &str = "summary_retry_v2";
 
 /// ゆうこの再説明（記事の「ゆうこの解説」）をAIへ依頼するときの prompt_id。出力は1段落の文字列。
 /// プロンプトの言い回し・長さの指示を変えても出力の契約（1つの文字列）は同じなので、版は上げない。
