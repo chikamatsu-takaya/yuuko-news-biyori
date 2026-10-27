@@ -246,14 +246,19 @@ function YuukoCharacter({ hopping = false }: { hopping?: boolean }) {
 /**
  * ガチャ結果・コレクションの 1 件を見せるモーダル。
  * 文面は外部由来ではないが、HTML としては扱わずプレーンテキストで表示する。
+ * keepOnOutsideClick: ガチャの結果（前回の結果を含む）は外側のクリックでは閉じず、「とじる」と Esc だけで閉じる。
+ * 動きを抑える設定では結果がすぐ出るため、まわした直後の別の場所へのクリックで見ないまま閉じてしまうのを防ぐ。
+ * コレクションの詳細は自分で開いたものなので、従来どおり外側のクリックでも閉じる。
  */
 function GachaItemDialog({
   item,
   heading,
+  keepOnOutsideClick,
   onClose,
 }: {
   item: DisplayItem | null;
   heading: string;
+  keepOnOutsideClick: boolean;
   onClose: () => void;
 }) {
   const KindIcon = item ? KIND_ICONS[item.kind] : Sparkles;
@@ -266,7 +271,15 @@ function GachaItemDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-sm" showCloseButton={false}>
+      <DialogContent
+        className="sm:max-w-sm"
+        showCloseButton={false}
+        onInteractOutside={(event) => {
+          if (keepOnOutsideClick) {
+            event.preventDefault();
+          }
+        }}
+      >
         {item && (
           <>
             <DialogHeader>
@@ -348,6 +361,8 @@ export default function GachaScreen({
   const [drawError, setDrawError] = React.useState<string | null>(null);
   const [dialogItem, setDialogItem] = React.useState<DisplayItem | null>(null);
   const [dialogHeading, setDialogHeading] = React.useState("");
+  // ガチャの結果として出しているか（コレクションの詳細と区別し、外側のクリックで閉じないようにする）。
+  const [dialogIsDrawResult, setDialogIsDrawResult] = React.useState(false);
   // state 更新は非同期なので、連打による二重抽選は ref で確実に止める。
   const drawingRef = React.useRef(false);
   // 抽選の世代。抽選の開始・反映で進め、それより前に出した NEW 解除の応答で抽選後の状態を上書きしないようにする。
@@ -394,6 +409,7 @@ export default function GachaScreen({
     resultToShowOnReturn = null;
     if (pending) {
       setDialogHeading("前回のガチャの結果");
+      setDialogIsDrawResult(true);
       setDialogItem(pending);
     }
   }, []);
@@ -452,6 +468,7 @@ export default function GachaScreen({
       setGacha((prev) => (prev ? applyDrawResult(prev, result) : prev));
       if (result.status === "drawn" && result.item) {
         setDialogHeading("ガチャの結果");
+        setDialogIsDrawResult(true);
         setDialogItem({
           itemId: result.item.itemId,
           kind: result.item.kind,
@@ -488,6 +505,7 @@ export default function GachaScreen({
 
   const handleOpenCollectionItem = (item: DisplayItem) => {
     setDialogHeading("コレクション");
+    setDialogIsDrawResult(false);
     setDialogItem(item);
   };
 
@@ -830,7 +848,12 @@ export default function GachaScreen({
         </div>
       </footer>
 
-      <GachaItemDialog item={dialogItem} heading={dialogHeading} onClose={handleCloseDialog} />
+      <GachaItemDialog
+        item={dialogItem}
+        heading={dialogHeading}
+        keepOnOutsideClick={dialogIsDrawResult}
+        onClose={handleCloseDialog}
+      />
     </div>
   );
 }

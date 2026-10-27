@@ -9862,6 +9862,46 @@ test("gacha draw hops yuuko briefly before the result, and skips it with reduced
   expect(await gachaDrawCallCount(page)).toBe(2);
 });
 
+// ガチャの結果は外側のクリックでは閉じず、「とじる」と Esc で閉じる（2026-10-26 E2E テスト 5）。
+// 動きを抑える設定では結果がすぐ出るため、まわした直後の別の場所へのクリックで見ないまま閉じないこと。
+test("gacha result dialog ignores outside clicks and closes with the button or Escape", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openGacha(page);
+  const dialog = page.getByRole("dialog");
+
+  // まわした直後に外側（背景）をクリックしても閉じない。
+  await gachaDrawButton(page).click();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  await expect(dialog.getByText("ガチャの結果")).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  // 閉じていないので NEW も外していない。
+  expect(await gachaSeenIds(page)).toEqual([]);
+
+  // Esc で閉じる。閉じたら NEW を外す（確認した扱い）。
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => gachaSeenIds(page)).toContain("card-002");
+
+  // 2回目も外側のクリックでは閉じず、「とじる」で閉じる。
+  await gachaDrawButton(page).click();
+  await expect(dialog.getByRole("heading", { name: "よぞら色テーマ" })).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // コレクションの詳細（自分で開いたもの）は従来どおり外側のクリックでも閉じる。
+  await page.getByRole("button", { name: /おはようカード/ }).click();
+  await expect(dialog.getByRole("heading", { name: "おはようカード" })).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toHaveCount(0);
+});
+
 // 演出中に別画面へ移っても、消費済みの結果は次にガチャ画面を開いたときに出す（演出の追加に伴う見逃し防止）。
 test("gacha result is shown on return when leaving during the hop", async ({ page }) => {
   await openGacha(page);
@@ -9882,6 +9922,9 @@ test("gacha result is shown on return when leaving during the hop", async ({ pag
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  // 前回の結果も、外側のクリックでは閉じない（とじる・Esc だけで閉じる）。
+  await page.mouse.click(5, 5);
+  await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
   await dialog.getByRole("button", { name: "とじる" }).click();
   await expect(dialog).toHaveCount(0);
   // 一度出したら、もう一度開いても出さない。
