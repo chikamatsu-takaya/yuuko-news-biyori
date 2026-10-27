@@ -1,8 +1,10 @@
 //! 要約の機械点検（`output_check`）と1回の作り直しの評価ハーネス（判断台帳 D166。`#[ignore]`・手動実行専用）。
 //!
 //! 国内記事の評価データ（`eval_data/domestic_articles_synthetic.json`。評価のために書いた架空の記事で、
-//! 実在の記事の転載ではない）で、アプリと同じ要約（`summary_v1`）を同梱ローカルLLMで解説レベルごとに作り、
+//! 実在の記事の転載ではない）で、アプリと同じ要約を同梱ローカルLLMで解説レベルごとに作り、
 //! 点検の結果と、アプリと同じ作り直し（`check_and_retry_summary`）の結果・所要時間を JSONL に書く。
+//! D167 から要約はアプリと同じく、先に要点（`article_points_v2`）を作り、タイトル・本文抜粋・要点を材料に
+//! `summary_v2` で作る（要点の所要時間も `pointsMs` に書く）。点検の材料はアプリと同じタイトル＋本文抜粋。
 //! 誤検出（問題がないのに問題ありとする）かどうかの判定は、人（Claude）が出力を読んで行う。
 //!
 //! 段階（`YUUKO_SUMMARY_CHECK_EVAL_PHASE`）:
@@ -34,11 +36,13 @@ use super::local_llm_quality_eval::{
 };
 use super::output_check::{check_japanese_summary, japanese_numbers, CheckReport, IssueKind};
 use super::{
-    build_focus_points, build_summary_seed, check_and_retry_summary, neutralize_seed_article,
-    request_validated_text_via, FallbackPolicy, SummaryOutputKind,
+    article_points_from_response, build_points_seed, build_summary_input, check_and_retry_summary,
+    neutralize_seed_article, request_validated_text_via, FallbackPolicy, SummaryOutputKind,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
-use crate::domain::summary::{AiRequest, SUMMARY_RETRY_PROMPT_ID};
+use crate::domain::summary::{
+    AiRequest, ARTICLE_POINTS_PROMPT_ID, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID,
+};
 use crate::paths::AppPaths;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
@@ -88,7 +92,7 @@ fn level_label(level: ExplanationLevel) -> &'static str {
     }
 }
 
-/// 記事ごと・解説レベルごとに、アプリと同じ種で要約を作り、点検と作り直しを記録する。
+/// 記事ごと・解説レベルごとに、アプリと同じ順（要点 → 要約）・入力で要約を作り、点検と作り直しを記録する。
 fn generate(out_dir: &Path) {
     let paths = AppPaths::new(out_dir.join("appdata"));
     paths.ensure_storage_dirs().expect("create temp data dirs");
@@ -123,26 +127,55 @@ fn generate(out_dir: &Path) {
                 continue;
             }
             let seed_article = neutralize_seed_article(&article);
-            let focus = build_focus_points(&seed_article, level);
-            let seed = build_summary_seed(&seed_article, level, &focus);
+            // 点検の材料（アプリと同じ。タイトル＋本文抜粋）。
+            let seed = build_points_seed(&seed_article);
+            let started = Instant::now();
+            let points = request_validated_text_via(
+                &ai,
+                AiRequest {
+                    prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
+                    input_text: seed.clone(),
+                    context: Some(seed_article.genre.clone()),
+                },
+                SummaryOutputKind::Points,
+                AiProvider::Local,
+                level,
+            )
+            .and_then(|response| article_points_from_response(&response));
+            let points_ms = started.elapsed().as_millis();
+            let mut record = json!({
+                "articleId": article_id,
+                "level": level_label(level),
+                "pointsMs": points_ms,
+            });
+            let points = match points {
+                Ok(points) => points,
+                Err(error) => {
+                    record["pointsError"] = json!(error_label(&error));
+                    append_line(&jsonl, &record);
+                    continue;
+                }
+            };
+            record["keyPoints"] = json!(points.key_points);
+            let input = build_summary_input(
+                &seed_article.title,
+                seed_article.excerpt.as_deref(),
+                Some(&points.key_points),
+            );
             let started = Instant::now();
             let first = request_validated_text_via(
                 &ai,
                 AiRequest {
-                    prompt_id: "summary_v1".to_string(),
-                    input_text: seed.clone(),
-                    context: Some(article.title.clone()),
+                    prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                    input_text: input.clone(),
+                    context: None,
                 },
                 SummaryOutputKind::Summary,
                 AiProvider::Local,
                 level,
             );
             let first_ms = started.elapsed().as_millis();
-            let mut record = json!({
-                "articleId": article_id,
-                "level": level_label(level),
-                "firstMs": first_ms,
-            });
+            record["firstMs"] = json!(first_ms);
             let first = match first {
                 Ok(first) => first,
                 Err(error) => {
@@ -158,6 +191,7 @@ fn generate(out_dir: &Path) {
             let check_started = Instant::now();
             let adopted = check_and_retry_summary(
                 first.clone(),
+                &input,
                 &seed,
                 AiProvider::Local,
                 level,
@@ -239,12 +273,7 @@ fn analyze(out_dir: &Path) {
         };
         first_count += 1;
         let article_id = record["articleId"].as_str().unwrap_or_default();
-        let level = match record["level"].as_str() {
-            Some("simple") => ExplanationLevel::Simple,
-            Some("detailed") => ExplanationLevel::Detailed,
-            _ => ExplanationLevel::Normal,
-        };
-        let Some(source) = seed_for(&repository, article_id, level) else {
+        let Some(source) = seed_for(&repository, article_id) else {
             continue;
         };
         // 点検は記録時の結果ではなく、今の点検でかけ直す（点検を直した後に、生成し直さずに比べるため）。
@@ -329,16 +358,11 @@ fn analyze(out_dir: &Path) {
     write_json(&out_dir.join("analysis.json"), &analysis);
 }
 
-/// generate 段で取り込んだ記事から、アプリと同じ要約の種を作り直す（analyze 段で点検をかけ直すため）。
-fn seed_for(
-    repository: &ArticleRepository,
-    article_id: &str,
-    level: ExplanationLevel,
-) -> Option<String> {
+/// generate 段で取り込んだ記事から、アプリと同じ点検の材料（タイトル＋本文抜粋）を作り直す
+/// （analyze 段で点検をかけ直すため）。
+fn seed_for(repository: &ArticleRepository, article_id: &str) -> Option<String> {
     let article = repository.get_article_detail(article_id).ok()?;
-    let seed_article = neutralize_seed_article(&article);
-    let focus = build_focus_points(&seed_article, level);
-    Some(build_summary_seed(&seed_article, level, &focus))
+    Some(build_points_seed(&neutralize_seed_article(&article)))
 }
 
 /// 要約の最初の「単位も区切りもない算用数字」を 10 倍にする（「12億」→「120億」）。

@@ -10,7 +10,7 @@ use crate::domain::summary::{
     GeneratedArticleSummaryDto, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAGS_MAX_ITEMS,
     ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS,
     FOCUS_POINTS_MAX_ITEMS, FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
-    POINT_ITEM_MAX_CHARS, SUMMARY_RETRY_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
+    POINT_ITEM_MAX_CHARS, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
     YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
@@ -131,7 +131,7 @@ impl SummaryService {
     /// `AutoSummaryOutcome::AlreadySummarized` を返す。
     /// 手動の `generate_article_summary` は Gemini の通信失敗などによる Mock の結果を従来どおり保存し、
     /// 要約済みでも作り直す。
-    /// 各段（要約・要点・再説明・感想）の AI 呼び出しの前に、同じ記事の手動要約が始まっていないか・
+    /// 各段（要点・要約・再説明・感想）の AI 呼び出しの前に、同じ記事の手動要約が始まっていないか・
     /// 要約済みになっていないかを確かめ、そうなら残りの段をやめる（`generate_auto_summary_with`）。
     pub fn generate_article_summary_without_fallback(
         &self,
@@ -252,38 +252,22 @@ impl SummaryService {
         // 保存する要点・注目ポイント・タグは、下の article_points_v2 の AI 出力から取る（D18 / D11）。
         let seed_article = neutralize_seed_article(&article);
         let seed_focus_points = build_focus_points(&seed_article, explanation_level);
-        let summary_seed = build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
+        // 要約の Mock の結果の種（本文抜粋＋定型文）。D167 の前の要約の入力と同じで、Mock 専用（context で渡し、
+        // 実AIへは送らない）。Mock の要約の文面を変えないため。
+        let summary_mock_seed =
+            build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
         let points_seed = build_points_seed(&seed_article);
 
-        // 4出力（要約・要点と注目ポイント・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
+        // 4出力（要点と注目ポイント・要約・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
         // 保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
         // 自動要約（RejectFallback）では、Mock に切り替わった時点で残りの AI 呼び出しをせずに止める
         // （キー未設定・利用枠超過のときに、保存しない出力のために外部AIを呼び続けないため）。
-        // 順序は 要約 → 要点 → 再説明 → 感想。再説明・感想の入力に前の2つの出力を使うため、先に作る。
+        // 順序は 要点 → 要約 → 再説明 → 感想（D167）。要約は先に作った要点（事実の箇条書き）を軸に組み立てさせる
+        // （本文抜粋だけから要約させると、小さいモデルが中心の出来事を落としたり主語と目的語を取り違えたりした一方、
+        // 要点は正確だったため）。再説明・感想の入力には前の2つの出力を使う。生成の回数は変わらない。
         // どの段で拒否・失敗しても `?` で止まるので、後の呼び出しはしない（D104 / D56）。
-        let summary_response = request_validated(
-            AiRequest {
-                prompt_id: "summary_v1".to_string(),
-                input_text: summary_seed.clone(),
-                context: Some(article.title.clone()),
-            },
-            SummaryOutputKind::Summary,
-            provider,
-            explanation_level,
-        )?;
-        reject_fallback_early(fallback_policy, &article_id, &summary_response)?;
-        // 実AIの要約は機械点検にかけ、問題があれば理由を添えて1回だけ作り直す（D166）。
-        // 作り直しも同じ取得手段（自動要約では手動要約との重なりの確認を含む）を通す。
-        let summary_response = check_and_retry_summary(
-            summary_response,
-            &summary_seed,
-            provider,
-            explanation_level,
-            fallback_policy,
-            &request_validated,
-        )?;
 
         // 要点・注目ポイント・タグ（D18 / D11）。ローカルLLMの負荷を抑えるため、1回の呼び出しで受け取る
         // （タグのためだけに AI を呼ばない）。
@@ -293,7 +277,7 @@ impl SummaryService {
         let points_response = request_validated(
             AiRequest {
                 prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
-                input_text: points_seed,
+                input_text: points_seed.clone(),
                 context: Some(seed_article.genre.clone()),
             },
             SummaryOutputKind::Points,
@@ -303,6 +287,40 @@ impl SummaryService {
         reject_fallback_early(fallback_policy, &article_id, &points_response)?;
         // 取得手段に関わらず、保存前にもう一度ここで検証して構造化する（形の崩れた出力を保存しない）。
         let points = article_points_from_response(&points_response)?;
+
+        // 要約（D167）の実AI入力: 無害化したタイトル・本文抜粋と、いま作った要点。要点が Mock の代替（手動生成で
+        // 要点だけ Gemini が失敗したとき。本文の文と定型文）なら入れない（実AIの出力ではない文を実AIの入力に混ぜない）。
+        let summary_key_points =
+            (points_response.provider != PROVIDER_MOCK).then_some(points.key_points.as_slice());
+        let summary_input = build_summary_input(
+            &seed_article.title,
+            seed_article.excerpt.as_deref(),
+            summary_key_points,
+        );
+        let summary_response = request_validated(
+            AiRequest {
+                prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                input_text: summary_input.clone(),
+                context: Some(summary_mock_seed),
+            },
+            SummaryOutputKind::Summary,
+            provider,
+            explanation_level,
+        )?;
+        reject_fallback_early(fallback_policy, &article_id, &summary_response)?;
+        // 実AIの要約は機械点検にかけ、問題があれば理由を添えて1回だけ作り直す（D166）。
+        // 作り直しも同じ取得手段（自動要約では手動要約との重なりの確認を含む）を通す。
+        // 点検の材料は記事そのもの（無害化したタイトル＋本文抜粋＝要点の種）にし、要点は含めない
+        // （要点も AI の出力なので、要点にだけある数字を要約が写したときも「記事情報にない数字」として拾うため）。
+        let summary_response = check_and_retry_summary(
+            summary_response,
+            &summary_input,
+            &points_seed,
+            provider,
+            explanation_level,
+            fallback_policy,
+            &request_validated,
+        )?;
 
         // 再説明・一言の実AI入力: 同じ生成で得た要約・要点（検証済み）。定型文の言い換えにさせないため、
         // 記事の中身を渡す。AI 出力も外部データ由来なので、種と同じく無害化・切り詰めてから渡す
@@ -450,7 +468,9 @@ impl SummaryService {
 ///
 /// - 点検するのは実AI（Gemini・ローカル）の要約だけ。Mock の結果（本文の抜粋）は点検しない。
 /// - 作り直すのは、国内記事の評価で誤検出の少なかった種類（`IssueKind::triggers_summary_retry`）が
-///   見つかったときだけ。理由（固定の文と数字・字だけ）を添えて、同じ種から1回だけ作り直す。
+///   見つかったときだけ。理由（固定の文と数字・字だけ）を添えて、最初と同じ入力（`summary_input`）から1回だけ作り直す。
+/// - 点検の材料（`check_source`）は、AI へ渡した入力とは別に渡す（要約は要点を含む入力から作るが、点検は
+///   記事そのもの〔タイトル＋本文抜粋〕と照らす。D167）。
 /// - 作り直した要約を採るのは、作り直しの理由になる問題の数が減り、新しい種類の問題が出ていないときだけ。
 ///   作り直しが失敗した・検証に落ちた・Mock に切り替わった・良くならなかったときは、最初の要約を使う
 ///   （最初の要約は保存前の検証を通っているので、作り直しで悪化させない）。
@@ -461,7 +481,8 @@ impl SummaryService {
 /// - ログは INFO で、問題の種類（固定ラベル）と結果だけを残す（本文・URL・理由の文は出さない）。
 fn check_and_retry_summary<F>(
     first: AiResponse,
-    summary_seed: &str,
+    summary_input: &str,
+    check_source: &str,
     provider: AiProvider,
     explanation_level: ExplanationLevel,
     fallback_policy: FallbackPolicy,
@@ -480,7 +501,7 @@ where
     }
     let fixed_texts = summary_fixed_prompt_texts();
     let fixed_refs: Vec<&str> = fixed_texts.iter().map(String::as_str).collect();
-    let first_report = check_japanese_summary(summary_seed, &first.text, None, &fixed_refs);
+    let first_report = check_japanese_summary(check_source, &first.text, None, &fixed_refs);
     let first_kinds = first_report.kinds_where(IssueKind::triggers_summary_retry);
     if first_kinds.is_empty() {
         return Ok(first);
@@ -493,7 +514,7 @@ where
     let retried = request_validated(
         AiRequest {
             prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
-            input_text: summary_seed.to_string(),
+            input_text: summary_input.to_string(),
             context: Some(reasons),
         },
         SummaryOutputKind::Summary,
@@ -523,7 +544,7 @@ where
             return Ok(first);
         }
     };
-    let retried_report = check_japanese_summary(summary_seed, &retried.text, None, &fixed_refs);
+    let retried_report = check_japanese_summary(check_source, &retried.text, None, &fixed_refs);
     let retried_kinds = retried_report.kinds_where(IssueKind::triggers_summary_retry);
     if is_retry_better(&first_report, &retried_report) {
         log::info!(
@@ -1441,6 +1462,44 @@ pub(crate) fn build_yuuko_speech_input(
     lines.join("\n")
 }
 
+/// 要約（`summary_v2`・D167）の実AI入力。無害化済みのタイトル・本文抜粋と、同じ生成で先に作った要点を、
+/// ラベル付きの行で並べる（`タイトル: …` / `本文抜粋:` に続く抜粋 / `要点:` に続く `・…` の行）。
+///
+/// 要点は §12.5 の検証を通った AI 出力だが、記事（外部データ）から作られたものなので信頼せず、
+/// 再説明・一言の入力と同じく `neutralize_seed_text` で無害化し、各100文字・最大4件に切り詰める。
+/// タイトル・本文抜粋は呼び出し側で無害化済み（`neutralize_seed_article`。タイトル200・抜粋1500文字）だが、
+/// 単体で使っても安全なように、ここでも同じ上限で無害化する（無害化済みの文は変わらない）。
+/// 要点を本文抜粋の後ろ（生成の直前）に置くのは、小さいモデルは入力の末尾に近い材料ほど使いやすいため。
+/// `key_points` が `None`・空（要点が Mock の代替だったとき）は要点の行を入れない。
+/// 抜粋が無い記事はタイトル（と要点）だけにする。
+pub(crate) fn build_summary_input(
+    title: &str,
+    excerpt: Option<&str>,
+    key_points: Option<&[String]>,
+) -> String {
+    let mut lines = vec![format!(
+        "タイトル: {}",
+        neutralize_seed_text(title, SEED_TITLE_MAX_CHARS)
+    )];
+    if let Some(excerpt) = excerpt.filter(|excerpt| !excerpt.trim().is_empty()) {
+        lines.push("本文抜粋:".to_string());
+        lines.push(neutralize_seed_text(excerpt.trim(), SEED_EXCERPT_MAX_CHARS));
+    }
+    if let Some(key_points) = key_points.filter(|points| !points.is_empty()) {
+        lines.push("要点:".to_string());
+        lines.extend(key_points.iter().take(KEY_POINTS_MAX_ITEMS).map(|point| {
+            format!(
+                "・{}",
+                neutralize_seed_text(point.trim(), POINT_ITEM_MAX_CHARS)
+            )
+        }));
+    }
+    lines.join(
+        "
+",
+    )
+}
+
 /// 要点・注目ポイントの種: 1行目に無害化済みタイトル、2行目以降に無害化済みの本文抜粋（無ければタイトルだけ）。
 /// 実AIへの入力であり、Mock はこの種の文から要点を組む（ai_provider_service の mock_article_points）。
 fn build_points_seed(article: &ArticleDetailDto) -> String {
@@ -1450,6 +1509,9 @@ fn build_points_seed(article: &ArticleDetailDto) -> String {
     }
 }
 
+/// 要約の Mock の結果の種（本文抜粋＋定型文）。Mock はこの先頭の短い抜粋を要約にする（`mock_excerpt`）。
+/// D167 の前は実AIへの要約の入力でもあったが、いまは Mock 専用（`AiRequest.context` で渡し、実AIへは送らない）。
+/// 実AIへの要約の入力は `build_summary_input`。
 fn build_summary_seed(
     article: &ArticleDetailDto,
     explanation_level: ExplanationLevel,
@@ -1590,7 +1652,7 @@ mod tests {
     use crate::domain::speech_tone::SpeechTone;
     use crate::domain::summary::{
         AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAG_MAX_CHARS,
-        KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
+        KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS, SUMMARY_PROMPT_ID,
     };
     use crate::error::{AppError, CommandError};
     use crate::paths::AppPaths;
@@ -1860,7 +1922,7 @@ mod tests {
         assert_eq!(mock.text, mock_seed);
     }
 
-    /// 実際の要約の種（`build_summary_seed`。定型文が抜粋の最終行と同じ行に続く）を Mock に渡したときの要約。
+    /// 実際の要約の Mock の種（`build_summary_seed`。定型文が抜粋の最終行と同じ行に続く）を Mock に渡したときの要約。
     fn mock_summary_from_seed(excerpt: &str, level: ExplanationLevel) -> String {
         let article = crate::domain::article::ArticleDetailDto {
             article_id: ARTICLE_ID.to_string(),
@@ -1886,10 +1948,15 @@ mod tests {
         let root_dir = std::env::temp_dir().join("yuuko_summary_mock_seed_test");
         AiProviderService::new(&AppPaths::new(root_dir))
             .request_text(
+                // アプリと同じく、実AIの入力は要約の入力（D167）、Mock の種は context で渡す。
                 crate::domain::summary::AiRequest {
-                    prompt_id: "summary_v1".to_string(),
-                    input_text: seed,
-                    context: Some(seed_article.title.clone()),
+                    prompt_id: crate::domain::summary::SUMMARY_PROMPT_ID.to_string(),
+                    input_text: super::build_summary_input(
+                        &seed_article.title,
+                        seed_article.excerpt.as_deref(),
+                        None,
+                    ),
+                    context: Some(seed),
                 },
                 crate::domain::settings::AiProvider::Mock,
                 level,
@@ -2176,7 +2243,7 @@ mod tests {
 
     #[test]
     fn explanation_and_comment_get_the_summary_and_key_points_of_the_same_run() {
-        // 要約 → 要点 → 再説明 → 感想の順に呼び、再説明・感想の実AI入力は同じ生成の要約・要点にする。
+        // 要点 → 要約 → 再説明 → 感想の順に呼び（D167）、再説明・感想の実AI入力は同じ生成の要約・要点にする。
         // 定型文（Mock 用）は context にだけ入り、実AIの入力（input_text）には入らない。
         let root_dir = temp_root("speech-input");
         let excerpt = "新しい半導体工場の建設計画が発表されました。投資額は1兆円です。";
@@ -2202,12 +2269,29 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                SummaryOutputKind::Summary,
                 SummaryOutputKind::Points,
+                SummaryOutputKind::Summary,
                 SummaryOutputKind::Explanation,
                 SummaryOutputKind::Comment
             ]
         );
+        // 要約の実AI入力は、タイトル・本文抜粋と、先に作った要点（D167）。Mock の種（本文抜粋＋定型文）は
+        // context にだけ入る。
+        let (_, summary_request) = &requests[1];
+        assert_eq!(summary_request.prompt_id, SUMMARY_PROMPT_ID);
+        assert_eq!(
+            summary_request.input_text,
+            format!(
+                "タイトル: 半導体工場の新設計画\n本文抜粋:\n{excerpt}\n要点:\n・工場（要点1）\n・工場（要点2）"
+            )
+        );
+        assert!(!summary_request.input_text.contains("要点を確認する"));
+        let summary_mock_seed = summary_request.context.as_deref().unwrap();
+        assert!(
+            summary_mock_seed.starts_with(excerpt),
+            "{summary_mock_seed}"
+        );
+        assert!(!summary_mock_seed.contains("要点1"), "{summary_mock_seed}");
         let expected_input =
             "タイトル: 半導体工場の新設計画\n要約: 工場が新設される。\n要点:\n・工場（要点1）\n・工場（要点2）";
         for (kind, request) in &requests[2..] {
@@ -2277,16 +2361,17 @@ mod tests {
         assert_eq!(
             prompt_ids,
             vec![
-                "summary_v1",
-                crate::domain::summary::SUMMARY_RETRY_PROMPT_ID,
                 ARTICLE_POINTS_PROMPT_ID,
+                SUMMARY_PROMPT_ID,
+                crate::domain::summary::SUMMARY_RETRY_PROMPT_ID,
                 crate::domain::summary::YUUKO_EXPLANATION_PROMPT_ID,
                 crate::domain::summary::YUUKO_COMMENT_PROMPT_ID,
             ]
         );
-        // 作り直しは同じ種から。理由（数字だけを含む固定の文）を context で渡す。
-        assert_eq!(requests[1].input_text, requests[0].input_text);
-        let reasons = requests[1].context.as_deref().unwrap();
+        // 作り直しは最初と同じ入力（要点を含む）から。理由（数字だけを含む固定の文）を context で渡す。
+        assert_eq!(requests[2].input_text, requests[1].input_text);
+        assert!(requests[2].input_text.contains("・工場（要点1）"));
+        let reasons = requests[2].context.as_deref().unwrap();
         assert!(reasons.contains("「2兆」は記事情報にない数字"), "{reasons}");
         // 再説明・一言の入力は、採った要約を使う。
         assert!(requests[3].input_text.contains("投資額1兆円"));
@@ -2357,16 +2442,18 @@ mod tests {
                 |_request, kind, _provider, _level| {
                     *calls.borrow_mut() += 1;
                     // 最初の要約を返した直後に、利用者が同じ記事の手動要約を始める。
-                    guard.replace(Some(service.mark_manual_summary_in_progress(ARTICLE_ID)));
+                    if kind == SummaryOutputKind::Summary {
+                        guard.replace(Some(service.mark_manual_summary_in_progress(ARTICLE_ID)));
+                    }
                     Ok(output(kind, "投資額2兆円の工場が新設される。", "local"))
                 },
             )
             .unwrap();
         assert_eq!(outcome, super::AutoSummaryOutcome::YieldedToManual);
-        // 作り直しも、その後の段も呼ばない。作り直しの停止をそのまま返すので、要点の段の待ちにも進まない
-        // （待ちは最初の要約と作り直しの2回だけ）。
-        assert_eq!(*calls.borrow(), 1);
-        assert_eq!(*waits.borrow(), 2);
+        // 作り直しも、その後の段も呼ばない。作り直しの停止をそのまま返すので、再説明の段の待ちにも進まない
+        // （待ちは要点・最初の要約・作り直しの3回だけ）。
+        assert_eq!(*calls.borrow(), 2);
+        assert_eq!(*waits.borrow(), 3);
         drop(guard);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
@@ -2379,10 +2466,10 @@ mod tests {
         let calls = RefCell::new(0);
         let result = service.generate_auto_summary_with(
             params(),
-            // 作り直しの前の待ちでアプリの終了に起こされる。
+            // 作り直しの前の待ち（要点・最初の要約の後の3回目）でアプリの終了に起こされる。
             |_provider| {
                 *waits.borrow_mut() += 1;
-                *waits.borrow() == 1
+                *waits.borrow() <= 2
             },
             |_request, kind, _provider, _level| {
                 *calls.borrow_mut() += 1;
@@ -2390,8 +2477,8 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(AppError::Validation(_))), "{result:?}");
-        assert_eq!(*calls.borrow(), 1);
-        assert_eq!(*waits.borrow(), 2);
+        assert_eq!(*calls.borrow(), 2);
+        assert_eq!(*waits.borrow(), 3);
         assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
@@ -2414,9 +2501,9 @@ mod tests {
                 })
             },
         );
-        // Mock の結果は保存せず、要点以降の AI 呼び出しもしない（D56）。
+        // Mock の結果は保存せず、再説明以降の AI 呼び出しもしない（D56）。
         assert!(matches!(result, Err(AppError::Network(_))), "{result:?}");
-        assert_eq!(requests.borrow().len(), 2);
+        assert_eq!(requests.borrow().len(), 3);
         assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
@@ -2563,7 +2650,7 @@ mod tests {
             .unwrap();
 
         let requests = requests.into_inner();
-        let points_input = &requests[1].1.input_text;
+        let points_input = &requests[0].1.input_text;
         assert_eq!(
             points_input,
             &format!(
@@ -2619,6 +2706,78 @@ mod tests {
             assert!(!request.input_text.contains("代わりの要約"), "{kind:?}");
         }
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn mock_key_points_are_left_out_of_the_summary_input() {
+        // 手動生成で要点だけ Mock の代替（本文の文と定型文）になったとき、要約の実AI入力には要点を入れず、
+        // タイトルと本文抜粋だけを渡す（D167）。Mock の要点は従来どおり保存される。
+        let root_dir = temp_root("summary-input-mock-points");
+        let excerpt = "新しい半導体工場の建設計画が発表されました。";
+        let (service, repository) = build_service(&root_dir, excerpt);
+
+        let requests = RefCell::new(Vec::new());
+        service
+            .generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |request, kind, _provider, _level| {
+                    requests.borrow_mut().push((kind, request));
+                    Ok(match kind {
+                        SummaryOutputKind::Points => output(kind, "代わりの要点", "mock"),
+                        _ => output(kind, "工場が新設される。", "gemini"),
+                    })
+                },
+            )
+            .unwrap();
+
+        let requests = requests.into_inner();
+        let (kind, summary_request) = &requests[1];
+        assert_eq!(*kind, SummaryOutputKind::Summary);
+        assert_eq!(
+            summary_request.input_text,
+            format!("タイトル: 半導体工場の新設計画\n本文抜粋:\n{excerpt}")
+        );
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.key_points[0], "代わりの要点（要点1）");
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn summary_input_neutralizes_and_caps_the_title_excerpt_and_key_points() {
+        // 要点は AI 出力（外部データ由来）なので、再説明・一言の入力と同じく無害化し、長さ・件数を抑える。
+        let excerpt = format!("#見出し\n<b>強調</b>\n---\n{}", "あ".repeat(3_000));
+        let points = vec![
+            "# 要点".to_string(),
+            "い".repeat(500),
+            "う".to_string(),
+            "え".to_string(),
+            "お".to_string(),
+        ];
+        let input = super::build_summary_input("#タイトル<i>", Some(&excerpt), Some(&points));
+
+        assert!(input.starts_with("タイトル: ＃タイトル＜i>\n本文抜粋:\n"));
+        assert!(!input.contains('<'));
+        assert!(input
+            .lines()
+            .all(|line| !line.trim_start().starts_with('#')));
+        assert!(input.lines().all(|line| line.trim() != "---"));
+        assert!(!input.contains(&"あ".repeat(super::SEED_EXCERPT_MAX_CHARS)));
+        assert!(input.contains("\n要点:\n・＃ 要点\n"));
+        assert!(input.contains(&format!("・{}", "い".repeat(POINT_ITEM_MAX_CHARS))));
+        assert!(!input.contains(&"い".repeat(POINT_ITEM_MAX_CHARS + 1)));
+        assert_eq!(
+            input.lines().filter(|line| line.starts_with('・')).count(),
+            KEY_POINTS_MAX_ITEMS
+        );
+        // 要点は本文抜粋の後ろ（生成の直前）に置く。
+        assert!(input.find("本文抜粋:").unwrap() < input.find("要点:").unwrap());
+
+        // 抜粋が無い・空の記事はタイトルと要点だけ。要点が無いときは要点の行を入れない。
+        let no_excerpt = super::build_summary_input("題", None, Some(&points[2..3]));
+        assert_eq!(no_excerpt, "タイトル: 題\n要点:\n・う");
+        let blank_excerpt = super::build_summary_input("題", Some("  "), Some(&[]));
+        assert_eq!(blank_excerpt, "タイトル: 題");
     }
 
     #[test]
@@ -2845,8 +3004,8 @@ mod tests {
             assert_eq!(
                 calls.into_inner(),
                 vec![
-                    SummaryOutputKind::Summary,
                     SummaryOutputKind::Points,
+                    SummaryOutputKind::Summary,
                     SummaryOutputKind::Explanation
                 ]
             );
@@ -2923,25 +3082,25 @@ mod tests {
         let root_dir = temp_root("strict-abort");
         let (service, repository) = build_service(&root_dir, "新しい半導体工場の建設計画です。");
 
-        // 1つ目（要約）で Mock に切り替わったら、再説明・感想の AI 呼び出しはしない。
-        let (result, calls) = generate_counting_calls(
-            &service,
-            FallbackPolicy::RejectFallback,
-            SummaryOutputKind::Summary,
-        );
-        assert!(result.is_err());
-        assert_eq!(calls, vec![SummaryOutputKind::Summary]);
-
-        // 2つ目（要点）で切り替わったら、再説明・感想は呼ばない。
+        // 1つ目（要点）で Mock に切り替わったら、要約・再説明・感想の AI 呼び出しはしない（D167 の順）。
         let (result, calls) = generate_counting_calls(
             &service,
             FallbackPolicy::RejectFallback,
             SummaryOutputKind::Points,
         );
         assert!(result.is_err());
+        assert_eq!(calls, vec![SummaryOutputKind::Points]);
+
+        // 2つ目（要約）で切り替わったら、作り直し・再説明・感想は呼ばない。
+        let (result, calls) = generate_counting_calls(
+            &service,
+            FallbackPolicy::RejectFallback,
+            SummaryOutputKind::Summary,
+        );
+        assert!(result.is_err());
         assert_eq!(
             calls,
-            vec![SummaryOutputKind::Summary, SummaryOutputKind::Points]
+            vec![SummaryOutputKind::Points, SummaryOutputKind::Summary]
         );
 
         // 3つ目（再説明）で切り替わったら、感想は呼ばない。
@@ -2954,8 +3113,8 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                SummaryOutputKind::Summary,
                 SummaryOutputKind::Points,
+                SummaryOutputKind::Summary,
                 SummaryOutputKind::Explanation
             ]
         );
@@ -3036,7 +3195,7 @@ mod tests {
 
         // 残りの段は呼ばず、保存もしない（失敗ではなく手動へ譲った扱い）。
         assert_eq!(outcome, super::AutoSummaryOutcome::YieldedToManual);
-        assert_eq!(*calls.borrow(), vec![SummaryOutputKind::Summary]);
+        assert_eq!(*calls.borrow(), vec![SummaryOutputKind::Points]);
         assert!(!repository.is_article_summarized(ARTICLE_ID).unwrap());
         drop(manual);
         assert!(!service.is_manual_summary_in_progress(ARTICLE_ID));

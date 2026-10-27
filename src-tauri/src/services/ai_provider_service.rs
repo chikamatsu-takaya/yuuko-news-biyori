@@ -20,8 +20,8 @@ use crate::domain::summary::{
     ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
     PHRASE_EXPLANATION_PROMPT_ID, POINT_ITEM_MAX_CHARS, SHORT_INPUT_FOCUS_POINTS_ITEMS,
-    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_RETRY_PROMPT_ID, TERM_EXPLANATION_PROMPT_ID,
-    YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
+    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID,
+    TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
 use crate::infra::gemini_client::{GeminiClient, GeminiConnectionOutcome};
@@ -331,9 +331,18 @@ impl AiProviderService {
     /// 再説明・感想は summary_service がゆうこの口調で組んだ定型文（context）をそのまま返す。
     /// input_text（実AI向けの要約・要点）は使わず、Mock の結果を従来の決定的な文面のままにする。
     /// context が無いときだけ input_text の短い抜粋を返す（従来の呼び出し方との互換）。
+    /// 要約（v2・D167）の実AI入力は「タイトル: …」などの見出し付きの材料なので、Mock は context の種
+    /// （本文抜粋＋定型文。v1 の入力と同じ）から抜粋を作り、Mock の要約の文面を D167 の前と同じにする。
+    /// 作り直しの context は点検の理由なので、作り直しの Mock は input_text の抜粋にする（作り直しが Mock に
+    /// 切り替わったときは、手動は最初の要約を使い、自動は止めるので、この文面は保存も表示もされない）。
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
-            "summary_v1" | SUMMARY_RETRY_PROMPT_ID => mock_excerpt(&request.input_text),
+            SUMMARY_PROMPT_ID => {
+                mock_excerpt(request.context.as_deref().unwrap_or(&request.input_text))
+            }
+            SUMMARY_RETRY_PROMPT_ID => mock_excerpt(&request.input_text),
+            #[cfg(test)]
+            crate::domain::summary::LEGACY_SUMMARY_PROMPT_ID => mock_excerpt(&request.input_text),
             id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => request
                 .context
                 .unwrap_or_else(|| mock_excerpt(&request.input_text)),
@@ -811,7 +820,12 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         SpeechTone::Normal => String::new(),
     };
     let instruction = match request.prompt_id.as_str() {
-        "summary_v1" => summary_instruction(level),
+        // 要約（v2・D167）。材料はタイトル・本文抜粋と、同じ生成で先に作った要点（summary_service の
+        // build_summary_input。どれも無害化・切り詰め済みで、記事情報の見出しの下に置く）。
+        SUMMARY_PROMPT_ID => summary_instruction(level),
+        // 旧版（v1）。海外記事の試作評価が当時の要約と比べるためだけに、テストのビルドに残す。
+        #[cfg(test)]
+        crate::domain::summary::LEGACY_SUMMARY_PROMPT_ID => legacy_summary_instruction(level),
         // 機械点検で問題が見つかった要約の作り直し（D166）。最初の要約と同じ指示に、点検の理由を添える。
         // 理由は summary_service の点検が作った文（固定の文と、数字・単位・字だけ）で、記事の文は入らない。
         // それでも出力由来の文字を含むので、行数・長さを絞り、無害化してから固定指示の側に置く。
@@ -872,12 +886,23 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
     prompt
 }
 
-/// 要約（`summary_v1`）の指示（固定文）。解説レベルの言い回しだけが変わる。
+/// 要約（`summary_v2`・D167）の指示（固定文）。解説レベルの言い回しだけが変わる。
+/// v1（本文抜粋だけから要約）では、小さいモデルが中心の出来事を落としたり、誰が何をしたかを取り違えたりした
+/// 一方、要点（事実の箇条書き）は正確だったため、先に作った要点を軸に組み立てさせる。
+/// 要点も AI の出力なので、要点・本文抜粋のどちらにもない事実は足させない。
 fn summary_instruction(level: &str) -> String {
+    format!(
+        "次の記事情報のタイトル・本文抜粋・要点をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。         要点に書かれた事実を軸にまとめ、要点と本文抜粋にない事実は足さないでください。         誰が何をしたのか（主語と目的語の関係）は要点・本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
+    )
+}
+
+/// 旧版の要約（`summary_v1`）の指示。テストのビルドにだけ残す（`LEGACY_SUMMARY_PROMPT_ID`）。
+#[cfg(test)]
+fn legacy_summary_instruction(level: &str) -> String {
     format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}")
 }
 
-/// 要約の作り直し（`summary_retry_v1`・D166）で、点検の理由の前に置く固定文。
+/// 要約の作り直し（`summary_retry_v2`・D166 / D167）で、点検の理由の前に置く固定文。
 /// 部分の修正ではなく記事情報からの書き直しを頼む（小さいモデルには「この語を直せ」より
 /// 「この問題を避けて書け」の方が通りやすかった。D165 の試作）。
 const SUMMARY_RETRY_INSTRUCTION: &str =
@@ -1704,8 +1729,68 @@ mod tests {
     }
 
     #[test]
+    fn summary_v2_prompt_builds_from_the_key_points_without_adding_facts_or_swapping_roles() {
+        // 要約（D167）: 要点・本文抜粋を材料にし、それにない事実を足さない・主語と目的語の関係を変えない指示を、
+        // 防御指示・記事情報の見出しより前の固定指示側に置く。材料（要点を含む）は見出しの後ろ。
+        let input = "タイトル: 題\n本文抜粋:\n抜粋の文。\n要点:\n・要点の文";
+        let prompt = build_prompt(
+            &request_for(SUMMARY_PROMPT_ID, input),
+            ExplanationLevel::Simple,
+        );
+        let instruction = prompt.find("要点に書かれた事実を軸に").unwrap();
+        let no_additions = prompt.find("要点と本文抜粋にない事実は足さない").unwrap();
+        let roles = prompt.find("主語と目的語の関係").unwrap();
+        let defense = prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap();
+        let heading = prompt.find(ARTICLE_DATA_HEADING).unwrap();
+        assert!(instruction < defense && no_additions < defense && roles < defense);
+        assert!(prompt.contains("やさしく簡潔に1〜2文で要約してください"));
+        assert!(prompt.find(FACTS_ONLY_RULE).unwrap() < defense);
+        assert!(heading < prompt.find("・要点の文").unwrap());
+        assert!(prompt.ends_with(input));
+        // 作り直しも v2 の指示に理由を足す。
+        let retry = build_prompt(
+            &AiRequest {
+                prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
+                input_text: input.to_string(),
+                context: Some("「2兆」は記事情報にない数字。".to_string()),
+            },
+            ExplanationLevel::Normal,
+        );
+        assert!(retry.contains("主語と目的語の関係"));
+        assert!(
+            retry.find(SUMMARY_RETRY_INSTRUCTION).unwrap()
+                < retry.find(ARTICLE_DATA_HEADING).unwrap()
+        );
+        // 固定指示の写しの点検（D166）にも v2 の指示が入る。
+        assert!(summary_fixed_prompt_texts()
+            .iter()
+            .any(|text| text.contains("主語と目的語の関係")));
+    }
+
+    #[test]
+    fn summary_v2_mock_uses_the_mock_seed_in_the_context() {
+        // 実AIの入力（見出し付きの材料）ではなく、context の種（本文抜粋＋定型文）から Mock の要約を作る。
+        let response = service()
+            .request_text(
+                AiRequest {
+                    prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                    input_text: "タイトル: 題\n本文抜粋:\n抜粋の文。".to_string(),
+                    context: Some("抜粋の文。 特に、題の要点を確認する。".to_string()),
+                },
+                AiProvider::Mock,
+                ExplanationLevel::Normal,
+            )
+            .unwrap();
+        assert!(response.text.starts_with("抜粋の文。"), "{}", response.text);
+        assert!(!response.text.contains("タイトル:"), "{}", response.text);
+    }
+
+    #[test]
     fn summary_and_speech_prompts_forbid_facts_beyond_the_input() {
-        let summary = build_prompt(&request_for("summary_v1", "本文"), ExplanationLevel::Normal);
+        let summary = build_prompt(
+            &request_for(SUMMARY_PROMPT_ID, "本文"),
+            ExplanationLevel::Normal,
+        );
         assert!(
             summary.find(FACTS_ONLY_RULE).unwrap() < summary.find(ARTICLE_DATA_HEADING).unwrap()
         );
@@ -1787,7 +1872,7 @@ mod tests {
         );
         // 自由文の出力はスキーマで縛らない。再説明・一言は短く頼むので上限も小さくする。
         for (prompt_id, expected) in [
-            ("summary_v1", LOCAL_MAX_OUTPUT_TOKENS),
+            (SUMMARY_PROMPT_ID, LOCAL_MAX_OUTPUT_TOKENS),
             (
                 YUUKO_EXPLANATION_PROMPT_ID,
                 LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS,
@@ -1851,7 +1936,7 @@ mod tests {
             prompt_for(YUUKO_COMMENT_PROMPT_ID, ExplanationLevel::Normal).contains("60文字以内")
         );
         // 要約・要点には念押しを付けない（中立な文体・JSON の契約を変えないため）。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             assert!(!prompt_for(prompt_id, ExplanationLevel::Normal)
                 .contains(YUUKO_SPEECH_REMINDER_HEADING));
         }
@@ -1911,7 +1996,7 @@ mod tests {
             assert!(calm.ends_with(YUUKO_CALM_TONE_REMINDER));
         }
         // 要約・要点・用語解説は中立な文体・JSON の契約のままなので、文末の規則を入れない。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             let prompt = prompt_for(prompt_id, ordinary);
             assert!(!prompt.contains(YUUKO_ENDING_RULE), "{prompt_id}");
             assert!(
@@ -1969,7 +2054,7 @@ mod tests {
         assert!(!prompt_for(YUUKO_COMMENT_PROMPT_ID, heavy).contains("親しみやすい短い感想"));
         assert!(prompt_for(YUUKO_COMMENT_PROMPT_ID, ordinary).contains("親しみやすい短い感想"));
         // 要約・要点は中立な文体なので、重いニュースでも口調の指示を入れない。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             let prompt = prompt_for(prompt_id, heavy);
             assert!(!prompt.contains(YUUKO_CALM_TONE_INSTRUCTION), "{prompt_id}");
             assert!(!prompt.contains(YUUKO_CALM_TONE_REMINDER), "{prompt_id}");
@@ -1979,7 +2064,7 @@ mod tests {
     #[test]
     fn build_prompt_includes_instruction_and_input_only() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "  生成AIの新機能が発表された  ".to_string(),
             context: Some("送信されないはずのコンテキスト".to_string()),
         };
@@ -2461,7 +2546,7 @@ mod tests {
     #[test]
     fn summary_prompt_stays_neutral_without_yuuko_tone() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "本文".to_string(),
             context: None,
         };
@@ -2498,7 +2583,7 @@ mod tests {
     #[test]
     fn summary_prompt_has_defense_and_external_data_heading_without_tone() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "入力本文".to_string(),
             context: None,
         };
@@ -2537,7 +2622,11 @@ mod tests {
     #[test]
     fn mock_responses_for_article_prompts_ignore_prompt_wrapping() {
         // Mock は組み立て後のプロンプトではなく input_text を使うため、防御指示・見出しは混入しない。
-        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+        for prompt_id in [
+            SUMMARY_PROMPT_ID,
+            "yuuko_explanation_v1",
+            "yuuko_comment_v1",
+        ] {
             let request = AiRequest {
                 prompt_id: prompt_id.to_string(),
                 input_text: "入力本文".to_string(),
@@ -2554,9 +2643,10 @@ mod tests {
         service()
             .request_text(
                 AiRequest {
-                    prompt_id: "summary_v1".to_string(),
-                    input_text: input_text.to_string(),
-                    context: Some("記事タイトル".to_string()),
+                    prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                    input_text: "タイトル: 記事タイトル".to_string(),
+                    // アプリと同じく、Mock の要約の種は context で渡す（D167）。
+                    context: Some(input_text.to_string()),
                 },
                 AiProvider::Mock,
                 ExplanationLevel::Normal,
@@ -2796,7 +2886,7 @@ mod tests {
     fn local_request_failure_is_returned_without_falling_back_to_mock() {
         // 黙って Mock（や Gemini）へ切り替えず、固定分類のエラーで返す。
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "本文".to_string(),
             context: None,
         };
@@ -3213,13 +3303,14 @@ mod tests {
         let title = "中小企業のデジタル化に新補助金";
         let input = format!("タイトル: {title}\n抜粋: {excerpt}");
         eprintln!("input chars: {}", input.chars().count());
-        // アプリと同じ順（要約 → 要点 → 再説明 → 一言）で呼び、再説明・一言には前の2つの出力から
-        // summary_service と同じ組み立て（build_yuuko_speech_input）で作った入力を渡す。
+        // アプリと同じ順（要点 → 要約 → 再説明 → 一言。D167）で呼ぶ。要約には要点から、再説明・一言には
+        // 前の2つの出力から、summary_service と同じ組み立て（build_summary_input / build_yuuko_speech_input）で
+        // 作った入力を渡す。
         let mut summary = String::new();
         let mut key_points = Vec::new();
         for prompt_id in [
-            "summary_v1",
             ARTICLE_POINTS_PROMPT_ID,
+            SUMMARY_PROMPT_ID,
             YUUKO_EXPLANATION_PROMPT_ID,
             YUUKO_COMMENT_PROMPT_ID,
         ] {
@@ -3236,6 +3327,12 @@ mod tests {
                     speech_input.chars().count()
                 );
                 speech_input
+            } else if prompt_id == SUMMARY_PROMPT_ID {
+                crate::services::summary_service::build_summary_input(
+                    title,
+                    Some(&excerpt),
+                    Some(&key_points),
+                )
             } else {
                 input.clone()
             };
@@ -3258,7 +3355,7 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
-            if prompt_id == "summary_v1" {
+            if prompt_id == SUMMARY_PROMPT_ID {
                 summary = response.text.trim().to_string();
             }
             if prompt_id == YUUKO_EXPLANATION_PROMPT_ID || prompt_id == YUUKO_COMMENT_PROMPT_ID {
