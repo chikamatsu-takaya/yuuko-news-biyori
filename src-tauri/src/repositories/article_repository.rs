@@ -1976,6 +1976,16 @@ impl PersistedArticleRecord {
         self.excerpt.as_deref().and_then(excerpt_without_urls)
     }
 
+    /// 画面へ返す summary（要約、無ければ本文抜粋）。過去ニュースの索引から作る履歴項目
+    /// （`ArchiveArticleIndexEntry::to_history_item_dto`）と表示をそろえるため、要約の URL も同じく除く。
+    /// 要約が URL だけだったときは本文抜粋で補う。
+    fn display_summary(&self) -> Option<String> {
+        self.summary
+            .as_deref()
+            .and_then(excerpt_without_urls)
+            .or_else(|| self.display_excerpt())
+    }
+
     fn to_summary_dto(&self, is_favorite: bool) -> ArticleSummaryDto {
         ArticleSummaryDto {
             article_id: self.article_id.clone(),
@@ -1983,7 +1993,7 @@ impl PersistedArticleRecord {
             source_name: self.source_name.clone(),
             published_at_text: self.published_at_text.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.display_excerpt()),
+            summary: self.display_summary(),
             is_favorite,
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
@@ -2008,7 +2018,7 @@ impl PersistedArticleRecord {
             published_at_text: self.published_at_text.clone(),
             fetched_at: self.fetched_at.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.display_excerpt()),
+            summary: self.display_summary(),
             is_favorite,
             read_state: self.read_state.clone(),
             is_archived: self.is_archived,
@@ -2026,7 +2036,7 @@ impl PersistedArticleRecord {
             original_url: self.original_url.clone(),
             published_at_text: self.published_at_text.clone(),
             genre: self.genre.clone(),
-            summary: self.summary.clone().or_else(|| self.display_excerpt()),
+            summary: self.display_summary(),
             excerpt: self.display_excerpt(),
             yuuko_explanation: self.yuuko_explanation.clone(),
             key_points: self.key_points.clone(),
@@ -2755,7 +2765,7 @@ impl ArchiveArticleIndexEntry {
             fetched_at: self.fetched_at.clone(),
             genre: self.genre.clone(),
             // 索引の summary は「要約、無ければ本文抜粋」の保存時の値（照合に使うため保存値は変えない）。
-            // 抜粋のときに URL が残らないよう、返すときに除く（要約に URL が無ければ変わらない）。
+            // 記事ファイルからの履歴項目（`display_summary`）と同じく、返すときに URL を除く。
             summary: self.summary.as_deref().and_then(excerpt_without_urls),
             is_favorite,
             read_state: self.read_state.clone(),
@@ -5860,6 +5870,14 @@ mod tests {
             entry.to_history_item_dto(false).summary.as_deref(),
             Some(URL_EXCERPT_FOR_DISPLAY)
         );
+
+        // 要約に URL がある場合も、記事ファイルからの履歴項目と索引からの履歴項目で表示をそろえる。
+        let mut summarized = record.clone();
+        summarized.summary = Some("要約の文 https://example.com/a。".to_string());
+        let entry = super::ArchiveArticleIndexEntry::from_record(&summarized).unwrap();
+        let from_record = summarized.to_history_item_dto(false).summary;
+        assert_eq!(from_record.as_deref(), Some("要約の文。"));
+        assert_eq!(entry.to_history_item_dto(false).summary, from_record);
     }
 
     #[test]

@@ -491,26 +491,25 @@ const MOCK_EXCERPT_MAX_SENTENCES: usize = 2;
 /// 抜粋が空になったとき（本文が URL だけ等）の固定文。出力検証の「空」に落ちて要約できなくならないようにする。
 const MOCK_EXCERPT_EMPTY_TEXT: &str = "くわしい内容は元記事で確かめてね。";
 
-/// Mock 用の短い抜粋（決定的・外部通信なし）。URL と日本語を含まない行（英語のツイート文など）を除き、空白・改行を1つの空白にまとめ、連続した「。」を1つにする。
+/// 要約の種（summary_service の `build_summary_seed`）が本文抜粋の後ろに続ける定型文の書き出し。
+/// 定型文は抜粋の最終行と同じ行に付く（例 `{抜粋} 特に、{注目ポイント}。`）ため、Mock で英語の文を除くときに
+/// 抜粋の文と定型文を分ける目印にする。定型文を変えたら合わせる（summary_service のテストで実際の種を確かめている）。
+const MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES: [&str; 4] =
+    ["特に、", "まずは「", "この記事では、", "さらに、"];
+
+/// Mock 用の短い抜粋（決定的・外部通信なし）。URL と、日本語を含まない文（英語のツイート文など）を除き、
+/// 空白・改行を1つの空白にまとめ、連続した「。」を1つにする（日本語を含まない文の扱いは `drop_sentences_without_japanese`）。
 /// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取る。
 /// 2文で `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは、1文目が収まれば1文目だけにし（文の途中で切らない）、
 /// 1文目も収まらないときは上限で切って「…」を付ける。
 /// 入力は無害化済みの種（`<` は全角・行頭 `#` なし・区切り行なし）。1行にまとめるので見出し・区切り行は生じないが、
 /// 記号だけが残った場合は区切り行と解釈されうるため固定文にする。
 fn mock_excerpt(text: &str) -> String {
-    let without_urls = remove_urls(text);
-    // 日本語を含まない行（本文抜粋に混ざった英語のツイート文など）は除く。どの行も日本語を含まない
-    // （英語だけの記事）ときは、要約が固定文だけにならないよう従来どおり全行を使う。
-    let japanese_lines = without_urls
-        .lines()
-        .filter(|line| contains_japanese(line))
-        .collect::<Vec<_>>();
-    let source = if japanese_lines.is_empty() {
-        without_urls.clone()
-    } else {
-        japanese_lines.join("\n")
-    };
-    let flattened = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flattened = remove_urls(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let flattened = drop_sentences_without_japanese(&flattened);
     let mut chars: Vec<char> = Vec::with_capacity(flattened.len());
     for c in flattened.chars() {
         if c == '。' && chars.last() == Some(&'。') {
@@ -563,6 +562,63 @@ fn mock_excerpt(text: &str) -> String {
     } else {
         excerpt
     }
+}
+
+/// 1行にまとめた種から、日本語を含まない文（本文抜粋に混ざった英語のツイート文など）を除く。
+/// 文は「。！？!?」と、空白が続く「.」で区切り、定型文の書き出し（`MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES`）の
+/// 手前でも区切る（抜粋の最終行に定型文が続くため）。定型文を除いた部分（本文抜粋）に日本語の文が1つも無い
+/// とき（英語だけの記事）は、要約が定型文だけにならないよう何も除かない。何も除かないときは入力をそのまま返す。
+fn drop_sentences_without_japanese(text: &str) -> String {
+    let mut sentences: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        let rest = &text[index..];
+        if index > start
+            && text[..index].ends_with(' ')
+            && MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        {
+            sentences.push(&text[start..index]);
+            start = index;
+        }
+        let next = chars.peek().map(|&(_, next)| next);
+        let is_end = matches!(c, '。' | '！' | '？' | '!' | '?')
+            || (c == '.' && next.is_none_or(char::is_whitespace));
+        if is_end {
+            let end = index + c.len_utf8();
+            sentences.push(&text[start..end]);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        sentences.push(&text[start..]);
+    }
+    let is_template = |sentence: &str| {
+        MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES
+            .iter()
+            .any(|prefix| sentence.trim_start().starts_with(prefix))
+    };
+    let body_has_japanese = sentences
+        .iter()
+        .any(|sentence| !is_template(sentence) && contains_japanese(sentence));
+    if !body_has_japanese || sentences.iter().all(|sentence| contains_japanese(sentence)) {
+        return text.to_string();
+    }
+    let mut kept = String::with_capacity(text.len());
+    for sentence in sentences
+        .iter()
+        .map(|sentence| sentence.trim())
+        .filter(|sentence| contains_japanese(sentence))
+    {
+        // ASCII で終わる文の後ろは空白でつなぐ（「.」の区切りと英単語の境目を保つ）。
+        if kept.chars().last().is_some_and(|c| c.is_ascii()) {
+            kept.push(' ');
+        }
+        kept.push_str(sentence);
+    }
+    kept
 }
 
 /// 日本語（ひらがな・カタカナ・漢字・半角カナ）を1文字でも含むか。Mock の要約・要点から、
@@ -2524,21 +2580,6 @@ mod tests {
                 "「Deno joins Cloudflare」についてのニュース。".to_string(),
                 "詳しくは元記事で確かめられる。".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn mock_summary_leaves_out_lines_without_japanese() {
-        assert_eq!(
-            mock_summary(
-                "Deno が Cloudflare に加わると発表した。\nWe are excited to announce that Deno is joining Cloudflare! — Deno (@deno_land) October 9, 2026\n今後も開発は続く。"
-            ),
-            "Deno が Cloudflare に加わると発表した。 今後も開発は続く。"
-        );
-        // どの行も日本語を含まない（英語だけの記事）ときは従来どおり全行から作る。
-        assert_eq!(
-            mock_summary("Deno is joining Cloudflare. It ships soon."),
-            "Deno is joining Cloudflare. It ships soon."
         );
     }
 

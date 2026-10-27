@@ -1400,8 +1400,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_yuuko_comment_seed, build_yuuko_explanation_seed, build_yuuko_speech_input,
-        combined_provider, neutralize_seed_text, seed_title_without_site_suffix,
+        build_focus_points, build_summary_seed, build_yuuko_comment_seed,
+        build_yuuko_explanation_seed, build_yuuko_speech_input, combined_provider,
+        neutralize_seed_article, neutralize_seed_text, seed_title_without_site_suffix,
         select_valid_output_in_tone, validate_article_points, validate_point_item,
         validate_summary_output, FallbackPolicy, OutputRejection, SummaryGeneration,
         SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS,
@@ -1680,6 +1681,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mock.text, mock_seed);
+    }
+
+    /// 実際の要約の種（`build_summary_seed`。定型文が抜粋の最終行と同じ行に続く）を Mock に渡したときの要約。
+    fn mock_summary_from_seed(excerpt: &str, level: ExplanationLevel) -> String {
+        let article = crate::domain::article::ArticleDetailDto {
+            article_id: ARTICLE_ID.to_string(),
+            title: "Deno が Cloudflare に参加".to_string(),
+            source_name: "テスト".to_string(),
+            original_url: "https://example.com/a".to_string(),
+            published_at_text: String::new(),
+            genre: "テクノロジー".to_string(),
+            summary: None,
+            excerpt: Some(excerpt.to_string()),
+            yuuko_explanation: None,
+            key_points: Vec::new(),
+            focus_points: Vec::new(),
+            yuuko_comment: None,
+            is_favorite: false,
+            keyword_candidates: Vec::new(),
+            summary_state: Default::default(),
+            tags: Vec::new(),
+        };
+        let seed_article = neutralize_seed_article(&article);
+        let focus_points = build_focus_points(&seed_article, level);
+        let seed = build_summary_seed(&seed_article, level, &focus_points);
+        let root_dir = std::env::temp_dir().join("yuuko_summary_mock_seed_test");
+        AiProviderService::new(&AppPaths::new(root_dir))
+            .request_text(
+                crate::domain::summary::AiRequest {
+                    prompt_id: "summary_v1".to_string(),
+                    input_text: seed,
+                    context: Some(seed_article.title.clone()),
+                },
+                crate::domain::settings::AiProvider::Mock,
+                level,
+            )
+            .unwrap()
+            .text
+    }
+
+    #[test]
+    fn mock_summary_from_real_seeds_leaves_out_english_tweet_sentences() {
+        // 英語のツイート文が抜粋の最終行にあり、定型文がその行に続く形（URL は Mock が除く）。
+        let excerpt = "Deno が Cloudflare に加わると発表した。\nWe are excited to announce that Deno is joining Cloudflare! https://t.co/hC5HOUbtt4 — Deno (@deno_land) October 9, 2026";
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let summary = mock_summary_from_seed(excerpt, level);
+            assert!(
+                summary.starts_with("Deno が Cloudflare に加わると発表した。"),
+                "{level:?}: {summary}"
+            );
+            for english in ["We are excited", "deno_land", "October", "http"] {
+                assert!(!summary.contains(english), "{level:?}: {summary}");
+            }
+        }
+    }
+
+    #[test]
+    fn mock_summary_from_real_seeds_keeps_english_only_articles() {
+        // 英語だけの複数行の記事は、定型文があっても抜粋の文を捨てない（従来どおり先頭の文から作る）。
+        let excerpt =
+            "Deno is joining Cloudflare.\nThe runtime will stay open source.\nMore details soon.";
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let summary = mock_summary_from_seed(excerpt, level);
+            assert!(
+                summary
+                    .starts_with("Deno is joining Cloudflare. The runtime will stay open source."),
+                "{level:?}: {summary}"
+            );
+        }
     }
 
     #[test]
