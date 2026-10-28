@@ -50,6 +50,7 @@
 //! ```
 //! 同梱物（モデル・llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
 //! `YUUKO_LOCAL_LLM_DIR` で場所を指す。
+//! 同梱と別のモデルで回すとき（D168 のモデル比較）は `YUUKO_LLM_EVAL_MODEL` などを指定する（`eval_model_override`）。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -61,6 +62,7 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::eval_model_override::{eval_local_llm, ModelProfile};
 use super::output_check::{check_japanese_summary, IssueKind};
 use super::{
     clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
@@ -85,7 +87,6 @@ use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::summary_fixed_prompt_texts;
 use crate::services::ai_provider_service::AiProviderService;
 use crate::services::dictionary_service::{DictionaryService, TermExplanationAi};
-use crate::services::local_llm_service::LocalLlmService;
 use crate::services::news_service::{
     article_id_from_url, normalize_published_at, utc_now_rfc3339, NewsSource, NewsSourcesConfig,
 };
@@ -146,7 +147,7 @@ fn local_llm_quality_eval() {
     if !(run_all || phase == "summary" || phase == "terms") {
         return;
     }
-    let local = LocalLlmService::new(Some(bundle_dir()));
+    let local = eval_local_llm(bundle_dir());
     let ai = AiProviderService::new(&paths).with_local_llm(local.clone());
     // 1回目の呼び出しに起動時間が乗らないよう、先に接続確認（検証・起動・短い生成）を済ませて別に記録する。
     let started = Instant::now();
@@ -619,6 +620,11 @@ fn record_stage(
             stages.borrow_mut().push(stage);
             return Err(error);
         }
+    };
+    // 候補のモデルごとの後始末（D168 のモデル比較。調整のない候補・同梱のモデルではそのまま）。
+    let raw = AiResponse {
+        text: ModelProfile::from_env().clean_raw(&raw.text),
+        ..raw
     };
     stage["provider"] = json!(raw.provider);
     stage["raw"] = json!(raw.text);
