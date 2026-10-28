@@ -41,8 +41,9 @@ use super::local_llm_quality_eval::{
 };
 use super::output_check::{check_japanese_summary, japanese_numbers, CheckReport, IssueKind};
 use super::{
-    article_points_from_response, build_points_seed, build_summary_input, check_and_retry_summary,
-    neutralize_seed_article, request_validated_text_via, FallbackPolicy, SummaryOutputKind,
+    article_points_from_response, build_check_source, build_points_seed, build_summary_input,
+    check_and_retry_summary, neutralize_seed_article, request_validated_text_via, FallbackPolicy,
+    SummaryOutputKind,
 };
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
 use crate::domain::summary::{
@@ -131,14 +132,15 @@ fn generate(out_dir: &Path) {
                 continue;
             }
             let seed_article = neutralize_seed_article(&article);
-            // 点検の材料（アプリと同じ。タイトル＋本文抜粋）。
-            let seed = build_points_seed(&seed_article);
+            // 要点の入力（タイトル＋本文抜粋）と、点検の材料（アプリと同じ。それに記事の公開日を足したもの）。
+            let points_seed = build_points_seed(&seed_article);
+            let seed = build_check_source(&points_seed, &article.published_at_text);
             let started = Instant::now();
             let points = request_validated_text_via(
                 &ai,
                 AiRequest {
                     prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
-                    input_text: seed.clone(),
+                    input_text: points_seed.clone(),
                     context: Some(seed_article.genre.clone()),
                 },
                 SummaryOutputKind::Points,
@@ -398,11 +400,14 @@ fn analyze(out_dir: &Path) {
     write_json(&out_dir.join("analysis.json"), &analysis);
 }
 
-/// generate 段で取り込んだ記事から、アプリと同じ点検の材料（タイトル＋本文抜粋）を作り直す
+/// generate 段で取り込んだ記事から、アプリと同じ点検の材料（タイトル＋本文抜粋＋公開日）を作り直す
 /// （analyze 段で点検をかけ直すため）。
 fn seed_for(repository: &ArticleRepository, article_id: &str) -> Option<String> {
     let article = repository.get_article_detail(article_id).ok()?;
-    Some(build_points_seed(&neutralize_seed_article(&article)))
+    Some(build_check_source(
+        &build_points_seed(&neutralize_seed_article(&article)),
+        &article.published_at_text,
+    ))
 }
 
 /// 要約の最初の「単位も区切りもない算用数字」を 10 倍にする（「12億」→「120億」）。

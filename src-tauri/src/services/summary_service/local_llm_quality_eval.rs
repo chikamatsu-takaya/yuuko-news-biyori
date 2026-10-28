@@ -541,8 +541,12 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             continue;
         }
         let stages = RefCell::new(Vec::<Value>::new());
-        // 点検の材料（アプリと同じく、要点の段の入力＝タイトル＋本文抜粋）。D170 の点検の記録に使う。
+        // 点検の材料（アプリと同じく、タイトル＋本文抜粋＋記事の公開日）。D170 の点検の記録に使う。
         let source = RefCell::new(None::<String>);
+        let published_at = ArticleRepository::new(paths)
+            .get_article_detail(article_id)
+            .map(|article| article.published_at_text)
+            .unwrap_or_default();
         let started = Instant::now();
         let result = service.generate_article_summary_with(
             GenerateArticleSummaryParams {
@@ -550,6 +554,12 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             },
             FallbackPolicy::SaveFallback,
             |request, kind, provider, level| {
+                if kind == SummaryOutputKind::Points && source.borrow().is_none() {
+                    source.replace(Some(super::build_check_source(
+                        &request.input_text,
+                        &published_at,
+                    )));
+                }
                 record_stage(&service, &stages, &source, request, kind, provider, level)
             },
         );
@@ -593,9 +603,6 @@ fn record_stage(
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
     let input_text = request.input_text.clone();
-    if kind == SummaryOutputKind::Points && source.borrow().is_none() {
-        source.replace(Some(request.input_text.clone()));
-    }
     let source_text = source.borrow().clone().unwrap_or_default();
     // 要約の作り直し（D166 の summary_retry_v2）を最初の要約と分けて数えるため。
     let prompt_id = request.prompt_id.clone();

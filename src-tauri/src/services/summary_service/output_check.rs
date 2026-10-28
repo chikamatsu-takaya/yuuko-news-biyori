@@ -450,6 +450,12 @@ pub(super) fn japanese_source_numbers(source: &str) -> SourceNumbers {
         }
     }
     allowed.extend(kanji_numbers(source));
+    // 「2026.10.28」「2026/10/28」の日付の年は、上の読み方では「2026.1」のような小数になるので、別に許す
+    // （D170。記事の日付・公開日の年を書いた出力を、材料にない数字・年としないため）。月・日は足さない
+    // （公開日の月・日〔10・28 など〕を許すと、桁違い・材料にない数字の点検がその値で通ってしまうため）。
+    for (year, _, _) in super::consistency_check::dates_in(source) {
+        allowed.push(f64::from(year));
+    }
     SourceNumbers {
         allowed,
         listed: found.into_iter().map(|number| number.values).collect(),

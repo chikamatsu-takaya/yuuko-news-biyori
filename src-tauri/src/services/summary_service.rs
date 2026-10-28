@@ -259,6 +259,8 @@ impl SummaryService {
         let summary_mock_seed =
             build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
         let points_seed = build_points_seed(&seed_article);
+        // 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）に記事の日付を足したもの。
+        let check_source = build_check_source(&points_seed, &article.published_at_text);
 
         // 4出力（要点と注目ポイント・要約・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
         // 保存・返却する。
@@ -296,7 +298,7 @@ impl SummaryService {
             points_response,
             points,
             points_request,
-            &points_seed,
+            &check_source,
             provider,
             explanation_level,
             fallback_policy,
@@ -334,7 +336,7 @@ impl SummaryService {
         let summary_response = check_and_retry_summary(
             summary_response,
             &retry_input,
-            &points_seed,
+            &check_source,
             provider,
             explanation_level,
             fallback_policy,
@@ -379,7 +381,7 @@ impl SummaryService {
             yuuko_explanation_response,
             yuuko_explanation_request,
             SummaryOutputKind::Explanation,
-            &points_seed,
+            &check_source,
             provider,
             explanation_level,
             fallback_policy,
@@ -402,7 +404,7 @@ impl SummaryService {
             yuuko_comment_response,
             yuuko_comment_request,
             SummaryOutputKind::Comment,
-            &points_seed,
+            &check_source,
             provider,
             explanation_level,
             fallback_policy,
@@ -593,8 +595,9 @@ where
     let retried_kinds = retried_report.kinds_where(IssueKind::triggers_summary_retry);
     // 反対の意味・年の取り違え（D170）が作り直しで消えたら、ほかの問題が残っていても作り直した方を使う
     // （意味を逆にした要約を見せるより、数字の言い換えなどが残る方が害が小さいため）。
-    if is_retry_better(&first_report, &retried_report)
-        || (first_report.blocks_use() && !retried_report.blocks_use())
+    // 作り直しに反対の意味・年の取り違えが残るときは、数が減っていても採らない（D170）。
+    if !retried_report.blocks_use()
+        && (is_retry_better(&first_report, &retried_report) || first_report.blocks_use())
     {
         log::info!(
             "adopted the regenerated summary (remaining issues: {})",
@@ -1841,6 +1844,22 @@ fn build_points_seed(article: &ArticleDetailDto) -> String {
     }
 }
 
+/// 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）の後ろに、記事の公開日（日本時間）を
+/// 「2026.10.28」の形で1行足す（公開日が読めないときは種のまま）。AI へは送らない（点検だけに使う）。
+/// 記事の日付は事実なので、要約・要点・再説明・一言が記事の日付を書いても、材料にない数字・年や年の組み合わせの
+/// 誤りとしないため（D169 の実記事で「2026年10月28日時点の…」を誤検出した）。点検の語（記事情報 など）を
+/// 含まない数字だけの行にして、指示の写し・注記の点検に影響させない。
+fn build_check_source(points_seed: &str, published_at_text: &str) -> String {
+    let Ok(published) = chrono::DateTime::parse_from_rfc3339(published_at_text.trim()) else {
+        return points_seed.to_string();
+    };
+    let Some(japan) = chrono::FixedOffset::east_opt(9 * 3600) else {
+        return points_seed.to_string();
+    };
+    let date = published.with_timezone(&japan).date_naive();
+    format!("{points_seed}\n{}", date.format("%Y.%m.%d"))
+}
+
 /// 要約の Mock の結果の種（本文抜粋＋定型文）。Mock はこの先頭の短い抜粋を要約にする（`mock_excerpt`）。
 /// D167 の前は実AIへの要約の入力でもあったが、いまは Mock 専用（`AiRequest.context` で渡し、実AIへは送らない）。
 /// 実AIへの要約の入力は `build_summary_input`。
@@ -2813,13 +2832,17 @@ mod tests {
         }
     }
 
-    const LOSS_TITLE: &str = "楽天、痛恨のサヨナラ負け";
+    /// 架空のチームの試合（D169 の A2 の形を、架空の名前と文で書いたもの）。
+    const LOSS_TITLE: &str = "みなとシーガルズ、最終回にサヨナラ負け";
     const LOSS_EXCERPT: &str =
-        "楽天は9回に逆転サヨナラ3ランを浴びて阪神に敗れた。安田は3安打だった。";
+        "みなとシーガルズは9回裏に逆転打を許してやまびこベアーズに敗れた。青木は3安打だった。";
 
     fn loss_points() -> String {
         points_text(
-            &["楽天は阪神にサヨナラ負けした", "安田は3安打だった"],
+            &[
+                "みなとシーガルズはやまびこベアーズにサヨナラ負けした",
+                "青木は3安打だった",
+            ],
             &["救援陣の失点に注目"],
         )
     }
@@ -2832,12 +2855,18 @@ mod tests {
             &service,
             Script {
                 points: vec![loss_points()],
-                summary: vec!["楽天はサヨナラ勝ちした。", "楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                summary: vec![
+                    "みなとシーガルズはサヨナラ勝ちした。",
+                    "みなとシーガルズはやまびこベアーズにサヨナラ負けした。",
+                ],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["悔しい負けだね"],
             },
         );
-        assert_eq!(generated(result).summary, "楽天は阪神にサヨナラ負けした。");
+        assert_eq!(
+            generated(result).summary,
+            "みなとシーガルズはやまびこベアーズにサヨナラ負けした。"
+        );
         assert_eq!(requests.len(), 5);
         assert_eq!(
             requests[2].prompt_id,
@@ -2856,8 +2885,11 @@ mod tests {
             &service,
             Script {
                 points: vec![loss_points()],
-                summary: vec!["楽天はサヨナラ勝ちした。", "楽天は阪神に勝利した。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                summary: vec![
+                    "みなとシーガルズはサヨナラ勝ちした。",
+                    "みなとシーガルズはやまびこベアーズに勝利した。",
+                ],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["悔しい負けだね"],
             },
         );
@@ -2870,21 +2902,62 @@ mod tests {
     }
 
     #[test]
+    fn regenerated_summary_with_fewer_issues_but_still_reversed_is_not_adopted() {
+        // 最初: 反対の意味＋材料にない数字（2件）。作り直し: 反対の意味だけ（1件）。数は減っても採らず、保存しない。
+        let root_dir = temp_root("d170-summary-fewer-but-reversed");
+        let (service, repository) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec![
+                    "みなとシーガルズは5点差でサヨナラ勝ちした。",
+                    "みなとシーガルズはサヨナラ勝ちした。",
+                ],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert!(matches!(result, Err(AppError::AiOutputRejected)));
+        assert_eq!(requests.len(), 3);
+        let reasons = requests[2].context.as_deref().unwrap();
+        assert!(reasons.contains("「5」"), "{reasons}");
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.yuuko_comment, None);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn check_source_adds_the_published_date_in_japan_time() {
+        assert_eq!(
+            super::build_check_source("題\n本文。", "2026-10-28T02:30:00Z"),
+            "題\n本文。\n2026.10.28"
+        );
+        // 日本時間で日付が変わる時刻（UTC 15時以降）は翌日。
+        assert_eq!(
+            super::build_check_source("題", "2026-10-27T15:30:00Z"),
+            "題\n2026.10.28"
+        );
+        // 読めない公開日は足さない。
+        assert_eq!(super::build_check_source("題", "Tue, 27 Oct"), "題");
+    }
+
+    #[test]
     fn summary_with_a_year_paired_with_another_event_is_regenerated() {
         let root_dir = temp_root("d170-summary-year");
         let excerpt =
-            "2023年12月に球団と12年の大型契約を結んだ。2026年に1200万ドルの年俸を受け取った。";
-        let (service, _) = build_service_with_title(&root_dir, "山本投手の年俸", excerpt);
+            "2023年12月にうみかぜ球団と10年の大型契約を結んだ。2026年に900万ドルの年俸を受け取った。";
+        let (service, _) = build_service_with_title(&root_dir, "青山投手の年俸", excerpt);
         let (result, requests) = generate_scripted(
             &service,
             Script {
                 points: vec![points_text(
-                    &["2023年12月に大型契約を結んだ", "2026年の年俸は1200万ドル"],
+                    &["2023年12月に大型契約を結んだ", "2026年の年俸は900万ドル"],
                     &["年俸の上がり方に注目"],
                 )],
                 summary: vec![
-                    "山本投手は2026年に球団と大型契約を結んだ。",
-                    "山本投手は2023年12月に球団と大型契約を結んだ。",
+                    "青山投手は2026年にうみかぜ球団と大型契約を結んだ。",
+                    "青山投手は2023年12月にうみかぜ球団と大型契約を結んだ。",
                 ],
                 explanation: vec!["2023年に契約したんだね。"],
                 comment: vec!["すごい契約だね"],
@@ -2892,7 +2965,7 @@ mod tests {
         );
         assert_eq!(
             generated(result).summary,
-            "山本投手は2023年12月に球団と大型契約を結んだ。"
+            "青山投手は2023年12月にうみかぜ球団と大型契約を結んだ。"
         );
         assert_eq!(requests.len(), 5);
         assert!(requests[2]
@@ -2911,16 +2984,19 @@ mod tests {
             &service,
             Script {
                 points: vec![loss_points()],
-                summary: vec!["**中心となる出来事の要約:** 楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["再説明：楽天はサヨナラ負けしたんだね。"],
+                summary: vec!["**中心となる出来事の要約:** みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec!["再説明：みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["**ゆうこの一言**\n悔しい負けだね"],
             },
         );
         let generated = generated(result);
-        assert_eq!(generated.summary, "楽天は阪神にサヨナラ負けした。");
+        assert_eq!(
+            generated.summary,
+            "みなとシーガルズはやまびこベアーズにサヨナラ負けした。"
+        );
         assert_eq!(
             generated.yuuko_explanation,
-            "楽天はサヨナラ負けしたんだね。"
+            "みなとシーガルズはサヨナラ負けしたんだね。"
         );
         assert_eq!(generated.yuuko_comment, "悔しい負けだね");
         assert_eq!(requests.len(), 4);
@@ -2936,9 +3012,9 @@ mod tests {
             &service,
             Script {
                 points: vec![loss_points()],
-                summary: vec!["楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
-                comment: vec!["楽天はサヨナラ勝ちしたんだね", "悔しい負けだね"],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
+                comment: vec!["みなとシーガルズはサヨナラ勝ちしたんだね", "悔しい負けだね"],
             },
         );
         assert_eq!(generated(result).yuuko_comment, "悔しい負けだね");
@@ -2954,8 +3030,11 @@ mod tests {
             &service,
             Script {
                 points: vec![loss_points()],
-                summary: vec!["楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ勝ちしたんだね。", "楽天の勝利だね。"],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec![
+                    "みなとシーガルズはサヨナラ勝ちしたんだね。",
+                    "みなとシーガルズの勝利だね。",
+                ],
                 comment: vec!["悔しい負けだね"],
             },
         );
@@ -2979,20 +3058,23 @@ mod tests {
             Script {
                 points: vec![points_text(
                     &[
-                        "楽天は阪神にサヨナラ負けした",
-                        "楽天は最後にサヨナラ勝ちした",
-                        "安田は3安打だった",
+                        "みなとシーガルズはやまびこベアーズにサヨナラ負けした",
+                        "みなとシーガルズは最後にサヨナラ勝ちした",
+                        "青木は3安打だった",
                     ],
                     &["救援陣の失点に注目"],
                 )],
-                summary: vec!["楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["悔しい負けだね"],
             },
         );
         assert_eq!(
             generated(result).key_points,
-            vec!["楽天は阪神にサヨナラ負けした", "安田は3安打だった"]
+            vec![
+                "みなとシーガルズはやまびこベアーズにサヨナラ負けした",
+                "青木は3安打だった"
+            ]
         );
         assert_eq!(requests.len(), 4);
         let _ = std::fs::remove_dir_all(&root_dir);
@@ -3005,19 +3087,25 @@ mod tests {
             Script {
                 points: vec![
                     points_text(
-                        &["楽天は最後にサヨナラ勝ちした", "安田は3安打だった"],
+                        &[
+                            "みなとシーガルズは最後にサヨナラ勝ちした",
+                            "青木は3安打だった",
+                        ],
                         &["救援陣の失点に注目"],
                     ),
                     loss_points(),
                 ],
-                summary: vec!["楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["悔しい負けだね"],
             },
         );
         assert_eq!(
             generated(result).key_points,
-            vec!["楽天は阪神にサヨナラ負けした", "安田は3安打だった"]
+            vec![
+                "みなとシーガルズはやまびこベアーズにサヨナラ負けした",
+                "青木は3安打だった"
+            ]
         );
         assert_eq!(requests.len(), 5);
         assert_eq!(requests[0].input_text, requests[1].input_text);
@@ -3027,15 +3115,18 @@ mod tests {
         let root_dir = temp_root("d170-points-rejected");
         let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
         let bad = points_text(
-            &["楽天は最後にサヨナラ勝ちした", "安田は3安打だった"],
+            &[
+                "みなとシーガルズは最後にサヨナラ勝ちした",
+                "青木は3安打だった",
+            ],
             &["救援陣の失点に注目"],
         );
         let (result, requests) = generate_scripted(
             &service,
             Script {
                 points: vec![bad.clone(), bad],
-                summary: vec!["楽天は阪神にサヨナラ負けした。"],
-                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
                 comment: vec!["悔しい負けだね"],
             },
         );
