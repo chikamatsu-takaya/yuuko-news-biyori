@@ -15,6 +15,7 @@
 //!
 //! 環境変数: `YUUKO_SUMMARY_CHECK_EVAL_OUT`（出力先。無ければ何もしない）、`YUUKO_LLM_EVAL_ARTICLES`
 //! （記事の JSON。省略時は上の評価データ）、`YUUKO_LOCAL_LLM_DIR`（同梱物の場所。読み取り専用で参照する）。
+//! 同梱と別のモデルで回すときは `YUUKO_LLM_EVAL_MODEL` など（`eval_model_override`）。
 //!
 //! 実行例（PowerShell）:
 //! ```text
@@ -30,6 +31,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
+use super::eval_model_override::eval_local_llm;
 use super::local_llm_quality_eval::{
     append_line, bundle_dir, check_json, error_label, import_articles, load_article_ids,
     recorded_keys, write_json,
@@ -47,7 +49,6 @@ use crate::paths::AppPaths;
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::{summary_fixed_prompt_texts, AiProviderService};
-use crate::services::local_llm_service::LocalLlmService;
 
 const OUT_ENV: &str = "YUUKO_SUMMARY_CHECK_EVAL_OUT";
 const PHASE_ENV: &str = "YUUKO_SUMMARY_CHECK_EVAL_PHASE";
@@ -101,7 +102,7 @@ fn generate(out_dir: &Path) {
         .expect("save temp settings");
     import_articles(&articles_file(), out_dir, &paths);
     let repository = ArticleRepository::new(&paths);
-    let local = LocalLlmService::new(Some(bundle_dir()));
+    let local = eval_local_llm(bundle_dir());
     let ai = AiProviderService::new(&paths).with_local_llm(local.clone());
     let started = Instant::now();
     let check = ai.test_connection(AiProvider::Local);
