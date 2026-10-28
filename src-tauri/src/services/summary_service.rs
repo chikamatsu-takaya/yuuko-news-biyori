@@ -259,8 +259,9 @@ impl SummaryService {
         let summary_mock_seed =
             build_summary_seed(&seed_article, explanation_level, &seed_focus_points);
         let points_seed = build_points_seed(&seed_article);
-        // 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）に記事の日付を足したもの。
-        let check_source = build_check_source(&points_seed, &article.published_at_text);
+        // 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）。記事の公開日は足さない
+        // （取得元に公開日が無いときは取得時刻が入り〔`normalize_published_at`〕、本当の記事の日付と区別できないため）。
+        let check_source = points_seed.clone();
 
         // 4出力（要点と注目ポイント・要約・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
         // 保存・返却する。
@@ -1844,22 +1845,6 @@ fn build_points_seed(article: &ArticleDetailDto) -> String {
     }
 }
 
-/// 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）の後ろに、記事の公開日（日本時間）を
-/// 「2026.10.28」の形で1行足す（公開日が読めないときは種のまま）。AI へは送らない（点検だけに使う）。
-/// 記事の日付は事実なので、要約・要点・再説明・一言が記事の日付を書いても、材料にない数字・年や年の組み合わせの
-/// 誤りとしないため（D169 の実記事で「2026年10月28日時点の…」を誤検出した）。点検の語（記事情報 など）を
-/// 含まない数字だけの行にして、指示の写し・注記の点検に影響させない。
-fn build_check_source(points_seed: &str, published_at_text: &str) -> String {
-    let Ok(published) = chrono::DateTime::parse_from_rfc3339(published_at_text.trim()) else {
-        return points_seed.to_string();
-    };
-    let Some(japan) = chrono::FixedOffset::east_opt(9 * 3600) else {
-        return points_seed.to_string();
-    };
-    let date = published.with_timezone(&japan).date_naive();
-    format!("{points_seed}\n{}", date.format("%Y.%m.%d"))
-}
-
 /// 要約の Mock の結果の種（本文抜粋＋定型文）。Mock はこの先頭の短い抜粋を要約にする（`mock_excerpt`）。
 /// D167 の前は実AIへの要約の入力でもあったが、いまは Mock 専用（`AiRequest.context` で渡し、実AIへは送らない）。
 /// 実AIへの要約の入力は `build_summary_input`。
@@ -2925,21 +2910,6 @@ mod tests {
         let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
         assert_eq!(detail.yuuko_comment, None);
         let _ = std::fs::remove_dir_all(&root_dir);
-    }
-
-    #[test]
-    fn check_source_adds_the_published_date_in_japan_time() {
-        assert_eq!(
-            super::build_check_source("題\n本文。", "2026-10-28T02:30:00Z"),
-            "題\n本文。\n2026.10.28"
-        );
-        // 日本時間で日付が変わる時刻（UTC 15時以降）は翌日。
-        assert_eq!(
-            super::build_check_source("題", "2026-10-27T15:30:00Z"),
-            "題\n2026.10.28"
-        );
-        // 読めない公開日は足さない。
-        assert_eq!(super::build_check_source("題", "Tue, 27 Oct"), "題");
     }
 
     #[test]

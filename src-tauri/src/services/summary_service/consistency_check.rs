@@ -42,8 +42,9 @@ const HEADING_MAX_CHARS: usize = 30;
 
 /// 「〜の要約:」「ゆうこの一言：」のようなラベルの末尾の語。プロンプトの段の名前と、その言い換え。
 /// 「説明」「回答」は「市の説明：『…』」のように本文の話し手を表すことがあるので入れない。
-/// 話し手の言葉にも使う語（`SPEAKER_LABEL_WORDS`）は、語だけか、出力の自分を指す前置き（`SELF_LABEL_PREFIXES`）の
-/// ときだけラベルとみなす（「首相の結論：」「監督の一言：」は本文として残す）。
+/// 話し手の言葉にも使う語（`SPEAKER_LABEL_WORDS`）は、語だけか、出力の自分を指す前置き（`SELF_LABEL_PREFIXES`）と
+/// 語だけのラベル（「ゆうこの一言」「今回の感想」「AIまとめ」）のときだけラベルとみなす
+/// （「首相の結論：」「監督の一言：」「今回の会見での首相の結論：」は本文として残す）。
 const LABEL_TAIL_WORDS: [&str; 14] = [
     "要約",
     "まとめ",
@@ -72,7 +73,8 @@ const SPEAKER_LABEL_WORDS: [&str; 7] = [
     "ひとこと",
 ];
 
-/// 出力の自分（ゆうこ・AI・記事の要約）を指すラベルの前置き。`SPEAKER_LABEL_WORDS` はこの前置きのときだけ消す。
+/// 出力の自分（ゆうこ・AI・記事の要約）を指すラベルの前置き。`SPEAKER_LABEL_WORDS` は、ラベルがちょうど
+/// 「前置き＋語」か「前置き＋の＋語」のときだけ消す（前置きで始まるだけの長いラベルは消さない）。
 const SELF_LABEL_PREFIXES: [&str; 8] = [
     "ゆうこ",
     "AI",
@@ -193,7 +195,7 @@ fn strip_leading_label(text: &str) -> Option<&str> {
 }
 
 /// ラベルの語か（読点・句点・括弧を含まず、`LABEL_TAIL_WORDS` のどれかで終わる）。
-/// 話し手の言葉にも使う語は、語だけか、自分を指す前置きのときだけ（`SPEAKER_LABEL_WORDS`）。
+/// 話し手の言葉にも使う語は、語だけか、ちょうど「自分を指す前置き（の）＋語」のときだけ（`SPEAKER_LABEL_WORDS`）。
 fn is_label(label: &str) -> bool {
     let label = label.trim();
     if label.is_empty() || label.contains(['。', '、', '「', '」', '(', '（']) {
@@ -205,9 +207,9 @@ fn is_label(label: &str) -> bool {
         .any(|word| {
             !SPEAKER_LABEL_WORDS.contains(word)
                 || label == *word
-                || SELF_LABEL_PREFIXES
-                    .iter()
-                    .any(|prefix| label.starts_with(prefix))
+                || SELF_LABEL_PREFIXES.iter().any(|prefix| {
+                    label == format!("{prefix}{word}") || label == format!("{prefix}の{word}")
+                })
         })
 }
 
@@ -461,9 +463,9 @@ const MASKED_COMPOUNDS: [&str; 8] = [
     "反対側",
 ];
 
-/// 語の直後がこれで始まれば打ち消し（「負けなかった」「決めておらず」「勝利を逃した」）とみなして数えない。
+/// 語の直後がこれで始まれば打ち消し（「負けなかった」「決めておらず」「決まっていません」）とみなして数えない。
 /// 「な」1字にしないのは、「増加など」「増加しながら」を打ち消しと読まないため。
-const NEGATING_FOLLOWERS: [&str; 32] = [
+const NEGATING_FOLLOWERS: [&str; 34] = [
     "ない",
     "なかっ",
     "なく",
@@ -475,15 +477,20 @@ const NEGATING_FOLLOWERS: [&str; 32] = [
     "しない",
     "しなかっ",
     "しなく",
+    "しません",
     "されず",
     "されな",
+    "されません",
+    "ません",
     "ておらず",
     "ていない",
     "ていなかっ",
+    "ていません",
     "てない",
     "てなかっ",
     "てず",
     "てはいな",
+    "てはいません",
     "てはおらず",
     "ではな",
     "とはな",
@@ -493,27 +500,47 @@ const NEGATING_FOLLOWERS: [&str; 32] = [
     "ならず",
     "できず",
     "できな",
-    "を逃",
-    "を許",
-    "を止め",
 ];
 
-/// 語の直後がこれで始まれば、打ち消しと同じく数えない（「連敗を脱した」「勝利を阻まれた」）。
-const REVERSING_FOLLOWERS: [&str; 2] = ["を脱", "を阻"];
+/// 語の直後がこれで始まれば、打ち消しと同じく数えない（「勝利を逃した」「連敗を脱した」「決定を見送った」）。
+/// ただし、その後ろがさらに打ち消し（`DOUBLE_NEGATING_TAILS`）なら二重の打ち消しで、語の意味のまま
+/// （「勝ちを逃さなかった」「勝利を逃さず」「連敗を止められなかった」は数える）。
+const REVERSING_FOLLOWERS: [&str; 6] = ["を逃", "を許", "を止め", "を脱", "を阻", "を見送"];
+
+/// `REVERSING_FOLLOWERS` の後ろの打ち消し（「逃さなかった」「逃さず」「止めなかった」「見送らなかった」）。
+const DOUBLE_NEGATING_TAILS: [&str; 14] = [
+    "さなかっ",
+    "さない",
+    "さず",
+    "さなく",
+    "しません",
+    "らなかっ",
+    "らない",
+    "らず",
+    "られなかっ",
+    "なかっ",
+    "ない",
+    "ず",
+    "ません",
+    "ませんでした",
+];
 
 /// 語＋（は・も）＋「し」「され」の後がこれで始まれば打ち消し（「決定していない」「決定されておらず」
-/// 「増加はしていない」「開始しなかった」）。
-const VERB_NEGATING_TAILS: [&str; 11] = [
+/// 「増加はしていない」「開始しなかった」「決定していません」「開始しませんでした」）。
+const VERB_NEGATING_TAILS: [&str; 14] = [
     "ていない",
     "ていなかっ",
+    "ていません",
     "ておらず",
     "てはいな",
+    "てはいません",
     "てはおらず",
     "てない",
     "てなかっ",
     "ない",
     "なかっ",
     "なく",
+    "ません",
     "ず",
 ];
 
@@ -586,37 +613,64 @@ fn contradiction_on(
 
 /// 勝敗の組（`subject_bound`）で、出力の語と材料の反対の語が同じ主語（チーム・人の名前）について言っているか。
 /// 「AがBを下した」記事を「BはAに敗れた」と言い換えた出力（主語の入れ替え）を、反対の意味と誤検出しないため。
-/// - 出力の語の主語（語の前で最も近い「は」「が」の直前の名前）が無いとき（「サヨナラ勝ちしたんだね」）は、
-///   記事と同じ主語の話とみなす（一言・再説明は主語を省くことが多いため）。
-/// - 材料の反対の語に主語があればその名前と、無ければその語のある文に出力の主語が出てくるかで比べる。
+/// - 主語の候補は、語の前で最も近い「は」「が」の直前の名前と、文の最初の「〜は」の名前（`subjects_at`。
+///   「Aは打線がつながらず敗れた」では「打線」と「A」）。
+/// - 出力の語に主語の候補が無いとき（「サヨナラ勝ちしたんだね」）は、記事と同じ主語の話とみなす
+///   （一言・再説明は主語を省くことが多いため）。
+/// - 材料の反対の語に主語の候補があれば名前どうしを（片方がもう片方を含めば同じとみなす）、無ければその語の
+///   ある文に出力の主語が出てくるかで比べる。
 fn same_subject(said: &Side, opposite: &Side, source: &str, output: &str) -> bool {
-    let output_subjects: Vec<Option<String>> = said
+    let output_subjects: Vec<Vec<String>> = said
         .terms
         .iter()
-        .flat_map(|term| {
-            affirmed_positions(output, term).map(|index| subject_before(output, index))
-        })
+        .flat_map(|term| affirmed_positions(output, term).map(|index| subjects_at(output, index)))
         .collect();
-    if output_subjects.iter().any(Option::is_none) {
+    if output_subjects.iter().any(Vec::is_empty) {
         return true;
     }
+    let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
     opposite.terms.iter().any(|term| {
         affirmed_positions(source, term).any(|index| {
-            let source_subject = subject_before(source, index);
+            let source_subjects = subjects_at(source, index);
             let sentence = sentence_around(source, index);
-            output_subjects
-                .iter()
-                .flatten()
-                .any(|subject| match &source_subject {
-                    Some(source_subject) => source_subject == subject,
-                    None => sentence.contains(subject.as_str()),
-                })
+            output_subjects.iter().flatten().any(|subject| {
+                if source_subjects.is_empty() {
+                    sentence.contains(subject.as_str())
+                } else {
+                    source_subjects
+                        .iter()
+                        .any(|source_subject| same(source_subject, subject))
+                }
+            })
         })
     })
 }
 
+/// `index` の語の主語の候補: 語の前で最も近い「は」「が」の直前の名前と、同じ文の最初の「〜は」の名前（重複なし）。
+fn subjects_at(text: &str, index: usize) -> Vec<String> {
+    let mut subjects: Vec<String> = subject_before(text, index).into_iter().collect();
+    let start = text[..index]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| matches!(c, '。' | '\n' | '！' | '？'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    if let Some(topic) = first_topic(&text[start..index]) {
+        if !subjects.contains(&topic) {
+            subjects.push(topic);
+        }
+    }
+    subjects
+}
+
+/// 文の頭から見て最初の「〜は」（「は」の前がひらがなでないもの）の名前。
+fn first_topic(sentence_head: &str) -> Option<String> {
+    let chars: Vec<char> = sentence_head.chars().collect();
+    let position = (1..chars.len()).find(|&i| chars[i] == 'は' && !is_hiragana(chars[i - 1]))?;
+    name_before(&chars, position)
+}
+
 /// `index` の前で最も近い主語の「は」「が」の直前の名前（同じ文の中だけ。「は」「が」の前がひらがなのときは
-/// 「ながら」「では」などの一部とみなして飛ばす）。名前は区切り（読点・括弧・空白）か「に・で・を・の・も・へ」まで。
+/// 「ながら」「では」などの一部とみなして飛ばす）。
 fn subject_before(text: &str, index: usize) -> Option<String> {
     let before: Vec<char> = text[..index].chars().collect();
     let mut cursor = before.len();
@@ -629,37 +683,45 @@ fn subject_before(text: &str, index: usize) -> Option<String> {
         if !matches!(c, 'は' | 'が') || cursor == 0 || is_hiragana(before[cursor - 1]) {
             continue;
         }
-        let mut start = cursor;
-        while start > 0
-            && cursor - start < 15
-            && !matches!(
-                before[start - 1],
-                '、' | '，'
-                    | ','
-                    | '。'
-                    | '\n'
-                    | ' '
-                    | '　'
-                    | '「'
-                    | '」'
-                    | '（'
-                    | '）'
-                    | '('
-                    | ')'
-                    | 'に'
-                    | 'で'
-                    | 'を'
-                    | 'の'
-                    | 'も'
-                    | 'へ'
-            )
-        {
-            start -= 1;
-        }
-        let name: String = before[start..cursor].iter().collect();
-        return (!name.is_empty()).then_some(name);
+        return name_before(&before, cursor);
     }
     None
+}
+
+/// `chars[particle]`（「は」「が」）の直前の名前。区切り（読点・括弧・空白）か、助詞「に・で・を・の・も・へ・は・が」
+/// まで、最大 15 字。
+fn name_before(chars: &[char], particle: usize) -> Option<String> {
+    let mut start = particle;
+    while start > 0
+        && particle - start < 15
+        && !matches!(
+            chars[start - 1],
+            '、' | '，'
+                | ','
+                | '。'
+                | '\n'
+                | ' '
+                | '　'
+                | '「'
+                | '」'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+                | 'に'
+                | 'で'
+                | 'を'
+                | 'の'
+                | 'も'
+                | 'へ'
+                | 'は'
+                | 'が'
+        )
+    {
+        start -= 1;
+    }
+    let name: String = chars[start..particle].iter().collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// `index` を含む文（「。」・改行で区切る）。
@@ -708,16 +770,25 @@ fn affirmed_positions<'a>(text: &'a str, term: &'a str) -> impl Iterator<Item = 
 }
 
 /// 語の直後（`after`）が打ち消しか。
-/// - 直後の打ち消し（`NEGATING_FOLLOWERS`・`REVERSING_FOLLOWERS`）。
+/// - 直後の打ち消し（`NEGATING_FOLLOWERS`）。`REVERSING_FOLLOWERS`（「を逃」など）は、後ろがさらに打ち消し
+///   （「逃さなかった」）なら打ち消しにしない。
 /// - 語＋（は・も）＋「し」「され」＋打ち消し（`VERB_NEGATING_TAILS`。「決定していない」「決定されておらず」）。
 /// - 語＋「には至」「に至」＋「ら」「っていない」（「決定には至らなかった」「決定には至っていない」）。
 fn is_negated_after(after: &str) -> bool {
     if NEGATING_FOLLOWERS
         .iter()
-        .chain(REVERSING_FOLLOWERS.iter())
         .any(|follower| after.starts_with(follower))
     {
         return true;
+    }
+    if let Some(follower) = REVERSING_FOLLOWERS
+        .iter()
+        .find(|follower| after.starts_with(**follower))
+    {
+        let rest = &after[follower.len()..];
+        return !DOUBLE_NEGATING_TAILS
+            .iter()
+            .any(|tail| rest.starts_with(tail));
     }
     for particle in ["", "は", "も"] {
         let Some(rest) = after.strip_prefix(particle) else {
@@ -808,12 +879,19 @@ fn years_in(text: &str) -> Vec<u32> {
     years
 }
 
-/// 文の中の年月日（「2026年10月28日」「2026.10.28」「2026/10/28」「2026-10-28」。全角も可）。
-/// 記事の日付の書き方を読み、記事の日付を書いた出力を年の誤りとしないため（`output_check` の数字の材料には年だけを使う）。
-pub(super) fn dates_in(text: &str) -> Vec<(u32, u32, u32)> {
+/// 文の中の年月日（「2026年10月28日」「2026.10.28」「2026/10/28」「2026-10-28」。全角も可）と、その位置（バイト）。
+/// 記事の日付を書いた出力を、材料にない年・年の組み合わせの誤りとしないため。日付の年は、出力が同じ年月日を
+/// 書いたときだけ許す（`mask_source_dates`）。年だけを数として許すと、「2026年に契約」のような作り話の年が通るため。
+fn date_spans(text: &str) -> Vec<((u32, u32, u32), std::ops::Range<usize>)> {
+    let offsets: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .collect();
     let chars: Vec<char> = text.chars().map(to_halfwidth).collect();
     let read = |start: usize, max_digits: usize| -> Option<(u32, usize)> {
-        let digits: String = chars[start..]
+        let digits: String = chars
+            .get(start..)?
             .iter()
             .take_while(|c| c.is_ascii_digit())
             .collect();
@@ -822,7 +900,7 @@ pub(super) fn dates_in(text: &str) -> Vec<(u32, u32, u32)> {
         }
         Some((digits.parse().ok()?, start + digits.len()))
     };
-    let mut dates = Vec::new();
+    let mut spans = Vec::new();
     let mut index = 0;
     while index < chars.len() {
         if !chars[index].is_ascii_digit() || (index > 0 && chars[index - 1].is_ascii_digit()) {
@@ -847,20 +925,42 @@ pub(super) fn dates_in(text: &str) -> Vec<(u32, u32, u32)> {
             if chars.get(after_month).copied() != month_end_mark {
                 return None;
             }
-            let (day, after_day) = read(after_month + 1, 2)?;
+            let (day, mut end) = read(after_month + 1, 2)?;
             if let Some(mark) = day_end_mark {
-                if chars.get(after_day) != Some(&mark) {
+                if chars.get(end) != Some(&mark) {
                     return None;
                 }
+                end += 1;
             }
-            ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((year, month, day))
+            ((1..=12).contains(&month) && (1..=31).contains(&day))
+                .then_some(((year, month, day), end))
         })();
-        if let Some(date) = date {
-            dates.push(date);
+        if let Some((date, end)) = date {
+            spans.push((date, offsets[index]..offsets[end]));
         }
         index = after_year;
     }
-    dates
+    spans
+}
+
+/// 文の中の年月日（`date_spans` の日付だけ）。
+pub(super) fn dates_in(text: &str) -> Vec<(u32, u32, u32)> {
+    date_spans(text).into_iter().map(|(date, _)| date).collect()
+}
+
+/// 出力のうち、材料にある年月日と同じ日付を書いた部分を、同じ字数の記号に置き換える（年・数字の点検で数えないため）。
+/// 「2026年10月28日時点の…」は、材料に「2026.10.28」（記事の日付）があれば数えない。年だけ（「2026年に」）は
+/// 置き換えない。
+pub(super) fn mask_source_dates(source: &str, output: &str) -> String {
+    let source_dates = dates_in(source);
+    let mut masked = output.to_string();
+    for (date, range) in date_spans(output).into_iter().rev() {
+        if source_dates.contains(&date) {
+            let chars = output[range.clone()].chars().count();
+            masked.replace_range(range, &"＿".repeat(chars));
+        }
+    }
+    masked
 }
 
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
@@ -872,19 +972,33 @@ fn sentences(text: &str) -> impl Iterator<Item = &str> {
 /// 要約では数字の点検、ほかの段では `find_unknown_years` が拾う）。誤検出を減らすため:
 /// - 出来事の語が2つ以上ある文は見ない（「2023年に契約し、2026年に移籍した」のように、どの年がどの出来事か
 ///   を語の並びだけでは決められないため）。
-/// - 材料にある年月日（記事の日付。「2026.10.28」の形を含む）として書かれた年は見ない
-///   （「2026年10月28日時点の契約内容」のように、記事の日付を書いた文を誤りとしないため）。
+/// - 材料にある年月日（記事の日付。「2026.10.28」の形を含む）と同じ日付として書かれた年は見ない
+///   （「2026年10月28日時点の契約内容」のように、記事の日付を書いた文を誤りとしないため。`mask_source_dates`）。
+/// - 材料の年には、年月日の形（「2026.10.28」）の年も含める。
 pub(super) fn find_year_mismatches(source: &str, output: &str) -> Vec<CheckIssue> {
     let source_sentences: Vec<(Vec<u32>, &str)> = sentences(source)
         .map(|sentence| (years_in(sentence), sentence))
         .collect();
+    // 材料の年は「2026年」の形に加え、年月日の形（「2026.10.28」）の年も含める（年の組み合わせを照合するため）。
     let source_years: Vec<u32> = source_sentences
         .iter()
-        .flat_map(|(years, _)| years.iter().copied())
+        .flat_map(|(years, sentence)| {
+            years
+                .iter()
+                .copied()
+                .chain(dates_in(sentence).into_iter().map(|(year, _, _)| year))
+                .collect::<Vec<_>>()
+        })
         .collect();
-    let source_dates = dates_in(source);
+    let paired_years = |sentence: &str| -> Vec<u32> {
+        years_in(sentence)
+            .into_iter()
+            .chain(dates_in(sentence).into_iter().map(|(year, _, _)| year))
+            .collect()
+    };
+    let output = mask_source_dates(source, output);
     let mut issues: Vec<CheckIssue> = Vec::new();
-    for sentence in sentences(output) {
+    for sentence in sentences(&output) {
         let words: Vec<&&str> = EVENT_WORDS
             .iter()
             .filter(|word| sentence.contains(**word))
@@ -892,14 +1006,9 @@ pub(super) fn find_year_mismatches(source: &str, output: &str) -> Vec<CheckIssue
         if words.len() != 1 {
             continue;
         }
-        let dated_years: Vec<u32> = dates_in(sentence)
-            .into_iter()
-            .filter(|date| source_dates.contains(date))
-            .map(|(year, _, _)| year)
-            .collect();
         let years: Vec<u32> = years_in(sentence)
             .into_iter()
-            .filter(|year| source_years.contains(year) && !dated_years.contains(year))
+            .filter(|year| source_years.contains(year))
             .collect();
         if years.is_empty() {
             continue;
@@ -908,7 +1017,7 @@ pub(super) fn find_year_mismatches(source: &str, output: &str) -> Vec<CheckIssue
         let paired: Vec<u32> = source_sentences
             .iter()
             .filter(|(_, source_sentence)| source_sentence.contains(word))
-            .flat_map(|(years, _)| years.iter().copied())
+            .flat_map(|(_, source_sentence)| paired_years(source_sentence))
             .collect();
         if paired.is_empty() || years.iter().any(|year| paired.contains(year)) {
             continue;
@@ -927,12 +1036,12 @@ pub(super) fn find_year_mismatches(source: &str, output: &str) -> Vec<CheckIssue
     issues
 }
 
-/// 材料の数字のどれとも合わない年（要点・再説明・一言用）。材料の年月日の形（「2026.10.28」）の年も許す
-/// （`japanese_source_numbers` が `dates_in` の年を読む）。
+/// 材料の数字のどれとも合わない年（要点・再説明・一言用）。材料にある年月日と同じ日付を書いた部分の年は
+/// 数えない（`mask_source_dates`）。年月日の形の年を、年だけの数としては許さない（作り話の年を通さないため）。
 fn find_unknown_years(source: &str, output: &str) -> Vec<CheckIssue> {
     let allowed = japanese_source_numbers(source).allowed;
     let mut issues: Vec<CheckIssue> = Vec::new();
-    for year in years_in(output) {
+    for year in years_in(&mask_source_dates(source, output)) {
         if contains_value(&allowed, f64::from(year)) {
             continue;
         }
@@ -1220,10 +1329,136 @@ mod tests {
         assert!(check_stage_consistency(source, "2023年に契約したんだね").is_empty());
         // 年でない数字（「3年間」「24歳」）は見ない。
         assert!(check_stage_consistency(source, "3年間で24歳になったんだね").is_empty());
-        // 記事の日付の形（「2026.10.28」「2026/10/28」）の年は、材料にある年として許す。
+        // 記事の日付の形（「2026.10.28」「2026/10/28」）と同じ年月日を書いた部分の年は数えない。
         let dated = format!("{source}\n2026.10.28");
-        assert!(check_stage_consistency(&dated, "2026年の今も話題だね").is_empty());
+        assert!(check_stage_consistency(&dated, "2026年10月28日の時点で話題だね").is_empty());
         let slashed = format!("{source}\n2026/10/28");
-        assert!(check_stage_consistency(&slashed, "2026年の今も話題だね").is_empty());
+        assert!(check_stage_consistency(&slashed, "2026年10月28日の時点で話題だね").is_empty());
+        // 日付の年を、年だけの数としては許さない（作り話の年を通さないため）。
+        assert_eq!(
+            kinds(&check_stage_consistency(&dated, "2026年の今も話題だね")),
+            vec![IssueKind::UnknownNumber]
+        );
+        // 別の日付（2026年10月27日）は記事の日付と同じではないので数える。
+        assert_eq!(
+            kinds(&check_stage_consistency(
+                &dated,
+                "2026年10月27日の時点で話題だね"
+            )),
+            vec![IssueKind::UnknownNumber]
+        );
+    }
+
+    #[test]
+    fn year_of_the_article_date_does_not_let_a_fabricated_year_through() {
+        // 記事は 2023年12月の契約、本文に記事の日付「2026.10.28」がある。出力は「2026年に契約」（作り話の年）。
+        let source = "うみかぜ球団の青山投手は2023年12月に10年の大型契約を結んだ。\n2026.10.28";
+        let output = "青山投手は2026年にうみかぜ球団と大型契約を結んだ。";
+        let stage = check_stage_consistency(source, output);
+        assert!(
+            stage
+                .iter()
+                .any(|issue| issue.kind == IssueKind::UnknownNumber),
+            "{stage:?}"
+        );
+        assert!(
+            stage
+                .iter()
+                .any(|issue| issue.kind == IssueKind::YearMismatch),
+            "{stage:?}"
+        );
+        let summary = super::super::output_check::check_japanese_summary(source, output, None, &[]);
+        assert!(
+            summary
+                .issues
+                .iter()
+                .any(|issue| issue.kind == IssueKind::UnknownNumber),
+            "{summary:?}"
+        );
+        assert!(summary.blocks_use(), "{summary:?}");
+        // 記事の日付と同じ年月日を書いた要約は、数字・年の点検に引っかからない。
+        let dated =
+            "2026年10月28日時点で、青山投手は2023年12月に結んだ10年の大型契約を続けている。";
+        let report = super::super::output_check::check_japanese_summary(source, dated, None, &[]);
+        assert!(report.passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subject_stops_at_particles_and_falls_back_to_the_topic() {
+        // 「Aは打線がつながらず敗れた」の主語は「打線」と、文の最初の「〜は」の「A」。
+        let source = "みなとシーガルズは打線がつながらず敗れた。";
+        assert_eq!(
+            kinds(&find_contradictions(
+                source,
+                "みなとシーガルズはサヨナラ勝ちした。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        let source = "みなとシーガルズは敗れた。";
+        assert_eq!(
+            kinds(&find_contradictions(
+                source,
+                "みなとシーガルズは打線が爆発して勝利した。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        // 別のチームが主語なら報告しない。
+        assert!(
+            find_contradictions(source, "やまびこベアーズは打線が爆発して勝利した。").is_empty()
+        );
+        assert_eq!(
+            subject_before(
+                "みなとシーガルズは打線がつながらず",
+                "みなとシーガルズは打線がつながらず".len()
+            ),
+            Some("打線".to_string())
+        );
+    }
+
+    #[test]
+    fn polite_and_double_negations_are_read() {
+        let proposal = "政府は削減を検討している。";
+        for output in [
+            "削減は決定していません。",
+            "削減はまだ決まっていません。",
+            "削減の決定を見送った。",
+        ] {
+            assert!(find_contradictions(proposal, output).is_empty(), "{output}");
+        }
+        assert!(
+            find_contradictions("受付は11月末で終了した。", "受付は開始しませんでした。")
+                .is_empty()
+        );
+        // 二重の打ち消し（「勝ちを逃さなかった」「勝利を逃さず」）は勝ちの意味のまま。
+        assert_eq!(
+            kinds(&find_contradictions(
+                LOSS,
+                "みなとシーガルズは最後まで勝ちを逃さなかった。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        assert_eq!(
+            kinds(&find_contradictions(
+                LOSS,
+                "みなとシーガルズは勝利を逃さず喜んだ。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        // 一重の打ち消しは数えない。
+        assert!(find_contradictions(LOSS, "みなとシーガルズは勝利を逃した。").is_empty());
+    }
+
+    #[test]
+    fn long_labels_starting_with_a_self_prefix_are_kept() {
+        for text in [
+            "今回の会見での首相の結論：増税は見送る。",
+            "ニュースで話題の監督の一言：よく粘った。",
+        ] {
+            assert_eq!(strip_heading_labels(text), (text.to_string(), 0), "{text}");
+        }
+        let (text, _) = strip_heading_labels("今回の感想：図書館が夜まで開くのはうれしいね");
+        assert_eq!(text, "図書館が夜まで開くのはうれしいね");
+        let (text, _) = strip_heading_labels("AIまとめ：図書館は夜まで開く。");
+        assert_eq!(text, "図書館は夜まで開く。");
     }
 }
