@@ -29,7 +29,8 @@ use crate::util::text_safety::{
 use super::ai_provider_service::{
     summary_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
 };
-use output_check::{check_japanese_summary, CheckReport, IssueKind};
+use consistency_check::{check_stage_consistency, strip_heading_labels};
+use output_check::{check_japanese_summary, CheckIssue, CheckReport, IssueKind};
 
 /// 手動の要約（「今すぐ要約」「要約を作成」「作り直す」）を生成中の記事ID。
 /// 自動要約キューは、ここにある記事を取り出さず（`AutoSummaryQueue`）、生成中の記事でも段の合間に
@@ -275,12 +276,13 @@ impl SummaryService {
         // 入力は無害化したタイトル＋本文抜粋だけにする（既存の注目ポイントや定型文を混ぜない）。
         // context の無害化済みジャンルは Mock のタグを作るためだけに使い、実AIへは送らない
         // （ai_provider_service の build_prompt は用語解説以外で context を使わない）。
+        let points_request = AiRequest {
+            prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
+            input_text: points_seed.clone(),
+            context: Some(seed_article.genre.clone()),
+        };
         let points_response = request_validated(
-            AiRequest {
-                prompt_id: ARTICLE_POINTS_PROMPT_ID.to_string(),
-                input_text: points_seed.clone(),
-                context: Some(seed_article.genre.clone()),
-            },
+            points_request.clone(),
             SummaryOutputKind::Points,
             provider,
             explanation_level,
@@ -288,6 +290,18 @@ impl SummaryService {
         reject_fallback_early(fallback_policy, &article_id, &points_response)?;
         // 取得手段に関わらず、保存前にもう一度ここで検証して構造化する（形の崩れた出力を保存しない）。
         let points = article_points_from_response(&points_response)?;
+        // 要点・注目ポイント・タグの点検（D170）。材料と反対の意味・材料にない年の項目は外し、外して件数が
+        // 足りなくなったときだけ1回作り直す。
+        let (points_response, points) = check_and_retry_points(
+            points_response,
+            points,
+            points_request,
+            &points_seed,
+            provider,
+            explanation_level,
+            fallback_policy,
+            &request_validated,
+        )?;
 
         // 要約（D167）の実AI入力: 無害化したタイトル・本文抜粋と、いま作った要点。要点が Mock の代替（手動生成で
         // 要点だけ Gemini が失敗したとき。本文の文と定型文）なら入れない（実AIの出力ではない文を実AIの入力に混ぜない）。
@@ -347,29 +361,53 @@ impl SummaryService {
         );
         let yuuko_comment_mock_text =
             build_yuuko_comment_seed(&seed_article, explanation_level, speech_tone);
+        // 再説明・一言も点検し（D170。材料は要約と同じ記事そのもの）、問題があれば1回だけ作り直す。
+        // 作り直しても残ったら、定型文（Mock の結果と同じ文）を使う（`check_and_retry_speech`）。
+        let yuuko_explanation_request = AiRequest {
+            prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
+            input_text: yuuko_speech_input.clone(),
+            context: Some(yuuko_explanation_mock_text),
+        };
         let yuuko_explanation_response = request_validated(
-            AiRequest {
-                prompt_id: YUUKO_EXPLANATION_PROMPT_ID.to_string(),
-                input_text: yuuko_speech_input.clone(),
-                context: Some(yuuko_explanation_mock_text),
-            },
+            yuuko_explanation_request.clone(),
             SummaryOutputKind::Explanation,
             provider,
             explanation_level,
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
+        let yuuko_explanation_response = check_and_retry_speech(
+            yuuko_explanation_response,
+            yuuko_explanation_request,
+            SummaryOutputKind::Explanation,
+            &points_seed,
+            provider,
+            explanation_level,
+            fallback_policy,
+            &request_validated,
+        )?;
 
+        let yuuko_comment_request = AiRequest {
+            prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
+            input_text: yuuko_speech_input,
+            context: Some(yuuko_comment_mock_text),
+        };
         let yuuko_comment_response = request_validated(
-            AiRequest {
-                prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
-                input_text: yuuko_speech_input,
-                context: Some(yuuko_comment_mock_text),
-            },
+            yuuko_comment_request.clone(),
             SummaryOutputKind::Comment,
             provider,
             explanation_level,
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_comment_response)?;
+        let yuuko_comment_response = check_and_retry_speech(
+            yuuko_comment_response,
+            yuuko_comment_request,
+            SummaryOutputKind::Comment,
+            &points_seed,
+            provider,
+            explanation_level,
+            fallback_policy,
+            &request_validated,
+        )?;
 
         // 永続化メタ用のプロバイダ。1つでも Mock に切り替わっていれば "mock" と記録する。
         let effective_provider = combined_provider(&[
@@ -536,7 +574,7 @@ where
             log::info!(
                 "the summary regeneration fell back to the mock provider; kept the first summary"
             );
-            return Ok(first);
+            return keep_first_unless_blocked(first, &first_report);
         }
         // 手動要約との重なり・アプリの終了による停止（自動要約の取得手段が返す）は、握りつぶさずに返す。
         Err(error @ AppError::Validation(_)) => {
@@ -548,12 +586,16 @@ where
                 "the summary regeneration failed ({}); kept the first summary",
                 error_label(&error)
             );
-            return Ok(first);
+            return keep_first_unless_blocked(first, &first_report);
         }
     };
     let retried_report = check_japanese_summary(check_source, &retried.text, None, &fixed_refs);
     let retried_kinds = retried_report.kinds_where(IssueKind::triggers_summary_retry);
-    if is_retry_better(&first_report, &retried_report) {
+    // 反対の意味・年の取り違え（D170）が作り直しで消えたら、ほかの問題が残っていても作り直した方を使う
+    // （意味を逆にした要約を見せるより、数字の言い換えなどが残る方が害が小さいため）。
+    if is_retry_better(&first_report, &retried_report)
+        || (first_report.blocks_use() && !retried_report.blocks_use())
+    {
         log::info!(
             "adopted the regenerated summary (remaining issues: {})",
             issue_labels(&retried_kinds)
@@ -564,8 +606,240 @@ where
             "kept the first summary because the regenerated one was not better ({})",
             issue_labels(&retried_kinds)
         );
-        Ok(first)
+        keep_first_unless_blocked(first, &first_report)
     }
+}
+
+/// 作り直しを使わないときに、最初の要約を使ってよいか。反対の意味・年の取り違え（`IssueKind::blocks_use`）が
+/// 残る要約は使わず、実AIの出力が検証に落ちたときと同じく保存しない（D170・D104。手動は固定文言のエラー、
+/// 自動要約はキューの再試行に回る）。
+fn keep_first_unless_blocked(
+    first: AiResponse,
+    first_report: &CheckReport,
+) -> Result<AiResponse, AppError> {
+    if first_report.blocks_use() {
+        log::warn!(
+            "the summary still contradicted the article after the regeneration ({}); the generated summary was not saved",
+            issue_labels(&first_report.kinds_where(IssueKind::blocks_use))
+        );
+        return Err(AppError::AiOutputRejected);
+    }
+    Ok(first)
+}
+
+/// 要点・注目ポイント・タグの点検（D170）と、件数が足りなくなったときの1回の作り直し。
+///
+/// - 点検するのは実AIの出力だけ（Mock の要点は本文の文なので点検しない）。
+/// - 各項目から見出し・太字の記号を消し（`strip_heading_labels`）、材料（タイトル＋本文抜粋）と反対の意味・
+///   材料にない年・年の組み合わせの誤り・消せない見出しのある項目は外す（`check_stage_consistency`）。
+///   タグは反対の意味のものだけを外し、3件に満たなくなったらタグを空にする（既存のタグを残す・D11）。
+/// - 外しても要点 2件・注目ポイント 1件以上が残れば、作り直さずに残りを使う（生成の回数を増やさない）。
+/// - 足りなくなったときだけ、同じ依頼で1回作り直す（要点の段には点検の理由を添える指示がないため）。
+///   作り直しも点検し、足りなければ実AIの出力が検証に落ちたときと同じく保存しない（D104）。
+/// - 作り直しが Mock に切り替わったとき: 自動要約は止め、手動は Mock の要点（本文の文）を使う。
+/// - 自動要約で、作り直しの前に手動要約が始まった・アプリが終わるときの停止のエラーはそのまま返す。
+#[allow(clippy::too_many_arguments)]
+fn check_and_retry_points<F>(
+    first_response: AiResponse,
+    first: AiArticlePoints,
+    request: AiRequest,
+    source: &str,
+    provider: AiProvider,
+    explanation_level: ExplanationLevel,
+    fallback_policy: FallbackPolicy,
+    request_validated: &F,
+) -> Result<(AiResponse, AiArticlePoints), AppError>
+where
+    F: Fn(
+        AiRequest,
+        SummaryOutputKind,
+        AiProvider,
+        ExplanationLevel,
+    ) -> Result<AiResponse, AppError>,
+{
+    if first_response.provider == PROVIDER_MOCK {
+        return Ok((first_response, first));
+    }
+    let first_kinds = match filter_checked_points(first, source) {
+        Ok(points) => return Ok((first_response, points)),
+        Err(kinds) => kinds,
+    };
+    log::info!(
+        "the article points check left too few items ({}); regenerating the points once",
+        issue_labels(&first_kinds)
+    );
+    let retried = match request_validated(
+        request,
+        SummaryOutputKind::Points,
+        provider,
+        explanation_level,
+    ) {
+        Ok(retried) => retried,
+        Err(error @ AppError::Validation(_)) => return Err(error),
+        Err(error) => {
+            log::warn!(
+                "the article points regeneration failed ({}); the generated summary was not saved",
+                error_label(&error)
+            );
+            return Err(AppError::AiOutputRejected);
+        }
+    };
+    let points = article_points_from_response(&retried)?;
+    if retried.provider == PROVIDER_MOCK {
+        reject_fallback_early_with_label(fallback_policy, "article points regeneration", &retried)?;
+        return Ok((retried, points));
+    }
+    match filter_checked_points(points, source) {
+        Ok(points) => {
+            log::info!(
+                "adopted the regenerated article points (first issues: {})",
+                issue_labels(&first_kinds)
+            );
+            Ok((retried, points))
+        }
+        Err(kinds) => {
+            log::warn!(
+                "the regenerated article points still left too few items ({}); the generated summary was not saved",
+                issue_labels(&kinds)
+            );
+            Err(AppError::AiOutputRejected)
+        }
+    }
+}
+
+/// 要点・注目ポイント・タグを点検し、問題のある項目を外す。件数が足りなくなったら、外した理由の種類を返す。
+fn filter_checked_points(
+    points: AiArticlePoints,
+    source: &str,
+) -> Result<AiArticlePoints, Vec<IssueKind>> {
+    let mut kinds: Vec<IssueKind> = Vec::new();
+    let mut keep_item = |item: String| -> Option<String> {
+        let (item, _) = strip_heading_labels(&item);
+        let issues = check_stage_consistency(source, &item);
+        if issues.is_empty() && !item.trim().is_empty() {
+            return Some(item);
+        }
+        kinds.extend(issues.iter().map(|issue| issue.kind));
+        None
+    };
+    let key_points: Vec<String> = points
+        .key_points
+        .into_iter()
+        .filter_map(&mut keep_item)
+        .collect();
+    let focus_points: Vec<String> = points
+        .focus_points
+        .into_iter()
+        .filter_map(&mut keep_item)
+        .collect();
+    let tag_count = points.tags.len();
+    let mut tags: Vec<String> = points
+        .tags
+        .into_iter()
+        .filter(|tag| consistency_check::find_contradictions(source, tag).is_empty())
+        .collect();
+    if tags.len() < tag_count {
+        kinds.push(IssueKind::Contradiction);
+        if tags.len() < ARTICLE_TAGS_MIN_ITEMS {
+            tags.clear();
+        }
+    }
+    kinds.sort_unstable();
+    kinds.dedup();
+    if !kinds.is_empty() {
+        // 本文は出さず、外した理由の種類だけを残す。
+        log::info!(
+            "removed article point items or tags that failed the check ({})",
+            issue_labels(&kinds)
+        );
+    }
+    if key_points.len() < KEY_POINTS_MIN_ITEMS || focus_points.len() < FOCUS_POINTS_MIN_ITEMS {
+        return Err(kinds);
+    }
+    Ok(AiArticlePoints {
+        key_points,
+        focus_points,
+        tags,
+    })
+}
+
+/// 再説明・一言の点検（D170）と1回の作り直し。
+///
+/// - 点検するのは実AIの出力だけ。材料は記事そのもの（タイトル＋本文抜粋）で、見出しの残り・反対の意味・
+///   材料にない年・年の組み合わせを見る（`check_stage_consistency`）。問題がなければ作り直さない。
+/// - 問題があれば同じ依頼で1回だけ作り直す（再説明・一言には点検の理由を添える指示がないため。
+///   temperature 0.2 の生成のばらつきで、別の言い方になることを期待する）。
+/// - 作り直しも問題が残る・失敗した・検証に落ちたときは、定型文（`request.context`。Mock の結果と同じ、
+///   タイトルとジャンルからの決まった文）を使う。誤った内容を見せるより安全なため。プロバイダの記録は
+///   変えない（要約・要点は実AIの出力のまま）。
+/// - 自動要約で、作り直しの前に手動要約が始まった・アプリが終わるときの停止のエラーはそのまま返す。
+///   作り直しが Mock に切り替わったときは、自動要約は止め、手動は Mock の結果（同じ定型文）を使う。
+#[allow(clippy::too_many_arguments)]
+fn check_and_retry_speech<F>(
+    first: AiResponse,
+    request: AiRequest,
+    kind: SummaryOutputKind,
+    source: &str,
+    provider: AiProvider,
+    explanation_level: ExplanationLevel,
+    fallback_policy: FallbackPolicy,
+    request_validated: &F,
+) -> Result<AiResponse, AppError>
+where
+    F: Fn(
+        AiRequest,
+        SummaryOutputKind,
+        AiProvider,
+        ExplanationLevel,
+    ) -> Result<AiResponse, AppError>,
+{
+    if first.provider == PROVIDER_MOCK {
+        return Ok(first);
+    }
+    let first_issues = check_stage_consistency(source, &first.text);
+    if first_issues.is_empty() {
+        return Ok(first);
+    }
+    log::info!(
+        "the {} check found issues ({}); regenerating it once",
+        kind.label(),
+        issue_labels(&issue_kinds(&first_issues))
+    );
+    let template = request.context.clone().unwrap_or_default();
+    let retried = request_validated(request, kind, provider, explanation_level);
+    let retried_issues = match retried {
+        Ok(retried) if retried.provider == PROVIDER_MOCK => {
+            reject_fallback_early_with_label(fallback_policy, kind.label(), &retried)?;
+            return Ok(retried);
+        }
+        Ok(retried) => {
+            let issues = check_stage_consistency(source, &retried.text);
+            if issues.is_empty() {
+                log::info!("adopted the regenerated {}", kind.label());
+                return Ok(retried);
+            }
+            issue_labels(&issue_kinds(&issues))
+        }
+        Err(error @ AppError::Validation(_)) => return Err(error),
+        Err(error) => error_label(&error).to_string(),
+    };
+    log::info!(
+        "the regenerated {} was not usable ({retried_issues}); used the fixed text instead",
+        kind.label()
+    );
+    // 定型文は Mock の種と同じく無害化済みで、保存前の検証を通る。念のため同じ検証にかける。
+    let text = validate_summary_output(kind, &template).map_err(|_| AppError::AiOutputRejected)?;
+    Ok(AiResponse {
+        text,
+        provider: first.provider,
+    })
+}
+
+fn issue_kinds(issues: &[CheckIssue]) -> Vec<IssueKind> {
+    let mut kinds: Vec<IssueKind> = issues.iter().map(|issue| issue.kind).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
 }
 
 /// 自動要約で作り直しが Mock に切り替わったときのエラー（`reject_fallback_early` と同じエラー）。
@@ -1257,6 +1531,7 @@ fn select_valid_output_in_tone(
     input_text: &str,
     primary: AiResponse,
 ) -> Result<AiResponse, AppError> {
+    let primary = strip_ai_headings(kind, primary);
     let primary = clean_ai_speech(kind, tone, input_text, primary);
     let rejection = match validate_summary_output(kind, &primary.text) {
         Ok(text) => {
@@ -1274,6 +1549,28 @@ fn select_valid_output_in_tone(
         rejection.label()
     );
     Err(rejection_error(&primary))
+}
+
+/// 実AIの要約・再説明・一言から、消しても文が壊れない見出し・ラベル（「**中心となる出来事の要約:**」
+/// 「ゆうこの一言：」・見出しだけの行・太字の記号）を消す（D170。`consistency_check::strip_heading_labels`）。
+/// 消すだけなので、続く保存前の検証（見出し・HTML・制御文字・文字数）はそのまま効く。Mock の結果は触らない。
+fn strip_ai_headings(kind: SummaryOutputKind, response: AiResponse) -> AiResponse {
+    if kind == SummaryOutputKind::Points || response.provider == PROVIDER_MOCK {
+        return response;
+    }
+    let (text, removed) = strip_heading_labels(&response.text);
+    if removed == 0 {
+        return response;
+    }
+    // 本文は出さず、数と出力種別だけを残す。
+    log::info!(
+        "removed {removed} heading(s) or label(s) from the AI output ({})",
+        kind.label()
+    );
+    AiResponse {
+        text,
+        provider: response.provider,
+    }
 }
 
 /// 実AI（Gemini・ローカル）の再説明・一言から、話の中身ではない飾り（括弧のト書き・中国語の助詞・
@@ -1686,8 +1983,9 @@ mod tests {
     use crate::domain::settings::ExplanationLevel;
     use crate::domain::speech_tone::SpeechTone;
     use crate::domain::summary::{
-        AiResponse, GenerateArticleSummaryParams, ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAG_MAX_CHARS,
-        KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS, SUMMARY_PROMPT_ID,
+        AiResponse, GenerateArticleSummaryParams, GeneratedArticleSummaryDto,
+        ARTICLE_POINTS_PROMPT_ID, ARTICLE_TAG_MAX_CHARS, KEY_POINTS_MAX_ITEMS,
+        KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS, SUMMARY_PROMPT_ID,
     };
     use crate::error::{AppError, CommandError};
     use crate::paths::AppPaths;
@@ -2461,6 +2759,289 @@ mod tests {
             assert_eq!(requests.len(), 4, "case {index}");
             let _ = std::fs::remove_dir_all(&root_dir);
         }
+    }
+
+    // --- D170: 見出しの残り・反対の意味・年の組み合わせの点検 ---
+
+    /// 段ごとに決めた出力を順に返す取得手段で要約一式を作る（実AIと同じく保存前の検証・後処理を通す）。
+    /// 用意した出力が尽きた段は検証落ち（AiOutputRejected）にする。
+    struct Script {
+        points: Vec<String>,
+        summary: Vec<&'static str>,
+        explanation: Vec<&'static str>,
+        comment: Vec<&'static str>,
+    }
+
+    fn generate_scripted(
+        service: &SummaryService,
+        script: Script,
+    ) -> (
+        Result<SummaryGeneration, AppError>,
+        Vec<crate::domain::summary::AiRequest>,
+    ) {
+        let points = RefCell::new(script.points.into_iter());
+        let summary = RefCell::new(script.summary.into_iter());
+        let explanation = RefCell::new(script.explanation.into_iter());
+        let comment = RefCell::new(script.comment.into_iter());
+        let requests = RefCell::new(Vec::new());
+        let result = service.generate_article_summary_with(
+            params(),
+            FallbackPolicy::SaveFallback,
+            |request, kind, _provider, _level| {
+                requests.borrow_mut().push(request);
+                let next = match kind {
+                    SummaryOutputKind::Points => points.borrow_mut().next(),
+                    SummaryOutputKind::Summary => summary.borrow_mut().next().map(str::to_string),
+                    SummaryOutputKind::Explanation => {
+                        explanation.borrow_mut().next().map(str::to_string)
+                    }
+                    SummaryOutputKind::Comment => comment.borrow_mut().next().map(str::to_string),
+                };
+                match next {
+                    Some(text) => select_valid_output(kind, response(&text, "local")),
+                    None => Err(AppError::AiOutputRejected),
+                }
+            },
+        );
+        (result, requests.into_inner())
+    }
+
+    fn generated(result: Result<SummaryGeneration, AppError>) -> GeneratedArticleSummaryDto {
+        match result.unwrap() {
+            SummaryGeneration::Generated(generated) => generated,
+            SummaryGeneration::AlreadySummarized => panic!("not generated"),
+        }
+    }
+
+    const LOSS_TITLE: &str = "楽天、痛恨のサヨナラ負け";
+    const LOSS_EXCERPT: &str =
+        "楽天は9回に逆転サヨナラ3ランを浴びて阪神に敗れた。安田は3安打だった。";
+
+    fn loss_points() -> String {
+        points_text(
+            &["楽天は阪神にサヨナラ負けした", "安田は3安打だった"],
+            &["救援陣の失点に注目"],
+        )
+    }
+
+    #[test]
+    fn summary_that_reverses_the_article_is_regenerated_once_with_the_reason() {
+        let root_dir = temp_root("d170-summary-retry");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["楽天はサヨナラ勝ちした。", "楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert_eq!(generated(result).summary, "楽天は阪神にサヨナラ負けした。");
+        assert_eq!(requests.len(), 5);
+        assert_eq!(
+            requests[2].prompt_id,
+            crate::domain::summary::SUMMARY_RETRY_PROMPT_ID
+        );
+        let reasons = requests[2].context.as_deref().unwrap();
+        assert!(reasons.contains("「勝ち」"), "{reasons}");
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn summary_that_stays_reversed_after_the_regeneration_is_not_saved() {
+        let root_dir = temp_root("d170-summary-rejected");
+        let (service, repository) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["楽天はサヨナラ勝ちした。", "楽天は阪神に勝利した。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert!(matches!(result, Err(AppError::AiOutputRejected)));
+        // 要点・要約・作り直しまでで止まり、再説明・一言は呼ばない。
+        assert_eq!(requests.len(), 3);
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.yuuko_comment, None);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn summary_with_a_year_paired_with_another_event_is_regenerated() {
+        let root_dir = temp_root("d170-summary-year");
+        let excerpt =
+            "2023年12月に球団と12年の大型契約を結んだ。2026年に1200万ドルの年俸を受け取った。";
+        let (service, _) = build_service_with_title(&root_dir, "山本投手の年俸", excerpt);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![points_text(
+                    &["2023年12月に大型契約を結んだ", "2026年の年俸は1200万ドル"],
+                    &["年俸の上がり方に注目"],
+                )],
+                summary: vec![
+                    "山本投手は2026年に球団と大型契約を結んだ。",
+                    "山本投手は2023年12月に球団と大型契約を結んだ。",
+                ],
+                explanation: vec!["2023年に契約したんだね。"],
+                comment: vec!["すごい契約だね"],
+            },
+        );
+        assert_eq!(
+            generated(result).summary,
+            "山本投手は2023年12月に球団と大型契約を結んだ。"
+        );
+        assert_eq!(requests.len(), 5);
+        assert!(requests[2]
+            .context
+            .as_deref()
+            .unwrap()
+            .contains("「2026年」と「契約」"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn bold_heading_in_the_summary_is_stripped_without_regeneration() {
+        let root_dir = temp_root("d170-heading");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["**中心となる出来事の要約:** 楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["再説明：楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["**ゆうこの一言**\n悔しい負けだね"],
+            },
+        );
+        let generated = generated(result);
+        assert_eq!(generated.summary, "楽天は阪神にサヨナラ負けした。");
+        assert_eq!(
+            generated.yuuko_explanation,
+            "楽天はサヨナラ負けしたんだね。"
+        );
+        assert_eq!(generated.yuuko_comment, "悔しい負けだね");
+        assert_eq!(requests.len(), 4);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn reversed_comment_is_regenerated_once_then_replaced_by_the_fixed_text() {
+        // 作り直しで直れば作り直した一言を使う。
+        let root_dir = temp_root("d170-comment-adopted");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["楽天はサヨナラ勝ちしたんだね", "悔しい負けだね"],
+            },
+        );
+        assert_eq!(generated(result).yuuko_comment, "悔しい負けだね");
+        assert_eq!(requests.len(), 5);
+        // 作り直しは同じ依頼（入力・定型文の種が同じ）。
+        assert_eq!(requests[3].input_text, requests[4].input_text);
+        let _ = std::fs::remove_dir_all(&root_dir);
+
+        // 作り直しても反対の意味なら、定型文（Mock と同じ文）を使い、誤った一言は見せない。
+        let root_dir = temp_root("d170-comment-template");
+        let (service, repository) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ勝ちしたんだね。", "楽天の勝利だね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        let generated = generated(result);
+        let template = requests[2].context.clone().unwrap();
+        assert_eq!(generated.yuuko_explanation, template);
+        assert!(!generated.yuuko_explanation.contains("勝"));
+        assert_eq!(requests.len(), 5);
+        let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+        assert_eq!(detail.yuuko_explanation.as_deref(), Some(template.as_str()));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn reversed_key_points_are_dropped_and_regenerated_only_when_too_few_remain() {
+        // 外しても 2 件残るなら作り直さない。
+        let root_dir = temp_root("d170-points-dropped");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![points_text(
+                    &[
+                        "楽天は阪神にサヨナラ負けした",
+                        "楽天は最後にサヨナラ勝ちした",
+                        "安田は3安打だった",
+                    ],
+                    &["救援陣の失点に注目"],
+                )],
+                summary: vec!["楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert_eq!(
+            generated(result).key_points,
+            vec!["楽天は阪神にサヨナラ負けした", "安田は3安打だった"]
+        );
+        assert_eq!(requests.len(), 4);
+        let _ = std::fs::remove_dir_all(&root_dir);
+
+        // 足りなくなったら1回だけ作り直す。
+        let root_dir = temp_root("d170-points-retry");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![
+                    points_text(
+                        &["楽天は最後にサヨナラ勝ちした", "安田は3安打だった"],
+                        &["救援陣の失点に注目"],
+                    ),
+                    loss_points(),
+                ],
+                summary: vec!["楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert_eq!(
+            generated(result).key_points,
+            vec!["楽天は阪神にサヨナラ負けした", "安田は3安打だった"]
+        );
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].input_text, requests[1].input_text);
+        let _ = std::fs::remove_dir_all(&root_dir);
+
+        // 作り直しても足りなければ保存しない。
+        let root_dir = temp_root("d170-points-rejected");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let bad = points_text(
+            &["楽天は最後にサヨナラ勝ちした", "安田は3安打だった"],
+            &["救援陣の失点に注目"],
+        );
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![bad.clone(), bad],
+                summary: vec!["楽天は阪神にサヨナラ負けした。"],
+                explanation: vec!["楽天はサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert!(matches!(result, Err(AppError::AiOutputRejected)));
+        assert_eq!(requests.len(), 2);
+        let _ = std::fs::remove_dir_all(&root_dir);
     }
 
     #[test]
@@ -3664,7 +4245,7 @@ mod tests {
                             kind,
                             response(
                                 &points_text(
-                                    &["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"],
+                                    &["工場の新設が発表された", "投資額は1兆円", "稼働は来年度"],
                                     &["地域の雇用がどう変わるかに注目"],
                                 ),
                                 "local",
@@ -3680,7 +4261,7 @@ mod tests {
         };
         assert_eq!(
             generated.key_points,
-            vec!["工場の新設が発表された", "投資額は1兆円", "稼働は2028年"]
+            vec!["工場の新設が発表された", "投資額は1兆円", "稼働は来年度"]
         );
         assert_eq!(
             generated.focus_points,
@@ -4228,6 +4809,9 @@ mod overseas_summary_eval;
 /// 要約の機械点検（D166。数字・簡体字・指示の写し・注記・長さ・日本語らしさ）。国内記事の要約の作り直しに使い、
 /// 海外記事の試作の点検（下の overseas_output_check）とも共通。
 mod output_check;
+
+/// 要約一式の見出しの残り・反対の意味・年の組み合わせの点検（D170）。要点・要約・再説明・一言に使う。
+mod consistency_check;
 
 /// 要約の機械点検と作り直しの評価ハーネス（D166。`#[ignore]`・手動実行専用）。
 #[cfg(test)]

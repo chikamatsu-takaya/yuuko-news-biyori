@@ -19,6 +19,8 @@
 //! - **注記**: 記事の内容ではなく材料についての注記（「記事情報には」「明記されていない」など）。
 //! - **長さ**: 空白を除いた文字数の上限（上限を渡したときだけ）。空の出力。
 //! - **日本語でない**: かなの割合が 10% 未満（英語のまま返した出力）。
+//! - **見出しの残り・反対の意味・年の組み合わせ**（D170。国内記事の要約だけ。`consistency_check`）:
+//!   消せずに残った見出し・ラベル、材料と反対の意味の語（勝ち⇔負け など）、材料にない年と出来事の組。
 //!
 //! どの種類で作り直すかは呼び出し側が決める（`IssueKind::triggers_summary_retry`）。国内記事の評価
 //! （`docs/00_project/要約の機械点検の評価_2026-10.md`）で誤検出の多かった種類は、作り直しの理由にしない。
@@ -46,6 +48,12 @@ pub(super) enum IssueKind {
     TooLong,
     Empty,
     NotJapanese,
+    /// 消せずに残った見出し・ラベル（「感想：」「**」など。D170）。
+    Heading,
+    /// 材料と反対の意味の語（材料は「負け」なのに「勝ち」と書いた など。D170）。
+    Contradiction,
+    /// 材料にない、年と出来事の組み合わせ（材料は「2023年に契約」なのに「2026年に契約」と書いた。D170）。
+    YearMismatch,
 }
 
 impl IssueKind {
@@ -60,6 +68,9 @@ impl IssueKind {
             Self::TooLong => "too_long",
             Self::Empty => "empty",
             Self::NotJapanese => "not_japanese",
+            Self::Heading => "heading",
+            Self::Contradiction => "contradiction",
+            Self::YearMismatch => "year_mismatch",
         }
     }
 
@@ -70,12 +81,22 @@ impl IssueKind {
             | Self::ScaleMismatch
             | Self::SimplifiedChinese
             | Self::PromptEcho
-            | Self::NotJapanese => true,
+            | Self::NotJapanese
+            | Self::Heading
+            | Self::Contradiction
+            | Self::YearMismatch => true,
             // 注記: 国内記事では「〜は明らかにされていない」のような記事そのものの言い回しと区別しにくい。
             // 長さ: 要約は「1〜2文」で頼んでおり文字数の上限を決めていない（上限は保存前の検証 3000 字）。
             // 空: 保存前の検証（validate_summary_output）が先に拒否するので、ここには来ない。
             Self::MetaComment | Self::TooLong | Self::Empty => false,
         }
+    }
+
+    /// 作り直しても残ったら、その出力を使わない種類か（D170）。意味を逆にした・年を取り違えた出力は、
+    /// そのまま見せると誤った情報になるため。数字の誤り（D166）は従来どおり作り直し1回までで、残っても使う
+    /// （材料にない数字の点検は言い換え〔「4か月」など〕でも引っかかり、捨てると記事が要約されないため）。
+    pub(super) fn blocks_use(self) -> bool {
+        matches!(self, Self::Contradiction | Self::YearMismatch)
     }
 }
 
@@ -90,6 +111,11 @@ impl CheckReport {
     #[cfg(test)]
     pub(super) fn passed(&self) -> bool {
         self.issues.is_empty()
+    }
+
+    /// 作り直しても残ったら使わない種類（`IssueKind::blocks_use`）の問題があるか。
+    pub(super) fn blocks_use(&self) -> bool {
+        self.issues.iter().any(|issue| issue.kind.blocks_use())
     }
 
     /// `filter` を満たす問題の種類（重複なし・並びは固定）。ログ・作り直しの判断に使う。
@@ -162,7 +188,7 @@ pub(super) fn check_japanese_summary(
     max_chars: Option<usize>,
     fixed_prompt_texts: &[&str],
 ) -> CheckReport {
-    check_output(
+    let mut report = check_output(
         &japanese_source_numbers(source),
         output,
         &CheckOptions {
@@ -173,7 +199,20 @@ pub(super) fn check_japanese_summary(
             fixed_prompt_texts,
             scale_hint: "単位（万・億など）は記事情報のとおりに書く。",
         },
-    )
+    );
+    // 空の出力は点検の対象外（check_output が Empty だけを返す）。
+    if !report
+        .issues
+        .iter()
+        .any(|issue| issue.kind == IssueKind::Empty)
+    {
+        report
+            .issues
+            .extend(super::consistency_check::check_summary_consistency(
+                source, output,
+            ));
+    }
+    report
 }
 
 /// 点検の本体（言語に依らない部分）。数字の照合は、材料から読んだ数字（`source_numbers`）と比べる。

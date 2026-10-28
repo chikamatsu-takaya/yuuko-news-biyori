@@ -541,6 +541,8 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             continue;
         }
         let stages = RefCell::new(Vec::<Value>::new());
+        // 点検の材料（アプリと同じく、要点の段の入力＝タイトル＋本文抜粋）。D170 の点検の記録に使う。
+        let source = RefCell::new(None::<String>);
         let started = Instant::now();
         let result = service.generate_article_summary_with(
             GenerateArticleSummaryParams {
@@ -548,7 +550,7 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             },
             FallbackPolicy::SaveFallback,
             |request, kind, provider, level| {
-                record_stage(&service, &stages, request, kind, provider, level)
+                record_stage(&service, &stages, &source, request, kind, provider, level)
             },
         );
         let total_ms = started.elapsed().as_millis();
@@ -583,6 +585,7 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
 fn record_stage(
     service: &SummaryService,
     stages: &RefCell<Vec<Value>>,
+    source: &RefCell<Option<String>>,
     request: AiRequest,
     kind: SummaryOutputKind,
     provider: AiProvider,
@@ -590,6 +593,10 @@ fn record_stage(
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
     let input_text = request.input_text.clone();
+    if kind == SummaryOutputKind::Points && source.borrow().is_none() {
+        source.replace(Some(request.input_text.clone()));
+    }
+    let source_text = source.borrow().clone().unwrap_or_default();
     // 要約の作り直し（D166 の summary_retry_v2）を最初の要約と分けて数えるため。
     let prompt_id = request.prompt_id.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
@@ -658,11 +665,61 @@ fn record_stage(
             _ => None,
         };
         if let Some(checked) = checked {
-            stage["check"] = check_json(&input_text, &checked);
+            // 点検の材料はアプリと同じ記事そのもの（タイトル＋本文抜粋）。
+            stage["check"] = check_json(&source_text, &checked);
         }
+        // D170 の点検（要点・注目ポイントは1件ずつ、タグ、再説明・一言）。アプリと同じ材料で照らす。
+        stage["consistency"] = consistency_json(kind, &source_text, &response.text);
     }
     stages.borrow_mut().push(stage);
     selected
+}
+
+/// D170 の点検（見出しの残り・反対の意味・材料にない年・年の組み合わせ）の結果を記録用の JSON にする。
+/// 要約は `check_json`（`check_japanese_summary` に同じ点検が入っている）で見るので、ここでは空にする。
+fn consistency_json(kind: SummaryOutputKind, source: &str, output: &str) -> Value {
+    let items: Vec<(String, String)> = match kind {
+        SummaryOutputKind::Summary => Vec::new(),
+        SummaryOutputKind::Points => match validate_article_points(output) {
+            Ok(validated) => {
+                let points = validated.points;
+                points
+                    .key_points
+                    .into_iter()
+                    .map(|item| ("key_point".to_string(), item))
+                    .chain(
+                        points
+                            .focus_points
+                            .into_iter()
+                            .map(|item| ("focus_point".to_string(), item)),
+                    )
+                    .chain(points.tags.into_iter().map(|tag| ("tag".to_string(), tag)))
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        },
+        _ => vec![(kind.label().to_string(), output.to_string())],
+    };
+    let issues: Vec<Value> = items
+        .iter()
+        .flat_map(|(part, item)| {
+            let issues = if part == "tag" {
+                super::consistency_check::find_contradictions(source, item)
+            } else {
+                let (stripped, _) = super::consistency_check::strip_heading_labels(item);
+                super::consistency_check::check_stage_consistency(source, &stripped)
+            };
+            issues.into_iter().map(move |issue| {
+                json!({
+                    "part": part,
+                    "item": item,
+                    "kind": issue.kind.label(),
+                    "reason": issue.reason,
+                })
+            })
+        })
+        .collect();
+    json!(issues)
 }
 
 /// 要約の機械点検（`output_check`）の結果を記録用の JSON にする（すべての種類・作り直しの対象かどうか）。

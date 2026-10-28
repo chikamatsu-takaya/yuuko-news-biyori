@@ -10,7 +10,8 @@
 //! 段階（`YUUKO_SUMMARY_CHECK_EVAL_PHASE`）:
 //! - `generate`: `<OUT>/summary_checks.jsonl` に1記事×1解説レベルで1行を追記する（記録済みは飛ばす）。
 //! - `analyze`: `summary_checks.jsonl` を読み、種類ごとの引っかかりの数と、合格した要約に人工の誤り
-//!   （桁違い・材料にない数字・簡体字・指示の写し）を入れたときの検出の率を `<OUT>/analysis.json` に書く。
+//!   （桁違い・材料にない数字・簡体字・指示の写し・反対の意味の語〔D170〕）を入れたときの検出の率を
+//!   `<OUT>/analysis.json` に書く。要点も D170 の点検（`check_stage_consistency`）にかけ、引っかかりを数える。
 //!   省略時は両方。
 //!
 //! 環境変数: `YUUKO_SUMMARY_CHECK_EVAL_OUT`（出力先。無ければ何もしない）、`YUUKO_LLM_EVAL_ARTICLES`
@@ -32,6 +33,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
+use super::consistency_check::{check_stage_consistency, strip_heading_labels};
 use super::eval_model_override::eval_local_llm;
 use super::local_llm_quality_eval::{
     append_line, bundle_dir, check_json, error_label, import_articles, load_article_ids,
@@ -262,6 +264,8 @@ fn analyze(out_dir: &Path) {
     let mut retried = 0;
     let mut adopted_retry = 0;
     let mut flagged: Vec<Value> = Vec::new();
+    let mut key_point_count = 0;
+    let mut key_point_flagged: Vec<Value> = Vec::new();
     let mut mutations: Vec<(String, usize, usize)> = Vec::new();
     let mut bump = |name: &str, detected: bool| {
         if let Some(entry) = mutations.iter_mut().find(|(n, _, _)| n == name) {
@@ -281,6 +285,23 @@ fn analyze(out_dir: &Path) {
         let Some(source) = seed_for(&repository, article_id) else {
             continue;
         };
+        // 要点の D170 の点検（アプリと同じく、見出しを消してから記事そのものと照らす）。
+        for item in record["keyPoints"].as_array().into_iter().flatten() {
+            let Some(item) = item.as_str() else {
+                continue;
+            };
+            key_point_count += 1;
+            let (stripped, _) = strip_heading_labels(item);
+            let issues = check_stage_consistency(&source, &stripped);
+            if !issues.is_empty() {
+                key_point_flagged.push(json!({
+                    "articleId": article_id,
+                    "level": record["level"],
+                    "item": item,
+                    "issues": issues.iter().map(|issue| issue.reason.clone()).collect::<Vec<_>>(),
+                }));
+            }
+        }
         // 点検は記録時の結果ではなく、今の点検でかけ直す（点検を直した後に、生成し直さずに比べるため）。
         let first_report = check_japanese_summary(&source, first, None, &fixed_refs);
         for issue in &first_report.issues {
@@ -332,6 +353,18 @@ fn analyze(out_dir: &Path) {
                 has(&check(&mutated), &[IssueKind::SimplifiedChinese]),
             );
         }
+        if let Some(mutated) = mutate_opposite(first, &source) {
+            bump(
+                "opposite_term",
+                has(&check(&mutated), &[IssueKind::Contradiction]),
+            );
+        }
+        bump(
+            "bold_heading_residue_after_strip",
+            !strip_heading_labels(&format!("**中心となる出来事の要約:** {first}"))
+                .0
+                .contains("**"),
+        );
         bump(
             "echo_heading_word",
             has(
@@ -355,6 +388,8 @@ fn analyze(out_dir: &Path) {
         "retried": retried,
         "adoptedRetry": adopted_retry,
         "flagged": flagged,
+        "keyPoints": key_point_count,
+        "keyPointFlagged": key_point_flagged,
         "mutations": mutations.iter().map(|(name, total, detected)| json!({
             "name": name, "total": total, "detected": detected,
         })).collect::<Vec<_>>(),
@@ -430,4 +465,31 @@ fn mutate_simplified(text: &str) -> Option<String> {
         .chars()
         .find_map(|c| PAIRS.iter().find(|(from, _)| *from == c).copied())?;
     Some(text.replacen(from, &to.to_string(), 1))
+}
+
+/// 要約と材料の両方にある語（増加・勝利 など）の最初の1つを、反対の意味の語に置き換える（D170 の人工の誤り）。
+/// 置き換えた語が材料にもあるとき（材料に両方の語がある記事）は使わない（点検の決まりで報告しないため）。
+fn mutate_opposite(text: &str, source: &str) -> Option<String> {
+    const PAIRS: [(&str, &str); 16] = [
+        ("増加", "減少"),
+        ("減少", "増加"),
+        ("上昇", "下落"),
+        ("下落", "上昇"),
+        ("勝利", "敗戦"),
+        ("敗れ", "勝利し"),
+        ("黒字", "赤字"),
+        ("赤字", "黒字"),
+        ("可決", "否決"),
+        ("賛成", "反対"),
+        ("開始", "終了"),
+        ("再開", "停止"),
+        ("増収", "減収"),
+        ("増益", "減益"),
+        ("値上げ", "値下げ"),
+        ("成功", "失敗"),
+    ];
+    let (from, to) = PAIRS.iter().find(|(from, to)| {
+        text.contains(from) && source.contains(from) && !source.contains(&to[..to.len().min(6)])
+    })?;
+    Some(text.replacen(from, to, 1))
 }
