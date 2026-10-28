@@ -15,7 +15,8 @@
 //!
 //! 環境変数: `YUUKO_SUMMARY_CHECK_EVAL_OUT`（出力先。無ければ何もしない）、`YUUKO_LLM_EVAL_ARTICLES`
 //! （記事の JSON。省略時は上の評価データ）、`YUUKO_LOCAL_LLM_DIR`（同梱物の場所。読み取り専用で参照する）。
-//! 同梱と別のモデルで回すときは `YUUKO_LLM_EVAL_MODEL` など（`eval_model_override`）。
+//! 同梱と別のモデルで回すときは `YUUKO_LLM_EVAL_MODEL` など（`eval_model_override`）。ただし Sarashina の末尾 `</s>` の後始末（`clean_raw`）は
+//! `local_llm_quality_eval` にしか入れていないので、このハーネスで Sarashina を回すときは結果を読み替えること。
 //!
 //! 実行例（PowerShell）:
 //! ```text
