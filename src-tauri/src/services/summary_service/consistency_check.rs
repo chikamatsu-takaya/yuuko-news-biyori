@@ -9,7 +9,8 @@
 //!   従来どおり保存前の検証（詳細設計書 §12.5）が出力ごと拒否する（消さない）。
 //! - **反対の意味**（`IssueKind::Contradiction`）: 出力に「勝ち」があるのに、材料（記事のタイトル＋本文抜粋）
 //!   には「勝」がなく「負け」がある、のように、出力の語の反対の語だけが材料にあるとき。語の組は
-//!   `OPPOSITE_PAIRS` の固定の一覧（勝ち⇔負け・増加⇔減少・可決⇔否決・決定⇐検討/案 など）。
+//!   `OPPOSITE_PAIRS` の固定の一覧（勝ち⇔負け・増加⇔減少・可決⇔否決・決定⇐検討/案・勝訴⇔敗訴・
+//!   訴えを認め⇔退け など）。
 //!   誤検出を減らすため:
 //!   - 材料の側は、出力の語より広い言い方（「勝」の1字など、`also`）がどれか1つでもあれば「材料にもある」とする。
 //!   - 打ち消し（「負けなかった」「決めておらず」「決定していない」「決定には至っていない」「未定」
@@ -385,6 +386,122 @@ const OPPOSITE_PAIRS: &[OppositePair] = &[
         a_only: false,
         subject_bound: false,
     },
+    // 判決・裁判の語の組（D175 のタスク。D167 の評価で、訴え〔権利〕を退けた判決を一言が「権利が認められた」と
+    // 逆に書いた誤りが両版で 4 件あった）。選んだ理由は 要約の機械点検の評価 §9.6。
+    // 勝訴⇔敗訴は、勝敗と同じく主語を見る（「原告が敗訴」を「国が勝訴」と言い換えた出力を誤検出しないため）。
+    OppositePair {
+        a: Side {
+            terms: &["勝訴"],
+            also: &[],
+        },
+        b: Side {
+            terms: &["敗訴"],
+            also: &[],
+        },
+        a_only: false,
+        subject_bound: true,
+    },
+    OppositePair {
+        a: Side {
+            terms: &["合憲"],
+            also: &[],
+        },
+        b: Side {
+            terms: &["違憲"],
+            also: &["憲法違反", "憲法に違反"],
+        },
+        a_only: false,
+        subject_bound: false,
+    },
+    // 「不適法」「非合法」は、直前が「不」「非」なので適法・合法の側には数えず（打ち消しの規則）、違法の側の語として数える。
+    OppositePair {
+        a: Side {
+            terms: &["適法", "合法"],
+            also: &[],
+        },
+        b: Side {
+            terms: &["違法", "不適法", "非合法"],
+            also: &[],
+        },
+        a_only: false,
+        subject_bound: false,
+    },
+    OppositePair {
+        a: Side {
+            terms: &["有効"],
+            also: &[],
+        },
+        b: Side {
+            terms: &["無効"],
+            also: &[],
+        },
+        a_only: false,
+        subject_bound: false,
+    },
+    // 「不起訴」の中の「起訴」は直前が「不」なので起訴の側に数えない。起訴猶予は不起訴の一種なので不起訴の側に入れ、
+    // 中の「起訴」は直後の「猶予」（打ち消しの続き）で起訴の側に数えない（材料が「起訴猶予処分」の記事で、
+    // 出力の「起訴された」を拾うため）。「起訴を見送」は不起訴の側。
+    OppositePair {
+        a: Side {
+            terms: &["起訴"],
+            also: &[],
+        },
+        b: Side {
+            terms: &["不起訴", "起訴猶予", "起訴を見送"],
+            also: &[],
+        },
+        a_only: false,
+        subject_bound: false,
+    },
+    // 訴え・請求を認めた⇔退けた。「認め」「退け」「棄却」だけでは、誰の訴え・主張か（「国の主張を退け」は原告の
+    // 勝ち）で意味が逆になるため、出力の語・材料の反対の語は、訴えた側の語（訴え・請求・申し立て・権利）に限る。
+    // 材料の側は「認め」「棄却」などの1語でもあれば、その側があるとみなす（「請求を一部認め」の記事で、
+    // 「請求を認めた」と書いた出力を誤検出しないため。控えめな側に倒す）。
+    OppositePair {
+        a: Side {
+            terms: &[
+                "訴えを認め",
+                "訴えが認められ",
+                "訴えは認められ",
+                "請求を認め",
+                "請求が認められ",
+                "請求は認められ",
+                "申し立てを認め",
+                "申し立てが認められ",
+                "申し立ては認められ",
+                "権利を認め",
+                "権利が認められ",
+                "権利は認められ",
+            ],
+            also: &["認め", "容認", "認容", "勝訴"],
+        },
+        b: Side {
+            terms: &[
+                "訴えを退け",
+                "訴えが退けられ",
+                "訴えは退けられ",
+                "訴えを棄却",
+                "訴えを却下",
+                "訴えが却下",
+                "請求を退け",
+                "請求が退けられ",
+                "請求は退けられ",
+                "請求を棄却",
+                "請求が棄却",
+                "請求は棄却",
+                "請求をいずれも棄却",
+                "請求をすべて棄却",
+                "請求を全て棄却",
+                "申し立てを退け",
+                "申し立てを却下",
+                "申し立てが却下",
+                "申し立ては却下",
+            ],
+            also: &["退け", "棄却", "却下", "敗訴"],
+        },
+        a_only: false,
+        subject_bound: false,
+    },
     OppositePair {
         a: Side {
             terms: &["当選"],
@@ -452,7 +569,9 @@ const OPPOSITE_PAIRS: &[OppositePair] = &[
 ];
 
 /// 語の一部が別の意味になる複合語（反対の意味の語として数えない）。
-const MASKED_COMPOUNDS: [&str; 8] = [
+/// 「選挙無効」「解雇無効」「特許無効」「無効確認」「無効を求め」「無効の請求」は訴えの名前・求めで、判決の結論ではない
+/// （一票の格差の訴訟で、出力の「選挙は有効とされた」を誤検出しないため）。「無効化」は「攻撃を無効化」のように防ぐ意味。
+const MASKED_COMPOUNDS: [&str; 15] = [
     "勝ち点",
     "勝ち越",
     "勝負",
@@ -461,11 +580,20 @@ const MASKED_COMPOUNDS: [&str; 8] = [
     "負傷",
     "負債",
     "反対側",
+    "選挙無効",
+    "解雇無効",
+    "特許無効",
+    "無効確認",
+    "無効を求め",
+    "無効の請求",
+    "無効化",
 ];
 
 /// 語の直後がこれで始まれば打ち消し（「負けなかった」「決めておらず」「決まっていません」）とみなして数えない。
 /// 「な」1字にしないのは、「増加など」「増加しながら」を打ち消しと読まないため。
-const NEGATING_FOLLOWERS: [&str; 34] = [
+/// 判決の言い方の「違法性はない」「違法とまではいえない」と、求めただけでまだ起きていない
+/// 「請求を退けるよう求めた」「権利を認めることを求めた」、不起訴の一種の「起訴猶予」も数えない（判決の語の組。§9.6）。
+const NEGATING_FOLLOWERS: [&str; 45] = [
     "ない",
     "なかっ",
     "なく",
@@ -500,6 +628,17 @@ const NEGATING_FOLLOWERS: [&str; 34] = [
     "ならず",
     "できず",
     "できな",
+    "性はな",
+    "性がな",
+    "とはいえな",
+    "とは言えな",
+    "とまではいえな",
+    "とまでは言えな",
+    "るよう求め",
+    "るよう訴え",
+    "るよう主張",
+    "ることを求め",
+    "猶予",
 ];
 
 /// 語の直後がこれで始まれば、打ち消しと同じく数えない（「勝利を逃した」「連敗を脱した」「決定を見送った」）。
@@ -1460,5 +1599,222 @@ mod tests {
         assert_eq!(text, "図書館が夜まで開くのはうれしいね");
         let (text, _) = strip_heading_labels("AIまとめ：図書館は夜まで開く。");
         assert_eq!(text, "図書館は夜まで開く。");
+    }
+
+    /// 架空の訴訟（D167 の評価で出た形: 訴え〔権利〕を退けた判決を、一言が「権利が認められた」と書いた）。
+    const DISMISSED: &str = "うみかぜ食品の表示訴訟、原告の訴えを退ける\nみなと地裁は、うみかぜ食品の商品名をめぐり原告が求めた表示の権利について、原告の請求を棄却する判決を言い渡した。";
+
+    #[test]
+    fn verdict_reversal_is_detected_in_every_stage() {
+        // 一言・再説明（check_stage_consistency）、要約（check_summary_consistency）、要点（項目ごと）。
+        for output in [
+            "原告の権利が認められたんだね、よかった！",
+            "裁判所は、原告の訴えを認めたんだよ。",
+            "みなと地裁は原告の請求を認める判決を言い渡した。",
+            "原告の請求が認められた",
+        ] {
+            assert_eq!(
+                kinds(&check_stage_consistency(DISMISSED, output)),
+                vec![IssueKind::Contradiction],
+                "{output}"
+            );
+            assert_eq!(
+                kinds(&check_summary_consistency(DISMISSED, output)),
+                vec![IssueKind::Contradiction],
+                "{output}"
+            );
+        }
+        // 逆向き（記事は認めた、出力は退けた）も拾う。
+        let granted = "みなと地裁は原告の請求を認め、被告に支払いを命じた。";
+        assert_eq!(
+            kinds(&check_stage_consistency(
+                granted,
+                "地裁は原告の請求を棄却した。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        // 勝訴⇔敗訴（主語が同じとき）。
+        let lost = "やまなみ市の住民が起こした訴訟で、住民側が敗訴した。";
+        let issues = check_stage_consistency(lost, "住民側が勝訴したんだね");
+        assert_eq!(kinds(&issues), vec![IssueKind::Contradiction]);
+        assert!(issues[0].reason.contains("勝訴") && issues[0].reason.contains("敗訴"));
+        assert_eq!(
+            kinds(&check_stage_consistency(lost, "勝訴できてよかったね")),
+            vec![IssueKind::Contradiction]
+        );
+        // 合憲⇔違憲・適法⇔違法・有効⇔無効・起訴⇔不起訴。
+        for (source, output) in [
+            (
+                "最高裁は、その規定を違憲と判断した。",
+                "最高裁は規定を合憲と判断した。",
+            ),
+            (
+                "高裁は、選挙は合憲だと判断した。",
+                "高裁は選挙を違憲と判断した。",
+            ),
+            (
+                "地裁は、市の処分を違法と判断した。",
+                "地裁は市の処分を適法とした。",
+            ),
+            (
+                "地裁は、市の処分を適法と判断した。",
+                "地裁は市の処分を違法とした。",
+            ),
+            (
+                "地裁は、その契約を無効とした。",
+                "地裁は契約を有効と認めた。",
+            ),
+            ("地検は、男性を不起訴処分とした。", "地検は男性を起訴した。"),
+            ("地検は、男性を起訴した。", "男性は不起訴になったんだね"),
+            ("地検は、男性の起訴を見送った。", "地検は男性を起訴した。"),
+            (
+                "地検は、男性を起訴猶予処分とした。",
+                "男性は起訴されたんだね",
+            ),
+        ] {
+            assert_eq!(
+                kinds(&check_stage_consistency(source, output)),
+                vec![IssueKind::Contradiction],
+                "{source} / {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn verdict_words_starting_with_a_negating_character_count_as_the_opposite_side() {
+        // 「不起訴」「無効」「不適法」「非合法」は、語の直前が打ち消しの字のときに数えない規則と食い合わず、
+        // 反対の側として数える。中の「起訴」「適法」「合法」は直前が「不」「非」なので、起訴・適法・合法の側に数えない。
+        assert!(occurs_affirmed("男性を不起訴とした。", "不起訴"));
+        assert!(!occurs_affirmed("男性を不起訴とした。", "起訴"));
+        assert!(occurs_affirmed("契約は無効とした。", "無効"));
+        assert!(!occurs_affirmed("契約は無効とした。", "有効"));
+        assert!(occurs_affirmed("訴えは不適法として却下した。", "不適法"));
+        assert!(!occurs_affirmed("訴えは不適法として却下した。", "適法"));
+        assert!(occurs_affirmed("非合法の取引だった。", "非合法"));
+        assert!(!occurs_affirmed("非合法の取引だった。", "合法"));
+        assert!(occurs_affirmed("規定を違憲とした。", "違憲"));
+        // 記事が「不起訴」で出力も「不起訴」なら、出力の「起訴」の字で報告しない（逆も同じ）。
+        let not_indicted = "地検は男性を不起訴処分とした。";
+        assert!(check_stage_consistency(not_indicted, "男性は不起訴になった。").is_empty());
+        assert!(check_stage_consistency(
+            "地裁は契約を無効と判断した。",
+            "契約は無効と判断されたんだね"
+        )
+        .is_empty());
+        assert!(check_stage_consistency(
+            "訴えは不適法として却下された。",
+            "訴えは不適法とされた。"
+        )
+        .is_empty());
+        // 打ち消しの字で始まる語そのものの打ち消し（「無効ではない」「不起訴とはならず」は語の直後で読む）。
+        assert!(!occurs_affirmed("契約は無効ではないとした。", "無効"));
+        assert!(!occurs_affirmed("規定は違憲とはいえないとした。", "違憲"));
+        // 起訴猶予は不起訴の一種: 記事が起訴猶予で出力が不起訴なら報告しない。
+        assert!(check_stage_consistency(
+            "地検は男性を起訴猶予処分とした。",
+            "男性は不起訴になったんだね"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn verdict_paraphrases_and_both_sides_are_not_reported() {
+        // 言い換え（「訴えが認められなかった」＝敗訴、「請求を認めず」）は打ち消しなので数えない。
+        for output in [
+            "原告の訴えは認められなかったんだね",
+            "原告の訴えが認められず、残念な結果になった。",
+            "地裁は原告の請求を認めなかった。",
+            "裁判所は原告の権利を認めず、請求を棄却した。",
+            "原告側の敗訴だね",
+            "原告の請求は退けられた。",
+        ] {
+            assert!(
+                check_stage_consistency(DISMISSED, output).is_empty(),
+                "{output}"
+            );
+            assert!(
+                check_summary_consistency(DISMISSED, output).is_empty(),
+                "{output}"
+            );
+        }
+        // 両方の側を書いた出力（一審は認め、二審は退けた）は報告しない。
+        assert!(check_stage_consistency(
+            DISMISSED,
+            "一審は原告の請求を認めたが、今回は原告の請求を棄却した。"
+        )
+        .is_empty());
+        // 記事が一部を認め、残りを退けたとき（材料に両方の側）は報告しない。
+        let partly = "地裁は原告の請求を一部認め、その他の請求を棄却した。";
+        assert!(check_stage_consistency(partly, "原告の請求が認められた。").is_empty());
+        assert!(check_stage_consistency(partly, "原告の請求は棄却された。").is_empty());
+        // 主語の入れ替え（「原告が敗訴」→「国が勝訴」）は反対の意味ではない。
+        let lost = "国を相手にした訴訟で、原告が敗訴した。";
+        assert!(check_stage_consistency(lost, "国が勝訴した。").is_empty());
+        // 求めただけの「退けるよう求めた」「認めるよう求めた」は、その側の語として数えない
+        // （判決が逆なら拾い、判決どおりなら通す）。
+        let asked = "被告側は請求を退けるよう求めていたが、地裁は原告の請求を認めた。";
+        assert!(check_stage_consistency(asked, "地裁は原告の請求を認めたんだね").is_empty());
+        assert_eq!(
+            kinds(&check_stage_consistency(
+                asked,
+                "地裁は原告の請求を退けた。"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        assert_eq!(
+            kinds(&check_stage_consistency(
+                "原告は権利を認めるよう求めていたが、地裁は原告の請求を棄却した。",
+                "原告の権利が認められたんだね"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        // 「違法性はない」「違法とまではいえない」は違法の側に数えない（記事がそう書き、出力が適法としても報告しない）。
+        assert!(check_stage_consistency(
+            "地裁は、市の対応に違法性はないと判断した。",
+            "地裁は市の対応を適法とした。"
+        )
+        .is_empty());
+        assert!(check_stage_consistency(
+            "高裁は、処分が違法とまではいえないとした。",
+            "処分は適法とされたんだね"
+        )
+        .is_empty());
+        // 判決と関係のない「有効」「認め」（記事にも同じ側がある）は報告しない。
+        assert!(check_stage_consistency(
+            "新しい薬は有効だと認められた。無効だった旧薬は使わない。",
+            "新しい薬は有効と認められた。"
+        )
+        .is_empty());
+        assert!(check_stage_consistency(
+            "被告は起訴内容を認めた。",
+            "被告は起訴内容を認めたんだね"
+        )
+        .is_empty());
+        // 訴えの名前の「選挙無効」「解雇無効」・求めの「無効を求め」と、防ぐ意味の「無効化」は無効の側に数えない。
+        for (source, output) in [
+            (
+                "高裁は違憲状態と判断したが、選挙無効の請求は棄却した。",
+                "選挙そのものは有効とされた。",
+            ),
+            (
+                "元社員が解雇無効を求めた訴訟で、地裁は請求を退けた。",
+                "会社の解雇は有効と判断されたんだね",
+            ),
+            (
+                "新しい機能は、マルウェアの攻撃を無効化する。",
+                "マルウェア対策に有効な新機能だね",
+            ),
+        ] {
+            assert!(
+                check_stage_consistency(source, output).is_empty(),
+                "{source} / {output}"
+            );
+        }
+        // 判決の「一部認容」は認めた側としても数える（材料に両方の側があるので報告しない）。
+        assert!(check_stage_consistency(
+            "地裁は原告の請求を一部認容し、その余の請求を棄却した。",
+            "原告の請求が認められた。"
+        )
+        .is_empty());
     }
 }
