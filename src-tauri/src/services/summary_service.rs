@@ -1590,7 +1590,7 @@ fn strip_ai_headings(kind: SummaryOutputKind, response: AiResponse) -> AiRespons
 /// 実AIの要約・再説明・一言の2文目以降の文頭のつなぎの語（「これにより、」「その結果、」など）と直後の読点を消す
 /// （Firestore タスク I9iRpb。`leading_connector::strip_leading_connectors`）。記事にない因果の言い足しを減らすため。
 /// `source` は点検の材料（タイトル＋本文抜粋）で、記事自体が同じ因果を同じ語で書いているときは消さない。
-/// 消すだけなので、先に通った保存前の検証（§12.5）の結果は変わらない（1文目は消さないので空にもならない）。
+/// 消した後の文にも保存前の検証（§12.5）をかけ直し、落ちたら（消すと行頭が `#`・`---` になるとき）消さずに元の出力を使う。
 /// Mock の結果・要点の段は触らない（`strip_ai_headings` と同じ）。
 fn strip_ai_leading_connectors(
     kind: SummaryOutputKind,
@@ -1604,6 +1604,19 @@ fn strip_ai_leading_connectors(
     if removed == 0 {
         return response;
     }
+    // 消した後の文にも §12.5 の検証をかけ直す（「その結果、# …」「その結果、---」は、消すと行頭が見出し・
+    // 区切り行になる）。落ちたら消さずに元の出力（検証済み）を使う。
+    let text = match validate_summary_output(kind, &text) {
+        Ok(text) => text,
+        Err(rejection) => {
+            log::info!(
+                "kept the leading connector(s) because the stripped AI output failed validation ({}: {})",
+                kind.label(),
+                rejection.label()
+            );
+            return response;
+        }
+    };
     // 本文は出さず、数と出力種別だけを残す。
     log::info!(
         "removed {removed} leading connector(s) from the AI output ({})",
@@ -3108,6 +3121,40 @@ mod tests {
             "台風が来た。",
         );
         assert_eq!(stripped.text, "台風が来た。中止した。");
+    }
+
+    #[test]
+    fn leading_connector_is_kept_when_removal_would_expose_a_heading_or_separator() {
+        // 「その結果、# …」「その結果、---」は §12.5 の検証を通るが、消すと行頭が見出し・区切り行になる。
+        // 消した後の文が検証に落ちるときは、消さずに元の出力（検証済み）を使う。
+        for text in [
+            "台風が来た。
+その結果、# 中止した。",
+            "台風が来た。
+その結果、---",
+            "台風が来た。
+これにより ## 中止",
+        ] {
+            assert!(
+                validate_summary_output(SummaryOutputKind::Summary, text).is_ok(),
+                "{text}"
+            );
+            for kind in [
+                SummaryOutputKind::Summary,
+                SummaryOutputKind::Explanation,
+                SummaryOutputKind::Comment,
+            ] {
+                let kept = strip_ai_leading_connectors(
+                    kind,
+                    AiResponse {
+                        text: text.to_string(),
+                        provider: "local".to_string(),
+                    },
+                    "台風が来た。",
+                );
+                assert_eq!(kept.text, text, "{kind:?}");
+            }
+        }
     }
 
     #[test]
