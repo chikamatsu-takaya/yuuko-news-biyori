@@ -705,6 +705,13 @@ fn consistency_json(kind: SummaryOutputKind, source: &str, output: &str) -> Valu
         .flat_map(|(part, item)| {
             let issues = if part == "tag" {
                 super::consistency_check::find_contradictions(source, item)
+            } else if matches!(
+                kind,
+                SummaryOutputKind::Explanation | SummaryOutputKind::Comment
+            ) {
+                // 再説明・一言はアプリと同じ点検（意味をなさない語・言い換えた指示の写しを含む）。
+                let (stripped, _) = super::consistency_check::strip_heading_labels(item);
+                super::consistency_check::check_speech_consistency(source, &stripped)
             } else {
                 let (stripped, _) = super::consistency_check::strip_heading_labels(item);
                 super::consistency_check::check_stage_consistency(source, &stripped)

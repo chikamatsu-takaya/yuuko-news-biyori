@@ -22,6 +22,7 @@
 //! - **見出しの残り・反対の意味・年の組み合わせ**（D170。国内記事の要約だけ。`consistency_check`）:
 //!   消せずに残った見出し・ラベル、材料と反対の意味の語（勝ち⇔負け など）、材料にない年と出来事の組。
 //!   推測・伝聞・訴えの言い切り（D175）、文の途中の因果のつなぎで記事にない因果を結んだ出力（Firestore タスク 6jL23k）。
+//! - **意味をなさない語・言い換えた指示の写し**（再説明・一言だけ。Firestore タスク NkBSwN。`consistency_check`）。
 //!
 //! どの種類で作り直すかは呼び出し側が決める（`IssueKind::triggers_summary_retry`）。国内記事の評価
 //! （`docs/00_project/要約の機械点検の評価_2026-10.md`）で誤検出の多かった種類は、作り直しの理由にしない。
@@ -61,6 +62,9 @@ pub(super) enum IssueKind {
     /// 文の途中の因果のつなぎ（「〜したため」「〜したことで」「その結果」）で、材料が因果として書いていない
     /// 出来事どうしを結んだ（Firestore タスク 6jL23k。`causal_check`）。
     UnsupportedCause,
+    /// 再説明・一言の、意味をなさない語・下品な語（「うんこ」など。材料にある語は除く）。文の書き出しの語は
+    /// 後処理（`util::speech_cleanup::strip_broken_openings`）が消すので、残った語だけを報告する（Firestore タスク NkBSwN）。
+    BrokenWord,
 }
 
 impl IssueKind {
@@ -80,6 +84,7 @@ impl IssueKind {
             Self::YearMismatch => "year_mismatch",
             Self::AssertedSpeculation => "asserted_speculation",
             Self::UnsupportedCause => "unsupported_cause",
+            Self::BrokenWord => "broken_word",
         }
     }
 
@@ -95,7 +100,8 @@ impl IssueKind {
             | Self::Contradiction
             | Self::YearMismatch
             | Self::AssertedSpeculation
-            | Self::UnsupportedCause => true,
+            | Self::UnsupportedCause
+            | Self::BrokenWord => true,
             // 注記: 国内記事では「〜は明らかにされていない」のような記事そのものの言い回しと区別しにくい。
             // 長さ: 要約は「1〜2文」で頼んでおり文字数の上限を決めていない（上限は保存前の検証 3000 字）。
             // 空: 保存前の検証（validate_summary_output）が先に拒否するので、ここには来ない。
