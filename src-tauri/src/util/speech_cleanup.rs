@@ -437,9 +437,10 @@ fn is_prompt_echo(sentence: &str, fixed_texts: &[&str]) -> bool {
 /// 再説明・一言のプロンプトの固定指示にだけ出る語句（Firestore タスク NkBSwN）。出力の文がこれを含めば、
 /// 固定指示と文字どおりに一致しなくても（「ゆうこの言葉で1段落だけ話すね」のような言い換え）指示の写しとみなす。
 /// 記事の話には出てこない、プロンプトの言い回し（指示の用語）だけを入れる。「案内役」「マスコットキャラクター」
-/// 「一段落」（「騒動が一段落した」）のように記事にも出る語は入れない。照合の前に全角数字を半角にそろえる
-/// （`normalize_digits`）。材料（AI への入力・点検の記事）にある語句は照合しない。
-const INSTRUCTION_ECHO_PHRASES: [&str; 20] = [
+/// 「一段落」（「騒動が一段落した」）・「で終えない」（「最下位で終えないよう」）のように記事にも出る語は入れない。
+/// 語の一部が記事の語になる形は `is_instruction_phrase_at` で除く（「非常体制」「外部データベース」）。
+/// 照合の前に全角数字を半角にそろえる（`normalize_digits`）。材料（AI への入力・点検の記事）にある語句は照合しない。
+const INSTRUCTION_ECHO_PHRASES: [&str; 19] = [
     "ゆうこの言葉",
     "ゆうこの話し方",
     "ゆうこの様子",
@@ -458,7 +459,6 @@ const INSTRUCTION_ECHO_PHRASES: [&str; 20] = [
     "自己紹介",
     "文末は",
     "常体",
-    "で終えない",
     "だよ」「",
 ];
 
@@ -472,6 +472,24 @@ fn normalize_digits(text: &str) -> String {
         .collect()
 }
 
+/// `text` の `index` の位置の `phrase` が、指示の語句として使われているか（別の語の一部でないか）。
+/// 「常体」の直前が「非」（「非常体制」）、「外部データ」の直後が片仮名（「外部データベース」）なら別の語とみなす。
+fn is_instruction_phrase_at(text: &str, index: usize, phrase: &str) -> bool {
+    let prev = text[..index].chars().next_back();
+    let next = text[index + phrase.len()..].chars().next();
+    match phrase {
+        "常体" => prev != Some('非'),
+        "外部データ" => !next.is_some_and(is_katakana),
+        _ => true,
+    }
+}
+
+/// `text` が指示の語句 `phrase` を、指示の語句として含むか。
+fn contains_instruction_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase)
+        .any(|(index, _)| is_instruction_phrase_at(text, index, phrase))
+}
+
 /// `text` が含む、固定指示にだけ出る語句（`INSTRUCTION_ECHO_PHRASES`）のうち、材料（`material`）に無いもの。
 /// summary_service の再説明・一言の点検（指示の写し）が使う。
 pub(crate) fn instruction_phrases_in(text: &str, material: &str) -> Vec<&'static str> {
@@ -479,14 +497,37 @@ pub(crate) fn instruction_phrases_in(text: &str, material: &str) -> Vec<&'static
     let material = normalize_digits(material);
     INSTRUCTION_ECHO_PHRASES
         .into_iter()
-        .filter(|phrase| text.contains(phrase) && !material.contains(phrase))
+        .filter(|phrase| contains_instruction_phrase(&text, phrase) && !material.contains(phrase))
         .collect()
+}
+
+/// 写しの文の内容語とみなす字（漢字・片仮名・数字・英字）。
+fn is_content_word_char(c: char) -> bool {
+    is_kanji(c) || is_katakana(c) || c.is_ascii_alphanumeric()
+}
+
+/// 指示の語句を除いた文の残りに、入力の内容語（漢字・片仮名・数字・英字が2字以上続く並びのうち、2字の並びが
+/// 入力に現れるもの）があるか。あれば、写しの句の後ろに記事の中身が続く文（「ゆうこが横で教えてくれる…として、
+/// （出来事）を改定したね」）とみなす。
+fn has_input_content_words(sentence: &str, phrases: &[&str], input: &str) -> bool {
+    let mut rest = sentence.to_string();
+    for phrase in phrases {
+        rest = rest.replace(phrase, "、");
+    }
+    let chars: Vec<char> = rest.chars().collect();
+    chars.windows(2).any(|pair| {
+        pair.iter().all(|c| is_content_word_char(*c))
+            && input.contains(&pair.iter().collect::<String>())
+    })
 }
 
 /// 再説明・一言から、固定指示を言い換えた写しの文（`INSTRUCTION_ECHO_PHRASES` の語句を含む文。入力にある語句は除く）を
 /// 取り除く（Firestore タスク NkBSwN。`strip_prompt_echo_sentences` は文字どおり10字以上一致する文だけを消す）。
-/// ほかに残る文が1つも無いとき（出力がその文だけのとき）は消さずにそのまま返し、呼び出し側の点検
-/// （summary_service の指示の写し）で作り直し→定型文にする（空にして検証で拒否すると記事が未要約のまま残るため）。
+/// 消すのは、語句を除いた残りに入力の内容語が無い文（写しだけの文）に限る。写しの句の後ろに記事の中身が続く文は、
+/// 消すと中身が失われ、残りの文の「これで」などが別の文を指して記事にない因果に読めることがあるため、消さずに
+/// 残して呼び出し側の点検（summary_service の指示の写し）で作り直し→定型文にする。
+/// ほかに残る文が1つも無いとき（出力がその文だけのとき）も消さずにそのまま返し、同じく点検に回す
+/// （空にして検証で拒否すると記事が未要約のまま残るため）。
 /// 文の分け方は `split_sentences`（かぎかっこの中では切らない）。戻り値の2つ目は、取り除いた文の数（ログ用）。
 pub(crate) fn strip_instruction_echo_sentences(text: &str, input: &str) -> (String, usize) {
     let input = normalize_digits(input);
@@ -496,7 +537,12 @@ pub(crate) fn strip_instruction_echo_sentences(text: &str, input: &str) -> (Stri
         .collect();
     let is_echo = |sentence: &str| {
         let sentence = normalize_digits(sentence);
-        phrases.iter().any(|phrase| sentence.contains(phrase))
+        let found: Vec<&str> = phrases
+            .iter()
+            .copied()
+            .filter(|phrase| contains_instruction_phrase(&sentence, phrase))
+            .collect();
+        !found.is_empty() && !has_input_content_words(&sentence, &found, &input)
     };
     let mut removed = 0;
     let mut kept_sentences = 0;
@@ -628,7 +674,8 @@ pub(crate) fn strip_broken_openings(text: &str, input: &str) -> (String, usize) 
     if removed == 0 || out.trim().is_empty() {
         return (text.to_string(), 0);
     }
-    (out, removed)
+    // 出力の先頭の語の後ろが改行だったとき（「うんこよ！」の次の行から本文）に残る、先頭の改行だけを詰める。
+    (out.trim_start().to_string(), removed)
 }
 
 /// 文の書き出しの意味をなさない語（と後ろに続く挨拶）を繰り返し消し、残りを返す。消さなかったときはそのまま返す。
@@ -646,9 +693,9 @@ fn strip_broken_opening<'a>(
     {
         *removed += 1;
         stripped = true;
+        // 改行は詰めない（前の文と次の行がつながらないように）。区切り記号と空白だけを詰める。
         rest = after
-            .trim_start_matches(|c: char| LEADING_LEFTOVERS.contains(&c) || matches!(c, '…' | '♪'))
-            .trim_start();
+            .trim_start_matches(|c: char| LEADING_LEFTOVERS.contains(&c) || matches!(c, '…' | '♪'));
         rest = strip_greeting_prefix(rest, at_output_start);
     }
     if stripped {
@@ -2672,6 +2719,60 @@ mod tests {
             );
             assert!(instruction_phrases_in(text, "").is_empty(), "{text}");
         }
+    }
+
+    #[test]
+    fn instruction_echo_with_article_content_is_kept_for_the_check() {
+        // 写しの句の後ろに記事の中身が続く文は消さない（消すと中身が失われ、「これで」が前の文を指して
+        // 記事にない因果に読めるため）。点検（summary_service）で作り直しにする。
+        let input = "行動指針を改定\n新版は5つの価値観を柱にした";
+        let text = "ゆうこが横で教えてくれる案内役として、行動指針を改定したね。これで5つの価値観が柱になったよ。";
+        assert_eq!(
+            strip_instruction_echo_sentences(text, input),
+            (text.to_string(), 0)
+        );
+        assert_eq!(instruction_phrases_in(text, input), vec!["横で教えて"]);
+        // 写しだけの文は従来どおり消す（入力の内容語が無い）。
+        assert_eq!(
+            strip_instruction_echo_sentences(
+                "ゆうこの言葉で1段落だけ話すね。行動指針を改定したよ。",
+                input
+            ),
+            ("行動指針を改定したよ。".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn instruction_phrases_inside_other_words_are_not_matched() {
+        for text in [
+            "災害に備えて非常体制をとったんだね。",
+            "外部データベースへの接続を止めたよ。",
+            "最下位で終えないよう最終戦に臨むんだね。",
+        ] {
+            assert!(instruction_phrases_in(text, "").is_empty(), "{text}");
+            assert_eq!(
+                strip_instruction_echo_sentences(&format!("{text}新しい話だよ。"), ""),
+                (format!("{text}新しい話だよ。"), 0),
+                "{text}"
+            );
+        }
+        // 指示の形の「常体」「外部データ」は従来どおり拾う。
+        assert_eq!(
+            instruction_phrases_in("常体で話すね。外部データとして読むよ。", ""),
+            vec!["外部データ", "常体"]
+        );
+    }
+
+    #[test]
+    fn line_break_after_a_broken_opening_is_kept() {
+        assert_eq!(
+            strip_broken_openings("新駅ができるよ。うんこよ！\n工事は来春からだね。", ""),
+            ("新駅ができるよ。\n工事は来春からだね。".to_string(), 1)
+        );
+        assert_eq!(
+            strip_broken_openings("うんこよ！\n工事は来春からだね。", ""),
+            ("工事は来春からだね。".to_string(), 1)
+        );
     }
 
     /// 再説明の念押しの固定文（ai_provider_service の YUUKO_EXPLANATION_REMINDER と同じ趣旨の文）。

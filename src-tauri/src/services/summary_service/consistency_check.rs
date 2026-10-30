@@ -2333,5 +2333,16 @@ mod tests {
         )
         .is_empty());
         assert!(check_stage_consistency(source, "ゆうこの言葉で1段落だけ話すね。").is_empty());
+
+        // 写しの句＋記事の中身の文は後処理で消えず、点検で作り直しになる。
+        let text =
+            "ゆうこが横で教えてくれる案内役として、図書館は午後9時まで開くんだね。便利だね。";
+        let (kept, removed) =
+            crate::util::speech_cleanup::strip_instruction_echo_sentences(text, source);
+        assert_eq!((kept.as_str(), removed), (text, 0));
+        assert_eq!(
+            kinds(&check_speech_consistency(source, &kept)),
+            vec![IssueKind::PromptEcho]
+        );
     }
 }
