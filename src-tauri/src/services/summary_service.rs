@@ -5061,6 +5061,9 @@ mod consistency_check;
 /// 要約・再説明・一言の文頭のつなぎの語（「これにより、」「その結果、」）を消す後処理（Firestore タスク I9iRpb）。
 mod leading_connector;
 
+/// 文の途中の因果のつなぎ（「〜したため」「その結果」）で記事にない因果を結んだ出力の点検（Firestore タスク 6jL23k）。
+mod causal_check;
+
 /// 要約の機械点検と作り直しの評価ハーネス（D166。`#[ignore]`・手動実行専用）。
 #[cfg(test)]
 mod summary_output_check_eval;
