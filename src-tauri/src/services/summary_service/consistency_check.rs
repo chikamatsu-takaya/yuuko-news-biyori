@@ -1127,9 +1127,29 @@ pub(super) fn find_asserted_speculation(source: &str, output: &str) -> Vec<Check
     issues
 }
 
-/// 言い切りの続きの後ろ（`end` から）が、仮定（「したら」）・願い（「したい」）でないか。
+/// 言い切りの続き（`ASSERTING_TAILS`）の後ろがこれで始まれば打ち消し（「時期が決まっていない」「流出していません」
+/// 「法案が成立しなかった」「事故は起きていない」）とみなし、言い切りとして数えない。
+const TAIL_NEGATIONS: [&str; 11] = [
+    "ていな",
+    "ていませ",
+    "てはいな",
+    "ておらず",
+    "てな",
+    "なかっ",
+    "ない",
+    "なく",
+    "ません",
+    "せん",
+    "ず",
+];
+
+/// 言い切りの続きの後ろ（`end` から）が、仮定（「したら」）・願い（「したい」）・打ち消し（`TAIL_NEGATIONS`）でないか。
 fn asserting_tail_at(output: &str, end: usize) -> bool {
-    !output[end..].starts_with(['ら', 'い'])
+    let rest = &output[end..];
+    !rest.starts_with(['ら', 'い'])
+        && !TAIL_NEGATIONS
+            .iter()
+            .any(|negation| rest.starts_with(negation))
 }
 
 /// 漢字（CJK 統合漢字・拡張A・「々」）か。
@@ -2151,6 +2171,36 @@ mod tests {
             kinds(&find_asserted_speculation(
                 "あおば通販で顧客情報流出か\n同社が調べている。",
                 "あおば通販で顧客情報が流出した。"
+            )),
+            vec![IssueKind::AssertedSpeculation]
+        );
+    }
+
+    #[test]
+    fn negated_outputs_are_not_reported() {
+        // 独立レビューの指摘: 言い切りの続きの後ろの打ち消しを言い切りとしない（架空の文）。
+        for (source, output) in [
+            (
+                "再開の時期は年内となる見通し。",
+                "再開の時期が決まっていない",
+            ),
+            (
+                "顧客情報が流出した可能性がある。",
+                "顧客情報は流出していません。",
+            ),
+            ("法案は今国会で成立する見通し。", "法案が成立しなかった。"),
+            ("停電が起きる恐れがある。", "停電が起きていない。"),
+        ] {
+            assert!(
+                find_asserted_speculation(source, output).is_empty(),
+                "{source} / {output}"
+            );
+        }
+        // 打ち消しでない続きは従来どおり拾う。
+        assert_eq!(
+            kinds(&find_asserted_speculation(
+                "法案は今国会で成立する見通し。",
+                "法案が成立した。"
             )),
             vec![IssueKind::AssertedSpeculation]
         );
