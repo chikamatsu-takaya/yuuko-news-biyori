@@ -34,7 +34,25 @@
 
 補足（判定条件の関係）:
 - `merge_ok = dry-run と apply の両方が safeAutoMerge=true、かつ両レポートが一致`。
+- `safeAutoMerge` 自体の判定内容は §4.1 を参照（2026-10-19 に D145 に合わせて見直し）。
 - 自動マージ step 実行には、上記に加えて **`enable_auto_merge=true` の明示**と、マージ直前の **PR差分が対象Markdown1ファイルのみ**の再確認が必要。
+
+### 4.1 `safeAutoMerge` の判定ルール（D145: Firestore を正本とする）
+この同期が Markdown に対して行うのは「既存タスクの属性更新」だけで、タスクの追加・削除・見出しやタイトルの変更はしない。そのため、Firestore にだけあるタスクは Markdown へ書き込まれず、Markdown を壊すこともない。
+
+| 状況 | レポート上の扱い | `safeAutoMerge` |
+|---|---|---|
+| `source=manual-poc`（画面・auto-dev で追加したタスク）。Markdown に対応タスクなし | `manualCandidates`（件数と ID・タイトルを報告） | 影響しない（以前は 1 件でもあると false だった） |
+| `source=md-import` だが Markdown に対応タスクが無い（Markdown 側でタイトル・見出しを直した、タスクを消した等）が `MISSING_MARKDOWN_NOTICE_LIMIT`（3）件以下 | `notices`（`md-import-missing-markdown`。ID・タイトルをログにも出す）＋ `skipped` | 影響しない |
+| 上記の欠落が 3 件を超える | `warnings`（`md-import-missing-markdown-bulk`） | **false**（Markdown 側の大量削除・見出し改名の疑い） |
+| `manual-poc` の ID が Markdown タスクの ID と一致 | `warnings`（`manual-poc-id-collision`） | **false**（どちらが正か判断できない） |
+| Markdown 側に同一 ID のタスクが複数 | `warnings`（`ambiguous-match`） | **false** |
+| 不正な status / mvpScope・completed と status の不整合など | `warnings` | **false**（既存の Markdown 値を守る） |
+| 反映後の再 parse で件数・見出し・タイトルが変化 | `warnings`（`reparse-mismatch`） | **false** |
+
+- `notices` で報告された `md-import` タスクは、Firestore 側を正として扱う。Markdown 側で改名したのなら Firestore の旧タスクを整理する（Markdown→Firestore 同期の削除候補）か、Firestore 側のタイトル等を合わせる。
+- 注意: この同期は Firestore の値を常に正として既存属性（Notes / Done when を含む）を上書きする。Markdown だけを直接直した内容は、Firestore 側も直さない限り次の同期で戻る。直すときはダッシュボード（Firestore）側で直す。
+- 判定は `task-management/sync-firestore-to-markdown.mjs` の `computeSync`、テストは `task-management/sync-firestore-to-markdown-safety.test.mjs`。
 
 ## 5. 再検証手順
 今後、同じ検証を行う場合の推奨手順:
