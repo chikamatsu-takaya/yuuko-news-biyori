@@ -54,6 +54,9 @@ pub(super) enum IssueKind {
     Contradiction,
     /// 材料にない、年と出来事の組み合わせ（材料は「2023年に契約」なのに「2026年に契約」と書いた。D170）。
     YearMismatch,
+    /// 材料では推測・伝聞・訴えとしてだけ書かれた出来事を、起きたこととして言い切った（材料は「流出した可能性」
+    /// なのに「流出した」と書いた。D175）。
+    AssertedSpeculation,
 }
 
 impl IssueKind {
@@ -71,6 +74,7 @@ impl IssueKind {
             Self::Heading => "heading",
             Self::Contradiction => "contradiction",
             Self::YearMismatch => "year_mismatch",
+            Self::AssertedSpeculation => "asserted_speculation",
         }
     }
 
@@ -84,7 +88,8 @@ impl IssueKind {
             | Self::NotJapanese
             | Self::Heading
             | Self::Contradiction
-            | Self::YearMismatch => true,
+            | Self::YearMismatch
+            | Self::AssertedSpeculation => true,
             // 注記: 国内記事では「〜は明らかにされていない」のような記事そのものの言い回しと区別しにくい。
             // 長さ: 要約は「1〜2文」で頼んでおり文字数の上限を決めていない（上限は保存前の検証 3000 字）。
             // 空: 保存前の検証（validate_summary_output）が先に拒否するので、ここには来ない。

@@ -27,6 +27,9 @@
 //!   文と、材料にある年月日（記事の日付）として書かれた年は見ない。
 //! - **材料にない年**（要点・再説明・一言用。`IssueKind::UnknownNumber`）: 「2025年」のような年が材料の
 //!   数字のどれとも合わないとき。要約は `output_check` の数字の点検が年も含めて見ているので使わない。
+//! - **推測・伝聞・訴えの言い切り**（`IssueKind::AssertedSpeculation`。D175）: 材料では「流出した可能性」
+//!   「無償化を主張」のように推測・伝聞・訴えとしてだけ書かれた出来事の語を、出力が「流出した」「無償化が
+//!   決まった」と言い切ったとき（`find_asserted_speculation`）。タグには使わない。
 //!
 //! 理由（`CheckIssue::reason`）に入る出力由来の文字は、固定の一覧の語と数字だけ（記事の文は入れない）。
 
@@ -949,6 +952,272 @@ fn is_negated_after(after: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// 推測・伝聞・訴えの言い切り
+// ---------------------------------------------------------------------------
+
+/// 出力で、出来事の語（漢字・カタカナの語）の直後にこれが続けば、その出来事が起きたと言い切っているとみなす
+/// （「流出した」「流出している」「無償化が決まった」）。「したら」「したい」は除く（`asserting_tail_at`）。
+const ASSERTING_TAILS: [&str; 28] = [
+    "した",
+    "された",
+    "させた",
+    "している",
+    "していた",
+    "していま",
+    "されている",
+    "されていた",
+    "されていま",
+    "させている",
+    "させていた",
+    "しまし",
+    "されまし",
+    "させまし",
+    "しちゃっ",
+    "されちゃっ",
+    "が決まっ",
+    "が決まりまし",
+    "が確定し",
+    "が実現し",
+    "が成立し",
+    "が判明し",
+    "が発生し",
+    "が起きた",
+    "が起きてい",
+    "が起きまし",
+    "があった",
+    "がありまし",
+];
+
+/// 材料で、出来事の語の直後（同じ区切りの中・`HEDGE_WINDOW_CHARS` 字以内）にこれがあれば、その語は推測・伝聞・
+/// 訴え・主張として書かれているとみなす（「流出した可能性」「感染したとみられる」「無償化を主張」「減税を訴え」
+/// 「増えたとしている」「盗んだとして」）。出力の文にあれば、言い切っていないとみなす（`OUTPUT_ONLY_HEDGES` も）。
+/// 「〜したという」は入れない: 記者が取材で確かめた事実を書く普通の言い方で、「送付したという」を「送付した」と
+/// 書いた要約を誤りとしないため（実記事の評価で誤検出になった。要約の機械点検の評価 §9.7）。
+const HEDGES: [&str; 32] = [
+    "可能性",
+    "かもしれ",
+    "とみられ",
+    "と見られ",
+    "とみて",
+    "との見方",
+    "疑い",
+    "恐れ",
+    "おそれ",
+    "見通し",
+    "見込み",
+    "とされ",
+    "といわれ",
+    "と言われ",
+    "と報じ",
+    "と訴え",
+    "を訴え",
+    "と主張",
+    "を主張",
+    "と求め",
+    "を求め",
+    "よう求め",
+    "と要求",
+    "を要求",
+    "と指摘",
+    "と批判",
+    "と非難",
+    "としてい",
+    "とした",
+    "とする",
+    "たとして",
+    "るとして",
+];
+
+/// 出力の文にあれば、言い切っていない（推測・伝聞・人の発言として書いた・問いかけ）とみなす言い方。
+/// 材料では見ない（「によって」の「って」、「ような」の「よう」のように、言い切りの文にも出るため）。
+/// 「求め」は「〜することが求められた」のように、求めの形のまま書いた出力を言い切りとしないため。
+const OUTPUT_ONLY_HEDGES: [&str; 34] = [
+    "という",
+    "求め",
+    "かも",
+    "だろう",
+    "でしょう",
+    "らしい",
+    "ようだ",
+    "ようです",
+    "みたい",
+    "そうだ",
+    "そうです",
+    "って",
+    "かな",
+    "かどうか",
+    "によると",
+    "によれば",
+    "と発表",
+    "と述べ",
+    "と説明",
+    "と話",
+    "と語",
+    "と伝え",
+    "と明らか",
+    "と明か",
+    "と認め",
+    "と強調",
+    "と報告",
+    "と答え",
+    "と判断",
+    "とのこと",
+    "と見て",
+    "わけではな",
+    "とは限らな",
+    "?",
+];
+
+/// 起きたことではなく、考え・つもり・ようす見を表す語。「検討している」「調査した」と書いても、記事の「検討するとしている」
+/// と食い違う出来事を言い切ったことにはならないので見ない（架空の判決記事の評価で「控訴を検討しているとしている」を
+/// 「控訴を検討している」と書いた注目ポイントが誤検出になった）。
+const NON_EVENT_WORDS: [&str; 22] = [
+    "検討", "予定", "計画", "方針", "協議", "調査", "調整", "準備", "模索", "要望", "要求", "主張",
+    "説明", "発表", "表明", "期待", "懸念", "注目", "予想", "想定", "警戒", "注意",
+];
+
+/// 材料で、出来事の語の後ろの推測・伝聞の言い方（`HEDGES`）を探す字数。語から遠い言い方は、別の語に
+/// かかることが多いので見ない（その出現は言い切りとみなし、報告しない側に倒す）。
+const HEDGE_WINDOW_CHARS: usize = 12;
+
+/// 推測・伝聞・訴えの言い切りの点検（`IssueKind::AssertedSpeculation`）。
+///
+/// 材料（タイトル＋本文抜粋）で、推測・伝聞・訴え・主張の形（「流出した可能性」「無償化を主張」）でだけ出てくる
+/// 出来事の語を、出力が打ち消し・推測・伝聞の印なしに「〜した」「〜が決まった」と言い切ったときに報告する。
+/// 誤検出を減らすため（報告しない側に倒す）:
+/// - 出力の語は、言い切りの続き（`ASSERTING_TAILS`）の直前の漢字・カタカナの語（2字以上）。材料にある最も長い
+///   後ろの部分（「情報流出」なら「情報流出」→「流出」）で照らす。材料に語が無ければ見ない（作り話は別の点検）。
+/// - 材料のどこか1か所でも、その語が推測・伝聞の印なしに出てくれば（言い切り・名詞のままの見出しを含む）、報告しない。
+///   打ち消された出現（「流出はしていない」）は、どちらにも数えない。
+/// - 出力の文に推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）があるか、問いかけ（「？」「〜か」）で
+///   終わる文は、言い切っていないとみなす。
+///
+/// 記事の文と出力を照らす単位は語で、文と文の対応（保留ブランチの「文ごとの裏付け」の点検）は見ない。
+pub(super) fn find_asserted_speculation(source: &str, output: &str) -> Vec<CheckIssue> {
+    let mut issues: Vec<CheckIssue> = Vec::new();
+    for tail in ASSERTING_TAILS {
+        for (index, _) in output.match_indices(tail) {
+            if !asserting_tail_at(output, index + tail.len()) {
+                continue;
+            }
+            let Some(word) = longest_source_word(source, &output[..index]) else {
+                continue;
+            };
+            if NON_EVENT_WORDS
+                .iter()
+                .any(|non_event| word.ends_with(non_event))
+                || output_is_hedged(output, index)
+            {
+                continue;
+            }
+            let Some(hedge) = hedge_only_in_source(source, word) else {
+                continue;
+            };
+            let reason = format!(
+                "記事情報で推測・伝聞・訴え（「{hedge}」など）として書かれた出来事を、起きたこととして言い切っていた。記事情報と同じく推測・伝聞・訴えとして書く。"
+            );
+            if !issues.iter().any(|issue| issue.reason == reason) {
+                issues.push(CheckIssue {
+                    kind: IssueKind::AssertedSpeculation,
+                    reason,
+                });
+            }
+        }
+    }
+    issues
+}
+
+/// 言い切りの続きの後ろ（`end` から）が、仮定（「したら」）・願い（「したい」）でないか。
+fn asserting_tail_at(output: &str, end: usize) -> bool {
+    !output[end..].starts_with(['ら', 'い'])
+}
+
+/// 漢字（CJK 統合漢字・拡張A・「々」）か。
+fn is_kanji(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '々')
+}
+
+/// 出来事の語の字（漢字・カタカナ・長音）か。
+fn is_word_char(c: char) -> bool {
+    is_kanji(c) || matches!(c, '\u{30A1}'..='\u{30FA}' | 'ー')
+}
+
+/// `before`（出力の言い切りの続きの前まで）の末尾の漢字・カタカナの語のうち、材料にある最も長い後ろの部分（2字以上）。
+/// カタカナを含む語は、語全体か、末尾の漢字だけの部分で照らす（「ータ流出」のような切れ端で照らさない）。
+fn longest_source_word<'a>(source: &str, before: &'a str) -> Option<&'a str> {
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word_char(*c))
+        .last()
+        .map(|(i, _)| i)?;
+    let run = &before[start..];
+    let kanji_start = run
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_kanji(*c))
+        .last()
+        .map_or(run.len(), |(i, _)| i);
+    let mut candidates: Vec<&str> = vec![run];
+    candidates.extend(
+        run[kanji_start..]
+            .char_indices()
+            .map(|(i, _)| &run[kanji_start + i..])
+            .filter(|suffix| *suffix != run),
+    );
+    candidates
+        .into_iter()
+        .filter(|word| word.chars().count() >= 2)
+        .find(|word| source.contains(*word))
+}
+
+/// 出力の `index` を含む文に、推測・伝聞・人の発言の言い方があるか、問いかけ（「？」「〜か」）で終わるか。
+fn output_is_hedged(output: &str, index: usize) -> bool {
+    let sentence = sentence_around(output, index);
+    let sentence_end = output[index..]
+        .find(['。', '\n', '！', '？'])
+        .map_or(output.len(), |i| index + i);
+    output[sentence_end..].starts_with('？')
+        || sentence.trim_end().ends_with('か')
+        || HEDGES
+            .iter()
+            .chain(OUTPUT_ONLY_HEDGES.iter())
+            .any(|hedge| sentence.contains(hedge))
+}
+
+/// 材料で `word` が推測・伝聞・訴えの形でだけ出てくるとき、その言い方（`HEDGES` の語。見出しの「〜か」は「か」）。
+/// 1か所でも印なしに出てくれば None（報告しない）。打ち消された出現（「流出はしていない」「未定」）は数えない。
+fn hedge_only_in_source(source: &str, word: &str) -> Option<&'static str> {
+    let mut found = None;
+    for (index, _) in source.match_indices(word) {
+        let before = source[..index].chars().next_back();
+        let after = &source[index + word.len()..];
+        if before.is_some_and(|c| NEGATING_PREFIXES.contains(&c)) || is_negated_after(after) {
+            continue;
+        }
+        let hedge = source_hedge_after(after)?;
+        found.get_or_insert(hedge);
+    }
+    found
+}
+
+/// 材料の語の直後（`after`）の、同じ区切りの中・`HEDGE_WINDOW_CHARS` 字以内にある推測・伝聞・訴えの言い方。
+/// 見出しの「〜か」（「情報流出か」「流出したか」）も推測とみなす。
+fn source_hedge_after(after: &str) -> Option<&'static str> {
+    let clause_end = after
+        .find(['。', '、', '\n', '！', '？', '!', '?', '　', ' '])
+        .unwrap_or(after.len());
+    let clause = &after[..clause_end];
+    let window: String = clause.chars().take(HEDGE_WINDOW_CHARS).collect();
+    if let Some(hedge) = HEDGES.iter().find(|hedge| window.contains(**hedge)) {
+        return Some(hedge);
+    }
+    ["か", "したか", "されたか", "させたか"]
+        .contains(&clause)
+        .then_some("か")
+}
+
+// ---------------------------------------------------------------------------
 // 年
 // ---------------------------------------------------------------------------
 
@@ -1195,15 +1464,18 @@ fn find_unknown_years(source: &str, output: &str) -> Vec<CheckIssue> {
     issues
 }
 
-/// 要約の点検（`output_check::check_japanese_summary`）に足す点検: 見出しの残り・反対の意味・年の組み合わせ。
+/// 要約の点検（`output_check::check_japanese_summary`）に足す点検: 見出しの残り・反対の意味・年の組み合わせ・
+/// 推測・伝聞・訴えの言い切り（D175）。
 pub(super) fn check_summary_consistency(source: &str, output: &str) -> Vec<CheckIssue> {
     let mut issues: Vec<CheckIssue> = find_heading_residue(output).into_iter().collect();
     issues.extend(find_contradictions(source, output));
     issues.extend(find_year_mismatches(source, output));
+    issues.extend(find_asserted_speculation(source, output));
     issues
 }
 
-/// 要点・注目ポイント・タグ・再説明・一言の点検: 見出しの残り・反対の意味・材料にない年・年の組み合わせ。
+/// 要点・注目ポイント・再説明・一言の点検: 見出しの残り・反対の意味・材料にない年・年の組み合わせ・推測の言い切り。
+/// タグは名詞だけで言い切りの形を持たないので、反対の意味だけを見る（`filter_checked_points`）。
 /// 数字全般の照合はしない（再説明・一言は要約・要点を言い換えるので、「3つ」「2人」のような数の数え方で
 /// 誤検出しやすい。年だけは D169 で誤りが出たので見る）。
 pub(super) fn check_stage_consistency(source: &str, output: &str) -> Vec<CheckIssue> {
@@ -1816,5 +2088,141 @@ mod tests {
             "原告の請求が認められた。"
         )
         .is_empty());
+    }
+
+    /// 架空の記事: 情報流出の「可能性が高い」記事（推測としてだけ書かれた出来事）。
+    const LEAK: &str = "あおば通販、顧客情報流出の可能性\nあおば通販は、外部からの不正アクセスにより顧客約2万人分の情報が流出した可能性が高いと発表した。";
+
+    #[test]
+    fn asserting_a_possible_leak_is_reported() {
+        for output in [
+            "あおば通販で顧客約2万人分の情報が流出した。",
+            "顧客情報が流出しちゃったんだね",
+            "不正アクセスで顧客情報が流出しました。",
+            // 材料の語より長い語（「情報流出」）でも、材料にある後ろの部分（「流出」）で照らす。
+            "あおば通販は顧客情報流出していた。",
+        ] {
+            let issues = find_asserted_speculation(LEAK, output);
+            assert_eq!(
+                kinds(&issues),
+                vec![IssueKind::AssertedSpeculation],
+                "{output}"
+            );
+            assert!(issues[0].reason.contains("可能性"), "{output}");
+        }
+    }
+
+    #[test]
+    fn hedged_or_negated_paraphrases_are_not_reported() {
+        for output in [
+            "顧客情報が流出したかもしれない。",
+            "顧客情報が流出したとされる。",
+            "顧客情報が流出した可能性が高い。",
+            "顧客情報が流出したとみられる。",
+            "あおば通販は、顧客情報が流出した可能性があると発表した。",
+            "顧客情報が流出したの？",
+            "顧客情報が流出したら大変だね",
+            "顧客情報はまだ流出していない。",
+            "顧客情報流出の可能性があるんだって",
+        ] {
+            assert!(
+                find_asserted_speculation(LEAK, output).is_empty(),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_that_asserts_the_event_somewhere_is_not_reported() {
+        // 材料のどこかで言い切られていれば報告しない（見出しの名詞のままの出現も言い切りとみなす）。
+        for source in [
+            "あおば通販、顧客情報が流出\n顧客情報が流出した可能性が高いと発表した。",
+            "顧客情報が流出した可能性があるとしていたが、調査の結果、流出したと発表した。",
+        ] {
+            assert!(
+                find_asserted_speculation(source, "顧客情報が流出した。").is_empty(),
+                "{source}"
+            );
+        }
+        // 材料に語がなければ見ない（材料にない内容は別の点検の対象）。
+        assert!(find_asserted_speculation(LEAK, "店舗の営業を停止した。").is_empty());
+        // 見出しの「〜か」は推測として数える。
+        assert_eq!(
+            kinds(&find_asserted_speculation(
+                "あおば通販で顧客情報流出か\n同社が調べている。",
+                "あおば通販で顧客情報が流出した。"
+            )),
+            vec![IssueKind::AssertedSpeculation]
+        );
+    }
+
+    #[test]
+    fn reported_facts_and_intentions_are_not_reported() {
+        // 実記事・架空の判決記事の評価で誤検出になった形（架空の文で書いた）。
+        for (source, output) in [
+            // 「〜したという」は記者が確かめた事実の普通の書き方なので、推測にしない。
+            (
+                "あおば楽器は、模倣品の販売元に警告書を送付したという。",
+                "あおば楽器は模倣品の販売元に警告書を送付した。",
+            ),
+            // 考え・つもりを表す語（検討など）は、出来事の言い切りとみなさない。
+            (
+                "団体側は控訴を検討するとしている。",
+                "控訴を検討している団体が今後に注目している",
+            ),
+            // 出力が求めの形のまま書いたもの。
+            (
+                "指針は、利用者の意図を理解した上で行動するよう求めている。",
+                "利用者の意図を理解した上で行動することが求められた。",
+            ),
+        ] {
+            assert!(
+                find_asserted_speculation(source, output).is_empty(),
+                "{source} / {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn asserting_a_complaint_or_a_party_claim_is_reported() {
+        // 「〜と訴えている」を「〜した」と書いた形（架空の文）。
+        let complaint = "住民、工場の騒音で体調悪化と訴え\n工場の近くの住民は、夜間の騒音で体調が悪化したと訴えている。";
+        assert_eq!(
+            kinds(&find_asserted_speculation(
+                complaint,
+                "工場の騒音で住民の体調が悪化した。"
+            )),
+            vec![IssueKind::AssertedSpeculation]
+        );
+        assert!(
+            find_asserted_speculation(complaint, "住民は騒音で体調が悪化したと訴えた。").is_empty()
+        );
+        // D169 の A10 を簡単にした形（架空の文）: 党の主張を「決まった」と書く。材料に「合意」があり、
+        // 反対の意味の点検（決定⇐主張）では拾えない。
+        let claim = "あおば党、保育料の無償化を主張\nあおば党の代表は会見で、来年度から保育料を無償化すると主張した。与党とは協議を続けることで合意した。";
+        let said = "来年度から保育料の無償化が決まったんだね";
+        assert!(find_contradictions(claim, said).is_empty());
+        assert_eq!(
+            kinds(&check_stage_consistency(claim, said)),
+            vec![IssueKind::AssertedSpeculation]
+        );
+        assert!(
+            check_stage_consistency(claim, "あおば党は保育料の無償化を主張したんだね").is_empty()
+        );
+    }
+
+    #[test]
+    fn asserted_speculation_triggers_the_summary_retry_but_does_not_block_use() {
+        let report = super::super::output_check::check_japanese_summary(
+            LEAK,
+            "あおば通販で顧客約2万人分の情報が流出した。",
+            None,
+            &[],
+        );
+        assert_eq!(
+            report.kinds_where(IssueKind::triggers_summary_retry),
+            vec![IssueKind::AssertedSpeculation]
+        );
+        assert!(!report.blocks_use());
     }
 }
