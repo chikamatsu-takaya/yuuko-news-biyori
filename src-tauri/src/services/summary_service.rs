@@ -30,6 +30,7 @@ use super::ai_provider_service::{
     summary_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
 };
 use consistency_check::{check_stage_consistency, strip_heading_labels};
+use leading_connector::strip_leading_connectors;
 use output_check::{check_japanese_summary, CheckIssue, CheckReport, IssueKind};
 
 /// 手動の要約（「今すぐ要約」「要約を作成」「作り直す」）を生成中の記事ID。
@@ -262,6 +263,15 @@ impl SummaryService {
         // 機械点検（D166・D170）の材料: 要点の種（タイトル＋本文抜粋）。記事の公開日は足さない
         // （取得元に公開日が無いときは取得時刻が入り〔`normalize_published_at`〕、本当の記事の日付と区別できないため）。
         let check_source = points_seed.clone();
+        // 実AIの要約・再説明・一言は、点検（D166・D170）の前に文頭のつなぎの語（「これにより、」「その結果、」）を消す
+        // （`strip_ai_leading_connectors`）。作り直しも同じ取得手段を通すので、点検・保存・再説明の入力は消した後の文になる。
+        let request_validated = |request: AiRequest,
+                                 kind: SummaryOutputKind,
+                                 provider: AiProvider,
+                                 level: ExplanationLevel| {
+            request_validated(request, kind, provider, level)
+                .map(|response| strip_ai_leading_connectors(kind, response, &check_source))
+        };
 
         // 4出力（要点と注目ポイント・要約・再説明・感想）とも詳細設計書 §12.5 の出力検証を通ったものだけを
         // 保存・返却する。
@@ -1577,6 +1587,47 @@ fn strip_ai_headings(kind: SummaryOutputKind, response: AiResponse) -> AiRespons
     }
 }
 
+/// 実AIの要約・再説明・一言の2文目以降の文頭のつなぎの語（「これにより、」「その結果、」など）と直後の読点を消す
+/// （Firestore タスク I9iRpb。`leading_connector::strip_leading_connectors`）。記事にない因果の言い足しを減らすため。
+/// `source` は点検の材料（タイトル＋本文抜粋）で、記事自体が同じ因果を同じ語で書いているときは消さない。
+/// 消した後の文にも保存前の検証（§12.5）をかけ直し、落ちたら（消すと行頭が `#`・`---` になるとき）消さずに元の出力を使う。
+/// Mock の結果・要点の段は触らない（`strip_ai_headings` と同じ）。
+fn strip_ai_leading_connectors(
+    kind: SummaryOutputKind,
+    response: AiResponse,
+    source: &str,
+) -> AiResponse {
+    if kind == SummaryOutputKind::Points || response.provider == PROVIDER_MOCK {
+        return response;
+    }
+    let (text, removed) = strip_leading_connectors(source, &response.text);
+    if removed == 0 {
+        return response;
+    }
+    // 消した後の文にも §12.5 の検証をかけ直す（「その結果、# …」「その結果、---」は、消すと行頭が見出し・
+    // 区切り行になる）。落ちたら消さずに元の出力（検証済み）を使う。
+    let text = match validate_summary_output(kind, &text) {
+        Ok(text) => text,
+        Err(rejection) => {
+            log::info!(
+                "kept the leading connector(s) because the stripped AI output failed validation ({}: {})",
+                kind.label(),
+                rejection.label()
+            );
+            return response;
+        }
+    };
+    // 本文は出さず、数と出力種別だけを残す。
+    log::info!(
+        "removed {removed} leading connector(s) from the AI output ({})",
+        kind.label()
+    );
+    AiResponse {
+        text,
+        provider: response.provider,
+    }
+}
+
 /// 実AI（Gemini・ローカル）の再説明・一言から、話の中身ではない飾り（括弧のト書き・中国語の助詞・
 /// 冒頭の挨拶・締めの挨拶）を取り除く。拒否すると記事が未要約のまま残る（D104 / D56）ため、捨てずに削る。
 /// 除去は文字を消すだけなので、続く `validate_summary_output` の検証（HTML・制御文字・見出し・文字数）は
@@ -1978,10 +2029,10 @@ mod tests {
         build_focus_points, build_summary_seed, build_yuuko_comment_seed,
         build_yuuko_explanation_seed, build_yuuko_speech_input, combined_provider,
         neutralize_seed_article, neutralize_seed_text, seed_title_without_site_suffix,
-        select_valid_output_in_tone, validate_article_points, validate_point_item,
-        validate_summary_output, FallbackPolicy, OutputRejection, SummaryGeneration,
-        SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS, EXPLANATION_MAX_CHARS,
-        SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
+        select_valid_output_in_tone, strip_ai_leading_connectors, validate_article_points,
+        validate_point_item, validate_summary_output, FallbackPolicy, OutputRejection,
+        SummaryGeneration, SummaryOutputKind, SummaryService, COMMENT_MAX_CHARS,
+        EXPLANATION_MAX_CHARS, SEED_SUMMARY_MAX_CHARS, SUMMARY_MAX_CHARS,
     };
     use crate::domain::article::{ArticleReadState, ArticleSummaryUpdate, FetchedArticle};
     use crate::domain::settings::ExplanationLevel;
@@ -2971,6 +3022,139 @@ mod tests {
         assert_eq!(generated.yuuko_comment, "悔しい負けだね");
         assert_eq!(requests.len(), 4);
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn leading_connectors_are_removed_from_real_ai_summary_and_speech() {
+        // 2文目以降の文頭のつなぎの語と読点だけを消す（1文目・要点は触らない）。作り直しはしない。
+        let root_dir = temp_root("leading-connector");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec![
+                    "みなとシーガルズはやまびこベアーズにサヨナラ負けした。その結果、青木は3安打だった。",
+                ],
+                explanation: vec![
+                    "このため、みなとシーガルズは負けたんだね。これにより、青木は3安打だったよ。",
+                ],
+                comment: vec!["サヨナラ負けだね。そのため、悔しいね"],
+            },
+        );
+        let generated = generated(result);
+        assert_eq!(
+            generated.summary,
+            "みなとシーガルズはやまびこベアーズにサヨナラ負けした。青木は3安打だった。"
+        );
+        assert_eq!(
+            generated.yuuko_explanation,
+            "このため、みなとシーガルズは負けたんだね。青木は3安打だったよ。"
+        );
+        assert_eq!(generated.yuuko_comment, "サヨナラ負けだね。悔しいね");
+        assert_eq!(requests.len(), 4);
+        // 再説明・一言の入力の要約も、消した後の文。
+        assert!(
+            requests[2].input_text.contains(
+                "要約: みなとシーガルズはやまびこベアーズにサヨナラ負けした。青木は3安打だった。"
+            ),
+            "{}",
+            requests[2].input_text
+        );
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn leading_connectors_are_removed_from_the_regenerated_summary_too() {
+        // 作り直しも同じ取得手段を通るので、作り直した要約のつなぎの語も消える。
+        let root_dir = temp_root("leading-connector-retry");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec![
+                    "みなとシーガルズはやまびこベアーズにサヨナラ勝ちした。",
+                    "みなとシーガルズはやまびこベアーズにサヨナラ負けした。その結果、青木は3安打だった。",
+                ],
+                explanation: vec!["みなとシーガルズはサヨナラ負けしたんだね。"],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert_eq!(
+            generated(result).summary,
+            "みなとシーガルズはやまびこベアーズにサヨナラ負けした。青木は3安打だった。"
+        );
+        assert_eq!(requests.len(), 5);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn leading_connectors_are_kept_in_mock_outputs() {
+        // Mock の結果（本文の抜粋・定型文）は触らない。記事に「このため」がない本文でも、Mock の要約はそのまま。
+        let response = AiResponse {
+            text: "台風が来た。このため、中止した。".to_string(),
+            provider: "mock".to_string(),
+        };
+        let kept = strip_ai_leading_connectors(
+            SummaryOutputKind::Summary,
+            response.clone(),
+            "台風が来た。",
+        );
+        assert_eq!(kept.text, response.text);
+        // 要点の段も触らない。
+        let points = AiResponse {
+            text: response.text.clone(),
+            provider: "local".to_string(),
+        };
+        assert_eq!(
+            strip_ai_leading_connectors(SummaryOutputKind::Points, points, "台風が来た。").text,
+            response.text
+        );
+        // 実AIの要約は消す。
+        let stripped = strip_ai_leading_connectors(
+            SummaryOutputKind::Summary,
+            AiResponse {
+                text: response.text,
+                provider: "local".to_string(),
+            },
+            "台風が来た。",
+        );
+        assert_eq!(stripped.text, "台風が来た。中止した。");
+    }
+
+    #[test]
+    fn leading_connector_is_kept_when_removal_would_expose_a_heading_or_separator() {
+        // 「その結果、# …」「その結果、---」は §12.5 の検証を通るが、消すと行頭が見出し・区切り行になる。
+        // 消した後の文が検証に落ちるときは、消さずに元の出力（検証済み）を使う。
+        for text in [
+            "台風が来た。
+その結果、# 中止した。",
+            "台風が来た。
+その結果、---",
+            "台風が来た。
+これにより ## 中止",
+        ] {
+            assert!(
+                validate_summary_output(SummaryOutputKind::Summary, text).is_ok(),
+                "{text}"
+            );
+            for kind in [
+                SummaryOutputKind::Summary,
+                SummaryOutputKind::Explanation,
+                SummaryOutputKind::Comment,
+            ] {
+                let kept = strip_ai_leading_connectors(
+                    kind,
+                    AiResponse {
+                        text: text.to_string(),
+                        provider: "local".to_string(),
+                    },
+                    "台風が来た。",
+                );
+                assert_eq!(kept.text, text, "{kind:?}");
+            }
+        }
     }
 
     #[test]
@@ -4873,6 +5057,9 @@ mod output_check;
 
 /// 要約一式の見出しの残り・反対の意味・年の組み合わせ（D170）・推測の言い切り（D175）の点検。要点・要約・再説明・一言に使う。
 mod consistency_check;
+
+/// 要約・再説明・一言の文頭のつなぎの語（「これにより、」「その結果、」）を消す後処理（Firestore タスク I9iRpb）。
+mod leading_connector;
 
 /// 要約の機械点検と作り直しの評価ハーネス（D166。`#[ignore]`・手動実行専用）。
 #[cfg(test)]
