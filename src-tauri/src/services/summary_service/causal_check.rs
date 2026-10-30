@@ -43,7 +43,8 @@ struct OutputLink {
 const VERB_ENDS: &[char] = &['る', 'た', 'い'];
 /// 直後の読点・空白（「により、」「を受けて、」）。
 const COMMA: &[&str] = &["、", "，", ","];
-/// 「〜することで合意した」のように、「ことで」が合意・一致の中身を表す続き。
+/// 「〜することで合意した」のように、「ことで」が合意・一致の中身を表す続き。「〜したことで知られる」
+/// （評判の中身）も入れる。
 const AGREEMENT_FOLLOWERS: &[&str] = &[
     "合意",
     "一致",
@@ -51,11 +52,20 @@ const AGREEMENT_FOLLOWERS: &[&str] = &[
     "妥結",
     "折り合",
     "話がまとま",
+    "和解",
+    "同意",
+    "了承",
+    "調整",
+    "知られ",
     "す",
     "し",
     "は",
     "も",
 ];
+
+/// 「地域によって、異なる」のように、「によって」「により」が「〜ごとに」の意味（違い・差）になる続き
+/// （直後の読点を含む。全角の読点は `normalize` で半角になる）。
+const DEPENDING_ON: &[&str] = &["、異な", "、違", "、差", ",異な", ",違", ",差"];
 
 /// 長いものから並べる（「ことによって」を「ことで」より先に）。
 const OUTPUT_LINKS: [OutputLink; 8] = [
@@ -81,13 +91,13 @@ const OUTPUT_LINKS: [OutputLink; 8] = [
         word: "によって",
         after_chars: &[],
         followed_by: COMMA,
-        not_followed_by: &[],
+        not_followed_by: DEPENDING_ON,
     },
     OutputLink {
         word: "により",
         after_chars: &[],
         followed_by: COMMA,
-        not_followed_by: &[],
+        not_followed_by: DEPENDING_ON,
     },
     OutputLink {
         word: "を受けて",
@@ -111,13 +121,16 @@ const OUTPUT_LINKS: [OutputLink; 8] = [
 ];
 
 /// 材料の文が因果を書いているとみなす言い方。出力の側より広く、言い換え（「〜ので」「〜から」「〜で」「〜て、」
-/// 「〜の影響で」「〜をきっかけに」）を含む（材料が別のつなぎで同じ因果を書いた出力を誤検出しないため）。
+/// 「〜の影響で」「〜をきっかけに」「〜したところ」「〜による」「〜を背景に」）を含む（材料が別のつなぎで同じ因果を書いた出力を誤検出しないため）。
 /// 「で」は「地震で通行止め」のような原因の「で」（見出しに多い）を読むために入れる。このほか、動詞の連用形で文を
 /// つなぐ読点（「本格化し、」「増え、」。`has_continuative_comma`）も因果の言い方とみなす。
-const SOURCE_CAUSAL_MARKERS: [&str; 24] = [
+const SOURCE_CAUSAL_MARKERS: [&str; 27] = [
     "ため",
     "ことで",
+    "ところ",
     "により",
+    "による",
+    "背景",
     "によって",
     "よって",
     "結果",
@@ -472,6 +485,40 @@ mod tests {
                 .into_iter()
                 .map(|issue| issue.kind)
                 .collect::<Vec<_>>(),
+            vec![IssueKind::UnsupportedCause]
+        );
+    }
+
+    #[test]
+    fn tokoro_niyoru_and_haikei_in_the_source_count_as_the_same_cause() {
+        let source = "市が現地を調査したところ、水道管の破損が判明した。";
+        assert!(kinds(source, "市が現地を調査した結果、水道管の破損が判明した。").is_empty());
+        let source = "円安による輸入品の値上がりが続いている。";
+        assert!(kinds(source, "円安により、輸入品が値上がりした。").is_empty());
+        let source = "円安を背景に、輸入品の値上がりが続いている。";
+        assert!(kinds(source, "円安が続いたため、輸入品が値上がりした。").is_empty());
+    }
+
+    #[test]
+    fn reputation_and_depending_on_are_not_counted() {
+        let source = "あおば工業は小型電池の開発で知られる。同社の業界での順位は3位だ。";
+        assert!(kinds(
+            source,
+            "あおば工業は小型電池を開発したことで知られる業界の会社だ。"
+        )
+        .is_empty());
+        // 同じ材料で、評判でない「ことで」は数える（対照）。
+        assert_eq!(
+            kinds(
+                source,
+                "あおば工業は小型電池を開発したことで業界の順位を上げた。"
+            ),
+            vec![IssueKind::UnsupportedCause]
+        );
+        let source = "料金は地域で異なる。新しい額は4月に適用する。";
+        assert!(kinds(source, "料金は地域によって、異なる額を4月に適用する。").is_empty());
+        assert_eq!(
+            kinds(source, "料金は地域によって、4月に適用する。"),
             vec![IssueKind::UnsupportedCause]
         );
     }
