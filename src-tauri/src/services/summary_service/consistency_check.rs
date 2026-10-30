@@ -1485,16 +1485,18 @@ fn find_unknown_years(source: &str, output: &str) -> Vec<CheckIssue> {
 }
 
 /// 要約の点検（`output_check::check_japanese_summary`）に足す点検: 見出しの残り・反対の意味・年の組み合わせ・
-/// 推測・伝聞・訴えの言い切り（D175）。
+/// 推測・伝聞・訴えの言い切り（D175）・文の途中の記事にない因果（Firestore タスク 6jL23k。`causal_check`）。
 pub(super) fn check_summary_consistency(source: &str, output: &str) -> Vec<CheckIssue> {
     let mut issues: Vec<CheckIssue> = find_heading_residue(output).into_iter().collect();
     issues.extend(find_contradictions(source, output));
     issues.extend(find_year_mismatches(source, output));
     issues.extend(find_asserted_speculation(source, output));
+    issues.extend(super::causal_check::find_unsupported_causes(source, output));
     issues
 }
 
-/// 要点・注目ポイント・再説明・一言の点検: 見出しの残り・反対の意味・材料にない年・年の組み合わせ・推測の言い切り。
+/// 要点・注目ポイント・再説明・一言の点検: 見出しの残り・反対の意味・材料にない年・年の組み合わせ・推測の言い切り・
+/// 記事にない因果。
 /// タグは名詞だけで言い切りの形を持たないので、反対の意味だけを見る（`filter_checked_points`）。
 /// 数字全般の照合はしない（再説明・一言は要約・要点を言い換えるので、「3つ」「2人」のような数の数え方で
 /// 誤検出しやすい。年だけは D169 で誤りが出たので見る）。

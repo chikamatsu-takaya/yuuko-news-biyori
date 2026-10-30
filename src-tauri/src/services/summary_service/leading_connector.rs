@@ -127,32 +127,38 @@ pub(super) fn strip_leading_connectors(source: &str, text: &str) -> (String, usi
     (out, removed)
 }
 
-/// `rest`（文の頭から後ろ）が消せるつなぎの語で始まるなら、消す長さ（語＋直後の読点・空白のバイト数）。
-fn removable_connector_len(source_norm: &str, rest: &str) -> Option<usize> {
-    for connector in &CONNECTORS {
-        let Some(after) = rest.strip_prefix(connector.word) else {
-            continue;
-        };
+/// `rest` がつなぎの語（`CONNECTORS`）として使われた語で始まるなら、その語と、語＋直後の読点・空白の後ろ
+/// （`body`）。語の一部（「この結果発表」「これを受け入れ」）は None。
+fn connector_match(rest: &str) -> Option<(&'static Connector, &str)> {
+    CONNECTORS.iter().find_map(|connector| {
+        let after = rest.strip_prefix(connector.word)?;
         let body = after.trim_start_matches(SEPARATORS);
         let separated = body.len() < after.len();
         let bare = connector.bare_ok && after.chars().next().is_some_and(is_content_char);
-        if !separated && !bare {
-            continue;
-        }
-        let sentence = sentence_body(body);
-        // つなぎの語のほかに中身のない文（「その結果。」）は残す。
-        if !sentence
-            .chars()
-            .any(|c| !c.is_whitespace() && !SEPARATORS.contains(&c))
-        {
-            return None;
-        }
-        if source_has_same_cause(source_norm, connector.family, &normalize(sentence)) {
-            return None;
-        }
-        return Some(rest.len() - body.len());
+        (separated || bare).then_some((connector, body))
+    })
+}
+
+/// `connector_match` の語だけを返す版。文の途中の因果の点検（`causal_check`）と共有する。
+pub(super) fn connector_at(rest: &str) -> Option<(&'static str, &str)> {
+    connector_match(rest).map(|(connector, body)| (connector.word, body))
+}
+
+/// `rest`（文の頭から後ろ）が消せるつなぎの語で始まるなら、消す長さ（語＋直後の読点・空白のバイト数）。
+fn removable_connector_len(source_norm: &str, rest: &str) -> Option<usize> {
+    let (connector, body) = connector_match(rest)?;
+    let sentence = sentence_body(body);
+    // つなぎの語のほかに中身のない文（「その結果。」）は残す。
+    if !sentence
+        .chars()
+        .any(|c| !c.is_whitespace() && !SEPARATORS.contains(&c))
+    {
+        return None;
     }
-    None
+    if source_has_same_cause(source_norm, connector.family, &normalize(sentence)) {
+        return None;
+    }
+    Some(rest.len() - body.len())
 }
 
 /// 文の終わり（句点・感嘆符・疑問符・改行）の手前まで。
@@ -180,7 +186,7 @@ fn source_has_same_cause(source_norm: &str, family: &[&str], sentence_norm: &str
 }
 
 /// 照合用に正規化する: 全角英数記号を半角に、英字を小文字に、空白を除く。
-fn normalize(text: &str) -> String {
+pub(super) fn normalize(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
@@ -192,14 +198,14 @@ fn normalize(text: &str) -> String {
 }
 
 /// 内容の字（漢字・カタカナ・英数字）か。ひらがな・記号は語の区切りとして扱う。
-fn is_content_char(c: char) -> bool {
+pub(super) fn is_content_char(c: char) -> bool {
     matches!(c, '\u{4E00}'..='\u{9FFF}' | '々' | '〆' | '\u{30A0}'..='\u{30FF}')
         || c.is_ascii_alphanumeric()
         || matches!(c, 'Ａ'..='Ｚ' | 'ａ'..='ｚ' | '０'..='９')
 }
 
 /// 内容の字の連なりごとの2字の連なり（1字だけの連なりは数えない）。重複は除く。
-fn content_bigrams(text: &str) -> Vec<String> {
+pub(super) fn content_bigrams(text: &str) -> Vec<String> {
     let mut grams: Vec<String> = Vec::new();
     let mut run: Vec<char> = Vec::new();
     for c in text.chars().chain(std::iter::once('。')) {
