@@ -19,8 +19,9 @@ use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::util::speech_cleanup::{
     calm_yuuko_speech, casualize_polite_endings, clean_yuuko_speech, count_unlisted_latin_words,
-    soften_rude_address, strip_foreign_script_sentences, strip_prompt_echo_sentences,
-    strip_repeated_sentences, ForeignScriptOutcome,
+    soften_rude_address, strip_broken_openings, strip_foreign_script_sentences,
+    strip_instruction_echo_sentences, strip_prompt_echo_sentences, strip_repeated_sentences,
+    ForeignScriptOutcome,
 };
 use crate::util::text_safety::{
     contains_disallowed_control_char, contains_html_tag, neutralize_html_and_control,
@@ -29,7 +30,7 @@ use crate::util::text_safety::{
 use super::ai_provider_service::{
     summary_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
 };
-use consistency_check::{check_stage_consistency, strip_heading_labels};
+use consistency_check::{check_speech_consistency, check_stage_consistency, strip_heading_labels};
 use leading_connector::strip_leading_connectors;
 use output_check::{check_japanese_summary, CheckIssue, CheckReport, IssueKind};
 
@@ -782,7 +783,9 @@ fn filter_checked_points(
 ///
 /// - 点検するのは実AIの出力だけ。材料は記事そのもの（タイトル＋本文抜粋）で、見出しの残り・反対の意味・
 ///   材料にない年・年の組み合わせ・推測の言い切り（D175）・記事にない因果（`causal_check`。D175 の決まり）を見る
-///   （`check_stage_consistency`）。問題がなければ作り直さない。
+///   （`check_stage_consistency`）。加えて、後処理で消せなかった意味をなさない語・下品な語（文の途中の「うんこ」）と
+///   言い換えた指示の写し（出力がその文だけのとき）を見る（`check_speech_consistency`。Firestore タスク NkBSwN）。
+///   問題がなければ作り直さない。
 /// - 問題があれば同じ依頼で1回だけ作り直す（再説明・一言には点検の理由を添える指示がないため。
 ///   temperature 0.2 の生成のばらつきで、別の言い方になることを期待する）。
 /// - 作り直しも問題が残る・失敗した・検証に落ちたときは、定型文（`request.context`。Mock の結果と同じ、
@@ -812,7 +815,7 @@ where
     if first.provider == PROVIDER_MOCK {
         return Ok(first);
     }
-    let first_issues = check_stage_consistency(source, &first.text);
+    let first_issues = check_speech_consistency(source, &first.text);
     if first_issues.is_empty() {
         return Ok(first);
     }
@@ -829,7 +832,7 @@ where
             return Ok(retried);
         }
         Ok(retried) => {
-            let issues = check_stage_consistency(source, &retried.text);
+            let issues = check_speech_consistency(source, &retried.text);
             if issues.is_empty() {
                 log::info!("adopted the regenerated {}", kind.label());
                 return Ok(retried);
@@ -1680,6 +1683,24 @@ fn clean_ai_speech(
         // 本文は出さず、数と出力種別だけを残す。
         log::info!(
             "removed {prompt_echoes} sentence(s) copying the fixed prompt from the AI output ({})",
+            kind.label()
+        );
+    }
+    // 固定指示を言い換えた写し（「ゆうこの言葉で1段落だけ話すね。」）の文を取り除く（ほかの文が残るときだけ）。
+    let (cleaned, paraphrased_echoes) = strip_instruction_echo_sentences(&cleaned, input_text);
+    if paraphrased_echoes > 0 {
+        // 本文は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed {paraphrased_echoes} sentence(s) paraphrasing the fixed prompt from the AI output ({})",
+            kind.label()
+        );
+    }
+    // 文の書き出しの意味をなさない語・下品な語（「うんこよ！」）を取り除く（入力にある語は除く）。
+    let (cleaned, broken_openings) = strip_broken_openings(&cleaned, input_text);
+    if broken_openings > 0 {
+        // 本文・語は出さず、数と出力種別だけを残す。
+        log::info!(
+            "removed {broken_openings} broken word(s) at sentence starts from the AI output ({})",
             kind.label()
         );
     }
@@ -3201,6 +3222,52 @@ mod tests {
         assert_eq!(requests.len(), 5);
         let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
         assert_eq!(detail.yuuko_explanation.as_deref(), Some(template.as_str()));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn broken_opening_and_paraphrased_instruction_are_removed_or_regenerated() {
+        // 書き出しの「うんこよ！」と、ほかの文がある言い換えの指示の写しは後処理で消し、作り直さない。
+        let root_dir = temp_root("nkbswn-speech-stripped");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec![
+                    "うんこよ！みなとシーガルズはサヨナラ負けしたんだね。ゆうこの言葉で1段落だけ話したよ。",
+                ],
+                comment: vec!["悔しい負けだね"],
+            },
+        );
+        assert_eq!(
+            generated(result).yuuko_explanation,
+            "みなとシーガルズはサヨナラ負けしたんだね。"
+        );
+        assert_eq!(requests.len(), 4);
+        let _ = std::fs::remove_dir_all(&root_dir);
+
+        // 出力が指示の写しだけ・文の途中に語が残るときは1回作り直し、残れば定型文にする。
+        let root_dir = temp_root("nkbswn-speech-template");
+        let (service, _) = build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+        let (result, requests) = generate_scripted(
+            &service,
+            Script {
+                points: vec![loss_points()],
+                summary: vec!["みなとシーガルズはやまびこベアーズにサヨナラ負けした。"],
+                explanation: vec![
+                    "ト書きや自己紹介は書かずに話すね。",
+                    "みなとシーガルズはうんこのように負けたんだね。",
+                ],
+                comment: vec!["記事情報への感想を1文だけ書くね", "悔しい負けだね"],
+            },
+        );
+        let generated = generated(result);
+        let template = requests[2].context.clone().unwrap();
+        assert_eq!(generated.yuuko_explanation, template);
+        assert_eq!(generated.yuuko_comment, "悔しい負けだね");
+        assert_eq!(requests.len(), 6);
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 

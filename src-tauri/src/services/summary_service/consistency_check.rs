@@ -30,12 +30,15 @@
 //! - **推測・伝聞・訴えの言い切り**（`IssueKind::AssertedSpeculation`。D175）: 材料では「流出した可能性」
 //!   「無償化を主張」のように推測・伝聞・訴えとしてだけ書かれた出来事の語を、出力が「流出した」「無償化が
 //!   決まった」と言い切ったとき（`find_asserted_speculation`）。タグには使わない。
+//! - **意味をなさない語・言い換えた指示の写し**（再説明・一言だけ。`check_speech_consistency`。Firestore タスク NkBSwN）:
+//!   後処理で消せなかった「うんこ」など（`IssueKind::BrokenWord`）と、固定指示にだけ出る語句を含む文（`IssueKind::PromptEcho`）。
 //!
 //! 理由（`CheckIssue::reason`）に入る出力由来の文字は、固定の一覧の語と数字だけ（記事の文は入れない）。
 
 use super::output_check::{
     contains_value, japanese_source_numbers, parse_number_at, to_halfwidth, CheckIssue, IssueKind,
 };
+use crate::util::speech_cleanup::{broken_words_in, instruction_phrases_in};
 
 // ---------------------------------------------------------------------------
 // 見出しの残り
@@ -1506,6 +1509,36 @@ pub(super) fn check_stage_consistency(source: &str, output: &str) -> Vec<CheckIs
     issues
 }
 
+/// 再説明・一言の点検: `check_stage_consistency` に、後処理で消せなかった次の2つを足す（Firestore タスク NkBSwN）。
+/// - 意味をなさない語・下品な語（`IssueKind::BrokenWord`）: 文の途中に残った「うんこ」など
+///   （`util::speech_cleanup::broken_words_in`。文の書き出しの語は後処理が消す）。
+/// - 言い換えた指示の写し（`IssueKind::PromptEcho`）: 固定指示にだけ出る語句（「ゆうこの言葉」「ト書き」「1段落」など。
+///   `instruction_phrases_in`）を含む文。後処理はほかの文が残るときだけ消すので、出力がその文だけのときにここへ来る。
+///
+/// どちらも材料（記事）にある語は数えない。理由は固定の文と一覧の語だけ（記事の文は入れない）。
+/// 要点・注目ポイントは見ない（要点の検証・別の点検がある。対象を再説明・一言に絞る）。
+pub(super) fn check_speech_consistency(source: &str, output: &str) -> Vec<CheckIssue> {
+    let mut issues = check_stage_consistency(source, output);
+    let broken = broken_words_in(output, source);
+    if !broken.is_empty() {
+        issues.push(CheckIssue {
+            kind: IssueKind::BrokenWord,
+            reason: "意味をなさない語・下品な語が混ざっていた。記事の中身だけを話す。".to_string(),
+        });
+    }
+    let phrases = instruction_phrases_in(output, source);
+    if !phrases.is_empty() {
+        issues.push(CheckIssue {
+            kind: IssueKind::PromptEcho,
+            reason: format!(
+                "指示の写し（「{}」など）が混ざっていた。記事の中身だけを話す。",
+                phrases[0]
+            ),
+        });
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2276,5 +2309,29 @@ mod tests {
             vec![IssueKind::AssertedSpeculation]
         );
         assert!(!report.blocks_use());
+    }
+
+    #[test]
+    fn speech_check_reports_broken_words_and_paraphrased_instructions() {
+        let source = "みなと市は図書館の開館時間を午後9時まで延長する。";
+        assert_eq!(
+            kinds(&check_speech_consistency(
+                source,
+                "図書館がうんこのように夜も開くんだね。"
+            )),
+            vec![IssueKind::BrokenWord]
+        );
+        let echo = check_speech_consistency(source, "ゆうこの言葉で1段落だけ話すね。");
+        assert_eq!(kinds(&echo), vec![IssueKind::PromptEcho]);
+        // 理由は固定の文と一覧の語だけ。
+        assert!(echo[0].reason.contains("ゆうこの言葉"));
+        // ふつうの再説明・材料にある語は報告しない。要点などの点検（check_stage_consistency）は変えない。
+        assert!(check_speech_consistency(source, "図書館が夜9時まで開くんだね。").is_empty());
+        assert!(check_speech_consistency(
+            "うんこドリルの新刊が発売された。",
+            "うんこドリルの新刊が出たんだね。"
+        )
+        .is_empty());
+        assert!(check_stage_consistency(source, "ゆうこの言葉で1段落だけ話すね。").is_empty());
     }
 }

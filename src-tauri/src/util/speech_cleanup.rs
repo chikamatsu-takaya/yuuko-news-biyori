@@ -31,6 +31,12 @@
 //! 2026-10-15（Firestore タスク H0BIec）: 失礼な呼びかけ（「お前ら」「てめえ」）を落とす・「みんな」へ言い換える
 //! （`soften_rude_address`）。同じ文の繰り返しは最初の1つだけ残す（`strip_repeated_sentences`）。
 //! どちらもかぎかっこ「」『』の中（引用）は触らず、空でない出力を空にしない。
+//!
+//! 2026-10-30（Firestore タスク NkBSwN）: 文の書き出しの意味をなさない語・下品な語（「うんこよ！」）を消す
+//! （`strip_broken_openings`）。固定指示を言い換えた写しの文（「ゆうこの言葉で1段落だけ話すね。」）を消す
+//! （`strip_instruction_echo_sentences`）。どちらも出力がその文・語だけのときは消さず、summary_service の点検で
+//! 作り直し→定型文にする（文の途中に残った語も同じ。`broken_words_in` / `instruction_phrases_in`）。
+//! 用語解説（dictionary_service）は使わない（再説明・一言の `clean_ai_speech` だけが呼ぶ）。
 
 /// 中国語の文末助詞・感嘆詞のうち、日本語の文にはまず現れない字。
 /// 「的」「了」などは日本語でも使うため含めない。中国語の文全体を見分けるのは難しいので、
@@ -426,6 +432,246 @@ fn is_prompt_echo(sentence: &str, fixed_texts: &[&str]) -> bool {
     let core = core.trim_end_matches(['、', '，']);
     core.chars().count() >= PROMPT_ECHO_MIN_CHARS
         && fixed_texts.iter().any(|fixed| fixed.contains(core))
+}
+
+/// 再説明・一言のプロンプトの固定指示にだけ出る語句（Firestore タスク NkBSwN）。出力の文がこれを含めば、
+/// 固定指示と文字どおりに一致しなくても（「ゆうこの言葉で1段落だけ話すね」のような言い換え）指示の写しとみなす。
+/// 記事の話には出てこない、プロンプトの言い回し（指示の用語）だけを入れる。「案内役」「マスコットキャラクター」
+/// 「一段落」（「騒動が一段落した」）のように記事にも出る語は入れない。照合の前に全角数字を半角にそろえる
+/// （`normalize_digits`）。材料（AI への入力・点検の記事）にある語句は照合しない。
+const INSTRUCTION_ECHO_PHRASES: [&str; 20] = [
+    "ゆうこの言葉",
+    "ゆうこの話し方",
+    "ゆうこの様子",
+    "横で教えて",
+    "記事情報",
+    "外部データ",
+    "厳守事項",
+    "固定指示",
+    "出力のきまり",
+    "システムプロンプト",
+    "1段落",
+    "1文だけ",
+    "改行のない",
+    "ト書き",
+    "括弧書き",
+    "自己紹介",
+    "文末は",
+    "常体",
+    "で終えない",
+    "だよ」「",
+];
+
+/// 全角数字を半角にそろえる（「１段落」と「1段落」を同じに照合するため）。
+fn normalize_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+            _ => c,
+        })
+        .collect()
+}
+
+/// `text` が含む、固定指示にだけ出る語句（`INSTRUCTION_ECHO_PHRASES`）のうち、材料（`material`）に無いもの。
+/// summary_service の再説明・一言の点検（指示の写し）が使う。
+pub(crate) fn instruction_phrases_in(text: &str, material: &str) -> Vec<&'static str> {
+    let text = normalize_digits(text);
+    let material = normalize_digits(material);
+    INSTRUCTION_ECHO_PHRASES
+        .into_iter()
+        .filter(|phrase| text.contains(phrase) && !material.contains(phrase))
+        .collect()
+}
+
+/// 再説明・一言から、固定指示を言い換えた写しの文（`INSTRUCTION_ECHO_PHRASES` の語句を含む文。入力にある語句は除く）を
+/// 取り除く（Firestore タスク NkBSwN。`strip_prompt_echo_sentences` は文字どおり10字以上一致する文だけを消す）。
+/// ほかに残る文が1つも無いとき（出力がその文だけのとき）は消さずにそのまま返し、呼び出し側の点検
+/// （summary_service の指示の写し）で作り直し→定型文にする（空にして検証で拒否すると記事が未要約のまま残るため）。
+/// 文の分け方は `split_sentences`（かぎかっこの中では切らない）。戻り値の2つ目は、取り除いた文の数（ログ用）。
+pub(crate) fn strip_instruction_echo_sentences(text: &str, input: &str) -> (String, usize) {
+    let input = normalize_digits(input);
+    let phrases: Vec<&str> = INSTRUCTION_ECHO_PHRASES
+        .into_iter()
+        .filter(|phrase| !input.contains(phrase))
+        .collect();
+    let is_echo = |sentence: &str| {
+        let sentence = normalize_digits(sentence);
+        phrases.iter().any(|phrase| sentence.contains(phrase))
+    };
+    let mut removed = 0;
+    let mut kept_sentences = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            split_sentences(line)
+                .into_iter()
+                .filter(|sentence| {
+                    if is_echo(sentence) {
+                        removed += 1;
+                        return false;
+                    }
+                    if !sentence.trim().is_empty() {
+                        kept_sentences += 1;
+                    }
+                    true
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if removed == 0 || kept_sentences == 0 {
+        return (text.to_string(), 0);
+    }
+    (lines.join("\n"), removed)
+}
+
+/// 再説明・一言に混ざる、意味をなさない語・下品な語（Firestore タスク NkBSwN）。D167-B/C の評価で、再説明が
+/// 「うんこよ！」で始まる出力が出た（`LEADING_GREETINGS` の「うん」は直後が区切り記号のときだけ消すので残った）。
+/// 記事の語と区別できるよう、固定の短い一覧にし、別の語の一部になる形を `next_exceptions` と字種で除く。
+struct BrokenWord {
+    word: &'static str,
+    /// 直後にこの字が続けば別の語とみなす（「うんこう（運行）」「うんちく（蘊蓄）」「うんちん（運賃）」「ちんこう（沈降）」）。
+    next_exceptions: &'static [char],
+}
+
+const BROKEN_WORDS: [BrokenWord; 5] = [
+    BrokenWord {
+        word: "うんこ",
+        next_exceptions: &['う'],
+    },
+    BrokenWord {
+        word: "うんち",
+        next_exceptions: &['く', 'ん'],
+    },
+    BrokenWord {
+        word: "ちんこ",
+        next_exceptions: &['う', 'ろ'],
+    },
+    BrokenWord {
+        word: "おしっこ",
+        next_exceptions: &[],
+    },
+    // 片仮名の語は、前後に片仮名が続けば別の語の一部（「ジャクソン」）とみなす（`is_part_of_other_word`）。
+    BrokenWord {
+        word: "クソ",
+        next_exceptions: &[],
+    },
+];
+
+/// 文の書き出しの意味をなさない語の後ろに付いて、一緒に消す字（「うんこよ！」「うんこだね、」）。
+const BROKEN_OPENING_TAILS: [char; 8] = ['よ', 'ね', 'さ', 'だ', 'っ', 'ー', 'ぁ', 'ぉ'];
+
+/// 語の後ろに付く字（`BROKEN_OPENING_TAILS`）として読む最大の字数。
+const BROKEN_OPENING_TAIL_MAX_CHARS: usize = 3;
+
+impl BrokenWord {
+    /// `prev`・`next` がこの語の直前・直後の字のとき、語が別の語の一部か。
+    fn is_part_of_other_word(&self, prev: Option<char>, next: Option<char>) -> bool {
+        let starts_katakana = self.word.chars().next().is_some_and(is_katakana);
+        let ends_katakana = self.word.chars().next_back().is_some_and(is_katakana);
+        next.is_some_and(|c| self.next_exceptions.contains(&c))
+            || (starts_katakana && prev.is_some_and(is_katakana))
+            || (ends_katakana && next.is_some_and(is_katakana))
+    }
+
+    fn occurs_in(&self, text: &str) -> bool {
+        text.match_indices(self.word).any(|(index, word)| {
+            let prev = text[..index].chars().next_back();
+            let next = text[index + word.len()..].chars().next();
+            !self.is_part_of_other_word(prev, next)
+        })
+    }
+}
+
+/// `text` が含む、意味をなさない語・下品な語（`BROKEN_WORDS`）のうち、材料（`material`）に無いもの。
+/// summary_service の再説明・一言の点検（文の途中に残った語）が使う。
+pub(crate) fn broken_words_in(text: &str, material: &str) -> Vec<&'static str> {
+    BROKEN_WORDS
+        .iter()
+        .filter(|word| !material.contains(word.word) && word.occurs_in(text))
+        .map(|word| word.word)
+        .collect()
+}
+
+/// 再説明・一言の文の書き出し（出力の先頭と、文の区切りの直後。かぎかっこの中は除く）の、意味をなさない語・
+/// 下品な語（`BROKEN_WORDS`。入力にある語は除く）を、後ろに付く字（「よ」「だね」など）と区切り記号ごと消す
+/// （「うんこよ！小学生のスマホ…」→「小学生のスマホ…」。Firestore タスク NkBSwN）。語の後ろが区切り記号・行末で
+/// ないとき（「うんこのような…」）は消さない（文の途中に残った語と同じく、呼び出し側の点検で作り直す）。
+/// 語を消した後ろに挨拶が続けば、それも `strip_greeting_prefix` で消す（「うんこよ！こんにちは！…」）。
+/// 全部消えるときは消さずにそのまま返す（点検で作り直し→定型文にする）。戻り値の2つ目は、消した語の数（ログ用）。
+pub(crate) fn strip_broken_openings(text: &str, input: &str) -> (String, usize) {
+    let words: Vec<&BrokenWord> = BROKEN_WORDS
+        .iter()
+        .filter(|word| !input.contains(word.word) && text.contains(word.word))
+        .collect();
+    if words.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let mut removed = 0;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = strip_broken_opening(text.trim_start(), true, &words, &mut removed);
+    let mut quote_depth = 0usize;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        out.push(c);
+        match c {
+            '「' => quote_depth += 1,
+            '」' => quote_depth = quote_depth.saturating_sub(1),
+            _ => {}
+        }
+        if quote_depth == 0 && (SENTENCE_START_BOUNDARIES.contains(&c) || c == '\n') {
+            rest = strip_broken_opening(rest, false, &words, &mut removed);
+        }
+    }
+    if removed == 0 || out.trim().is_empty() {
+        return (text.to_string(), 0);
+    }
+    (out, removed)
+}
+
+/// 文の書き出しの意味をなさない語（と後ろに続く挨拶）を繰り返し消し、残りを返す。消さなかったときはそのまま返す。
+fn strip_broken_opening<'a>(
+    text: &'a str,
+    at_output_start: bool,
+    words: &[&BrokenWord],
+    removed: &mut usize,
+) -> &'a str {
+    let mut rest = text.trim_start_matches([' ', '　']);
+    let mut stripped = false;
+    while let Some(after) = words
+        .iter()
+        .find_map(|word| after_broken_opening(rest, word))
+    {
+        *removed += 1;
+        stripped = true;
+        rest = after
+            .trim_start_matches(|c: char| LEADING_LEFTOVERS.contains(&c) || matches!(c, '…' | '♪'))
+            .trim_start();
+        rest = strip_greeting_prefix(rest, at_output_start);
+    }
+    if stripped {
+        rest
+    } else {
+        text
+    }
+}
+
+/// `text` が `word` で始まり、後ろに付く字（`BROKEN_OPENING_TAILS`）の後が区切り記号・行末なら、その後ろを返す。
+fn after_broken_opening<'a>(text: &'a str, word: &BrokenWord) -> Option<&'a str> {
+    let after = text.strip_prefix(word.word)?;
+    if word.is_part_of_other_word(None, after.chars().next()) {
+        return None;
+    }
+    let tail_bytes: usize = after
+        .chars()
+        .take_while(|c| BROKEN_OPENING_TAILS.contains(c))
+        .take(BROKEN_OPENING_TAIL_MAX_CHARS)
+        .map(char::len_utf8)
+        .sum();
+    let after = &after[tail_bytes..];
+    is_greeting_boundary(after.chars().next()).then_some(after)
 }
 
 /// 失礼な呼びかけの語（長いものから照合する）。ゆうこは読者を「お前」などとは呼ばない。
@@ -2293,4 +2539,142 @@ mod tests {
             ("ｶﾞｲﾄﾞが出たよ。".to_string(), 1)
         );
     }
+
+    #[test]
+    fn broken_word_at_sentence_start_is_removed() {
+        // D167-B/C の形: 再説明が「うんこよ！」で始まる。
+        assert_eq!(
+            strip_broken_openings("うんこよ！小学生のスマホ所持率が5割を超えたんだね。", ""),
+            ("小学生のスマホ所持率が5割を超えたんだね。".to_string(), 1)
+        );
+        // 後ろに付く字・区切り記号・続く挨拶ごと消す。文の区切りの直後・改行の直後も見る。
+        assert_eq!(
+            strip_broken_openings("うんこだね、こんにちは！図書館が夜9時まで開くよ。", ""),
+            ("図書館が夜9時まで開くよ。".to_string(), 1)
+        );
+        assert_eq!(
+            strip_broken_openings("新駅ができるよ。うんちっ！工事は来春からだね。", ""),
+            ("新駅ができるよ。工事は来春からだね。".to_string(), 1)
+        );
+        assert_eq!(
+            strip_broken_openings("新駅ができるよ\nクソ…工事は来春からだね。", ""),
+            ("新駅ができるよ\n工事は来春からだね。".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn broken_word_is_kept_when_it_is_part_of_another_word_or_in_the_input() {
+        for text in [
+            // 別の語（運行・蘊蓄・運賃・沈降・ジャクソン）と、「うんと高い」のような相づちに似た語。
+            "うんこうを再開したよ。",
+            "うんちくを語る番組だね。",
+            "うんちんが上がるよ。",
+            "ちんこうが進んでいるんだね。",
+            "ジャクソン選手が活躍したよ。",
+            "うんと高い山だね。",
+            // 語の後ろが区切り記号でない（文の途中に続く）ときは消さない（点検で作り直す）。
+            "うんこのような形の雲が話題だよ。",
+            // かぎかっこの中は触らない。
+            "「うんこ。」という名前の展示が人気だよ。",
+        ] {
+            assert_eq!(
+                strip_broken_openings(text, ""),
+                (text.to_string(), 0),
+                "{text}"
+            );
+        }
+        // 入力（材料）にある語は消さない。
+        let text = "うんこよ！ドリルの新刊が出たね。";
+        assert_eq!(
+            strip_broken_openings(text, "うんこドリルの新刊が発売"),
+            (text.to_string(), 0)
+        );
+        // 全部消えるときは消さない（点検で作り直し→定型文にする）。
+        assert_eq!(
+            strip_broken_openings("うんこよ！", ""),
+            ("うんこよ！".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn broken_words_in_finds_words_left_in_the_middle_of_sentences() {
+        assert_eq!(
+            broken_words_in("給食費がうんこのように無料になるんだね。", ""),
+            vec!["うんこ"]
+        );
+        assert_eq!(broken_words_in("今日はクソ暑い日だね。", ""), vec!["クソ"]);
+        for text in [
+            "バスのうんこうが再開したよ。",
+            "うんちくが面白い本だね。",
+            "ジャクソン選手が活躍したよ。",
+            "うんと高い山だね。",
+        ] {
+            assert!(broken_words_in(text, "").is_empty(), "{text}");
+        }
+        assert!(broken_words_in("うんこドリルの新刊だね。", "うんこドリルの新刊").is_empty());
+    }
+
+    #[test]
+    fn paraphrased_instruction_sentences_are_removed_when_other_sentences_remain() {
+        // 固定指示と文字どおりには一致しない言い換えの写し（strip_prompt_echo_sentences では消えない）。
+        let text = "ゆうこの言葉で1段落だけ話すね。図書館が夜9時まで開くよ。";
+        assert_eq!(
+            strip_prompt_echo_sentences(text, &[YUUKO_REMINDER_FOR_TEST]).1,
+            0
+        );
+        assert_eq!(
+            strip_instruction_echo_sentences(text, ""),
+            ("図書館が夜9時まで開くよ。".to_string(), 1)
+        );
+        // 全角数字・行をまたぐ形・文末の写し。
+        assert_eq!(
+            strip_instruction_echo_sentences(
+                "新駅は来春に開業するよ。\n記事情報の中身を、ト書きなしで１段落にまとめたよ。",
+                ""
+            ),
+            ("新駅は来春に開業するよ。".to_string(), 1)
+        );
+        assert_eq!(
+            strip_instruction_echo_sentences(
+                "給食費が無料になるんだ。文末は「〜だよ」「〜だね」にしたよ。自己紹介は省くね。",
+                ""
+            ),
+            ("給食費が無料になるんだ。".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn instruction_echo_is_kept_when_it_is_the_whole_output_or_in_the_input() {
+        // 出力がその文だけなら消さない（点検で作り直し→定型文）。
+        let only = "ゆうこが横で教えてくれる、やわらかい一言だよ。";
+        assert_eq!(
+            strip_instruction_echo_sentences(only, ""),
+            (only.to_string(), 0)
+        );
+        assert_eq!(instruction_phrases_in(only, ""), vec!["横で教えて"]);
+        // 入力にある語句（記事が自己紹介カードの話）は照合しない。
+        let text = "自己紹介カードが配られたよ。新学期の行事だね。";
+        assert_eq!(
+            strip_instruction_echo_sentences(text, "新学期に自己紹介カードを配布"),
+            (text.to_string(), 0)
+        );
+        assert!(instruction_phrases_in(text, "新学期に自己紹介カードを配布").is_empty());
+        // 記事にも出る語（一段落・案内役）は指示の語句にしない。
+        for text in [
+            "値上げの騒動が一段落したんだね。",
+            "観光の案内役を市民が務めるよ。",
+            "うんと高い山に登る行事だよ。",
+        ] {
+            assert_eq!(
+                strip_instruction_echo_sentences(text, ""),
+                (text.to_string(), 0),
+                "{text}"
+            );
+            assert!(instruction_phrases_in(text, "").is_empty(), "{text}");
+        }
+    }
+
+    /// 再説明の念押しの固定文（ai_provider_service の YUUKO_EXPLANATION_REMINDER と同じ趣旨の文）。
+    const YUUKO_REMINDER_FOR_TEST: &str =
+        "上の記事情報の中身を、ゆうこの言葉で1段落だけ書いてください。";
 }
