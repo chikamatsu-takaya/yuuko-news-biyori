@@ -34,7 +34,7 @@ overrides:
   # eslint-config-next > eslint-plugin-react-hooks（と zod-validation-error）経由の開発時（lint）のみの依存で、
   # アプリ本体には入らない。react-hooks 7.1.1 は zod "^3.25.0 || ^4.0.0" を許容するが既定では 3.x に解決されるため、
   # 修正版 4.6.6 以上へ寄せる。2026-10-30 藤井承認。
-  zod: ">=4.6.6"
+  zod: "^4.6.6"
 
 # ビルドスクリプト（install / postinstall）の実行を許可するパッケージ。
 # pnpm 11 は strictDepBuilds により未許可のビルドスクリプトを無視して非ゼロ終了する（ERR_PNPM_IGNORED_BUILDS）。
