@@ -1034,8 +1034,12 @@ const HEDGES: [&str; 32] = [
 /// 出力の文にあれば、言い切っていない（推測・伝聞・人の発言として書いた・問いかけ）とみなす言い方。
 /// 材料では見ない（「によって」の「って」、「ような」の「よう」のように、言い切りの文にも出るため）。
 /// 「求め」は「〜することが求められた」のように、求めの形のまま書いた出力を言い切りとしないため。
-const OUTPUT_ONLY_HEDGES: [&str; 34] = [
+/// 「疑われ」「だとして」は、送り仮名の動詞の形（「車を盗んだと疑われている」「盗んだとして逮捕」）を
+/// 言い切りとしないため（Firestore タスク RWW00G）。
+const OUTPUT_ONLY_HEDGES: [&str; 36] = [
     "という",
+    "疑われ",
+    "だとして",
     "求め",
     "かも",
     "だろう",
@@ -1092,12 +1096,69 @@ const HEDGE_WINDOW_CHARS: usize = 12;
 ///   後ろの部分（「情報流出」なら「情報流出」→「流出」）で照らす。材料に語が無ければ見ない（作り話は別の点検）。
 /// - 材料のどこか1か所でも、その語が推測・伝聞の印なしに出てくれば（言い切り・名詞のままの見出しを含む）、報告しない。
 ///   打ち消された出現（「流出はしていない」）は、どちらにも数えない。
-/// - 出力の文に推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）があるか、問いかけ（「？」「〜か」）で
-///   終わる文は、言い切っていないとみなす。
+/// - 出力の文の、言い切った語より後ろに推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）があるか、
+///   文全体にかかる言い方（「〜によると」）があるか、問いかけ（「？」「〜か」）で終わる文は、言い切っていないと
+///   みなす（`output_assertion`）。語より前にだけある言い方（「…と発表し、顧客情報が流出した」）は別の出来事に
+///   かかるとみなす（Firestore タスク RWW00G）。
+///
+/// D175 の形（「〜した」「〜が決まった」）に加え、Firestore タスク RWW00G で次の形を足した（評価は要約の機械点検の
+/// 評価 §9.7.7）。材料の側では、主張・訴え・「〜とした」は推測として数えない（`SPECULATION_HEDGES`）。
+/// - 名詞・形容動詞の言い切り（`copula_findings`。材料「原因は漏電とみられる」→ 出力「原因は漏電だ」）。
+/// - 送り仮名の動詞（`kana_verb_findings`。材料「車を盗んだとして逮捕」→ 出力「車を盗んだ」）。
+/// - 確かになったことの言い方（`certainty_findings`。出力「原因は漏電と判明した」「漏電の可能性を断定した」）。
 ///
 /// 記事の文と出力を照らす単位は語で、文と文の対応（保留ブランチの「文ごとの裏付け」の点検）は見ない。
 pub(super) fn find_asserted_speculation(source: &str, output: &str) -> Vec<CheckIssue> {
     let mut issues: Vec<CheckIssue> = Vec::new();
+    for finding in speculation_findings(source, output) {
+        let hedge = finding.hedge;
+        let reason = format!(
+            "記事情報で推測・伝聞・訴え（「{hedge}」など）として書かれた出来事を、起きたこととして言い切っていた。記事情報と同じく推測・伝聞・訴えとして書く。"
+        );
+        if !issues.iter().any(|issue| issue.reason == reason) {
+            issues.push(CheckIssue {
+                kind: IssueKind::AssertedSpeculation,
+                reason,
+            });
+        }
+    }
+    issues
+}
+
+/// 推測の言い切りの形（評価の内訳に使う。どの形も同じ `IssueKind::AssertedSpeculation` として扱う）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpeculationForm {
+    /// 漢字・カタカナの語＋「した」「が決まった」など（D175 の形）。
+    Verb,
+    /// 名詞・形容動詞＋「だ」「です」「である」（材料「原因は漏電とみられる」→ 出力「原因は漏電だ」）。
+    Copula,
+    /// 送り仮名のある動詞（材料「車を盗んだとして逮捕」→ 出力「車を盗んだ」）。
+    KanaVerb,
+    /// 「〜と判明した」「〜と断定した」「〜の可能性を断定した」。
+    Certainty,
+}
+
+/// 推測の言い切りの1件。`mixed` は、出力の文の語より前にだけ推測・伝聞の言い方がある（D175 の版では文ごと
+/// 見なかった）ときに true。`hedge` は材料の側の推測の言い方（理由に入れる固定の語）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SpeculationFinding {
+    pub form: SpeculationForm,
+    pub mixed: bool,
+    pub hedge: &'static str,
+}
+
+/// 推測の言い切りを形ごとに探す（`find_asserted_speculation` の本体）。
+pub(super) fn speculation_findings(source: &str, output: &str) -> Vec<SpeculationFinding> {
+    let mut findings = Vec::new();
+    verb_findings(source, output, &mut findings);
+    copula_findings(source, output, &mut findings);
+    kana_verb_findings(source, output, &mut findings);
+    certainty_findings(source, output, &mut findings);
+    findings
+}
+
+/// D175 の形: 言い切りの続き（`ASSERTING_TAILS`）の直前の漢字・カタカナの語。
+fn verb_findings(source: &str, output: &str, findings: &mut Vec<SpeculationFinding>) {
     for tail in ASSERTING_TAILS {
         for (index, _) in output.match_indices(tail) {
             if !asserting_tail_at(output, index + tail.len()) {
@@ -1106,28 +1167,307 @@ pub(super) fn find_asserted_speculation(source: &str, output: &str) -> Vec<Check
             let Some(word) = longest_source_word(source, &output[..index]) else {
                 continue;
             };
-            if NON_EVENT_WORDS
-                .iter()
-                .any(|non_event| word.ends_with(non_event))
-                || output_is_hedged(output, index)
-            {
+            if is_non_event(word) {
                 continue;
             }
-            let Some(hedge) = hedge_only_in_source(source, word) else {
+            let Some(mixed) = output_assertion(output, index - word.len()) else {
                 continue;
             };
-            let reason = format!(
-                "記事情報で推測・伝聞・訴え（「{hedge}」など）として書かれた出来事を、起きたこととして言い切っていた。記事情報と同じく推測・伝聞・訴えとして書く。"
-            );
-            if !issues.iter().any(|issue| issue.reason == reason) {
-                issues.push(CheckIssue {
-                    kind: IssueKind::AssertedSpeculation,
-                    reason,
-                });
+            let Some(hedge) = hedge_only_in_source(source, word, &HEDGES) else {
+                continue;
+            };
+            findings.push(SpeculationFinding {
+                form: SpeculationForm::Verb,
+                mixed,
+                hedge,
+            });
+        }
+    }
+}
+
+/// 名詞・形容動詞の言い切り（`SpeculationForm::Copula`）・「〜と判明した」（`SpeculationForm::Certainty`）・
+/// 送り仮名の動詞（`SpeculationForm::KanaVerb`）で、材料の側の推測の言い方として数えるもの。主張・訴え・
+/// 「〜とした」「〜としている」は入れない（「対象とした」「解雇は相当とはいえないとした」のように、推測でない
+/// 書き方にも出て、名詞・ひらがなの語では見分けにくいため）。
+const SPECULATION_HEDGES: [&str; 14] = [
+    "可能性",
+    "かもしれ",
+    "とみられ",
+    "と見られ",
+    "とみて",
+    "との見方",
+    "疑い",
+    "恐れ",
+    "おそれ",
+    "見通し",
+    "見込み",
+    "とされ",
+    "といわれ",
+    "と言われ",
+];
+
+/// 名詞・形容動詞の言い切りの続き。後ろの字で、言い切りでないもの（「だけ」「だろう」「だと」「であると」
+/// 「であっても」）を除く（`copula_asserts`）。
+const COPULA_TAILS: [&str; 5] = ["だ", "です", "でした", "である", "であっ"];
+
+/// 名詞・形容動詞の言い切りか（`tail` の後ろが `rest`）。「だと」「であると」「であること」は「〜と判明」の形
+/// （`certainty_findings`）か引用なので、ここでは見ない。
+fn copula_asserts(tail: &str, rest: &str) -> bool {
+    match tail {
+        "だ" => !rest.starts_with(['け', 'ろ', 'と', 'ら']),
+        "である" => !rest.starts_with('と') && !rest.starts_with("こと"),
+        "であっ" => !rest.starts_with("ても"),
+        _ => true,
+    }
+}
+
+/// 名詞・形容動詞の言い切り（材料「原因は漏電とみられる」→ 出力「原因は漏電だ」「漏電でした」）。
+fn copula_findings(source: &str, output: &str, findings: &mut Vec<SpeculationFinding>) {
+    for tail in COPULA_TAILS {
+        for (index, _) in output.match_indices(tail) {
+            if !copula_asserts(tail, &output[index + tail.len()..]) {
+                continue;
+            }
+            let Some(word) = longest_source_word(source, &output[..index]) else {
+                continue;
+            };
+            if is_non_event(word) {
+                continue;
+            }
+            let Some(mixed) = output_assertion(output, index - word.len()) else {
+                continue;
+            };
+            let Some(hedge) = hedge_only_in_source(source, word, &SPECULATION_HEDGES) else {
+                continue;
+            };
+            findings.push(SpeculationFinding {
+                form: SpeculationForm::Copula,
+                mixed,
+                hedge,
+            });
+        }
+    }
+}
+
+/// 送り仮名の動詞の形で、材料の側の推測・訴えの言い方（動詞の過去形の直後に続くもの）。`SPECULATION_HEDGES`
+/// に加え、「〜と訴え」「〜と主張」と、逮捕・提訴の理由の「〜として」（「〜としてい」は除く）。
+const KANA_VERB_HEDGES: [&str; 13] = [
+    "可能性",
+    "かもしれ",
+    "とみられ",
+    "と見られ",
+    "とみて",
+    "疑い",
+    "恐れ",
+    "おそれ",
+    "とされ",
+    "といわれ",
+    "と言われ",
+    "と訴え",
+    "と主張",
+];
+
+/// 動詞の目的語・主語につく助詞（送り仮名の動詞の形で、照らす句の区切りに使う）。
+const KANA_VERB_PARTICLES: [char; 8] = ['を', 'が', 'に', 'で', 'へ', 'と', 'は', 'も'];
+
+/// `after`（材料の動詞の過去形の直後）が、送り仮名の動詞の形の推測・訴えの言い方で始まるか。
+fn kana_verb_hedge_at(after: &str) -> Option<&'static str> {
+    if after.starts_with("として") && !after.starts_with("としてい") {
+        return Some("として");
+    }
+    KANA_VERB_HEDGES
+        .iter()
+        .find(|hedge| after.starts_with(**hedge))
+        .copied()
+}
+
+/// 材料の推測・訴えの言い方の直前の「〈助詞の前の1字〉〈助詞〉〈漢字〉〈送り仮名（2字以上・「た」「だ」で終わる）〉」
+/// （「車を盗んだ」「被害を受けた」「現金をだまし取った」）。漢字2字以上＋「し」「さ」で始まる送り仮名は D175 の形
+/// （`verb_findings`）が見る。
+fn kana_verb_phrase_before(before: &str) -> Option<&str> {
+    if !before.ends_with(['た', 'だ']) {
+        return None;
+    }
+    let chars: Vec<(usize, char)> = before.char_indices().collect();
+    let mut i = chars.len();
+    let kana_end = i;
+    while i > 0 && is_hiragana(chars[i - 1].1) {
+        i -= 1;
+    }
+    let kana_len = kana_end - i;
+    let kana_first = chars.get(i).map(|(_, c)| *c)?;
+    let kanji_end = i;
+    while i > 0 && is_kanji(chars[i - 1].1) {
+        i -= 1;
+    }
+    let kanji_len = kanji_end - i;
+    if kana_len < 2 || kanji_len == 0 || (kanji_len >= 2 && matches!(kana_first, 'し' | 'さ')) {
+        return None;
+    }
+    // 複合動詞（「受け取った」「だまし取った」）は、前の動詞の部分（助詞でないひらがな＋漢字）も1つだけ含める。
+    if i > 0 && is_hiragana(chars[i - 1].1) && !KANA_VERB_PARTICLES.contains(&chars[i - 1].1) {
+        while i > 0 && is_hiragana(chars[i - 1].1) && !KANA_VERB_PARTICLES.contains(&chars[i - 1].1)
+        {
+            i -= 1;
+        }
+        while i > 0 && is_kanji(chars[i - 1].1) {
+            i -= 1;
+        }
+    }
+    if i < 2 || !KANA_VERB_PARTICLES.contains(&chars[i - 1].1) {
+        return None;
+    }
+    // 助詞の前の1字（「車を盗んだ」の「車」、「眠りを妨げられた」の「り」）まで含めて照らす。
+    let (noun_start, noun) = chars[i - 2];
+    (is_word_char(noun) || is_hiragana(noun)).then(|| &before[noun_start..])
+}
+
+/// 送り仮名の動詞の言い切り（材料「男が車を盗んだとして逮捕」→ 出力「男が車を盗んだ」）。照らす句は材料から作り、
+/// 出力に同じ句があるときだけ見る（言い換えた動詞は見ない）。材料でその句が1か所でも推測・訴えの言い方なしに
+/// 出てくれば報告しない。
+fn kana_verb_findings(source: &str, output: &str, findings: &mut Vec<SpeculationFinding>) {
+    let mut phrases: Vec<(&str, &'static str)> = Vec::new();
+    for (index, _) in source.char_indices() {
+        let Some(hedge) = kana_verb_hedge_at(&source[index..]) else {
+            continue;
+        };
+        if let Some(phrase) = kana_verb_phrase_before(&source[..index]) {
+            if !phrases.iter().any(|(p, _)| *p == phrase) {
+                phrases.push((phrase, hedge));
             }
         }
     }
-    issues
+    for (phrase, hedge) in phrases {
+        let hedged_everywhere = source
+            .match_indices(phrase)
+            .all(|(index, _)| kana_verb_hedge_at(&source[index + phrase.len()..]).is_some());
+        if !hedged_everywhere {
+            continue;
+        }
+        for (index, _) in output.match_indices(phrase) {
+            if output[index + phrase.len()..].starts_with('ら') {
+                continue;
+            }
+            let Some(mixed) = output_assertion(output, index) else {
+                continue;
+            };
+            findings.push(SpeculationFinding {
+                form: SpeculationForm::KanaVerb,
+                mixed,
+                hedge,
+            });
+        }
+    }
+}
+
+/// 確かになったことを表す語。「〜と判明した」「〜と断定された」のように、材料が推測として書いた中身を確かな
+/// こととして書いた出力を見る（`certainty_findings`）。
+const CERTAINTY_STEMS: [&str; 6] = ["判明", "断定", "特定", "確定", "確認", "発覚"];
+
+/// 確かになったことを表す語の後ろの言い切り（「判明していない」などの打ち消しは `asserting_tail_at` で除く）。
+const CERTAINTY_DONE: [&str; 8] = [
+    "した",
+    "している",
+    "していた",
+    "しました",
+    "された",
+    "されている",
+    "されていた",
+    "されました",
+];
+
+/// 確かになったことを表す語の前のつなぎ（長いものから）。「が判明した」は D175 の形（主語の名詞を照らす）が見る。
+const CERTAINTY_LEADS: [&str; 5] = ["であることが", "であると", "ことが", "だと", "と"];
+
+/// 中身の語の後ろの言い切りの続き（「関与したと断定」の「した」、「漏電であると判明」の「である」）。
+const CONTENT_ENDINGS: [&str; 8] = [
+    "されていた",
+    "されている",
+    "された",
+    "していた",
+    "している",
+    "した",
+    "である",
+    "だ",
+];
+
+/// 「〜と判明した」「〜と断定した」「〜の可能性を断定した」（材料「原因は漏電とみられる」→ 出力「原因は漏電と
+/// 判明した」）。照らす語は、確かになったことを表す語の前の中身の語。
+fn certainty_findings(source: &str, output: &str, findings: &mut Vec<SpeculationFinding>) {
+    for stem in CERTAINTY_STEMS {
+        for (index, _) in output.match_indices(stem) {
+            let end = index + stem.len();
+            let Some(done) = CERTAINTY_DONE
+                .iter()
+                .find(|done| output[end..].starts_with(**done))
+            else {
+                continue;
+            };
+            if !asserting_tail_at(output, end + done.len()) {
+                continue;
+            }
+            let before = &output[..index];
+            let (content, masked) = match possibility_object(before, stem, source) {
+                Some((content, possibility)) => {
+                    // 「可能性」を同じバイト数の記号にして、文の推測の言い方として数えないようにする。
+                    let mut masked = output.to_string();
+                    masked.replace_range(possibility..possibility + "可能性".len(), "＿＿＿");
+                    (content, Some(masked))
+                }
+                None => {
+                    let Some(lead) = CERTAINTY_LEADS.iter().find(|lead| before.ends_with(**lead))
+                    else {
+                        continue;
+                    };
+                    (&before[..before.len() - lead.len()], None)
+                }
+            };
+            let content = CONTENT_ENDINGS
+                .iter()
+                .find_map(|ending| content.strip_suffix(ending))
+                .unwrap_or(content);
+            let Some(word) = longest_source_word(source, content) else {
+                continue;
+            };
+            if is_non_event(word) {
+                continue;
+            }
+            let checked = masked.as_deref().unwrap_or(output);
+            let Some(mixed) = output_assertion(checked, content.len() - word.len()) else {
+                continue;
+            };
+            let Some(hedge) = hedge_only_in_source(source, word, &SPECULATION_HEDGES) else {
+                continue;
+            };
+            findings.push(SpeculationFinding {
+                form: SpeculationForm::Certainty,
+                mixed,
+                hedge,
+            });
+        }
+    }
+}
+
+/// 「〜（の）可能性を断定した」「〜可能性が確定した」の、「可能性」より前と「可能性」の位置（バイト）。
+/// 可能性は断定・確定できないので、この形の「可能性」は推測の印として数えない。材料が「断定」「確定」を
+/// 打ち消しなしに書いていれば None（材料の言い方をなぞった出力とみなす）。
+fn possibility_object<'a>(before: &'a str, stem: &str, source: &str) -> Option<(&'a str, usize)> {
+    if !matches!(stem, "断定" | "確定") || occurs_affirmed(source, stem) {
+        return None;
+    }
+    let rest = before
+        .strip_suffix('を')
+        .or_else(|| before.strip_suffix('が'))?;
+    let rest = rest.strip_suffix("可能性")?;
+    let possibility = rest.len();
+    Some((rest.strip_suffix('の').unwrap_or(rest), possibility))
+}
+
+/// 考え・つもりを表す語（`NON_EVENT_WORDS`）で終わるか。
+fn is_non_event(word: &str) -> bool {
+    NON_EVENT_WORDS
+        .iter()
+        .any(|non_event| word.ends_with(non_event))
 }
 
 /// 言い切りの続き（`ASSERTING_TAILS`）の後ろがこれで始まれば打ち消し（「時期が決まっていない」「流出していません」
@@ -1194,23 +1534,34 @@ fn longest_source_word<'a>(source: &str, before: &'a str) -> Option<&'a str> {
         .find(|word| source.contains(*word))
 }
 
-/// 出力の `index` を含む文に、推測・伝聞・人の発言の言い方があるか、問いかけ（「？」「〜か」）で終わるか。
-fn output_is_hedged(output: &str, index: usize) -> bool {
-    let sentence = sentence_around(output, index);
-    let sentence_end = output[index..]
-        .find(['。', '\n', '！', '？'])
-        .map_or(output.len(), |i| index + i);
-    output[sentence_end..].starts_with('？')
+/// 文全体にかかる伝聞の言い方（文のどこにあっても、その文は言い切っていないとみなす）。
+const SENTENCE_WIDE_HEDGES: [&str; 2] = ["によると", "によれば"];
+
+/// 出力の `start`（言い切った語の始まり）を含む文が、その語を言い切っているか。
+/// - None: 言い切っていない。語より後ろに推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）がある、
+///   文全体にかかる言い方（「〜によると」）がある、または問いかけ（「？」「〜か」）で終わる文。
+/// - Some(mixed): 言い切っている。語より前にだけ推測・伝聞の言い方がある文（「…と発表し、顧客情報が流出した」）は
+///   `mixed` = true（D175 の版は文ごと見なかった。語の前の言い方は別の出来事にかかるので、言い切りとして見る）。
+fn output_assertion(output: &str, start: usize) -> Option<bool> {
+    let sentence = sentence_around(output, start);
+    let sentence_start = sentence.as_ptr() as usize - output.as_ptr() as usize;
+    let sentence_end = sentence_start + sentence.len();
+    let output_hedges = || HEDGES.iter().chain(OUTPUT_ONLY_HEDGES.iter());
+    if output[sentence_end..].starts_with('？')
         || sentence.trim_end().ends_with('か')
-        || HEDGES
+        || SENTENCE_WIDE_HEDGES
             .iter()
-            .chain(OUTPUT_ONLY_HEDGES.iter())
             .any(|hedge| sentence.contains(hedge))
+        || output_hedges().any(|hedge| output[start..sentence_end].contains(hedge))
+    {
+        return None;
+    }
+    Some(output_hedges().any(|hedge| sentence.contains(hedge)))
 }
 
-/// 材料で `word` が推測・伝聞・訴えの形でだけ出てくるとき、その言い方（`HEDGES` の語。見出しの「〜か」は「か」）。
+/// 材料で `word` が推測・伝聞・訴えの形（`hedges` の語）でだけ出てくるとき、その言い方（見出しの「〜か」は「か」）。
 /// 1か所でも印なしに出てくれば None（報告しない）。打ち消された出現（「流出はしていない」「未定」）は数えない。
-fn hedge_only_in_source(source: &str, word: &str) -> Option<&'static str> {
+fn hedge_only_in_source(source: &str, word: &str, hedges: &[&'static str]) -> Option<&'static str> {
     let mut found = None;
     for (index, _) in source.match_indices(word) {
         let before = source[..index].chars().next_back();
@@ -1218,7 +1569,7 @@ fn hedge_only_in_source(source: &str, word: &str) -> Option<&'static str> {
         if before.is_some_and(|c| NEGATING_PREFIXES.contains(&c)) || is_negated_after(after) {
             continue;
         }
-        let hedge = source_hedge_after(after)?;
+        let hedge = source_hedge_after(after, hedges)?;
         found.get_or_insert(hedge);
     }
     found
@@ -1226,13 +1577,13 @@ fn hedge_only_in_source(source: &str, word: &str) -> Option<&'static str> {
 
 /// 材料の語の直後（`after`）の、同じ区切りの中・`HEDGE_WINDOW_CHARS` 字以内にある推測・伝聞・訴えの言い方。
 /// 見出しの「〜か」（「情報流出か」「流出したか」）も推測とみなす。
-fn source_hedge_after(after: &str) -> Option<&'static str> {
+fn source_hedge_after(after: &str, hedges: &[&'static str]) -> Option<&'static str> {
     let clause_end = after
         .find(['。', '、', '\n', '！', '？', '!', '?', '　', ' '])
         .unwrap_or(after.len());
     let clause = &after[..clause_end];
     let window: String = clause.chars().take(HEDGE_WINDOW_CHARS).collect();
-    if let Some(hedge) = HEDGES.iter().find(|hedge| window.contains(**hedge)) {
+    if let Some(hedge) = hedges.iter().find(|hedge| window.contains(**hedge)) {
         return Some(hedge);
     }
     ["か", "したか", "されたか", "させたか"]
@@ -2309,6 +2660,175 @@ mod tests {
             vec![IssueKind::AssertedSpeculation]
         );
         assert!(!report.blocks_use());
+    }
+
+    /// 架空の記事: 火災の原因が「漏電とみられる」記事（見出しは「〜か」）。
+    const FIRE: &str = "あおば市の住宅火災、原因は漏電か\nあおば市で26日、住宅1棟が全焼した。出火の原因は台所の配線の漏電とみられる。けが人はいなかった。";
+
+    fn forms(source: &str, output: &str) -> Vec<(SpeculationForm, bool)> {
+        speculation_findings(source, output)
+            .into_iter()
+            .map(|finding| (finding.form, finding.mixed))
+            .collect()
+    }
+
+    #[test]
+    fn asserting_a_presumed_noun_or_its_certainty_is_reported() {
+        // Firestore タスク RWW00G: 「〜とみられる」を「〜だ」「〜と判明」「〜の可能性を断定」と書いた形（架空の文）。
+        for (output, form) in [
+            ("出火の原因は漏電だ。", SpeculationForm::Copula),
+            ("原因は台所の配線の漏電でした。", SpeculationForm::Copula),
+            ("火災の原因は漏電である。", SpeculationForm::Copula),
+            ("出火の原因は漏電と判明した。", SpeculationForm::Certainty),
+            (
+                "出火の原因は漏電だと判明しました。",
+                SpeculationForm::Certainty,
+            ),
+            (
+                "消防は出火原因を漏電と断定した。",
+                SpeculationForm::Certainty,
+            ),
+            ("消防は漏電の可能性を断定した。", SpeculationForm::Certainty),
+        ] {
+            assert_eq!(forms(FIRE, output), vec![(form, false)], "{output}");
+            assert_eq!(
+                kinds(&find_asserted_speculation(FIRE, output)),
+                vec![IssueKind::AssertedSpeculation],
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn hedged_or_negated_noun_paraphrases_are_not_reported() {
+        for output in [
+            "出火の原因は漏電とみられる。",
+            "原因は漏電の可能性がある。",
+            "原因は漏電かもしれない。",
+            "原因は漏電だろう。",
+            "原因は漏電とされる。",
+            "原因は漏電だったのか",
+            "消防によると、原因は漏電だ。",
+            "原因は漏電と判明していない。",
+            "原因が漏電かどうかは確認されていない。",
+            "漏電の可能性が判明した。",
+            "漏電だけが原因とは限らない。",
+        ] {
+            assert!(speculation_findings(FIRE, output).is_empty(), "{output}");
+        }
+        // 材料が言い切っていれば報告しない。
+        let asserted = "出火の原因は台所の配線の漏電とみられていたが、消防は漏電と断定した。";
+        for output in [
+            "原因は漏電だ。",
+            "原因は漏電と判明した。",
+            "消防は漏電の可能性を断定した。",
+        ] {
+            assert!(
+                speculation_findings(asserted, output).is_empty(),
+                "{output}"
+            );
+        }
+        // 材料の主張・「〜とした」は、名詞の言い切りでは推測として数えない。
+        for (source, output) in [
+            ("判決は、解雇は不当とした。", "解雇は不当だ。"),
+            ("団体は、表示は違法だと主張している。", "表示は違法である。"),
+            ("会社は、対象を正社員とした。", "対象は正社員だ。"),
+        ] {
+            assert!(
+                speculation_findings(source, output).is_empty(),
+                "{source} / {output}"
+            );
+        }
+    }
+
+    /// 架空の記事: 窃盗の疑いでの逮捕（容疑者は否認）。
+    const ARREST: &str = "あおば署、車盗んだ疑いで男を逮捕\nあおば署は、駐車場で乗用車を盗んだとして、無職の男を窃盗の疑いで逮捕した。男は容疑を否認しているという。";
+
+    #[test]
+    fn asserting_a_suspected_or_claimed_kana_verb_is_reported() {
+        for output in [
+            "無職の男が駐車場で乗用車を盗んだ。",
+            "男は車を盗んだんだって思うと怖いね",
+        ] {
+            // 「って」が語より後ろにあるので、2つ目は言い切りでない。
+            let expected = if output.contains("って") {
+                vec![]
+            } else {
+                vec![(SpeculationForm::KanaVerb, false)]
+            };
+            assert_eq!(forms(ARREST, output), expected, "{output}");
+        }
+        // 複合動詞（「だまし取った」「受け取った」）。
+        let fraud = "男は、高齢の女性から現金をだまし取ったとして逮捕された。補助金を不正に受け取った疑いもある。";
+        for output in [
+            "男は女性から現金をだまし取った。",
+            "男は補助金を不正に受け取った。",
+        ] {
+            assert_eq!(
+                forms(fraud, output),
+                vec![(SpeculationForm::KanaVerb, false)],
+                "{output}"
+            );
+        }
+        // 「〜と主張」を言い切った形。
+        let claim = "住民は、工場の騒音で眠りを妨げられたと主張している。";
+        assert_eq!(
+            forms(claim, "住民は騒音で眠りを妨げられた。"),
+            vec![(SpeculationForm::KanaVerb, false)]
+        );
+    }
+
+    #[test]
+    fn hedged_or_supported_kana_verbs_are_not_reported() {
+        for output in [
+            "男は乗用車を盗んだとして逮捕された。",
+            "男は乗用車を盗んだ疑いで逮捕された。",
+            "男が車を盗んだ可能性がある。",
+            "車を盗んだら罪になる。",
+            "男は車を盗んだと疑われている。",
+            "警察によると、男は車を盗んだ。",
+            "男は駐車場で乗用車を盗み、逃げた。",
+        ] {
+            assert!(speculation_findings(ARREST, output).is_empty(), "{output}");
+        }
+        // 材料の別の箇所で言い切られていれば報告しない。
+        let seen = format!("{ARREST}防犯カメラには、男が乗用車を盗んだ様子が映っていた。");
+        assert!(speculation_findings(&seen, "男が乗用車を盗んだ。").is_empty());
+        // 判決・報告の「〜とした」「〜としている」は推測として数えない。
+        for (source, output) in [
+            (
+                "判決は、会社が安全への配慮を怠ったとした。",
+                "会社は安全への配慮を怠った。",
+            ),
+            (
+                "同社は、障害の影響は一部の利用者に限られたとしている。",
+                "障害の影響は一部の利用者に限られた。",
+            ),
+        ] {
+            assert!(
+                speculation_findings(source, output).is_empty(),
+                "{source} / {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn assertion_after_a_hedge_for_another_event_is_reported() {
+        // 推測・伝聞の言い方が語より前にだけある文（別の出来事にかかる）は、言い切りとして見る。
+        assert_eq!(
+            forms(
+                LEAK,
+                "あおば通販は不正アクセスを受けたと発表し、顧客情報が流出した。"
+            ),
+            vec![(SpeculationForm::Verb, true)]
+        );
+        for output in [
+            "あおば通販は、顧客情報が流出した可能性があると発表した。",
+            "あおば通販によれば、顧客情報が流出した。",
+            "不正アクセスを受けたと発表し、顧客情報が流出したかもしれない。",
+        ] {
+            assert!(speculation_findings(LEAK, output).is_empty(), "{output}");
+        }
     }
 
     #[test]
