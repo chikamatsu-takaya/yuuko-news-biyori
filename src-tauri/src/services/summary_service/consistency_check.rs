@@ -15,10 +15,13 @@
 //!   - 材料の側は、出力の語より広い言い方（「勝」の1字など、`also`）がどれか1つでもあれば「材料にもある」とする。
 //!   - 打ち消し（「負けなかった」「決めておらず」「決定していない」「決定には至っていない」「未定」
 //!     「連敗を止めた」）の語は、出力・材料のどちらでも数えない。
-//!   - 出力が両方の側を言っているとき（「停止していた運転を再開した」）は報告しない。
-//!   - 勝敗は、出力の語と材料の反対の語の主語（「は」「が」の前の名前）が同じときだけ報告する
-//!     （「AがBを下した」を「BはAに敗れた」と言い換えた出力を誤検出しないため）。
-//!   - 語の一部が別の意味になる複合語（「勝ち点」「勝負」「決勝」「負担」）は数えない。
+//!   - 出力が両方の側を言っているとき（「停止していた運転を再開した」）は報告しない。勝敗の組で主語ごとに勝敗を
+//!     入れ替えた出力（「Aが勝った。Bは敗れた。」）と、足した勝敗の言い方（大勝・快勝・大敗 など）は、記録だけ
+//!     （`contradiction_findings` の `recorded_only`。Firestore タスク R7cWic）。
+//!   - 勝敗は、出力の語と材料の反対の語の主語（「は」「が」の前の名前、「Aの勝利」「勝ったのはA」の A）が
+//!     同じときだけ報告する（「AがBを下した」を「BはAに敗れた」と言い換えた出力を誤検出しないため）。
+//!   - 語の一部が別の意味になる複合語（「勝ち点」「勝負」「決勝」「準優勝」「勝利投手」「負担」）と、結果でない
+//!     言い方（「勝利を目指し」「勝ってほしい」「連勝が止まった」）は数えない。
 //!   - 材料に両方の語があるとき（両チームの勝敗が書かれた記事など）は報告しない。
 //! - **年の組み合わせ**（`IssueKind::YearMismatch`）: 出力の文の「2026年」と出来事の語（「契約」など、
 //!   `EVENT_WORDS`）の組が、材料のどの文にもないとき。材料ではその語が別の年（「2023年12月に…契約」）と
@@ -258,14 +261,41 @@ struct OppositePair {
 /// ニュースでよく逆にされる組を入れた。語を足すときは、誤検出の評価（要約の機械点検の評価 §9）をやり直す。
 const OPPOSITE_PAIRS: &[OppositePair] = &[
     // 勝敗。材料の側は「勝」「敗」「負」の1字でもあれば、その側があるとみなす（「決勝」「勝負」も含めて控えめに）。
+    // 「大勝」「快勝」「接戦を制し」「大敗」「屈し」「苦杯」などは Firestore タスク R7cWic で足した（評価 §9.11）。
+    // 出力の語・材料の反対の語としては記録だけ（`RECORD_ONLY_TERMS`）で、材料の側の言い方には使う。
+    // 「下し」「破っ」は入れない（「判断を下し」「記録を破っ」「均衡を破っ」〔先制の意味〕で誤検出しやすいため）。
+    // 「制し」は試合・大会の語の付いた形だけ（「中盤を制し」「空中戦を制し」は試合の勝ちではないため）。
     OppositePair {
         a: Side {
-            terms: &["勝利", "勝ち", "勝っ", "白星", "連勝", "優勝"],
+            terms: &[
+                "勝利",
+                "勝ち",
+                "勝っ",
+                "白星",
+                "連勝",
+                "優勝",
+                "大勝",
+                "圧勝",
+                "快勝",
+                "完勝",
+                "辛勝",
+                "雪辱",
+                "試合を制し",
+                "接戦を制し",
+                "熱戦を制し",
+                "激戦を制し",
+                "延長戦を制し",
+                "攻防戦を制し",
+                "打ち合いを制し",
+                "大会を制し",
+                "シリーズを制し",
+            ],
             also: &["勝"],
         },
         b: Side {
             terms: &[
-                "敗れ", "敗戦", "敗北", "負け", "黒星", "惜敗", "完敗", "連敗", "敗退",
+                "敗れ", "敗戦", "敗北", "負け", "黒星", "惜敗", "完敗", "連敗", "敗退", "大敗",
+                "惨敗", "零敗", "屈し", "苦杯",
             ],
             also: &["敗", "負"],
         },
@@ -577,7 +607,9 @@ const OPPOSITE_PAIRS: &[OppositePair] = &[
 /// 語の一部が別の意味になる複合語（反対の意味の語として数えない）。
 /// 「選挙無効」「解雇無効」「特許無効」「無効確認」「無効を求め」「無効の請求」は訴えの名前・求めで、判決の結論ではない
 /// （一票の格差の訴訟で、出力の「選挙は有効とされた」を誤検出しないため）。「無効化」は「攻撃を無効化」のように防ぐ意味。
-const MASKED_COMPOUNDS: [&str; 15] = [
+/// 「勝利投手」「敗戦投手」などは投手の記録の名前（負けたチームの記事にも勝利投手が出る）、「優勝候補」「優勝争い」「勝利数」は
+/// 結果ではない言い方・数の名前、「機先を制」は「先手を取る」の意味、「準優勝」は決勝で負けたこと（Firestore タスク R7cWic）。
+const MASKED_COMPOUNDS: [&str; 29] = [
     "勝ち点",
     "勝ち越",
     "勝負",
@@ -593,13 +625,29 @@ const MASKED_COMPOUNDS: [&str; 15] = [
     "無効を求め",
     "無効の請求",
     "無効化",
+    "勝利投手",
+    "勝ち投手",
+    "敗戦投手",
+    "負け投手",
+    "優勝候補",
+    "優勝争い",
+    "機先を制",
+    "準優勝",
+    "勝利数",
+    "勝ち筋",
+    "勝利の方程式",
+    "勝ち気",
+    "負けん気",
+    "負け越",
 ];
 
 /// 語の直後がこれで始まれば打ち消し（「負けなかった」「決めておらず」「決まっていません」）とみなして数えない。
 /// 「な」1字にしないのは、「増加など」「増加しながら」を打ち消しと読まないため。
 /// 判決の言い方の「違法性はない」「違法とまではいえない」と、求めただけでまだ起きていない
 /// 「請求を退けるよう求めた」「権利を認めることを求めた」、不起訴の一種の「起訴猶予」も数えない（判決の語の組。§9.6）。
-const NEGATING_FOLLOWERS: [&str; 45] = [
+/// 「勝ち切れなかった」「勝ちきれず」と、願い・仮定の「勝ちたい」「勝ってほしい」「負けたくない」「勝ってたら」も数えない
+/// （Firestore タスク R7cWic）。
+const NEGATING_FOLLOWERS: [&str; 66] = [
     "ない",
     "なかっ",
     "なく",
@@ -645,12 +693,82 @@ const NEGATING_FOLLOWERS: [&str; 45] = [
     "るよう主張",
     "ることを求め",
     "猶予",
+    "切れな",
+    "切れず",
+    "きれな",
+    "きれず",
+    "たい",
+    "たく",
+    "てほし",
+    "たか",
+    "たら",
+    "てたら",
+    "ていたら",
+    "ていれば",
+    "てれば",
+    "て当然",
+    "られな",
+    "なし",
+    "抜けば",
+    "て当たり前",
+    "したい",
+    "したく",
+    "してほし",
 ];
 
 /// 語の直後がこれで始まれば、打ち消しと同じく数えない（「勝利を逃した」「連敗を脱した」「決定を見送った」）。
 /// ただし、その後ろがさらに打ち消し（`DOUBLE_NEGATING_TAILS`）なら二重の打ち消しで、語の意味のまま
 /// （「勝ちを逃さなかった」「勝利を逃さず」「連敗を止められなかった」は数える）。
-const REVERSING_FOLLOWERS: [&str; 6] = ["を逃", "を許", "を止め", "を脱", "を阻", "を見送"];
+/// 「勝利を献上」「勝利を目指した」「勝利に向けて」「勝利目前」「勝ちから遠ざかる」も結果の勝ちではないので数えない
+/// （Firestore タスク R7cWic。勝敗以外の組でも、目指す・向ける語は結果を言っていない）。
+const REVERSING_FOLLOWERS: [&str; 26] = [
+    "を逃",
+    "を許",
+    "を止め",
+    "を脱",
+    "を阻",
+    "を見送",
+    "を献上",
+    "を譲",
+    "をストップ",
+    "から遠ざか",
+    "に見放",
+    "を目指",
+    "を狙",
+    "に向け",
+    "を誓",
+    "目前",
+    "まであと",
+    "を期",
+    "を願",
+    "を祈",
+    "を信じ",
+    "が見え",
+    "の予感",
+    "を持っていか",
+    "をさらわ",
+    "はお預",
+];
+
+/// 連勝・連敗の記録が止まったことを言う語（「連勝が7で止まった」「連勝ストップ」「連敗が途切れた」）。
+/// `STREAK_TERMS` の語の後ろの、読点・句点までの 8 字以内にこれがあれば、その語を数えない
+/// （「連勝が止まった」は負けの意味で、勝ちと読まないため。Firestore タスク R7cWic）。
+const STREAK_TERMS: [&str; 2] = ["連勝", "連敗"];
+const STREAK_ENDINGS: [&str; 6] = ["止ま", "止め", "ストップ", "途切", "阻ま", "阻ん"];
+const STREAK_WINDOW_CHARS: usize = 8;
+
+/// 連勝・連敗の語（`term`）の直後（`after`）が、記録が止まったことを言っているか。
+fn streak_ended(term: &str, after: &str) -> bool {
+    if !STREAK_TERMS.contains(&term) {
+        return false;
+    }
+    let window: String = after
+        .chars()
+        .take_while(|c| !matches!(c, '。' | '、' | '\n' | '！' | '？'))
+        .take(STREAK_WINDOW_CHARS)
+        .collect();
+    STREAK_ENDINGS.iter().any(|ending| window.contains(ending))
+}
 
 /// `REVERSING_FOLLOWERS` の後ろの打ち消し（「逃さなかった」「逃さず」「止めなかった」「見送らなかった」）。
 const DOUBLE_NEGATING_TAILS: [&str; 14] = [
@@ -698,39 +816,100 @@ const NEGATING_PREFIXES: [char; 4] = ['未', '不', '非', '無'];
 
 /// 反対の意味の点検。`source` は材料（記事のタイトル＋本文抜粋）、`output` は点検する出力。
 pub(super) fn find_contradictions(source: &str, output: &str) -> Vec<CheckIssue> {
+    contradiction_findings(source, output)
+        .into_iter()
+        .filter(|finding| !finding.recorded_only)
+        .map(|finding| finding.issue)
+        .collect()
+}
+
+/// 反対の意味の1件。`recorded_only` が true のものは記録だけ（評価で数える）で、`find_contradictions` は返さない。
+/// Firestore タスク R7cWic で足した勝敗の言い方（`RECORD_ONLY_TERMS`）と、勝敗の両方の側を書いた出力の中の
+/// 入れ替え（`swapped_subject`）は、架空の意地悪な文で直しきれない誤検出（別の試合・前の試合の勝ち、主語を省いた
+/// 負けの文）があったため記録だけにした（評価 §9.11）。
+#[derive(Debug, Clone)]
+pub(super) struct ContradictionFinding {
+    pub issue: CheckIssue,
+    pub recorded_only: bool,
+}
+
+/// 反対の意味を探す（`find_contradictions` の本体。評価では記録だけのものも数える）。
+/// 組ごとに、まず作り直しの理由にする規則（`strict`）で探し、無ければ記録だけの規則でも探す。
+pub(super) fn contradiction_findings(source: &str, output: &str) -> Vec<ContradictionFinding> {
     let source = mask_compounds(source);
     let output = mask_compounds(output);
-    let mut issues = Vec::new();
+    let mut findings = Vec::new();
     for pair in OPPOSITE_PAIRS {
-        if let Some(issue) = contradiction_on(pair, &pair.a, &pair.b, &source, &output) {
-            issues.push(issue);
-        } else if !pair.a_only {
-            if let Some(issue) = contradiction_on(pair, &pair.b, &pair.a, &source, &output) {
-                issues.push(issue);
+        for strict in [true, false] {
+            let found =
+                contradiction_on(pair, &pair.a, &pair.b, &source, &output, strict).or_else(|| {
+                    (!pair.a_only)
+                        .then(|| contradiction_on(pair, &pair.b, &pair.a, &source, &output, strict))
+                        .flatten()
+                });
+            if let Some(issue) = found {
+                findings.push(ContradictionFinding {
+                    issue,
+                    recorded_only: !strict,
+                });
+                break;
             }
         }
     }
-    issues
+    findings
 }
 
+/// Firestore タスク R7cWic で足した勝敗の言い方。出力の語・材料の反対の語としては記録だけに使う
+/// （「Aは1回戦でBに快勝した」のように、記事の別の試合の勝ち負けを書いた出力を、今の規則では見分けられないため。
+/// 従来の「勝っ」「勝利」でも同じ誤検出は起こるが、語を足すと誤検出の機会が増える）。材料の側の言い方
+/// （「材料にもある」の判定）と、出力が両方の側を言っているかの判定には使う（どちらも報告を減らす向き）。
+const RECORD_ONLY_TERMS: [&str; 20] = [
+    "大勝",
+    "圧勝",
+    "快勝",
+    "完勝",
+    "辛勝",
+    "雪辱",
+    "試合を制し",
+    "接戦を制し",
+    "熱戦を制し",
+    "激戦を制し",
+    "延長戦を制し",
+    "攻防戦を制し",
+    "打ち合いを制し",
+    "大会を制し",
+    "シリーズを制し",
+    "大敗",
+    "惨敗",
+    "零敗",
+    "屈し",
+    "苦杯",
+];
+
 /// 出力が `said` の側を言い、材料は `said` の側を言わず `opposite` の側だけを言うとき、その問題を返す。
-/// 出力が両方の側を言っているとき（「停止していた運転を再開した」）は報告しない。
+/// 出力が両方の側を言っているとき（「停止していた運転を再開した」）は報告しない。ただし勝敗の組
+/// （`subject_bound`）は、記録だけの規則（`strict` が false）で、主語ごとに勝敗を入れ替えていないかを見る
+/// （`swapped_subject`。Firestore タスク R7cWic）。`strict` が true のときは、出力の語・材料の反対の語に
+/// `RECORD_ONLY_TERMS` を使わない。
 fn contradiction_on(
     pair: &OppositePair,
     said: &Side,
     opposite: &Side,
     source: &str,
     output: &str,
+    strict: bool,
 ) -> Option<CheckIssue> {
-    let said_term = said
-        .terms
+    let said_terms = checked_terms(said, strict);
+    let opposite_terms = checked_terms(opposite, strict);
+    let said_term = said_terms
         .iter()
         .find(|term| occurs_affirmed(output, term))?;
-    if opposite
+    // 両方の側の判定には記録だけの語も使う（報告を減らす向き）。
+    let output_says_both = opposite
         .terms
         .iter()
-        .any(|term| occurs_affirmed(output, term))
-    {
+        .any(|term| occurs_affirmed(output, term));
+    if output_says_both && (strict || !pair.subject_bound) {
         return None;
     }
     let source_says_it = said
@@ -741,11 +920,14 @@ fn contradiction_on(
     if source_says_it {
         return None;
     }
-    let opposite_term = opposite
-        .terms
+    let opposite_term = opposite_terms
         .iter()
         .find(|term| occurs_affirmed(source, term))?;
-    if pair.subject_bound && !same_subject(said, opposite, source, output) {
+    if output_says_both {
+        if !swapped_subject(&said_terms, &opposite_terms, source, output) {
+            return None;
+        }
+    } else if pair.subject_bound && !same_subject(&said_terms, &opposite_terms, source, output) {
         return None;
     }
     Some(CheckIssue {
@@ -756,6 +938,15 @@ fn contradiction_on(
     })
 }
 
+/// 点検に使う語（`strict` のときは `RECORD_ONLY_TERMS` を除く）。
+fn checked_terms(side: &Side, strict: bool) -> Vec<&'static str> {
+    side.terms
+        .iter()
+        .copied()
+        .filter(|term| !strict || !RECORD_ONLY_TERMS.contains(term))
+        .collect()
+}
+
 /// 勝敗の組（`subject_bound`）で、出力の語と材料の反対の語が同じ主語（チーム・人の名前）について言っているか。
 /// 「AがBを下した」記事を「BはAに敗れた」と言い換えた出力（主語の入れ替え）を、反対の意味と誤検出しないため。
 /// - 主語の候補は、語の前で最も近い「は」「が」の直前の名前と、文の最初の「〜は」の名前（`subjects_at`。
@@ -764,28 +955,70 @@ fn contradiction_on(
 ///   （一言・再説明は主語を省くことが多いため）。
 /// - 材料の反対の語に主語の候補があれば名前どうしを（片方がもう片方を含めば同じとみなす）、無ければその語の
 ///   ある文に出力の主語が出てくるかで比べる。
-fn same_subject(said: &Side, opposite: &Side, source: &str, output: &str) -> bool {
-    let output_subjects: Vec<Vec<String>> = said
-        .terms
-        .iter()
-        .flat_map(|term| affirmed_positions(output, term).map(|index| subjects_at(output, index)))
-        .collect();
-    if output_subjects.iter().any(Vec::is_empty) {
-        return true;
-    }
+/// - 語の直前の「Aの」（「Aのサヨナラ勝ち」「相手の勝利」。`possessive_subject_before`）があれば、その A も記事の
+///   主語と同じときだけ報告する（Firestore タスク R7cWic。「Bは、相手の勝利で…」の誤検出を減らす。報告を減らす向き
+///   だけに使い、ほかの候補が合わないのに A だけで報告することはしない）。
+fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) -> bool {
     let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
-    opposite.terms.iter().any(|term| {
-        affirmed_positions(source, term).any(|index| {
-            let source_subjects = subjects_at(source, index);
-            let sentence = sentence_around(source, index);
-            output_subjects.iter().flatten().any(|subject| {
+    // 材料の反対の語の主語に、出力の主語が当たるか。
+    let matches_source = |subject: &str| {
+        opposite.iter().any(|term| {
+            affirmed_positions(source, term).any(|index| {
+                let source_subjects = subjects_at(source, index);
                 if source_subjects.is_empty() {
-                    sentence.contains(subject.as_str())
+                    sentence_around(source, index).contains(subject)
                 } else {
                     source_subjects
                         .iter()
                         .any(|source_subject| same(source_subject, subject))
                 }
+            })
+        })
+    };
+    said.iter().any(|term| {
+        affirmed_positions(output, term).any(|index| {
+            let subjects = output_subjects_at(output, index, term);
+            let matched = subjects.is_empty() || subjects.iter().any(|s| matches_source(s));
+            matched
+                && possessive_subject_before(output, index)
+                    .is_none_or(|owner| matches_source(&owner))
+        })
+    })
+}
+
+/// 勝敗の両方の側を書いた出力（「Aは勝ち、Bは負けた」）で、勝敗を入れ替えたか（Firestore タスク R7cWic）。
+/// 記録だけの規則（`contradiction_on` の `strict` が false）でだけ使う（「Aは前日Bに勝った。この日はCに敗れた。」の
+/// ように負けの文の主語を省いた正しい出力も真になるため）。材料が `opposite` の側だけを言う記事（`contradiction_on` で確かめ済み）で、次のときに真:
+/// - 出力の `said` の語に主語の候補（`subjects_at`）があり、その主語には出力が `opposite` の語を言っていない
+///   （「Aは勝利を目指したが、敗れた」のように、同じ主語の勝ちと負けを両方書いた出力は見ない）。
+///   出力の `opposite` の語の主語は、文の最初の「〜は」も含めて広く取る（「Aは前回勝ったが、今回は負けた」の
+///   「負け」の主語は「今回」と「A」）。そのため「Aは勝ち、Bは負けた」の 1 文の入れ替えは拾えず（「負け」の主語に
+///   A も入る）、「Aが勝ち、Bは負けた」「Aが勝った。Bは負けた。」の形だけを拾う（誤検出を避ける側に倒す）。
+/// - 材料の `opposite` の語の主語の候補に、その主語と同じ名前がある（材料の語に主語の候補が無ければ見ない）。
+///
+/// 主語の無い出力の語は見ない（両方の側を書いた出力で主語を省くと、どちらのチームの話か決められないため）。
+fn swapped_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) -> bool {
+    let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
+    let opposite_in_output: Vec<String> = opposite
+        .iter()
+        .flat_map(|term| affirmed_positions(output, term))
+        .flat_map(|index| subjects_at(output, index))
+        .collect();
+    let said_subjects: Vec<String> = said
+        .iter()
+        .flat_map(|term| affirmed_positions(output, term).map(move |index| (*term, index)))
+        .flat_map(|(term, index)| output_subjects_at(output, index, term))
+        .filter(|subject| !opposite_in_output.iter().any(|other| same(other, subject)))
+        .collect();
+    if said_subjects.is_empty() {
+        return false;
+    }
+    opposite.iter().any(|term| {
+        affirmed_positions(source, term).any(|index| {
+            subjects_at(source, index).iter().any(|source_subject| {
+                said_subjects
+                    .iter()
+                    .any(|subject| same(source_subject, subject))
             })
         })
     })
@@ -805,6 +1038,86 @@ fn subjects_at(text: &str, index: usize) -> Vec<String> {
         }
     }
     subjects
+}
+
+/// 出力の語（`term`。`index` の位置）の主語の候補: `subjects_at` が空のときは、「Aのサヨナラ勝ち」の A
+/// （`possessive_subject_before`）、それも無ければ「勝ったのはAだ」の A（`cleft_subject_after`）。
+/// 出力の側だけに使う（主語の無い出力は記事と同じ主語とみなして報告するので、候補が増えると報告は減る向きになる）。
+fn output_subjects_at(output: &str, index: usize, term: &str) -> Vec<String> {
+    let mut subjects = subjects_at(output, index);
+    if subjects.is_empty() {
+        subjects.extend(possessive_subject_before(output, index));
+    }
+    if subjects.is_empty() {
+        subjects.extend(cleft_subject_after(output, index + term.len()));
+    }
+    subjects
+}
+
+/// 語の前に主語が無い文の「Aのサヨナラ勝ち」「Aの勝利で」の A（Firestore タスク R7cWic）。語の直前の
+/// 漢字・カタカナ・数字（「サヨナラ」「逆転」「3」など 6 字まで）の前の「の」の前の名前。
+fn possessive_subject_before(text: &str, index: usize) -> Option<String> {
+    let chars: Vec<char> = text[..index].chars().collect();
+    let mut cursor = chars.len();
+    while cursor > 0 && chars.len() - cursor < 6 && !is_hiragana(chars[cursor - 1]) {
+        let c = chars[cursor - 1];
+        if matches!(
+            c,
+            '。' | '、' | '\n' | '！' | '？' | '「' | '」' | ' ' | '　'
+        ) {
+            return None;
+        }
+        cursor -= 1;
+    }
+    if cursor < 2 || chars[cursor - 1] != 'の' {
+        return None;
+    }
+    name_before(&chars, cursor - 1)
+}
+
+/// 語の前に主語が無い文の「〜したのはAだ」「〜ったのがA」の A（Firestore タスク R7cWic）。
+/// ゆうこの話し言葉に多い形で、主語の無い文として記事と同じ主語とみなすと、勝ったのが相手のチームのときに
+/// 誤検出するため。語の後ろ（`term_end`）から「のは」「のが」までがひらがなだけ（活用の語尾。6 字まで）のときだけ見る。
+fn cleft_subject_after(text: &str, term_end: usize) -> Option<String> {
+    let tail = &text[term_end..];
+    let marker = ["のは", "のが"]
+        .iter()
+        .filter_map(|marker| tail.find(marker).map(|i| (i, marker.len())))
+        .min()?;
+    let between: Vec<char> = tail[..marker.0].chars().collect();
+    if between.len() > 6 || !between.iter().all(|c| is_hiragana(*c)) {
+        return None;
+    }
+    let name: String = tail[marker.0 + marker.1..]
+        .chars()
+        .take_while(|c| {
+            !matches!(
+                c,
+                '、' | '。'
+                    | '\n'
+                    | '！'
+                    | '？'
+                    | ' '
+                    | '　'
+                    | '」'
+                    | 'だ'
+                    | 'で'
+                    | 'よ'
+                    | 'ね'
+                    | 'の'
+                    | 'に'
+                    | 'を'
+                    | 'が'
+                    | 'は'
+                    | 'も'
+                    | 'な'
+                    | 'さ'
+                    | 'じ'
+            )
+        })
+        .take(15)
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// 文の頭から見て最初の「〜は」（「は」の前がひらがなでないもの）の名前。
@@ -909,8 +1222,10 @@ fn affirmed_positions<'a>(text: &'a str, term: &'a str) -> impl Iterator<Item = 
         .map(|(index, _)| index)
         .filter(move |index| {
             let before = text[..*index].chars().next_back();
+            let after = &text[*index + term.len()..];
             !before.is_some_and(|c| NEGATING_PREFIXES.contains(&c))
-                && !is_negated_after(&text[*index + term.len()..])
+                && !is_negated_after(after)
+                && !streak_ended(term, after)
         })
 }
 
@@ -2116,6 +2431,224 @@ mod tests {
             kinds(&find_contradictions(won, "みなとFCは山城FCに敗れた。")),
             vec![IssueKind::Contradiction]
         );
+    }
+
+    /// 架空の試合（Firestore タスク R7cWic の単体テスト用。どれも架空の名前と文）。
+    const WALKOFF_LOSS: &str = "みなとシーガルズは1日、やまびこベアーズに3－4でサヨナラ負けを喫した。チームは3連敗となった。";
+    const CLOSE_WIN: &str =
+        "山城FCは港南ユナイテッドとの接戦を制し、首位に浮上した。港南ユナイテッドは2位に後退した。";
+
+    /// 記録だけ（評価用の `contradiction_findings` は返すが、作り直しの理由の `find_contradictions` は返さない）か。
+    fn recorded_only(source: &str, output: &str) -> bool {
+        find_contradictions(source, output).is_empty()
+            && contradiction_findings(source, output)
+                .iter()
+                .any(|finding| {
+                    finding.recorded_only && finding.issue.kind == IssueKind::Contradiction
+                })
+    }
+
+    #[test]
+    fn other_win_and_loss_expressions_are_recorded_only() {
+        // 「勝ち」「白星」以外の勝敗の言い方（快勝・接戦を制し・大敗・苦杯・圧勝）は記録だけ（評価 §9.11）。
+        for output in [
+            "シーガルズは延長戦を制したね",
+            "シーガルズは快勝したね",
+            "みなとシーガルズは圧勝した。",
+        ] {
+            assert!(recorded_only(WALKOFF_LOSS, output), "{output}");
+        }
+        assert!(recorded_only(CLOSE_WIN, "山城FCは港南に大敗した。"));
+        let won = "ひばり高校がつばめ工業に勝利した。";
+        assert!(recorded_only(won, "ひばり高校は苦杯をなめたね"));
+        let election = "あおば党は総選挙で議席を大きく減らし、大敗した。";
+        assert!(recorded_only(election, "あおば党が圧勝した。"));
+        assert!(contradiction_findings(election, "ひかり党が圧勝した。").is_empty());
+        // 記録だけの語が材料にあるときは、従来の語の出力でも作り直しの理由にしない（材料の反対の語に使わない）。
+        assert!(recorded_only(
+            CLOSE_WIN,
+            "山城FCは港南ユナイテッドに敗れた。"
+        ));
+        // 材料の側の言い方としては使う（「接戦を制し」の記事で「山城FCが勝った」は報告しない）。
+        assert!(contradiction_findings(CLOSE_WIN, "山城FCが勝った。").is_empty());
+    }
+
+    #[test]
+    fn possessive_and_cleft_subjects_are_compared() {
+        // 「Aのサヨナラ勝ち」「勝ったのはAだ」の A を主語として照らす（ゆうこの話し言葉に多い形）。
+        assert_eq!(
+            kinds(&find_contradictions(
+                WALKOFF_LOSS,
+                "シーガルズのサヨナラ勝ちだね"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        assert_eq!(
+            kinds(&find_contradictions(
+                WALKOFF_LOSS,
+                "サヨナラ勝ちしたのはシーガルズだね"
+            )),
+            vec![IssueKind::Contradiction]
+        );
+        // 勝ったのが相手のチームなら正しい言い換え（主語の無い文として扱うと誤検出していた形）。
+        for output in [
+            "サヨナラ勝ちしたのはベアーズだね",
+            "最後に勝ったのがやまびこベアーズだったんだね",
+            "ベアーズのサヨナラ勝ちで試合が決まったね",
+            "延長戦を制したのはやまびこベアーズ。シーガルズは連敗だね",
+        ] {
+            assert!(
+                contradiction_findings(WALKOFF_LOSS, output).is_empty(),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn swapped_win_and_loss_in_a_two_sided_output_is_recorded_only() {
+        // 出力が勝敗の両方を書き、主語ごとに入れ替えた形（評価 §9.4 の既知の限界だったもの）は記録だけ
+        // （「Aは前日Bに勝った。この日はCに敗れた。」のように、負けの文の主語を省いた正しい出力を見分けられないため）。
+        for (source, output) in [
+            (WALKOFF_LOSS, "シーガルズが勝った。ベアーズは敗れた。"),
+            (CLOSE_WIN, "港南ユナイテッドが勝ち、山城FCは敗れた。"),
+            (
+                CLOSE_WIN,
+                "港南ユナイテッドが接戦を制した。山城FCは敗れた。",
+            ),
+            // 略称（記事の名前の一部）でも同じ主語とみなす。
+            (CLOSE_WIN, "港南が勝ち、山城は敗れた。"),
+            (
+                "国を相手にした訴訟で、原告が敗訴した。",
+                "原告が勝訴し、国は敗訴した。",
+            ),
+        ] {
+            assert!(recorded_only(source, output), "{output}");
+        }
+        // 記録だけにした理由の形: 負けの文の主語が省かれている（「この日は」）と、正しい出力でも記録される。
+        assert!(recorded_only(
+            "みなとシーガルズはやまびこベアーズに敗れた。",
+            "みなとシーガルズは前日うみねこ団に勝った。この日はベアーズに敗れた。"
+        ));
+    }
+
+    #[test]
+    fn two_sided_outputs_that_follow_the_article_are_not_reported() {
+        for (source, output) in [
+            (WALKOFF_LOSS, "ベアーズが勝ち、シーガルズは負けた。"),
+            (WALKOFF_LOSS, "ベアーズは勝ち、シーガルズは敗れた。"),
+            (CLOSE_WIN, "山城FCが勝ち、港南ユナイテッドは敗れた。"),
+            (CLOSE_WIN, "山城FCは勝ち、港南ユナイテッドが敗れた。"),
+            (CLOSE_WIN, "山城FCは接戦を制し、港南ユナイテッドは敗れた。"),
+            // 同じ主語の勝ちと負けを両方書いた出力（目指した・前回の勝ち・勝ったものの敗れた）。
+            (
+                WALKOFF_LOSS,
+                "シーガルズは勝利を目指したけど、サヨナラ負けしちゃったね",
+            ),
+            (
+                WALKOFF_LOSS,
+                "シーガルズは前回ベアーズに勝っていたけど、今回はサヨナラ負けだったね",
+            ),
+            (
+                WALKOFF_LOSS,
+                "シーガルズは前回の対戦では勝利したけど、今回はベアーズに敗れて3連敗",
+            ),
+            (
+                "みなとFCは決勝で港南FCに敗れ、準優勝だった。",
+                "みなとFCは準決勝で山城FCに勝ったものの、決勝で港南FCに敗れた。",
+            ),
+            // 主語の無い出力（どちらのチームの話か決められない）。
+            (WALKOFF_LOSS, "勝っても負けても応援したいね"),
+            (
+                "みなとFCは決勝で港南FCに敗れ、準優勝だった。",
+                "準決勝では勝ったけど、決勝で敗れちゃったね",
+            ),
+            (
+                "国を相手にした訴訟で、原告が敗訴した。",
+                "国が勝訴し、原告は敗訴した。",
+            ),
+            // 両チームの勝敗が書かれた記事は、出力が何を書いても報告しない（従来どおり）。
+            (
+                "うみねこ団は前日にかもめ団に勝ったが、この日は敗れた。",
+                "うみねこ団は勝った",
+            ),
+        ] {
+            assert!(
+                contradiction_findings(source, output).is_empty(),
+                "{output}"
+            );
+        }
+        // 既知の限界: 1 文で「Aは勝ち、Bは敗れた」と書くと、「敗れ」の主語に文の最初の A も入るので、
+        // 入れ替えても拾わない（誤検出を避ける側に倒した。評価 §9.11）。
+        assert!(
+            find_contradictions(WALKOFF_LOSS, "シーガルズは勝ち、ベアーズは敗れた。").is_empty()
+        );
+    }
+
+    #[test]
+    fn compounds_wishes_and_non_result_win_words_are_not_reported() {
+        for output in [
+            // 複合語・記録の名前（勝ち点・勝負・勝利投手・優勝争い）。
+            "勝ち点の話じゃないけど、シーガルズは3連敗だね",
+            "勝負どころでベアーズに打たれ、シーガルズは負けたね",
+            "勝利投手はベアーズの投手で、シーガルズは敗れた。",
+            "シーガルズは優勝争いから一歩後退し、3連敗となった。",
+            // 結果でない勝ち（目指す・目前・願い・仮定・当然・遠ざかる・勝ちきれない・見えていた）。
+            "シーガルズは勝利目前だったのに、延長で敗れたよ",
+            "シーガルズは勝利まであと一歩だった",
+            "次こそ勝ってほしいな！",
+            "監督は「次は勝ちたい」と話していたね",
+            "シーガルズは「勝ちたかった」と悔しがった。",
+            "シーガルズ、勝ってたら首位だったのにね",
+            "シーガルズは勝って当然の試合を落としちゃったね",
+            "シーガルズは勝ちから遠ざかっていて、3連敗だね",
+            "シーガルズは勝ちきれず、3連敗となった。",
+            "シーガルズの勝ちが見えてたのに残念だったね",
+            "シーガルズは雪辱を期して次の試合に臨むね",
+            // 試合の勝ちでない「制し」。
+            "シーガルズは中盤を制したけど、最後に打たれちゃったね",
+            // 連勝が止まった（負けの意味）。
+            "シーガルズは連勝がストップしちゃったね",
+        ] {
+            assert!(
+                contradiction_findings(WALKOFF_LOSS, output).is_empty(),
+                "{output}"
+            );
+        }
+        let won = "ひばり高校がつばめ工業に勝利した。";
+        for output in [
+            "ひばり高校にとって負けられない試合だったね",
+            "ひばり高校は前回敗れたつばめ工業に勝ったね",
+            "ひばり高校は前回屈したつばめ工業に雪辱した。",
+            "つばめ工業は苦杯をなめたね",
+        ] {
+            assert!(contradiction_findings(won, output).is_empty(), "{output}");
+        }
+        // 決勝で負けた記事の「準優勝」、敗者復活戦の記事。
+        assert!(contradiction_findings(
+            "みなとFCは決勝で港南FCに敗れ、準優勝だった。",
+            "みなとFCは準優勝だったね"
+        )
+        .is_empty());
+        assert!(contradiction_findings(
+            "山本は3位決定戦に勝利し、銅メダルを獲得した。",
+            "山本は敗者復活戦を経て銅メダルを獲得した。"
+        )
+        .is_empty());
+        // 「判断を下した」（「下し」は勝敗の語に入れていない）。
+        assert!(contradiction_findings(
+            "あおば商事は価格競争に敗れ、撤退を決めた。",
+            "あおば商事は撤退の判断を下したね"
+        )
+        .is_empty());
+        // 連勝が止まった記事を「連勝ストップ」と書いた出力。
+        let streak = "北辰ホークスはみなみオーシャンズに敗れ、連勝が7で止まった。";
+        for output in ["ホークスの連勝ストップだね", "連勝が止まったのは悔しいね"]
+        {
+            assert!(
+                contradiction_findings(streak, output).is_empty(),
+                "{output}"
+            );
+        }
     }
 
     #[test]
