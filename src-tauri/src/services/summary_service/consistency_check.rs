@@ -985,10 +985,15 @@ fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) ->
         })
     };
     // 材料の反対の語の主語（負けた側など）。
+    // 材料の反対の語の主語（負けた側など）。「Bの連敗」の B も入れる（再レビューの指摘）。
     let opposite_subjects: Vec<String> = opposite
         .iter()
         .flat_map(|term| win_loss_positions(source, term))
-        .flat_map(|index| subjects_at(source, index))
+        .flat_map(|index| {
+            let mut subjects = subjects_at(source, index);
+            subjects.extend(possessive_subject_before(source, index));
+            subjects
+        })
         .collect();
     said.iter().any(|term| {
         win_loss_positions(output, term).any(|index| {
@@ -1005,11 +1010,17 @@ fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) ->
 }
 
 /// 出力の「Aの勝利」の A が、記事のもう一方の側か: 「相手」「対戦相手」か、記事で主語・相手として出てくる名前
-/// （「は」「が」「に」「を」の直前の名前）に合い、記事の反対の語の主語（`opposite_subjects`）には合わないもの。
+/// （「は」「が」「に」「を」の直前の名前）に合い、記事の反対の語の主語（`opposite_subjects`。「Bの連敗」の B を含む）
+/// には合わないもの。`opposite_subjects` が空なら偽（どちらの側か決められない）。
 /// 「今季初の勝利」「3試合ぶりの勝利」「ベアーズ戦の勝利」の「今季初」などは記事の名前に合わないので、報告を止めない
 /// （独立レビューの指摘。止めると、develop で拾えていた「シーガルズは今季初の勝利を挙げた」を見逃すため）。
 fn is_other_side(owner: &str, source: &str, opposite_subjects: &[String]) -> bool {
     let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
+    // 材料の反対の語に主語が取れない記事（「Bに黒星がついた」）では、どちらの側か決められないので止めない
+    // （develop どおり報告する。再レビューの指摘）。
+    if opposite_subjects.is_empty() {
+        return false;
+    }
     if owner.ends_with("相手") || owner == "相手チーム" {
         return true;
     }
@@ -2598,6 +2609,21 @@ mod tests {
         ] {
             assert_eq!(
                 kinds(&find_contradictions(source, output)),
+                vec![IssueKind::Contradiction],
+                "{output}"
+            );
+        }
+        // 材料の負けた側の語に「は」「が」の主語が無い記事（「Bの連敗」「Bに黒星」）でも、Bの勝ちは拾う（再レビューの指摘）。
+        let streak = "やまびこベアーズがみなとシーガルズを3－1で破り、首位に立った。みなとシーガルズの連敗は5に伸びた。";
+        assert_eq!(
+            kinds(&find_contradictions(streak, "みなとシーガルズの勝利だね")),
+            vec![IssueKind::Contradiction]
+        );
+        let black = "やまびこベアーズ戦で、みなとシーガルズに黒星がついた。";
+        for output in ["シーガルズの勝利だね", "みなとシーガルズの白星だね"]
+        {
+            assert_eq!(
+                kinds(&find_contradictions(black, output)),
                 vec![IssueKind::Contradiction],
                 "{output}"
             );
