@@ -1095,7 +1095,7 @@ fn possessive_subject_before(text: &str, index: usize) -> Option<String> {
     name_before(&chars, cursor - 1)
 }
 
-/// 語の後ろ（`term_end`）が「（ひらがなの語尾 6 字まで）のは／のが＋相手」の形か（「勝ったのは相手だね」）。
+/// 語の後ろ（`term_end`）が「（ひらがなの語尾 6 字まで）のは／のが＋相手＋文の終わりの形」か（「勝ったのは相手だね」）。
 /// A が「相手」などの固定の語（`OPPONENT_OWNERS`）のときだけ真。名前は照らさない（Firestore タスク R7cWic）。
 fn cleft_opponent_after(text: &str, term_end: usize) -> bool {
     let tail = &text[term_end..];
@@ -1109,10 +1109,32 @@ fn cleft_opponent_after(text: &str, term_end: usize) -> bool {
     let between = &tail[..at];
     between.chars().count() <= 6
         && between.chars().all(is_hiragana)
-        && OPPONENT_OWNERS
-            .iter()
-            .any(|owner| tail[at + len..].starts_with(owner))
+        && OPPONENT_OWNERS.iter().any(|owner| {
+            // 語の直後が文の終わりの形のときだけ（「勝ったのは相手打線を抑えたA」の「相手」は修飾語の一部）。
+            tail[at + len..].strip_prefix(owner).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with(char::is_whitespace)
+                    || CLEFT_OPPONENT_ENDINGS
+                        .iter()
+                        .any(|end| rest.starts_with(end))
+            })
+        })
 }
+
+/// 「勝ったのは相手」の「相手」の後ろに続いてよい文の終わりの形。
+const CLEFT_OPPONENT_ENDINGS: [&str; 11] = [
+    "だ",
+    "です",
+    "で、",
+    "。",
+    "、",
+    "！",
+    "？",
+    "ね",
+    "よ",
+    "じゃ",
+    "でした",
+];
 
 /// 文の頭から見て最初の「〜は」（「は」の前がひらがなでないもの）の名前。
 fn first_topic(sentence_head: &str) -> Option<String> {
@@ -2644,6 +2666,17 @@ mod tests {
         }
         // 「勝ったのは相手だね」（固定の語）は報告しない。
         assert!(find_contradictions(WALKOFF_LOSS, "勝ったのは相手だね").is_empty());
+        // 「相手」が名前の前の修飾語の一部なら止めない（独立レビューの指摘）。
+        for output in [
+            "勝ったのは相手打線を抑えたシーガルズだね",
+            "勝ったのは相手チームを圧倒したシーガルズ",
+            "勝利したのが相手方のエラーにつけこんだシーガルズ",
+        ] {
+            assert!(
+                !find_contradictions(WALKOFF_LOSS, output).is_empty(),
+                "{output}"
+            );
+        }
         // 勝ったのが相手の名前の正しい出力は、develop どおり報告する（既知の誤検出。評価 §9.11.7）。
         for output in [
             "サヨナラ勝ちしたのはベアーズだね",
