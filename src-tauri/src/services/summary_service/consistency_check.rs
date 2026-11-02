@@ -963,9 +963,9 @@ fn checked_terms(side: &Side, strict: bool) -> Vec<&'static str> {
 ///   （一言・再説明は主語を省くことが多いため）。
 /// - 材料の反対の語に主語の候補があれば名前どうしを（片方がもう片方を含めば同じとみなす）、無ければその語の
 ///   ある文に出力の主語が出てくるかで比べる。
-/// - 語の直前の「Aの」（「相手の勝利」「ベアーズのサヨナラ勝ち」。`possessive_subject_before`）の A が、記事のもう一方の
-///   側（「相手」か、記事の名前で反対の語の主語でないもの。`is_other_side`）なら報告しない（Firestore タスク R7cWic。
-///   「Bは、相手の勝利で…」の誤検出を減らす。「今季初の勝利」の「今季初」のような A では止めない）。
+/// - 語の直前が「相手の」「対戦相手の」など名前でない固定の語（`OPPONENT_OWNERS`）なら報告しない（Firestore タスク
+///   R7cWic。「Bは、相手の勝利で…」の誤検出を減らす）。「ベアーズの勝利」のような名前の所有者では止めない
+///   （名前で照らして止める規則は、取りこぼしの後追いが 3 回続いたため、誤報を拾う側を優先してやめた。評価 §9.11.7）。
 /// - 出力の語の前に主語の候補が無いときは、「勝ったのはAだ」の A も候補にする（`output_subjects_at`）。
 fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) -> bool {
     let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
@@ -984,22 +984,11 @@ fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) ->
             })
         })
     };
-    // 材料の反対の語の主語（負けた側など）。
-    // 材料の反対の語の主語（負けた側など）。「Bの連敗」の B も入れる（再レビューの指摘）。
-    let opposite_subjects: Vec<String> = opposite
-        .iter()
-        .flat_map(|term| win_loss_positions(source, term))
-        .flat_map(|index| {
-            let mut subjects = subjects_at(source, index);
-            subjects.extend(possessive_subject_before(source, index));
-            subjects
-        })
-        .collect();
     said.iter().any(|term| {
         win_loss_positions(output, term).any(|index| {
-            // 「相手の勝利」「ベアーズのサヨナラ勝ち」（記事のもう一方の側の勝ち）は、ほかの主語の候補に関係なく報告しない。
+            // 「相手の勝利」は、ほかの主語の候補に関係なく報告しない。
             if possessive_subject_before(output, index)
-                .is_some_and(|owner| is_other_side(&owner, source, &opposite_subjects))
+                .is_some_and(|owner| OPPONENT_OWNERS.contains(&owner.as_str()))
             {
                 return false;
             }
@@ -1009,30 +998,15 @@ fn same_subject(said: &[&str], opposite: &[&str], source: &str, output: &str) ->
     })
 }
 
-/// 出力の「Aの勝利」の A が、記事のもう一方の側か: 「相手」「対戦相手」か、記事で主語・相手として出てくる名前
-/// （「は」「が」「に」「を」の直前の名前）に合い、記事の反対の語の主語（`opposite_subjects`。「Bの連敗」の B を含む）
-/// には合わないもの。`opposite_subjects` が空なら偽（どちらの側か決められない）。
-/// 「今季初の勝利」「3試合ぶりの勝利」「ベアーズ戦の勝利」の「今季初」などは記事の名前に合わないので、報告を止めない
-/// （独立レビューの指摘。止めると、develop で拾えていた「シーガルズは今季初の勝利を挙げた」を見逃すため）。
-fn is_other_side(owner: &str, source: &str, opposite_subjects: &[String]) -> bool {
-    let same = |a: &str, b: &str| a.contains(b) || b.contains(a);
-    // 材料の反対の語に主語が取れない記事（「Bに黒星がついた」）では、どちらの側か決められないので止めない
-    // （develop どおり報告する。再レビューの指摘）。
-    if opposite_subjects.is_empty() {
-        return false;
-    }
-    if owner.ends_with("相手") || owner == "相手チーム" {
-        return true;
-    }
-    if opposite_subjects.iter().any(|subject| same(subject, owner)) {
-        return false;
-    }
-    let chars: Vec<char> = source.chars().collect();
-    (1..chars.len())
-        .filter(|&i| matches!(chars[i], 'は' | 'が' | 'に' | 'を') && !is_hiragana(chars[i - 1]))
-        .filter_map(|i| name_before(&chars, i))
-        .any(|name| same(&name, owner))
-}
+/// 出力の「Aの勝利」で報告を止める所有者（名前でない固定の語だけ。「相手の勝利」「対戦相手の勝ち」）。
+const OPPONENT_OWNERS: [&str; 6] = [
+    "相手",
+    "対戦相手",
+    "相手チーム",
+    "相手側",
+    "相手方",
+    "お相手",
+];
 
 /// 勝敗の両方の側を書いた出力（「Aは勝ち、Bは負けた」）で、勝敗を入れ替えたか（Firestore タスク R7cWic）。
 /// 記録だけの規則（`contradiction_on` の `strict` が false）でだけ使う（「Aは前日Bに勝った。この日はCに敗れた。」の
@@ -1103,8 +1077,8 @@ fn output_subjects_at(output: &str, index: usize, term: &str) -> Vec<String> {
     subjects
 }
 
-/// 「Aのサヨナラ勝ち」「Aの勝利で」の A（Firestore タスク R7cWic。`same_subject` が、A が記事のもう一方の側の
-/// ときだけ報告を止めるのに使う。`is_other_side`）。語の直前の
+/// 「Aのサヨナラ勝ち」「Aの勝利で」の A（Firestore タスク R7cWic。`same_subject` が、A が「相手」などの固定の語
+/// 〔`OPPONENT_OWNERS`〕のときだけ報告を止めるのに使う）。語の直前の
 /// 漢字・カタカナ・数字（「サヨナラ」「逆転」「3」など 6 字まで）の前の「の」の前の名前。
 fn possessive_subject_before(text: &str, index: usize) -> Option<String> {
     let chars: Vec<char> = text[..index].chars().collect();
@@ -2628,13 +2602,35 @@ mod tests {
                 "{output}"
             );
         }
-        // 「相手の」「記事の相手の名前＋の」の勝ちは、主語のある文でも報告しない。
+        // 負けの語の主語が「チーム」「投手陣」のような名前でない語の記事でも、Bの勝ちは拾う（3 回目のレビューの指摘）。
+        for source in [
+            "やまびこベアーズ戦で、みなとシーガルズに黒星がついた。チームは3連敗となった。",
+            "やまびこベアーズとの試合で、みなとシーガルズは打線が沈黙。投手陣が崩れて敗れた。",
+        ] {
+            assert_eq!(
+                kinds(&find_contradictions(source, "シーガルズの勝利だね")),
+                vec![IssueKind::Contradiction],
+                "{source}"
+            );
+        }
+        // 「相手の」「対戦相手の」（名前でない固定の語）の勝ちは、主語のある文でも報告しない。
         for output in [
             "シーガルズは、相手の勝利で3連敗となった。",
-            "シーガルズは、やまびこベアーズのサヨナラ勝ちで3連敗となった。",
+            "シーガルズは、対戦相手のサヨナラ勝ちで3連敗となった。",
         ] {
             assert!(
                 find_contradictions(WALKOFF_LOSS, output).is_empty(),
+                "{output}"
+            );
+        }
+        // 名前の所有者（「ベアーズの勝ち」）では止めない。develop どおり報告する（既知の誤検出。評価 §9.11.7）。
+        for output in [
+            "シーガルズは、やまびこベアーズのサヨナラ勝ちで首位を明け渡した。",
+            "ベアーズのサヨナラ勝ちで試合が決まったね",
+        ] {
+            assert_eq!(
+                kinds(&find_contradictions(WALKOFF_LOSS, output)),
+                vec![IssueKind::Contradiction],
                 "{output}"
             );
         }
@@ -2642,7 +2638,7 @@ mod tests {
 
     #[test]
     fn possessive_and_cleft_subjects_are_compared() {
-        // 「Aのサヨナラ勝ち」「勝ったのはAだ」の A を主語として照らす（ゆうこの話し言葉に多い形）。
+        // 「Aのサヨナラ勝ち」（主語の無い文として記事と同じ主語とみなす）・「勝ったのはAだ」の A を照らす。
         assert_eq!(
             kinds(&find_contradictions(
                 WALKOFF_LOSS,
@@ -2661,7 +2657,6 @@ mod tests {
         for output in [
             "サヨナラ勝ちしたのはベアーズだね",
             "最後に勝ったのがやまびこベアーズだったんだね",
-            "ベアーズのサヨナラ勝ちで試合が決まったね",
             "延長戦を制したのはやまびこベアーズ。シーガルズは連敗だね",
         ] {
             assert!(
