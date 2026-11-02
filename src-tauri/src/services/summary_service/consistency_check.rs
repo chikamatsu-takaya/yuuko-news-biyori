@@ -1100,7 +1100,8 @@ const HEDGE_WINDOW_CHARS: usize = 12;
 ///   文全体にかかる言い方（「〜によると」）があるか、問いかけ（「？」「〜か」）で終わる文は、言い切っていないと
 ///   みなす（`output_assertion`）。語より前にだけある言い方（「…と発表し、顧客情報が流出した」）は別の出来事に
 ///   かかるとみなす（Firestore タスク RWW00G）。ただし、その言い方が読点をはさまずに主語・主題にかかる文
-///   （「原因とみられるのは漏電だ」）は言い切っていないとみなす。
+///   （「原因とみられるのは漏電だ」）は言い切っていないとみなす。語より前にだけ言い方がある文での言い切り（`mixed`）は
+///   記録だけで、ここでは報告しない（架空の文で誤検出が続いたため）。
 ///
 /// D175 の形（「〜した」「〜が決まった」）に加え、Firestore タスク RWW00G で次の形を足した（評価は要約の機械点検の
 /// 評価 §9.7.7）。材料の側では、主張・訴え・「〜とした」は推測として数えない（`SPECULATION_HEDGES`）。
@@ -1111,7 +1112,12 @@ const HEDGE_WINDOW_CHARS: usize = 12;
 /// 記事の文と出力を照らす単位は語で、文と文の対応（保留ブランチの「文ごとの裏付け」の点検）は見ない。
 pub(super) fn find_asserted_speculation(source: &str, output: &str) -> Vec<CheckIssue> {
     let mut issues: Vec<CheckIssue> = Vec::new();
-    for finding in speculation_findings(source, output) {
+    // 語より前にだけ推測・伝聞の言い方がある文（`mixed`）は記録だけにし、作り直しの理由にしない（架空の文で
+    // 「可能性が高い原因は漏電だ」のような誤検出が続き、止める条件を後追いしきれなかったため。評価 §9.7.7）。
+    for finding in speculation_findings(source, output)
+        .into_iter()
+        .filter(|finding| !finding.mixed)
+    {
         let hedge = finding.hedge;
         let reason = format!(
             "記事情報で推測・伝聞・訴え（「{hedge}」など）として書かれた出来事を、起きたこととして言い切っていた。記事情報と同じく推測・伝聞・訴えとして書く。"
@@ -1139,7 +1145,8 @@ pub(super) enum SpeculationForm {
     Certainty,
 }
 
-/// 推測の言い切りの1件。`mixed` は、出力の文の語より前にだけ推測・伝聞の言い方がある（D175 の版では文ごと
+/// 推測の言い切りの1件。`mixed` が true のものは記録だけ（評価で数える）で、`find_asserted_speculation` は報告しない。
+/// `mixed` は、出力の文の語より前にだけ推測・伝聞の言い方がある（D175 の版では文ごと
 /// 見なかった）ときに true。`hedge` は材料の側の推測の言い方（理由に入れる固定の語）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SpeculationFinding {
@@ -1223,16 +1230,27 @@ fn copula_asserts(tail: &str, rest: &str) -> bool {
     }
 }
 
-/// 名詞の言い切りで、語の直前にあれば容疑の名前を述べた文とみなす主題（「男の容疑は窃盗だ」「逮捕容疑は窃盗です」。
+/// 名詞の言い切りで、語の前にあれば容疑の名前を述べた文とみなす主題（「男の容疑は窃盗だ」「容疑は車の窃盗だ」。
 /// 材料「窃盗の疑いで逮捕」の「窃盗」を言い切ったことにはならない）。「〜の疑いで逮捕され、動機は金銭目的だ」の
 /// ように、容疑の語が別の主題にかかる文は止めない。
 const SUSPICION_TOPICS: [&str; 3] = ["容疑は", "容疑が", "疑いは"];
 
-/// 出力の `start`（語の始まり）の直前が容疑の主題（`SUSPICION_TOPICS`）か。
+/// 出力の `start`（語の始まり）を含む文で、語より前に最後に出る容疑の主題（`SUSPICION_TOPICS`）から語までが、
+/// 漢字・カタカナ・「の」・「、」だけか（「容疑は、窃盗」「容疑は乗用車の窃盗」）。
 fn suspicion_before(output: &str, start: usize) -> bool {
-    SUSPICION_TOPICS
+    let sentence = sentence_around(output, start);
+    let sentence_start = sentence.as_ptr() as usize - output.as_ptr() as usize;
+    let prefix = &output[sentence_start..start];
+    let Some(topic_end) = SUSPICION_TOPICS
         .iter()
-        .any(|topic| output[..start].ends_with(topic))
+        .filter_map(|topic| prefix.rfind(topic).map(|i| i + topic.len()))
+        .max()
+    else {
+        return false;
+    };
+    prefix[topic_end..]
+        .chars()
+        .all(|c| is_word_char(c) || matches!(c, 'の' | '、'))
 }
 
 /// 名詞・形容動詞の言い切り（材料「原因は漏電とみられる」→ 出力「原因は漏電だ」「漏電でした」）。
@@ -1589,7 +1607,7 @@ const HEDGED_NOUN_TOPIC_CHARS: usize = 8;
 /// - None: 言い切っていない。語より後ろに推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）がある、
 ///   文全体にかかる言い方（「〜によると」）がある、または問いかけ（「？」「〜か」）で終わる文。
 /// - Some(mixed): 言い切っている。語より前にだけ推測・伝聞の言い方がある文（「…と発表し、顧客情報が流出した」）は
-///   `mixed` = true（D175 の版は文ごと見なかった。語の前の言い方は別の出来事にかかるので、言い切りとして見る）。
+///   `mixed` = true（D175 の版は文ごと見なかった。記録だけにし、`find_asserted_speculation` は報告しない）。
 fn output_assertion(output: &str, start: usize) -> Option<bool> {
     let sentence = sentence_around(output, start);
     let sentence_start = sentence.as_ptr() as usize - output.as_ptr() as usize;
@@ -2849,6 +2867,9 @@ mod tests {
             "男の容疑は窃盗です。",
             "逮捕容疑は窃盗だ。",
             "男は窃盗の疑いで逮捕された。容疑は窃盗だ。",
+            "男の容疑は、窃盗です。",
+            "男の容疑は乗用車の窃盗です。",
+            "容疑は車の窃盗だ。",
         ] {
             assert!(speculation_findings(ARREST, output).is_empty(), "{output}");
         }
@@ -2949,15 +2970,11 @@ mod tests {
     }
 
     #[test]
-    fn assertion_after_a_hedge_for_another_event_is_reported() {
-        // 推測・伝聞の言い方が語より前にだけある文（別の出来事にかかる）は、言い切りとして見る。
-        assert_eq!(
-            forms(
-                LEAK,
-                "あおば通販は不正アクセスを受けたと発表し、顧客情報が流出した。"
-            ),
-            vec![(SpeculationForm::Verb, true)]
-        );
+    fn assertion_after_a_hedge_for_another_event_is_recorded_only() {
+        // 推測・伝聞の言い方が語より前にだけある文（別の出来事にかかる）は、記録だけ（作り直しの理由にしない）。
+        let output = "あおば通販は不正アクセスを受けたと発表し、顧客情報が流出した。";
+        assert_eq!(forms(LEAK, output), vec![(SpeculationForm::Verb, true)]);
+        assert!(find_asserted_speculation(LEAK, output).is_empty());
         for output in [
             "あおば通販は、顧客情報が流出した可能性があると発表した。",
             "あおば通販によれば、顧客情報が流出した。",
@@ -2968,31 +2985,58 @@ mod tests {
     }
 
     #[test]
-    fn assertions_after_a_hedge_that_is_not_the_topic_are_reported() {
-        // 2 回目の独立レビューの指摘: 推測の言い方そのものが主語で動詞が続く文・別の主題の文は止めない（架空の文）。
-        assert_eq!(
-            forms(FIRE, "漏電の可能性が指摘されたが、原因は漏電だ。"),
-            vec![(SpeculationForm::Copula, true)]
-        );
-        assert_eq!(
-            forms(
-                LEAK,
-                "不正アクセスの可能性が話題となり、顧客情報が流出した。"
-            ),
-            vec![(SpeculationForm::Verb, true)]
-        );
-        assert_eq!(
-            forms(
-                ARREST,
-                "車を盗んだとして逮捕された男は、駐車場で乗用車を盗んだ。"
-            ),
-            vec![(SpeculationForm::KanaVerb, true)]
-        );
+    fn assertions_after_a_hedge_that_is_not_the_topic_are_recorded_only() {
+        // 2 回目の独立レビューの指摘: 推測の言い方そのものが主語で動詞が続く文・別の主題の文は記録する。
+        // 3 回目の指摘で、語より前に推測の言い方がある文（mixed）は記録だけにした（作り直しの理由にしない）。
         let motive = format!("{ARREST}動機は金銭目的とみられる。");
-        assert_eq!(
-            forms(&motive, "男は窃盗の疑いで逮捕され、動機は金銭目的だ。"),
-            vec![(SpeculationForm::Copula, true)]
-        );
+        for (source, output, form) in [
+            (
+                FIRE,
+                "漏電の可能性が指摘されたが、原因は漏電だ。",
+                SpeculationForm::Copula,
+            ),
+            (
+                LEAK,
+                "不正アクセスの可能性が話題となり、顧客情報が流出した。",
+                SpeculationForm::Verb,
+            ),
+            (
+                ARREST,
+                "車を盗んだとして逮捕された男は、駐車場で乗用車を盗んだ。",
+                SpeculationForm::KanaVerb,
+            ),
+            (
+                motive.as_str(),
+                "男は窃盗の疑いで逮捕され、動機は金銭目的だ。",
+                SpeculationForm::Copula,
+            ),
+        ] {
+            assert_eq!(forms(source, output), vec![(form, true)], "{output}");
+            assert!(
+                find_asserted_speculation(source, output).is_empty(),
+                "{output}"
+            );
+        }
+        // 3 回目の独立レビューの指摘: 推測の言い方が主題の名詞にかかる文。記録されても作り直しの理由にはならない。
+        for output in [
+            "最も可能性が高いのは漏電だ。",
+            "可能性の高い原因は漏電だ。",
+            "可能性が高い原因は漏電だ。",
+            "疑いの強い原因は漏電です。",
+            "原因とみられる台所の配線は漏電です。",
+            "原因とみられることは漏電だ。",
+        ] {
+            assert!(
+                find_asserted_speculation(FIRE, output).is_empty(),
+                "{output}"
+            );
+            assert!(
+                speculation_findings(FIRE, output)
+                    .iter()
+                    .all(|finding| finding.mixed),
+                "{output}"
+            );
+        }
         // 連体形＋名詞1語＋は／が（推測の言い方が主題の名詞にかかる）は止める。
         for output in [
             "漏電とされる原因は漏電だ。",
