@@ -1223,17 +1223,16 @@ fn copula_asserts(tail: &str, rest: &str) -> bool {
     }
 }
 
-/// 名詞の言い切りの文で、語より前にあれば容疑の名前を述べた文とみなす語（「男の容疑は窃盗だ」「逮捕容疑は
-/// 窃盗です」。材料「窃盗の疑いで逮捕」の「窃盗」を言い切ったことにはならない）。
-const SUSPICION_WORDS: [&str; 2] = ["容疑", "疑い"];
+/// 名詞の言い切りで、語の直前にあれば容疑の名前を述べた文とみなす主題（「男の容疑は窃盗だ」「逮捕容疑は窃盗です」。
+/// 材料「窃盗の疑いで逮捕」の「窃盗」を言い切ったことにはならない）。「〜の疑いで逮捕され、動機は金銭目的だ」の
+/// ように、容疑の語が別の主題にかかる文は止めない。
+const SUSPICION_TOPICS: [&str; 3] = ["容疑は", "容疑が", "疑いは"];
 
-/// 出力の `start` を含む文の、語より前に容疑の語（`SUSPICION_WORDS`）があるか。
+/// 出力の `start`（語の始まり）の直前が容疑の主題（`SUSPICION_TOPICS`）か。
 fn suspicion_before(output: &str, start: usize) -> bool {
-    let sentence = sentence_around(output, start);
-    let sentence_start = sentence.as_ptr() as usize - output.as_ptr() as usize;
-    SUSPICION_WORDS
+    SUSPICION_TOPICS
         .iter()
-        .any(|word| output[sentence_start..start].contains(word))
+        .any(|topic| output[..start].ends_with(topic))
 }
 
 /// 名詞・形容動詞の言い切り（材料「原因は漏電とみられる」→ 出力「原因は漏電だ」「漏電でした」）。
@@ -1578,10 +1577,13 @@ const SENTENCE_WIDE_HEDGES: [&str; 6] = [
     "たぶん",
 ];
 
-/// 語より前の推測・伝聞の言い方が文の主語・主題にかかる形（「原因とみられるのは漏電だ」「流出した可能性が
-/// あるのは顧客情報だ」「漏電とされる原因は…」）。推測の言い方の後ろ（読点の前）にこの助詞があれば、文の言い切りは
-/// 推測の中身を述べたものとみなす（「のは」「のが」もこれに当たる）。
-const HEDGED_TOPIC_MARKERS: [&str; 2] = ["は", "が"];
+/// 推測の言い方の直後のひらがな（活用の語尾）にこれがあれば、推測の言い方が主語・主題にかかる
+/// （「原因とみられるのは漏電だ」「流出した可能性があるのは顧客情報だ」）。
+const HEDGED_TOPIC_MARKERS: [&str; 2] = ["のは", "のが"];
+
+/// 「〈推測の言い方〉〈連体形の語尾〉〈名詞1語〉は／が」（「漏電とされる原因は」「可能性がある顧客情報が」）とみなす、
+/// 推測の言い方の後ろから「は」「が」までの字数の上限。
+const HEDGED_NOUN_TOPIC_CHARS: usize = 8;
 
 /// 出力の `start`（言い切った語の始まり）を含む文が、その語を言い切っているか。
 /// - None: 言い切っていない。語より後ろに推測・伝聞・人の発言の言い方（`HEDGES`・`OUTPUT_ONLY_HEDGES`）がある、
@@ -1606,22 +1608,49 @@ fn output_assertion(output: &str, start: usize) -> Option<bool> {
     Some(output_hedges().any(|hedge| sentence.contains(hedge)))
 }
 
-/// 文の語より前（`prefix`）に「〈推測・伝聞の言い方〉…のは／は／が」の主語・主題があるか（同じ読点の区切りの中だけ見る。
-/// 「…と発表し、顧客情報が流出した」の「と発表」は読点の後ろにかからないので数えない）。
+/// 文の語より前（`prefix`）に、推測・伝聞の言い方が主語・主題にかかる形があるか。止めるのは次の2つだけ:
+/// - 推測の言い方の直後のひらがな（「るのは」「があるのは」「ているのが」）に「のは」「のが」がある。
+/// - 推測の言い方の直後が「〈ひらがなの連体形の語尾（る・た・い で終わる）〉〈漢字・カタカナの名詞1語〉は／が」で、
+///   推測の言い方から `HEDGED_NOUN_TOPIC_CHARS` 字以内（読点も動詞も間に入らない）。
+///
+/// 「可能性が指摘されたが、」「可能性が話題となり、」のように推測の言い方そのものが主語で動詞が続く形、
+/// 「…と発表し、顧客情報が流出した」のように読点で区切られた形は止めない。
 fn hedged_topic_before(prefix: &str) -> bool {
     HEDGES
         .iter()
         .chain(OUTPUT_ONLY_HEDGES.iter())
         .chain(SPECULATION_HEDGES.iter())
         .any(|hedge| {
-            prefix.match_indices(hedge).any(|(index, _)| {
-                let rest = &prefix[index + hedge.len()..];
-                let segment = &rest[..rest.find('、').unwrap_or(rest.len())];
-                HEDGED_TOPIC_MARKERS
-                    .iter()
-                    .any(|marker| segment.contains(marker))
-            })
+            prefix
+                .match_indices(hedge)
+                .any(|(index, _)| hedged_topic_after(&prefix[index + hedge.len()..]))
         })
+}
+
+/// 推測の言い方の直後（`rest`）が、主語・主題にかかる形か（`hedged_topic_before`）。
+fn hedged_topic_after(rest: &str) -> bool {
+    let kana_end = rest
+        .char_indices()
+        .find(|(_, c)| !is_hiragana(*c))
+        .map_or(rest.len(), |(i, _)| i);
+    let kana = &rest[..kana_end];
+    if HEDGED_TOPIC_MARKERS
+        .iter()
+        .any(|marker| kana.contains(marker))
+    {
+        return true;
+    }
+    if !kana.ends_with(['る', 'た', 'い']) {
+        return false;
+    }
+    let noun = &rest[kana_end..];
+    let noun_end = noun
+        .char_indices()
+        .find(|(_, c)| !is_word_char(*c))
+        .map_or(noun.len(), |(i, _)| i);
+    noun_end > 0
+        && noun[noun_end..].starts_with(['は', 'が'])
+        && rest[..kana_end + noun_end].chars().count() < HEDGED_NOUN_TOPIC_CHARS
 }
 
 /// 材料で `word` が推測・伝聞・訴えの形（`hedges` の語を `hedge_after` で探す）でだけ出てくるとき、その言い方（見出しの「〜か」は「か」）。
@@ -2935,6 +2964,41 @@ mod tests {
             "不正アクセスを受けたと発表し、顧客情報が流出したかもしれない。",
         ] {
             assert!(speculation_findings(LEAK, output).is_empty(), "{output}");
+        }
+    }
+
+    #[test]
+    fn assertions_after_a_hedge_that_is_not_the_topic_are_reported() {
+        // 2 回目の独立レビューの指摘: 推測の言い方そのものが主語で動詞が続く文・別の主題の文は止めない（架空の文）。
+        assert_eq!(
+            forms(FIRE, "漏電の可能性が指摘されたが、原因は漏電だ。"),
+            vec![(SpeculationForm::Copula, true)]
+        );
+        assert_eq!(
+            forms(
+                LEAK,
+                "不正アクセスの可能性が話題となり、顧客情報が流出した。"
+            ),
+            vec![(SpeculationForm::Verb, true)]
+        );
+        assert_eq!(
+            forms(
+                ARREST,
+                "車を盗んだとして逮捕された男は、駐車場で乗用車を盗んだ。"
+            ),
+            vec![(SpeculationForm::KanaVerb, true)]
+        );
+        let motive = format!("{ARREST}動機は金銭目的とみられる。");
+        assert_eq!(
+            forms(&motive, "男は窃盗の疑いで逮捕され、動機は金銭目的だ。"),
+            vec![(SpeculationForm::Copula, true)]
+        );
+        // 連体形＋名詞1語＋は／が（推測の言い方が主題の名詞にかかる）は止める。
+        for output in [
+            "漏電とされる原因は漏電だ。",
+            "出火原因とみられている場所は台所の配線の漏電だ。",
+        ] {
+            assert!(speculation_findings(FIRE, output).is_empty(), "{output}");
         }
     }
 
