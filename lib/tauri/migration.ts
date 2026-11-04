@@ -98,3 +98,25 @@ export const restartApp = async (): Promise<boolean> => {
   await invoke<void>("restart_app");
   return true;
 };
+
+/**
+ * get_storage_usage の結果（設定画面の「ストレージ状況」）。
+ * 移行ZIPと同じ許可リストの保存データ（記事・アーカイブ・辞書・設定など）だけを数えた区分ごとの合計。
+ * ログ・キャッシュ・書き出したZIP・同梱AIモデルは含まない。パスは受け取らない。
+ */
+export type StorageUsage = {
+  totalBytes: number;
+  articleBytes: number;
+  archiveBytes: number;
+  dictionaryBytes: number;
+  /** 設定・お気に入り・友情ランク・報酬・ガチャ・アーカイブ索引。 */
+  otherBytes: number;
+};
+
+export const getStorageUsage = async (): Promise<StorageUsage | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<StorageUsage>("get_storage_usage");
+};

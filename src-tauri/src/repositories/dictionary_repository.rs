@@ -451,6 +451,8 @@ mod tests {
             related_article_title: Some("生成AIスタートアップの資金調達が再加速".to_string()),
             is_starred: true,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         }
     }
 
@@ -726,6 +728,8 @@ mod tests {
             related_article_title: Some("国内SaaS企業、業務改善支援の新施策を発表".to_string()),
             is_starred: false,
             saved_in_dictionary: false,
+            is_notice: false,
+            expanded_from: None,
         };
         context
             .repository
@@ -744,6 +748,55 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key_text, "生成AI");
+    }
+
+    #[test]
+    fn phrase_filter_includes_legacy_key_point_entries_without_rewriting_file() {
+        // 旧種別 key_point の項目はフレーズの絞り込みに含まれる（D144）。一覧の読み込みではファイルを書き換えない。
+        let context = TestRepositoryContext::new();
+        let mut legacy = serde_json::to_value(persisted_entry(
+            "dict-legacy",
+            "円安が進み輸入品の値段が上がった",
+            "100",
+            &["article-001"],
+            "旧要点説明",
+        ))
+        .unwrap();
+        legacy["entryType"] = serde_json::json!("key_point");
+        let term = serde_json::to_value(persisted_entry(
+            "dict-term",
+            "saas",
+            "200",
+            &["article-002"],
+            "用語の説明",
+        ))
+        .unwrap();
+        let raw = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "entries": [legacy, term],
+        }))
+        .unwrap();
+        context.write_raw_store(&raw);
+
+        let phrases = context
+            .repository
+            .list_dictionary_entries(None, Some(DictionaryEntryType::Phrase), false)
+            .unwrap();
+        assert_eq!(phrases.len(), 1);
+        assert_eq!(phrases[0].entry_id, "dict-legacy");
+        assert_eq!(phrases[0].entry_type, DictionaryEntryType::Phrase);
+
+        let terms = context
+            .repository
+            .list_dictionary_entries(None, Some(DictionaryEntryType::Term), false)
+            .unwrap();
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].entry_id, "dict-term");
+
+        assert_eq!(
+            std::fs::read_to_string(&context.dictionary_path).unwrap(),
+            raw
+        );
     }
 
     #[test]

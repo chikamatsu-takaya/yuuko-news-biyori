@@ -45,7 +45,9 @@ export default function RootLayout({
     // 配色は data-theme で切り替わる CSS 変数（app/globals.css）に従わせる。
     // 初期 HTML は既定テーマで描き、保存済みテーマは UiThemeApplier がマウント後に反映する。
     // そのため別テーマ選択時は、起動直後の最初の描画だけ一瞬既定色（クリーム）になる。
-    <html lang="ja" data-theme="default" className="bg-background">
+    // data-pattern はテーマの地に敷く模様（D152〜D154）。既定は "none"（模様なし）で、メイン画面だけ
+    // components/layout/PatternGround.tsx が保存済みの模様を反映する（常駐ゆうこウィンドウは "none" のまま）。
+    <html lang="ja" data-theme="default" data-pattern="none" className="bg-background">
       <body className={`${notoSansJP.className} antialiased`}>
         <UiThemeApplier />
         {children}

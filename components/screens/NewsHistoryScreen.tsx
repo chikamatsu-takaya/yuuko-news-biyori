@@ -1,13 +1,18 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -38,26 +43,23 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 import {
-  Home,
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
+import {
   Newspaper,
   Clock,
-  BookOpen,
-  Sparkles,
-  Dice5,
-  Settings,
   ArrowLeft,
   Search,
-  Filter,
   List,
   Circle,
   CheckCircle,
   Star,
   Archive,
   Bell,
-  HelpCircle,
   RotateCcw,
-  Share2,
   FolderOpen,
   Info,
   Tag,
@@ -83,13 +85,6 @@ interface HistoryItem {
   summaryState?: ArticleSummaryState;
   // 記事のタグ（整形済み）。タグでの絞り込みに使う。タグの無い記事は空配列。
   tags: string[];
-}
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
 }
 
 interface FilterChip {
@@ -207,22 +202,15 @@ const mockHistoryItems: HistoryItem[] = [
   },
 ];
 
-const mockNavigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: true },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Dice5, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
-
 const filterChips: FilterChip[] = [
   { id: "all", label: "すべて", icon: List },
   { id: "unread", label: "未読", icon: Circle },
   { id: "read", label: "既読", icon: CheckCircle },
   { id: "favorite", label: "お気に入り", icon: Star },
-  { id: "archived", label: "アーカイブ", icon: Archive },
+  // アーカイブ済み（過去ニュースへしまった）記事の絞り込み。メニューの「過去ニュース」と同じ記事を指すことが
+  // 分かるよう、名前を「過去ニュース」にそろえる（実機テスト B14）。違いは並べ方（ここは履歴の一覧、
+  // 過去ニュース画面は月ごと）だけで、選んだときに下の案内で説明する。
+  { id: "archived", label: "過去ニュース", icon: Archive },
 ];
 
 const historyFilterIds: ArticleHistoryFilter[] = [
@@ -267,13 +255,15 @@ const mapTauriHistoryItemToUi = (
     id: article.articleId,
     title: article.title,
     source: article.sourceName,
-    datetime: article.publishedAtText || article.fetchedAt,
+    // RFC3339 のまま出さず「YYYY/MM/DD HH:mm」（端末ローカル）に整える。
+    datetime: formatArticleDateTime(article.publishedAtText || article.fetchedAt),
     description:
       article.summary ??
       "概要はまだありません。記事を開くと保存済みの内容を確認できます。",
     readState,
     isFavorite: article.isFavorite,
-    isNew: readState === "unread",
+    // 未読でも公開（無ければ取得）から24時間を過ぎた記事には NEW を付けない。
+    isNew: isArticleNew(article),
     isArchived: article.isArchived,
     category: article.genre || "未分類",
     thumbnailType: toThumbnailType(article.genre),
@@ -389,7 +379,7 @@ function FilterChipButton({
     <button
       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all border disabled:cursor-not-allowed disabled:opacity-50 ${
         isActive
-          ? "bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)]"
+          ? `bg-[var(--yuuko-green)] text-white border-[var(--yuuko-green)] ${FORCED_COLORS_SELECTED}`
           : "bg-white text-muted-foreground border-border hover:border-[var(--yuuko-green)]/50"
       }`}
       onClick={onClick}
@@ -416,20 +406,28 @@ function HistoryItemCard({
   selectedTag: string | null;
   onSelectTag: (tag: string | null) => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で開く）に対応する。読み上げ名は記事タイトル。
+  // カード内のタグボタンは自身で Enter/Space を処理する（activateOnEnterOrSpace が target で除外）。
+  const titleId = React.useId();
   return (
     <Card
-      className={`cursor-pointer transition-all py-3 px-0 ${
+      role="button"
+      tabIndex={0}
+      aria-labelledby={titleId}
+      aria-current={isSelected ? "true" : undefined}
+      className={`cursor-pointer transition-all py-3 px-0 ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
-          ? "border-[var(--yuuko-green)] border-2 bg-[var(--yuuko-green-light)]/50 shadow-md"
+          ? "border-[var(--yuuko-green-text)] border-2 bg-[var(--yuuko-green-light)]/50 shadow-md"
           : "border-0 shadow-sm hover:shadow-md"
       }`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
         <HistoryThumbnail type={item.thumbnailType} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="font-semibold text-sm text-foreground truncate">{item.title}</h3>
+            <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">{item.title}</h3>
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1">
             <span>{item.source}</span>
@@ -449,7 +447,7 @@ function HistoryItemCard({
             <Badge
               className={`text-[10px] px-1.5 py-0 border-0 ${
                 item.readState === "read"
-                  ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green)]"
+                  ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green-text)]"
                   : "bg-blue-100 text-blue-600"
               }`}
             >
@@ -769,7 +767,7 @@ export default function NewsHistoryScreen({
           {/* Back Button */}
           <Button
             variant="outline"
-            className="mb-4 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
+            className="mb-4 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
             onClick={() => handleNavigate("home")}
           >
             <ArrowLeft className="w-4 h-4" />
@@ -777,22 +775,17 @@ export default function NewsHistoryScreen({
           </Button>
 
           {/* Navigation */}
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="history"
+            onNavigate={handleNavigate}
+          />
 
           {/* Yuuko Comment Card */}
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
-              <h4 className="text-xs font-semibold text-[var(--yuuko-green)] mb-2">ゆうこの一言</h4>
+              <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">ゆうこの一言</h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
                 過去の記事も大切な
                 <br />
@@ -803,7 +796,7 @@ export default function NewsHistoryScreen({
                 見つけてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
               </div>
             </CardContent>
           </Card>
@@ -822,7 +815,7 @@ export default function NewsHistoryScreen({
             {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
             <button
               type="button"
-              className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
               onClick={() => handleNavigate("home")}
             >
               ホーム
@@ -833,11 +826,11 @@ export default function NewsHistoryScreen({
 
           {/* Title */}
           <div className="flex items-center gap-2 mb-4">
-            <Clock className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
+            <Clock className="w-6 h-6 text-[var(--yuuko-green-text)]" aria-hidden="true" />
             <h1 className="text-xl font-bold text-foreground">ニュース履歴</h1>
           </div>
 
-          {/* Search */}
+          {/* Search（絞り込みは下のフィルタチップとタグで行う。処理の無い「絞り込み」ボタンは置かない） */}
           <div className="flex items-center gap-2 mb-3">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
@@ -849,10 +842,6 @@ export default function NewsHistoryScreen({
                 aria-label="ニュース履歴を検索"
               />
             </div>
-            <Button variant="outline" className="gap-2">
-              <Filter className="w-4 h-4" aria-hidden="true" />
-              絞り込み
-            </Button>
           </div>
 
           {/* Filter Chips */}
@@ -874,13 +863,33 @@ export default function NewsHistoryScreen({
             ))}
           </div>
 
+          {/* 「過去ニュース」で絞り込んだときだけ、過去ニュース画面との違い（並べ方）と移り方を案内する。 */}
+          {activeFilter === "archived" && (
+            <div
+              className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4 text-xs text-muted-foreground"
+              data-testid="history-archived-filter-hint"
+            >
+              <Info className="w-4 h-4 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <span>30日より前に過去ニュースへしまった記事を、履歴の一覧で表示しています。</span>
+              {onNavigate && (
+                <button
+                  type="button"
+                  className="text-[var(--yuuko-green-text)] underline underline-offset-2 hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)] rounded-sm"
+                  onClick={() => onNavigate("past-news")}
+                >
+                  月ごとに見るなら「過去ニュース」へ
+                </button>
+              )}
+            </div>
+          )}
+
           {/* タグでの絞り込み中の表示と解除。カードや詳細のタグを押すと絞り込み、ここでいつでも解除できる。 */}
           {selectedTag && (
             <div
               className="flex items-center gap-2 mb-4 min-w-0 text-xs text-muted-foreground"
               data-testid="history-tag-filter"
             >
-              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <Tag className="w-4 h-4 shrink-0 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <span role="status" className="min-w-0 flex items-center gap-1">
                 <span className="shrink-0">タグ</span>
                 <span className="max-w-[12rem] truncate font-semibold text-foreground" title={selectedTag}>
@@ -903,8 +912,8 @@ export default function NewsHistoryScreen({
 
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span
                   role={
@@ -921,7 +930,7 @@ export default function NewsHistoryScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                     onClick={() => void loadHistoryItems()}
                     disabled={isLoading}
                   >
@@ -966,37 +975,39 @@ export default function NewsHistoryScreen({
         {/* Right Sidebar */}
         {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
         <aside className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto">
-          {/* Yuuko Speech Bubble */}
-          <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
-            <CardContent className="p-3">
-              <p className="text-xs text-foreground leading-relaxed">
-                前に読んだニュースも、
-                <br />
-                すぐ見返せるよ〜！
-                <br />
-                気になる記事を
-                <br />
-                もう一度見てみよっ♪
-              </p>
-              <div className="flex justify-end">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
-              </div>
-            </CardContent>
-          </Card>
+          {/* Yuuko Speech Bubble（着せかえ D155 に従う。「いつもの」はもともとのカードの形で、しっぽは無い） */}
+          <YuukoBalloon
+            className="mb-2"
+            tail="none"
+            data-testid="history-yuuko-balloon"
+            defaultRender={(content) => (
+              <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
+                <CardContent className="p-3">{content}</CardContent>
+              </Card>
+            )}
+          >
+            <p className="text-xs text-foreground leading-relaxed">
+              前に読んだニュースも、
+              <br />
+              すぐ見返せるよ〜！
+              <br />
+              気になる記事を
+              <br />
+              もう一度見てみよっ♪
+            </p>
+            <div className="flex justify-end">
+              <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
+            </div>
+          </YuukoBalloon>
 
           {/* Yuuko Character */}
           <div className="flex justify-center mb-3">
             <div className="relative">
-              <Image
-                src="/assets/yuuko.png"
+              <YuukoFigure
                 width={160}
                 height={160}
-                alt="ゆうこ"
-                className="w-40 h-40 object-contain animate-[float_3s_ease-in-out_infinite]"
-                onError={(e) => {
-                  const target = e.target as HTMLImageElement;
-                  target.style.display = "none";
-                }}
+                imageClassName="w-40 h-40 object-contain"
+                className="animate-[float_3s_ease-in-out_infinite]"
               />
             </div>
           </div>
@@ -1013,7 +1024,7 @@ export default function NewsHistoryScreen({
                   <Badge
                     className={`text-[10px] px-1.5 py-0 border-0 ${
                       selectedItem.readState === "read"
-                        ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green)]"
+                        ? "bg-[var(--yuuko-green)]/20 text-[var(--yuuko-green-text)]"
                         : "bg-blue-100 text-blue-600"
                     }`}
                   >
@@ -1085,22 +1096,20 @@ export default function NewsHistoryScreen({
                         ? "お気に入り解除"
                         : "お気に入り登録"}
                   </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full gap-2"
-                    onClick={() => console.log("アーカイブを展開:", selectedItem.id)}
-                  >
-                    <FolderOpen className="w-4 h-4" aria-hidden="true" />
-                    アーカイブを展開
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full gap-2"
-                    onClick={() => console.log("記事をシェア:", selectedItem.id)}
-                  >
-                    <Share2 className="w-4 h-4" aria-hidden="true" />
-                    記事をシェア
-                  </Button>
+                  {/* アーカイブ済み記事だけ、月別にたどれる過去ニュース画面への導線を出す。
+                      1記事の取り出しは「もう一度見る」の確認ダイアログで行うため、ここでは画面遷移だけにする。
+                      記事のシェアは機能が無いためボタンを置かない。 */}
+                  {selectedItem.isArchived && onNavigate && (
+                    <Button
+                      variant="outline"
+                      className="w-full gap-2"
+                      disabled={isRestoring}
+                      onClick={() => onNavigate("past-news")}
+                    >
+                      <FolderOpen className="w-4 h-4" aria-hidden="true" />
+                      過去ニュースで探す
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -1114,20 +1123,15 @@ export default function NewsHistoryScreen({
           <Bell className="w-3.5 h-3.5" aria-hidden="true" />
           <span>お知らせ</span>
           <span className="mx-1" aria-hidden="true">|</span>
-          <span className="text-[var(--yuuko-green)]" aria-hidden="true">●</span>
+          <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">●</span>
           <span>
             {visibleHistoryItems.length}件を表示中 / 保存済み履歴
             {historyItems.length}件
           </span>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            className="hover:text-foreground transition-colors"
-            aria-label="ヘルプ"
-          >
-            <HelpCircle className="w-4 h-4" />
-          </button>
-          <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+          <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
         </div>
       </footer>
 

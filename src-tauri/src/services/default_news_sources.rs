@@ -1,7 +1,12 @@
-//! 同梱の既定ニュース取得元（判断台帳 D138）。
+//! 同梱の既定ニュース取得元（判断台帳 D138。D150 で6媒体を除外）。
 //!
 //! 初回起動時に取得元が空だと何も取得されず、取得元を追加する画面も無いため、
-//! アプリに既定の取得元（RSS 11件）と、それに対応する許可ドメインを同梱する。
+//! アプリに既定の取得元（RSS 5件）と、それに対応する許可ドメインを同梱する。
+//!
+//! D138 では11件を同梱していたが、D150 で利用規約が自動収集・保存・AI要約や私的使用を超える
+//! 利用を明示的に禁じている6媒体（BBCニュース日本語・東洋経済オンライン・sorae・ハフポスト日本版・
+//! Business Insider Japan・ライフハッカー）を外した（`docs/00_project/リリース前調査_2026-10.md`）。
+//! 既に11件の既定値を書き出した環境の設定ファイルは、下記の方針どおり書き換えない。
 //!
 //! 適用方針（「ユーザーの編集が常に勝つ」）:
 //! - 既定値は `config/news_sources.json` が **存在しないとき（新規インストール等）だけ**、
@@ -39,14 +44,15 @@ pub(crate) struct BundledNewsSource {
     /// フィード取得先のホスト（`allowedRssDomains` へ入れる）。
     pub feed_host: &'static str,
     /// フィード内の記事リンクのホスト（`allowedArticleDomains` へ入れる）。
-    /// フィードと記事でホストが違う媒体がある（ITmedia・BBC）。
+    /// フィードと記事でホストが違う媒体がある（ITmedia）。
     pub article_host: &'static str,
 }
 
-/// D138 で決めた既定の取得元。
+/// D138 で決めた既定の取得元から、D150 で規約上のリスクが高い6媒体を除いたもの。
 ///
 /// ジャンルは必ず設定画面の興味ジャンルの選択肢（`lib/settings-options.ts` の `GENRE_OPTIONS`。
-/// 国際〜暮らしは D141 で追加）の値にする。選べないジャンルの取得元を作らないため
+/// 国際〜暮らしは D141 で追加。D150 後は国際・科学・暮らし・ビジネスに同梱の取得元が無いが、
+/// 選択肢は残す）の値にする。選べないジャンルの取得元を作らないため
 /// （`lib/genre-options.test.mjs` で照合）。興味ジャンルによる絞り込み（D10）の
 /// 対象になるため、既定設定（AI / IT）では IT の取得元だけが取得される。
 /// 記事ホストは実取得評価（v3）で確認したリンク先に合わせている。
@@ -66,46 +72,11 @@ pub(crate) const BUNDLED_NEWS_SOURCES: &[BundledNewsSource] = &[
         article_host: "gigazine.net",
     },
     BundledNewsSource {
-        name: "BBCニュース日本語",
-        feed_url: "https://feeds.bbci.co.uk/japanese/rss.xml",
-        genre: "国際",
-        feed_host: "feeds.bbci.co.uk",
-        article_host: "www.bbc.com",
-    },
-    BundledNewsSource {
-        name: "ハフポスト日本版",
-        feed_url: "https://www.huffingtonpost.jp/feeds/index.xml",
-        genre: "社会",
-        feed_host: "www.huffingtonpost.jp",
-        article_host: "www.huffingtonpost.jp",
-    },
-    BundledNewsSource {
         name: "J-CAST",
         feed_url: "https://www.j-cast.com/index.xml",
         genre: "社会",
         feed_host: "www.j-cast.com",
         article_host: "www.j-cast.com",
-    },
-    BundledNewsSource {
-        name: "東洋経済オンライン",
-        feed_url: "https://toyokeizai.net/list/feed/rss",
-        genre: "ビジネス",
-        feed_host: "toyokeizai.net",
-        article_host: "toyokeizai.net",
-    },
-    BundledNewsSource {
-        name: "Business Insider Japan",
-        feed_url: "https://www.businessinsider.jp/feed/index.xml",
-        genre: "ビジネス",
-        feed_host: "www.businessinsider.jp",
-        article_host: "www.businessinsider.jp",
-    },
-    BundledNewsSource {
-        name: "sorae",
-        feed_url: "https://sorae.info/feed",
-        genre: "科学",
-        feed_host: "sorae.info",
-        article_host: "sorae.info",
     },
     BundledNewsSource {
         name: "Full-Count",
@@ -120,13 +91,6 @@ pub(crate) const BUNDLED_NEWS_SOURCES: &[BundledNewsSource] = &[
         genre: "スポーツ",
         feed_host: "www.soccer-king.jp",
         article_host: "www.soccer-king.jp",
-    },
-    BundledNewsSource {
-        name: "ライフハッカー",
-        feed_url: "https://www.lifehacker.jp/feed/index.xml",
-        genre: "暮らし",
-        feed_host: "www.lifehacker.jp",
-        article_host: "www.lifehacker.jp",
     },
 ];
 
@@ -148,8 +112,8 @@ pub(crate) fn bundled_sources_config() -> NewsSourcesConfig {
 /// 既定取得元のフィード／記事ホストだけを登録する（親ドメインは登録しない）。
 ///
 /// 照合は既存の url_guard の仕様どおり「完全一致またはサブドメイン一致」で、http / https を
-/// 受け付ける。そのため登録ホストが媒体の基底ドメインである gigazine.net・toyokeizai.net・
-/// sorae.info・full-count.jp は、同じ媒体のサブドメインも許可される。ローカル/プライベートIP
+/// 受け付ける。そのため登録ホストが媒体の基底ドメインである gigazine.net・full-count.jp は、
+/// 同じ媒体のサブドメインも許可される。ローカル/プライベートIP
 /// 拒否・DNS rebinding 対策は変わらず適用される。
 pub(crate) fn bundled_allowlist() -> NetworkAllowlist {
     let mut allowlist = NetworkAllowlist::default();
@@ -262,16 +226,53 @@ mod tests {
     }
 
     #[test]
-    fn bundled_sources_are_the_eleven_d138_feeds() {
+    fn bundled_sources_are_the_five_d150_feeds() {
         let urls: Vec<&str> = BUNDLED_NEWS_SOURCES.iter().map(|s| s.feed_url).collect();
-        assert_eq!(urls.len(), 11);
+        assert_eq!(urls.len(), 5);
         let mut unique = urls.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), 11, "feed URLs must not repeat");
+        assert_eq!(unique.len(), 5, "feed URLs must not repeat");
         for source in BUNDLED_NEWS_SOURCES {
             assert!(!source.name.trim().is_empty());
             assert!(!source.genre.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn bundled_sources_exclude_d150_removed_media() {
+        // D150: 規約上のリスクが高い6媒体は既定取得元・既定許可ホストに含めない。
+        let names: Vec<&str> = BUNDLED_NEWS_SOURCES.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "ITmedia NEWS",
+                "GIGAZINE",
+                "J-CAST",
+                "Full-Count",
+                "サッカーキング"
+            ]
+        );
+        let allowlist = bundled_allowlist();
+        for removed in [
+            "feeds.bbci.co.uk",
+            "www.bbc.com",
+            "toyokeizai.net",
+            "sorae.info",
+            "www.huffingtonpost.jp",
+            "www.businessinsider.jp",
+            "www.lifehacker.jp",
+        ] {
+            assert!(!allowlist.allowed_rss_domains.iter().any(|h| h == removed));
+            assert!(!allowlist
+                .allowed_article_domains
+                .iter()
+                .any(|h| h == removed));
+            let url = format!("https://{removed}/feed");
+            assert!(
+                validate_url(&url, UrlPurpose::Rss, &allowlist).is_err(),
+                "{removed} must not be allowed by default"
+            );
         }
     }
 

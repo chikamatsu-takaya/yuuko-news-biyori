@@ -31,11 +31,13 @@ use services::data_export_service::DataExportService;
 use services::data_import_service::{DataImportService, MigrationWriteLocks};
 use services::default_news_sources;
 use services::dictionary_service::DictionaryService;
+use services::dressup_service::DressupService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
 use services::local_llm_service::LocalLlmService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::NewsService;
+use services::pattern_service::PatternService;
 use services::recommendation_service::RecommendationService;
 use services::reward_service::RewardService;
 use services::settings_service::SettingsService;
@@ -110,9 +112,15 @@ pub fn run() {
             let article_repository = ArticleRepository::new(&paths);
             // 旧版が書いたサンプル記事（D139）の掃除結果。辞書・ゆうこ状態の参照掃除に使う。
             let legacy_seed_cleanup = article_repository.initialize_default_if_missing()?;
-            // ガチャ状態は画面から取得・実行されたとき、またはかけらを付与するときに読む（起動時には読まない）。
+            // ガチャ状態は画面から取得・実行されたとき、かけらを付与するとき、メイン画面の起動時に模様の所持を確かめるときに読む。
             // 記事を読む・ランクアップでかけらを付与するため、記事・友情ランクのサービスより先に作る。
             let gacha_service = GachaService::new(GachaRepository::new(&paths));
+            // テーマの地に敷く模様。保存の正は設定 ui.patternId、所持はガチャ状態から読む（D152〜D154）。
+            let pattern_service =
+                PatternService::new(settings_service.clone(), gacha_service.clone());
+            // ゆうこの着せかえ。保存の正は設定 ui.balloonId / ui.decoId、所持はガチャ状態から読む（D155）。
+            let dressup_service =
+                DressupService::new(settings_service.clone(), gacha_service.clone());
             let article_service = ArticleService::new(article_repository.clone())
                 .with_gacha_service(gacha_service.clone());
             let news_service = NewsService::new(
@@ -212,6 +220,8 @@ pub fn run() {
                 gacha_service,
                 local_llm_service,
                 news_service,
+                pattern_service,
+                dressup_service,
                 reward_service,
                 settings_service,
                 summary_service,
@@ -241,6 +251,7 @@ pub fn run() {
             commands::article_commands::update_article_favorite,
             commands::article_commands::open_original_article,
             commands::article_commands::generate_article_summary,
+            commands::article_commands::get_auto_summary_status,
             commands::article_commands::get_archive_candidates,
             commands::article_commands::archive_old_articles,
             commands::article_commands::restore_archived_article,
@@ -257,6 +268,7 @@ pub fn run() {
             commands::app_commands::take_pending_main_window_article,
             commands::data_export_commands::export_migration_data,
             commands::data_export_commands::open_migration_folder,
+            commands::data_export_commands::get_storage_usage,
             commands::data_import_commands::list_migration_imports,
             commands::data_import_commands::import_migration_data,
             commands::news_commands::refresh_news,
@@ -270,6 +282,7 @@ pub fn run() {
             commands::settings_commands::get_user_settings,
             commands::settings_commands::get_ui_theme_id,
             commands::settings_commands::save_user_settings,
+            commands::settings_commands::set_nickname,
             commands::settings_commands::reset_user_settings,
             commands::settings_commands::test_ai_provider,
             commands::yuuko_commands::get_yuuko_notification_state,
@@ -284,7 +297,12 @@ pub fn run() {
             commands::reward_commands::set_active_theme,
             commands::gacha_commands::get_gacha_state,
             commands::gacha_commands::draw_gacha_once,
-            commands::gacha_commands::mark_gacha_items_seen
+            commands::gacha_commands::mark_gacha_items_seen,
+            commands::pattern_commands::get_pattern_state,
+            commands::pattern_commands::set_active_pattern,
+            commands::dressup_commands::get_dressup_state,
+            commands::dressup_commands::set_active_balloon,
+            commands::dressup_commands::set_active_deco
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

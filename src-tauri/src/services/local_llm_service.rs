@@ -571,10 +571,24 @@ impl LocalLlmService {
                 Ok((text, elapsed))
             }
             Err(error) => {
-                log_chat_failure(error, elapsed);
+                if self.is_shut_down() {
+                    // アプリ終了で llama-server を止めたための中断。失敗ではないので WARN にしない。
+                    log::info!(
+                        "local llm request interrupted by app exit: reason={} after {:.1}s",
+                        error.label(),
+                        elapsed.as_secs_f32()
+                    );
+                } else {
+                    log_chat_failure(error, elapsed);
+                }
                 Err(chat_failure_to_local(error))
             }
         }
+    }
+
+    /// アプリ終了で止めた後か（`shutdown` 済みか）。終了による中断を失敗のログと分けるために使う。
+    pub fn is_shut_down(&self) -> bool {
+        self.shared.shut_down.load(Ordering::SeqCst)
     }
 
     /// 利用者の要求が走っている間と、その直後 `manual_priority_grace` の間だけ待つ（自動要約の窓口用）。
@@ -2105,8 +2119,11 @@ mod tests {
         let launcher = FakeLauncher::new(FakeMode::Healthy);
         let service = service_with(&bundle, launcher.clone(), test_config());
         service.generate("p", 8).expect("generated");
+        assert!(!service.is_shut_down());
 
         service.shutdown();
+        // 終了による中断をログ・自動要約で失敗と分けるための印。
+        assert!(service.is_shut_down());
         assert_eq!(launcher.stops(), 1);
         assert!(!service.is_running());
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::StartFailed));

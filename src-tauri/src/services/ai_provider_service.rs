@@ -20,7 +20,8 @@ use crate::domain::summary::{
     ARTICLE_TAG_FORBIDDEN_CHARS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS,
     PHRASE_EXPLANATION_PROMPT_ID, POINT_ITEM_MAX_CHARS, SHORT_INPUT_FOCUS_POINTS_ITEMS,
-    SHORT_INPUT_KEY_POINTS_ITEMS, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
+    SHORT_INPUT_KEY_POINTS_ITEMS, SUMMARY_INPUT_KEY_POINTS_LABEL, SUMMARY_PROMPT_ID,
+    SUMMARY_RETRY_PROMPT_ID, TERM_EXPLANATION_PROMPT_ID, YUUKO_COMMENT_PROMPT_ID,
     YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
@@ -31,6 +32,7 @@ use crate::infra::local_llm_runtime::{
 };
 use crate::paths::AppPaths;
 use crate::util::text_safety::neutralize_html_and_control;
+use crate::util::url_text::remove_urls;
 
 use super::local_llm_service::LocalLlmService;
 
@@ -235,7 +237,12 @@ impl AiProviderService {
                 })
                 .map_err(|failure| {
                     // 本文・プロンプトは出さず、固定の分類だけを残す。
-                    log::warn!("local AI request failed ({failure:?})");
+                    // アプリ終了で llama-server を止めたための中断は失敗ではないので WARN にしない。
+                    if self.local_llm.is_shut_down() {
+                        log::info!("local AI request interrupted by app exit ({failure:?})");
+                    } else {
+                        log::warn!("local AI request failed ({failure:?})");
+                    }
                     AppError::LocalAi(failure)
                 });
         }
@@ -320,15 +327,26 @@ impl AiProviderService {
     }
 
     /// Mock 応答。画面にそのまま表示されるため、mock / normal などの内部ラベルは文面に含めない。
+    /// 要約は種（本文抜粋＋定型文）の先頭の数文だけを短く返す（`mock_excerpt`）。種そのものを返すと
+    /// 本文抜粋（最大1500文字・URL入り）がほぼそのまま要約欄に出て、原文の大量転載に近くなるため。
     /// 再説明・感想は summary_service がゆうこの口調で組んだ定型文（context）をそのまま返す。
     /// input_text（実AI向けの要約・要点）は使わず、Mock の結果を従来の決定的な文面のままにする。
-    /// context が無いときだけ input_text を返す（従来の呼び出し方との互換）。
+    /// context が無いときだけ input_text の短い抜粋を返す（従来の呼び出し方との互換）。
+    /// 要約（v2・D167）の実AI入力は「タイトル: …」などの見出し付きの材料なので、Mock は context の種
+    /// （本文抜粋＋定型文。v1 の入力と同じ）から抜粋を作り、Mock の要約の文面を D167 の前と同じにする。
+    /// 作り直しの context は点検の理由なので、作り直しの Mock は input_text の抜粋にする（作り直しが Mock に
+    /// 切り替わったときは、手動は最初の要約を使い、自動は止めるので、この文面は保存も表示もされない）。
     fn mock_response(&self, request: AiRequest, explanation_level: ExplanationLevel) -> String {
         match request.prompt_id.as_str() {
-            "summary_v1" => request.input_text,
-            id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => {
-                request.context.unwrap_or(request.input_text)
+            SUMMARY_PROMPT_ID => {
+                mock_excerpt(request.context.as_deref().unwrap_or(&request.input_text))
             }
+            SUMMARY_RETRY_PROMPT_ID => mock_excerpt(&request.input_text),
+            #[cfg(test)]
+            crate::domain::summary::LEGACY_SUMMARY_PROMPT_ID => mock_excerpt(&request.input_text),
+            id if id == YUUKO_EXPLANATION_PROMPT_ID || id == YUUKO_COMMENT_PROMPT_ID => request
+                .context
+                .unwrap_or_else(|| mock_excerpt(&request.input_text)),
             // 要点・注目ポイント・タグ: 種（無害化済みのタイトル＋本文抜粋）と context の無害化済みジャンルから
             // 決定的な JSON を組む（外部通信なし）。
             id if id == ARTICLE_POINTS_PROMPT_ID => serde_json::to_string(&mock_article_points(
@@ -356,7 +374,7 @@ impl AiProviderService {
                 "detail": mock_phrase_explanation_detail(explanation_level),
             })
             .to_string(),
-            _ => request.input_text.trim().to_string(),
+            _ => mock_excerpt(&request.input_text),
         }
     }
 }
@@ -393,16 +411,22 @@ fn mock_phrase_explanation_detail(explanation_level: ExplanationLevel) -> &'stat
 
 /// 要点・注目ポイントの Mock（決定的）。種は summary_service が無害化した「1行目=タイトル、2行目以降=本文抜粋」。
 /// 要点は本文抜粋（無ければタイトル）を「。」・改行で区切った先頭の文から作り、足りなければ定型文で2件にする。
+/// URL と、日本語を含まない文（本文抜粋に混ざった英語のツイート文など）は要点にしない。
 /// 種は無害化済み（`<` は全角・制御文字なし・行頭 `#` と区切り行なし）だが、「。」で区切った途中から
 /// `#` や `-` で始まる断片はできうるため、Mock でも出力検証に落ちないよう取り除く。
 /// 画面にそのまま出るため、mock などの内部ラベルは文面に含めない。
 /// タグはジャンル（summary_service が無害化した値）と固定の語から3件作る（`mock_article_tags`）。
 fn mock_article_points(input_text: &str, genre: &str) -> AiArticlePoints {
     fn sentences<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+        // 本文抜粋の URL（t.co の短縮URLなど）は要点に要らないので、区切る前に除く。
+        let lines = lines.map(remove_urls).collect::<Vec<_>>();
         lines
+            .iter()
             .flat_map(|line| line.split('。'))
             .map(str::trim)
             .filter(|sentence| !sentence.is_empty() && !sentence.starts_with(['#', '-', '*']))
+            // 英語のツイート文など日本語を含まない文は要点にしない（足りなければ定型文で補う）。
+            .filter(|sentence| contains_japanese(sentence))
             .take(3)
             .map(|sentence| {
                 sentence
@@ -467,6 +491,161 @@ fn mock_article_tags(genre: &str) -> Vec<String> {
         }
     }
     tags
+}
+
+/// Mock の要約（と context の無い Mock 応答）の上限文字数。実AIの要約（1〜2文・百数十文字）と同じくらいに抑え、
+/// 本文抜粋がそのまま並ばないようにする。
+const MOCK_EXCERPT_MAX_CHARS: usize = 120;
+/// Mock の要約に使う先頭の文の数。
+const MOCK_EXCERPT_MAX_SENTENCES: usize = 2;
+/// 抜粋が空になったとき（本文が URL だけ等）の固定文。出力検証の「空」に落ちて要約できなくならないようにする。
+const MOCK_EXCERPT_EMPTY_TEXT: &str = "くわしい内容は元記事で確かめてね。";
+
+/// 要約の種（summary_service の `build_summary_seed`）が本文抜粋の後ろに続ける定型文の書き出し。
+/// 定型文は抜粋の最終行と同じ行に付く（例 `{抜粋} 特に、{注目ポイント}。`）ため、Mock で英語の文を除くときに
+/// 抜粋の文と定型文を分ける目印にする。定型文を変えたら合わせる（summary_service のテストで実際の種を確かめている）。
+const MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES: [&str; 4] =
+    ["特に、", "まずは「", "この記事では、", "さらに、"];
+
+/// Mock 用の短い抜粋（決定的・外部通信なし）。URL と、日本語を含まない文（英語のツイート文など）を除き、
+/// 空白・改行を1つの空白にまとめ、連続した「。」を1つにする（日本語を含まない文の扱いは `drop_sentences_without_japanese`）。
+/// 先頭から `MOCK_EXCERPT_MAX_SENTENCES` 文（「。！？!?」と、空白が続く「.」で区切る）までを取る。
+/// 2文で `MOCK_EXCERPT_MAX_CHARS` 文字を超えるときは、1文目が収まれば1文目だけにし（文の途中で切らない）、
+/// 1文目も収まらないときは上限で切って「…」を付ける。
+/// 入力は無害化済みの種（`<` は全角・行頭 `#` なし・区切り行なし）。1行にまとめるので見出し・区切り行は生じないが、
+/// 記号だけが残った場合は区切り行と解釈されうるため固定文にする。
+fn mock_excerpt(text: &str) -> String {
+    let flattened = remove_urls(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let flattened = drop_sentences_without_japanese(&flattened);
+    let mut chars: Vec<char> = Vec::with_capacity(flattened.len());
+    for c in flattened.chars() {
+        if c == '。' && chars.last() == Some(&'。') {
+            continue;
+        }
+        chars.push(c);
+    }
+    // 文の終わり（区切り文字の直後の位置）を先頭から最大 MOCK_EXCERPT_MAX_SENTENCES 個集める。
+    let sentence_ends = chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &c)| {
+            matches!(c, '。' | '！' | '？' | '!' | '?')
+                || (c == '.' && chars.get(index + 1).is_none_or(|next| next.is_whitespace()))
+        })
+        .map(|(index, _)| index + 1)
+        .take(MOCK_EXCERPT_MAX_SENTENCES)
+        .collect::<Vec<_>>();
+    let end = if sentence_ends.len() < MOCK_EXCERPT_MAX_SENTENCES {
+        chars.len()
+    } else {
+        sentence_ends[MOCK_EXCERPT_MAX_SENTENCES - 1]
+    };
+    let end = if end > MOCK_EXCERPT_MAX_CHARS {
+        // 収まる最後の文の終わりまでにする。1文目も収まらなければ上限で切る。
+        sentence_ends
+            .iter()
+            .copied()
+            .filter(|&sentence_end| sentence_end <= MOCK_EXCERPT_MAX_CHARS)
+            .max()
+            .unwrap_or(end)
+    } else {
+        end
+    };
+    let excerpt = if end > MOCK_EXCERPT_MAX_CHARS {
+        let cut = chars[..MOCK_EXCERPT_MAX_CHARS]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        format!("{cut}…")
+    } else {
+        chars[..end].iter().collect::<String>().trim().to_string()
+    };
+    let only_marks = excerpt
+        .chars()
+        .all(|c| c.is_whitespace() || matches!(c, '-' | '*' | '_' | '=' | '…'));
+    if only_marks {
+        MOCK_EXCERPT_EMPTY_TEXT.to_string()
+    } else {
+        excerpt
+    }
+}
+
+/// 1行にまとめた種から、日本語を含まない文（本文抜粋に混ざった英語のツイート文など）を除く。
+/// 文は「。！？!?」と、空白が続く「.」で区切り、定型文の書き出し（`MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES`）の
+/// 手前でも区切る（抜粋の最終行に定型文が続くため）。定型文を除いた部分（本文抜粋）に日本語の文が1つも無い
+/// とき（英語だけの記事）は、要約が定型文だけにならないよう何も除かない。何も除かないときは入力をそのまま返す。
+fn drop_sentences_without_japanese(text: &str) -> String {
+    let mut sentences: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        let rest = &text[index..];
+        if index > start
+            && text[..index].ends_with(' ')
+            && MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        {
+            sentences.push(&text[start..index]);
+            start = index;
+        }
+        let next = chars.peek().map(|&(_, next)| next);
+        let is_end = matches!(c, '。' | '！' | '？' | '!' | '?')
+            || (c == '.' && next.is_none_or(char::is_whitespace));
+        if is_end {
+            let end = index + c.len_utf8();
+            sentences.push(&text[start..end]);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        sentences.push(&text[start..]);
+    }
+    let is_template = |sentence: &str| {
+        MOCK_SUMMARY_SEED_TEMPLATE_PREFIXES
+            .iter()
+            .any(|prefix| sentence.trim_start().starts_with(prefix))
+    };
+    let body_has_japanese = sentences
+        .iter()
+        .any(|sentence| !is_template(sentence) && contains_japanese(sentence));
+    if !body_has_japanese || sentences.iter().all(|sentence| contains_japanese(sentence)) {
+        return text.to_string();
+    }
+    let mut kept = String::with_capacity(text.len());
+    for sentence in sentences
+        .iter()
+        .map(|sentence| sentence.trim())
+        .filter(|sentence| contains_japanese(sentence))
+    {
+        // ASCII で終わる文の後ろは空白でつなぐ（「.」の区切りと英単語の境目を保つ）。
+        if kept.chars().last().is_some_and(|c| c.is_ascii()) {
+            kept.push(' ');
+        }
+        kept.push_str(sentence);
+    }
+    kept
+}
+
+/// 日本語（ひらがな・カタカナ・漢字・半角カナ）を1文字でも含むか。Mock の要約・要点から、
+/// 本文抜粋に混ざった英語のツイート文（「We are excited to announce… — Deno (@deno_land) October 9, 2026」）など
+/// 日本語を含まない文を除くために使う。記号・数字・全角の句読点・長音だけでは日本語とみなさない。
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{3041}'..='\u{309F}'   // ひらがな
+            | '\u{30A1}'..='\u{30FA}' // カタカナ（中点・長音は含めない）
+            | '\u{3400}'..='\u{4DBF}' // 漢字（拡張A）
+            | '\u{4E00}'..='\u{9FFF}' // 漢字
+            | '\u{F900}'..='\u{FAFF}' // 互換漢字
+            | '\u{FF66}'..='\u{FF9D}' // 半角カナ
+            | '々'
+        )
+    })
 }
 
 /// ローカルLLMへの要求の形（出力上限・出力スキーマ）を prompt_id から決める（純粋関数）。
@@ -642,9 +821,26 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         SpeechTone::Normal => String::new(),
     };
     let instruction = match request.prompt_id.as_str() {
-        "summary_v1" => format!(
-            "次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}"
-        ),
+        // 要約（v2・D167）。材料はタイトル・本文抜粋と、同じ生成で先に作った要点（summary_service の
+        // build_summary_input。どれも無害化・切り詰め済みで、記事情報の見出しの下に置く）。
+        SUMMARY_PROMPT_ID => {
+            summary_instruction(level, summary_input_has_key_points(&request.input_text))
+        }
+        // 旧版（v1）。海外記事の試作評価が当時の要約と比べるためだけに、テストのビルドに残す。
+        #[cfg(test)]
+        crate::domain::summary::LEGACY_SUMMARY_PROMPT_ID => legacy_summary_instruction(level),
+        // 機械点検で問題が見つかった要約の作り直し（D166）。最初の要約と同じ指示に、点検の理由を添える。
+        // 理由は summary_service の点検が作った文（固定の文と、数字・単位・字だけ）で、記事の文は入らない。
+        // それでも出力由来の文字を含むので、行数・長さを絞り、無害化してから固定指示の側に置く。
+        SUMMARY_RETRY_PROMPT_ID => {
+            format!(
+                "{}
+{SUMMARY_RETRY_INSTRUCTION}
+{}",
+                summary_instruction(level, summary_input_has_key_points(&request.input_text)),
+                summary_retry_reason_lines(request.context.as_deref().unwrap_or(""))
+            )
+        }
         // 再説明は画面の1段落に収まる長さにする（解説レベルで文の数と上限だけを変える）。
         id if id == YUUKO_EXPLANATION_PROMPT_ID => {
             let length = match explanation_level {
@@ -691,6 +887,90 @@ fn build_prompt(request: &AiRequest, explanation_level: ExplanationLevel) -> Str
         }
     }
     prompt
+}
+
+/// 要約（`summary_v2`・D167）の指示（固定文）。解説レベルの言い回しと、入力に要点があるかだけで変わる。
+/// v1（本文抜粋だけから要約）では、小さいモデルが中心の出来事を落としたり、誰が何をしたかを取り違えたりした
+/// 一方、要点（事実の箇条書き）は正確だったため、先に作った要点を軸に組み立てさせる。
+/// 要点も AI の出力なので、要点・本文抜粋のどちらにもない事実は足させない。
+/// 入力に要点が無いとき（要点が Mock の代替だったとき・作り直し）は、無い材料を指示で挙げない
+/// （小さいモデルが無い要点を探して材料にない文を作らないように）。
+fn summary_instruction(level: &str, with_key_points: bool) -> String {
+    if with_key_points {
+        format!(
+            "次の記事情報のタイトル・本文抜粋・要点をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。\
+             要点に書かれた事実を軸にまとめ、要点と本文抜粋にない事実は足さないでください。\
+             誰が何をしたのか（主語と目的語の関係）は要点・本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
+        )
+    } else {
+        format!(
+            "次の記事情報のタイトル・本文抜粋をもとに、このニュースで中心となる出来事を、日本語で{level}1〜2文で要約してください。\
+             本文抜粋にない事実は足さないでください。\
+             誰が何をしたのか（主語と目的語の関係）は本文抜粋のとおりに書き、入れ替えないでください。{FACTS_ONLY_RULE}"
+        )
+    }
+}
+
+/// 要約の入力に要点があるか（`SUMMARY_INPUT_KEY_POINTS_LABEL` だけの行があるか）。外部由来の文の行頭の見出しは
+/// summary_service が全角コロンにしているので、この行は summary_service が置いた見出しだけになる。
+fn summary_input_has_key_points(input_text: &str) -> bool {
+    input_text
+        .lines()
+        .any(|line| line.trim_end() == SUMMARY_INPUT_KEY_POINTS_LABEL)
+}
+
+/// 旧版の要約（`summary_v1`）の指示。テストのビルドにだけ残す（`LEGACY_SUMMARY_PROMPT_ID`）。
+#[cfg(test)]
+fn legacy_summary_instruction(level: &str) -> String {
+    format!("次のニュースの要点を、日本語で{level}1〜2文で要約してください。{FACTS_ONLY_RULE}")
+}
+
+/// 要約の作り直し（`summary_retry_v2`・D166 / D167）で、点検の理由の前に置く固定文。
+/// 部分の修正ではなく記事情報からの書き直しを頼む（小さいモデルには「この語を直せ」より
+/// 「この問題を避けて書け」の方が通りやすかった。D165 の試作）。
+const SUMMARY_RETRY_INSTRUCTION: &str =
+    "前に書いた要約には次の問題がありました。同じ問題が出ないように、記事情報から要約を書き直してください。";
+
+/// 作り直しのプロンプトに入れる理由の行数・1行の文字数の上限。
+const SUMMARY_RETRY_MAX_REASONS: usize = 5;
+const SUMMARY_RETRY_REASON_MAX_CHARS: usize = 120;
+
+/// 点検の理由（context。1行1件）を、行数・長さを絞り、HTML・制御文字・行頭の見出し記号を無害化した
+/// 「- 理由」の行にする。
+fn summary_retry_reason_lines(reasons: &str) -> String {
+    reasons
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(SUMMARY_RETRY_MAX_REASONS)
+        .map(|line| {
+            let line = line.trim_start_matches(['#', '-', ' ']);
+            let cut: String = line.chars().take(SUMMARY_RETRY_REASON_MAX_CHARS).collect();
+            format!("- {}", neutralize_html_and_control(&cut))
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
+/// 要約・要約の作り直しのプロンプトに入る固定指示の文（記事を含まない）。要約の出力にこれらの写しが
+/// 混ざっていないかを、summary_service の機械点検が確かめるために使う（D166）。
+pub(crate) fn summary_fixed_prompt_texts() -> Vec<String> {
+    let mut texts: Vec<String> = ["やさしく簡潔に", "分かりやすく", "詳しく"]
+        .into_iter()
+        .flat_map(|level| [true, false].map(|with| summary_instruction(level, with)))
+        .collect();
+    texts.extend(
+        [
+            FACTS_ONLY_RULE,
+            ARTICLE_DATA_DEFENSE_INSTRUCTION,
+            SUMMARY_RETRY_INSTRUCTION,
+        ]
+        .map(str::to_string),
+    );
+    texts
 }
 
 /// 再説明・一言のプロンプトに入る固定指示の文（利用者の入力・記事を含まない）。出力にこれらの写しが
@@ -819,7 +1099,8 @@ fn build_term_explanation_prompt(
          参考文脈に選択語が出てこない場合は、記事のタイトルや分野からどの分野の言葉かを判断し、\
          その分野での一般的な意味を説明してください。\
          意味に自信がない場合は、分かる範囲の一般的な説明にとどめ、\
-         具体的な数値・日付・名前・出来事を作らないでください。\n\
+         具体的な数値・日付・名前・出来事を作らないでください。\
+         {TERM_UNKNOWN_INSTRUCTION}\n\
          short: 選択語の名前で始まる「〇〇とは、…」の形の1文で、一般的な定義を書いてください\
          （{TERM_SHORT_PROMPT_MAX_CHARS}文字以内）。\n\
          detail: short の定義を補う説明を{detail_length}で書いてください。{level_instruction}\n\
@@ -950,7 +1231,76 @@ const TERM_EXPLANATION_REMINDER_HEADING: &str = YUUKO_SPEECH_REMINDER_HEADING;
 const TERM_EXPLANATION_REMINDER: &str = "上の選択語そのものの意味を説明してください。\
 short は〇〇の部分を選択語の名前にした「〇〇とは、…」の1文の定義にしてください。\
 記事の内容の要約は書かず、分からないことは作らないでください。\
+選択語が言葉の切れ端や意味をなさない文字列のときだけは、short と detail を「わからない」としてください。\
 short と detail はどちらも、ゆうこの話し方（〜だよ・〜だね）で書いてください。JSON だけを返してください。";
+
+/// 「分からない」と答えさせる固定指示（用語解説の固定指示の中に置く。Gemini・ローカル共通）。
+///
+/// 2026-10-21 の実機テスト（A4）で、言葉の切れ端「ドエンジニアリング」を、ローカルAIが
+/// 「専門的なエンジニアリングを指す」と存在しない語として解説した。小さいモデルは「〇〇とは、…」の形を
+/// 頼まれると、知らない語でも定義を作ってしまうため、作らずに決まった印（`TERM_UNKNOWN_MARKER`）を
+/// 返す逃げ道を用意する。印は `term_explanation_says_unknown` で見分け、画面には固定文言を出す
+/// （`dictionary_service`）。言葉の途中の選択は、AI を呼ぶ前に `resolve_selection_boundary` で直す。
+///
+/// 実測（2026-10-21・同梱 Qwen3.5-2B・normal・12 語）: 2B は言葉の切れ端（「ラウドサービス」など）にも
+/// 印を返さず定義を作った（0 / 12。印の JSON 例を足しても 0 件）。一般的な語の解説は崩れなかった。
+/// そのため主な対策は AI を呼ぶ前の語境界の補正で、この指示は Gemini や今後のモデルのための逃げ道として置く
+/// （印を返したときに作り話を表示しない・作り直しで名前を言わせない、という受け皿を用意しておく）。
+///
+/// 逃げ道は「言葉の切れ端・意味をなさない文字列」だけに限る。「知らない語」まで含めると、直前の
+/// 「参考文脈に無ければ分野から一般的な意味を説明する」と競合し、新しい製品名・固有名詞まで「わからない」に
+/// なるおそれがある（特に Gemini）。そのため、意味をなす言葉は知らなくても分かる範囲（分野・種類）で説明する、
+/// と明記する。
+const TERM_UNKNOWN_INSTRUCTION: &str = "ただし、選択語が言葉の切れ端（語の途中から始まる、または途中で終わる文字列）や、\
+意味をなさない文字列の場合だけは、説明を作らずに、short と detail の両方を「わからない」とだけ書いてください。\
+新しい製品名・サービス名・人名・組織名などの固有名詞は、詳しく知らなくても切れ端ではないので、\
+記事のタイトルや参考文脈から分かる範囲（どの分野の、どんな種類のものか）で説明してください。";
+
+/// 「分からない」の印（プロンプトで頼む文字列）。見分けは表記の揺れ（`UNKNOWN_ANSWERS`）を含めて行う。
+const TERM_UNKNOWN_MARKER: &str = "わからない";
+
+/// 「分からない」の印とみなす short の本体（主語「〇〇とは」・句読点・引用符・空白・語尾を除いた後）。
+const UNKNOWN_ANSWERS: [&str; 6] = [
+    TERM_UNKNOWN_MARKER,
+    "分からない",
+    "わかりません",
+    "分かりません",
+    "不明",
+    "わからないです",
+];
+
+/// 用語解説の short が「分からない」の印か（プロンプトの `TERM_UNKNOWN_INSTRUCTION` への応答）。
+///
+/// 「わからない」「わからないよ。」「「わからない」」「ドエンジニアリングとは、わからないよ。」のように、
+/// 印だけ（主語の「〇〇とは」・句読点・語尾を除いて）の short を印とみなす。
+/// 「〜かはわからないけれど、…」のように説明が続くものは印とみなさない（説明として表示する）。
+pub(crate) fn term_explanation_says_unknown(short: &str) -> bool {
+    let chars = normalize_term_notation(short);
+    // 「〇〇とは、」の前置きを外す（主語の判定と同じ規則。読点を含む長い前置きは外さない）。
+    let body = match definition_subject(&chars) {
+        Some(_) => {
+            let position = chars
+                .windows(2)
+                .position(|pair| pair == ['と', 'は'])
+                .unwrap_or(0);
+            &chars[position + 2..]
+        }
+        None => &chars[..],
+    };
+    let text: String = body
+        .iter()
+        .filter(|c| {
+            !(is_opening_quote(**c)
+                || is_closing_quote(**c)
+                || matches!(c, '、' | ',' | '。' | '.' | '!' | '?' | '…' | '〜' | '~'))
+        })
+        .collect();
+    let text = ["だよね", "だよ", "だね", "よ", "ね"]
+        .iter()
+        .find_map(|ending| text.strip_suffix(ending))
+        .unwrap_or(&text);
+    UNKNOWN_ANSWERS.contains(&text)
+}
 
 /// 用語解説レベル別の指示本文。simple → normal → detailed で「情報量・説明範囲」が段階的に
 /// 増えるよう、曖昧な形容詞（簡潔に／詳しく）だけに頼らず具体的な指示にする。
@@ -1001,9 +1351,15 @@ const TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET: std::time::Duration =
 
 /// 「別の語を定義した」ときの作り直しで、末尾の念押しの後ろに足す固定の注意書き。
 /// 利用者の入力（選択語・参考文脈）は含めない（外部データは区切りの中だけに置く構造を保つ）。
+///
+/// 選択語の名前を言わせるだけだと、知らない語・言葉の切れ端でも定義を作らせてしまう（2026-10-21 の
+/// 実機テスト A4: 作り直しで「ドエンジニアリングとは、…」と存在しない語を解説した）。そのため、
+/// 言葉の切れ端・意味をなさない文字列のときは名前を出して作らずに「わからない」と答える逃げ道を最後に添える
+/// （固有名詞などの意味をなす言葉は対象にしない。`TERM_UNKNOWN_INSTRUCTION` と同じ範囲）。
 const TERM_SUBJECT_RETRY_NOTE: &str = "前の回答は、選択語とは別の言葉を説明していました。\
 short の最初の文は、必ず選択語そのものの名前で始めてください。\
-参考文脈に出てくるほかの言葉や、記事の主題の言葉を説明しないでください。";
+参考文脈に出てくるほかの言葉や、記事の主題の言葉を説明しないでください。\
+選択語が言葉の切れ端や意味をなさない文字列のときだけは、意味を作らずに、short と detail を「わからない」としてください。";
 
 /// `とは` の前を主語とみなす最大の長さ（文字数）。これより長いものは定義の主語ではないとみなす。
 const TERM_SUBJECT_MAX_CHARS: usize = 40;
@@ -1076,7 +1432,12 @@ where
     log::info!("local term explanation named another subject; retrying once");
     match generate(retry_prompt) {
         Ok((retried, _)) if !term_explanation_defines_other_subject(selected_term, &retried) => {
-            log::info!("local term explanation retry named the selected term");
+            // 「わからない」は作り話より安全なので、1回目（別の語の定義）より優先して返す。
+            if term_output_says_unknown(&retried) {
+                log::info!("local term explanation retry answered unknown");
+            } else {
+                log::info!("local term explanation retry named the selected term");
+            }
             Ok(retried)
         }
         Ok(_) => {
@@ -1092,6 +1453,19 @@ where
     }
 }
 
+/// 用語解説の出力（JSON `{short, detail}`）の short が「わからない」の印か（ログの書き分け用）。
+fn term_output_says_unknown(output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("short")?
+                .as_str()
+                .map(term_explanation_says_unknown)
+        })
+        .unwrap_or(false)
+}
+
 /// 用語解説の出力（JSON `{short, detail}`）の short が、選択語ではなく別の語を定義しているか。
 ///
 /// true になるのは次のどちらか:
@@ -1102,6 +1476,7 @@ where
 /// ひらがな・カタカナ、空白と中黒、前後の「」『』や引用符、語の直後の読み・言い換えの括弧
 /// （例: 「証拠金（しょうこきん）とは」）。
 /// JSON として読めない・short が無いときは判定しない（false。解析の失敗は従来どおり dictionary_service が扱う）。
+/// short が「わからない」の印（`term_explanation_says_unknown`）のときも false（作り直して名前を言わせない）。
 fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
         return false;
@@ -1109,6 +1484,10 @@ fn term_explanation_defines_other_subject(selected_term: &str, output: &str) -> 
     let Some(short) = value.get("short").and_then(serde_json::Value::as_str) else {
         return false;
     };
+    // 「わからない」の印は別の語の定義ではない。作り直して名前を言わせると、作り話を後押しする。
+    if term_explanation_says_unknown(short) {
+        return false;
+    }
     // 選択語の後ろの括弧書き（「X（旧Twitter）」の「（旧Twitter）」）も、short 側の主語と同じように外して比べる。
     let mut term = strip_quotes(&normalize_term_notation(selected_term));
     strip_trailing_parenthetical(&mut term);
@@ -1373,8 +1752,124 @@ mod tests {
     }
 
     #[test]
+    fn summary_v2_prompt_builds_from_the_key_points_without_adding_facts_or_swapping_roles() {
+        // 要約（D167）: 要点・本文抜粋を材料にし、それにない事実を足さない・主語と目的語の関係を変えない指示を、
+        // 防御指示・記事情報の見出しより前の固定指示側に置く。材料（要点を含む）は見出しの後ろ。
+        let input = "タイトル: 題\n本文抜粋:\n抜粋の文。\n要点:\n・要点の文";
+        let prompt = build_prompt(
+            &request_for(SUMMARY_PROMPT_ID, input),
+            ExplanationLevel::Simple,
+        );
+        let instruction = prompt.find("要点に書かれた事実を軸に").unwrap();
+        let no_additions = prompt.find("要点と本文抜粋にない事実は足さない").unwrap();
+        let roles = prompt.find("主語と目的語の関係").unwrap();
+        let defense = prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap();
+        let heading = prompt.find(ARTICLE_DATA_HEADING).unwrap();
+        assert!(instruction < defense && no_additions < defense && roles < defense);
+        assert!(prompt.contains("やさしく簡潔に1〜2文で要約してください"));
+        assert!(prompt.find(FACTS_ONLY_RULE).unwrap() < defense);
+        assert!(heading < prompt.find("・要点の文").unwrap());
+        assert!(prompt.ends_with(input));
+        // 作り直しも v2 の指示に理由を足す。
+        let retry = build_prompt(
+            &AiRequest {
+                prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
+                input_text: input.to_string(),
+                context: Some("「2兆」は記事情報にない数字。".to_string()),
+            },
+            ExplanationLevel::Normal,
+        );
+        assert!(retry.contains("主語と目的語の関係"));
+        assert!(
+            retry.find(SUMMARY_RETRY_INSTRUCTION).unwrap()
+                < retry.find(ARTICLE_DATA_HEADING).unwrap()
+        );
+        // 固定指示の写しの点検（D166）にも v2 の指示が入る。
+        assert!(summary_fixed_prompt_texts()
+            .iter()
+            .any(|text| text.contains("主語と目的語の関係")));
+    }
+
+    #[test]
+    fn summary_v2_instruction_mentions_key_points_only_when_the_input_has_them() {
+        let level_prompt = |prompt_id: &str, input: &str| {
+            build_prompt(
+                &AiRequest {
+                    prompt_id: prompt_id.to_string(),
+                    input_text: input.to_string(),
+                    context: Some("「2兆」は記事情報にない数字。".to_string()),
+                },
+                ExplanationLevel::Normal,
+            )
+        };
+        let instruction_part = |prompt: &str| {
+            prompt[..prompt.find(ARTICLE_DATA_DEFENSE_INSTRUCTION).unwrap()].to_string()
+        };
+        let with_points = "タイトル: 題\n本文抜粋:\n抜粋の文。\n要点:\n・要点の文";
+        // 要点が無い入力（Mock の要点・作り直し）と、本文に全角コロンの「要点：」がある入力（偽の見出しは
+        // summary_service が全角にする）では、指示が要点に触れない。
+        let without_points = [
+            "タイトル: 題\n本文抜粋:\n抜粋の文。",
+            "タイトル: 題\n本文抜粋:\n要点：抜粋の文。",
+        ];
+        for prompt_id in [SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID] {
+            let prompt = instruction_part(&level_prompt(prompt_id, with_points));
+            assert!(prompt.contains("要点に書かれた事実を軸に"), "{prompt_id}");
+            for input in without_points {
+                let prompt = instruction_part(&level_prompt(prompt_id, input));
+                assert!(!prompt.contains("要点"), "{prompt_id}: {prompt}");
+                assert!(
+                    prompt.contains("本文抜粋にない事実は足さない"),
+                    "{prompt_id}"
+                );
+                assert!(prompt.contains("主語と目的語の関係"), "{prompt_id}");
+            }
+        }
+        // 固定指示の写しの点検には、要点あり・なしの両方の指示が入る。
+        let fixed = summary_fixed_prompt_texts();
+        assert!(fixed.contains(&summary_instruction("分かりやすく", true)));
+        assert!(fixed.contains(&summary_instruction("分かりやすく", false)));
+    }
+
+    #[test]
+    fn summary_instructions_have_no_runs_of_spaces() {
+        // 行末の `\` が抜けると、続く行の字下げの空白が指示文に入る。
+        for level in ["やさしく簡潔に", "分かりやすく", "詳しく"] {
+            for with_points in [true, false] {
+                let instruction = summary_instruction(level, with_points);
+                assert!(!instruction.contains("  "), "{instruction}");
+                assert!(!instruction.contains('\n'), "{instruction}");
+            }
+        }
+        for text in summary_fixed_prompt_texts() {
+            assert!(!text.contains("  "), "{text}");
+        }
+    }
+
+    #[test]
+    fn summary_v2_mock_uses_the_mock_seed_in_the_context() {
+        // 実AIの入力（見出し付きの材料）ではなく、context の種（本文抜粋＋定型文）から Mock の要約を作る。
+        let response = service()
+            .request_text(
+                AiRequest {
+                    prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                    input_text: "タイトル: 題\n本文抜粋:\n抜粋の文。".to_string(),
+                    context: Some("抜粋の文。 特に、題の要点を確認する。".to_string()),
+                },
+                AiProvider::Mock,
+                ExplanationLevel::Normal,
+            )
+            .unwrap();
+        assert!(response.text.starts_with("抜粋の文。"), "{}", response.text);
+        assert!(!response.text.contains("タイトル:"), "{}", response.text);
+    }
+
+    #[test]
     fn summary_and_speech_prompts_forbid_facts_beyond_the_input() {
-        let summary = build_prompt(&request_for("summary_v1", "本文"), ExplanationLevel::Normal);
+        let summary = build_prompt(
+            &request_for(SUMMARY_PROMPT_ID, "本文"),
+            ExplanationLevel::Normal,
+        );
         assert!(
             summary.find(FACTS_ONLY_RULE).unwrap() < summary.find(ARTICLE_DATA_HEADING).unwrap()
         );
@@ -1456,7 +1951,7 @@ mod tests {
         );
         // 自由文の出力はスキーマで縛らない。再説明・一言は短く頼むので上限も小さくする。
         for (prompt_id, expected) in [
-            ("summary_v1", LOCAL_MAX_OUTPUT_TOKENS),
+            (SUMMARY_PROMPT_ID, LOCAL_MAX_OUTPUT_TOKENS),
             (
                 YUUKO_EXPLANATION_PROMPT_ID,
                 LOCAL_YUUKO_EXPLANATION_MAX_OUTPUT_TOKENS,
@@ -1520,7 +2015,7 @@ mod tests {
             prompt_for(YUUKO_COMMENT_PROMPT_ID, ExplanationLevel::Normal).contains("60文字以内")
         );
         // 要約・要点には念押しを付けない（中立な文体・JSON の契約を変えないため）。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             assert!(!prompt_for(prompt_id, ExplanationLevel::Normal)
                 .contains(YUUKO_SPEECH_REMINDER_HEADING));
         }
@@ -1580,7 +2075,7 @@ mod tests {
             assert!(calm.ends_with(YUUKO_CALM_TONE_REMINDER));
         }
         // 要約・要点・用語解説は中立な文体・JSON の契約のままなので、文末の規則を入れない。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             let prompt = prompt_for(prompt_id, ordinary);
             assert!(!prompt.contains(YUUKO_ENDING_RULE), "{prompt_id}");
             assert!(
@@ -1638,7 +2133,7 @@ mod tests {
         assert!(!prompt_for(YUUKO_COMMENT_PROMPT_ID, heavy).contains("親しみやすい短い感想"));
         assert!(prompt_for(YUUKO_COMMENT_PROMPT_ID, ordinary).contains("親しみやすい短い感想"));
         // 要約・要点は中立な文体なので、重いニュースでも口調の指示を入れない。
-        for prompt_id in ["summary_v1", ARTICLE_POINTS_PROMPT_ID] {
+        for prompt_id in [SUMMARY_PROMPT_ID, ARTICLE_POINTS_PROMPT_ID] {
             let prompt = prompt_for(prompt_id, heavy);
             assert!(!prompt.contains(YUUKO_CALM_TONE_INSTRUCTION), "{prompt_id}");
             assert!(!prompt.contains(YUUKO_CALM_TONE_REMINDER), "{prompt_id}");
@@ -1648,7 +2143,7 @@ mod tests {
     #[test]
     fn build_prompt_includes_instruction_and_input_only() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "  生成AIの新機能が発表された  ".to_string(),
             context: Some("送信されないはずのコンテキスト".to_string()),
         };
@@ -1658,6 +2153,36 @@ mod tests {
         assert!(prompt.contains("生成AIの新機能が発表された"));
         // context は送信プロンプトに含めない（最小化）。
         assert!(!prompt.contains("送信されないはず"));
+    }
+
+    #[test]
+    fn summary_retry_prompt_adds_bounded_reasons_before_the_article_data() {
+        // D166: 点検の理由（context）は固定指示の側（記事情報の見出しより前）に、無害化・行数を絞って置く。
+        let reasons = (1..=7)
+            .map(|n| format!("「{n}<b>」は記事情報にない数字だった。"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = AiRequest {
+            prompt_id: SUMMARY_RETRY_PROMPT_ID.to_string(),
+            input_text: "投資額は1兆円。".to_string(),
+            context: Some(format!("# {}\n\n{}", "あ".repeat(200), reasons)),
+        };
+        let prompt = build_prompt(&request, ExplanationLevel::Normal);
+
+        let heading = prompt.find(ARTICLE_DATA_HEADING).unwrap();
+        let retry = prompt.find(SUMMARY_RETRY_INSTRUCTION).unwrap();
+        assert!(prompt.starts_with(&summary_instruction("分かりやすく", false)));
+        assert!(retry < heading);
+        assert!(prompt[..heading].contains(&format!("- {}\n", "あ".repeat(120))));
+        assert!(prompt[..heading].contains("「1＜b>」は記事情報にない数字だった。"));
+        assert!(prompt[..heading].contains("「4＜b>」"));
+        assert!(!prompt.contains("「5＜b>」"));
+        assert!(!prompt.contains('<'));
+        assert!(prompt[heading..].contains("投資額は1兆円。"));
+        // 固定指示の一覧（写しの点検用）には、作り直しの固定文と各解説レベルの指示が入る。
+        let fixed = summary_fixed_prompt_texts();
+        assert!(fixed.contains(&SUMMARY_RETRY_INSTRUCTION.to_string()));
+        assert!(fixed.contains(&summary_instruction("詳しく", true)));
     }
 
     #[test]
@@ -2100,7 +2625,7 @@ mod tests {
     #[test]
     fn summary_prompt_stays_neutral_without_yuuko_tone() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "本文".to_string(),
             context: None,
         };
@@ -2137,7 +2662,7 @@ mod tests {
     #[test]
     fn summary_prompt_has_defense_and_external_data_heading_without_tone() {
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "入力本文".to_string(),
             context: None,
         };
@@ -2176,7 +2701,11 @@ mod tests {
     #[test]
     fn mock_responses_for_article_prompts_ignore_prompt_wrapping() {
         // Mock は組み立て後のプロンプトではなく input_text を使うため、防御指示・見出しは混入しない。
-        for prompt_id in ["summary_v1", "yuuko_explanation_v1", "yuuko_comment_v1"] {
+        for prompt_id in [
+            SUMMARY_PROMPT_ID,
+            "yuuko_explanation_v1",
+            "yuuko_comment_v1",
+        ] {
             let request = AiRequest {
                 prompt_id: prompt_id.to_string(),
                 input_text: "入力本文".to_string(),
@@ -2187,6 +2716,133 @@ mod tests {
                 .unwrap();
             assert_eq!(response.text, "入力本文", "{prompt_id}");
         }
+    }
+
+    fn mock_summary(input_text: &str) -> String {
+        service()
+            .request_text(
+                AiRequest {
+                    prompt_id: SUMMARY_PROMPT_ID.to_string(),
+                    input_text: "タイトル: 記事タイトル".to_string(),
+                    // アプリと同じく、Mock の要約の種は context で渡す（D167）。
+                    context: Some(input_text.to_string()),
+                },
+                AiProvider::Mock,
+                ExplanationLevel::Normal,
+            )
+            .unwrap()
+            .text
+    }
+
+    #[test]
+    fn mock_summary_is_a_short_excerpt_of_the_first_sentences_without_urls() {
+        // 本文抜粋（最大1500文字）をそのまま要約欄に出さない（原文の大量転載に近くなるため）。
+        let excerpt = "新しい補助金の受付が始まった。対象は中小企業です。詳しくはこちら https://t.co/AbCdEf をご覧ください。"
+            .repeat(30);
+        let summary = mock_summary(&format!("{excerpt} 特に、注目ポイント。"));
+        assert_eq!(
+            summary,
+            "新しい補助金の受付が始まった。対象は中小企業です。"
+        );
+        assert!(summary.chars().count() <= MOCK_EXCERPT_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn mock_summary_removes_urls_and_cuts_long_sentences() {
+        // 英語のツイート（改行・t.co の URL 入り）でも URL を除き、上限文字数で切って「…」を付ける。
+        let tweet = "Breaking: the city council approved the new budget for public transport https://t.co/xyz\n\
+            and many residents welcomed the decision because it will extend bus routes to the suburbs and lower fares for students and seniors alike";
+        let summary = mock_summary(tweet);
+        assert!(!summary.contains("http"), "{summary}");
+        assert!(!summary.contains("t.co"), "{summary}");
+        assert!(!summary.contains('\n'));
+        assert!(summary.ends_with('…'), "{summary}");
+        assert!(summary.chars().count() <= MOCK_EXCERPT_MAX_CHARS + 1);
+        // 英語の文も「.」＋空白で区切る。
+        assert_eq!(
+            mock_summary("First sentence. Second one! Third sentence."),
+            "First sentence. Second one!"
+        );
+        // 日本語の文に続けて書かれた URL も、URL の手前までは残す。
+        assert_eq!(
+            mock_summary("詳しくはこちらhttps://example.com/a"),
+            "詳しくはこちら"
+        );
+    }
+
+    #[test]
+    fn mock_summary_falls_back_to_a_fixed_text_when_nothing_is_left() {
+        assert_eq!(
+            mock_summary("https://t.co/abc www.example.com"),
+            MOCK_EXCERPT_EMPTY_TEXT
+        );
+        assert_eq!(mock_summary("---"), MOCK_EXCERPT_EMPTY_TEXT);
+    }
+
+    #[test]
+    fn mock_summary_keeps_only_the_first_sentence_when_two_do_not_fit() {
+        // 1文目は上限内・2文目まで入れると上限を超える → 文の途中で切らず1文目だけにする。
+        let first = format!("{}。", "あ".repeat(60));
+        let second = format!("{}。", "い".repeat(80));
+        assert_eq!(mock_summary(&format!("{first}{second}")), first);
+        // 2文目の後に区切りが無く長い本文が続く場合も同じ。
+        let tail = "う".repeat(200);
+        assert_eq!(mock_summary(&format!("{first}{tail}")), first);
+        // 1文目だけで上限を超えるときは上限で切って「…」を付ける。
+        let long_first = format!("{}。", "え".repeat(200));
+        let summary = mock_summary(&long_first);
+        assert_eq!(summary, format!("{}…", "え".repeat(MOCK_EXCERPT_MAX_CHARS)));
+    }
+
+    #[test]
+    fn mock_summary_merges_repeated_periods() {
+        // 連続した「。」は1つにまとめ、空の文として数えない。
+        assert_eq!(
+            mock_summary("受付が始まった。。。対象は中小企業。。続きの文。"),
+            "受付が始まった。対象は中小企業。"
+        );
+    }
+
+    #[test]
+    fn mock_article_points_leave_out_urls() {
+        let points = mock_article_points(
+            "タイトル\n新製品を発表した https://t.co/abc。価格は据え置きだ。",
+            "テクノロジー",
+        );
+        assert_eq!(points.key_points[0], "新製品を発表した");
+        assert_eq!(points.key_points[1], "価格は据え置きだ");
+        assert!(points
+            .key_points
+            .iter()
+            .all(|point| !point.contains("http")));
+    }
+
+    #[test]
+    fn mock_article_points_leave_out_sentences_without_japanese() {
+        // 本文抜粋に混ざった英語のツイート文（URL は除いた後に残る部分）は要点にしない。
+        let points = mock_article_points(
+            "Deno が Cloudflare に参加\nDeno が Cloudflare に加わると発表した。\nWe are excited to announce that Deno is joining Cloudflare! https://t.co/hC5HOUbtt4 — Deno (@deno_land) October 9, 2026\n今後も開発は続く。",
+            "テクノロジー",
+        );
+        assert_eq!(
+            points.key_points,
+            vec![
+                "Deno が Cloudflare に加わると発表した".to_string(),
+                "今後も開発は続く".to_string(),
+            ]
+        );
+        // 日本語の文が無ければ定型文で2件にそろえる。
+        let points = mock_article_points(
+            "Deno joins Cloudflare\nWe are excited to announce that Deno is joining Cloudflare!",
+            "テクノロジー",
+        );
+        assert_eq!(
+            points.key_points,
+            vec![
+                "「Deno joins Cloudflare」についてのニュース。".to_string(),
+                "詳しくは元記事で確かめられる。".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2309,7 +2965,7 @@ mod tests {
     fn local_request_failure_is_returned_without_falling_back_to_mock() {
         // 黙って Mock（や Gemini）へ切り替えず、固定分類のエラーで返す。
         let request = AiRequest {
-            prompt_id: "summary_v1".to_string(),
+            prompt_id: SUMMARY_PROMPT_ID.to_string(),
             input_text: "本文".to_string(),
             context: None,
         };
@@ -2521,6 +3177,89 @@ mod tests {
         assert_eq!(fake.prompts.len(), 1);
     }
 
+    // --- 「わからない」の印（2026-10-21 実機テスト A4） ---
+
+    #[test]
+    fn unknown_answer_is_detected_with_notation_variants() {
+        for short in [
+            "わからない",
+            "わからないよ。",
+            "分からないよ！",
+            "「わからない」",
+            "わからないです。",
+            "わかりません。",
+            "不明",
+            " わからない だよ ",
+            "ドエンジニアリングとは、わからないよ。",
+            "「ドエンジニアリング」とは、わからない。",
+        ] {
+            assert!(term_explanation_says_unknown(short), "{short}");
+        }
+    }
+
+    #[test]
+    fn explanations_that_mention_not_knowing_are_not_the_unknown_answer() {
+        for short in [
+            "需要とは、先のことはわからないけれど、買いたい気持ちの量のことだよ。",
+            "証拠金とは、取引の担保だよ。",
+            "わからないことを調べる方法だよ。",
+            "不明瞭とは、はっきりしないことだよ。",
+            "",
+        ] {
+            assert!(!term_explanation_says_unknown(short), "{short}");
+        }
+    }
+
+    #[test]
+    fn unknown_answer_is_not_treated_as_another_subject() {
+        // 「わからない」を別の語の定義とみなして作り直すと、名前を言わせて作り話を後押しする。
+        for short in ["わからない", "わからないよ。"] {
+            assert!(!defines_other("ドエンジニアリング", short), "{short}");
+        }
+        let unknown = term_output("わからない");
+        let mut fake = FakeTermGenerator::new(vec![Ok(unknown.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(unknown));
+        assert_eq!(fake.prompts, vec!["FIRST_PROMPT"]);
+    }
+
+    #[test]
+    fn subject_retry_prefers_an_unknown_answer_over_another_subject() {
+        // 作り直しで「わからない」と答えたら、1回目（別の語の定義）より安全なのでそちらを返す。
+        let wrong = term_output("永久先物とは、満期のない先物だよ。");
+        let unknown = term_output("わからない");
+        let mut fake = FakeTermGenerator::new(vec![Ok(wrong), Ok(unknown.clone())]);
+        assert_eq!(fake.run(RETRY_BUDGET), Ok(unknown));
+        assert_eq!(fake.prompts.len(), 2);
+    }
+
+    #[test]
+    fn term_prompt_and_retry_note_offer_the_unknown_answer() {
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let prompt = term_explanation_prompt_for(level);
+            assert!(prompt.contains(TERM_UNKNOWN_INSTRUCTION));
+            assert!(prompt.contains(&format!("「{TERM_UNKNOWN_MARKER}」")));
+            // 固定指示（防御指示より前）と末尾の念押しの両方にある。
+            let defense = prompt.find("厳守事項").unwrap();
+            assert!(prompt.find(TERM_UNKNOWN_INSTRUCTION).unwrap() < defense);
+            assert!(TERM_EXPLANATION_REMINDER.contains(TERM_UNKNOWN_MARKER));
+        }
+        assert!(TERM_SUBJECT_RETRY_NOTE.contains(&format!("「{TERM_UNKNOWN_MARKER}」")));
+        // フレーズの説明には「わからない」を頼まない（判定もしない）。
+        let phrase = build_phrase_explanation_prompt(
+            &AiRequest {
+                prompt_id: PHRASE_EXPLANATION_PROMPT_ID.to_string(),
+                input_text: "選んだ文章".to_string(),
+                context: None,
+            },
+            ExplanationLevel::Normal,
+        );
+        assert!(!phrase.contains(TERM_UNKNOWN_MARKER));
+    }
+
     #[test]
     fn subject_retry_prompt_keeps_only_the_title_and_adds_a_fixed_note() {
         let request = AiRequest {
@@ -2643,13 +3382,14 @@ mod tests {
         let title = "中小企業のデジタル化に新補助金";
         let input = format!("タイトル: {title}\n抜粋: {excerpt}");
         eprintln!("input chars: {}", input.chars().count());
-        // アプリと同じ順（要約 → 要点 → 再説明 → 一言）で呼び、再説明・一言には前の2つの出力から
-        // summary_service と同じ組み立て（build_yuuko_speech_input）で作った入力を渡す。
+        // アプリと同じ順（要点 → 要約 → 再説明 → 一言。D167）で呼ぶ。要約には要点から、再説明・一言には
+        // 前の2つの出力から、summary_service と同じ組み立て（build_summary_input / build_yuuko_speech_input）で
+        // 作った入力を渡す。
         let mut summary = String::new();
         let mut key_points = Vec::new();
         for prompt_id in [
-            "summary_v1",
             ARTICLE_POINTS_PROMPT_ID,
+            SUMMARY_PROMPT_ID,
             YUUKO_EXPLANATION_PROMPT_ID,
             YUUKO_COMMENT_PROMPT_ID,
         ] {
@@ -2666,6 +3406,12 @@ mod tests {
                     speech_input.chars().count()
                 );
                 speech_input
+            } else if prompt_id == SUMMARY_PROMPT_ID {
+                crate::services::summary_service::build_summary_input(
+                    title,
+                    Some(&excerpt),
+                    Some(&key_points),
+                )
             } else {
                 input.clone()
             };
@@ -2688,7 +3434,7 @@ mod tests {
                 response.text
             );
             assert_eq!(response.provider, "local");
-            if prompt_id == "summary_v1" {
+            if prompt_id == SUMMARY_PROMPT_ID {
                 summary = response.text.trim().to_string();
             }
             if prompt_id == YUUKO_EXPLANATION_PROMPT_ID || prompt_id == YUUKO_COMMENT_PROMPT_ID {
@@ -2764,6 +3510,80 @@ mod tests {
             serde_json::from_str::<AiTermExplanation>(response.text.trim())
                 .expect("strict term explanation JSON");
         }
+        local.shutdown();
+    }
+
+    /// 実モデルで、言葉の切れ端・知らない語に「わからない」と答え、一般的な語は従来どおり解説するかを
+    /// 見る（手動実行のみ・結果は目視。2026-10-21 実機テスト A4 の確認用）。作り直しの経路も含めて通す。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_local_llm_term_unknown -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires the real llama-server and model placed by scripts/local-llm/place-bundle.mjs"]
+    fn real_local_llm_term_unknown_answers() {
+        use crate::domain::summary::AiTermExplanation;
+        use std::time::Instant;
+        let dir = std::env::var_os("YUUKO_LOCAL_LLM_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources")
+                    .join("local_llm")
+            });
+        let local = LocalLlmService::new(Some(dir));
+        let service = service().with_local_llm(local.clone());
+        let fde = "タイトル: 米テック企業、FDE職の採用を拡大\n\
+            抜粋: 米企業でFDE（フォワードデプロイドエンジニアリング）の担当者が増えている。\
+            顧客の現場に入り込んでAIを導入する役割だ。";
+        let subsidy = "タイトル: 中小企業のデジタル化に新補助金\n\
+            抜粋: 政府は来年度から、中小企業のデジタル化を支援する新しい補助金制度を始めると発表した。";
+        let gadget = "タイトル: ソニー、新型ゲーム機「PlayStation 6」を発表\n\
+            抜粋: ソニーは新型ゲーム機PlayStation 6を発表した。\
+            クアルコムのSnapdragon X2 Eliteを載せたノートPCも各社から出る。";
+        let mut unknown_count = 0;
+        let cases = [
+            ("ドエンジニアリング", fde),
+            ("ォワードデプロイ", fde),
+            ("ラウドサービス", subsidy),
+            ("フォワードデプロイドエンジニアリング", fde),
+            ("FDE", fde),
+            ("エンジニアリング", fde),
+            ("補助金", subsidy),
+            ("クラウドサービス", subsidy),
+            ("デジタル化", subsidy),
+            ("データセンター", subsidy),
+            ("証拠金", subsidy),
+            ("中小企業", subsidy),
+            // 新しい固有名詞・製品名（切れ端ではないので「わからない」にならないこと）。
+            ("PlayStation 6", gadget),
+            ("Snapdragon X2 Elite", gadget),
+            ("ソニー", gadget),
+            ("クアルコム", gadget),
+        ];
+        for (term, context) in cases {
+            let started = Instant::now();
+            let response = service
+                .request_text(
+                    AiRequest {
+                        prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
+                        input_text: term.to_string(),
+                        context: Some(context.to_string()),
+                    },
+                    AiProvider::Local,
+                    ExplanationLevel::Normal,
+                )
+                .expect("local generation");
+            let parsed = serde_json::from_str::<AiTermExplanation>(response.text.trim())
+                .expect("strict term explanation JSON");
+            let unknown = term_explanation_says_unknown(&parsed.short);
+            unknown_count += usize::from(unknown);
+            eprintln!(
+                "[{}] {term}: {:.1}s\n  short: {}\n  detail: {}\n",
+                if unknown { "UNKNOWN" } else { "explained" },
+                started.elapsed().as_secs_f32(),
+                parsed.short,
+                parsed.detail
+            );
+        }
+        eprintln!("unknown answers: {unknown_count} / {}", cases.len());
         local.shutdown();
     }
 

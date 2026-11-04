@@ -50,6 +50,7 @@
 //! ```
 //! 同梱物（モデル・llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
 //! `YUUKO_LOCAL_LLM_DIR` で場所を指す。
+//! 同梱と別のモデルで回すとき（D168 のモデル比較）は `YUUKO_LLM_EVAL_MODEL` などを指定する（`eval_model_override`）。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -61,6 +62,8 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::eval_model_override::{eval_local_llm, ModelProfile};
+use super::output_check::{check_japanese_summary, IssueKind};
 use super::{
     clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
     FallbackPolicy, SummaryGeneration, SummaryOutputKind, SummaryService,
@@ -81,9 +84,9 @@ use crate::paths::{AppPaths, NETWORK_ALLOWLIST_RELATIVE_PATH, NEWS_SOURCES_RELAT
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::ai_provider_service::summary_fixed_prompt_texts;
 use crate::services::ai_provider_service::AiProviderService;
 use crate::services::dictionary_service::{DictionaryService, TermExplanationAi};
-use crate::services::local_llm_service::LocalLlmService;
 use crate::services::news_service::{
     article_id_from_url, normalize_published_at, utc_now_rfc3339, NewsSource, NewsSourcesConfig,
 };
@@ -144,7 +147,7 @@ fn local_llm_quality_eval() {
     if !(run_all || phase == "summary" || phase == "terms") {
         return;
     }
-    let local = LocalLlmService::new(Some(bundle_dir()));
+    let local = eval_local_llm(bundle_dir());
     let ai = AiProviderService::new(&paths).with_local_llm(local.clone());
     // 1回目の呼び出しに起動時間が乗らないよう、先に接続確認（検証・起動・短い生成）を済ませて別に記録する。
     let started = Instant::now();
@@ -163,7 +166,7 @@ fn local_llm_quality_eval() {
     local.shutdown();
 }
 
-fn bundle_dir() -> PathBuf {
+pub(super) fn bundle_dir() -> PathBuf {
     std::env::var_os(BUNDLE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -431,7 +434,7 @@ fn article_record(
     })
 }
 
-fn write_json(path: &Path, value: &Value) {
+pub(super) fn write_json(path: &Path, value: &Value) {
     std::fs::write(
         path,
         serde_json::to_string_pretty(value).expect("serialize json"),
@@ -441,7 +444,7 @@ fn write_json(path: &Path, value: &Value) {
 
 /// 保存済みの `articles.json` の記事を一時データフォルダへ取り込み（既にある記事は飛ばす）、
 /// `<RUN>/articles.json` として複写する。別の回で同じ記事を評価するため。
-fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
+pub(super) fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
     let text = std::fs::read_to_string(articles_file).expect("read saved articles.json");
     let records: Vec<Value> = serde_json::from_str(&text).expect("parse saved articles.json");
     let repository = ArticleRepository::new(paths);
@@ -484,7 +487,7 @@ fn import_articles(articles_file: &Path, run_dir: &Path, paths: &AppPaths) {
     }
 }
 
-fn load_article_ids(out_dir: &Path) -> Vec<String> {
+pub(super) fn load_article_ids(out_dir: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(out_dir.join("articles.json"))
         .expect("articles.json (run the fetch phase first)");
     let records: Vec<Value> = serde_json::from_str(&text).expect("parse articles.json");
@@ -495,7 +498,10 @@ fn load_article_ids(out_dir: &Path) -> Vec<String> {
 }
 
 /// 追記先の JSONL に記録済みのキー（記事ID など）を読む。途中で止めても続きから再開できるようにする。
-fn recorded_keys(path: &Path, key: impl Fn(&Value) -> Option<String>) -> HashSet<String> {
+pub(super) fn recorded_keys(
+    path: &Path,
+    key: impl Fn(&Value) -> Option<String>,
+) -> HashSet<String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -504,7 +510,7 @@ fn recorded_keys(path: &Path, key: impl Fn(&Value) -> Option<String>) -> HashSet
         .collect()
 }
 
-fn append_line(path: &Path, value: &Value) {
+pub(super) fn append_line(path: &Path, value: &Value) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -513,7 +519,7 @@ fn append_line(path: &Path, value: &Value) {
     writeln!(file, "{value}").expect("append jsonl");
 }
 
-fn error_label(error: &AppError) -> String {
+pub(super) fn error_label(error: &AppError) -> String {
     format!("{error:?}")
 }
 
@@ -535,6 +541,8 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             continue;
         }
         let stages = RefCell::new(Vec::<Value>::new());
+        // 点検の材料（アプリと同じく、要点の段の入力＝タイトル＋本文抜粋）。D170 の点検の記録に使う。
+        let source = RefCell::new(None::<String>);
         let started = Instant::now();
         let result = service.generate_article_summary_with(
             GenerateArticleSummaryParams {
@@ -542,7 +550,10 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
             },
             FallbackPolicy::SaveFallback,
             |request, kind, provider, level| {
-                record_stage(&service, &stages, request, kind, provider, level)
+                if kind == SummaryOutputKind::Points && source.borrow().is_none() {
+                    source.replace(Some(request.input_text.clone()));
+                }
+                record_stage(&service, &stages, &source, request, kind, provider, level)
             },
         );
         let total_ms = started.elapsed().as_millis();
@@ -577,6 +588,7 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
 fn record_stage(
     service: &SummaryService,
     stages: &RefCell<Vec<Value>>,
+    source: &RefCell<Option<String>>,
     request: AiRequest,
     kind: SummaryOutputKind,
     provider: AiProvider,
@@ -584,6 +596,9 @@ fn record_stage(
 ) -> Result<AiResponse, AppError> {
     let input_chars = request.input_text.chars().count();
     let input_text = request.input_text.clone();
+    let source_text = source.borrow().clone().unwrap_or_default();
+    // 要約の作り直し（D166 の summary_retry_v2）を最初の要約と分けて数えるため。
+    let prompt_id = request.prompt_id.clone();
     // 本番（request_validated_text）と同じく、再説明・一言の口調を入力から判定する（D122）。
     let tone = SpeechTone::for_request(&request.prompt_id, &request.input_text);
     // 再説明・一言の入力は同じ生成の AI 出力（要約・要点）だけなので、確認用に残す。
@@ -599,6 +614,7 @@ fn record_stage(
     let elapsed_ms = started.elapsed().as_millis();
     let mut stage = json!({
         "kind": kind.label(),
+        "promptId": prompt_id,
         "ms": elapsed_ms,
         "inputChars": input_chars,
         "speechInput": speech_input,
@@ -611,6 +627,11 @@ fn record_stage(
             stages.borrow_mut().push(stage);
             return Err(error);
         }
+    };
+    // 候補のモデルごとの後始末（D168 のモデル比較。調整のない候補・同梱のモデルではそのまま）。
+    let raw = AiResponse {
+        text: ModelProfile::from_env().clean_raw(&raw.text),
+        ..raw
     };
     stage["provider"] = json!(raw.provider);
     stage["raw"] = json!(raw.text);
@@ -632,9 +653,101 @@ fn record_stage(
     let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
+        // 機械点検（D166）の結果。要約は作り直しの判断と同じ点検、要点・注目ポイントは記録だけ（作り直さない）。
+        let checked = match kind {
+            SummaryOutputKind::Summary => Some(response.text.clone()),
+            SummaryOutputKind::Points => validate_article_points(&response.text).ok().map(|v| {
+                [v.points.key_points, v.points.focus_points].concat().join(
+                    "
+",
+                )
+            }),
+            _ => None,
+        };
+        if let Some(checked) = checked {
+            // 点検の材料はアプリと同じ記事そのもの（タイトル＋本文抜粋）。
+            stage["check"] = check_json(&source_text, &checked);
+        }
+        // D170 の点検（要点・注目ポイントは1件ずつ、タグ、再説明・一言）。アプリと同じ材料で照らす。
+        stage["consistency"] = consistency_json(kind, &source_text, &response.text);
     }
     stages.borrow_mut().push(stage);
     selected
+}
+
+/// D170 の点検（見出しの残り・反対の意味・材料にない年・年の組み合わせ）の結果を記録用の JSON にする。
+/// 要約は `check_json`（`check_japanese_summary` に同じ点検が入っている）で見るので、ここでは空にする。
+fn consistency_json(kind: SummaryOutputKind, source: &str, output: &str) -> Value {
+    let items: Vec<(String, String)> = match kind {
+        SummaryOutputKind::Summary => Vec::new(),
+        SummaryOutputKind::Points => match validate_article_points(output) {
+            Ok(validated) => {
+                let points = validated.points;
+                points
+                    .key_points
+                    .into_iter()
+                    .map(|item| ("key_point".to_string(), item))
+                    .chain(
+                        points
+                            .focus_points
+                            .into_iter()
+                            .map(|item| ("focus_point".to_string(), item)),
+                    )
+                    .chain(points.tags.into_iter().map(|tag| ("tag".to_string(), tag)))
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        },
+        _ => vec![(kind.label().to_string(), output.to_string())],
+    };
+    let issues: Vec<Value> = items
+        .iter()
+        .flat_map(|(part, item)| {
+            let issues = if part == "tag" {
+                super::consistency_check::find_contradictions(source, item)
+            } else if matches!(
+                kind,
+                SummaryOutputKind::Explanation | SummaryOutputKind::Comment
+            ) {
+                // 再説明・一言はアプリと同じ点検（意味をなさない語・言い換えた指示の写しを含む）。
+                let (stripped, _) = super::consistency_check::strip_heading_labels(item);
+                super::consistency_check::check_speech_consistency(source, &stripped)
+            } else {
+                let (stripped, _) = super::consistency_check::strip_heading_labels(item);
+                super::consistency_check::check_stage_consistency(source, &stripped)
+            };
+            issues.into_iter().map(move |issue| {
+                json!({
+                    "part": part,
+                    "item": item,
+                    "kind": issue.kind.label(),
+                    "reason": issue.reason,
+                })
+            })
+        })
+        .collect();
+    json!(issues)
+}
+
+/// 要約の機械点検（`output_check`）の結果を記録用の JSON にする（すべての種類・作り直しの対象かどうか）。
+pub(super) fn check_json(source: &str, output: &str) -> Value {
+    let fixed = summary_fixed_prompt_texts();
+    let fixed_refs: Vec<&str> = fixed.iter().map(String::as_str).collect();
+    let report = check_japanese_summary(source, output, None, &fixed_refs);
+    json!({
+        "issues": report.issues.iter().map(|issue| json!({
+            "kind": issue.kind.label(),
+            "retry": issue.kind.triggers_summary_retry(),
+            "reason": issue.reason,
+        })).collect::<Vec<_>>(),
+        "retryKinds": report
+            .kinds_where(IssueKind::triggers_summary_retry)
+            .iter()
+            .map(|kind| kind.label())
+            .collect::<Vec<_>>(),
+        "sourceNumberKept": report.source_number_kept,
+        "chars": output.chars().filter(|c| !c.is_whitespace()).count(),
+    })
 }
 
 #[derive(Debug, Deserialize)]

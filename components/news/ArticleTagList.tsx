@@ -111,11 +111,11 @@ function TagFilterButton({
       onClick={handleClick}
       className={cn(
         TAG_BASE_CLASS,
-        "block rounded-md transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--yuuko-green)]",
+        "block rounded-md transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--yuuko-green-text)]",
         // 押下中はサイドバーの選択中項目と同じ配色にする（globals.css で全テーマ 4.6:1 以上を確認済みの組み合わせ）。
         isSelected
-          ? "border-[var(--yuuko-green)] bg-[var(--yuuko-green-light)] font-semibold text-[var(--yuuko-green)]"
-          : "border-border bg-secondary text-secondary-foreground hover:border-[var(--yuuko-green)]"
+          ? "border-[var(--yuuko-green-text)] bg-[var(--yuuko-green-light)] font-semibold text-[var(--yuuko-green-text)]"
+          : "border-border bg-secondary text-secondary-foreground hover:border-[var(--yuuko-green-text)]"
       )}
     >
       #{tag}

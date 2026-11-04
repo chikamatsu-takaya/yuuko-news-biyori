@@ -60,6 +60,23 @@ pub async fn save_user_settings(
     Ok(CommandOk { ok: true })
 }
 
+/// 呼び名だけを保存し、保存した呼び名（前後の空白を除いたもの）を返す（カスタマイズ画面。判断台帳 D161）。
+/// 設定全体を上書きする `save_user_settings` と分け、受け取るのは呼び名の文字列だけにする
+/// （ほかの欄を古い値で上書きしない・任意の欄を書き換えられる汎用 command にしない）。
+/// 検証（32文字・制御文字なし）は `save_user_settings` と同じで、不正なら検証エラーにして何も保存しない。
+/// 常駐ゆうこウィンドウには許可しない（D110）。
+#[tauri::command]
+pub async fn set_nickname(
+    state: State<'_, AppState>,
+    params: SetNicknameParams,
+) -> CommandResult<String> {
+    let settings_service = state.settings_service.clone();
+    tauri::async_runtime::spawn_blocking(move || settings_service.set_nickname(&params.nickname))
+        .await
+        .map_err(|error| CommandError::join_error("set-nickname", error))?
+        .map_err(CommandError::from)
+}
+
 /// 設定を既定値へ初期化する。破壊的操作のためReact側で確認ダイアログを挟む（画面詳細設計書 SCR-003 §7.6）。
 #[tauri::command]
 pub async fn reset_user_settings(state: State<'_, AppState>) -> CommandResult<UserSettingsDto> {
@@ -147,6 +164,12 @@ fn internal_connection_result() -> AiProviderConnectionTestResult {
 #[serde(rename_all = "camelCase")]
 pub struct SaveUserSettingsParams {
     pub settings: UserSettingsDto,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNicknameParams {
+    pub nickname: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

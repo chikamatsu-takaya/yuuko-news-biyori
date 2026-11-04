@@ -19,10 +19,13 @@
 //! - 実AIの失敗・利用枠超過で Mock の代替出力になった場合、および実AIの出力が検証に落ちた場合は保存せず
 //!   失敗として扱い、再試行→失敗の流れに乗せる（`generate_article_summary_without_fallback`、D56 / D104）。
 //! - 1回の投入はおすすめ順の上位 `maxDailyRecommendations` 件まで（常駐負荷を抑えるため、D56。ローカルでも同じ）。
-//! - ローカルLLMはこのパソコンの CPU とメモリを使うため、全画面（プレゼン・ゲーム）中とマイク使用中
-//!   （会議中を含む）は取り出しを止めて待つ（D103）。止めた記事は失敗にも試行回数にも数えず、待機列の先頭に残す。
-//!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使い、通知の抑制設定には
-//!   左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
+//! - ローカルLLMはこのパソコンの CPU とメモリを使うため、ゲーム（Direct3D 全画面）・発表（プレゼンモード）中と
+//!   マイク使用中（会議中を含む）は取り出しを止めて待つ（D103、全画面の範囲は D158 で見直し）。
+//!   ふつうの全画面（QUNS_BUSY）では止めない。別モニターの全画面ウィンドウ・動画の全画面表示などでも返り続け、
+//!   自動要約がいつまでも始まらなかったため（実機テスト A3）。止めた記事は失敗にも試行回数にも数えず、待機列の先頭に残す。
+//!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使うが、全画面の種類の
+//!   見方は分ける（通知は種類を問わず抑制、自動要約は `FullscreenStatus::pauses_auto_summary` のときだけ止める）。
+//!   通知の抑制設定には左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
 //! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から5分で止まる（`local_llm_service`）。
 //!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
 //!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
@@ -56,6 +59,12 @@
 //!   （取り出すと失敗の試行回数だけが進み、記事が `Failed` になるため）。どちらも `LocalLlmService::background_wait`
 //!   で判定し、止めた記事は待機列の先頭に残す。待ちは `LOCAL_LLM_RECHECK_MAX` 以下の区切りで測り直す
 //!   （設定の切り替えにも追いつくため。常時ポーリングはしない）。Gemini の設定では見ない。
+//! - 動かさないと決めたとき（理由付き）・止めたとき・待つとき・動き出したとき・空になったとき・投入した件数を
+//!   INFO ログへ1行で残す（`QueueNotice`。投入以外は直前と同じなら繰り返さない。本文・URL・キーは出さない）。
+//! - 利用者が「なぜ要約されないか」を分かるように、今の状態の種類だけを `AutoSummaryQueue::status` で返す
+//!   （`get_auto_summary_status`。D158）。設定・待機列はその場で確かめ、一時停止・ローカルLLM待ちはワーカーが
+//!   最後に記録した知らせ（`last_notice`）を使う（画面から OS へ問い合わせ直さない。一時停止の解除は
+//!   次の確かめ直し＝最長 `PAUSE_RECHECK_INTERVAL` で反映される）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,10 +75,12 @@ use crate::domain::article::{
     ArticleDetailDto, ArticleHistoryItemDto, ArticleSummaryDto, SummaryState,
 };
 use crate::domain::settings::{AiProvider, PersistedSettings};
-use crate::domain::summary::GenerateArticleSummaryParams;
+use crate::domain::summary::{
+    AutoSummaryStatusDto, AutoSummaryStatusKind, GenerateArticleSummaryParams,
+};
 use crate::error::AppError;
 use crate::infra::fullscreen_detector::{
-    FullscreenDetector, FullscreenStatus, SystemFullscreenDetector,
+    FullscreenDetector, FullscreenKind, FullscreenStatus, SystemFullscreenDetector,
 };
 use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
 use crate::repositories::settings_repository::SettingsRepository;
@@ -93,7 +104,7 @@ const GEMINI_ITEM_INTERVAL: Duration = Duration::from_secs(30);
 /// まとめて要約する間にモデルを読み込み直すことはない。
 const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
 
-/// 全画面・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
+/// ゲーム・発表中・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
 const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待つときの、1回の待ちの上限。
@@ -130,7 +141,7 @@ impl From<bool> for Enablement {
 enum StepOutcome {
     /// 取り出す記事が無い、または処理中の記事がある（同時に2件は処理しない）。
     Idle,
-    /// 終了要求済みのため取り出さなかった。
+    /// 終了要求済みのため取り出さなかった。または、処理中に終了要求が来て AI の呼び出しが中断された（失敗に数えない）。
     Stopped,
     /// 自動要約が無効のため、待機中の記事を捨てて何もしなかった。
     Disabled,
@@ -311,6 +322,14 @@ impl QueueCore {
                 state.failure_counts.remove(&article_id);
                 StepOutcome::YieldedToManual(article_id)
             }
+            // アプリ終了の要求後の失敗は、終了でローカルLLM（llama-server）を止めたこと・優先待ちを
+            // 打ち切ったことによる中断とみなし、失敗に数えない（再試行回数・失敗記録を進めず、WARN にもしない）。
+            // 記事は待機列の先頭へ戻す（終了中なので取り出されない）。
+            Err(error) if self.stopped.load(Ordering::SeqCst) => {
+                log::info!("auto summary for {article_id} interrupted by app exit: {error}");
+                state.pending.push_front(article_id);
+                StepOutcome::Stopped
+            }
             Err(error) => {
                 // 本文は出さず、記事IDとエラー種別だけを残す。
                 log::warn!("auto summary failed for {article_id}: {error}");
@@ -363,8 +382,8 @@ impl QueueCore {
 /// 実AIを呼べる見込みがあるかの判定（Gemini はキーの有無、ローカルは同梱物の有無）。AI は呼ばない。
 type AiReadyCheck = Arc<dyn Fn(AiProvider) -> bool + Send + Sync>;
 
-/// 全画面・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
-type UserBusyCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+/// ゲーム・発表中・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
+type UserBusyCheck = Arc<dyn Fn() -> Option<BusyCause> + Send + Sync>;
 
 /// 待機列が空になったときの知らせ。本番は `LocalLlmService::release_soon`（早めの停止の予約）。
 type DrainedHook = Arc<dyn Fn() + Send + Sync>;
@@ -372,12 +391,94 @@ type DrainedHook = Arc<dyn Fn() + Send + Sync>;
 /// ローカルLLMの都合で取り出しを待つ長さ。本番は `LocalLlmService::background_wait`。
 type LocalLlmWait = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 
-/// 全画面（プレゼン・ゲームなど）またはマイク使用中か。会議中は「会議アプリ起動中 かつ マイク使用中」
-/// なので、マイク使用中を見れば含まれる。OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
-/// どのアプリかは扱わず、真偽値だけを使う。
-fn is_user_busy_on_this_pc() -> bool {
-    matches!(SystemFullscreenDetector.detect(), FullscreenStatus::Busy)
-        || SystemMeetingDetector.is_mic_in_use()
+/// ゲーム（Direct3D 全画面）・発表（プレゼンモード）中、またはマイク使用中か。会議中は
+/// 「会議アプリ起動中 かつ マイク使用中」なので、マイク使用中を見れば含まれる。
+/// OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
+/// どのアプリかは扱わず、どの理由かだけを返す（ログと画面の状態表示に理由を出すため）。
+fn user_busy_cause_on_this_pc() -> Option<BusyCause> {
+    busy_cause_from(SystemFullscreenDetector.detect(), || {
+        SystemMeetingDetector.is_mic_in_use()
+    })
+}
+
+/// 全画面の判定結果とマイク使用中の判定から、自動要約を止める理由を決める（純粋関数・D158）。
+/// ふつうの全画面（`FullscreenKind::App`）では止めない。マイクは全画面で止めないときだけ尋ねる。
+fn busy_cause_from(
+    fullscreen: FullscreenStatus,
+    mic_in_use: impl FnOnce() -> bool,
+) -> Option<BusyCause> {
+    // 止める全画面かどうかは `pauses_auto_summary` だけで決める（通知側の判定と混ぜないため）。
+    if fullscreen.pauses_auto_summary() {
+        return Some(
+            if fullscreen == FullscreenStatus::Busy(FullscreenKind::Presentation) {
+                BusyCause::Presentation
+            } else {
+                BusyCause::Game
+            },
+        );
+    }
+    mic_in_use().then_some(BusyCause::MicInUse)
+}
+
+/// ローカルLLMの自動要約を止める理由（ゲーム・発表中・マイク使用中）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BusyCause {
+    /// Direct3D 全画面（主にゲーム）。
+    Game,
+    /// プレゼンテーションモード（発表中）。
+    Presentation,
+    MicInUse,
+    /// テストで差し替えた判定（理由を区別しない）。
+    #[cfg(test)]
+    Test,
+}
+
+impl BusyCause {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Game => "d3d_fullscreen",
+            Self::Presentation => "presentation",
+            Self::MicInUse => "mic_in_use",
+            #[cfg(test)]
+            Self::Test => "test",
+        }
+    }
+}
+
+/// 自動要約を動かさない理由（`is_auto_summary_allowed` の判定）。ログに1行で残すため分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OffReason {
+    /// 設定 `ai.autoSummaryEnabled` が無効。
+    DisabledInSettings,
+    /// AI プロバイダが実AI（Gemini・ローカル）ではない（Mock・未実装の openai）。
+    NotRealAi(AiProvider),
+    /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている）。
+    AiNotReady(AiProvider),
+}
+
+impl OffReason {
+    fn describe(self) -> String {
+        match self {
+            Self::DisabledInSettings => "reason=disabled_in_settings".to_string(),
+            Self::NotRealAi(provider) => format!("reason=not_real_ai provider={provider:?}"),
+            Self::AiNotReady(provider) => format!("reason=ai_not_ready provider={provider:?}"),
+        }
+    }
+}
+
+/// 自動要約の状態の知らせ（INFO ログ）。同じ知らせは続けて出さない（`AutoSummaryQueue::note`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueNotice {
+    /// 動かさないと決めた（理由付き）。
+    Off(OffReason),
+    /// ゲーム・発表中・マイク使用中のため取り出しを止めている。
+    Paused(BusyCause),
+    /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待っている。
+    WaitingForLocalLlm,
+    /// 記事を取り出して要約を始めた（止まっていた後の再開を含む）。
+    Running,
+    /// 待機列が空になった。
+    Drained,
 }
 
 /// 自動要約キュー。AppState と NewsScheduler で共有する（clone しても同じキューを指す）。
@@ -390,7 +491,7 @@ pub struct AutoSummaryQueue {
     /// 本番は `SummaryService::is_real_ai_ready`。テストでは環境変数・同梱物を用意せずに差し替える
     /// （並列テストで環境変数を書き換えると互いに干渉するため）。
     ai_ready: AiReadyCheck,
-    /// 本番は `is_user_busy_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
+    /// 本番は `user_busy_cause_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
     user_busy: UserBusyCheck,
     /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm` で差し込む）。
     on_drained: DrainedHook,
@@ -398,6 +499,8 @@ pub struct AutoSummaryQueue {
     local_llm_wait: LocalLlmWait,
     /// 設定が読めない状態か。警告を状態が変わったときだけ出すために持つ（clone しても同じ値を指す）。
     settings_unreadable: Arc<AtomicBool>,
+    /// 最後に INFO ログへ出した状態の知らせ。同じ知らせを繰り返さないために持つ（clone しても同じ値を指す）。
+    last_notice: Arc<Mutex<Option<QueueNotice>>>,
 }
 
 impl AutoSummaryQueue {
@@ -413,10 +516,11 @@ impl AutoSummaryQueue {
             summary_service,
             settings_repository,
             ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
-            user_busy: Arc::new(is_user_busy_on_this_pc),
+            user_busy: Arc::new(user_busy_cause_on_this_pc),
             on_drained: Arc::new(|| {}),
             local_llm_wait: Arc::new(|| None),
             settings_unreadable: Arc::new(AtomicBool::new(false)),
+            last_notice: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -458,37 +562,105 @@ impl AutoSummaryQueue {
         self
     }
 
-    /// 全画面・マイク使用中の判定を差し替える（テスト用）。
+    /// ゲーム・発表中・マイク使用中の判定を差し替える（テスト用）。
     #[cfg(test)]
     fn with_busy_check(mut self, user_busy: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        self.user_busy = Arc::new(user_busy);
+        self.user_busy = Arc::new(move || user_busy().then_some(BusyCause::Test));
         self
     }
 
     /// 未要約の記事をおすすめ順で待機列へ並べ直す。ニュース取得の完了後・起動時・設定保存後に呼ぶ。
     /// 無効時は待機列を空にする（処理中の1件はそのまま終わらせる）。設定が読めないときは
     /// 今の待機列を変えない（読めない一瞬のために捨てない）。
+    /// 動かさないと決めたとき（理由付き）と、並べた件数を INFO ログへ1行で残す（記事の中身・URL は出さない）。
     pub fn enqueue_unsummarized(&self) {
         let Some(settings) = self.load_settings() else {
             return;
         };
-        if !is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider)) {
+        if !self.allowed(&settings) {
             self.core.clear_pending();
             return;
         }
         match self.article_service.list_unsummarized_article_ids() {
             Ok(ids) => {
+                let unsummarized = ids.len();
                 let failed = self.core.failed_ids();
-                self.core
-                    .replace_pending(cap_for_enqueue(ids, &settings, &failed));
+                let capped = cap_for_enqueue(ids, &settings, &failed);
+                let queued = capped.len();
+                self.core.replace_pending(capped);
+                log::info!(
+                    "auto summary queued {queued} of {unsummarized} unsummarized article(s): provider={:?}",
+                    settings.to_dto().ai_provider
+                );
             }
             Err(error) => log::warn!("failed to list unsummarized articles: {error}"),
+        }
+    }
+
+    /// 自動要約を動かしてよいか。動かさないときは理由を INFO ログへ残す（同じ理由は繰り返さない）。
+    /// 動かしてよいときは「動かさない」の記録を外し、後で再び止まったときにもう一度残せるようにする。
+    fn allowed(&self, settings: &PersistedSettings) -> bool {
+        match auto_summary_off_reason(settings, |provider| (self.ai_ready)(provider)) {
+            Some(reason) => {
+                self.note(QueueNotice::Off(reason));
+                false
+            }
+            None => {
+                self.forget_notice(|notice| matches!(notice, QueueNotice::Off(_)));
+                true
+            }
+        }
+    }
+
+    /// 状態の知らせを INFO ログへ1行で残す。直前と同じ知らせなら出さない（取り出しのたび・確かめ直すたびに
+    /// 同じ行を繰り返さないため）。キー・本文・URL は含めない。出したら true。
+    fn note(&self, notice: QueueNotice) -> bool {
+        {
+            let mut last = self
+                .last_notice
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *last == Some(notice) {
+                return false;
+            }
+            *last = Some(notice);
+        }
+        match notice {
+            QueueNotice::Off(reason) => {
+                log::info!("auto summary is not running: {}", reason.describe())
+            }
+            QueueNotice::Paused(cause) => log::info!(
+                "auto summary paused while the pc is busy: cause={} (rechecking every {}s)",
+                cause.label(),
+                PAUSE_RECHECK_INTERVAL.as_secs()
+            ),
+            QueueNotice::WaitingForLocalLlm => log::info!(
+                "auto summary is waiting for the local llm (a manual request or a start cooldown)"
+            ),
+            QueueNotice::Running => log::info!(
+                "auto summary started: {} article(s) left in the queue",
+                self.core.lock().pending.len()
+            ),
+            QueueNotice::Drained => log::info!("auto summary queue is empty"),
+        }
+        true
+    }
+
+    /// 直前の知らせが `matches` に当たれば忘れる（次に同じ知らせが来たらまた出す）。
+    fn forget_notice(&self, matches: impl Fn(QueueNotice) -> bool) {
+        let mut last = self
+            .last_notice
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.is_some_and(matches) {
+            *last = None;
         }
     }
 
     /// 専用スレッドでワーカーを開始する。起動時に残っている未要約記事も対象にする。
     pub fn start(&self) {
         let queue = self.clone();
+        log::info!("auto summary worker starts in {}s", STARTUP_DELAY.as_secs());
         std::thread::spawn(move || {
             // 終了要求があれば待ちを打ち切る（その後の wait_for_work が false を返して終わる）。
             queue.core.wait_interval(STARTUP_DELAY);
@@ -503,6 +675,7 @@ impl AutoSummaryQueue {
         while self.core.wait_for_work() {
             // 手動の要求の最中・直後、起動を控えている間は取り出さない（記事は待機列の先頭に残る）。
             if let Some(wait) = self.local_llm_wait() {
+                self.note(QueueNotice::WaitingForLocalLlm);
                 log::debug!(
                     "auto summary is waiting {}s for the local llm",
                     wait.as_secs()
@@ -515,6 +688,8 @@ impl AutoSummaryQueue {
                 || self.is_paused(),
                 |article_id| self.is_done_or_taken(article_id),
                 |article_id| {
+                    // AI を呼ぶ直前。止まっていた後（待ち・一時停止・空）から動き出したときだけ1行残す。
+                    self.note(QueueNotice::Running);
                     self.summary_service
                         .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
                             article_id: article_id.to_string(),
@@ -559,6 +734,10 @@ impl AutoSummaryQueue {
     /// 後から記事が投入されれば、その要約の要求が予約を取り消す（`local_llm_service`）。
     fn notify_if_drained(&self, outcome: &StepOutcome) {
         if took_an_item(outcome) && self.core.is_drained() {
+            // 無効で捨てた（Disabled）ときは、理由の行（Off）を残したままにする。
+            if *outcome != StepOutcome::Disabled {
+                self.note(QueueNotice::Drained);
+            }
             (self.on_drained)();
         }
     }
@@ -579,13 +758,47 @@ impl AutoSummaryQueue {
         local_llm_wait_for(provider, || (self.local_llm_wait)())
     }
 
-    /// ローカルLLMで要約する設定のときだけ、全画面・マイク使用中なら止める。
+    /// ローカルLLMで要約する設定のときだけ、ゲーム・発表中・マイク使用中なら止める。
     /// Gemini は このパソコンの CPU をほとんど使わないため止めない。
+    /// 止めたときは理由（ゲーム・発表・マイク使用中）を INFO ログへ1回だけ残す（画面の状態表示にも使う）。
     fn is_paused(&self) -> bool {
         let is_local = self
             .load_settings()
             .is_some_and(|settings| settings.to_dto().ai_provider == AiProvider::Local);
-        is_local && (self.user_busy)()
+        if !is_local {
+            return false;
+        }
+        match (self.user_busy)() {
+            Some(cause) => {
+                self.note(QueueNotice::Paused(cause));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 自動要約の今の状態（種類だけ）。画面が「なぜ要約されないか」を出すために使う（D158）。
+    /// 設定（無効・実AIでない・実AIの準備ができていない）と待機列はその場で確かめる。
+    /// 一時停止・ローカルLLM待ちはワーカーが最後に記録した知らせを使い、OS へは問い合わせない
+    /// （画面を開いた時点では前面がこのアプリになり、ゲーム・発表の判定が実際の休み方と食い違うため）。
+    /// 知らせを残す（ログへ出す）副作用は持たない。キー・本文・パスは返さない。
+    pub fn status(&self) -> AutoSummaryStatusDto {
+        let kind = match self.load_settings() {
+            None => AutoSummaryStatusKind::Unknown,
+            Some(settings) => {
+                let last_notice = *self
+                    .last_notice
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                status_kind_for(
+                    &settings,
+                    |provider| (self.ai_ready)(provider),
+                    self.core.is_drained(),
+                    last_notice,
+                )
+            }
+        };
+        AutoSummaryStatusDto { kind }
     }
 
     /// 終了要求。以後は新しい記事を取り出さない（処理中の1件は待たない）。
@@ -644,9 +857,7 @@ impl AutoSummaryQueue {
     /// 待機列を残す（`Enablement::Unknown`）。
     fn is_enabled(&self) -> Enablement {
         match self.load_settings() {
-            Some(settings) => {
-                is_auto_summary_allowed(&settings, |provider| (self.ai_ready)(provider)).into()
-            }
+            Some(settings) => self.allowed(&settings).into(),
             None => Enablement::Unknown,
         }
     }
@@ -677,23 +888,68 @@ impl AutoSummaryQueue {
 /// Mock と同じく動かさない。未知の値は DTO 変換で Mock 扱いになる。
 /// `ai_ready` は Gemini ならキーの有無、ローカルなら同梱物の有無だけを返す安い確認で、
 /// 設定で無効なとき・実AI以外のときは呼ばない（不要な確認をしないため）。
+#[cfg(test)]
 fn is_auto_summary_allowed(
     settings: &PersistedSettings,
     ai_ready: impl FnOnce(AiProvider) -> bool,
 ) -> bool {
+    auto_summary_off_reason(settings, ai_ready).is_none()
+}
+
+/// 自動要約を動かさない理由（純粋関数）。動かしてよければ None。判定の規則は `is_auto_summary_allowed` のとおり。
+/// 理由はプロバイダ名と固定の分類だけで、キーの値・同梱物の場所は扱わない。
+fn auto_summary_off_reason(
+    settings: &PersistedSettings,
+    ai_ready: impl FnOnce(AiProvider) -> bool,
+) -> Option<OffReason> {
     if !settings.ai.auto_summary_enabled {
-        return false;
+        return Some(OffReason::DisabledInSettings);
     }
     let provider = settings.to_dto().ai_provider;
     if !matches!(provider, AiProvider::Gemini | AiProvider::Local) {
-        return false;
+        return Some(OffReason::NotRealAi(provider));
     }
     if !ai_ready(provider) {
-        // キーの値・同梱物の場所は扱わず、固定文言だけを残す。
-        log::debug!("auto summary skipped: {provider:?} is not ready");
-        return false;
+        return Some(OffReason::AiNotReady(provider));
     }
-    true
+    None
+}
+
+/// 自動要約の状態の種類を決める（純粋関数・D158）。優先順は
+/// 「動かさない理由（設定）」→「待機列が空」→「一時停止・ローカルLLM待ち（ローカルのときだけ）」→「動いている」。
+/// 一時停止・待ちの知らせはローカルLLMの設定のときだけ使う（Gemini へ切り替えた直後の古い知らせを出さないため）。
+fn status_kind_for(
+    settings: &PersistedSettings,
+    ai_ready: impl FnOnce(AiProvider) -> bool,
+    drained: bool,
+    last_notice: Option<QueueNotice>,
+) -> AutoSummaryStatusKind {
+    if let Some(reason) = auto_summary_off_reason(settings, ai_ready) {
+        return match reason {
+            OffReason::DisabledInSettings => AutoSummaryStatusKind::DisabledInSettings,
+            OffReason::NotRealAi(_) => AutoSummaryStatusKind::NotRealAi,
+            OffReason::AiNotReady(AiProvider::Local) => AutoSummaryStatusKind::LocalAiNotReady,
+            OffReason::AiNotReady(_) => AutoSummaryStatusKind::GeminiNotReady,
+        };
+    }
+    if drained {
+        return AutoSummaryStatusKind::Idle;
+    }
+    if settings.to_dto().ai_provider == AiProvider::Local {
+        match last_notice {
+            Some(QueueNotice::Paused(BusyCause::MicInUse)) => {
+                return AutoSummaryStatusKind::PausedMicInUse;
+            }
+            Some(QueueNotice::Paused(_)) => {
+                return AutoSummaryStatusKind::PausedGameOrPresentation;
+            }
+            Some(QueueNotice::WaitingForLocalLlm) => {
+                return AutoSummaryStatusKind::WaitingForLocalAi;
+            }
+            _ => {}
+        }
+    }
+    AutoSummaryStatusKind::Running
 }
 
 /// 待機列から記事を取り出した（または無効で捨てた）結果か。取り出していない
@@ -772,6 +1028,7 @@ fn resolve_summary_state(persisted: SummaryState, queued: SummaryState) -> Summa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ai_connection::LocalAiFailure;
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
 
@@ -1293,6 +1550,44 @@ mod tests {
     }
 
     #[test]
+    fn failure_after_stop_request_is_not_counted_as_a_failure() {
+        // アプリ終了で llama-server を止めたために進行中の要求が失敗した場合を模す。
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a", "b"]));
+
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| {
+                core.request_stop();
+                Err(AppError::LocalAi(LocalAiFailure::RequestFailed))
+            },
+        );
+
+        assert_eq!(outcome, StepOutcome::Stopped);
+        let state = core.lock();
+        assert!(state.failure_counts.is_empty());
+        assert!(state.failed.is_empty());
+        assert!(state.processing.is_none());
+        assert_eq!(state.pending, VecDeque::from(ids(&["a", "b"])));
+    }
+
+    #[test]
+    fn failure_without_stop_request_is_still_counted() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a"]));
+
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| Err(AppError::LocalAi(LocalAiFailure::RequestFailed)),
+        );
+
+        assert_eq!(outcome, StepOutcome::Retrying("a".to_string()));
+        assert_eq!(core.lock().failure_counts.get("a"), Some(&1));
+    }
+
+    #[test]
     fn stop_wakes_up_a_waiting_worker_promptly() {
         let core = Arc::new(QueueCore::default());
         let waiter = {
@@ -1629,6 +1924,177 @@ mod tests {
         assert!(core.lock().pending.is_empty());
     }
 
+    /// 初回起動と同じ順序・同じ配線（lib.rs）で作った実キュー。同梱物は小さな偽物を一時フォルダへ置く。
+    struct FirstRunContext {
+        queue: AutoSummaryQueue,
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for FirstRunContext {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn first_run_context(name: &str, fetched: usize) -> FirstRunContext {
+        use crate::infra::local_llm_runtime::{ChildProcessLauncher, LocalLlmBundle};
+        use crate::paths::AppPaths;
+        use crate::repositories::article_repository::ArticleRepository;
+        use crate::services::ai_provider_service::AiProviderService;
+        use crate::services::local_llm_service::LocalLlmConfig;
+        use crate::services::settings_service::SettingsService;
+
+        let root = std::env::temp_dir().join(format!(
+            "auto-summary-first-run-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = AppPaths::new(root.join("app-data"));
+        paths.ensure_storage_dirs().expect("create storage dirs");
+        // 起動時と同じく、設定ファイルが無ければ初期値（ローカル・自動要約オン）で作る。
+        SettingsService::new(SettingsRepository::new(&paths))
+            .initialize_default_if_missing()
+            .expect("initialize settings");
+        let article_repository = ArticleRepository::new(&paths);
+        article_repository
+            .initialize_default_if_missing()
+            .expect("initialize articles");
+        let fetched_at = chrono::Utc::now().to_rfc3339();
+        let articles = (0..fetched)
+            .map(|index| crate::domain::article::FetchedArticle {
+                article_id: format!("fetched-{index:03}"),
+                title: format!("取得した記事 {index}"),
+                source_name: "テストソース".to_string(),
+                original_url: format!("https://example.com/fetched/{index}"),
+                fetched_at: fetched_at.clone(),
+                published_at_text: fetched_at.clone(),
+                genre: "テクノロジー".to_string(),
+                tags: Vec::new(),
+                excerpt: Some("抜粋".to_string()),
+                recommendation_score: 0.5,
+                read_state: ArticleReadState::Unread,
+            })
+            .collect();
+        article_repository
+            .save_fetched_articles(articles)
+            .expect("save fetched articles");
+
+        // 同梱物の形だけを置く（起動はしない。大きさの確認だけが通るようにする）。
+        let bundle_dir = root.join("local_llm");
+        let bundle = LocalLlmBundle::in_dir(&bundle_dir);
+        std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
+        std::fs::write(&bundle.exe, b"exe").unwrap();
+        std::fs::write(&bundle.model, b"model").unwrap();
+        let local_llm = LocalLlmService::with_parts(
+            Some(bundle_dir),
+            Arc::new(ChildProcessLauncher),
+            LocalLlmConfig {
+                model_size: 5,
+                ..LocalLlmConfig::default()
+            },
+        );
+        let ai_provider_service = AiProviderService::new(&paths).with_local_llm(local_llm.clone());
+        let queue = AutoSummaryQueue::new(
+            ArticleService::new(ArticleRepository::new(&paths)),
+            SummaryService::new(
+                ai_provider_service,
+                article_repository,
+                SettingsRepository::new(&paths),
+            ),
+            SettingsRepository::new(&paths),
+        )
+        .with_local_llm(local_llm)
+        .with_busy_check(|| false);
+        FirstRunContext { queue, root }
+    }
+
+    #[test]
+    fn first_run_enqueues_fetched_articles_with_the_initial_local_settings() {
+        let ctx = first_run_context("enqueue", 60);
+        let queue = &ctx.queue;
+        queue.enqueue_unsummarized();
+        assert_eq!(queue.core.lock().pending.len(), 10);
+        assert_eq!(*queue.last_notice.lock().unwrap(), None);
+        let first = queue.core.lock().pending.front().cloned().unwrap();
+        assert_eq!(queue.local_llm_wait(), None);
+        let outcome = queue.core.process_next_unless_paused(
+            || queue.is_enabled(),
+            || queue.is_paused(),
+            |article_id| queue.is_done_or_taken(article_id),
+            |_| Ok(SAVED),
+        );
+        assert_eq!(outcome, StepOutcome::Succeeded(first));
+    }
+
+    #[test]
+    fn off_reason_names_why_auto_summary_does_not_run() {
+        assert_eq!(
+            auto_summary_off_reason(&settings_with(false, "local", 10), with_key),
+            Some(OffReason::DisabledInSettings)
+        );
+        assert_eq!(
+            auto_summary_off_reason(&settings_with(true, "mock", 10), with_key),
+            Some(OffReason::NotRealAi(AiProvider::Mock))
+        );
+        assert_eq!(
+            auto_summary_off_reason(&settings_with(true, "local", 10), without_key),
+            Some(OffReason::AiNotReady(AiProvider::Local))
+        );
+        assert_eq!(
+            auto_summary_off_reason(&settings_with(true, "local", 10), with_key),
+            None
+        );
+        // ログの理由はプロバイダ名と固定の分類だけ（キー・場所は含まない）。
+        assert_eq!(
+            OffReason::AiNotReady(AiProvider::Gemini).describe(),
+            "reason=ai_not_ready provider=Gemini"
+        );
+    }
+
+    #[test]
+    fn the_same_notice_is_logged_only_once_in_a_row() {
+        let ctx = queue_context_with("notice-repeat", "local", true);
+        let queue = &ctx.queue;
+        assert!(queue.note(QueueNotice::Running));
+        assert!(!queue.note(QueueNotice::Running));
+        assert!(queue.note(QueueNotice::Paused(BusyCause::Game)));
+        assert!(!queue.note(QueueNotice::Paused(BusyCause::Game)));
+        assert!(queue.note(QueueNotice::Paused(BusyCause::MicInUse)));
+        // 止まっていた後に動き出したら、もう一度残す。
+        assert!(queue.note(QueueNotice::Running));
+        assert!(queue.note(QueueNotice::Drained));
+        assert!(!queue.note(QueueNotice::Drained));
+    }
+
+    #[test]
+    fn off_decision_is_noted_once_and_forgotten_when_allowed_again() {
+        let ctx = queue_context_with("notice-off", "local", false);
+        let off = QueueNotice::Off(OffReason::AiNotReady(AiProvider::Local));
+        ctx.queue.enqueue_unsummarized();
+        assert_eq!(*ctx.queue.last_notice.lock().unwrap(), Some(off));
+        // 取り出し側の確認（is_enabled）でも同じ理由なら繰り返さない。
+        assert_eq!(ctx.queue.is_enabled(), Enablement::Disabled);
+        assert!(!ctx.queue.note(off));
+
+        // 呼べるようになれば並べ、「動かさない」の記録を外す（また止まったら残せるように）。
+        let ready = ctx.queue.clone().with_ai_check(|_| true);
+        ready.enqueue_unsummarized();
+        assert_eq!(*ready.last_notice.lock().unwrap(), None);
+        assert!(!ready.core.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn paused_queue_notes_the_busy_cause() {
+        let ctx = queue_context_with("notice-paused", "local", true);
+        let queue = ctx.queue.clone().with_busy_check(|| true);
+        assert!(queue.is_paused());
+        assert_eq!(
+            *queue.last_notice.lock().unwrap(),
+            Some(QueueNotice::Paused(BusyCause::Test))
+        );
+    }
+
     #[test]
     fn settings_retry_interval_backs_off_to_ten_minutes() {
         let secs = |streak| settings_retry_interval(streak).as_secs();
@@ -1640,5 +2106,161 @@ mod tests {
         assert_eq!(secs(5), 600);
         assert_eq!(secs(100), 600);
         assert_eq!(secs(u32::MAX), 600);
+    }
+
+    /// D158: 自動要約はゲーム（D3D 全画面）・発表（プレゼンモード）・マイク使用中だけで止め、
+    /// ふつうの全画面（QUNS_BUSY）では止めない。OS 判定に失敗したときも止めない（fail-open）。
+    #[test]
+    fn auto_summary_pauses_only_for_games_presentations_and_the_mic() {
+        let no_mic = || false;
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), no_mic),
+            Some(BusyCause::Game)
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Presentation), no_mic),
+            Some(BusyCause::Presentation)
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), no_mic),
+            None
+        );
+        assert_eq!(busy_cause_from(FullscreenStatus::Free, no_mic), None);
+        assert_eq!(busy_cause_from(FullscreenStatus::Unknown, no_mic), None);
+        // ふつうの全画面でも、マイク使用中なら止める。
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), || true),
+            Some(BusyCause::MicInUse)
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Free, || true),
+            Some(BusyCause::MicInUse)
+        );
+        // ゲーム・発表で止めるときは、マイクを尋ねない（OS への問い合わせを1回で済ませる）。
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), || {
+                panic!("mic must not be queried")
+            }),
+            Some(BusyCause::Game)
+        );
+    }
+
+    /// 状態の種類は「設定で動かさない理由」→「待機列が空」→「一時停止・待ち（ローカルのみ）」→「動いている」の順。
+    #[test]
+    fn status_kind_explains_why_auto_summary_is_not_running() {
+        use AutoSummaryStatusKind as K;
+        let local = settings_with(true, "local", 10);
+        let gemini = settings_with(true, "gemini", 10);
+        let paused_game = Some(QueueNotice::Paused(BusyCause::Game));
+        let paused_presentation = Some(QueueNotice::Paused(BusyCause::Presentation));
+        let paused_mic = Some(QueueNotice::Paused(BusyCause::MicInUse));
+
+        // 設定で動かさない理由が最優先（待機列・知らせより先）。
+        assert_eq!(
+            status_kind_for(
+                &settings_with(false, "local", 10),
+                with_key,
+                false,
+                paused_game
+            ),
+            K::DisabledInSettings
+        );
+        assert_eq!(
+            status_kind_for(&settings_with(true, "mock", 10), with_key, false, None),
+            K::NotRealAi
+        );
+        assert_eq!(
+            status_kind_for(&local, without_key, false, paused_game),
+            K::LocalAiNotReady
+        );
+        assert_eq!(
+            status_kind_for(&gemini, without_key, false, None),
+            K::GeminiNotReady
+        );
+        // 待機列が空なら、古い一時停止の知らせが残っていても休みとは言わない。
+        assert_eq!(
+            status_kind_for(&local, with_key, true, paused_game),
+            K::Idle
+        );
+        // ローカルで待機中の記事があり、最後の知らせが一時停止・待ちならその理由。
+        assert_eq!(
+            status_kind_for(&local, with_key, false, paused_game),
+            K::PausedGameOrPresentation
+        );
+        assert_eq!(
+            status_kind_for(&local, with_key, false, paused_presentation),
+            K::PausedGameOrPresentation
+        );
+        assert_eq!(
+            status_kind_for(&local, with_key, false, paused_mic),
+            K::PausedMicInUse
+        );
+        assert_eq!(
+            status_kind_for(
+                &local,
+                with_key,
+                false,
+                Some(QueueNotice::WaitingForLocalLlm)
+            ),
+            K::WaitingForLocalAi
+        );
+        assert_eq!(
+            status_kind_for(&local, with_key, false, Some(QueueNotice::Running)),
+            K::Running
+        );
+        assert_eq!(status_kind_for(&local, with_key, false, None), K::Running);
+        // Gemini へ切り替えた直後の古い一時停止の知らせは使わない（Gemini は止めない）。
+        assert_eq!(
+            status_kind_for(&gemini, with_key, false, paused_game),
+            K::Running
+        );
+    }
+
+    /// 実際のキューでも、一時停止した理由が状態として読め、状態を読んでも知らせ（ログ）は変わらない。
+    #[test]
+    fn queue_status_reports_the_pause_recorded_by_the_worker() {
+        let ctx = queue_context_with("status-paused", "local", true);
+        let queue = ctx.queue.clone();
+        // 待機列が空のうちは Idle。
+        assert_eq!(queue.status().kind, AutoSummaryStatusKind::Idle);
+
+        queue.enqueue_unsummarized();
+        assert_eq!(queue.status().kind, AutoSummaryStatusKind::Running);
+
+        let paused = queue.clone().with_busy_check(|| true);
+        let outcome = paused.core.process_next_unless_paused(
+            || paused.is_enabled(),
+            || paused.is_paused(),
+            not_done,
+            |_| panic!("must not run the local llm while paused"),
+        );
+        assert_eq!(outcome, StepOutcome::Paused);
+        assert_eq!(
+            queue.status().kind,
+            AutoSummaryStatusKind::PausedGameOrPresentation
+        );
+        let notice_before = *queue.last_notice.lock().unwrap();
+        let _ = queue.status();
+        assert_eq!(*queue.last_notice.lock().unwrap(), notice_before);
+
+        queue.note(QueueNotice::Paused(BusyCause::MicInUse));
+        assert_eq!(queue.status().kind, AutoSummaryStatusKind::PausedMicInUse);
+    }
+
+    #[test]
+    fn auto_summary_status_is_serialized_as_a_camel_case_kind_only() {
+        let json = serde_json::to_value(AutoSummaryStatusDto {
+            kind: AutoSummaryStatusKind::PausedGameOrPresentation,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "pausedGameOrPresentation" })
+        );
+        let json = serde_json::to_value(AutoSummaryStatusDto {
+            kind: AutoSummaryStatusKind::WaitingForLocalAi,
+        })
+        .unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "waitingForLocalAi" }));
     }
 }

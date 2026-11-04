@@ -4,8 +4,13 @@
  * カスタマイズ画面（画面詳細設計書 §13.1・判断台帳 D83）。
  * - テーマ: 既定・ランク報酬テーマ・ガチャの色違いテーマを並べ、選べるものだけ切り替える。
  *   選べるかの判定と保存は Rust の set_active_theme が行い、ここは結果（activeThemeId）を表示・適用するだけ。
- * - 呼び名: 現在の値を読み取り専用で出し、変更は設定画面へ案内する。
- * - 飾り・吹き出し: 「準備中」と表示する（素材ができてから追加。D75）。口調・性格は扱わない（D83）。
+ * - 模様: テーマの地に敷く模様（D152〜D154）。色テーマとは独立に、なし・初期の模様・ガチャで手に入れた模様から選ぶ。
+ *   選べるかの判定と保存は Rust の set_active_pattern が行い、ここは結果（activePatternId）を表示・適用するだけ。
+ * - 呼び名: 入力して確定（Enter・ボタン）したら、呼び名だけを書く Rust の set_nickname で保存する（D161）。
+ *   検証（32文字・制御文字なし）は Rust が正。ゆうこの吹き出しは次に表示するときから新しい呼び名になる。
+ * - 飾り・吹き出し: ゆうこの着せかえ（D155）。既定（なし・いつもの）とガチャで手に入れたものから選ぶ。
+ *   選べるかの判定と保存は Rust の set_active_deco / set_active_balloon が行い、ここは結果を表示し、
+ *   各画面のゆうこへ反映する（YuukoDressupProvider）だけ。口調・性格は扱わない（D83）。
  */
 
 import * as React from "react";
@@ -14,20 +19,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
-  Home,
-  Newspaper,
-  Clock,
-  BookOpen,
   Sparkles,
-  Dices,
-  Settings,
   ArrowLeft,
   Bell,
-  HelpCircle,
   ChevronRight,
   MessageCircle,
   Palette,
@@ -40,18 +38,38 @@ import {
   Moon,
   Rainbow,
   Clover,
+  Grid3x3,
 } from "lucide-react";
-import Image from "next/image";
-import { getUserSettings, isTauriRuntime } from "@/lib/tauri/settings";
+import { getUserSettings, isTauriRuntime, setNickname as saveNickname } from "@/lib/tauri/settings";
 import { getFriendshipState, type FriendshipState } from "@/lib/tauri/yuuko";
 import { getRewardState, setActiveTheme, type RewardItem } from "@/lib/tauri/rewards";
 import { getGachaState, type GachaCollectionItem } from "@/lib/tauri/gacha";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { applyUiPattern } from "@/hooks/use-ui-pattern";
+import { getPatternState, setActivePattern } from "@/lib/tauri/patterns";
+import { buildPatternOptions, uiPatternLabel } from "@/lib/ui-pattern.mjs";
+import { PatternSwatch } from "@/components/customize/PatternSwatch";
+import { DressupPanel, type DressupLoadStatus, type DressupSlot } from "@/components/customize/DressupPanel";
+import { NICKNAME_INVALID_TEXT, NicknamePanel, type NicknameMessage } from "@/components/customize/NicknamePanel";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { useYuukoDressup } from "@/components/yuuko/YuukoDressupProvider";
+import { getDressupState, setActiveBalloon, setActiveDeco, type DressupState } from "@/lib/tauri/dressup";
+import {
+  BALLOON_DEFAULT_ID,
+  DECO_NONE_ID,
+  balloonLabel,
+  buildBalloonOptions,
+  buildDecoOptions,
+  decoLabel,
+  type DressupOption,
+} from "@/lib/yuuko-dressup.mjs";
 import { useToast } from "@/hooks/use-toast";
 import { buildThemeOptions } from "@/lib/customize-themes.mjs";
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 
 // Types
-type CustomizeTab = "theme" | "name" | "deco" | "balloon";
+type CustomizeTab = "theme" | "pattern" | "name" | "deco" | "balloon";
 
 /**
  * 友情ランク・報酬などの読み込み状態。
@@ -65,26 +83,11 @@ type FriendshipView = Pick<FriendshipState, "currentRank" | "currentPoint" | "ne
 /** テーマ一覧の 1 件（lib/customize-themes.mjs の buildThemeOptions の戻り値）。 */
 type ThemeOption = ReturnType<typeof buildThemeOptions>[number];
 
+/** 模様一覧の 1 件（lib/ui-pattern.mjs の buildPatternOptions の戻り値）。 */
+type PatternOption = ReturnType<typeof buildPatternOptions>[number];
+
 /** テーマ切り替えの成功表示（固定文言のみ）。失敗はトーストで出す（辞書・設定画面と同じ）。 */
 type ThemeMessage = { kind: "success"; text: string } | null;
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-}
-
-// Mock Data
-const mockNavigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: true },
-  { id: "gacha", label: "ガチャ", icon: Dices, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 // Tauri 外のプレビュー専用のサンプル値。実データと誤解されないよう「サンプル」表示と組で使う。
 const previewFriendship: FriendshipView = {
@@ -100,9 +103,10 @@ const mockRankRewardItems = [
   { id: "moon", name: "月", icon: Moon, color: "bg-indigo-100" },
 ];
 
-// カテゴリ（D83）: テーマ・呼び名は使える。飾り・吹き出しは「準備中」。口調・性格は置かない。
+// カテゴリ（D83）: テーマ・模様（D152〜D154）・呼び名・飾り・吹き出し（D155）。口調・性格は置かない。
 const tabItems = [
   { id: "theme" as CustomizeTab, label: "テーマ", icon: Palette },
+  { id: "pattern" as CustomizeTab, label: "模様", icon: Grid3x3 },
   { id: "name" as CustomizeTab, label: "呼び名", icon: Tag },
   { id: "deco" as CustomizeTab, label: "飾り", icon: Sparkles },
   { id: "balloon" as CustomizeTab, label: "吹き出し", icon: MessageCircle },
@@ -113,6 +117,7 @@ const tabItems = [
 /**
  * テーマの色見本。配色を持つテーマは `data-theme` 付きの要素の中で CSS 変数を読み、そのテーマの色を出す
  * （app/globals.css の `[data-theme="<id>"]`）。配色が未登録のテーマは、適用中の色と誤解されないよう点線の枠だけ出す。
+ * 見本は色そのものが情報なので、Windows ハイコントラストでも元の色で描く（forced-color-adjust-none・D148）。
  */
 function ThemeSwatch({ option }: { option: ThemeOption }) {
   if (!option.hasPalette) {
@@ -128,7 +133,7 @@ function ThemeSwatch({ option }: { option: ThemeOption }) {
   return (
     <span
       data-theme={option.id}
-      className={`w-10 h-10 rounded-lg border border-border overflow-hidden flex shrink-0 ${
+      className={`w-10 h-10 rounded-lg border border-border overflow-hidden flex shrink-0 forced-color-adjust-none ${
         option.selectable ? "" : "opacity-50"
       }`}
       aria-hidden="true"
@@ -160,7 +165,7 @@ function ThemeOptionButton({
       type="button"
       className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
         isSelected
-          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green)]"
+          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green-text)]"
           : option.selectable
             ? "bg-white border border-border hover:border-[var(--yuuko-green)]/50"
             : "bg-muted/50 border border-border/50 opacity-70"
@@ -201,6 +206,61 @@ function ThemeOptionButton({
 }
 
 /**
+ * 模様 1 件の選択ボタン（3 列のタイル）。見本はいまの色テーマで出す。
+ * 未所持のガチャ模様は名前と形を伏せ、ガチャで手に入ることだけを出す（ガチャのコレクションと同じ。D80）。
+ */
+function PatternOptionButton({
+  option,
+  showSelected,
+  isSaving,
+  disabled,
+  onSelect,
+}: {
+  option: PatternOption;
+  showSelected: boolean;
+  isSaving: boolean;
+  disabled: boolean;
+  onSelect: (option: PatternOption) => void;
+}) {
+  const isSelected = showSelected && option.selected;
+  return (
+    <button
+      type="button"
+      className={`relative w-full flex flex-col items-center gap-1 p-1.5 rounded-xl text-center transition-all ${
+        isSelected
+          ? "bg-[var(--yuuko-green-light)] border-2 border-[var(--yuuko-green-text)]"
+          : option.selectable
+            ? "bg-white border border-border hover:border-[var(--yuuko-green)]/50"
+            : "bg-muted/50 border border-border/50 opacity-70"
+      }`}
+      onClick={() => onSelect(option)}
+      disabled={!option.selectable || disabled}
+      aria-pressed={isSelected}
+      aria-label={`${option.label}${option.lockText !== null ? `（${option.lockText}）` : ""}`}
+      title={option.lockText ?? undefined}
+      data-testid="customize-pattern-option"
+    >
+      <PatternSwatch
+        patternId={option.id}
+        hidden={!option.selectable && option.source === "gacha"}
+        className="w-full h-9"
+      />
+      <span
+        className={`w-full text-[10px] leading-tight truncate ${option.selectable ? "font-medium" : "text-muted-foreground"}`}
+      >
+        {isSaving ? "保存中…" : option.label}
+      </span>
+      {isSelected && (
+        <Check
+          className="absolute top-1 right-1 w-3.5 h-3.5 text-[var(--yuuko-green-text)]"
+          aria-hidden="true"
+        />
+      )}
+    </button>
+  );
+}
+
+/**
  * 読み込みに失敗した欄へ出す「もう一度読み込む」ボタン（ガチャ画面と同じ見た目・文言）。
  * 同じ文言のボタンが複数の欄に同時に出ることがあるため、読み上げ用の名前（ariaLabel）で欄を区別する。
  */
@@ -227,23 +287,6 @@ function LoadRetryButton({
   );
 }
 
-/** 飾り・吹き出しの「準備中」表示（D83 / D75）。 */
-function ComingSoonPanel({ title }: { title: string }) {
-  return (
-    <div className="space-y-2" data-testid="customize-coming-soon">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium">{title}</span>
-        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-          準備中
-        </Badge>
-      </div>
-      <p className="text-xs text-muted-foreground leading-relaxed">
-        いま準備中だよ。できあがったら、ここで選べるようになるよ。
-      </p>
-    </div>
-  );
-}
-
 export default function CustomizeScreen({
   onNavigate,
 }: {
@@ -259,8 +302,21 @@ export default function CustomizeScreen({
   const [gachaItems, setGachaItems] = React.useState<GachaCollectionItem[]>([]);
   const [nicknameStatus, setNicknameStatus] = React.useState<RankLoadStatus>("loading");
   const [nickname, setNickname] = React.useState("");
+  const [isSavingNickname, setIsSavingNickname] = React.useState(false);
+  const [nicknameMessage, setNicknameMessage] = React.useState<NicknameMessage>(null);
   const [savingThemeId, setSavingThemeId] = React.useState<string | null>(null);
   const [themeMessage, setThemeMessage] = React.useState<ThemeMessage>(null);
+  const [patternStatus, setPatternStatus] = React.useState<RankLoadStatus>("loading");
+  const [selectablePatternIds, setSelectablePatternIds] = React.useState<string[]>([]);
+  const [activePatternId, setActivePatternId] = React.useState<string | null>(null);
+  const [savingPatternId, setSavingPatternId] = React.useState<string | null>(null);
+  const [patternMessage, setPatternMessage] = React.useState<ThemeMessage>(null);
+  // 着せかえ（D155）。吹き出し・飾りは 1 つの command（get_dressup_state）でまとめて読む。
+  const [dressupStatus, setDressupStatus] = React.useState<DressupLoadStatus>("loading");
+  const [dressup, setDressup] = React.useState<DressupState | null>(null);
+  const [savingDressupId, setSavingDressupId] = React.useState<string | null>(null);
+  const [dressupMessage, setDressupMessage] = React.useState<{ slot: DressupSlot; text: string } | null>(null);
+  const { applyDressupState } = useYuukoDressup();
 
   const { toast } = useToast();
 
@@ -273,6 +329,8 @@ export default function CustomizeScreen({
   const rewardRequestRef = React.useRef(0);
   const gachaRequestRef = React.useRef(0);
   const nicknameRequestRef = React.useRef(0);
+  const patternRequestRef = React.useRef(0);
+  const dressupRequestRef = React.useRef(0);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -343,6 +401,49 @@ export default function CustomizeScreen({
     }
   }, []);
 
+  const loadPattern = React.useCallback(async () => {
+    const requestId = ++patternRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== patternRequestRef.current;
+    setPatternStatus("loading");
+    try {
+      const state = await getPatternState();
+      if (isStale()) return;
+      if (!state) {
+        setPatternStatus("error");
+        return;
+      }
+      setSelectablePatternIds(state.selectablePatternIds);
+      setActivePatternId(state.activePatternId);
+      setPatternStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load pattern state:", error);
+      setPatternStatus("error");
+    }
+  }, []);
+
+  // 着せかえの状態を読む。ガチャで手に入れたばかりの品も選べるよう、画面を開くたびに読み直す。
+  const loadDressup = React.useCallback(async () => {
+    const requestId = ++dressupRequestRef.current;
+    const isStale = () => !isMountedRef.current || requestId !== dressupRequestRef.current;
+    setDressupStatus("loading");
+    try {
+      const state = await getDressupState();
+      if (isStale()) return;
+      if (!state) {
+        setDressupStatus("error");
+        return;
+      }
+      setDressup(state);
+      applyDressupState(state);
+      setDressupStatus("ready");
+    } catch (error) {
+      if (isStale()) return;
+      console.warn("Failed to load dressup state:", error);
+      setDressupStatus("error");
+    }
+  }, [applyDressupState]);
+
   const loadNickname = React.useCallback(async () => {
     const requestId = ++nicknameRequestRef.current;
     const isStale = () => !isMountedRef.current || requestId !== nicknameRequestRef.current;
@@ -370,13 +471,17 @@ export default function CustomizeScreen({
       setRewardStatus("preview");
       setGachaStatus("preview");
       setNicknameStatus("preview");
+      setPatternStatus("preview");
+      setDressupStatus("preview");
       return;
     }
     void loadFriendship();
     void loadRewards();
     void loadGacha();
     void loadNickname();
-  }, [loadFriendship, loadRewards, loadGacha, loadNickname]);
+    void loadPattern();
+    void loadDressup();
+  }, [loadFriendship, loadRewards, loadGacha, loadNickname, loadPattern, loadDressup]);
 
   // テーマ欄の再試行: 失敗した方（報酬・ガチャ）だけ読み直す。
   const retryThemeLoads = () => {
@@ -400,6 +505,42 @@ export default function CustomizeScreen({
     : null;
   const unlockedThemeOptions = themeOptions.filter(
     (option) => option.source !== "default" && option.selectable
+  );
+
+  // 模様一覧。選べるかは Rust の selectablePatternIds が正。読めないときは「なし」だけ選べる形で並べる
+  // （選択は canShowActivePattern で止める）。ブラウザプレビューでは初期の模様（なし・水玉・肉球）を見本として出す。
+  const patternOptions = React.useMemo(
+    () =>
+      buildPatternOptions({
+        selectablePatternIds:
+          patternStatus === "ready"
+            ? selectablePatternIds
+            : patternStatus === "preview"
+              ? ["none", "pattern_dots", "pattern_paw"]
+              : [],
+        activePatternId: patternStatus === "ready" ? activePatternId : null,
+      }),
+    [patternStatus, selectablePatternIds, activePatternId]
+  );
+  const canShowActivePattern = patternStatus === "ready";
+
+  // 着せかえの一覧。選べるかは Rust の selectable*Ids が正。読めないときは既定だけ選べる形で並べる
+  // （選択は dressupStatus で止める）。ブラウザプレビューでは既定（なし・いつもの）だけを見本として出す。
+  const decoOptions = React.useMemo(
+    () =>
+      buildDecoOptions({
+        selectableIds: dressupStatus === "ready" ? dressup?.selectableDecoIds : [DECO_NONE_ID],
+        activeId: dressupStatus === "ready" ? dressup?.activeDecoId : null,
+      }),
+    [dressupStatus, dressup]
+  );
+  const balloonOptions = React.useMemo(
+    () =>
+      buildBalloonOptions({
+        selectableIds: dressupStatus === "ready" ? dressup?.selectableBalloonIds : [BALLOON_DEFAULT_ID],
+        activeId: dressupStatus === "ready" ? dressup?.activeBalloonId : null,
+      }),
+    [dressupStatus, dressup]
   );
 
   const handleNavigate = (id: string) => {
@@ -447,6 +588,125 @@ export default function CustomizeScreen({
       });
   };
 
+  // 模様も選んだ時点で保存する。選べるかは Rust が判定し、選べない ID は reject される（表示側のロックは補助）。
+  // 保存できたら Rust が返した activePatternId をすぐ画面へ適用する（再起動後は PatternGround が読み込んで適用する）。
+  const handleSelectPattern = (option: PatternOption) => {
+    if (!option.selectable || savingPatternId !== null || !canShowActivePattern) return;
+    if (option.selected) return;
+    setSavingPatternId(option.id);
+    setPatternMessage(null);
+    const showSaveFailedToast = () => {
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: "模様を保存できなかったよ。もう一度ためしてね。",
+      });
+    };
+    setActivePattern(option.id)
+      .then((state) => {
+        if (!state) {
+          showSaveFailedToast();
+          return;
+        }
+        setSelectablePatternIds(state.selectablePatternIds);
+        setActivePatternId(state.activePatternId);
+        const applied = applyUiPattern(state.activePatternId);
+        setPatternMessage({
+          kind: "success",
+          text: applied === "none" ? "模様をなしにしたよ。" : `模様を「${uiPatternLabel(applied)}」にしたよ。`,
+        });
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to save active pattern:", error);
+        showSaveFailedToast();
+      })
+      .finally(() => {
+        setSavingPatternId(null);
+      });
+  };
+
+  // 着せかえも選んだ時点で保存する。選べるかは Rust が判定し、選べない ID は reject される（表示側のロックは補助）。
+  // 保存できたら Rust が返した状態をすぐ各画面のゆうこへ反映する（再起動後は YuukoDressupProvider が読み込む）。
+  const handleSelectDressup = (slot: DressupSlot, option: DressupOption) => {
+    if (!option.selectable || option.selected || savingDressupId !== null || dressupStatus !== "ready") return;
+    setSavingDressupId(option.id);
+    setDressupMessage(null);
+    const showSaveFailedToast = () => {
+      toast({
+        variant: "destructive",
+        title: "保存に失敗しちゃった",
+        description: `${slot === "deco" ? "飾り" : "吹き出し"}を保存できなかったよ。もう一度ためしてね。`,
+      });
+    };
+    const save = slot === "deco" ? setActiveDeco : setActiveBalloon;
+    save(option.id)
+      .then((state) => {
+        if (!state) {
+          showSaveFailedToast();
+          return;
+        }
+        setDressup(state);
+        applyDressupState(state);
+        let text: string;
+        if (slot === "deco") {
+          text =
+            state.activeDecoId === DECO_NONE_ID
+              ? "飾りをはずしたよ。"
+              : `飾りを「${decoLabel(state.activeDecoId)}」にしたよ。`;
+        } else {
+          text = `吹き出しを「${balloonLabel(state.activeBalloonId)}」にしたよ。`;
+        }
+        setDressupMessage({ slot, text });
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to save dressup:", error);
+        showSaveFailedToast();
+      })
+      .finally(() => {
+        setSavingDressupId(null);
+      });
+  };
+
+  // 呼び名は確定した時点で保存する（D161）。保存するのは呼び名だけで、ほかの設定には触れない（set_nickname）。
+  // 検証は Rust が正で、不正な入力は VALIDATION_ERROR で reject される（何も保存されない）。
+  const handleSaveNickname = (draft: string) => {
+    if (isSavingNickname || nicknameStatus !== "ready") return;
+    setIsSavingNickname(true);
+    setNicknameMessage(null);
+    saveNickname(draft)
+      .then((saved) => {
+        if (saved === null) {
+          throw new Error("set_nickname is unavailable");
+        }
+        // 古い読み込みの応答で、保存した値を上書きしないよう世代を進める。
+        nicknameRequestRef.current += 1;
+        setNickname(saved);
+        setNicknameMessage({
+          kind: "success",
+          text: saved !== "" ? `呼び名を「${saved}」にしたよ。` : "呼び名をなしにしたよ。",
+        });
+      })
+      .catch((error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          (error as { code?: unknown }).code === "VALIDATION_ERROR"
+        ) {
+          setNicknameMessage({ kind: "invalid", text: NICKNAME_INVALID_TEXT });
+          return;
+        }
+        console.warn("Failed to save nickname:", error);
+        toast({
+          variant: "destructive",
+          title: "保存に失敗しちゃった",
+          description: "呼び名を保存できなかったよ。もう一度ためしてね。",
+        });
+      })
+      .finally(() => {
+        setIsSavingNickname(false);
+      });
+  };
+
   // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける）。
   const isMaxRank = friendship !== null && friendship.nextRequiredPoint <= 0;
   const progressPercent =
@@ -467,7 +727,7 @@ export default function CustomizeScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <ArrowLeft className="w-4 h-4" />
@@ -475,23 +735,18 @@ export default function CustomizeScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {mockNavigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 px-3 space-y-1 overflow-y-auto"
+            activeId="customize"
+            onNavigate={handleNavigate}
+          />
 
           {/* Yuuko's Comment */}
-          <div className="p-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   <MessageCircle className="w-3 h-3" aria-hidden="true" />
                   ゆうこの一言
                 </CardTitle>
@@ -507,7 +762,7 @@ export default function CustomizeScreen({
                   いっしょに考えよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -528,7 +783,7 @@ export default function CustomizeScreen({
               {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
               <button
                 type="button"
-                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
                 onClick={() => handleNavigate("home")}
               >
                 ホーム
@@ -539,7 +794,7 @@ export default function CustomizeScreen({
 
             {/* Title */}
             <div className="flex items-center gap-2 mb-1">
-              <Sparkles className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <Sparkles className="w-6 h-6 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <h1 className="text-xl font-bold text-foreground">ゆうこカスタマイズ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-4">
@@ -558,7 +813,7 @@ export default function CustomizeScreen({
                     aria-selected={isActive}
                     className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0 ${
                       isActive
-                        ? "bg-[var(--yuuko-green)] text-white"
+                        ? `bg-[var(--yuuko-green)] text-white ${FORCED_COLORS_SELECTED}`
                         : "bg-white text-muted-foreground hover:bg-muted border border-border"
                     }`}
                     onClick={() => handleTabChange(tab.id)}
@@ -618,7 +873,7 @@ export default function CustomizeScreen({
                       {themeMessage !== null && (
                         <p
                           role="status"
-                          className="text-xs text-[var(--yuuko-green)]"
+                          className="text-xs text-[var(--yuuko-green-text)]"
                           data-testid="customize-theme-message"
                         >
                           {themeMessage.text}
@@ -626,43 +881,98 @@ export default function CustomizeScreen({
                       )}
                     </>
                   )}
-                  {activeTab === "name" && (
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">ゆうこがあなたを呼ぶときの名前だよ。</p>
-                      <div className="rounded-lg border border-border bg-white px-3 py-2 text-sm break-all" data-testid="customize-nickname">
-                        {nicknameStatus === "ready"
-                          ? nickname.trim() !== ""
-                            ? nickname
-                            : "まだ決めていないよ"
-                          : nicknameStatus === "error"
-                            ? "呼び名を読み込めなかったよ。"
-                            : nicknameStatus === "preview"
-                              ? "アプリで設定した呼び名が表示されるよ。"
-                              : "読み込み中…"}
+                  {activeTab === "pattern" && (
+                    <>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        テーマの地にうすく敷く模様だよ。色はいまのテーマに合わせるね。
+                      </p>
+                      <div className="grid grid-cols-3 gap-1.5" data-testid="customize-pattern-list">
+                        {patternOptions.map((option) => (
+                          <PatternOptionButton
+                            key={option.id}
+                            option={option}
+                            showSelected={canShowActivePattern}
+                            isSaving={savingPatternId === option.id}
+                            disabled={savingPatternId !== null || !canShowActivePattern}
+                            onSelect={handleSelectPattern}
+                          />
+                        ))}
                       </div>
-                      {nicknameStatus === "error" && (
-                        <LoadRetryButton onRetry={() => void loadNickname()} testId="customize-nickname-retry"
-                        ariaLabel="呼び名をもう一度読み込む"
-                      />
+                      {patternOptions.some((option) => option.source === "gacha" && !option.selectable) && (
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <Lock className="w-3 h-3 shrink-0" aria-hidden="true" />
+                          <span>？？？の模様はガチャで手に入るよ</span>
+                        </p>
                       )}
-                      <Button
-                        variant="outline"
-                        className="w-full text-sm"
-                        onClick={() => handleNavigate("settings")}
-                      >
-                        設定で変える
-                        <ChevronRight className="w-4 h-4 ml-1" aria-hidden="true" />
-                      </Button>
-                    </div>
+                      {patternStatus === "loading" && (
+                        <p className="text-xs text-muted-foreground">読み込み中…</p>
+                      )}
+                      {patternStatus === "error" && (
+                        <>
+                          <p className="text-xs text-muted-foreground" data-testid="customize-pattern-load-error">
+                            模様の状態を読み込めなかったよ。
+                          </p>
+                          <LoadRetryButton
+                            onRetry={() => void loadPattern()}
+                            testId="customize-pattern-retry"
+                            ariaLabel="模様をもう一度読み込む"
+                          />
+                        </>
+                      )}
+                      {patternStatus === "preview" && (
+                        <p className="text-xs text-muted-foreground">
+                          プレビューでは模様を切り替えられないよ。アプリで選んでね。
+                        </p>
+                      )}
+                      {patternMessage !== null && (
+                        <p
+                          role="status"
+                          className="text-xs text-[var(--yuuko-green-text)]"
+                          data-testid="customize-pattern-message"
+                        >
+                          {patternMessage.text}
+                        </p>
+                      )}
+                    </>
                   )}
-                  {activeTab === "deco" && <ComingSoonPanel title="飾り" />}
-                  {activeTab === "balloon" && <ComingSoonPanel title="吹き出し" />}
+                  {activeTab === "name" && (
+                    <NicknamePanel
+                      status={nicknameStatus}
+                      nickname={nickname}
+                      isSaving={isSavingNickname}
+                      message={nicknameMessage}
+                      onSave={handleSaveNickname}
+                      onInvalid={() => setNicknameMessage({ kind: "invalid", text: NICKNAME_INVALID_TEXT })}
+                      onEdit={() => setNicknameMessage(null)}
+                      retryButton={
+                        <LoadRetryButton
+                          onRetry={() => void loadNickname()}
+                          testId="customize-nickname-retry"
+                          ariaLabel="呼び名をもう一度読み込む"
+                        />
+                      }
+                    />
+                  )}
+                  {(activeTab === "deco" || activeTab === "balloon") && (
+                    <DressupPanel
+                      key={activeTab}
+                      slot={activeTab}
+                      options={activeTab === "deco" ? decoOptions : balloonOptions}
+                      status={dressupStatus}
+                      savingId={savingDressupId}
+                      message={dressupMessage?.slot === activeTab ? dressupMessage.text : null}
+                      onSelect={(option) => handleSelectDressup(activeTab, option)}
+                      onRetry={() => void loadDressup()}
+                    />
+                  )}
                 </CardContent>
               </Card>
 
               {/* Yuuko Preview */}
-              <Card className="flex-1 min-w-[280px] overflow-hidden">
-                <div className="relative h-80 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
+              {/* 左の一覧カードと高さがそろって伸びたとき、見本の下に空白が残らないよう、舞台（flex-1）が伸びる。
+                  カード既定の上下余白・すき間は付けない（実機テスト B10）。 */}
+              <Card className="flex-1 min-w-[280px] overflow-hidden gap-0 py-0">
+                <div className="relative flex-1 min-h-[336px] bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Room Background Elements */}
                   <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
                     {/* Window */}
@@ -684,25 +994,45 @@ export default function CustomizeScreen({
                     <div className="absolute bottom-20 right-16 text-[var(--yuuko-green)]/10 text-xl">🐾</div>
                   </div>
 
-                  {/* Yuuko Character */}
-                  <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
-                    <Image
-                      src="/assets/yuuko.png"
-                      alt="ゆうこ"
+                  {/* Yuuko Character（適用中の飾りを重ねる。D155） */}
+                  <div className="absolute bottom-6 left-1/2 w-[180px] -translate-x-1/2">
+                    {/* 吹き出しタブでは、選んだ吹き出しの見本をゆうこの頭の上に出し、しっぽを頭へ向ける（D155）。
+                        舞台の隅に置くとゆうこから離れて見えたため、ゆうこの絵を基準に置く（実機テスト B10）。 */}
+                    {activeTab === "balloon" && (
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-max max-w-[190px]">
+                        <YuukoBalloon
+                          tail="bottom-left"
+                          defaultClassName="rounded-2xl border border-border/50 bg-white px-4 py-3 shadow-md"
+                          defaultTail={
+                            <div className="absolute -bottom-1.5 left-8 h-3 w-3 rotate-45 border-b border-r border-border/50 bg-white" />
+                          }
+                          data-testid="customize-preview-balloon"
+                        >
+                          <p className="text-xs text-foreground leading-relaxed">
+                            この吹き出しで
+                            <br />
+                            おしゃべりするね！
+                          </p>
+                        </YuukoBalloon>
+                      </div>
+                    )}
+                    <YuukoFigure
                       width={963}
                       height={1174}
-                      className="w-[180px] h-auto drop-shadow-lg animate-[float_3s_ease-in-out_infinite]"
+                      imageClassName="w-[180px] h-auto"
+                      className="drop-shadow-lg animate-[float_3s_ease-in-out_infinite]"
                       style={{
                         animation: "float 3s ease-in-out infinite",
                       }}
+                      data-testid="customize-yuuko-figure"
                     />
                   </div>
                 </div>
 
                 {/* Save Note: テーマは選んだ時点で保存するため、別の保存ボタンは置かない */}
                 <div className="flex flex-wrap items-center justify-center gap-2 p-4 bg-white border-t border-border text-xs text-muted-foreground">
-                  <Check className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-                  <span>テーマは選ぶとすぐに保存されるよ。</span>
+                  <Check className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+                  <span>テーマ・模様・飾り・吹き出しは選ぶとすぐに保存されるよ。</span>
                 </div>
               </Card>
             </div>
@@ -713,7 +1043,7 @@ export default function CustomizeScreen({
               <Card className="flex-1 min-w-[280px]">
                 <CardHeader className="p-3 pb-2">
                   <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <Gift className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                    <Gift className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
                     解放済みアイテム
                   </CardTitle>
                 </CardHeader>
@@ -767,7 +1097,7 @@ export default function CustomizeScreen({
                             data-testid="customize-rank-reward-item"
                           >
                             {reward.unlocked ? (
-                              <Check className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                              <Check className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                             ) : (
                               <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
                             )}
@@ -841,13 +1171,19 @@ export default function CustomizeScreen({
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]"></span>
-                <span className="text-xs text-foreground">新しいニュースが3件届いてるよ！</span>
+                {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みの友情ランクを出す。
+                    ブラウザプレビューのサンプル値（preview）や失敗時は数値を出さず、画面名だけにする。 */}
+                <span className="text-xs text-foreground" data-testid="customize-footer-status">
+                  {friendshipStatus === "loading"
+                    ? "読み込み中..."
+                    : friendshipStatus === "ready" && friendship !== null
+                      ? `友情ランク ${friendship.currentRank}`
+                      : "カスタマイズ"}
+                </span>
               </div>
             </div>
+            {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
             <div className="flex items-center gap-2">
-              <button className="p-1 hover:bg-muted rounded transition-colors">
-                <HelpCircle className="w-4 h-4 text-muted-foreground" />
-              </button>
               <div className="w-5 h-5 rounded-full bg-[var(--yuuko-green-light)] flex items-center justify-center">
                 <span className="text-[10px]">🐾</span>
               </div>
@@ -866,7 +1202,7 @@ export default function CustomizeScreen({
               </CardHeader>
               <CardContent className="p-3 pt-0 space-y-2">
                 <div className="flex items-center gap-2 text-xs">
-                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <Palette className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                   <span className="text-muted-foreground w-12 shrink-0">テーマ</span>
                   <span className="text-foreground min-w-0 truncate" data-testid="customize-current-theme">
                     {activeThemeOption !== null
@@ -877,12 +1213,40 @@ export default function CustomizeScreen({
                   </span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
-                  <span className="text-muted-foreground w-12 shrink-0">吹き出し</span>
-                  <span className="text-muted-foreground">準備中</span>
+                  <Grid3x3 className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">模様</span>
+                  <span className="text-foreground min-w-0 truncate" data-testid="customize-current-pattern">
+                    {patternStatus === "ready"
+                      ? uiPatternLabel(activePatternId)
+                      : patternStatus === "loading"
+                        ? "読み込み中…"
+                        : "—"}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green)] shrink-0" aria-hidden="true" />
+                  <MessageCircle className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">吹き出し</span>
+                  <span className="text-foreground min-w-0 truncate" data-testid="customize-current-balloon">
+                    {dressupStatus === "ready"
+                      ? balloonLabel(dressup?.activeBalloonId)
+                      : dressupStatus === "loading"
+                        ? "読み込み中…"
+                        : "—"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <Sparkles className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
+                  <span className="text-muted-foreground w-12 shrink-0">飾り</span>
+                  <span className="text-foreground min-w-0 truncate" data-testid="customize-current-deco">
+                    {dressupStatus === "ready"
+                      ? decoLabel(dressup?.activeDecoId)
+                      : dressupStatus === "loading"
+                        ? "読み込み中…"
+                        : "—"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <Tag className="w-3.5 h-3.5 text-[var(--yuuko-green-text)] shrink-0" aria-hidden="true" />
                   <span className="text-muted-foreground w-12 shrink-0">呼び名</span>
                   <span className="text-foreground min-w-0 truncate">
                     {nicknameStatus === "ready"
@@ -898,7 +1262,7 @@ export default function CustomizeScreen({
             {/* Yuuko's Comment */}
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/50">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   <Heart className="w-3 h-3 fill-[var(--yuuko-green)]" aria-hidden="true" />
                   ゆうこのおはなし
                 </CardTitle>
@@ -912,7 +1276,7 @@ export default function CustomizeScreen({
                   ありがとう！うれしいよ〜！
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]" aria-hidden="true">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -936,7 +1300,7 @@ export default function CustomizeScreen({
                     <div className="flex items-baseline gap-1 mb-1">
                       <span className="text-xs text-muted-foreground">ランク</span>
                       <span
-                        className="text-3xl font-bold text-[var(--yuuko-green)]"
+                        className="text-3xl font-bold text-[var(--yuuko-green-text)]"
                         data-testid="customize-friendship-rank"
                       >
                         {friendship.currentRank}
@@ -977,9 +1341,11 @@ export default function CustomizeScreen({
 
       {/* Float animation keyframes */}
       <style jsx global>{`
+        /* 横の中央寄せは外側の入れ物（-translate-x-1/2）が行う。ここでも -50% ずらすと二重になり、
+           ゆうこが左へずれて狭い幅では切れていた（実機テスト B10）。 */
         @keyframes float {
-          0%, 100% { transform: translateY(0) translateX(-50%); }
-          50% { transform: translateY(-8px) translateX(-50%); }
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-8px); }
         }
       `}</style>
     </div>

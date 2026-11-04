@@ -14,11 +14,9 @@ const IGNORE_COOLDOWN_MINUTES: i64 = 180; // 無操作（無視）後の再通�
 /// トレイ「ゆうこを呼ぶ」（判断台帳 D140）で紹介できる記事が無いときの一言（固定文言）。
 pub const SUMMON_NO_ARTICLE_MESSAGE: &str = "いま紹介できるニュースがないみたい。";
 /// トレイ「ゆうこを呼ぶ」で、通知設定が OFF のときの一言（固定文言）。
-pub const SUMMON_NOTIFICATIONS_OFF_MESSAGE: &str =
-    "通知がOFFになっているよ。設定でONにすると、ニュースを紹介できるよ。";
+pub const SUMMON_NOTIFICATIONS_OFF_MESSAGE: &str = "通知がOFFだよ。設定でONにしてね。";
 /// トレイ「ゆうこを呼ぶ」で、記事一覧などを読めなかったときの一言（固定文言）。
-pub const SUMMON_FAILED_MESSAGE: &str =
-    "いまはニュースを確認できなかったみたい。少ししてからまた呼んでね。";
+pub const SUMMON_FAILED_MESSAGE: &str = "ニュースを確認できなかったよ。また呼んでね。";
 /// 紹介済みIDの保持上限（FIFO）。状態ファイルの肥大化を防ぐ。
 const INTRODUCED_HISTORY_CAP: usize = 500;
 /// 保存用タイムスタンプ形式（UTC）。news / friendship / summary と統一。
@@ -127,6 +125,10 @@ pub struct PersistedYuukoState {
     /// OK せずに閉じた・放置した報酬も再通知しない（ランクアップダイアログ・カスタマイズ画面で気づける）。
     /// 未確認でなくなった ID は通知判定時に取り除き、肥大化させない。旧データには無いため既定は空。
     pub announced_reward_ids: Vec<String>,
+    /// ランダム系の通知モードで「次に自動通知してよい時刻」（UTC・RFC3339。判断台帳 D143）。
+    /// クールタイム明けにランダムな待ちを足した時刻を保存し、再起動しても待ちをやり直さない。
+    /// 決め方と失効条件は domain::notification_mode。旧データには無く、既定は None（次の判定で決める）。
+    pub next_random_notify_at: Option<String>,
 }
 
 impl Default for PersistedYuukoState {
@@ -144,6 +146,7 @@ impl Default for PersistedYuukoState {
             daily_notification: DailyNotificationCount::default(),
             introduced_article_ids: Vec::new(),
             announced_reward_ids: Vec::new(),
+            next_random_notify_at: None,
         }
     }
 }
@@ -173,6 +176,17 @@ pub struct YuukoNotificationState {
     /// それ以外（メイン画面からの取得・通常の通知判定）では常に None（送らない）。固定文言だけを入れる。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summon_message: Option<String>,
+    /// その時点で適用する吹き出しの ID（着せかえ。判断台帳 D156）。永続化しない。
+    ///
+    /// 常駐ゆうこウィンドウには get_dressup_state を許可しないため、ゆうこ用ウィンドウのマウント時の
+    /// 状態取得に限って Rust が詰める（未所持・未知は既定 `balloon_default` に倒した値）。
+    /// メイン画面からの取得・通常の通知判定では常に None（送らない。メインは get_dressup_state で読む）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon_id: Option<String>,
+    /// その時点で適用する飾りの ID（未所持・未知は既定 `deco_none`）。balloon_id と同じく
+    /// ゆうこ用ウィンドウのマウント時の状態取得でだけ詰める。永続化しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deco_id: Option<String>,
 }
 
 /// 軽量プレビューに出す短い要約の最大文字数（Unicode のコードポイント数。省略記号を含む）。
@@ -281,6 +295,8 @@ impl PersistedYuukoState {
             reward_notification: self.reward_notification.clone(),
             preview_short_summary: None,
             summon_message: None,
+            balloon_id: None,
+            deco_id: None,
         }
     }
 
@@ -741,6 +757,8 @@ impl PersistedYuukoState {
 /// 報酬通知の吹き出し文言（固定文言＋報酬マスタの名前）。保存ファイル由来の未知 ID は名前に使わない。
 ///
 /// 報酬は当面テーマのみ（D34）。1件ならマスタの名前を入れ、複数なら件数で伝える。
+/// 常駐ゆうこウィンドウの吹き出しは2行で省略されるため、呼び名付きでも収まるよう短くしている（D157）。
+/// 以前の長い文言が yuuko_state.json に残っていても、`sync_reward_notice` が毎回ここから作り直して揃える。
 pub fn reward_notice_message(reward_ids: &[String]) -> String {
     let names: Vec<&'static str> = reward_ids
         .iter()
@@ -750,12 +768,9 @@ pub fn reward_notice_message(reward_ids: &[String]) -> String {
         })
         .collect();
     match names.as_slice() {
-        [] => "新しいテーマが届いたよ！カスタマイズで切り替えられるよ。".to_string(),
-        [name] => format!("新しいテーマ「{name}」が届いたよ！カスタマイズで切り替えられるよ。"),
-        many => format!(
-            "新しいテーマが{}つ届いたよ！カスタマイズで切り替えられるよ。",
-            many.len()
-        ),
+        [] => "新しいテーマが届いたよ！".to_string(),
+        [name] => format!("新しいテーマ「{name}」が届いたよ！"),
+        many => format!("新しいテーマが{}つ届いたよ！", many.len()),
     }
 }
 
@@ -787,7 +802,7 @@ pub struct RequestYuukoNotificationResult {
 }
 
 /// 保存用タイムスタンプ文字列を生成する（UTC・他サービスと同形式）。
-fn format_timestamp(value: DateTime<Utc>) -> String {
+pub(crate) fn format_timestamp(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
 }
 
@@ -804,14 +819,14 @@ pub(crate) fn local_date_key<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> Strin
 
 /// 保存済みRFC3339文字列を UTC DateTime へ復元する。
 /// パース不能ならその制約は無視（fail-open）し、恒久的に通知が止まらないようにする。
-fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// "HH:MM" 形式の文字列をパースして (時, 分) を返す。
-fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_hour_minute(s: &str) -> Option<(u32, u32)> {
     let (h_str, m_str) = s.split_once(':')?;
     let h: u32 = h_str.parse().ok()?;
     let m: u32 = m_str.parse().ok()?;
@@ -1306,18 +1321,15 @@ mod tests {
     fn reward_notice_message_uses_master_name_or_count() {
         assert_eq!(
             reward_notice_message(&ids(&["theme_001"])),
-            "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。"
+            "新しいテーマ「そらいろ」が届いたよ！"
         );
         assert_eq!(
             reward_notice_message(&ids(&["theme_001", "theme_002"])),
-            "新しいテーマが2つ届いたよ！カスタマイズで切り替えられるよ。"
+            "新しいテーマが2つ届いたよ！"
         );
         // マスタに無い ID の文字列は文言に入れない。
         let unknown = reward_notice_message(&ids(&["<b>evil</b>"]));
-        assert_eq!(
-            unknown,
-            "新しいテーマが届いたよ！カスタマイズで切り替えられるよ。"
-        );
+        assert_eq!(unknown, "新しいテーマが届いたよ！");
     }
 
     #[test]
@@ -1335,7 +1347,7 @@ mod tests {
         assert!(state.preview_article.is_none() && state.current_article_id.is_none());
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！")
         );
         let reward = state.reward_notification.clone().unwrap();
         assert!(reward.pending);
@@ -1390,7 +1402,7 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(
             state.balloon_text.as_deref(),
-            Some("新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「さくら」が届いたよ！")
         );
         // すべて確認済みなら通知自体を外す（二重に知らせない）。クールタイムは付けない。
         assert!(state.sync_reward_notice(&[]));
@@ -1406,14 +1418,14 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
         let mut state = PersistedYuukoState::default();
         state.mark_reward_notified(now, 3, ids(&["theme_001"]));
-        // 仮名時代に保存された文言が残っている状態を再現する。
+        // 仮名時代に保存された文言（短くする前の長い文言）が残っている状態を再現する。
         let stale = "新しいテーマ「テーマ①」が届いたよ！カスタマイズで切り替えられるよ。";
         state.reward_notification.as_mut().unwrap().message = stale.to_string();
         state.balloon_text = Some(stale.to_string());
 
         // 件数は同じでも、文言を現在の表示名で作り直して保存対象にする。
         assert!(state.sync_reward_notice(&ids(&["theme_001"])));
-        let expected = "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "新しいテーマ「そらいろ」が届いたよ！";
         assert_eq!(
             state.reward_notification.as_ref().unwrap().message,
             expected
@@ -1422,6 +1434,41 @@ mod tests {
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         // 揃った後は変化なし（保存不要）。
         assert!(!state.sync_reward_notice(&ids(&["theme_001"])));
+    }
+
+    #[test]
+    fn sync_reward_notice_shortens_long_text_saved_before_d157() {
+        // 短くする前（D157）の長い文言が保存済みでも、同期で現在の短い文言へ揃え、確認もできる。
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 3, 0, 0).unwrap();
+        for (reward_ids, old, expected) in [
+            (
+                ids(&["theme_001"]),
+                "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。",
+                "新しいテーマ「そらいろ」が届いたよ！",
+            ),
+            (
+                ids(&["theme_001", "theme_002"]),
+                "新しいテーマが2つ届いたよ！カスタマイズで切り替えられるよ。",
+                "新しいテーマが2つ届いたよ！",
+            ),
+        ] {
+            let mut state = PersistedYuukoState::default();
+            state.mark_reward_notified(now, 7, reward_ids.clone());
+            state.reward_notification.as_mut().unwrap().message = old.to_string();
+            state.balloon_text = Some(old.to_string());
+
+            assert!(state.sync_reward_notice(&reward_ids));
+            assert_eq!(
+                state.reward_notification.as_ref().unwrap().message,
+                expected
+            );
+            assert_eq!(state.balloon_text.as_deref(), Some(expected));
+            assert!(!state.sync_reward_notice(&reward_ids));
+            // 文言ではなく報酬 ID で確認するため、古い文言のデータでも確認できる。
+            state.confirm_rank_up_reward(&reward_ids).unwrap();
+            assert_eq!(state.state, YuukoResidentState::Waiting);
+            assert!(state.reward_notification.is_none());
+        }
     }
 
     #[test]
@@ -1442,7 +1489,7 @@ mod tests {
         state.mark_reward_notified(now, 7, ids(&["theme_001", "theme_002"]));
         state.confirm_rank_up_reward(&ids(&["theme_001"])).unwrap();
 
-        let expected = "新しいテーマ「さくら」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "新しいテーマ「さくら」が届いたよ！";
         assert_eq!(state.state, YuukoResidentState::RewardNotifying);
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
         let reward = state.reward_notification.unwrap();
@@ -1457,7 +1504,7 @@ mod tests {
         state.mark_reward_notified(now, 3, ids(&["theme_001"]));
         let mut dto = state.to_notification_state();
         dto.apply_nickname("ゆう");
-        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
         assert_eq!(dto.balloon_text.as_deref(), Some(expected));
         assert_eq!(dto.reward_notification.unwrap().message, expected);
         // 保存状態には焼き込まない。

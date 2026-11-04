@@ -20,6 +20,7 @@
     "check:rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "review:quick": "pnpm run check:frontend && pnpm run check:rust && pnpm run check:rust:test",
     "review:strict": "pnpm run review:quick && pnpm run build && pnpm run check:rust:fmt && pnpm run check:rust:clippy",
+    "review:ui": "pnpm run review:strict && pnpm run test:ui",
     "review": "pnpm run review:strict",
     "setup:dev-news-source": "node scripts/setup-dev-news-source.mjs",
     "hooks:install": "git config --local core.hooksPath .githooks"
@@ -38,7 +39,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.564.0",
-    "next": "16.3.8",
+    "next": "16.4.1",
     "next-themes": "^0.4.6",
     "react": "^19",
     "react-dom": "^19",
@@ -52,8 +53,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9.38.0",
-    "eslint-config-next": "16.3.8",
-    "postcss": "^8.5.12",
+    "eslint-config-next": "16.4.1",
+    "postcss": "^8.5.32",
     "tailwindcss": "^4.2.0",
     "tw-animate-css": "1.3.3",
     "typescript": "5.7.3"

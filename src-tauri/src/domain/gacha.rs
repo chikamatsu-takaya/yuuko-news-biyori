@@ -37,11 +37,11 @@ pub enum GachaItemKind {
     Card,
     /// 色違いテーマ。
     Theme,
-    /// ゆうこの飾り。素材ができたらマスタに行を足すだけで追加できるよう、種類だけ用意する（D75）。
-    #[allow(dead_code)]
+    /// テーマの地に敷く模様（判断台帳 D152〜D154）。色テーマとは独立に選ぶ。
+    Pattern,
+    /// ゆうこの飾り（アクセサリー。D75・D155）。立ち絵の上に重ねる。
     Deco,
-    /// 吹き出しデザイン。`Deco` と同じく種類だけ用意する（D75）。
-    #[allow(dead_code)]
+    /// 吹き出しデザイン（D75・D155）。
     Balloon,
 }
 
@@ -77,10 +77,38 @@ const fn theme(item_id: &'static str, name: &'static str) -> GachaItemDefinition
     }
 }
 
+const fn pattern(item_id: &'static str, name: &'static str) -> GachaItemDefinition {
+    GachaItemDefinition {
+        item_id,
+        kind: GachaItemKind::Pattern,
+        name,
+        text: None,
+    }
+}
+
+const fn balloon(item_id: &'static str, name: &'static str) -> GachaItemDefinition {
+    GachaItemDefinition {
+        item_id,
+        kind: GachaItemKind::Balloon,
+        name,
+        text: None,
+    }
+}
+
+const fn deco(item_id: &'static str, name: &'static str) -> GachaItemDefinition {
+    GachaItemDefinition {
+        item_id,
+        kind: GachaItemKind::Deco,
+        name,
+        text: None,
+    }
+}
+
 /// ガチャマスタ（アプリ同梱）。報酬マスタ（§11.3）と同じ理由で、同梱 JSON ではなくバイナリに埋め込む
 /// （外部から書き換えられない値を正にできるため）。
 ///
-/// - ひとことカード 40 枚＋ガチャ用テーマ 3 種の計 43 個（D79）。ID は文面が変わっても変えない
+/// - ひとことカード 40 枚＋ガチャ用テーマ 3 種（D79）＋模様 12 種（D152〜D154）＋吹き出し 9 種・飾り 10 種（D155）の
+///   計 74 個。ID は文面が変わっても変えない
 ///   （保存済みの獲得状態を引き継ぐため）。
 /// - カードの名前・文面は藤井さんが承認した確定文（D89）。中身は「え、まじ！？」となる雑学＋
 ///   最後の一文にゆうこのリアクション（D87）。4ジャンル×10枚で、card_001〜010 は生き物・自然、
@@ -88,7 +116,14 @@ const fn theme(item_id: &'static str, name: &'static str) -> GachaItemDefinition
 ///   文面を直すときも ID はそのままで文字列だけ差し替える。
 /// - テーマの表示名は仮の名前で、実際の配色はテーマ設計の別タスクで決める。ID はランク報酬
 ///   （`theme_001` / `theme_002`）と重ならないよう `gacha_theme_` で始める。
-/// - `deco` / `balloon` は素材ができたら行を足す（D75）。
+/// - 模様の ID は `gacha_pattern_<形の名前>`。テーマと違い、模様は形そのものが中身で名前も確定している
+///   ため、番号ではなく形の英語名にする（素材ファイル public/assets/patterns/<形>.svg と対応が読める）。
+///   初期所持の模様（なし・水玉・肉球）はガチャに入れない（domain/pattern.rs）。季節の柄も自動では
+///   切り替えず、ふつうのガチャ模様として扱う（D154）。
+/// - 吹き出しの ID は `gacha_balloon_<形の名前>`、飾り（アクセサリー）の ID は `gacha_deco_<物の名前>`（D155）。
+///   模様と同じく番号ではなく英語名にする（吹き出しの CSS・素材ファイル public/assets/accessories/<物>.svg と
+///   対応が読める）。最初から使える「いつもの」吹き出し・「なし」の飾りはガチャに入れない（domain/dressup.rs）。
+///   季節もの（桜・サンタ帽）も自動では切り替えず、ふつうのガチャ品として扱う。
 pub const GACHA_MASTER: &[GachaItemDefinition] = &[
     // --- ひとことカード（雑学＋ゆうこのリアクション・D87。文面は D89 で承認済み） ---
     card("card_001", "タコの心臓", "タコには心臓が3つあって、血は青いんだって。……3つもあったら、ドキドキも3倍なのかな？"),
@@ -135,6 +170,40 @@ pub const GACHA_MASTER: &[GachaItemDefinition] = &[
     theme("gacha_theme_001", "ミント"),
     theme("gacha_theme_002", "ひだまり"),
     theme("gacha_theme_003", "ラベンダー"),
+    // --- 模様（形は public/assets/patterns、表示名は lib/ui-pattern.mjs の UI_PATTERNS と揃える） ---
+    pattern("gacha_pattern_sparkle", "キラキラ"),
+    pattern("gacha_pattern_gingham", "ギンガムチェック"),
+    pattern("gacha_pattern_bone", "ほねっこ"),
+    pattern("gacha_pattern_grid", "方眼ノート"),
+    pattern("gacha_pattern_kotoba", "ことばのかけら"),
+    pattern("gacha_pattern_stripe", "マルシェストライプ"),
+    pattern("gacha_pattern_heart", "ぷっくりハート"),
+    pattern("gacha_pattern_cloud", "雲とおひさま"),
+    pattern("gacha_pattern_sakura", "桜ひらり（春）"),
+    pattern("gacha_pattern_seigaiha", "青海波（夏）"),
+    pattern("gacha_pattern_ginkgo", "いちょう（秋）"),
+    pattern("gacha_pattern_snow", "ゆきのひ（冬）"),
+    // --- 吹き出し（形は app/globals.css の .yuuko-bb-<形>、表示名は lib/yuuko-dressup.mjs の UI_BALLOONS と揃える） ---
+    balloon("gacha_balloon_rim", "テーマ色のふち"),
+    balloon("gacha_balloon_cloud", "もこもこ雲"),
+    balloon("gacha_balloon_note", "ノート"),
+    balloon("gacha_balloon_sticky", "付箋"),
+    balloon("gacha_balloon_dash", "点線"),
+    balloon("gacha_balloon_airmail", "エアメール"),
+    balloon("gacha_balloon_pixel", "ドット絵"),
+    balloon("gacha_balloon_game", "ゲームの窓"),
+    balloon("gacha_balloon_seal", "シール"),
+    // --- 飾り（絵は public/assets/accessories、表示名は lib/yuuko-dressup.mjs の UI_DECOS と揃える） ---
+    deco("gacha_deco_ribbon", "リボン"),
+    deco("gacha_deco_flower", "お花"),
+    deco("gacha_deco_star_pin", "星のヘアピン"),
+    deco("gacha_deco_crown", "ちび王冠"),
+    deco("gacha_deco_round_sunglasses", "丸サングラス"),
+    deco("gacha_deco_swirl_glasses", "ぐるぐるメガネ"),
+    deco("gacha_deco_heart_sunglasses", "ハートのサングラス"),
+    deco("gacha_deco_silk_hat", "シルクハット"),
+    deco("gacha_deco_sakura", "桜（春）"),
+    deco("gacha_deco_santa_hat", "サンタ帽（冬）"),
 ];
 
 /// マスタに存在する排出対象か。外部（保存ファイル・フロント）由来の ID を検証するのに使う。
@@ -475,8 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn master_has_40_cards_and_3_themes_with_unique_ids() {
-        assert_eq!(GACHA_MASTER.len(), 43);
+    fn master_has_40_cards_3_themes_12_patterns_and_dressup_with_unique_ids() {
+        assert_eq!(GACHA_MASTER.len(), 74);
         let cards: Vec<_> = GACHA_MASTER
             .iter()
             .filter(|def| def.kind == GachaItemKind::Card)
@@ -501,6 +570,27 @@ mod tests {
                 ("gacha_theme_003", None)
             ]
         );
+        let patterns: Vec<_> = GACHA_MASTER
+            .iter()
+            .filter(|def| def.kind == GachaItemKind::Pattern)
+            .collect();
+        assert_eq!(patterns.len(), 12);
+        assert!(patterns
+            .iter()
+            .all(|def| def.item_id.starts_with("gacha_pattern_")
+                && def.text.is_none()
+                && !def.name.is_empty()));
+        // 吹き出し 9 種・飾り 10 種（D155）。
+        for (kind, prefix, count) in [
+            (GachaItemKind::Balloon, "gacha_balloon_", 9),
+            (GachaItemKind::Deco, "gacha_deco_", 10),
+        ] {
+            let items: Vec<_> = GACHA_MASTER.iter().filter(|def| def.kind == kind).collect();
+            assert_eq!(items.len(), count, "{prefix}");
+            assert!(items.iter().all(|def| def.item_id.starts_with(prefix)
+                && def.text.is_none()
+                && !def.name.is_empty()));
+        }
         let mut all: Vec<&str> = GACHA_MASTER.iter().map(|def| def.item_id).collect();
         all.sort_unstable();
         all.dedup();
@@ -509,6 +599,42 @@ mod tests {
         assert!(REWARD_MASTER
             .iter()
             .all(|reward| find_gacha_item(reward.reward_id).is_none()));
+    }
+
+    #[test]
+    fn drawn_pattern_is_reported_with_pattern_kind() {
+        // 模様も「未所持から等確率で1つ」の同じ流れに乗り、種類 "pattern" として結果に出る（D152〜D154）。
+        let mut state = owning_all_but(&["gacha_pattern_snow"]);
+        let outcome = state.draw(|n| {
+            assert_eq!(n, 1);
+            0
+        });
+        let dto = GachaDrawResultDto::from_outcome(outcome, &state);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["item"]["itemId"], "gacha_pattern_snow");
+        assert_eq!(json["item"]["kind"], "pattern");
+        assert_eq!(json["item"]["text"], serde_json::Value::Null);
+        assert_eq!(json["isComplete"], true);
+    }
+
+    #[test]
+    fn drawn_balloon_and_deco_are_reported_with_their_kinds() {
+        // 吹き出し・飾りも同じ抽選の流れに乗り、種類 "balloon" / "deco" として結果に出る（D155）。
+        for (item_id, kind) in [
+            ("gacha_balloon_cloud", "balloon"),
+            ("gacha_deco_santa_hat", "deco"),
+        ] {
+            let mut state = owning_all_but(&[item_id]);
+            let outcome = state.draw(|n| {
+                assert_eq!(n, 1);
+                0
+            });
+            let dto = GachaDrawResultDto::from_outcome(outcome, &state);
+            let json = serde_json::to_value(&dto).unwrap();
+            assert_eq!(json["item"]["itemId"], item_id);
+            assert_eq!(json["item"]["kind"], kind);
+            assert_eq!(json["item"]["text"], serde_json::Value::Null);
+        }
     }
 
     /// カード文面は UI にそのまま出すため、空・HTML・制御文字を混ぜず、同じ文面の重複もないことを保証する（D89）。
@@ -540,7 +666,7 @@ mod tests {
         assert!(!state.is_complete());
         let dto = state.to_dto();
         assert!(dto.can_draw);
-        assert_eq!((dto.owned_count, dto.total_count), (0, 43));
+        assert_eq!((dto.owned_count, dto.total_count), (0, 74));
     }
 
     #[test]
@@ -548,7 +674,7 @@ mod tests {
         let mut state = GachaState::default();
         state.add_fragments(GACHA_COST);
         let outcome = state.draw(|n| {
-            assert_eq!(n, 43);
+            assert_eq!(n, 74);
             40
         });
         let DrawOutcome::Drawn(item) = outcome else {
@@ -559,9 +685,9 @@ mod tests {
         assert_eq!(state.owned_item_ids, ids(&["gacha_theme_001"]));
         assert_eq!(state.new_item_ids, ids(&["gacha_theme_001"]));
 
-        // 2回目は未所持の 42 個から選ぶ（重複は出ない）。
+        // 2回目は未所持の 73 個から選ぶ（重複は出ない）。
         let outcome = state.draw(|n| {
-            assert_eq!(n, 42);
+            assert_eq!(n, 73);
             0
         });
         assert_eq!(outcome, DrawOutcome::Drawn(&GACHA_MASTER[0]));
@@ -596,7 +722,7 @@ mod tests {
         assert_eq!(state, before);
         let dto = state.to_dto();
         assert!(dto.is_complete && !dto.can_draw);
-        assert_eq!(dto.owned_count, 43);
+        assert_eq!(dto.owned_count, 74);
     }
 
     #[test]
@@ -662,7 +788,7 @@ mod tests {
             ..GachaState::default()
         };
         let dto = state.to_dto();
-        assert_eq!(dto.items.len(), 43);
+        assert_eq!(dto.items.len(), 74);
         assert_eq!((dto.owned_count, dto.star_fragments), (2, 12));
         assert!(!dto.can_draw && !dto.is_complete);
 

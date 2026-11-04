@@ -35,26 +35,135 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # next/font/google はビルド時に Google Fonts からフォントを取得するため、通信の一時失敗で
+      # ビルドが落ちることがある（D149）。フォント取得失敗に一致するときだけ最大 3 回まで試す。
+      # それ以外の失敗（型・lint・バンドルエラーなど）は再試行せず、その場で失敗させる。
       - name: Build
-        run: pnpm build
+        shell: bash
+        run: |
+          # Actions の bash は -e 付きで起動するため、終了コードを自前で扱えるよう -e を外す。
+          set +e -uo pipefail
+          # 過去の失敗ログ（Turbopack）で実際に出た文言と、next/font の取得失敗文言に一致させる。
+          font_error_pattern='Failed to fetch font|Failed to fetch `[^`]*` from Google Fonts|Failed to (fetch|download).*fonts\.(googleapis|gstatic)\.com|next/font/google queries have exactly one entry|turbopack-next/internal/font/google'
+          log_file="$RUNNER_TEMP/next-build.log"
+          max_attempts=3
+          status=1
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "pnpm build（試行 ${attempt}/${max_attempts}）"
+            pnpm build 2>&1 | tee "$log_file"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+            if ! grep -Eq "$font_error_pattern" "$log_file"; then
+              echo "::error::フォント取得以外の理由で pnpm build が失敗したため再試行しません"
+              exit "$status"
+            fi
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "::warning::Google Fonts の取得失敗とみられるため pnpm build を再試行します（${attempt}/${max_attempts} 回目が失敗）"
+              sleep $((attempt * 15))
+            fi
+          done
+          echo "::error::Google Fonts の取得失敗が ${max_attempts} 回続いたため失敗にします"
+          exit "$status"
 
   rust:
     name: Rust (check/fmt/clippy)
     runs-on: windows-latest
+    env:
+      # CI では差分ビルドの恩恵がなく、incremental はキャッシュを肥大化・不安定化させるため切る（D149）。
+      CARGO_INCREMENTAL: 0
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # PR のマージコミット（HEAD）と第1親（base 側）を比べるため 2 世代だけ取得する。
+          fetch-depth: 2
+
+      # Rust に関係する変更がない PR では重い手順をスキップする（D149）。
+      # ジョブ自体は常に起動して成功を報告するため、必須チェックが Pending のまま残らない
+      # （security-ci.yml と同じ理由で on.paths は使わない）。
+      # push（develop / main）では常に実行し、判定に失敗したときも安全側（実行する）に倒す。
+      - name: Detect Rust changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # Rust のビルド・検査結果に影響し得るパス。このワークフロー自身の変更も含める。
+          RUST_PATH_PATTERN: '^(src-tauri/|Cargo\.(toml|lock)$|rust-toolchain(\.toml)?$|\.cargo/|\.github/workflows/ci\.yml$)'
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+            && files=$(git -c core.quotepath=off diff --no-renames --name-only 'HEAD^1' HEAD) \
+            && [ -n "$files" ]; then
+            # Actions の bash は -e 付きのため、grep の終了コードは || で受け取る。
+            # grep の 1 は「一致なし」。2 以上（エラー）は実行側に倒す。
+            match=0
+            grep -Eq "$RUST_PATH_PATTERN" <<<"$files" || match=$?
+            if [ "$match" -eq 1 ]; then
+              run=false
+            fi
+          fi
+          echo "Rust 手順を実行するか: ${run}"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust toolchain
+        if: steps.changes.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
 
+      # 依存クレートのビルド成果物とレジストリを復元する。PR は復元のみで保存しない
+      # （PR ごとのキャッシュが develop / main の共有キャッシュを追い出さないようにするため）。
+      # キーの 1.88.0 は上の dtolnay/rust-toolchain のバージョンと揃える。
+      - name: Restore Rust cache
+        id: rust-cache
+        if: steps.changes.outputs.run != 'false'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: rust-${{ runner.os }}-1.88.0-check-clippy-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-1.88.0-check-clippy-
+
       - name: Cargo check
+        if: steps.changes.outputs.run != 'false'
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
       - name: Cargo fmt check
+        if: steps.changes.outputs.run != 'false'
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Cargo clippy
+        if: steps.changes.outputs.run != 'false'
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # 保存前に、毎回作り直されるワークスペース自身（app / app_lib）の成果物と incremental を消して
+      # キャッシュを依存クレート中心の小さいものに保つ。
+      - name: Prune Rust cache
+        if: steps.changes.outputs.run != 'false' && github.event_name == 'push' && steps.rust-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          target=src-tauri/target/debug
+          rm -rf "$target/incremental"
+          rm -rf "$target"/deps/app-* "$target"/deps/app_lib-* "$target"/deps/libapp_lib-* \
+            "$target"/deps/app.* "$target"/deps/app_lib.* "$target"/deps/libapp_lib.* \
+            "$target"/.fingerprint/app-* "$target"/build/app-* \
+            "$target"/app.* "$target"/app_lib.* "$target"/libapp_lib.*
+
+      # develop / main への push で、Cargo.lock に対応するキャッシュがまだ無いときだけ保存する。
+      - name: Save Rust cache
+        if: steps.changes.outputs.run != 'false' && github.event_name == 'push' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}

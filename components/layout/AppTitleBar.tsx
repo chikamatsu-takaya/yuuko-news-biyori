@@ -1,30 +1,29 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { WindowControls } from "@/components/layout/WindowControls";
 import { cn } from "@/lib/utils";
 
+/**
+ * 各画面上部のアプリ名表示（D147）。
+ * 最小化・最大化・閉じるは OS のタイトルバーに任せ、ここには操作ボタンを置かない
+ * （二重のタイトルバーで押しても動かないボタンが並ぶのを避けるため）。
+ * OS の閉じるは Rust 側の close-to-hide でバックグラウンド待機へ戻る。
+ */
 type AppTitleBarProps = {
   title?: string;
   logo?: ReactNode;
   className?: string;
-  onMinimize?: () => void;
-  onMaximize?: () => void;
-  onClose?: () => void;
 };
 
 export function AppTitleBar({
   title = "ゆうこと、ニュースを読みやすく。",
   logo,
   className,
-  onMinimize,
-  onMaximize,
-  onClose,
 }: AppTitleBarProps) {
   return (
     <header
       className={cn(
-        "h-10 bg-white border-b border-border flex items-center justify-between px-4 shrink-0",
+        "h-10 bg-white border-b border-border flex items-center px-4 shrink-0",
         className
       )}
     >
@@ -36,11 +35,6 @@ export function AppTitleBar({
         )}
         <span className="text-sm font-medium text-foreground">{title}</span>
       </div>
-      <WindowControls
-        onMinimize={onMinimize}
-        onMaximize={onMaximize}
-        onClose={onClose}
-      />
     </header>
   );
 }

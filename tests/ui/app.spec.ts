@@ -38,7 +38,8 @@ const majorScreens = [
     navName: "ニュース履歴",
     expectedHeading: "ニュース履歴",
     expectedText: "ニュース履歴",
-    criticalButtons: ["ホームへ戻る", "絞り込み"],
+    // 処理の無かった「絞り込み」ボタンは撤去したため、絞り込みはフィルタチップで確認する。
+    criticalButtons: ["ホームへ戻る", "すべて"],
   },
   {
     id: "customize",
@@ -83,20 +84,10 @@ test("home screen renders and primary controls are hittable", async ({
   await page.getByRole("button", { name: "ニュースを更新" }).click();
   await expect(page.getByText("ニュースを更新しました。")).toBeVisible();
 
-  // Tauriのclose呼び出しをmockし、共通タイトルバーの操作経路を確認する。
-  await page.getByRole("button", { name: "バックグラウンドで待機" }).click();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          Boolean(
-            (window as typeof window & {
-              __E2E_WINDOW_CLOSE_CALLED__?: boolean;
-            }).__E2E_WINDOW_CLOSE_CALLED__
-          )
-      )
-    )
-    .toBe(true);
+  // ウィンドウ操作は OS のタイトルバーに任せるため、画面内には最小化・最大化・閉じるを置かない（D147）。
+  for (const name of ["最小化", "最大化", "バックグラウンドで待機"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
   await expect(
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
@@ -673,6 +664,26 @@ test("past news: sidebar opens the month list and a month opens its article list
   await expect(page.getByTestId("past-news-month-list")).toBeVisible();
 });
 
+test("past news: sidebar 過去ニュース while a month is open returns to the month list", async ({
+  page,
+}) => {
+  await openPastNews(page);
+  await page.getByTestId("past-news-month-2026-09").getByRole("button").click();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toBeVisible();
+
+  // 表示中の画面と同じ項目を押しても画面は作り直されないため、画面側で月一覧へ戻す。
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "過去ニュース", exact: true })
+    .click();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "2026年9月の過去ニュース" })
+  ).toHaveCount(0);
+});
+
 test("past news: opening an article asks first, restores by id, and back returns to the same month", async ({
   page,
 }) => {
@@ -845,6 +856,100 @@ test("past news: old-format months explain that the article list is unavailable"
   await expect(month.getByRole("button")).toHaveCount(0);
 });
 
+// 押しても何も起きなかったボタン（console.log だけ・onClick 無し）の整理。
+// 既存機能で裏付けられるものは接続し、裏付けの無いもの（シェア・共有・ヘルプ・絞り込み）は表示しない。
+test("news history: dead share / filter / help buttons are not rendered", async ({
+  page,
+}) => {
+  await openNewsHistory(page);
+
+  await expect(page.getByRole("button", { name: "記事をシェア" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "絞り込み", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "ヘルプ" })).toHaveCount(0);
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+  // アーカイブされていない記事には過去ニュースへの導線（旧「アーカイブを展開」）を出さない。
+  await expect(page.getByRole("button", { name: "アーカイブを展開" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "過去ニュースで探す" })).toHaveCount(0);
+});
+
+test("news history: archived article offers 過去ニュースで探す which opens the past news screen", async ({
+  page,
+}) => {
+  await setArchivedHistory(page);
+  await openNewsHistory(page);
+
+  await expect(page.locator("main").getByText("アーカイブ済み", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "過去ニュースで探す" }).click();
+
+  // 画面遷移だけで、1記事の取り出し（restore_archived_article）は呼ばない。
+  await expect(
+    page.getByRole("heading", { name: "過去ニュース", exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("past-news-month-list")).toBeVisible();
+  expect(await readRestoreArchivedArgs(page)).toEqual([]);
+});
+
+test("dictionary: dead share / filter / help buttons are not rendered and delete stays", async ({
+  page,
+}) => {
+  await openDictionary(page);
+  await dictionaryListItem(page, "E2E用語").click();
+  await expect(dictionaryDetailHeading(page)).toHaveText("E2E用語");
+
+  await expect(page.getByRole("button", { name: "削除する" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "共有する" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "絞り込み", exact: true })).toHaveCount(0);
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+});
+
+for (const target of [
+  { navName: "カスタマイズ", heading: "ゆうこカスタマイズ" },
+  { navName: "ガチャ", heading: "ゆうこガチャ" },
+] as const) {
+  test(`${target.navName}: the footer has no dead help button`, async ({ page }) => {
+    await openScreenFromSidebar(page, target.navName, target.heading);
+    await expect(page.locator("footer")).toBeVisible();
+    await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+  });
+}
+
+test("reader: すべての関連ワードを見る expands the remaining candidate terms in place", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_KEYWORD_CANDIDATES__ = [
+      "候補語A",
+      "候補語B",
+      "候補語C",
+      "候補語D",
+      "候補語E",
+      "候補語F",
+      "候補語G",
+    ];
+  });
+  await openReaderWithoutExplain(page);
+  const aside = page.locator("aside");
+
+  // 既定では先頭5件だけ。残り2件は展開ボタンの件数で示す。
+  await expect(aside.getByText("候補語E", { exact: true })).toBeVisible();
+  await expect(aside.getByText("候補語F", { exact: true })).toHaveCount(0);
+  const expandButton = page.getByRole("button", { name: "すべての関連ワードを見る（ほか2件）" });
+  await expect(expandButton).toBeVisible();
+
+  await expandButton.click();
+  await expect(aside.getByText("候補語F", { exact: true })).toBeVisible();
+  await expect(aside.getByText("候補語G", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /すべての関連ワードを見る/ })).toHaveCount(0);
+  // ヘルプ画面は無いため、フッターに押せないヘルプボタンを置かない。
+  await expect(page.locator("footer").getByRole("button")).toHaveCount(0);
+});
+
+test("reader: 5 or fewer candidate terms show no expand button", async ({ page }) => {
+  await openReaderWithoutExplain(page);
+  await expect(page.locator("aside").getByText("Playwright", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /すべての関連ワードを見る/ })).toHaveCount(0);
+});
+
 test("home すべて見る opens the today-news list screen", async ({ page }) => {
   await openHome(page);
 
@@ -924,6 +1029,84 @@ for (const { themeId, expectedTheme, background } of [
   });
 }
 
+// テーマの地に敷く模様（D152〜D154）: 保存済みの模様を <html data-pattern> へ反映し、画面の地に1枚の層で敷く。
+// 各画面の外側の地の塗りは透明になり、サイドバーなど不透明な白の部品はそのまま上に乗る。
+test("saved pattern is applied to the main window ground as one layer", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "pattern_paw");
+  const layer = page.getByTestId("app-pattern-layer");
+  await expect(layer).toHaveCount(1);
+  await expect(layer).toHaveCSS("position", "fixed");
+  await expect(layer).toHaveCSS("pointer-events", "none");
+  await expect(layer).toHaveCSS("opacity", "0.12");
+  const mask = await layer.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return { image: style.maskImage || style.webkitMaskImage, size: style.maskSize || style.webkitMaskSize };
+  });
+  expect(mask.image).toContain("/assets/patterns/paw.svg");
+  expect(mask.size).toBe("64px 64px");
+  // 層はビューポート全体を覆う1枚（列ごとに分けない）。
+  const box = await layer.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box && viewport && box.width === viewport.width && box.height === viewport.height).toBe(true);
+  // 画面の外側の地の塗りは透明にし、外枠が同じ地の色を受け持つ。サイドバーは白のまま。
+  await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.locator(".app-ground")).toHaveCSS("background-color", "rgb(255, 253, 245)");
+  await expect(page.locator("aside").first()).toHaveCSS("background-color", "rgb(255, 255, 255)");
+
+  // 他の画面へ移っても同じ層が残る。
+  await openScreenFromSidebar(page, "ニュース履歴", "ニュース履歴");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+  await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+});
+
+for (const activePatternId of ["none", "gacha_pattern_unknown", "../evil"]) {
+  test(`pattern ${activePatternId} keeps the ground plain (no layer, opaque screen background)`, async ({
+    page,
+  }) => {
+    await page.addInitScript((id: string) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_PATTERN_STATE__ = {
+        activePatternId: id,
+        selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, activePatternId);
+    await openHome(page);
+
+    await expect(page.locator("html")).toHaveAttribute("data-pattern", "none");
+    await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+    await expect(page.locator(".app-ground > div").nth(1)).toHaveCSS("background-color", "rgb(255, 253, 245)");
+  });
+}
+
+test("pattern layer is hidden when printing", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_dots",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "pattern_dots");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+  await page.emulateMedia({ media: "print" });
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+  await page.emulateMedia({ media: "screen", forcedColors: "active" });
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+});
+
 // サイドバー「ニュースを見る」で当日ニュース一覧を開く共通操作。
 const openTodayNewsList = async (page: Page) => {
   await page
@@ -957,6 +1140,43 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
   await expect(main.getByText("公開本日だが取得前日の記事")).toHaveCount(0);
   // カード（h3見出し）はちょうど1件。
   await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
+});
+
+test.describe("article date display", () => {
+  // 日時は端末ローカル時刻で出すため、日本時間に固定して確かめる。
+  test.use({ timezoneId: "Asia/Tokyo" });
+
+  test("today-news list formats dates and shows NEW only for articles published within 24 hours", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_HISTORY_DATE_DISPLAY__ = true;
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await openHome(page);
+    await openTodayNewsList(page);
+
+    const main = page.locator("main");
+    const freshCard = main.getByRole("button", { name: "公開直後の記事" });
+    const oldCard = main.getByRole("button", { name: "4か月前に公開された記事" });
+    await expect(freshCard).toContainText("NEW");
+    await expect(freshCard).toContainText(/公開日: \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/);
+    // 取得したばかりでも4か月前に公開された記事は NEW にしない（B2）。
+    await expect(oldCard).not.toContainText("NEW");
+    // RFC3339 のままではなく、日本時間の「YYYY/MM/DD HH:mm」で出す（B1）。
+    await expect(oldCard).toContainText("公開日: 2026/06/05 15:43");
+    await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+
+    // ニュース履歴でも同じ表示にする。
+    await page
+      .getByRole("navigation")
+      .first()
+      .getByRole("button", { name: "ニュース履歴", exact: true })
+      .click();
+    await expect(main.getByText("2026/06/05 15:43").first()).toBeVisible();
+    await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
 });
 
 test("today-news list shows the empty state (no crash, no cards) when nothing was acquired today", async ({
@@ -1094,15 +1314,14 @@ test("today-news list marks the sidebar ニュースを見る item as active", a
   await openTodayNewsList(page);
 
   const nav = page.getByRole("navigation").first();
-  // SidebarNavItem は aria-current/aria-selected を持たないため、選択状態は
-  // 見た目の色ではなく構造的なクラス（font-medium）で判定する。
+  // 選択状態は aria-current="page" で判定する（SidebarNavItem が選択中の項目にだけ付ける）。
   await expect(
     nav.getByRole("button", { name: "ニュースを見る", exact: true })
-  ).toHaveClass(/font-medium/);
+  ).toHaveAttribute("aria-current", "page");
   // 非選択項目には付かない（選択状態が正しい項目にのみ適用されることを確認）。
   await expect(
     nav.getByRole("button", { name: "ゆうこ辞書", exact: true })
-  ).not.toHaveClass(/font-medium/);
+  ).not.toHaveAttribute("aria-current", /.*/);
 });
 
 // 記事詳細（NewsReaderScreen）をホームのニュースカードから開く。
@@ -1834,6 +2053,9 @@ test("customize: friendship rank and reward unlock state come from real data", a
   );
   await expect(page.getByText("350 / 1000")).toHaveCount(0);
   await expect(page.getByText("サンプル", { exact: true })).toHaveCount(0);
+  // フッターは固定の「3件届いてるよ」ではなく、取得済みの友情ランクを出す。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.getByTestId("customize-footer-status")).toHaveText("友情ランク 4");
 
   const rewardItems = page.getByTestId("customize-rank-reward-item");
   await expect(rewardItems).toHaveCount(2);
@@ -1984,7 +2206,7 @@ test("customize: nickname load failure offers a retry", async ({ page }) => {
     delete (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__;
   });
   await page.getByTestId("customize-nickname-retry").click();
-  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
   await expect(page.getByTestId("customize-nickname-retry")).toHaveCount(0);
 });
 
@@ -2010,6 +2232,281 @@ test("customize: browser preview (outside Tauri) labels the sample rank values",
   );
   await expect(page.getByTestId("customize-rank-reward-preview")).toBeVisible();
   await expect(page.getByTestId("customize-rank-reward-item")).toHaveCount(0);
+  // サンプル値はフッターに数値として出さない。
+  await expect(page.getByTestId("customize-footer-status")).toHaveText("カスタマイズ");
+});
+
+// カスタマイズ画面の模様（set_active_pattern・D152〜D154）。なし・初期の模様・所持済みのガチャ模様だけ選べる。
+const readPatternCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_SET_ACTIVE_PATTERN_CALLS__ as
+        | string[]
+        | undefined) ?? []
+  );
+
+test("customize: pattern tab lists owned patterns, hides unowned gacha ones and applies the choice", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "none",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw", "gacha_pattern_snow"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("なし");
+  await page.getByRole("tab", { name: "模様" }).click();
+
+  const options = page.getByTestId("customize-pattern-option");
+  await expect(options).toHaveCount(15);
+  const none = options.filter({ hasText: "なし" });
+  const dots = options.filter({ hasText: "水玉" });
+  const snow = options.filter({ hasText: "ゆきのひ（冬）" });
+  const locked = options.filter({ hasText: "？？？" });
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  await expect(dots).toBeEnabled();
+  await expect(snow).toBeEnabled();
+  // 未所持のガチャ模様 11 種は名前・形を伏せて押せない。
+  await expect(locked).toHaveCount(11);
+  await expect(locked.first()).toBeDisabled();
+  await expect(locked.first()).toHaveAttribute("aria-label", "？？？（ガチャで手に入るよ）");
+  await expect(locked.first().getByTestId("pattern-swatch")).toHaveCount(0);
+  await expect(page.getByText("桜ひらり（春）")).toHaveCount(0);
+  await expect(page.getByText("？？？の模様はガチャで手に入るよ")).toBeVisible();
+  // 見本はいまの色テーマで、その模様の形を出す。
+  const dotsSwatch = dots.getByTestId("pattern-swatch");
+  await expect(dotsSwatch).toHaveAttribute("data-pattern", "pattern_dots");
+
+  await locked.first().click({ force: true });
+  expect(await readPatternCalls(page)).toEqual([]);
+
+  await snow.click();
+  await expect(page.getByTestId("customize-pattern-message")).toHaveText("模様を「ゆきのひ（冬）」にしたよ。");
+  expect(await readPatternCalls(page)).toEqual(["gacha_pattern_snow"]);
+  await expect(snow).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "gacha_pattern_snow");
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("ゆきのひ（冬）");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "block");
+
+  await none.click();
+  await expect(page.getByTestId("customize-pattern-message")).toHaveText("模様をなしにしたよ。");
+  await expect(page.locator("html")).toHaveAttribute("data-pattern", "none");
+  await expect(page.getByTestId("app-pattern-layer")).toHaveCSS("display", "none");
+});
+
+test("customize: pattern load failure shows a fixed message and a retry without raw errors", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "模様" }).click();
+  await expect(page.getByTestId("customize-pattern-load-error")).toHaveText("模様の状態を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-pattern-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-current-pattern")).toHaveText("—");
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByTestId("customize-pattern-retry").click();
+  await expect(page.getByTestId("customize-pattern-load-error")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-pattern-option").filter({ hasText: "肉球" })
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+// 再読み込みせずにサイドバーで画面を移る（着せかえの反映を、同じページの中で確かめるため）。
+const switchScreenInApp = async (page: Page, navName: string, heading: string) => {
+  await page.getByRole("navigation").first().getByRole("button", { name: navName, exact: true }).click();
+  await expect(page.getByRole("heading", { name: heading }).first()).toBeVisible();
+};
+
+// ゆうこの着せかえ（D155）。既定（なし・いつもの）と所持済みのガチャ品だけ選べ、選ぶと各画面のゆうこへ反映する。
+const readDressupCalls = (page: Page) =>
+  page.evaluate(
+    () =>
+      ((window as unknown as Record<string, unknown>).__E2E_SET_DRESSUP_CALLS__ as string[] | undefined) ?? []
+  );
+
+const setDressupState = (
+  page: Page,
+  state: {
+    activeBalloonId: string;
+    selectableBalloonIds: string[];
+    activeDecoId: string;
+    selectableDecoIds: string[];
+  }
+) =>
+  page.addInitScript((value) => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = value;
+  }, state);
+
+test("customize: deco tab lists owned decos, hides unowned ones and dresses yuuko", async ({ page }) => {
+  await setDressupState(page, {
+    activeBalloonId: "balloon_default",
+    selectableBalloonIds: ["balloon_default"],
+    activeDecoId: "deco_none",
+    selectableDecoIds: ["deco_none", "gacha_deco_santa_hat", "gacha_deco_ribbon"],
+  });
+  await openCustomize(page);
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("なし");
+  await expect(page.getByTestId("customize-current-balloon")).toHaveText("いつもの");
+  // 既定（なし）では立ち絵に何も重ねない。
+  const figure = page.getByTestId("customize-yuuko-figure");
+  await expect(figure).toHaveAttribute("data-deco", "none");
+  await expect(figure.getByTestId("yuuko-deco-layer")).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "飾り" }).click();
+  const options = page.getByTestId("customize-deco-option");
+  await expect(options).toHaveCount(11);
+  const none = options.filter({ hasText: "なし" });
+  const santa = options.filter({ hasText: "サンタ帽（冬）" });
+  const locked = options.filter({ hasText: "？？？" });
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  await expect(santa).toBeEnabled();
+  // 未所持の 8 種は名前・形を伏せて押せない。
+  await expect(locked).toHaveCount(8);
+  await expect(locked.first()).toBeDisabled();
+  await expect(locked.first()).toHaveAttribute("aria-label", "？？？（ガチャで手に入るよ）");
+  await expect(locked.first().getByTestId("dressup-swatch")).toHaveCount(0);
+  await expect(page.getByText("ちび王冠")).toHaveCount(0);
+  await expect(page.getByText("？？？の飾りはガチャで手に入るよ")).toBeVisible();
+  // 所持済みの見本は、小さなゆうこに飾りを重ねて見せる。
+  await expect(santa.getByTestId("yuuko-deco-layer")).toHaveAttribute("src", /\/assets\/accessories\/santa_hat\.svg$/);
+
+  await locked.first().click({ force: true });
+  expect(await readDressupCalls(page)).toEqual([]);
+
+  await santa.click();
+  await expect(page.getByTestId("customize-deco-message")).toHaveText("飾りを「サンタ帽（冬）」にしたよ。");
+  expect(await readDressupCalls(page)).toEqual(["deco:gacha_deco_santa_hat"]);
+  await expect(santa).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("サンタ帽（冬）");
+  // プレビューのゆうこに重なり、頭の上にはみ出す分の余白を取って切れない。
+  await expect(figure).toHaveAttribute("data-deco", "on");
+  const layer = figure.getByTestId("yuuko-deco-layer");
+  await expect(layer).toHaveAttribute("src", /santa_hat\.svg$/);
+  const [figureBox, layerBox, imageBox] = await Promise.all([
+    figure.boundingBox(),
+    layer.boundingBox(),
+    figure.getByRole("img", { name: "ゆうこ" }).boundingBox(),
+  ]);
+  expect(figureBox && layerBox && imageBox).toBeTruthy();
+  // 飾りの層は立ち絵の下端にそろい、上へ 100/779 だけ伸びる。外枠はその上端まで含む。
+  expect(Math.abs(layerBox!.y + layerBox!.height - (imageBox!.y + imageBox!.height))).toBeLessThan(1.5);
+  expect(Math.abs(layerBox!.height - (imageBox!.height * 879) / 779)).toBeLessThan(1.5);
+  expect(figureBox!.y).toBeLessThanOrEqual(imageBox!.y - (imageBox!.height * 94) / 779 + 1.5);
+
+  // 他の画面のゆうこにも反映される。
+  await switchScreenInApp(page, "ゆうこ辞書", "ゆうこ辞書");
+  await expect(page.getByTestId("dictionary-yuuko-figure").getByTestId("yuuko-deco-layer")).toHaveAttribute(
+    "src",
+    /santa_hat\.svg$/
+  );
+
+  await switchScreenInApp(page, "カスタマイズ", "カスタマイズ");
+  await page.getByRole("tab", { name: "飾り" }).click();
+  await page.getByTestId("customize-deco-option").filter({ hasText: "なし" }).click();
+  await expect(page.getByTestId("customize-deco-message")).toHaveText("飾りをはずしたよ。");
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "none");
+});
+
+test("customize: balloon tab switches the balloon shape on other screens", async ({ page }) => {
+  await setDressupState(page, {
+    activeBalloonId: "balloon_default",
+    selectableBalloonIds: ["balloon_default", "gacha_balloon_cloud"],
+    activeDecoId: "deco_none",
+    selectableDecoIds: ["deco_none"],
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "吹き出し" }).click();
+  const options = page.getByTestId("customize-balloon-option");
+  await expect(options).toHaveCount(10);
+  await expect(options.filter({ hasText: "いつもの" })).toHaveAttribute("aria-pressed", "true");
+  await expect(options.filter({ hasText: "？？？" })).toHaveCount(8);
+  await expect(page.getByText("？？？の吹き出しはガチャで手に入るよ")).toBeVisible();
+  // ステージに選んだ吹き出しの見本が出る（既定は今の形）。
+  await expect(page.getByTestId("customize-preview-balloon")).toHaveAttribute("data-balloon-shape", "default");
+
+  await options.filter({ hasText: "もこもこ雲" }).click();
+  await expect(page.getByTestId("customize-balloon-message")).toHaveText("吹き出しを「もこもこ雲」にしたよ。");
+  expect(await readDressupCalls(page)).toEqual(["balloon:gacha_balloon_cloud"]);
+  await expect(page.getByTestId("customize-current-balloon")).toHaveText("もこもこ雲");
+  await expect(page.getByTestId("customize-preview-balloon")).toHaveAttribute("data-balloon-shape", "cloud");
+
+  await switchScreenInApp(page, "ゆうこ辞書", "ゆうこ辞書");
+  const balloon = page.getByTestId("dictionary-yuuko-balloon");
+  await expect(balloon).toHaveAttribute("data-balloon-shape", "cloud");
+  await expect(balloon).toHaveClass(/yuuko-bb-cloud/);
+  await expect(balloon).toHaveAttribute("data-tail", "bottom-left");
+  await expect(balloon).toContainText("わからない言葉は");
+});
+
+test("customize: dressup load failure shows a fixed message and a retry without raw errors", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = "fail";
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "飾り" }).click();
+  await expect(page.getByTestId("customize-deco-load-error")).toHaveText("飾りの状態を読み込めなかったよ。");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-deco-option").first()).toBeDisabled();
+  await expect(page.getByTestId("customize-current-deco")).toHaveText("—");
+  // 読み込めなくてもゆうこは既定の見た目で出る。
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "none");
+
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_DRESSUP_STATE__ = {
+      activeBalloonId: "balloon_default",
+      selectableBalloonIds: ["balloon_default"],
+      activeDecoId: "gacha_deco_crown",
+      selectableDecoIds: ["deco_none", "gacha_deco_crown"],
+    };
+  });
+  await page.getByTestId("customize-deco-retry").click();
+  await expect(page.getByTestId("customize-deco-load-error")).toHaveCount(0);
+  await expect(
+    page.getByTestId("customize-deco-option").filter({ hasText: "ちび王冠" })
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("customize-yuuko-figure")).toHaveAttribute("data-deco", "on");
+});
+
+// 既定（いつもの・なし）では、各画面のゆうこと吹き出しの見た目が今までと同じ（共通部品に置き換えても形が変わらない）。
+test("dressup defaults keep the original yuuko and balloon look on each screen", async ({ page }) => {
+  await openHome(page);
+  await openScreenFromSidebar(page, "ゆうこ辞書", "ゆうこ辞書");
+  const dictBalloon = page.getByTestId("dictionary-yuuko-balloon");
+  await expect(dictBalloon).toHaveAttribute("data-balloon-shape", "default");
+  await expect(dictBalloon).toHaveClass(/rounded-2xl/);
+  await expect(dictBalloon).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await expect(dictBalloon).toHaveCSS("border-top-width", "2px");
+  await expect(dictBalloon).not.toHaveClass(/yuuko-bb/);
+  const dictFigure = page.getByTestId("dictionary-yuuko-figure");
+  await expect(dictFigure).toHaveAttribute("data-deco", "none");
+  const image = dictFigure.getByRole("img", { name: "ゆうこ" });
+  await expect(image).toHaveAttribute("src", /\/assets\/yuuko\.png/);
+  const imageBox = await image.boundingBox();
+  expect(imageBox && Math.round(imageBox.width)).toBe(144);
+  // 余白（はみ出し用）を足していないので、外枠の高さは立ち絵と同じ。
+  const figureBox = await dictFigure.boundingBox();
+  expect(figureBox && imageBox && Math.abs(figureBox.height - imageBox.height)).toBeLessThan(1);
+
+  await openScreenFromSidebar(page, "設定", "設定");
+  const settingsBalloon = page.getByTestId("settings-yuuko-balloon");
+  await expect(settingsBalloon).toHaveAttribute("data-balloon-shape", "default");
+  await expect(settingsBalloon).toHaveClass(/rounded-xl/);
 });
 
 // カスタマイズ画面のテーマ切り替え（set_active_theme）。報酬テーマは解放済みだけ、ガチャテーマは所持済みだけ選べる。
@@ -2120,7 +2617,7 @@ test("customize: theme save failure shows a toast and keeps the current theme", 
   ).toHaveAttribute("aria-pressed", "true");
 });
 
-test("customize: categories follow D83 (deco and balloon are coming soon, nickname is read-only)", async ({
+test("customize: categories follow D83 (deco, balloon and nickname are editable here)", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -2129,22 +2626,129 @@ test("customize: categories follow D83 (deco and balloon are coming soon, nickna
   await openCustomize(page);
 
   const tabs = page.getByRole("tab");
-  await expect(tabs).toHaveText(["テーマ", "呼び名", "飾り", "吹き出し"]);
+  // 模様（D152〜D154）はテーマの次に並ぶ。
+  await expect(tabs).toHaveText(["テーマ", "模様", "呼び名", "飾り", "吹き出し"]);
   await expect(page.getByRole("tab", { name: "口調" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "性格" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "テーマ" })).toHaveAttribute("aria-selected", "true");
 
+  // 飾り・吹き出しは「準備中」をやめ、選べる一覧を出す（D155）。
   await page.getByRole("tab", { name: "飾り" }).click();
-  await expect(page.getByTestId("customize-coming-soon")).toContainText("準備中");
+  await expect(page.getByTestId("customize-coming-soon")).toHaveCount(0);
+  await expect(page.getByTestId("customize-deco-option")).toHaveCount(11);
   await expect(page.getByTestId("customize-theme-option")).toHaveCount(0);
   await page.getByRole("tab", { name: "吹き出し" }).click();
-  await expect(page.getByTestId("customize-coming-soon")).toContainText("吹き出し");
+  await expect(page.getByTestId("customize-balloon-option")).toHaveCount(10);
 
+  // 呼び名はこの画面で変える（D161）。設定画面へ送る案内は置かない。
   await page.getByRole("tab", { name: "呼び名" }).click();
-  await expect(page.getByTestId("customize-nickname")).toHaveText("ゆう");
-  await expect(page.locator("main").getByRole("textbox")).toHaveCount(0);
-  await page.getByRole("button", { name: "設定で変える" }).click();
-  await expect(page.getByRole("heading", { name: "設定" }).first()).toBeVisible();
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
+  await expect(page.getByTestId("customize-nickname-input")).toHaveValue("ゆう");
+  await expect(page.getByRole("button", { name: "設定で変える" })).toHaveCount(0);
+});
+
+test("customize: nickname is saved on Enter or the button, only via set_nickname (D161)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "呼び名" }).click();
+
+  const input = page.getByTestId("customize-nickname-input");
+  const save = page.getByTestId("customize-nickname-save");
+  await expect(input).toHaveAttribute("maxlength", "32");
+  // 変えていないあいだは押せない。
+  await expect(save).toBeDisabled();
+
+  // Enter で確定すると呼び名だけを保存する（設定全体の save_user_settings は呼ばない）。
+  await input.fill("  みどり  ");
+  await expect(save).toBeEnabled();
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText("呼び名を「みどり」にしたよ。");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: みどり");
+  await expect(input).toHaveValue("みどり");
+  await expect(save).toBeDisabled();
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__)
+  ).toEqual(["  みどり  "]);
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SAVED_USER_SETTINGS__)
+  ).toBeUndefined();
+  // 右の「いまの設定」も新しい呼び名になる。
+  await expect(page.getByText("みどり", { exact: true })).toBeVisible();
+
+  // 入力を変えると前回の「〜にしたよ」は消える（書きかけの結果に見えないように）。
+  await input.fill("あお");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveCount(0);
+
+  // フォーカスが外れただけでは保存しない。
+  await page.getByTestId("customize-nickname").click();
+  expect(
+    await page.evaluate(
+      () => ((window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__ as string[]).length
+    )
+  ).toBe(1);
+
+  // ボタンでも確定できる。空にすると呼び名なし。
+  await input.fill("");
+  await save.click();
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText("呼び名をなしにしたよ。");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: まだ決めていないよ");
+
+  // 設定画面の「ゆうこ表示」にも保存した値が出る。
+  await input.fill("ゆう<b>");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう<b>");
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await page.getByRole("button", { name: "ゆうこ表示", exact: true }).click();
+  await expect(page.getByTestId("current-nickname")).toHaveText("ゆう<b>");
+});
+
+test("customize: invalid nickname is rejected without saving, and save failure keeps the old value", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = { nickname: "ゆう" };
+  });
+  await openCustomize(page);
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  const input = page.getByTestId("customize-nickname-input");
+
+  // 貼り付けなどで入ったタブ文字は、送る前に止めて理由を出す。
+  await input.fill("ゆう	こ");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText(
+    "この呼び名は使えないよ。32文字以内にして、改行・タブなどの見えない文字は取り除いてね。"
+  );
+  await expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_CALLS__)
+  ).toBeUndefined();
+
+  // 33文字（maxlength は UTF-16 単位のため、Rust の上限超えは Rust 側の検証で拒否される）。
+  await input.evaluate((element: HTMLInputElement) => element.removeAttribute("maxlength"));
+  await input.fill("あ".repeat(33));
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname-message")).toHaveText(
+    "この呼び名は使えないよ。32文字以内にして、改行・タブなどの見えない文字は取り除いてね。"
+  );
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
+
+  // 保存そのものの失敗はトーストで伝え、生エラー文・パスは出さない。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SET_NICKNAME_FAIL__ = true;
+  });
+  await input.fill("みどり");
+  await input.press("Enter");
+  await expect(page.getByText("呼び名を保存できなかったよ。もう一度ためしてね。").first()).toBeVisible();
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: ゆう");
 });
 
 // ランクアップ演出（RankUpDialog）。記事を開いた友情イベントでランクアップさせる。
@@ -2591,6 +3195,115 @@ test("reader: 解説 command failure shows a reselect hint and 再試行 without
   await expect(page.getByText(READER_TERM_DETAIL_TEXT)).toBeVisible();
   await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+});
+
+// explain_selected_term のモック応答の一部を差し替える（案内・語境界まで広げた解説の表示検証用）。
+const setExplainOverride = (page: Page, override: Record<string, unknown>) =>
+  page.evaluate((value) => {
+    (window as unknown as Record<string, unknown>).__E2E_EXPLAIN_TERM_OVERRIDE__ = value;
+  }, override);
+
+test("reader: a notice instead of an explanation hides 辞書に保存 and adds no friendship point", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // Rust が AI の「わからない」を固定の案内に置き換えて返した場合（isNotice）。
+  await setExplainOverride(page, {
+    shortExplanation: "この言葉はゆうこにも分からなかったよ。",
+    detailExplanation: "言葉の途中だけを選んでいないか確かめてみてね。",
+    isNotice: true,
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  await expect(termPopup(page).getByText("この言葉はゆうこにも分からなかったよ。")).toBeVisible();
+  // 案内は辞書へ保存しないので、保存ボタン（保存済み表示も）を出さない。
+  await expect(termPopup(page).getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
+  await expect(termPopup(page).getByRole("button", { name: "辞書保存済み" })).toHaveCount(0);
+  // 案内では term_explained の友情ポイントを加算しない。
+  await page.waitForTimeout(300);
+  expect(await recordedFriendshipEvents(page)).not.toContain("term_explained");
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+});
+
+test("reader: a selection extended to the whole word shows the word as the heading", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // Rust が言葉の途中の選択を語境界まで広げて解説した場合（keyText が広げた言葉・expandedFrom が元の選択）。
+  await setExplainOverride(page, {
+    keyText: "フォワードデプロイドエンジニアリング",
+    expandedFrom: "ドエンジニアリング",
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+
+  const popup = termPopup(page);
+  await expect(
+    popup.getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect(
+    popup.getByText("（選んだ「ドエンジニアリング」から言葉全体にしたよ）")
+  ).toBeVisible();
+  // ダイアログの読み上げ名も広げた言葉になる。
+  await expect(
+    page.getByRole("dialog", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  // 通常の解説なので保存でき、友情ポイントも加算される。保存後も見出しと注記を保つ。
+  await expect(popup.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await popup.getByRole("button", { name: "辞書に保存" }).click();
+  await expect(popup.getByRole("button", { name: "辞書保存済み" })).toBeVisible();
+  expect((await lastSavedDictionaryEntry(page))?.keyText).toBe(
+    "フォワードデプロイドエンジニアリング"
+  );
+  await expect(
+    popup.getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect(
+    popup.getByText("（選んだ「ドエンジニアリング」から言葉全体にしたよ）")
+  ).toBeVisible();
+  expect(await recordedFriendshipEvents(page)).toContain("term_explained");
+});
+
+test("reader: different selections extended to the same word add the friendship point once", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  // どちらの選択も Rust が同じ言葉へ広げて解説した場合。友情ポイントは解説した言葉（keyText）で1回だけ。
+  await setExplainOverride(page, {
+    keyText: "フォワードデプロイドエンジニアリング",
+    expandedFrom: "ドエンジニアリング",
+  });
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await expect
+    .poll(async () =>
+      (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+    )
+    .toBe(1);
+  await termPopup(page).getByRole("button", { name: "閉じる" }).click();
+
+  // 別の場所（候補語）から選んでも、同じ言葉に広がったなら数えない。
+  await page.getByRole("button", { name: "E2E用語", exact: true }).first().click();
+  await expect(
+    termPopup(page).getByRole("heading", { name: "フォワードデプロイドエンジニアリング" })
+  ).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(
+    (await recordedFriendshipEvents(page)).filter((e) => e === "term_explained").length
+  ).toBe(1);
+});
+
+test("reader: a regular explanation keeps the selected text as the heading without a note", async ({
+  page,
+}) => {
+  await openReaderWithCandidatePopup(page);
+  const popup = termPopup(page);
+  await expect(popup.getByRole("button", { name: "辞書に保存" })).toBeEnabled();
+  await expect(popup.locator('[data-term-popup-expanded-note="true"]')).toHaveCount(0);
 });
 
 test("reader: 解説 failure message is chosen by error code and the selected text is not logged", async ({
@@ -3046,7 +3759,14 @@ const READER_SAMPLE_RELATED_TITLES = [
   "国内SaaS企業、業務改善支援の新施策を発表",
   "量子コンピュータ研究で新たな誤り訂正手法",
 ];
-const READER_EMPTY_TERMS_HINT = "本文を選ぶと、ゆうこが解説するよ";
+// 右下「用語サポート」の使い方の案内（記事画面に本文欄は無いため、実際に選べる欄と「解説」ボタンに合わせる）。
+const READER_EMPTY_TERMS_HINT =
+  "要約や解説・要点の気になる言葉をなぞって選ぶと「解説」ボタンが出るよ。押すと、ゆうこが説明するね。";
+// 要約前で生成済みの欄が無いとき、空の4欄の代わりに要約欄へ出す1行の案内。
+const READER_SECTIONS_PENDING_TEXT =
+  "要約ができると、ゆうこの解説・要点・注目ポイント・感想もここに並ぶよ。";
+const READER_CREATING_SUMMARY_TEXT =
+  "ゆうこが要約を作っているよ。できあがったらここに表示するね。";
 
 // サンプル記事のタイトル・候補語・関連記事が画面（本文・右サイド）のどこにも出ていないことを確認する。
 const expectNoReaderSampleContent = async (page: Page) => {
@@ -3104,15 +3824,20 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   // 右の吹き出しも「まとめた」とは言わず、まだまとめていないことを伝える。
   await expect(readerYuukoBubble(page)).toContainText("まだまとめていないよ");
   await expect(readerYuukoBubble(page)).not.toContainText("まとめてみました");
+  // 要約前は空の4欄（解説・要点・注目ポイント・感想）を並べず、要約欄の1行の案内にまとめる。
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toBeVisible();
+  for (const emptyText of [
+    "ゆうこの解説はまだ作成されていないよ。",
+    "要点はまだ作成されていないよ。",
+    "注目ポイントはまだ作成されていないよ。",
+    "ゆうこの感想はまだ作成されていないよ。",
+  ]) {
+    await expect(main.getByText(emptyText)).toHaveCount(0);
+  }
+  await expect(main.getByRole("heading", { name: "要点", exact: true })).toHaveCount(0);
+  // 選べる文がまだ無いので、右下の案内も「要約ができたら」と伝える。
   await expect(
-    main.getByText("ゆうこの解説はまだ作成されていないよ。")
-  ).toBeVisible();
-  await expect(main.getByText("要点はまだ作成されていないよ。")).toBeVisible();
-  await expect(
-    main.getByText("注目ポイントはまだ作成されていないよ。")
-  ).toBeVisible();
-  await expect(
-    main.getByText("ゆうこの感想はまだ作成されていないよ。")
+    page.getByText("要約ができたら、文中の気になる言葉を選んでゆうこに聞けるよ。")
   ).toBeVisible();
   // サンプル記事の要点や、本文抜粋の流用が出ていない。
   await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
@@ -3123,6 +3848,14 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await page.getByRole("button", { name: "要約を作成" }).click();
   // 生成中は吹き出しも「まだまとめていない」ではなく、まとめている最中であることを伝える。
   await expect(readerYuukoBubble(page)).toContainText("まとめているところだよ");
+  // 要約欄も「準備中」のままにせず、作成中であることを出す（実機テスト B5）。
+  await expect(page.getByRole("button", { name: "作成中..." })).toBeVisible();
+  await expect(main.getByText(READER_CREATING_SUMMARY_TEXT)).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(
+    main.getByText("ゆうこの解説・要点・注目ポイント・感想も、いっしょに作っているよ。")
+  ).toBeVisible();
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toHaveCount(0);
   await expect(main.locator('[data-explain-selectable="summary"]')).toHaveText(
     "E2Eで生成された要約です。"
   );
@@ -3135,6 +3868,8 @@ test("reader summary: an unsummarized article shows the not-ready state without 
   await expect(main.getByText("確認できたよ。")).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_CREATING_SUMMARY_TEXT)).toHaveCount(0);
+  await expect(main.getByText(READER_SECTIONS_PENDING_TEXT)).toHaveCount(0);
 });
 
 // --- 自動要約の状態表示（判断台帳 D17） ---
@@ -3204,6 +3939,164 @@ test("reader summary: a waiting article offers 今すぐ要約 via the manual su
     "E2Eで生成された要約です。"
   );
   await expect(page.getByRole("button", { name: "要約を更新" })).toBeVisible();
+});
+
+// --- 自動要約が進まない理由の一言（判断台帳 D158） ---
+
+const AUTO_SUMMARY_PAUSED_GAME_TEXT =
+  "いまは発表やゲーム中みたいだから、自動の要約はお休みしているよ。終わったら続きを作るね。";
+
+const setAutoSummaryStatus = async (page: Page, kind: string) => {
+  await page.addInitScript((value) => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = value;
+  }, kind);
+};
+
+test("reader summary: a waiting article explains that auto summary is resting during games or presentations", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  // 順番待ちの案内はそのまま残し、その下に休んでいる理由を添える。手動の「今すぐ要約」も使える。
+  await expect(
+    main.getByText("要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。")
+  ).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    AUTO_SUMMARY_PAUSED_GAME_TEXT
+  );
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toBeVisible();
+
+  // ゲーム・発表が終わって動き出した → ニュース取得の完了時に読み直し、一言を消す（定期的には問い合わせない）。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = "running";
+  });
+  await emitNewsRefreshed(page);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+
+  // マイク使用中で休んだ → ウィンドウへ戻ったときに読み直して理由を出す。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ =
+      "pausedMicInUse";
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(main.getByTestId("auto-summary-reason")).toContainText(
+    "マイクを使っているみたい"
+  );
+});
+
+test("reader summary: an unsummarized article outside the queue explains why auto summary is off", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ = true;
+  });
+  await setAutoSummaryStatus(page, "disabledInSettings");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toContainText(
+    "自動の要約は設定でオフになっているよ。"
+  );
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+});
+
+test("reader summary: no reason is shown for a pause unrelated to an article outside the queue", async ({
+  page,
+}) => {
+  // 待機列に無い記事に、一時停止の理由は出さない（その記事は止まっている列に入っていない）。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ = true;
+  });
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__ ?? 0
+      )
+    )
+    .toBeGreaterThan(0);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+});
+
+test("reader summary: a shown pause reason disappears when the status can no longer be read", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  // まず一時停止の一言が出ている。
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    AUTO_SUMMARY_PAUSED_GAME_TEXT
+  );
+
+  // 状態を読めなくなったら、古い一言を残さず消す。記事の表示と手動の要約はそのまま使える。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, boolean>).__E2E_AUTO_SUMMARY_STATUS_FAIL__ = true;
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(
+    main.getByText("要約の順番待ちだよ。すぐ読みたいときは「今すぐ要約」で作れるよ。")
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toBeVisible();
+});
+
+test("reader summary: a pause reason is rechecked with the waiting poll and disappears when the queue resumes", async ({
+  page,
+}) => {
+  // 10秒ごとの順番待ちの読み直しを実時間で待たないよう、時計を差し替えて進める。
+  await page.clock.install();
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    AUTO_SUMMARY_PAUSED_GAME_TEXT
+  );
+
+  // キューが再開した（focus・取得完了のイベントは来ない）→ 次の読み直しで一言が消える。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = "running";
+  });
+  await page.clock.runFor(11_000);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+
+  // 一言を出していない間は、順番待ちの読み直しが続いても状態は読み直さない。
+  const callsAfterResume = await page.evaluate(
+    () => (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__
+  );
+  await page.clock.runFor(31_000);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__
+    )
+  ).toBe(callsAfterResume);
+});
+
+test("reader summary: a summarized article does not ask for the auto summary status", async ({
+  page,
+}) => {
+  await setAutoSummaryStatus(page, "pausedGameOrPresentation");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+  await expect(main.locator('[data-explain-selectable="summary"]')).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as Record<string, number>).__E2E_AUTO_SUMMARY_STATUS_CALLS__ ?? 0
+    )
+  ).toBe(0);
 });
 
 test("reader summary: a failed article offers 要約を作り直す via the manual summary", async ({
@@ -3509,6 +4402,255 @@ test("reader summary: a failed article load shows an error state with 再試行 
   await expect(main.getByText(READER_SAMPLE_KEY_POINT)).toHaveCount(0);
 });
 
+// --- 過去ニュースへ移った記事・見つからない記事の案内（2026-10-21 実機テスト A1） ---
+
+test("reader: an archived article explains it is in past news and restores it on request", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_FAIL__ =
+      "ARTICLE_ARCHIVED";
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  // 「少し待って」「再試行」ではなく、過去ニュースにしまってあることと取り出しを案内する。
+  await expect(main.getByRole("alert")).toHaveText(
+    "この記事は過去ニュースにしまってあるよ。取り出して開く？"
+  );
+  await expect(main.getByText("少し待ってから", { exact: false })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "過去ニュースを見る" })).toBeVisible();
+  await expect(readerYuukoBubble(page)).toContainText("過去ニュースに");
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  // 開いただけでは取り出さない（押したときだけ）。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_RESTORE_ARCHIVED_ARGS__?: unknown[] })
+          .__E2E_RESTORE_ARCHIVED_ARGS__ ?? []
+    )
+  ).toEqual([]);
+
+  // 取り出すと（既存の restore_archived_article を記事IDだけで呼ぶ）、記事を開き直して表示する。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_ARTICLE_DETAIL_FAIL__ = false;
+  });
+  await main.getByRole("button", { name: "取り出して開く" }).click();
+  await expect(
+    main.getByRole("heading", { name: "E2Eテスト用ニュース" })
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_RESTORE_ARCHIVED_ARGS__?: unknown[] })
+          .__E2E_RESTORE_ARCHIVED_ARGS__
+    )
+  ).toEqual([{ articleId: "e2e-article-1" }]);
+});
+
+test("reader: a failed restore of an archived article stays put and points to past news", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_ARTICLE_DETAIL_FAIL__ = "ARTICLE_ARCHIVED";
+    win.__E2E_RESTORE_ARCHIVED_FAIL__ = true;
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await main.getByRole("button", { name: "取り出して開く" }).click();
+  await expect(
+    main.getByText("うまく取り出せなかったよ。「過去ニュース」の画面から取り出してみてね。")
+  ).toBeVisible();
+  await expect(page.getByText("/internal/secret/archive.zip")).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "取り出して開く" })).toBeEnabled();
+
+  await main.getByRole("button", { name: "過去ニュースを見る" }).click();
+  await expect(
+    page.getByRole("navigation").first().getByRole("button", { name: "過去ニュース", exact: true })
+  ).toHaveAttribute("aria-current", "page");
+});
+
+test("reader: a missing article does not ask to wait and offers a way back to the list", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_FAIL__ =
+      "NOT_FOUND_ERROR";
+  });
+  await openHome(page);
+  await page.locator("main").getByText("E2Eテスト用ニュース").first().click();
+  const main = page.locator("main");
+
+  await expect(main.getByRole("alert")).toHaveText(
+    "この記事は見つからなかったよ。整理で片付けられたのかも。ほかのニュースを見てみてね。"
+  );
+  await expect(main.getByText("少し待ってから", { exact: false })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "再試行" })).toHaveCount(0);
+  await expect(main.getByRole("button", { name: "取り出して開く" })).toHaveCount(0);
+  await expect(readerYuukoBubble(page)).toContainText("見つからなかった");
+  await expectNoReaderSampleContent(page);
+
+  await main.getByRole("button", { name: "ニュース一覧へ戻る" }).click();
+  await expect(
+    page.getByRole("navigation").first().getByRole("button", { name: "ニュースを見る", exact: true })
+  ).toHaveAttribute("aria-current", "page");
+});
+
+// --- 要約以外の生成欄での用語解説と「解説」ボタンの位置（2026-10-21 実機テスト B6） ---
+
+for (const [region, label] of [
+  ["keyPoints", "要点"],
+  ["focusPoints", "注目ポイント"],
+  ["thoughts", "ゆうこの感想"],
+] as const) {
+  test(`reader: selecting text in ${label} also offers 解説 and explains it`, async ({
+    page,
+  }) => {
+    await openReaderWithoutExplain(page);
+    const selector = `[data-explain-selectable="${region}"]`;
+    const selectedText = (
+      (await page.locator(selector).textContent()) ?? ""
+    ).trim();
+    expect(selectedText.length).toBeGreaterThan(0);
+
+    // 画面外の選択にはボタンを出さないため、利用者と同じく欄を見える位置までスクロールしてから選ぶ。
+    await page.locator(selector).scrollIntoViewIfNeeded();
+    await selectContentsWithin(page, selector);
+    await expect(explainButton(page)).toBeVisible();
+    await explainButton(page).click();
+
+    await expect(termPopup(page)).toBeVisible();
+    await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  });
+}
+
+test("reader: the 解説 button sits below the selected text instead of over the next line", async ({
+  page,
+}) => {
+  // 複数行に折り返す長めの要約で、選択の直下の行と重ならないことを確かめる。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "ゆうこが読みやすいように、長めの要約文を用意しました。".repeat(6);
+  });
+  await openReaderWithoutExplain(page);
+
+  // 1行目の先頭数文字だけを選ぶ（従来はこの直下＝2行目の文字にボタンが重なっていた）。
+  await page.evaluate(() => {
+    const element = document.querySelector('[data-explain-selectable="summary"]');
+    const node = element?.firstChild;
+    if (!node) {
+      return;
+    }
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(explainButton(page)).toBeVisible();
+  const buttonBox = await explainButton(page).boundingBox();
+  const regionBox = await page
+    .locator('[data-explain-selectable="summary"]')
+    .boundingBox();
+  expect(buttonBox).not.toBeNull();
+  expect(regionBox).not.toBeNull();
+  // 要約が2行以上あり、ボタンは要約の最後の行より下にある（どの行の文字にも重ならない）。
+  expect(regionBox!.height).toBeGreaterThan(30);
+  expect(buttonBox!.y).toBeGreaterThanOrEqual(regionBox!.y + regionBox!.height);
+});
+
+test("reader: in a card taller than the window, the 解説 button stays next to a selection near its top", async ({
+  page,
+}) => {
+  // 要約カードの下端が画面外に出るほど長い要約にする。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, string>).__E2E_ARTICLE_DETAIL_SUMMARY__ =
+      "ゆうこが読みやすいように、とても長い要約文を用意しました。".repeat(80);
+  });
+  await openReaderWithoutExplain(page);
+  const region = page.locator('[data-explain-selectable="summary"]');
+  const viewport = page.viewportSize()!;
+  const regionBox = await region.boundingBox();
+  expect(regionBox).not.toBeNull();
+  // 事前条件: 要約の下端は画面外（カード下端基準だとボタンが画面下端へ押し付けられる状況）。
+  expect(regionBox!.y + regionBox!.height).toBeGreaterThan(viewport.height);
+
+  // 要約の先頭数文字だけを選ぶ。
+  const selectionBottom = await page.evaluate(() => {
+    const element = document.querySelector('[data-explain-selectable="summary"]');
+    const node = element?.firstChild;
+    if (!node) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return range.getBoundingClientRect().bottom;
+  });
+  expect(selectionBottom).not.toBeNull();
+  await expect(explainButton(page)).toBeVisible();
+  const buttonBox = await explainButton(page).boundingBox();
+  expect(buttonBox).not.toBeNull();
+  // 画面下端ではなく、選択のすぐ下（従来の選択基準）に出る。
+  expect(buttonBox!.y).toBeGreaterThanOrEqual(selectionBottom!);
+  expect(buttonBox!.y).toBeLessThan(selectionBottom! + 20);
+  expect(buttonBox!.y + buttonBox!.height).toBeLessThan(viewport.height - 40);
+});
+
+test("reader: a selection spanning several key points is sent as one line", async ({
+  page,
+}) => {
+  await openReaderWithoutExplain(page);
+  const selector = '[data-explain-selectable="keyPoints"]';
+  await page.locator(selector).scrollIntoViewIfNeeded();
+  await selectContentsWithin(page, selector);
+  await expect(explainButton(page)).toBeVisible();
+  await explainButton(page).click();
+  await expect.poll(() => explainTermCallCount(page)).toBe(1);
+  // 項目ごとの改行は空白1つに置き換えて送る。
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__?: string })
+          .__E2E_EXPLAIN_TERM_LAST_SELECTED_TEXT__
+    )
+  ).toBe("クリックできること 表示が崩れないこと");
+});
+
+test("reader: the term popup uses readable text sizes", async ({ page }) => {
+  await openReaderWithoutExplain(page);
+  await selectContentsWithin(page, '[data-explain-selectable="summary"]');
+  await explainButton(page).click();
+  await expect(termPopup(page)).toBeVisible();
+  await expect(page.getByText("用語解説を調べているよ…")).toHaveCount(0);
+
+  // 小窓の中の文字は 12px 以上（従来は 9〜10px の文字があった）。
+  const smallestFontSize = await termPopup(page).evaluate((root) => {
+    let smallest = Number.POSITIVE_INFINITY;
+    root.querySelectorAll("*").forEach((element) => {
+      const hasText = Array.from(element.childNodes).some(
+        (child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim()
+      );
+      if (hasText) {
+        smallest = Math.min(smallest, Number.parseFloat(getComputedStyle(element).fontSize));
+      }
+    });
+    return smallest;
+  });
+  expect(smallestFontSize).toBeGreaterThanOrEqual(12);
+});
+
 test("reader: a real article with no keyword candidates shows the selection hint instead of sample terms or related articles", async ({
   page,
 }) => {
@@ -3665,6 +4807,9 @@ test("dictionary: the フレーズ filter separates phrases from terms", async (
   const list = main.locator("[data-slot='card']");
   await expect(main.getByText("E2E用語").first()).toBeVisible();
   await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
+  // 種別の絞り込みは 単語 / フレーズ だけ。旧「要点説明」はフレーズに統合した（判断台帳 D144）。
+  await expect(main.getByRole("button", { name: "要点説明", exact: true })).toHaveCount(0);
+  await expect(main.getByText("要点説明")).toHaveCount(0);
 
   await main.getByRole("button", { name: "フレーズ", exact: true }).first().click();
   await expect(main.getByText(E2E_PHRASE_KEY_TEXT).first()).toBeVisible();
@@ -3862,9 +5007,9 @@ test("term popup: shrinking to a Tauri-like width keeps the close button reachab
   await openReaderWithCandidatePopup(page);
   await dragPopupFromBackground(page, 6000, 6000); // 右端へ寄せる
 
-  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。Tauri 初期幅の 800px では右列が w-60 に狭まり
-  // main が約352pxあるため（D109）、左右固定領域（208px + 240px）を除いて main が約292pxになる 740px を使う。
-  await page.setViewportSize({ width: 740, height: 600 });
+  // main が TermPopup 固定幅(320px)より狭くなる幅へ縮小する。記事画面の右列は lg 未満で w-48（192px）のため
+  // （D109・実機テスト B8）、左右固定領域（208px + 192px）を除いて main が約290pxになる 690px を使う。
+  await page.setViewportSize({ width: 690, height: 600 });
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
 
   // main が TermPopup 固定幅(320px)より狭い＝今回の不具合条件を実際に再現している。
@@ -4227,21 +5372,44 @@ const readSavedSettings = (page: Page) =>
       ).__E2E_SAVED_USER_SETTINGS__
   );
 
-test("settings save persists the notification frequency dropdown selection", async ({
+// 1日の最大通知件数スライダー（D159。通知頻度ドロップダウンは廃止）を、キー操作で目的の件数へ動かす。
+const notifyMaxPerDaySlider = (page: Page) =>
+  page.getByTestId("notify-max-per-day-slider").getByRole("slider");
+
+const setNotifyMaxPerDay = async (page: Page, value: number) => {
+  const slider = notifyMaxPerDaySlider(page);
+  const current = Number(await slider.getAttribute("aria-valuenow"));
+  await slider.focus();
+  const diff = value - current;
+  for (let i = 0; i < Math.abs(diff); i += 1) {
+    await slider.press(diff > 0 ? "ArrowRight" : "ArrowLeft");
+  }
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText(`${value}件`);
+};
+
+test("settings: notification frequency dropdown is gone and the slider alone sets notifyMaxPerDay (D159)", async ({
   page,
 }) => {
   await openSettings(page);
 
-  // 通知頻度を「1日3回まで」（既定）から「1日5回まで」へ変更する。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  // 同じ値を書き換えていた「通知頻度」ドロップダウンは無い。
+  await expect(page.getByText("通知頻度", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("combobox").filter({ hasText: "1日3回まで" })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "制限なし" })).toHaveCount(0);
+  // 範囲は 1〜20。0 は選べない（止めたいときは通知のスイッチを使う）ことを説明する。
+  const slider = notifyMaxPerDaySlider(page);
+  await expect(slider).toHaveAttribute("aria-valuemin", "1");
+  await expect(slider).toHaveAttribute("aria-valuemax", "20");
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
+  await expect(page.getByTestId("notify-max-per-day-help")).toContainText("1〜20件");
 
-  // 保存する。
+  // スライダーを 3 → 4 にすると、その値がそのまま notifyMaxPerDay として保存される
+  //（以前はドロップダウンが「1日5回まで」と食い違って見えていた）。
+  await setNotifyMaxPerDay(page, 4);
   await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = await readSavedSettings(page);
-  // 通知頻度が notifyMaxPerDay として保存される（=5）。
-  expect(saved?.notifyMaxPerDay).toBe(5);
+  expect(saved?.notifyMaxPerDay).toBe(4);
   // 既存の通知時間帯（午前/午後2枠）は壊れない。
   expect(saved?.workTimeRanges).toEqual([
     { start: "09:00", end: "12:00" },
@@ -4249,37 +5417,65 @@ test("settings save persists the notification frequency dropdown selection", asy
   ]);
   expect(saved?.notifyStartTime).toBe("09:00");
   expect(saved?.notifyEndTime).toBe("18:00");
+
+  // 上限まで動かすと 20 で保存される（「制限なし」と言いながら 20 件だった表示は無くなった）。
+  await setNotifyMaxPerDay(page, 20);
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect.poll(async () => (await readSavedSettings(page))?.notifyMaxPerDay).toBe(20);
 });
 
-test("settings reload restores the saved notification frequency (not the default)", async ({
+test("settings reload restores the saved notification max per day on the slider", async ({
   page,
 }) => {
-  // 保存値として notifyMaxPerDay=5 を返させる。
   await page.addInitScript(() => {
     // @ts-expect-error: E2E override
-    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 5 };
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 7 };
   });
 
   await openSettings(page);
 
-  // 既定の「1日3回まで」ではなく、保存値に対応する「1日5回まで」が表示される。
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toHaveCount(0);
+  await expect(notifyMaxPerDaySlider(page)).toHaveAttribute("aria-valuenow", "7");
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("7件");
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
-test("settings shows the default frequency 1日3回まで when there is no saved value", async ({
+test("settings rounds a hand-edited notifyMaxPerDay above 20 down to 20 so saving does not fail", async ({
   page,
 }) => {
-  // 既定（notifyMaxPerDay=3）のまま開く。
+  // Rust の検証は 0〜20。21 以上のままだと、ほかの設定の保存まで毎回検証エラーになる。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 25 };
+  });
+
   await openSettings(page);
 
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("20件");
+  await expect(notifyMaxPerDaySlider(page)).toHaveAttribute("aria-valuenow", "20");
+  // 読み込んだだけでは未保存にしない。
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  // ほかの設定を保存すると、件数は 20 で保存される。
+  await page.getByRole("switch").first().click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  expect((await readSavedSettings(page))?.notifyMaxPerDay).toBe(20);
+});
+
+test("settings keeps a saved notifyMaxPerDay of 0 untouched and explains it", async ({
+  page,
+}) => {
+  // Rust は 0（自動では声をかけない）も受け付ける。手編集などで 0 のときは書き換えずに説明する。
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = { notifyMaxPerDay: 0 };
+  });
+
+  await openSettings(page);
+
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("0件");
+  await expect(page.getByTestId("notify-max-per-day-help")).toContainText("いまは0件");
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
 // 設定メニュー（左サイドバー）を切り替える。
@@ -4324,7 +5520,7 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   await expect(autoSummarySwitch).not.toBeChecked();
   await expect(autoSummarySwitch).toBeEnabled();
   await expect(page.getByTestId("auto-summary-help")).toHaveText(
-    "AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）"
+    "AIの設定が開発・デモ用のときは動きません（ローカル・Gemini のときだけ、1件ずつ順番に要約します）"
   );
 
   await autoSummarySwitch.click();
@@ -4360,6 +5556,83 @@ test("settings auto summary switch is off by default and saves autoSummaryEnable
   ).toBeChecked();
 });
 
+// D143: 通知のタイミング（通知モード）を選び、未保存表示→保存→開き直しで復元される。
+test("settings notification mode select saves notificationMode and restores it", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  const modeSelect = page.getByRole("combobox", { name: "通知のタイミング" });
+  const description = page.getByTestId("notification-mode-description");
+  const saveState = page.getByTestId("settings-save-state");
+  // 既定は時間帯内ランダムで、読み込んだだけでは未保存にならない。
+  await expect(modeSelect).toHaveText("時間帯内ランダム（既定）");
+  await expect(description).toContainText("通知時間帯の中で");
+  await expect(saveState).not.toHaveText("未保存の変更あり");
+
+  // 選択肢は4つ。
+  await modeSelect.click();
+  for (const label of ["時間帯内ランダム（既定）", "ランダム", "定時", "通知しない"]) {
+    await expect(page.getByRole("option", { name: label, exact: true })).toBeVisible();
+  }
+  await page.getByRole("option", { name: "通知しない", exact: true }).click();
+  await expect(description).toContainText("報酬のお知らせも含む");
+  await expect(description).toContainText("「ゆうこを呼ぶ」");
+  const randomNote = page.getByTestId("notification-mode-random-note");
+  await expect(randomNote).toHaveCount(0);
+
+  // ランダムを選ぶと、通知時間帯を使わないことを添える。
+  await modeSelect.click();
+  await page.getByRole("option", { name: "ランダム", exact: true }).click();
+  await expect(description).toContainText("7:00〜23:00");
+  await expect(randomNote).toHaveText("ランダムでは下の通知時間帯の設定は使わないよ。");
+
+  // 通知OFFのあいだは選べない（ONに戻すと選べる）。
+  const notificationSwitch = page.getByRole("switch").first();
+  await notificationSwitch.click();
+  await expect(modeSelect).toBeDisabled();
+  await notificationSwitch.click();
+  await expect(modeSelect).toBeEnabled();
+
+  await modeSelect.click();
+  await page.getByRole("option", { name: "定時", exact: true }).click();
+  await expect(description).toHaveText("各時間帯の開始時刻に1回ずつ声をかけるね。");
+  await expect(randomNote).toHaveCount(0);
+  await expect(saveState).toHaveText("未保存の変更あり");
+
+  await page.getByRole("button", { name: "保存する" }).click();
+  const saved = (await readSavedSettings(page)) as
+    | { notificationMode?: string; notifyMaxPerDay?: number }
+    | undefined;
+  expect(saved?.notificationMode).toBe("fixed_time");
+  // 他の通知設定は変わらない。
+  expect(saved?.notifyMaxPerDay).toBe(3);
+  await expect(saveState).not.toHaveText("未保存の変更あり");
+
+  // 保存値を次回の読込値にして画面を開き直すと「定時」のまま表示される。
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      __E2E_SAVED_USER_SETTINGS__?: Record<string, unknown>;
+      __E2E_USER_SETTINGS_OVERRIDE__?: Record<string, unknown>;
+    };
+    target.__E2E_USER_SETTINGS_OVERRIDE__ = structuredClone(
+      target.__E2E_SAVED_USER_SETTINGS__
+    );
+  });
+  await page.getByRole("button", { name: "ホームへ戻る" }).click();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await expect(
+    page.getByRole("combobox", { name: "通知のタイミング" })
+  ).toHaveText("定時");
+  await expect(page.getByTestId("settings-save-state")).not.toHaveText(
+    "未保存の変更あり"
+  );
+});
+
 // D133: 未保存の設定があるあいだはメインウィンドウを破棄しないよう、未保存の有無を Rust へ知らせる。
 test("settings reports unsaved changes to Rust and clears them after save", async ({
   page,
@@ -4384,17 +5657,139 @@ test("settings reports unsaved changes to Rust and clears them after save", asyn
   await expect.poll(readReports).toEqual([true, false]);
 });
 
-// ストレージ状況は実容量を取得できないため、固定の仮値・プログレスバーを出さず「準備中」と表示する（SCR-003）。
-test("settings storage panel shows 準備中 instead of dummy usage values", async ({
+// ストレージ状況は Rust（get_storage_usage）が返す保存データの大きさを区分ごとに出す（実機テスト B9）。
+// 「準備中」の文言は出さず、読めないときも固定の仮値・生エラー・パスは出さない（SCR-003）。
+test("settings storage panel shows saved data usage from the backend", async ({
   page,
 }) => {
   await openSettings(page);
 
-  await expect(page.getByTestId("storage-status-placeholder")).toHaveText(
-    "保存データの使用状況の表示は準備中です。"
+  const status = page.getByTestId("storage-status");
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+  await expect(status).toContainText("記事");
+  await expect(status).toContainText("2.0 MB");
+  await expect(status).toContainText("アーカイブ");
+  await expect(status).toContainText("1.0 MB");
+  await expect(status).toContainText("辞書");
+  await expect(status).toContainText("256.0 KB");
+  // 数える範囲（持ち運ぶ保存データだけ）を短く添える。
+  await expect(page.getByTestId("storage-scope-note")).toHaveText(
+    "引っ越しで持ち運ぶ保存データの合計だよ（ログ・書き出したZIP・AIモデルは含まないよ）。"
   );
-  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
+  await expect(page.getByText(/準備中/)).toHaveCount(0);
   await expect(page.getByRole("progressbar")).toHaveCount(0);
+
+  // 「最新にする」で読み直す（常時ポーリングはしない）。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = {
+      totalBytes: 2048,
+      articleBytes: 1024,
+      archiveBytes: 0,
+      dictionaryBytes: 512,
+      otherBytes: 512,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "最新にする" }).click();
+  await expect(page.getByTestId("storage-total")).toHaveText("2.0 KB");
+});
+
+test("settings storage panel shows a fixed message when usage cannot be read", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+
+  const status = page.getByTestId("storage-status");
+  await expect(status).toContainText("使用量を読み込めなかったよ。");
+  await expect(status).not.toContainText("/internal/secret/path");
+  await expect(page.getByTestId("storage-total")).toHaveCount(0);
+  await expect(page.getByText(/\d+(\.\d+)?\s*GB/)).toHaveCount(0);
+
+  // 読めるようになったら「もう一度読み込む」で表示できる。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    delete (window as any).__E2E_STORAGE_USAGE__;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "もう一度読み込む" }).click();
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+});
+
+// ゆうこ表示タブは、今の着せかえ（テーマ・模様・吹き出し・飾り）と呼び名を読み取り専用で一覧にする（実機テスト B9）。
+// 変更はカスタマイズ画面（呼び名は「その他」）で行い、ここには入力部品を置かない。
+test("settings yuuko display tab lists the current dressup and nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = {
+      activePatternId: "pattern_paw",
+      selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+    };
+    (window as any).__E2E_DRESSUP_STATE__ = {
+      activeBalloonId: "gacha_balloon_cloud",
+      selectableBalloonIds: ["balloon_default", "gacha_balloon_cloud"],
+      activeDecoId: "gacha_deco_ribbon",
+      selectableDecoIds: ["deco_none", "gacha_deco_ribbon"],
+    };
+    (window as any).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      selectedThemeId: "theme_002",
+      nickname: "みどり",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-theme-id")).toHaveText("さくら");
+  await expect(page.getByTestId("current-pattern")).toHaveText("肉球");
+  await expect(page.getByTestId("current-balloon")).toHaveText("もこもこ雲");
+  await expect(page.getByTestId("current-deco")).toHaveText("リボン");
+  await expect(page.getByTestId("current-nickname")).toHaveText("みどり");
+  const summary = page.getByTestId("yuuko-dressup-summary");
+  await expect(summary.getByRole("textbox")).toHaveCount(0);
+  await expect(summary.getByRole("combobox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "カスタマイズを開く" })).toBeEnabled();
+});
+
+test("settings yuuko display tab shows a fixed message when the pattern cannot be read", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_PATTERN_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-pattern")).toHaveText("読み込めなかったよ");
+  await expect(page.getByTestId("current-pattern")).not.toContainText("/internal/secret/path");
+  // 吹き出し・飾りは既定（いつもの・なし）、呼び名が空なら未設定と出す。
+  await expect(page.getByTestId("current-balloon")).toHaveText("いつもの");
+  await expect(page.getByTestId("current-deco")).toHaveText("なし");
+});
+
+// 設定を読めなかったときは、呼び名を「まだ決めていない」と誤って出さない（レビュー対応）。
+test("settings yuuko display tab does not claim an empty nickname when settings fail to load", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_USER_SETTINGS_LOAD_FAIL_CODE__ = "IO_ERROR";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+
+  await expect(page.getByTestId("current-nickname")).toHaveText("読み込めなかったよ");
+  await expect(page.getByTestId("current-nickname")).not.toContainText("/internal/secret/path");
 });
 
 // 辞書の書き出しはデータ移行で兼ねるため、設定画面には単独の書き出し項目を置かない（判断台帳 D24）。
@@ -4402,7 +5797,7 @@ test("settings storage panel shows 準備中 instead of dummy usage values", asy
 test("settings data panel has no dictionary export or cache delete item", async ({ page }) => {
   await openSettings(page);
 
-  await expect(page.getByTestId("storage-status-placeholder")).toBeVisible();
+  await expect(page.getByTestId("storage-status")).toBeVisible();
   await expect(page.getByText(/辞書データをエクスポート/)).toHaveCount(0);
   await expect(page.getByText(/キャッシュを削除/)).toHaveCount(0);
   await expect(page.getByText("アーカイブを管理（準備中）")).toHaveCount(0);
@@ -4743,6 +6138,35 @@ test("settings archive management deletes a month after confirming and refreshes
   ]);
 });
 
+// アーカイブ月を消すと保存データが減るため、ストレージ状況を読み直す（レビュー対応）。
+test("settings storage panel reloads usage after an archive month is deleted", async ({
+  page,
+}) => {
+  await openDataManagement(page);
+  await expect(page.getByTestId("storage-total")).toHaveText("3.5 MB");
+  const callsBefore = (await readWindowValue(page, "__E2E_STORAGE_USAGE_CALL_COUNT__")) as number;
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_STORAGE_USAGE__ = {
+      totalBytes: 512 * 1024,
+      articleBytes: 256 * 1024,
+      archiveBytes: 0,
+      dictionaryBytes: 128 * 1024,
+      otherBytes: 128 * 1024,
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await page.getByRole("button", { name: "2026年7月のアーカイブを削除" }).click();
+  await page.getByRole("button", { name: "削除する" }).click();
+  await expect(page.getByTestId("archive-manage-status")).toHaveText(
+    "2026年7月のアーカイブ（30件）を削除したよ。"
+  );
+
+  await expect(page.getByTestId("storage-total")).toHaveText("512.0 KB");
+  expect(await readWindowValue(page, "__E2E_STORAGE_USAGE_CALL_COUNT__")).toBe(callsBefore + 1);
+});
+
 test("settings archive management still reports success when zip cleanup is pending", async ({
   page,
 }) => {
@@ -4842,9 +6266,7 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   await expect(page.getByRole("switch")).not.toBeChecked();
   await expect(page.getByRole("textbox").first()).toHaveValue("10:00");
   await expect(page.getByRole("textbox").nth(1)).toHaveValue("16:00");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("5件");
 
   // 解説・AI設定メニュー: aiProvider / explanationLevel が反映される。
   await openSettingsMenu(page, "解説・AI設定");
@@ -4861,12 +6283,108 @@ test("settings load reflects saved MVP settings and shows the theme read-only", 
   // テーマ変更は「準備中」ではなく、カスタマイズ画面への案内を出す。
   await expect(page.getByText("変更機能は準備中")).toHaveCount(0);
   await expect(page.getByTestId("theme-customize-guide")).toHaveText(
-    "テーマはカスタマイズ画面で変えられるよ"
+    "着せかえと呼び名はカスタマイズ画面で変えられるよ"
   );
 
   // その他メニュー: genres が反映される。
   await openSettingsMenu(page, "その他");
   await expect(page.getByRole("checkbox", { name: "IT" })).toBeChecked();
+});
+
+// 呼び名はカスタマイズ画面で変える（D161）。設定「その他」に入力欄は無く、保存では読み込んだ呼び名をそのまま書き戻す。
+test("settings other tab has no nickname field and saving keeps the stored nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      nickname: "みどり",
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "その他");
+  await expect(page.getByText("ニックネーム", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("呼び名", { exact: true })).toHaveCount(0);
+  await expect(page.getByPlaceholder("ゆうこに呼んでほしい名前")).toHaveCount(0);
+  await expect(page.locator("main").getByRole("textbox")).toHaveCount(0);
+
+  await page.getByRole("checkbox", { name: "IT" }).click();
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+  const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
+  expect(saved?.nickname).toBe("みどり");
+});
+
+// 設定画面 → カスタマイズで呼び名を変える → 設定画面に戻ってほかの設定を保存しても、呼び名は新しい値のまま（D161）。
+test("settings save after changing the nickname in customize keeps the new nickname", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      nickname: "ゆう",
+    };
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("ゆう");
+
+  // 設定画面の案内（「カスタマイズを開く」）からカスタマイズ画面へ移り、呼び名を変える。
+  await page.getByRole("button", { name: "カスタマイズを開く" }).click();
+  await page.getByRole("tab", { name: "呼び名" }).click();
+  const input = page.getByTestId("customize-nickname-input");
+  await input.fill("みどり");
+  await input.press("Enter");
+  await expect(page.getByTestId("customize-nickname")).toHaveText("いまの呼び名: みどり");
+
+  // 設定画面へ戻り、ほかの設定（通知の件数）だけを変えて保存する。
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await setNotifyMaxPerDay(page, 6);
+  await page.getByRole("button", { name: "保存する" }).click();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
+
+  const saved = (await readSavedSettings(page)) as Record<string, unknown> | undefined;
+  expect(saved?.notifyMaxPerDay).toBe(6);
+  // 古い呼び名（ゆう）で戻さない。
+  expect(saved?.nickname).toBe("みどり");
+  await openSettingsMenu(page, "ゆうこ表示");
+  await expect(page.getByTestId("current-nickname")).toHaveText("みどり");
+});
+
+// 「保存する」を待たずに反映される欄には、同じ文言・見た目の注記をそろえて付ける（D160）。
+test("settings marks the immediately-applied sections with the same note", async ({ page }) => {
+  await openSettings(page);
+  const lead = "すぐ反映されるよ（「保存する」は不要）。";
+
+  // 「保存する」で反映する通知タブには付けない。
+  await expect(page.getByText(lead)).toHaveCount(0);
+
+  await openSettingsMenu(page, "起動・連携");
+  await expect(page.getByTestId("integration-immediate-note")).toContainText(lead);
+
+  await openSettingsMenu(page, "データ管理");
+  await expect(page.getByTestId("data-immediate-note")).toContainText(lead);
+
+  for (const label of ["ゆうこ表示", "抑制条件", "解説・AI設定", "その他"]) {
+    await openSettingsMenu(page, label);
+    await expect(page.locator("main").getByText(lead)).toHaveCount(0);
+  }
+
+  await page.getByRole("button", { name: "設定を初期状態に戻す" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog.getByTestId("reset-immediate-note")).toContainText(lead);
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+
+  // 見た目（クラス）もそろっている。
+  await openSettingsMenu(page, "起動・連携");
+  const integrationClass = await page.getByTestId("integration-immediate-note").getAttribute("class");
+  await openSettingsMenu(page, "データ管理");
+  const dataClass = await page.getByTestId("data-immediate-note").getAttribute("class");
+  const withoutMargin = (value: string | null) =>
+    (value ?? "").split(/\s+/).filter((name) => name !== "" && name !== "mt-4").join(" ");
+  expect(withoutMargin(dataClass)).toBe(withoutMargin(integrationClass));
 });
 
 // MVP対象設定の編集 → 保存DTO確認、selectedThemeId が保存で失われないこと。
@@ -4883,14 +6401,13 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
 
   await openSettings(page);
 
-  // 通知頻度 1日5回まで / 通知ON→OFF。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  // 1日の最大通知件数 5 / 通知ON→OFF。
+  await setNotifyMaxPerDay(page, 5);
   await page.getByRole("switch").click();
 
   // AI: provider=Gemini, 解説の詳しさ=詳しく。
   await openSettingsMenu(page, "解説・AI設定");
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "Gemini" }).click();
   await page.getByRole("combobox").filter({ hasText: "ふつう" }).click();
   await page.getByRole("option", { name: "詳しく" }).click();
@@ -4961,9 +6478,7 @@ test("settings save round-trips MVP settings and preserves selectedThemeId", asy
   await expect(timeInputs.nth(1)).toHaveValue("12:00");
   await expect(timeInputs.nth(2)).toHaveValue("13:00");
   await expect(timeInputs.nth(3)).toHaveValue("18:00");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日5回まで" })
-  ).toBeVisible(); // notifyMaxPerDay=5
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("5件"); // notifyMaxPerDay=5
 
   // 解説・AI設定メニュー: aiProvider / explanationLevel。
   await openSettingsMenu(page, "解説・AI設定");
@@ -5031,7 +6546,7 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   // 解説・AI設定: Provider/解説の詳しさは操作可能。専門用語の解説レベル・優先モードは表示しない。
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
   ).toBeEnabled();
   await expect(
     page.getByRole("combobox").filter({ hasText: "ふつう" })
@@ -5039,29 +6554,35 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   await expect(page.getByRole("combobox")).toHaveCount(2);
   await expect(page.getByText("専門用語の解説レベル")).toHaveCount(0);
   await expect(page.getByText("AI処理の優先モード")).toHaveCount(0);
-  // 自動要約スイッチは DTO 保存されるため操作可能、長文要点説明は準備中で非活性。
-  await expect(page.getByRole("switch")).toHaveCount(2);
-  await expect(
-    page.getByRole("switch", { name: "長文要点説明の自動候補（準備中）" })
-  ).toBeDisabled();
+  // 自動要約スイッチは DTO 保存されるため操作可能。長文要点説明の自動候補（準備中）は
+  // D21 でフレーズ解説に統合したため置かない（判断台帳 D144）。
+  await expect(page.getByRole("switch")).toHaveCount(1);
+  await expect(page.getByText(/長文要点説明/)).toHaveCount(0);
   await expect(
     page.getByRole("switch", { name: "ニュース取得後に自動で要約する" })
   ).toBeEnabled();
 
-  // AIプロバイダーの選択肢: OpenAI は無く、ローカルは「準備中」を外して選べる（判断台帳 D99）。
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  // AIプロバイダーの選択肢: 主経路のローカルを先頭（おすすめ）に、Gemini、最後に開発・デモ用（Mock）。
+  // OpenAI は無く、ローカルは「準備中」を外して選べる（判断台帳 D99）。
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await expect(page.getByRole("option")).toHaveText([
-    "MockProvider（APIキー不要）",
-    "Gemini",
-    "ローカル",
+    "ローカル（おすすめ）",
+    "Gemini（APIキーが必要）",
+    "開発・デモ用（本物のAIは使いません）",
   ]);
   await page.keyboard.press("Escape");
   // 案内文も OpenAI に触れず、ローカルを「準備中」と案内しない。
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
   await expect(page.getByText(/ローカルは準備中/)).toHaveCount(0);
-  await expect(
-    page.getByText(/ローカル.*はこのパソコンの中だけで動くAIで/)
-  ).toBeVisible();
+  // 案内文は方針どおり: ローカル＝記事を外へ送らない／Gemini＝キーが必要で記事の一部を外部へ送る／
+  // 開発・デモ用＝動作確認用。Mock を推奨しない。
+  const guide = page.getByTestId("ai-provider-guide");
+  await expect(guide).toContainText("ローカル（おすすめ）：このパソコンの中で動くAIです");
+  await expect(guide).toContainText("記事の内容を外部へ送りません");
+  await expect(guide).toContainText("APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります");
+  await expect(guide).toContainText("開発・デモ用：動作確認のための設定です");
+  await expect(guide).not.toContainText("推奨します");
+  await expect(guide).not.toContainText("MockProvider");
 });
 
 // ローカルを選ぶと、初回の準備に時間がかかることを短く案内する（Mock の注記は消える）。
@@ -5071,7 +6592,7 @@ test("settings shows the local AI note when ローカル is selected", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(page.getByTestId("local-provider-note")).toHaveCount(0);
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "ローカル" }).click();
   await expect(page.getByTestId("local-provider-note")).toHaveText(
     "このパソコンの中で動くAIだよ。初めて使うときは準備に少し時間がかかるよ。"
@@ -5093,14 +6614,12 @@ test("settings shows unsaved changes and returns to 保存済み after saving", 
   await expect(saveState).toHaveText("保存済み");
   await expect(saveButton).toBeDisabled();
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(saveState).toHaveText("未保存の変更あり");
   await expect(saveButton).toBeEnabled();
 
   // 元の値へ戻せば変更なしに戻る（保存と同じ正規化で比較している）。
-  await page.getByRole("combobox").filter({ hasText: "1日5回まで" }).click();
-  await page.getByRole("option", { name: "1日3回まで" }).click();
+  await setNotifyMaxPerDay(page, 3);
   await expect(saveState).toHaveText("保存済み");
   await expect(saveButton).toBeDisabled();
 
@@ -5112,8 +6631,7 @@ test("settings shows unsaved changes and returns to 保存済み after saving", 
   await expect(saveState).toHaveText("保存済み");
 
   await openSettingsMenu(page, "通知");
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(saveState).toHaveText("未保存の変更あり");
 
   await saveButton.click();
@@ -5174,7 +6692,7 @@ test("settings genre section notes the all-sources fallback only when Rust repor
   await expect(note).toBeVisible();
 });
 
-// 同梱の既定取得元（D138）のジャンルを興味ジャンルとして選べる（D141）。
+// D138 の既定取得元のジャンルを興味ジャンルとして選べる（D141）。D150 で一部の媒体を外した後も選択肢は残す。
 test("settings genre section offers the bundled source genres", async ({ page }) => {
   await openSettings(page);
   await openSettingsMenu(page, "その他");
@@ -5209,8 +6727,7 @@ test("settings cancel discards unsaved changes and returns to the main screen", 
 }) => {
   await openSettings(page);
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await expect(page.getByTestId("settings-save-state")).toHaveText(
     "未保存の変更あり"
   );
@@ -5228,9 +6745,7 @@ test("settings cancel discards unsaved changes and returns to the main screen", 
     .first()
     .getByRole("button", { name: "設定", exact: true })
     .click();
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
 });
 
@@ -5241,8 +6756,7 @@ test("settings save failure keeps the unsaved state", async ({ page }) => {
   });
   await openSettings(page);
 
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
   await page.getByRole("button", { name: "保存する" }).click();
 
   await expect(page.getByText("保存に失敗しちゃった").first()).toBeVisible();
@@ -5260,11 +6774,12 @@ test("settings shows the development note only while MockProvider is selected", 
   await openSettingsMenu(page, "解説・AI設定");
 
   const note = page.getByTestId("mock-provider-note");
+  // 以前から Mock のままの利用者にも、ローカルへの切り替えを案内する（自動では切り替えない）。
   await expect(note).toHaveText(
-    "MockProvider は開発・デモ用です（外部AIは使いません）。"
+    "いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。"
   );
 
-  await page.getByRole("combobox").filter({ hasText: "MockProvider" }).click();
+  await page.getByRole("combobox").filter({ hasText: "開発・デモ用" }).click();
   await page.getByRole("option", { name: "Gemini" }).click();
   await expect(note).toHaveCount(0);
 });
@@ -5283,7 +6798,7 @@ test("settings treats a saved openai provider as MockProvider", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "MockProvider" })
+    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
   ).toBeVisible();
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
 
@@ -5436,10 +6951,17 @@ for (const screen of sidebarAutostartScreens) {
   });
 }
 
-// ホーム・記事詳細のサイドバーも同じ共通部品に置き換えた（固定の「ON」表示をやめる）。
+// ホーム・記事詳細・ニュース一覧のサイドバーも同じ共通部品で表示する（固定の「ON」表示をやめる）。
 const sidebarAutostartOpeners = [
   { id: "home", open: openHome },
   { id: "reader", open: openReaderFromHome },
+  {
+    id: "news",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
 ] as const;
 
 for (const screen of sidebarAutostartOpeners) {
@@ -5492,6 +7014,15 @@ const quitResidentOpeners = [
       openScreenFromSidebar(page, screen.navName, screen.heading),
   })),
   { id: "reader", open: openReaderFromHome },
+  {
+    id: "news",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
+  { id: "past-news", open: openPastNews },
+  { id: "settings", open: openSettings },
 ] as const;
 
 const quitAppCalls = (page: Page) =>
@@ -5568,6 +7099,116 @@ for (const failure of [
   });
 }
 
+// 左サイドバーの画面ナビは、ホーム以外の各画面で共通部品 AppSidebarNav を使い、
+// ホームと同じ項目・順序で並べる（画面詳細設計書 §3.3）。選択中の項目は aria-current="page" で示す。
+const expectedSidebarNavLabels = [
+  "ホーム",
+  "ニュースを見る",
+  "ニュース履歴",
+  "過去ニュース",
+  "ゆうこ辞書",
+  "カスタマイズ",
+  "ガチャ",
+  "設定",
+];
+
+const sidebarNavScreens = [
+  {
+    id: "news",
+    active: "ニュースを見る",
+    open: async (page: Page) => {
+      await openHome(page);
+      await openTodayNewsList(page);
+    },
+  },
+  { id: "reader", active: "ニュースを見る", open: openReaderFromHome },
+  {
+    id: "history",
+    active: "ニュース履歴",
+    open: (page: Page) =>
+      openScreenFromSidebar(page, "ニュース履歴", "ニュース履歴"),
+  },
+  { id: "past-news", active: "過去ニュース", open: openPastNews },
+  {
+    id: "dictionary",
+    active: "ゆうこ辞書",
+    open: (page: Page) => openScreenFromSidebar(page, "ゆうこ辞書", "ゆうこ辞書"),
+  },
+  {
+    id: "customize",
+    active: "カスタマイズ",
+    open: (page: Page) =>
+      openScreenFromSidebar(page, "カスタマイズ", "ゆうこカスタマイズ"),
+  },
+  {
+    id: "gacha",
+    active: "ガチャ",
+    open: (page: Page) => openScreenFromSidebar(page, "ガチャ", "ゆうこガチャ"),
+  },
+] as const;
+
+// 左サイドバー内の画面ナビ（記事詳細はパンくずの nav もあるため aside 内に限定する）。
+const leftSidebarNav = (page: Page) =>
+  page.locator("aside").first().getByRole("navigation");
+
+test("sidebar nav on home lists the reference items in order", async ({
+  page,
+}) => {
+  await openHome(page);
+
+  const nav = leftSidebarNav(page);
+  await expect(nav.getByRole("button")).toHaveText(expectedSidebarNavLabels);
+  await expect(nav.locator('[aria-current="page"]')).toHaveText(["ホーム"]);
+});
+
+for (const screen of sidebarNavScreens) {
+  test(`sidebar nav on ${screen.id} matches home's items and order and marks the current screen`, async ({
+    page,
+  }) => {
+    await screen.open(page);
+
+    const nav = leftSidebarNav(page);
+    await expect(nav.getByRole("button")).toHaveText(expectedSidebarNavLabels);
+    await expect(nav.locator('[aria-current="page"]')).toHaveText([
+      screen.active,
+    ]);
+    // 常駐終了もホーム以外の全画面のサイドバーに置く。
+    await expect(
+      page
+        .locator("aside")
+        .first()
+        .getByRole("button", { name: "常駐を終了する", exact: true })
+    ).toBeVisible();
+
+    // どの画面からでも「過去ニュース」で過去ニュース画面（月一覧）へ移れる。
+    await nav.getByRole("button", { name: "過去ニュース", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "過去ニュース", exact: true })
+    ).toBeVisible();
+    await expect(
+      leftSidebarNav(page).locator('[aria-current="page"]')
+    ).toHaveText(["過去ニュース"]);
+  });
+}
+
+// 設定画面の左サイドバーは設定カテゴリ一覧（§7.3）のため画面ナビは置かないが、
+// 「ホームへ戻る」と「常駐を終了する」は他画面と同じく置く。カテゴリの選択中は aria-current="true"。
+test("settings sidebar keeps the category menu with home and quit actions", async ({
+  page,
+}) => {
+  await openSettings(page);
+
+  const aside = page.locator("aside").first();
+  await expect(
+    aside.getByRole("button", { name: "ホームへ戻る", exact: true })
+  ).toBeVisible();
+  await expect(
+    aside.getByRole("button", { name: "常駐を終了する", exact: true })
+  ).toBeVisible();
+  await expect(aside.locator('[aria-current="true"]')).toHaveCount(1);
+  await expect(aside.locator('[aria-current="page"]')).toHaveCount(0);
+});
+
 test("dictionary sidebar has no autostart toggle (changes are made in settings)", async ({
   page,
 }) => {
@@ -5629,8 +7270,7 @@ test("settings corrupt file shows the reset path and resets to defaults after co
     );
 
   // 初期化前に画面上の値を変えておき、初期化で既定値へ戻ることを確認できるようにする。
-  await page.getByRole("combobox").filter({ hasText: "1日3回まで" }).click();
-  await page.getByRole("option", { name: "1日5回まで" }).click();
+  await setNotifyMaxPerDay(page, 5);
 
   // ボタンは確認ダイアログを開くだけで、キャンセルすれば初期化しない（自動で上書きしない）。
   await resetButton.click();
@@ -5655,9 +7295,7 @@ test("settings corrupt file shows the reset path and resets to defaults after co
   // 初期化結果がそのまま保存済みの基準になるため、変更するまでは保存ボタンは押せない。
   await expect(saveButton).toBeDisabled();
   await expect(page.getByTestId("settings-save-state")).toHaveText("保存済み");
-  await expect(
-    page.getByRole("combobox").filter({ hasText: "1日3回まで" })
-  ).toBeVisible();
+  await expect(page.getByTestId("notify-max-per-day-value")).toHaveText("3件");
   await page.getByRole("switch").click();
   await expect(saveButton).toBeEnabled();
 
@@ -5805,7 +7443,11 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   });
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
-  await expect(page.getByText("保存済みの設定でテストします")).toBeVisible();
+  // 保存済みの AI（既定は開発・デモ用）でテストすることを名前つきで示す。
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（開発・デモ用）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(page.getByTestId("ai-connection-test-unsaved-note")).toHaveCount(0);
 
   const button = page.getByRole("button", { name: "接続テスト" });
   await button.click();
@@ -5814,13 +7456,141 @@ test("settings AI connection test shows 利用可能 and blocks double clicks wh
   await expect(running).toBeDisabled();
   await running.click({ force: true });
 
-  await expect(aiTestResultRegion(page)).toContainText("利用可能です");
+  // Mock の成功は「本物のAIではない」ことが分かる文言にする。
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（開発・デモ用）：使えます");
+  await expect(aiTestResultRegion(page)).toContainText("本物のAIは使いません");
   await expect(button).toBeEnabled();
   expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
   await expect(aiTestResultRegion(page)).not.toContainText("MockProvider");
 });
 
-test("settings AI connection test shows APIキー未設定 with a MockProvider recommendation for Gemini", async ({
+// ローカルの初回は約30秒かかるため、テスト中は待ち時間の案内を出し、終わったら結果を欄の下に残す。
+test("settings AI connection test explains the wait and keeps the result after it finishes", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 800;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(page.getByTestId("ai-connection-test-target")).toContainText(
+    "保存済みの設定（ローカル）でテストします"
+  );
+
+  const progress = page.getByTestId("ai-connection-test-progress");
+  await expect(progress).toHaveCount(0);
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(progress).toHaveText(
+    "テストしているよ。初めてのときは準備に30秒ほどかかるから、少し待っていてね。"
+  );
+
+  const region = aiTestResultRegion(page);
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
+  await expect(region).toContainText("このAIで要約・解説を作れます");
+  await expect(progress).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
+
+  // 終わった後も結果は残る（ボタンが元に戻るだけにしない）。
+  await page.waitForTimeout(1000);
+  await expect(region).toContainText("テスト結果（ローカル）：使えます");
+
+  // 失敗の結果も「使えません」と固定文言で残る。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AI_TEST_RESULT__ = {
+      provider: "local",
+      checkedProvider: "local",
+      status: "unavailable",
+      errorKind: "local_ai_start_failed",
+      mockAvailable: true,
+    };
+  });
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
+  await expect(region).toContainText("ローカルAIを起動できませんでした");
+  await expect(region).not.toContainText("local_ai_start_failed");
+  await page.waitForTimeout(1000);
+  await expect(region).toContainText("テスト結果（ローカル）：使えません");
+});
+
+// テスト中に AI の選択を切り替えたら、届いた結果は切り替え前の AI のものなので表示しない。
+test("settings AI connection test drops the result when the provider is switched during the test", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__E2E_AI_TEST_DELAY_MS__ = 1000;
+    w.__E2E_USER_SETTINGS_OVERRIDE__ = { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(page.getByRole("button", { name: "テスト中…" })).toBeDisabled();
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  // テストが終わってボタンが戻っても、ローカルの結果は出さない。
+  await expect(page.getByRole("button", { name: "接続テスト" })).toBeEnabled();
+  await expect(aiTestResultRegion(page)).not.toContainText("テスト結果");
+  expect(await readCount(page, "__E2E_AI_TEST_CALL_COUNT__")).toBe(1);
+});
+
+// 選択を変えて未保存のままだと、保存済みの AI でテストすることと、先に保存が要ることを示す。
+test("settings AI connection test names the saved provider when the selection is unsaved", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ =
+      { aiProvider: "local" };
+  });
+  await setAiTestResult(page, {
+    provider: "local",
+    checkedProvider: "local",
+    status: "available",
+    errorKind: null,
+    mockAvailable: true,
+  });
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+
+  const unsavedNote = page.getByTestId("ai-connection-test-unsaved-note");
+  await expect(unsavedNote).toHaveCount(0);
+  await page.getByRole("combobox").filter({ hasText: "ローカル" }).click();
+  await page.getByRole("option", { name: "Gemini" }).click();
+
+  await expect(page.getByTestId("ai-connection-test-target")).toHaveText(
+    "保存済みの設定（ローカル）でテストします（未保存の変更は反映されません）"
+  );
+  await expect(unsavedNote).toHaveText(
+    "いま選んでいる「Gemini」をテストするには、先に保存してね。"
+  );
+  // 押すと保存済みのローカルを確かめ、見出しにもその名前が出る。
+  await page.getByRole("button", { name: "接続テスト" }).click();
+  await expect(aiTestResultRegion(page)).toContainText("テスト結果（ローカル）：使えます");
+
+  // 選択を保存済みに戻すと案内は消える。
+  await page.getByRole("combobox").filter({ hasText: "Gemini" }).click();
+  await page.getByRole("option", { name: "ローカル" }).click();
+  await expect(unsavedNote).toHaveCount(0);
+});
+
+test("settings AI connection test shows APIキー未設定 with a ローカル recommendation for Gemini", async ({
   page,
 }) => {
   await setAiTestResult(page, {
@@ -5837,7 +7607,9 @@ test("settings AI connection test shows APIキー未設定 with a MockProvider r
 
   const region = aiTestResultRegion(page);
   await expect(region).toContainText("APIキーが未設定です");
-  await expect(region).toContainText("MockProvider");
+  // 開発・デモ用（Mock）ではなく、キーの要らないローカルを案内する（判断台帳 D99 / D103）。
+  await expect(region).toContainText("ローカル（おすすめ）");
+  await expect(region).not.toContainText("MockProvider");
   // 秘密情報・生エラーを扱う欄は出さない。
   await expect(page.getByRole("textbox")).toHaveCount(0);
 });
@@ -6689,8 +8461,7 @@ test("auto-dismisses the balloon after the timeout via mark_yuuko_ignored", asyn
 });
 
 // 未確認の報酬を知らせる報酬通知（Rust request_yuuko_notification が報酬を優先して返す状態）。
-const REWARD_NOTICE_TEXT =
-  "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+const REWARD_NOTICE_TEXT = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
 
 async function enableRewardNotice(page: Page) {
   await page.addInitScript((text: string) => {
@@ -7046,8 +8817,7 @@ test("yuuko-summoned OFF message is shown even while notifications are disabled"
   const region = page.getByRole("region", { name: NOTIFICATION_REGION });
   await expect(region).toHaveCount(0);
 
-  const message =
-    "通知がOFFになっているよ。設定でONにすると、ニュースを紹介できるよ。";
+  const message = "通知がOFFだよ。設定でONにしてね。";
   await expect
     .poll(() => emitYuukoSummoned(page, { message }))
     .toBeGreaterThan(0);
@@ -7810,6 +9580,101 @@ test("onboarding overlay completes even when autostart fails", async ({
   });
 });
 
+// D146: ホームの「オンボーディングを見る」は旧 OnboardingScreen ではなく、初回と同じ案内を見直し表示で重ねる。
+// 現在の設定を初期表示し、「閉じる」・Esc では何も保存せず、元の画面へ戻る。
+// 見直し表示は見出しだけ初回と変える（初回の「はじめまして」は出さない）。
+const onboardingReplayDialog = (page: Page) =>
+  page.getByRole("dialog", { name: "ゆうこの設定、もう一度見てみよう！" });
+const setOnboardingCompleted = (page: Page) =>
+  page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      onboardingCompleted: true,
+      genres: ["AI", "セキュリティ"],
+      nickname: "ゆうちゃん",
+    };
+  });
+
+test("onboarding replay opens the current overlay from home and closes back without saving", async ({
+  page,
+}) => {
+  await setOnboardingCompleted(page);
+  await openHome(page);
+  await page.waitForTimeout(500);
+  await expect(onboardingDialog(page)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  const dialog = onboardingReplayDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(onboardingDialog(page)).toHaveCount(0);
+  // 現在の設定を初期表示する（既定値へ巻き戻さない）。
+  await expect(dialog.getByLabel("ニックネーム")).toHaveValue("ゆうちゃん");
+  await expect(dialog.getByLabel("セキュリティ", { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel("IT", { exact: true })).not.toBeChecked();
+  // 見直し表示ではスキップの代わりに「閉じる」「保存する」を出す。
+  await expect(dialog.getByRole("button", { name: "スキップ" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "保存する" })).toBeVisible();
+
+  await dialog.getByLabel("ニックネーム").fill("保存しない名前");
+  await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
+  // Esc でも保存せずに閉じられる。開き直すと保存済みの値に戻っている。
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("ニックネーム")).toHaveValue("ゆうちゃん");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  expect(await readSavedSettingsRecord(page)).toBeUndefined();
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+});
+
+test("onboarding replay saves changes while keeping onboarding completed", async ({
+  page,
+}) => {
+  await setOnboardingCompleted(page);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_AUTOSTART_ENABLED__ = true;
+  });
+  await openHome(page);
+
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  const dialog = onboardingReplayDialog(page);
+  await expect(dialog).toBeVisible();
+  // 自動起動は OS の登録状態を初期表示する。
+  const autostartSwitch = dialog.getByRole("switch", {
+    name: "PC起動時の自動起動",
+  });
+  await expect(autostartSwitch).toHaveAttribute("aria-checked", "true");
+
+  await dialog.getByLabel("IT", { exact: true }).click();
+  await dialog.getByLabel("ニックネーム").fill("ゆうこファン");
+  await dialog.getByRole("button", { name: "保存する" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+    genres: ["AI", "セキュリティ", "IT"],
+    nickname: "ゆうこファン",
+  });
+  // 自動起動は変えていないので OS 登録は呼ばない。
+  expect(await readAutostartSetCalls(page)).toEqual([]);
+
+  // 見直しで自動起動を OFF にしたときだけ解除する。
+  await page.getByRole("button", { name: "オンボーディングを見る" }).click();
+  await expect(dialog).toBeVisible();
+  await autostartSwitch.click();
+  await dialog.getByRole("button", { name: "保存する" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => readAutostartSetCalls(page)).toEqual([false]);
+  expect(await readSavedSettingsRecord(page)).toMatchObject({
+    onboardingCompleted: true,
+  });
+});
+
 // 「元記事を開く」: Tauri 上では window.open を使わず、記事IDだけを open_original_article へ渡す。
 const spyWindowOpen = (page: Page) =>
   page.addInitScript(() => {
@@ -7971,6 +9836,186 @@ test("gacha draw shows result dialog, marks it seen, then shows complete", async
   await expect(page.getByTestId("gacha-status-message")).toContainText("コンプリート");
   await expect(gachaDrawButton(page)).toBeDisabled();
 });
+
+// まわすとゆうこが少し跳ねてから結果が出る（実機テスト B16）。動きを抑える設定では跳ねずにすぐ結果を出す。
+test("gacha draw hops yuuko briefly before the result, and skips it with reduced motion", async ({
+  page,
+}) => {
+  await openGacha(page);
+  const hopper = page.locator("[data-hopping]");
+  await expect(hopper).toHaveCount(0);
+  await gachaDrawButton(page).click();
+  // 演出中は結果を出さず、ゆうこが跳ねる（CSS アニメーションが付く）。
+  await expect(hopper).toHaveCount(1);
+  expect(await hopper.evaluate((node) => getComputedStyle(node).animationName)).toBe("yuuko-gacha-hop");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(hopper).toHaveCount(0);
+  await page.getByRole("dialog").getByRole("button", { name: "とじる" }).click();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const startedAt = Date.now();
+  await gachaDrawButton(page).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // 待ち時間（900ms）を入れずに結果を出す。
+  expect(Date.now() - startedAt).toBeLessThan(800);
+  expect(await gachaDrawCallCount(page)).toBe(2);
+});
+
+// ガチャの結果は外側のクリックでは閉じず、「とじる」と Esc で閉じる（2026-10-26 E2E テスト 5）。
+// 動きを抑える設定では結果がすぐ出るため、まわした直後の別の場所へのクリックで見ないまま閉じないこと。
+test("gacha result dialog ignores outside clicks and closes with the button or Escape", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openGacha(page);
+  const dialog = page.getByRole("dialog");
+
+  // まわした直後に外側（背景）をクリックしても閉じない。
+  await gachaDrawButton(page).click();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  await expect(dialog.getByText("ガチャの結果")).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  // 閉じていないので NEW も外していない。
+  expect(await gachaSeenIds(page)).toEqual([]);
+
+  // Esc で閉じる。閉じたら NEW を外す（確認した扱い）。
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => gachaSeenIds(page)).toContain("card-002");
+
+  // 2回目も外側のクリックでは閉じず、「とじる」で閉じる。
+  await gachaDrawButton(page).click();
+  await expect(dialog.getByRole("heading", { name: "よぞら色テーマ" })).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // コレクションの詳細（自分で開いたもの）は従来どおり外側のクリックでも閉じる。
+  await page.getByRole("button", { name: /おはようカード/ }).click();
+  await expect(dialog.getByRole("heading", { name: "おはようカード" })).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toHaveCount(0);
+});
+
+// 演出中に別画面へ移っても、消費済みの結果は次にガチャ画面を開いたときに出す（演出の追加に伴う見逃し防止）。
+test("gacha result is shown on return when leaving during the hop", async ({ page }) => {
+  await openGacha(page);
+  await gachaDrawButton(page).click();
+  await expect(page.locator("[data-hopping]")).toHaveCount(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ゆうこ辞書" }).first()).toBeVisible();
+  // 演出の時間（900ms）が過ぎて抽選の結果が返るまで待ってから戻る。
+  await page.waitForTimeout(1200);
+  expect(await gachaDrawCallCount(page)).toBe(1);
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "おつかれカード" })).toBeVisible();
+  // 前回の結果も、外側のクリックでは閉じない（とじる・Esc だけで閉じる）。
+  await page.mouse.click(5, 5);
+  await expect(dialog.getByText("前回のガチャの結果")).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(dialog).toHaveCount(0);
+  // 一度出したら、もう一度開いても出さない。
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ゆうこ辞書", exact: true })
+    .click();
+  await page
+    .getByRole("navigation", { name: "画面ナビ" })
+    .getByRole("button", { name: "ガチャ", exact: true })
+    .click();
+  await expect(page.getByTestId("gacha-collection-count")).toHaveText("3 / 4");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("gacha draw of a pattern shows its kind and a swatch", async ({ page }) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_GACHA_OVERRIDE__ = {
+      ownedIds: ["card-001"],
+      newIds: [],
+      master: [
+        { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
+        { itemId: "gacha_pattern_sakura", kind: "pattern", name: "桜ひらり（春）", text: null },
+      ],
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openGacha(page);
+
+  await gachaDrawButton(page).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "桜ひらり（春）" })).toBeVisible();
+  await expect(dialog.getByText("種類：模様")).toBeVisible();
+  await expect(dialog.getByTestId("pattern-swatch")).toHaveAttribute("data-pattern", "gacha_pattern_sakura");
+  await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toBeVisible();
+  await dialog.getByRole("button", { name: "とじる" }).click();
+  await expect(
+    page.getByTestId("gacha-collection-owned").getByRole("button", { name: /桜ひらり（春）（模様）/ })
+  ).toBeVisible();
+});
+
+for (const { itemId, kind, name, kindLabel, sampleId } of [
+  { itemId: "gacha_deco_crown", kind: "deco", name: "ちび王冠", kindLabel: "飾り", sampleId: "gacha-deco-sample" },
+  {
+    itemId: "gacha_balloon_game",
+    kind: "balloon",
+    name: "ゲームの窓",
+    kindLabel: "吹き出し",
+    sampleId: "gacha-balloon-sample",
+  },
+]) {
+  test(`gacha draw of a ${kind} shows its kind and a sample`, async ({ page }) => {
+    await page.addInitScript(
+      ({ itemId, kind, name }) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).__E2E_GACHA_OVERRIDE__ = {
+          ownedIds: ["card-001"],
+          newIds: [],
+          master: [
+            { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
+            { itemId, kind, name, text: null },
+          ],
+        };
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      },
+      { itemId, kind, name }
+    );
+    await openGacha(page);
+
+    await gachaDrawButton(page).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name })).toBeVisible();
+    await expect(dialog.getByText(`種類：${kindLabel}`)).toBeVisible();
+    const sample = dialog.getByTestId(sampleId);
+    await expect(sample).toBeVisible();
+    if (kind === "deco") {
+      await expect(sample.getByTestId("yuuko-deco-layer")).toHaveAttribute("src", /crown\.svg$/);
+    } else {
+      await expect(sample.locator("[data-balloon-shape]")).toHaveAttribute("data-balloon-shape", "game");
+      await expect(sample.locator(".yuuko-bb-game p")).toHaveCSS("color", "rgb(255, 255, 255)");
+    }
+    await expect(dialog.getByText("カスタマイズ画面で切り替えられるよ")).toBeVisible();
+    // 引いただけでは適用しない（ガチャ画面のゆうこは既定のまま）。
+    await expect(page.getByTestId("gacha-yuuko-figure")).toHaveAttribute("data-deco", "none");
+    await dialog.getByRole("button", { name: "とじる" }).click();
+    await expect(
+      page.getByTestId("gacha-collection-owned").getByRole("button", { name: new RegExp(`${name}（${kindLabel}）`) })
+    ).toBeVisible();
+  });
+}
 
 test("gacha disables the draw button and explains when fragments are insufficient", async ({
   page,
@@ -8247,13 +10292,6 @@ async function installTauriMocks(page: Page) {
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return null;
           }
-          case "plugin:window|close":
-            (
-              window as typeof window & {
-                __E2E_WINDOW_CLOSE_CALLED__?: boolean;
-              }
-            ).__E2E_WINDOW_CLOSE_CALLED__ = true;
-            return null;
           case "get_recommended_articles": {
             // 一覧の読み直し回数の検証用に呼び出し回数を数える。
             const recommendedCallWindow = window as unknown as Record<string, number>;
@@ -8389,6 +10427,29 @@ async function installTauriMocks(page: Page) {
               ];
             }
 
+            // 日時表示・NEW 判定テスト用: 公開直後の未読記事と、取得は本日だが4か月前に公開された未読記事。
+            if (historyWin.__E2E_HISTORY_DATE_DISPLAY__) {
+              const now = new Date();
+              return [
+                {
+                  ...articleHistoryItem,
+                  articleId: "date-fresh",
+                  title: "公開直後の記事",
+                  fetchedAt: now.toISOString(),
+                  publishedAtText: new Date(
+                    now.getTime() - 60 * 60 * 1000
+                  ).toISOString(),
+                },
+                {
+                  ...articleHistoryItem,
+                  articleId: "date-old",
+                  title: "4か月前に公開された記事",
+                  fetchedAt: now.toISOString(),
+                  publishedAtText: "2026-06-05T06:43:31Z",
+                },
+              ];
+            }
+
             // 当日件数テスト用: 当日取得件数を設定すると fetchedAt=当日 の記事をその件数返す。
             const todayCount = historyWin.__E2E_HISTORY_TODAY__;
             if (typeof todayCount === "number") {
@@ -8417,9 +10478,13 @@ async function installTauriMocks(page: Page) {
               });
             }
             // 取得失敗モード: 本番と同じ CommandError 形式で reject する（生エラー・内部パスを含める）。
+            // 文字列を入れたときはそのコードで reject する（ARTICLE_ARCHIVED / NOT_FOUND_ERROR の案内の検証用）。
             if (detailWin.__E2E_ARTICLE_DETAIL_FAIL__) {
               throw {
-                code: "STORAGE_ERROR",
+                code:
+                  typeof detailWin.__E2E_ARTICLE_DETAIL_FAIL__ === "string"
+                    ? detailWin.__E2E_ARTICLE_DETAIL_FAIL__
+                    : "STORAGE_ERROR",
                 message: "E2E raw detail failure /internal/secret/path",
               };
             }
@@ -8463,7 +10528,10 @@ async function installTauriMocks(page: Page) {
               yuukoComment: "UI確認中だよ。",
               // 同名・別IDの用語切替テスト用: フラグ時は表示文字列が同じ2候補（ID は別になる）。
               // 候補語なしテスト用: フラグ時は空（実記事で候補語が無い状態）。
-              keywordCandidates: detailWin.__E2E_EMPTY_KEYWORDS__
+              // 候補語の件数を変える検証用（「すべての関連ワードを見る」の展開）: フラグ時は指定の配列。
+              keywordCandidates: Array.isArray(detailWin.__E2E_KEYWORD_CANDIDATES__)
+                ? detailWin.__E2E_KEYWORD_CANDIDATES__
+                : detailWin.__E2E_EMPTY_KEYWORDS__
                 ? []
                 : detailWin.__E2E_SAME_NAME_TERMS__
                   ? ["同じ用語", "同じ用語"]
@@ -8533,6 +10601,24 @@ async function installTauriMocks(page: Page) {
             }
             /* eslint-enable @typescript-eslint/no-explicit-any */
             return null;
+          }
+          case "get_auto_summary_status": {
+            // 自動要約の状態の種類（判断台帳 D158）。既定は動いている（一言を出さない）。
+            // フラグで種類を差し替え、失敗フラグ時は本番と同じ CommandError 形式で reject する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const statusWin = window as any;
+            statusWin.__E2E_AUTO_SUMMARY_STATUS_CALLS__ =
+              (statusWin.__E2E_AUTO_SUMMARY_STATUS_CALLS__ || 0) + 1;
+            if (statusWin.__E2E_AUTO_SUMMARY_STATUS_FAIL__) {
+              throw { code: "INTERNAL_ERROR", message: "E2E auto summary status failure" };
+            }
+            return {
+              kind:
+                typeof statusWin.__E2E_AUTO_SUMMARY_STATUS__ === "string"
+                  ? statusWin.__E2E_AUTO_SUMMARY_STATUS__
+                  : "running",
+            };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "generate_article_summary": {
             // 生成中表示の確認用: フラグ時は応答を遅らせる。
@@ -8665,6 +10751,29 @@ async function installTauriMocks(page: Page) {
               }
             ).__E2E_SAVED_USER_SETTINGS__ = params.settings;
             return { ok: true };
+          // 呼び名だけの保存（カスタマイズ画面。D161）。Rust の set_nickname と同じく前後の空白を除き、
+          // 32文字（コードポイント数）超・制御文字は VALIDATION_ERROR で拒否して何も保存しない。
+          case "set_nickname": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const nicknameWin = window as any;
+            nicknameWin.__E2E_SET_NICKNAME_CALLS__ = [
+              ...(nicknameWin.__E2E_SET_NICKNAME_CALLS__ || []),
+              params.nickname,
+            ];
+            if (nicknameWin.__E2E_SET_NICKNAME_FAIL__) {
+              throw { code: "IO_ERROR", message: "E2E nickname save failure /internal/secret/path" };
+            }
+            const trimmed = String(params.nickname).trim();
+            if ([...trimmed].length > 32 || /[\u0000-\u001f\u007f-\u009f]/.test(trimmed)) {
+              throw { code: "VALIDATION_ERROR", message: "validation error: nickname" };
+            }
+            nicknameWin.__E2E_USER_SETTINGS_OVERRIDE__ = {
+              ...(nicknameWin.__E2E_USER_SETTINGS_OVERRIDE__ || {}),
+              nickname: trimmed,
+            };
+            return trimmed;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
           // 自動起動（OS 登録状態）。既定は OFF。失敗時の文言に生エラーが出ないことも確認できるよう識別子を含める。
           case "get_autostart_enabled": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -8709,6 +10818,25 @@ async function installTauriMocks(page: Page) {
               archiveCount: 1,
               totalBytes: 2048,
             };
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_storage_usage": {
+            // 設定画面「ストレージ状況」。__E2E_STORAGE_USAGE__ で差し替え（"fail" で読み込み失敗）。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const storageWin = window as any;
+            storageWin.__E2E_STORAGE_USAGE_CALL_COUNT__ =
+              (storageWin.__E2E_STORAGE_USAGE_CALL_COUNT__ || 0) + 1;
+            const usage = storageWin.__E2E_STORAGE_USAGE__ ?? {
+              totalBytes: 3 * 1024 * 1024 + 512 * 1024,
+              articleBytes: 2 * 1024 * 1024,
+              archiveBytes: 1024 * 1024,
+              dictionaryBytes: 256 * 1024,
+              otherBytes: 256 * 1024,
+            };
+            if (usage === "fail") {
+              throw { code: "IO_ERROR", message: "E2E raw storage failure /internal/secret/path" };
+            }
+            return usage;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "list_migration_imports": {
@@ -9068,6 +11196,12 @@ async function installTauriMocks(page: Page) {
             // 保存済み辞書の命中（★ は外した状態）を返すテスト用。
             const savedUnstarred =
               explainWin.__E2E_EXPLAIN_TERM_SAVED_UNSTARRED__ === true;
+            // 応答の一部を差し替えるテスト用（案内 isNotice・語境界まで広げた expandedFrom など）。
+            const explainOverride =
+              explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__ &&
+              typeof explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__ === "object"
+                ? explainWin.__E2E_EXPLAIN_TERM_OVERRIDE__
+                : {};
             /* eslint-enable @typescript-eslint/no-explicit-any */
             // 種別のテスト用（既定は用語）。フレーズの判定自体は Rust 側の単体テストで確かめる。
             const explainType =
@@ -9080,6 +11214,8 @@ async function installTauriMocks(page: Page) {
               type: explainType,
               isStarred: false,
               savedInDictionary: savedUnstarred,
+              isNotice: false,
+              ...explainOverride,
             };
           }
           case "save_dictionary_entry": {
@@ -9251,6 +11387,68 @@ async function installTauriMocks(page: Page) {
             };
             themeWin.__E2E_REWARD_STATE__ = { ...base, activeThemeId: params.themeId };
             return themeWin.__E2E_REWARD_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_dressup_state":
+          case "set_active_balloon":
+          case "set_active_deco": {
+            // ゆうこの着せかえ（D155）。既定は「いつもの」「なし」だけ選べる。
+            // __E2E_DRESSUP_STATE__ で差し替え（"fail" で読み込み失敗）、切り替えの呼び出しは記録する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const dressupWin = window as any;
+            const current = dressupWin.__E2E_DRESSUP_STATE__ ?? {
+              activeBalloonId: "balloon_default",
+              selectableBalloonIds: ["balloon_default"],
+              activeDecoId: "deco_none",
+              selectableDecoIds: ["deco_none"],
+            };
+            if (cmd === "get_dressup_state") {
+              if (current === "fail") {
+                throw new Error("E2E dressup failure /internal/secret/path");
+              }
+              return current;
+            }
+            const isBalloon = cmd === "set_active_balloon";
+            const id = isBalloon ? params.balloonId : params.decoId;
+            dressupWin.__E2E_SET_DRESSUP_CALLS__ = [
+              ...(dressupWin.__E2E_SET_DRESSUP_CALLS__ || []),
+              `${isBalloon ? "balloon" : "deco"}:${id}`,
+            ];
+            const selectable = isBalloon ? current.selectableBalloonIds : current.selectableDecoIds;
+            if (!selectable.includes(id)) {
+              throw { code: "VALIDATION_ERROR", message: "E2E raw dressup failure /internal/secret/path" };
+            }
+            dressupWin.__E2E_DRESSUP_STATE__ = isBalloon
+              ? { ...current, activeBalloonId: id }
+              : { ...current, activeDecoId: id };
+            return dressupWin.__E2E_DRESSUP_STATE__;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          }
+          case "get_pattern_state":
+          case "set_active_pattern": {
+            // テーマの地に敷く模様（D152〜D154）。既定は「なし」・初期の模様だけ選べる。
+            // __E2E_PATTERN_STATE__ で差し替え（"fail" で読み込み失敗）、set_active_pattern の呼び出しは記録する。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const patternWin = window as any;
+            const current = patternWin.__E2E_PATTERN_STATE__ ?? {
+              activePatternId: "none",
+              selectablePatternIds: ["none", "pattern_dots", "pattern_paw"],
+            };
+            if (cmd === "get_pattern_state") {
+              if (current === "fail") {
+                throw new Error("E2E pattern failure /internal/secret/path");
+              }
+              return current;
+            }
+            patternWin.__E2E_SET_ACTIVE_PATTERN_CALLS__ = [
+              ...(patternWin.__E2E_SET_ACTIVE_PATTERN_CALLS__ || []),
+              params.patternId,
+            ];
+            if (!current.selectablePatternIds.includes(params.patternId)) {
+              throw { code: "VALIDATION_ERROR", message: "E2E raw pattern failure /internal/secret/path" };
+            }
+            patternWin.__E2E_PATTERN_STATE__ = { ...current, activePatternId: params.patternId };
+            return patternWin.__E2E_PATTERN_STATE__;
             /* eslint-enable @typescript-eslint/no-explicit-any */
           }
           case "record_friendship_event": {
@@ -9475,7 +11673,7 @@ async function installTauriMocks(page: Page) {
             const gachaWin = window as any;
             if (!gachaWin.__E2E_GACHA__) {
               const override = gachaWin.__E2E_GACHA_OVERRIDE__ || {};
-              const master = [
+              const master = override.master ?? [
                 { itemId: "card-001", kind: "card", name: "おはようカード", text: "きょうもいっしょにニュースを読もうね。" },
                 { itemId: "theme-001", kind: "theme", name: "さくら色テーマ", text: null },
                 { itemId: "card-002", kind: "card", name: "おつかれカード", text: "がんばったね。ひと休みしよう？" },
@@ -9725,3 +11923,173 @@ async function captureScreen(page: Page, testInfo: TestInfo, name: string) {
     fullPage: false,
   });
 }
+
+// --- キーボード操作・支援技術（カードを開く・用語ポップアップ・通知の Esc） ---
+
+test("keyboard: today-news card opens the article with Enter", async ({ page }) => {
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  const card = page
+    .locator("main")
+    .getByRole("button", { name: "E2Eテスト用ニュース" })
+    .first();
+  await card.focus();
+  await expect(card).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(readerBackButton(page).first()).toBeVisible();
+  expect(await readRequestedArticleId(page)).toBe("e2e-article-1");
+});
+
+test("keyboard: news history card is selected with Space", async ({
+  page,
+}) => {
+  // 4件の履歴を出す（要約タグ用のモック）。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_HISTORY_SUMMARY_STATES__ = true;
+  });
+  await openNewsHistory(page);
+
+  const cards = page.locator('main [role="button"][aria-labelledby]');
+  await expect(cards.nth(1)).toBeVisible();
+  const second = cards.nth(1);
+  const title = (await second.locator("h3").innerText()).trim();
+
+  await second.focus();
+  await page.keyboard.press(" ");
+  // 一覧のカードと詳細ペインの両方にタイトルが出る（＝選択された）。
+  await expect(
+    page.getByRole("heading", { name: title, exact: true })
+  ).toHaveCount(2);
+});
+
+test("keyboard: dictionary list item opens the detail with Enter and ★ has its own name", async ({
+  page,
+}) => {
+  // 用語＋フレーズの2件を出す。
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_DICTIONARY_WITH_PHRASE__ = true;
+  });
+  await openDictionary(page);
+
+  const cards = page.locator('main [role="button"][aria-labelledby]');
+  await expect(cards.nth(1)).toBeVisible();
+  const second = cards.nth(1);
+  const term = (await second.locator("span.line-clamp-2").innerText()).trim();
+
+  await second.focus();
+  await page.keyboard.press("Enter");
+  await expect(second).toHaveAttribute("aria-current", "true");
+  await expect(dictionaryDetailHeading(page)).toHaveText(term);
+
+  // 一覧の★は「<用語>をお気に入りに登録」という名前を持ち、押しても項目の選択は変わらない。
+  const first = cards.nth(0);
+  const firstStar = first.getByRole("button", { name: /をお気に入りに登録$/ });
+  await expect(firstStar).toHaveAttribute("aria-pressed", /true|false/);
+  await firstStar.focus();
+  await page.keyboard.press("Enter");
+  await expect(second).toHaveAttribute("aria-current", "true");
+  await expect(first).not.toHaveAttribute("aria-current", "true");
+});
+
+test("dictionary memo save / cancel icon buttons have accessible names", async ({
+  page,
+}) => {
+  await openDictionary(page);
+  await page
+    .locator("main aside")
+    .getByRole("button", { name: "編集", exact: true })
+    .click();
+  await expect(page.getByRole("button", { name: "メモを保存" })).toBeVisible();
+  await page.getByRole("button", { name: "メモの編集をやめる" }).click();
+  await expect(page.getByRole("button", { name: "メモを保存" })).toHaveCount(0);
+});
+
+test("term popup: opens from the 解説 button by keyboard as a dialog, Esc closes it and returns focus", async ({
+  page,
+}) => {
+  await openReaderFromHome(page);
+  await expectNoInitialTermPopup(page);
+
+  const explain = page.getByRole("button", { name: "E2E用語を解説", exact: true });
+  await explain.focus();
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "E2E用語" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(termPopup(page)).toHaveCount(0);
+  await expect(explain).toBeFocused();
+
+  // ×ボタンで閉じたときも開いたボタンへ戻る。
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+  await expect(termPopup(page)).toHaveCount(0);
+  await expect(explain).toBeFocused();
+});
+
+test("notification Escape is ignored while typing in an input", async ({ page }) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 入力欄（ここでは検証用に追加したもの）にフォーカスがある Esc は入力側の操作として扱う。
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.setAttribute("aria-label", "E2E入力欄");
+    document.body.appendChild(input);
+    input.focus();
+  });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await expect(notification).toBeVisible();
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(0);
+});
+
+test("notification Escape is ignored while another dialog is open", async ({ page }) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 通知以外のダイアログが開いている間は、フォーカスが無くても通知を閉じない。
+  await page.evaluate(() => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-label", "E2Eダイアログ");
+    document.body.appendChild(dialog);
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await expect(notification).toBeVisible();
+  expect(await readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__")).toBe(0);
+});
+
+test("notification Escape closes it when focus is inside the notification", async ({
+  page,
+}) => {
+  await enableNotificationCandidate(page);
+  await openHome(page);
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification).toBeVisible();
+
+  // 他にダイアログがあっても、通知を操作中（フォーカスが通知内）なら通知を閉じる。
+  await page.evaluate(() => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-label", "E2Eダイアログ");
+    document.body.appendChild(dialog);
+  });
+  await notification.getByRole("button", { name: "通知を閉じる" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
+    .toBeGreaterThanOrEqual(1);
+});

@@ -53,6 +53,8 @@ pub struct YuukoService {
     meeting_detector: Arc<dyn MeetingDetector>,
     /// スリープ復帰の検知（デスクトップ通知スレッドの心拍）と復帰後の猶予。
     resume_tracker: Arc<Mutex<ResumeGraceTracker>>,
+    /// 通知モードのランダムな待ち（D143）に使うシードの取得元。本番は時刻由来、テストでは固定値を差し込む。
+    random_delay_seed: fn() -> u64,
 }
 
 impl YuukoService {
@@ -73,6 +75,7 @@ impl YuukoService {
             fullscreen_tracker: Arc::new(Mutex::new(FullscreenSuppressionTracker::default())),
             meeting_detector: Arc::new(SystemMeetingDetector),
             resume_tracker: Arc::new(Mutex::new(ResumeGraceTracker::default())),
+            random_delay_seed: time_seed,
         }
     }
 
@@ -87,6 +90,13 @@ impl YuukoService {
     #[cfg(test)]
     fn with_meeting_detector(mut self, detector: Arc<dyn MeetingDetector>) -> Self {
         self.meeting_detector = detector;
+        self
+    }
+
+    /// テストで通知モードのランダムな待ちを固定する。
+    #[cfg(test)]
+    fn with_random_delay_seed(mut self, seed: fn() -> u64) -> Self {
+        self.random_delay_seed = seed;
         self
     }
 
@@ -119,14 +129,13 @@ impl YuukoService {
             tracker.reset();
             return FullscreenGate::Allowed;
         }
-        let busy = match self.fullscreen_detector.detect() {
-            FullscreenStatus::Busy => true,
-            FullscreenStatus::Free => false,
-            FullscreenStatus::Unknown => {
-                log::warn!("全画面状態を取得できなかったため、全画面による通知抑制を行いません");
-                false
-            }
-        };
+        // 通知はどの種類の全画面（ふつうの全画面・Direct3D 全画面・プレゼン）でも抑制する。
+        // 自動要約の一時停止（D3D 全画面・プレゼンだけ）とは条件が違う（判断台帳 D158）。
+        let status = self.fullscreen_detector.detect();
+        if status == FullscreenStatus::Unknown {
+            log::warn!("全画面状態を取得できなかったため、全画面による通知抑制を行いません");
+        }
+        let busy = status.suppresses_notifications();
         tracker.observe(now, busy, grace_from_seed(time_seed()))
     }
 
@@ -369,7 +378,12 @@ impl YuukoService {
     /// 全画面・プレゼン中と解除後の猶予 / スリープ復帰後の猶予）と
     /// 候補選定（未紹介・未読・スコア順／お気に入り除外）を満たす場合のみ、おすすめから1件を
     /// 「紹介中」状態にする（設計書 §4.3/§5.2/§6/§12）。未確認の報酬があればニュースより優先して報酬通知にする（§6.4）。
+    /// 通知モード（ランダム / 時間帯内ランダム / 定時 / 通知しない）による出すタイミングも判定する（D143・§4.2）。
     pub fn request_yuuko_notification(&self) -> Result<RequestYuukoNotificationResult, AppError> {
+        use crate::domain::notification_mode::{
+            check_mode_timing, ModeTimingGate, NotificationMode,
+        };
+
         let settings = self.settings_repository.load_or_default()?;
         // 判定から保存までを1つの更新として扱う（同時に「閉じる」が来ても、そのクールタイムを後勝ちで消さない）。
         // 保持中に呼ぶ記事・報酬・全画面判定は、このロックを取らないため入れ子にならない。
@@ -401,15 +415,33 @@ impl YuukoService {
             ));
         }
 
+        // 通知モード「通知しない」（D143）は新しい自動通知（ニュース・報酬のお知らせとも）を出さない。
+        // 表示中の通知（トレイ「ゆうこを呼ぶ」〔D140〕で出したものを含む）は上の already_active で
+        // そのまま返すため、ここは「表示中のものが無い」ときだけ通る。呼ぶで出した記事は紹介済みに
+        // 記録済みなので、ここで disabled を返して消すと記事だけ消費されてしまう。
+        let mode = NotificationMode::from_storage(&settings.notification.mode);
+        if mode == NotificationMode::Off {
+            return Ok(notification_result(
+                false,
+                "disabled",
+                &state,
+                &settings.user.nickname,
+            ));
+        }
+
         let now = Utc::now();
+        // 通知モードで使う時間帯（ランダムは終日、それ以外は保存済みの通知時間帯）。
+        let work_time_ranges: Vec<(&str, &str)> = settings
+            .notification
+            .work_time_ranges
+            .iter()
+            .map(|range| (range.start.as_str(), range.end.as_str()))
+            .collect();
+        let time_ranges = mode.time_ranges(&work_time_ranges);
         match state.can_notify(
             now,
             settings.notification.max_per_day,
-            settings
-                .notification
-                .work_time_ranges
-                .iter()
-                .map(|range| (range.start.as_str(), range.end.as_str())),
+            time_ranges.iter().copied(),
         ) {
             NotificationGate::DailyLimitReached => {
                 return Ok(notification_result(
@@ -436,6 +468,39 @@ impl YuukoService {
                 ));
             }
             NotificationGate::Allowed => {}
+        }
+
+        // 通知モードのタイミング（D143）: ランダム系はクールタイム明けからさらにランダムに待ち、
+        // 定時は各時間帯の開始時刻の回だけ出す。日次上限・クールタイム等を通った後に判定するので、
+        // 既存の抑制条件はそのまま効く。待ち時刻を決め直したら保存し、再起動しても待ちをやり直さない。
+        let (mode_gate, schedule_changed) = check_mode_timing(
+            &mut state,
+            mode,
+            now,
+            &time_ranges,
+            (self.random_delay_seed)(),
+        );
+        if schedule_changed {
+            self.yuuko_state_repository.save(&state)?;
+        }
+        match mode_gate {
+            ModeTimingGate::Allowed => {}
+            ModeTimingGate::Waiting => {
+                return Ok(notification_result(
+                    false,
+                    "cooling_down",
+                    &state,
+                    &settings.user.nickname,
+                ));
+            }
+            ModeTimingGate::OutsideSlot => {
+                return Ok(notification_result(
+                    false,
+                    "outside_time_range",
+                    &state,
+                    &settings.user.nickname,
+                ));
+            }
         }
 
         // 全画面・プレゼン中と解除後の猶予中は出さない。候補選定（紹介済み記録・通知枠の消費）の前に
@@ -751,6 +816,7 @@ mod tests {
     use super::*;
     use crate::domain::article::{ArticleHistoryFilter, ArticleReadState, GetArticleDetailParams};
     use crate::domain::settings::{PersistedSettings, WorkTimeRange};
+    use crate::infra::fullscreen_detector::FullscreenKind;
     use crate::paths::AppPaths;
     use crate::repositories::article_repository::ArticleRepository;
     use crate::repositories::friendship_repository::FriendshipRepository;
@@ -858,7 +924,9 @@ mod tests {
             reward_service,
             friendship_service,
         )
-        .with_fullscreen_detector(fullscreen.clone());
+        .with_fullscreen_detector(fullscreen.clone())
+        // 既定は待ち0分に固定し、通知モードのランダムな待ち以外を確かめるテストを従来どおり即時に通す。
+        .with_random_delay_seed(zero_delay_seed);
         let meeting = Arc::new(FakeMeetingDetector::default());
         let service = service.with_meeting_detector(meeting.clone());
 
@@ -933,6 +1001,200 @@ mod tests {
         assert!(!state.has_active_notification());
         assert!(state.introduced_article_ids.is_empty());
         assert_eq!(state.daily_notification.count, 0);
+    }
+
+    // --- 通知モード（判断台帳 D143） ---
+
+    fn seed_for_delay_minutes(minutes: i64) -> u64 {
+        use crate::domain::notification_mode::random_delay_from_seed;
+        (0..100_000u64)
+            .find(|seed| {
+                random_delay_from_seed(
+                    *seed,
+                    crate::domain::notification_mode::RANDOM_DELAY_MAX_MINUTES,
+                ) == Duration::minutes(minutes)
+            })
+            .expect("seed for delay")
+    }
+
+    fn zero_delay_seed() -> u64 {
+        seed_for_delay_minutes(0)
+    }
+
+    fn max_delay_seed() -> u64 {
+        seed_for_delay_minutes(crate::domain::notification_mode::RANDOM_DELAY_MAX_MINUTES)
+    }
+
+    fn save_mode_settings(
+        ctx: &ServiceContext,
+        mode: &str,
+        max_per_day: u32,
+        ranges: Vec<WorkTimeRange>,
+    ) {
+        let mut settings = PersistedSettings::default();
+        settings.notification.enabled = true;
+        settings.notification.mode = mode.to_string();
+        settings.notification.max_per_day = max_per_day;
+        settings.notification.work_time_ranges = ranges;
+        ctx.settings_repository
+            .save(&settings)
+            .expect("save settings");
+    }
+
+    /// 現在のローカル時刻から `start_offset` 分ずらした開始時刻と `end_offset` 分ずらした終了時刻の時間帯。
+    fn range_around_now(start_offset: i64, end_offset: i64) -> Vec<WorkTimeRange> {
+        let to_hhmm = |t: chrono::DateTime<Local>| format!("{:02}:{:02}", t.hour(), t.minute());
+        let now = Local::now();
+        vec![WorkTimeRange {
+            start: to_hhmm(now + Duration::minutes(start_offset)),
+            end: to_hhmm(now + Duration::minutes(end_offset)),
+        }]
+    }
+
+    #[test]
+    fn mode_none_returns_disabled_without_consuming_anything() {
+        let ctx = make_context();
+        ctx.article_repository.seed_sample_articles_for_tests();
+        save_mode_settings(&ctx, "none", 3, all_day_ranges());
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(!result.notified);
+        assert_eq!(result.reason, "disabled");
+        let state = load_state(&ctx);
+        assert!(!state.has_active_notification());
+        assert!(state.introduced_article_ids.is_empty());
+        assert_eq!(state.daily_notification.count, 0);
+        assert!(state.next_random_notify_at.is_none());
+    }
+
+    /// 「通知しない」でも、トレイ「ゆうこを呼ぶ」（D140）で出した通知は、続く定期の判定で消さずに返す。
+    #[test]
+    fn mode_none_keeps_a_summoned_notification_on_the_next_request() {
+        let ctx = make_context();
+        ctx.article_repository.seed_sample_articles_for_tests();
+        save_mode_settings(&ctx, "none", 3, all_day_ranges());
+
+        let summoned =
+            summoned_notification(ctx.service.summon_yuuko(SummonSurface::InApp).unwrap());
+        let article_id = summoned
+            .current_article_id
+            .clone()
+            .expect("summoned article");
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert!(!result.notified);
+        assert_eq!(result.reason, "already_active");
+        assert_eq!(
+            result.state.current_article_id.as_deref(),
+            Some(article_id.as_str())
+        );
+        let state = load_state(&ctx);
+        assert!(state.has_active_notification());
+        assert_eq!(
+            state.current_article_id.as_deref(),
+            Some(article_id.as_str())
+        );
+        // 呼んだ分は自動の通知枠を使わない（D140）。
+        assert_eq!(state.daily_notification.count, 0);
+    }
+
+    #[test]
+    fn random_in_work_time_waits_a_saved_random_delay_before_notifying() {
+        let ctx = make_context();
+        let service = ctx.service.clone().with_random_delay_seed(max_delay_seed);
+        ctx.article_repository.seed_sample_articles_for_tests();
+        // 今から200分先まで続く時間帯（残りが90分以上あり、待ちの上限が縮まない）。
+        save_mode_settings(&ctx, "random_in_work_time", 3, range_around_now(-10, 200));
+
+        let before = Utc::now();
+        let first = service.request_yuuko_notification().unwrap();
+        assert!(!first.notified);
+        assert_eq!(first.reason, "cooling_down");
+        // 待ち時刻（90分後）を保存し、候補・通知枠は消費しない。
+        let saved = load_state(&ctx)
+            .next_random_notify_at
+            .expect("next time is saved");
+        let at = chrono::DateTime::parse_from_rfc3339(&saved).unwrap();
+        let waited = at.with_timezone(&Utc) - before;
+        assert!(waited > Duration::minutes(89) && waited <= Duration::minutes(91));
+        assert_nothing_consumed(&ctx);
+
+        // 次の判定でも待ちを決め直さず（保存値のまま）待つ。
+        let second = service.request_yuuko_notification().unwrap();
+        assert_eq!(second.reason, "cooling_down");
+        assert_eq!(load_state(&ctx).next_random_notify_at, Some(saved));
+    }
+
+    #[test]
+    fn saved_random_time_that_has_passed_allows_notification() {
+        let ctx = make_context();
+        let service = ctx.service.clone().with_random_delay_seed(max_delay_seed);
+        ctx.article_repository.seed_sample_articles_for_tests();
+        // 今から200分先まで続く時間帯（残りが90分以上あり、待ちの上限が縮まない）。
+        save_mode_settings(&ctx, "random_in_work_time", 3, range_around_now(-10, 200));
+        let mut state = load_state(&ctx);
+        state.next_random_notify_at = Some(
+            (Utc::now() - Duration::seconds(30))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
+        );
+        ctx.yuuko_state_repository.save(&state).unwrap();
+
+        let result = service.request_yuuko_notification().unwrap();
+
+        assert!(result.notified, "reason={}", result.reason);
+        assert_eq!(load_state(&ctx).daily_notification.count, 1);
+    }
+
+    #[test]
+    fn random_mode_ignores_work_ranges() {
+        let ctx = make_context();
+        ctx.article_repository.seed_sample_articles_for_tests();
+        // 今を含まない通知時間帯でも、ランダムは固定の 7:00〜23:00 で判定する。
+        save_mode_settings(&ctx, "random", 3, ranges_excluding_now());
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        // 実行時刻が 7:00〜23:00 の外なら、通知時間帯に関係なく時間外になる。
+        let now = Local::now();
+        let minutes = now.hour() * 60 + now.minute();
+        if (7 * 60..=23 * 60).contains(&minutes) {
+            assert!(result.notified, "reason={}", result.reason);
+        } else {
+            assert_eq!(result.reason, "outside_time_range");
+        }
+    }
+
+    #[test]
+    fn fixed_time_notifies_only_near_the_range_start() {
+        let ctx = make_context();
+        ctx.article_repository.seed_sample_articles_for_tests();
+        // 開始から90分経った時間帯（中にはいるが、定時の回の猶予60分を過ぎている）。
+        save_mode_settings(&ctx, "fixed_time", 3, range_around_now(-90, 30));
+        let late = ctx.service.request_yuuko_notification().unwrap();
+        assert!(!late.notified);
+        assert_eq!(late.reason, "outside_time_range");
+        assert_nothing_consumed(&ctx);
+
+        // 開始直後なら出す。定時はランダムの待ちを使わない。
+        save_mode_settings(&ctx, "fixed_time", 3, range_around_now(-1, 30));
+        let on_time = ctx.service.request_yuuko_notification().unwrap();
+        assert!(on_time.notified, "reason={}", on_time.reason);
+        assert!(load_state(&ctx).next_random_notify_at.is_none());
+    }
+
+    #[test]
+    fn fixed_time_still_respects_daily_limit() {
+        let ctx = make_context();
+        ctx.article_repository.seed_sample_articles_for_tests();
+        save_mode_settings(&ctx, "fixed_time", 0, range_around_now(-1, 30));
+
+        let result = ctx.service.request_yuuko_notification().unwrap();
+
+        assert_eq!(result.reason, "daily_limit");
+        assert_nothing_consumed(&ctx);
     }
 
     /// 2. 保存済み max_per_day=1 が日次上限として効く（2回目は daily_limit）。
@@ -1160,13 +1422,40 @@ mod tests {
         assert!(state.introduced_article_ids.is_empty());
     }
 
+    /// D158 で自動要約の一時停止をゲーム・発表だけにしても、ゆうこ通知の抑制は変えない。
+    /// ふつうの全画面（QUNS_BUSY）・Direct3D 全画面・プレゼンモードのどれでも fullscreen で抑制する。
+    #[test]
+    fn request_is_suppressed_for_every_fullscreen_kind() {
+        for kind in [
+            FullscreenKind::App,
+            FullscreenKind::Game,
+            FullscreenKind::Presentation,
+        ] {
+            let ctx = make_context();
+            ctx.article_repository.seed_sample_articles_for_tests();
+            save_notification_settings(&ctx, true, 3, all_day_ranges());
+            ctx.fullscreen.set(FullscreenStatus::Busy(kind));
+
+            let result = ctx.service.request_yuuko_notification().unwrap();
+            assert!(!result.notified, "{kind:?} must suppress notifications");
+            assert_eq!(result.reason, "fullscreen", "{kind:?}");
+            assert_nothing_consumed(&ctx);
+            assert_eq!(
+                ctx.service.fullscreen_gate_for_redisplay(),
+                FullscreenGate::Suppressed,
+                "{kind:?} must block redisplay"
+            );
+        }
+    }
+
     /// 11. 全画面中は fullscreen で抑制し、解除後は猶予（30〜180秒）を置いてから同じ候補を出す。
     #[test]
     fn request_holds_candidate_while_fullscreen_and_notifies_after_grace() {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 3, all_day_ranges());
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let suppressed = ctx.service.request_yuuko_notification().unwrap();
         assert!(!suppressed.notified);
@@ -1278,7 +1567,8 @@ mod tests {
             .record_notifier_heartbeat(std::time::Duration::from_secs(5 * 60));
         assert!(ctx.service.resume_grace_remaining().is_some());
 
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         let fullscreen = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(fullscreen.reason, "fullscreen");
 
@@ -1303,7 +1593,8 @@ mod tests {
             ..PersistedYuukoState::default()
         };
         ctx.yuuko_state_repository.save(&active_state).unwrap();
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
         assert_eq!(result.reason, "already_active");
@@ -1341,7 +1632,8 @@ mod tests {
         settings.notification.work_time_ranges = all_day_ranges();
         settings.notification.suppress_in_fullscreen = false;
         ctx.settings_repository.save(&settings).unwrap();
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
 
@@ -1368,7 +1660,8 @@ mod tests {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_notification_settings(&ctx, true, 0, all_day_ranges());
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
 
         let result = ctx.service.request_yuuko_notification().unwrap();
 
@@ -1483,7 +1776,8 @@ mod tests {
         let ctx = make_context();
         ctx.article_repository.seed_sample_articles_for_tests();
         save_meeting_settings(&ctx, true, true);
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         ctx.meeting.set(true, true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
@@ -1946,7 +2240,7 @@ mod tests {
         assert_eq!(reward.rank, 3);
         assert_eq!(
             result.state.balloon_text.as_deref(),
-            Some("新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。")
+            Some("新しいテーマ「そらいろ」が届いたよ！")
         );
         // ニュースは紹介していない（候補は残る）。通知回数は1回分消費する。
         let saved = load_state(&ctx);
@@ -2053,11 +2347,34 @@ mod tests {
         save_nickname(&ctx, "ゆう", true);
 
         let result = ctx.service.request_yuuko_notification().unwrap();
-        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
         assert_eq!(result.state.balloon_text.as_deref(), Some(expected));
         assert_eq!(result.state.reward_notification.unwrap().message, expected);
         let state = ctx.service.get_yuuko_notification_state().unwrap();
         assert_eq!(state.balloon_text.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn reward_notice_saved_with_long_text_before_d157_is_shown_shortened() {
+        // 短くする前（D157）の長い文言が yuuko_state.json に残っていても、取得時に短い文言で返して保存し直す。
+        let ctx = reward_pending_context(3);
+        save_nickname(&ctx, "ゆう", true);
+        assert!(ctx.service.request_yuuko_notification().unwrap().notified);
+        let old = "新しいテーマ「そらいろ」が届いたよ！カスタマイズで切り替えられるよ。";
+        let mut saved = load_state(&ctx);
+        saved.reward_notification.as_mut().unwrap().message = old.to_string();
+        saved.balloon_text = Some(old.to_string());
+        ctx.yuuko_state_repository.save(&saved).unwrap();
+
+        let shown = ctx.service.get_yuuko_notification_state().unwrap();
+        let expected = "ゆう、新しいテーマ「そらいろ」が届いたよ！";
+        assert_eq!(shown.balloon_text.as_deref(), Some(expected));
+        assert_eq!(shown.reward_notification.unwrap().message, expected);
+        let resaved = load_state(&ctx);
+        assert_eq!(
+            resaved.reward_notification.unwrap().message,
+            "新しいテーマ「そらいろ」が届いたよ！"
+        );
     }
 
     /// 閉じた後のクールタイム・最短クールタイムを過去にして、次の判定を通せるようにする。
@@ -2157,7 +2474,8 @@ mod tests {
         settings.notification.suppress_when_mic_in_use = true;
         ctx.settings_repository.save(&settings).unwrap();
         ctx.meeting.set(true, true);
-        ctx.fullscreen.set(FullscreenStatus::Busy);
+        ctx.fullscreen
+            .set(FullscreenStatus::Busy(FullscreenKind::App));
         let before = load_state(&ctx);
         assert_eq!(
             ctx.service.request_yuuko_notification().unwrap().reason,

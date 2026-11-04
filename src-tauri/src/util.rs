@@ -2,6 +2,7 @@
 
 pub(crate) mod speech_cleanup;
 pub(crate) mod text_safety;
+pub(crate) mod url_text;
 
 /// 先頭の UTF-8 BOM (U+FEFF) を除去する。
 ///

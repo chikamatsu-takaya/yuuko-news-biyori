@@ -1,18 +1,12 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
 import {
-  Home,
   Newspaper,
-  Clock,
   BookOpen,
   Sparkles,
-  Gift,
-  Settings,
   ArrowLeft,
   Search,
-  Filter,
   List,
   Star,
   Bot,
@@ -22,16 +16,18 @@ import {
   CircuitBoard,
   ChevronLeft,
   ChevronRight,
-  Share2,
   Trash2,
   Pencil,
   Bell,
-  HelpCircle,
   Save,
   X,
   Info,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -43,7 +39,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -63,13 +59,9 @@ import {
 } from "@/lib/tauri/dictionary";
 
 import { useToast } from "@/hooks/use-toast";
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
+import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 
 type FilterType = "all" | TauriDictionaryEntryType | "favorite";
 type SortOption = "recent" | "name" | "favorite";
@@ -92,16 +84,6 @@ type DictionaryEntry = {
   iconType: DictionaryIconType;
 };
 
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: true },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
-
 const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
     id: "entry-article-001-generated-ai",
@@ -123,7 +105,7 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
     id: "entry-article-001-fundraising",
     term: "資金調達",
-    type: "phrase",
+    type: "term",
     shortDescription: "企業が事業拡大のために投資や融資で資金を集めることだよ。",
     fullDescription:
       "資金調達は、企業が新しい開発や採用、営業活動を進めるために必要なお金を外部から集めることだよ。この記事では、生成AI関連企業に再び投資が集まり始めている流れを示しているよ。",
@@ -155,7 +137,7 @@ const fallbackDictionaryEntries: DictionaryEntry[] = [
   {
     id: "entry-article-002-business-improvement",
     term: "業務改善",
-    type: "key_point",
+    type: "term",
     shortDescription: "仕事の流れを見直して効率や成果を高めることだよ。",
     fullDescription:
       "業務改善は、現場の手間や無駄を減らしながら成果を上げるための取り組みだよ。この記事では、単なるツール導入ではなく、改善が定着する運用設計までが主題になっているよ。",
@@ -198,7 +180,6 @@ const filterOptions: Array<{
   { id: "all", label: "すべて", icon: List },
   { id: "term", label: "単語", icon: Search },
   { id: "phrase", label: "フレーズ", icon: Sparkles },
-  { id: "key_point", label: "要点説明", icon: Pencil },
   { id: "favorite", label: "お気に入り", icon: Star },
 ];
 
@@ -223,18 +204,12 @@ function typeLabel(type: TauriDictionaryEntryType): string {
   if (type === "phrase") {
     return "フレーズ";
   }
-  if (type === "key_point") {
-    return "要点説明";
-  }
   return "単語";
 }
 
 function iconTypeFor(type: TauriDictionaryEntryType): DictionaryIconType {
   if (type === "phrase") {
     return "brain";
-  }
-  if (type === "key_point") {
-    return "chip";
   }
   return "robot";
 }
@@ -384,7 +359,7 @@ function EntryIcon({ type }: { type: DictionaryIconType }) {
     <div
       className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${backgroundColors[type]}`}
     >
-      <Icon className="h-6 w-6 text-[var(--yuuko-green)]" />
+      <Icon className="h-6 w-6 text-[var(--yuuko-green-text)]" />
     </div>
   );
 }
@@ -393,7 +368,6 @@ function TypeBadge({ type }: { type: TauriDictionaryEntryType }) {
   const colors = {
     term: "bg-[var(--yuuko-green)] text-white",
     phrase: "bg-blue-500 text-white",
-    key_point: "bg-amber-500 text-white",
   } as const;
 
   return (
@@ -414,21 +388,32 @@ function DictionaryEntryCard({
   onClick: () => void;
   onToggleFavorite: (entryId: string, current: boolean) => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で詳細を表示）に対応する。読み上げ名は用語。
+  // カード内の★ボタンは自身で Enter/Space を処理する（activateOnEnterOrSpace が target で除外）。
+  const termId = React.useId();
   return (
     <Card
-      className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${
+      role="button"
+      tabIndex={0}
+      aria-labelledby={termId}
+      aria-current={isSelected ? "true" : undefined}
+      className={`cursor-pointer px-0 py-2 transition-all hover:shadow-md ${CLICKABLE_CARD_FOCUS_CLASS} ${
         isSelected
-          ? "border-2 border-[var(--yuuko-green)] bg-[var(--yuuko-green-light)]/30"
+          ? "border-2 border-[var(--yuuko-green-text)] bg-[var(--yuuko-green-light)]/30"
           : "border-border/50 hover:border-border"
       }`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="flex items-start gap-3 p-3">
         <EntryIcon type={entry.iconType} />
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">
             {/* フレーズ（約200字までの文章・D21）は一覧で2行に省略する（全文は詳細で表示）。 */}
-            <span className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground">
+            <span
+              id={termId}
+              className="line-clamp-2 min-w-0 break-words text-sm font-semibold text-foreground"
+            >
               {entry.term}
             </span>
             <TypeBadge type={entry.type} />
@@ -449,6 +434,8 @@ function DictionaryEntryCard({
         <button
           type="button"
           className="shrink-0 p-1"
+          aria-label={`${entry.term}をお気に入りに登録`}
+          aria-pressed={entry.isFavorite}
           onClick={(event) => {
             event.stopPropagation();
             onToggleFavorite(entry.id, entry.isFavorite);
@@ -510,8 +497,9 @@ function Pagination({
           className="h-7 px-2"
           onClick={() => onPageChange(currentPage - 1)}
           disabled={currentPage === 1}
+          aria-label="前のページ"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4" aria-hidden="true" />
         </Button>
         {visiblePages[0] > 1 ? (
           <span className="px-1 text-muted-foreground">…</span>
@@ -523,7 +511,7 @@ function Pagination({
             size="sm"
             className={`h-7 w-7 p-0 ${
               currentPage === page
-                ? "bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90"
+                ? `bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 ${FORCED_COLORS_SELECTED}`
                 : ""
             }`}
             onClick={() => onPageChange(page)}
@@ -540,8 +528,9 @@ function Pagination({
           className="h-7 px-2"
           onClick={() => onPageChange(currentPage + 1)}
           disabled={currentPage === totalPages}
+          aria-label="次のページ"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4" aria-hidden="true" />
         </Button>
       </div>
     </div>
@@ -818,7 +807,7 @@ export default function DictionaryScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={handleGoHome}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -826,22 +815,17 @@ export default function DictionaryScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 space-y-1 overflow-y-auto px-3">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 space-y-1 overflow-y-auto px-3"
+            activeId="dictionary"
+            onNavigate={handleNavigate}
+          />
 
-          <div className="p-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
               <CardContent className="p-3">
-                <p className="mb-2 text-xs font-medium text-[var(--yuuko-green)]">
+                <p className="mb-2 text-xs font-medium text-[var(--yuuko-green-text)]">
                   ゆうこの一言
                 </p>
                 <p className="text-[11px] leading-relaxed text-foreground">
@@ -881,7 +865,7 @@ export default function DictionaryScreen({
             </div>
 
             <div className="mb-6 flex items-center gap-2">
-              <BookOpen className="h-6 w-6 text-[var(--yuuko-green)]" />
+              <BookOpen className="h-6 w-6 text-[var(--yuuko-green-text)]" />
               <h1 className="text-xl font-bold text-foreground">ゆうこ辞書</h1>
             </div>
 
@@ -895,10 +879,6 @@ export default function DictionaryScreen({
                   className="bg-white pl-10"
                 />
               </div>
-              <Button variant="outline" className="gap-2" disabled>
-                <Filter className="h-4 w-4" />
-                絞り込み
-              </Button>
             </div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -911,7 +891,7 @@ export default function DictionaryScreen({
                     type="button"
                     className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
                       isActive
-                        ? "bg-[var(--yuuko-green)] text-white"
+                        ? `bg-[var(--yuuko-green)] text-white ${FORCED_COLORS_SELECTED}`
                         : "border border-border bg-white text-muted-foreground hover:border-[var(--yuuko-green)]/50"
                     }`}
                     onClick={() => setActiveFilter(filter.id)}
@@ -925,8 +905,8 @@ export default function DictionaryScreen({
 
             {loadNotice && (
               <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm">
-                <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-                <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+                <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+                <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
                 <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                   <span role={loadNoticeKind === "error" ? "alert" : "status"}>
                     {loadNotice}
@@ -935,7 +915,7 @@ export default function DictionaryScreen({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                       onClick={() => void loadEntries()}
                       disabled={isLoading}
                     >
@@ -994,7 +974,7 @@ export default function DictionaryScreen({
                       <Button
                         variant="outline"
                         size="sm"
-                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        className="mt-1 text-xs border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                         onClick={handleClearConditions}
                       >
                         条件をクリア
@@ -1047,27 +1027,37 @@ export default function DictionaryScreen({
           {/* 右列（ゆうこ列）は lg 未満（既定ウィンドウ 800px 等）で w-60 に狭め、中央列の幅を確保する（D109）。lg 以上は従来幅。 */}
           <aside className="w-60 lg:w-72 shrink-0 overflow-y-auto border-l border-border/50 bg-[var(--yuuko-cream-dark)]/30 p-4">
             <div className="relative mb-2">
-              <div className="relative rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3">
+              {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はもともとの形（白地・淡いふち・下向きのしっぽ）。 */}
+              <YuukoBalloon
+                defaultClassName="rounded-2xl border-2 border-[var(--yuuko-green)]/30 bg-white p-3"
+                defaultTail={
+                  <>
+                    <div className="absolute -bottom-2 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                    <div className="absolute -bottom-3 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
+                  </>
+                }
+                data-testid="dictionary-yuuko-balloon"
+              >
                 <p className="text-xs leading-relaxed text-foreground">
                   わからない言葉は
                   <br />
                   ここで見返せるよ〜！
                 </p>
-                <div className="absolute -bottom-2 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
-                <div className="absolute -bottom-3 left-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-[var(--yuuko-green)]/30" />
                 <PawIcon className="absolute right-2 top-2 h-4 w-4 text-[var(--yuuko-green)]/40" />
-              </div>
+              </YuukoBalloon>
             </div>
 
             <div className="mb-4 flex justify-center">
               <div className="relative">
-                <Image
-                  src="/assets/yuuko.png"
+                <YuukoFigure
+                  // 右列（ゆうこ列）の先頭付近に常に表示され、画面を開いた時点で見えているため、遅延読み込みしない。
+                  loading="eager"
                   width={144}
                   height={144}
-                  alt="ゆうこ"
-                  className="h-auto w-36 animate-float"
+                  imageClassName="h-auto w-36"
+                  className="animate-float"
                   style={{ animation: "float 3s ease-in-out infinite" }}
+                  data-testid="dictionary-yuuko-figure"
                 />
                 <style jsx>{`
                   @keyframes float {
@@ -1136,7 +1126,7 @@ export default function DictionaryScreen({
                 <Card className="border-border/50 py-0">
                   <CardContent className="p-3">
                     <div className="mb-2 flex items-center gap-1.5">
-                      <BookOpen className="h-4 w-4 text-[var(--yuuko-green)]" />
+                      <BookOpen className="h-4 w-4 text-[var(--yuuko-green-text)]" />
                       <h4 className="text-sm font-semibold text-foreground">
                         やさしい説明
                       </h4>
@@ -1154,14 +1144,14 @@ export default function DictionaryScreen({
                   <CardContent className="p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5">
-                        <Newspaper className="h-4 w-4 text-[var(--yuuko-green)]" />
+                        <Newspaper className="h-4 w-4 text-[var(--yuuko-green-text)]" />
                         <h4 className="text-sm font-semibold text-foreground">
                           関連ニュース
                         </h4>
                       </div>
                       <button
                         type="button"
-                        className="flex items-center gap-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                        className="flex items-center gap-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
                         onClick={handleOpenRelatedArticle}
                         disabled={!selectedEntry.relatedArticleId}
                       >
@@ -1201,7 +1191,7 @@ export default function DictionaryScreen({
                       {!isEditingMemo ? (
                         <button
                           type="button"
-                          className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                          className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
                           onClick={handleStartEditMemo}
                         >
                           編集
@@ -1210,17 +1200,19 @@ export default function DictionaryScreen({
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green)] hover:underline"
+                            className="rounded border border-[var(--yuuko-green)]/30 bg-white px-2 py-0.5 text-[10px] text-[var(--yuuko-green-text)] hover:underline"
+                            aria-label="メモを保存"
                             onClick={handleSaveMemo}
                           >
-                            <Save className="h-3 w-3" />
+                            <Save className="h-3 w-3" aria-hidden="true" />
                           </button>
                           <button
                             type="button"
                             className="rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] text-red-500 hover:underline"
+                            aria-label="メモの編集をやめる"
                             onClick={() => setIsEditingMemo(false)}
                           >
-                            <X className="h-3 w-3" />
+                            <X className="h-3 w-3" aria-hidden="true" />
                           </button>
                         </div>
                       )}
@@ -1243,18 +1235,8 @@ export default function DictionaryScreen({
                   </CardContent>
                 </Card>
 
+                {/* 辞書項目の共有機能は無いため「共有する」ボタンは置かない（削除のみ）。 */}
                 <div className="flex items-center gap-2 pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-                    onClick={() =>
-                      console.log("Share dictionary entry:", selectedEntry.id)
-                    }
-                  >
-                    <Share2 className="mr-1 h-4 w-4" />
-                    共有する
-                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
@@ -1299,13 +1281,8 @@ export default function DictionaryScreen({
             </span>
           </div>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            className="text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
           <PawIcon className="h-4 w-4 text-muted-foreground" />
         </div>
       </footer>

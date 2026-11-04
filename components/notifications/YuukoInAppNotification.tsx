@@ -1,9 +1,11 @@
 "use client";
 
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { YuukoPositionMode } from "@/lib/tauri/yuuko";
+import { shouldNotificationHandleEscape } from "@/lib/notification-escape.mjs";
 
 /**
  * 常駐ゆうこ通知（アプリ内）。
@@ -65,8 +67,9 @@ type YuukoInAppNotificationProps = {
   /** 自動退場（無操作タイムアウト＝無視扱い）。退場後に呼ばれる。 */
   onIgnore: () => void;
   /**
-   * 吹き出し文言と記事タイトルを3行までに収めるか（既定 false＝従来どおり全文）。
-   * 中身に合わせた固定サイズのデスクトップ用ウィンドウで、長いタイトルが上にはみ出さないようにする。
+   * 吹き出し文言と記事タイトルを3行まで（OK の付く報酬通知・一言の文言は2行まで）に収めるか
+   * （既定 false＝従来どおり全文）。中身に合わせた固定サイズのデスクトップ用ウィンドウで、
+   * 長い文言が上にはみ出さないようにする。省略は見た目だけで、吹き出し文言の全文は title にも載せる。
    */
   clampText?: boolean;
   /**
@@ -82,6 +85,11 @@ type YuukoInAppNotificationProps = {
    */
   variant?: "news" | "reward" | "message";
 };
+
+// Esc 判定で「入力欄」「ダイアログ操作中」とみなす要素。
+const EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+const DIALOG_SELECTOR =
+  '[role="dialog"], [role="alertdialog"], dialog[open], [role="listbox"], [role="menu"]';
 
 // 右下基準で「画面端から登場し、画面端へ戻る」（§7.2/§7.5）。
 const POSITION_CLASS: Record<YuukoPositionMode, string> = {
@@ -186,12 +194,35 @@ export default function YuukoInAppNotification({
   }, [view, exiting, variant, fireTerminal]);
 
   // Esc は閉じると同等（§10.6）。退場中は確定済みのため購読しない。
+  // ただし window 全体で受けるため、入力欄・ダイアログ（用語ポップアップ・確認ダイアログ等）の上で押した
+  // Esc はその部品の取り消しとして扱い、通知を閉じない（閉じると再通知のクールタイムが付くため）。
+  // 判定は lib/notification-escape.mjs（迷ったら閉じない側）。
+  const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (exiting) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key !== "Escape") {
+        return;
+      }
+      const root = rootRef.current;
+      const active =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const focusInsideNotification = Boolean(root && active && root.contains(active));
+      const dialogOpen = Array.from(document.querySelectorAll(DIALOG_SELECTOR)).some(
+        (element) => !root?.contains(element)
+      );
+      const handle = shouldNotificationHandleEscape({
+        key: event.key,
+        defaultPrevented: event.defaultPrevented,
+        isComposing: event.isComposing,
+        focusInsideNotification,
+        focusInEditable: Boolean(active?.closest(EDITABLE_SELECTOR)),
+        focusInDialog: Boolean(active?.closest(DIALOG_SELECTOR)),
+        dialogOpen,
+      });
+      if (handle) {
         fireTerminal(() => onCloseRef.current());
       }
     };
@@ -215,6 +246,7 @@ export default function YuukoInAppNotification({
 
   return (
     <div
+      ref={rootRef}
       role="region"
       aria-label="ゆうこからのお知らせ"
       // 退場中は確定済みのため、支援技術・フォーカス移動の対象からも外す。
@@ -240,24 +272,36 @@ export default function YuukoInAppNotification({
         }}
       >
         {/* 吹き出し / 軽量プレビュー（ゆうこ本体の上・近くに表示） */}
-        <div className="relative rounded-2xl border border-border/50 bg-white p-3 pr-7 shadow-lg">
+        {/* 吹き出しは着せかえ（D155）に従う（常駐ゆうこウィンドウでは通知のデータで受け取った着せかえ・D156）。
+            閉じるボタンの分の右余白（pr-7）はどの形でも残す。 */}
+        <YuukoBalloon
+          className="pr-7"
+          tail="none"
+          defaultClassName="rounded-2xl border border-border/50 bg-white p-3 shadow-lg"
+          data-testid="yuuko-notification-balloon"
+        >
           <button
             type="button"
             aria-label="通知を閉じる"
             onClick={handleClose}
-            className="absolute right-2 top-2 text-muted-foreground transition-colors hover:text-foreground"
+            // 位置は形ごとに globals.css の .yuuko-bb-close が決める（雲の丸など、内側に描くふちへ重ねないため・B15）。
+            data-testid="yuuko-notification-close"
+            className="yuuko-bb-close absolute text-muted-foreground transition-colors hover:text-foreground"
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
 
           {variant !== "news" ? (
             // 報酬通知: 短い吹き出し＋OK。OK で確認済みにする（Rust 側）。閉じる・放置では未確認のまま。
             // デスクトップの吹き出し段階のウィンドウ（固定サイズ）に収まるよう、余白は小さめにする。
+            // clampText では OK の分だけ行数を2行に抑える（3行＋OK だと固定高さのウィンドウから上へはみ出すため）。
+            // 省略は見た目だけで、全文は DOM に残り読み上げられる。マウスを載せれば title で全文が読める。
             <div className="flex flex-col gap-1">
               <p
                 className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
-                  clampText ? "line-clamp-3" : ""
+                  clampText ? "line-clamp-2" : ""
                 }`}
+                title={clampText ? (balloonText ?? undefined) : undefined}
               >
                 {balloonText ?? "新しいテーマが届いたよ！"}
               </p>
@@ -277,10 +321,12 @@ export default function YuukoInAppNotification({
               onClick={handleFirstClick}
               className="block w-full text-left"
             >
+              {/* 3行で省略したときも、マウスを載せれば title で全文が読める。 */}
               <p
                 className={`whitespace-pre-line text-xs leading-relaxed text-foreground ${
                   clampText ? "line-clamp-3" : ""
                 }`}
+                title={clampText ? (balloonText ?? undefined) : undefined}
               >
                 {balloonText ?? "気になるニュースを見つけたよ。"}
               </p>
@@ -323,19 +369,17 @@ export default function YuukoInAppNotification({
               </button>
             </div>
           )}
-        </div>
+        </YuukoBalloon>
 
         {/* ゆうこ本体（画面端から登場）。読み込み失敗時は非表示にフォールバック。 */}
         <div className="self-end">
-          <Image
-            src="/assets/yuuko.png"
+          <YuukoFigure
+            // 通知が出た時点で画面内に見えている主役の画像（常駐ゆうこウィンドウでは最大要素）なので、遅延読み込みしない。
+            loading="eager"
             width={96}
             height={96}
-            alt="ゆうこ"
-            className="h-20 w-20 object-contain drop-shadow-md"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = "none";
-            }}
+            imageClassName="h-20 w-20 object-contain"
+            className="drop-shadow-md"
           />
         </div>
       </div>

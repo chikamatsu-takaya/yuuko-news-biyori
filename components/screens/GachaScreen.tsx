@@ -8,7 +8,8 @@
  */
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
 import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
@@ -33,34 +34,22 @@ import {
   type GachaState,
 } from "@/lib/tauri/gacha";
 import {
-  Home,
-  Newspaper,
-  Clock,
-  BookOpen,
   Sparkles,
-  Dices,
-  Settings,
   ArrowLeft,
   Bell,
-  HelpCircle,
   ChevronRight,
   MessageCircle,
   MessageSquare,
   Star,
   Palette,
   Gift,
+  Grid3x3,
 } from "lucide-react";
+import { PatternSwatch } from "@/components/customize/PatternSwatch";
 
 // ============================================
 // TypeScript Types
 // ============================================
-
-interface NavigationItem {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-}
 
 /** 結果モーダル・コレクション詳細で見せる 1 件（獲得済みのものだけ）。 */
 interface DisplayItem {
@@ -77,19 +66,29 @@ type LoadStatus = "loading" | "ready" | "unavailable" | "error";
 // Constants
 // ============================================
 
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: Clock, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Sparkles, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Dices, isActive: true },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
+// まわしたときの演出の長さ（ゆうこが3回跳ねる。app/globals.css の .yuuko-gacha-hop と同じ長さ）。
+// 結果がすぐ出て「まわした」感じが無かったため（実機テスト B16）。要件（ガチャの演出は控えめに）に合わせて
+// 1秒未満の CSS アニメーションだけにし、動きを抑える設定では待たずにすぐ結果を出す。
+const DRAW_REVEAL_DELAY_MS = 900;
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const wait = (ms: number) =>
+  ms > 0 ? new Promise<void>((resolve) => window.setTimeout(resolve, ms)) : Promise.resolve();
+
+// 演出中に別画面へ移ると画面がアンマウントされ、かけらは消費済みなのに結果モーダルを出せない。
+// その結果をモジュール内に1件だけ預け、次にガチャ画面を開いたときに「前回のガチャの結果」として出す
+// （PastNewsScreen の戻り先の記憶と同じく、共有の app/page.tsx に state を足さないため）。
+// アプリを終了した場合は消えるが、獲得したものはコレクションに NEW 付きで残る。
+let resultToShowOnReturn: DisplayItem | null = null;
 
 const KIND_LABELS: Record<GachaItemKind, string> = {
   card: "カード",
   theme: "テーマ",
+  pattern: "模様",
   deco: "飾り",
   balloon: "吹き出し",
 };
@@ -97,6 +96,7 @@ const KIND_LABELS: Record<GachaItemKind, string> = {
 const KIND_ICONS: Record<GachaItemKind, React.ComponentType<{ className?: string }>> = {
   card: MessageCircle,
   theme: Palette,
+  pattern: Grid3x3,
   deco: Gift,
   balloon: MessageSquare,
 };
@@ -171,7 +171,8 @@ function PawIcon({ className }: { className?: string }) {
 
 function GachaMachine() {
   return (
-    <div className="relative w-24 h-36" aria-hidden="true">
+    // 絵だけの装飾なので、Windows ハイコントラストでも元の配色のまま描く（文字を含まないため読みやすさに影響しない・D148）。
+    <div className="relative w-24 h-36 forced-color-adjust-none" aria-hidden="true">
       {/* Machine body */}
       <div className="absolute bottom-0 w-full h-24 bg-gradient-to-b from-[var(--yuuko-green)] to-emerald-600 rounded-xl shadow-lg">
         {/* Glass dome */}
@@ -215,33 +216,29 @@ function Sparkle({ className }: { className?: string }) {
   );
 }
 
-function YuukoCharacter() {
+function YuukoCharacter({ hopping = false }: { hopping?: boolean }) {
   return (
-    <div className="relative">
-      <Image
-        src="/assets/yuuko.png"
+    // まわしている間だけ跳ねる（動きを抑える設定では CSS 側で付けない）。
+    <div className={`relative${hopping ? " yuuko-gacha-hop" : ""}`} data-hopping={hopping || undefined}>
+      <YuukoFigure
         width={963}
         height={1174}
-        alt="ゆうこ"
         priority
-        className="w-auto h-[clamp(180px,34vh,380px)] drop-shadow-lg"
+        imageClassName="w-auto h-[clamp(180px,34vh,380px)]"
+        className="drop-shadow-lg"
         style={{
           animation: "float 3s ease-in-out infinite",
         }}
-        onError={(e) => {
-          const target = e.target as HTMLImageElement;
-          target.style.display = "none";
-          const fallback = target.nextElementSibling as HTMLElement;
-          if (fallback) fallback.classList.remove("hidden");
-        }}
+        data-testid="gacha-yuuko-figure"
+        fallback={
+          <div className="w-52 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
+            <div className="w-28 h-28 bg-gray-700 rounded-full flex items-center justify-center mb-2">
+              <PawIcon className="w-16 h-16 text-pink-300" />
+            </div>
+            <span className="text-white text-base font-medium">ゆうこ</span>
+          </div>
+        }
       />
-      {/* Fallback placeholder */}
-      <div className="hidden w-52 h-64 bg-gradient-to-b from-gray-800 to-gray-900 rounded-3xl flex flex-col items-center justify-center shadow-xl">
-        <div className="w-28 h-28 bg-gray-700 rounded-full flex items-center justify-center mb-2">
-          <PawIcon className="w-16 h-16 text-pink-300" />
-        </div>
-        <span className="text-white text-base font-medium">ゆうこ</span>
-      </div>
     </div>
   );
 }
@@ -249,14 +246,19 @@ function YuukoCharacter() {
 /**
  * ガチャ結果・コレクションの 1 件を見せるモーダル。
  * 文面は外部由来ではないが、HTML としては扱わずプレーンテキストで表示する。
+ * keepOnOutsideClick: ガチャの結果（前回の結果を含む）は外側のクリックでは閉じず、「とじる」と Esc だけで閉じる。
+ * 動きを抑える設定では結果がすぐ出るため、まわした直後の別の場所へのクリックで見ないまま閉じてしまうのを防ぐ。
+ * コレクションの詳細は自分で開いたものなので、従来どおり外側のクリックでも閉じる。
  */
 function GachaItemDialog({
   item,
   heading,
+  keepOnOutsideClick,
   onClose,
 }: {
   item: DisplayItem | null;
   heading: string;
+  keepOnOutsideClick: boolean;
   onClose: () => void;
 }) {
   const KindIcon = item ? KIND_ICONS[item.kind] : Sparkles;
@@ -269,12 +271,20 @@ function GachaItemDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-sm" showCloseButton={false}>
+      <DialogContent
+        className="sm:max-w-sm"
+        showCloseButton={false}
+        onInteractOutside={(event) => {
+          if (keepOnOutsideClick) {
+            event.preventDefault();
+          }
+        }}
+      >
         {item && (
           <>
             <DialogHeader>
               <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--yuuko-green-light)]">
-                <KindIcon className="h-6 w-6 text-[var(--yuuko-green)]" />
+                <KindIcon className="h-6 w-6 text-[var(--yuuko-green-text)]" />
               </div>
               <p className="text-center text-xs text-muted-foreground">{heading}</p>
               <DialogTitle className="text-center">{item.name}</DialogTitle>
@@ -290,7 +300,33 @@ function GachaItemDialog({
                 {item.text}
               </p>
             )}
-            {item.kind === "theme" && (
+            {item.kind === "pattern" && (
+              // 模様は名前だけでは形が分からないため、いまの色テーマで見本を出す（D152〜D154）。
+              <div className="flex justify-center">
+                <PatternSwatch patternId={item.itemId} className="w-40 h-20" />
+              </div>
+            )}
+            {item.kind === "deco" && (
+              // 飾りは小さなゆうこに重ねて見本を出す（D155）。頭の上にはみ出す飾りも切れないよう余白を取る。
+              <div
+                className="mx-auto flex w-40 justify-center rounded-lg bg-[var(--yuuko-cream)] px-2 pt-2"
+                data-testid="gacha-deco-sample"
+              >
+                <YuukoFigure decoId={item.itemId} width={96} height={117} alt="" imageClassName="h-28 w-auto" />
+              </div>
+            )}
+            {item.kind === "balloon" && (
+              // 吹き出しは短い文で形を見せる（いまの色テーマの色で出す。D155）。
+              <div
+                className="mx-auto w-48 rounded-lg bg-[var(--yuuko-cream)] p-3 pb-6"
+                data-testid="gacha-balloon-sample"
+              >
+                <YuukoBalloon balloonId={item.itemId}>
+                  <p className="text-xs leading-relaxed text-foreground">この吹き出しで話すね！</p>
+                </YuukoBalloon>
+              </div>
+            )}
+            {item.kind !== "card" && (
               <p className="text-center text-xs text-muted-foreground">
                 カスタマイズ画面で切り替えられるよ
               </p>
@@ -325,6 +361,8 @@ export default function GachaScreen({
   const [drawError, setDrawError] = React.useState<string | null>(null);
   const [dialogItem, setDialogItem] = React.useState<DisplayItem | null>(null);
   const [dialogHeading, setDialogHeading] = React.useState("");
+  // ガチャの結果として出しているか（コレクションの詳細と区別し、外側のクリックで閉じないようにする）。
+  const [dialogIsDrawResult, setDialogIsDrawResult] = React.useState(false);
   // state 更新は非同期なので、連打による二重抽選は ref で確実に止める。
   const drawingRef = React.useRef(false);
   // 抽選の世代。抽選の開始・反映で進め、それより前に出した NEW 解除の応答で抽選後の状態を上書きしないようにする。
@@ -365,6 +403,17 @@ export default function GachaScreen({
     void loadState();
   }, [loadState]);
 
+  // 前回、演出中に画面を離れたため出せなかった結果があれば、開いたときに一度だけ出す。
+  React.useEffect(() => {
+    const pending = resultToShowOnReturn;
+    resultToShowOnReturn = null;
+    if (pending) {
+      setDialogHeading("前回のガチャの結果");
+      setDialogIsDrawResult(true);
+      setDialogItem(pending);
+    }
+  }, []);
+
   const handleNavigate = (id: string) => {
     if (onNavigate) {
       onNavigate(id);
@@ -393,8 +442,21 @@ export default function GachaScreen({
     setIsDrawing(true);
     setDrawError(null);
     try {
-      const result = await drawGachaOnce();
+      // 抽選は Rust が即座に返すため、演出の分だけ結果を出すのを待つ（抽選結果そのものは変えない）。
+      const [result] = await Promise.all([
+        drawGachaOnce(),
+        wait(prefersReducedMotion() ? 0 : DRAW_REVEAL_DELAY_MS),
+      ]);
       if (!isMountedRef.current) {
+        // 演出中に別画面へ移った。消費済みの結果を見逃さないよう、次に開いたときに出す。
+        if (result?.status === "drawn" && result.item) {
+          resultToShowOnReturn = {
+            itemId: result.item.itemId,
+            kind: result.item.kind,
+            name: result.item.name,
+            text: result.item.text,
+          };
+        }
         return;
       }
       if (!result) {
@@ -406,6 +468,7 @@ export default function GachaScreen({
       setGacha((prev) => (prev ? applyDrawResult(prev, result) : prev));
       if (result.status === "drawn" && result.item) {
         setDialogHeading("ガチャの結果");
+        setDialogIsDrawResult(true);
         setDialogItem({
           itemId: result.item.itemId,
           kind: result.item.kind,
@@ -442,6 +505,7 @@ export default function GachaScreen({
 
   const handleOpenCollectionItem = (item: DisplayItem) => {
     setDialogHeading("コレクション");
+    setDialogIsDrawResult(false);
     setDialogItem(item);
   };
 
@@ -481,7 +545,7 @@ export default function GachaScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <ArrowLeft className="w-4 h-4" />
@@ -489,23 +553,17 @@ export default function GachaScreen({
             </Button>
           </div>
 
-          <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="flex-1 px-3 space-y-1 overflow-y-auto"
+            activeId="gacha"
+            onNavigate={handleNavigate}
+          />
 
-          {/* Yuuko's Comment */}
-          <div className="p-3">
+          {/* Yuuko's Comment（高さが足りないときは隠して、画面ナビを全部見せる。実機テスト B8） */}
+          <div className="p-3 [@media(max-height:739px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-xs font-medium text-[var(--yuuko-green)] flex items-center gap-1">
+                <CardTitle className="text-xs font-medium text-[var(--yuuko-green-text)] flex items-center gap-1">
                   ゆうこのおはなし
                 </CardTitle>
               </CardHeader>
@@ -540,7 +598,7 @@ export default function GachaScreen({
               {/* パンくず「ホーム」。button にしてクリックとキーボード（Tab→Enter/Space）の両方でホームへ戻れるようにする。 */}
               <button
                 type="button"
-                className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
                 onClick={() => handleNavigate("home")}
               >
                 ホーム
@@ -567,7 +625,7 @@ export default function GachaScreen({
           {/* Title */}
           <div className="px-4 shrink-0">
             <div className="flex items-center gap-2 mb-1">
-              <PawIcon className="w-7 h-7 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <PawIcon className="w-7 h-7 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               <h1 className="text-2xl font-bold text-foreground">ゆうこガチャ</h1>
             </div>
             <p className="text-sm text-muted-foreground mb-2">
@@ -583,8 +641,8 @@ export default function GachaScreen({
               {/* Center: Gacha Animation Area */}
               <Card className="overflow-hidden relative h-full min-h-[420px]">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
-                  {/* Background decorations */}
-                  <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
+                  {/* Background decorations（文字を含まない装飾なので、ハイコントラストでも元の配色で描く・D148） */}
+                  <div className="absolute inset-0 overflow-hidden forced-color-adjust-none" aria-hidden="true">
                     {/* Paw print pattern */}
                     <div className="absolute top-8 left-12 text-[var(--yuuko-green)]/10">
                       <PawIcon className="w-10 h-10" />
@@ -636,7 +694,7 @@ export default function GachaScreen({
 
                   {/* Yuuko Character */}
                   <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
-                    <YuukoCharacter />
+                    <YuukoCharacter hopping={isDrawing} />
                   </div>
                 </div>
 
@@ -686,7 +744,7 @@ export default function GachaScreen({
                   </div>
                   {isReady && (
                     <p
-                      className="text-xs text-[var(--yuuko-green)] font-medium"
+                      className="text-xs text-[var(--yuuko-green-text)] font-medium"
                       data-testid="gacha-collection-remaining"
                     >
                       {gacha.isComplete ? "コンプリート！" : `のこり ${remainingCount}`}
@@ -734,7 +792,7 @@ export default function GachaScreen({
                           <li key={item.itemId} data-testid="gacha-collection-owned">
                             <button
                               type="button"
-                              className="relative w-full aspect-square rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 p-1 flex flex-col items-center justify-center gap-1 hover:bg-[var(--yuuko-green-light)] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green)]"
+                              className="relative w-full aspect-square rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 p-1 flex flex-col items-center justify-center gap-1 hover:bg-[var(--yuuko-green-light)] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--yuuko-green-text)]"
                               aria-label={`${name}（${KIND_LABELS[item.kind]}）${item.isNew ? " NEW" : ""}`}
                               onClick={() => {
                                 handleOpenCollectionItem({
@@ -750,7 +808,7 @@ export default function GachaScreen({
                                   NEW
                                 </Badge>
                               )}
-                              <KindIcon className="w-4 h-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+                              <KindIcon className="w-4 h-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
                               <span className="w-full truncate text-center text-[10px] font-medium">
                                 {name}
                               </span>
@@ -772,7 +830,7 @@ export default function GachaScreen({
         <div className="flex items-center gap-2">
           <Bell className="w-3.5 h-3.5 text-muted-foreground" aria-hidden="true" />
           <span className="text-xs text-muted-foreground">お知らせ</span>
-          <span className="text-xs text-[var(--yuuko-green)]">
+          <span className="text-xs text-[var(--yuuko-green-text)]">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)] inline-block mr-1" aria-hidden="true" />
             {/* 以前は全画面共通の固定文言（3件届いてるよ）だった。実データと食い違うため、取得済みのコレクション状況を出す。 */}
             {loadStatus === "loading"
@@ -782,20 +840,20 @@ export default function GachaScreen({
                 : "ガチャ"}
           </span>
         </div>
+        {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}
         <div className="flex items-center gap-3">
-          <button
-            className="text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="ヘルプ"
-          >
-            <HelpCircle className="w-4 h-4" />
-          </button>
           <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center" aria-hidden="true">
             <PawIcon className="w-4 h-4 text-white" />
           </div>
         </div>
       </footer>
 
-      <GachaItemDialog item={dialogItem} heading={dialogHeading} onClose={handleCloseDialog} />
+      <GachaItemDialog
+        item={dialogItem}
+        heading={dialogHeading}
+        keepOnOutsideClick={dialogIsDrawResult}
+        onClose={handleCloseDialog}
+      />
     </div>
   );
 }

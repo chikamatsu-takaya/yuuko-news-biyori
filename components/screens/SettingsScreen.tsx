@@ -1,9 +1,11 @@
 "use client";
 
 import * as React from "react";
-import Image from "next/image";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Home,
   Bell,
@@ -14,7 +16,6 @@ import {
   Settings,
   Lightbulb,
   RotateCcw,
-  HelpCircle,
   Archive,
   Check,
   Info,
@@ -36,24 +37,32 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   getAutostartEnabled,
   getUserSettings,
   isSettingsCorruptError,
+  isTauriRuntime,
   saveUserSettings,
   setAutostartEnabled,
   resetUserSettings,
   testAiProvider,
   type AiProviderConnectionTestResult,
+  type NotificationMode,
   type WorkTimeRangeDto,
   type UserSettingsDto,
   type ExplanationLevel,
 } from "@/lib/tauri/settings";
 import { setMainWindowUnsavedChanges } from "@/lib/tauri/window";
 import { applyUiTheme } from "@/hooks/use-ui-theme";
+import { refreshUiPatternFromSettings } from "@/hooks/use-ui-pattern";
+import { useYuukoDressup } from "@/components/yuuko/YuukoDressupProvider";
 import { uiThemeLabel } from "@/lib/ui-theme.mjs";
+import { PATTERN_NONE_ID, uiPatternLabel } from "@/lib/ui-pattern.mjs";
+import { balloonLabel, decoLabel } from "@/lib/yuuko-dressup.mjs";
+import { getPatternState } from "@/lib/tauri/patterns";
+import { getStorageUsage, type StorageUsage } from "@/lib/tauri/migration";
+import { formatMigrationBytes } from "@/lib/migration-display.mjs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,17 +78,22 @@ import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
+import { ImmediateApplyNote } from "@/components/settings/ImmediateApplyNote";
 import {
+  DEFAULT_NOTIFICATION_MODE,
   GENRE_OPTIONS,
-  NICKNAME_MAX_LENGTH,
+  NOTIFICATION_MODE_OPTIONS,
+  normalizeNotificationMode,
   normalizeWorkTimeRanges,
 } from "@/lib/settings-options";
 
 // Types
 type NotificationSettings = {
   enabled: boolean;
+  // 通知モード（時間帯内ランダム / ランダム / 定時 / 通知しない。D143）。
+  mode: NotificationMode;
   workTimeRanges: WorkTimeRangeDto[];
-  frequency: string;
+  // 1日の最大通知件数（= notifyMaxPerDay / notification.maxPerDay）。スライダーだけで変える（判断台帳 D159）。
   maxPerDay: number;
 };
 
@@ -92,14 +106,9 @@ type SuppressionSettings = {
 
 type AiSettings = {
   explanationDetail: string;
-  autoSuggestLongSummary: boolean;
   provider: string;
   providerStatus: string;
   autoSummaryEnabled: boolean;
-};
-
-type UserProfileSettingsState = {
-  nickname: string;
 };
 
 type NewsSettingsState = {
@@ -115,7 +124,6 @@ type SettingsState = {
   notification: NotificationSettings;
   suppression: SuppressionSettings;
   ai: AiSettings;
-  user: UserProfileSettingsState;
   news: NewsSettingsState;
   integration: IntegrationSettings;
 };
@@ -148,11 +156,11 @@ function YuukoDisplayMenuIcon({ className }: { className?: string }) {
 const mockSettings: SettingsState = {
   notification: {
     enabled: true,
+    mode: DEFAULT_NOTIFICATION_MODE,
     workTimeRanges: [
       { start: "09:00", end: "12:00" },
       { start: "13:00", end: "18:00" },
     ],
-    frequency: "1日3回まで",
     maxPerDay: 3,
   },
   suppression: {
@@ -162,13 +170,9 @@ const mockSettings: SettingsState = {
   },
   ai: {
     explanationDetail: "ふつう",
-    autoSuggestLongSummary: true,
     provider: "mock",
     providerStatus: "MockProviderで動作中",
     autoSummaryEnabled: false,
-  },
-  user: {
-    nickname: "",
   },
   news: {
     genres: ["AI", "IT"],
@@ -197,6 +201,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
     { start: "09:00", end: "12:00" },
     { start: "13:00", end: "18:00" },
   ],
+  notificationMode: DEFAULT_NOTIFICATION_MODE,
   notifyMaxPerDay: 3,
   enableYuukoPopup: true,
   suppressDuringMeeting: true,
@@ -213,37 +218,11 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   autoSummaryEnabled: false,
 };
 
-// 通知頻度ドロップダウンの表示文言と、永続値 notifyMaxPerDay（= notification.maxPerDay）の対応。
-// 通知頻度は notifyMaxPerDay として保存・復元する（独立フィールドは増やさない）。
-// 「制限なし」は Rust 側の検証上限（0〜20）に合わせて 20 として扱う。
-const UNLIMITED_MAX_PER_DAY = 20;
-
-const frequencyToMaxPerDay = (frequency: string): number => {
-  switch (frequency) {
-    case "1日1回まで":
-      return 1;
-    case "1日5回まで":
-      return 5;
-    case "制限なし":
-      return UNLIMITED_MAX_PER_DAY;
-    case "1日3回まで":
-    default:
-      return 3;
-  }
-};
-
-const maxPerDayToFrequency = (maxPerDay: number): string => {
-  if (maxPerDay <= 1) {
-    return "1日1回まで";
-  }
-  if (maxPerDay <= 3) {
-    return "1日3回まで";
-  }
-  if (maxPerDay <= 5) {
-    return "1日5回まで";
-  }
-  return "制限なし";
-};
+// 1日の最大通知件数スライダーの範囲（Rust の検証は 0〜20）。0 は「自動では声をかけない」になるが、
+// 止めたいときは「ニュース通知を受け取る」・通知のタイミング「通知しない」があるため、スライダーは 1 から（判断台帳 D159）。
+// 手編集などで 0 が保存されていても書き換えず、その旨を表示する（触らなければ 0 のまま保存される）。
+const MAX_PER_DAY_MIN = 1;
+const MAX_PER_DAY_MAX = 20;
 
 // 解説レベル（DTO: simple/normal/detailed）と「解説の詳しさ」ドロップダウン表示の対応。
 // UI 表示ラベルを explanationLevel として保存・復元する（独立フィールドは増やさない）。
@@ -286,10 +265,12 @@ const mapSettingsFromDto = (
     notification: {
       ...base.notification,
       enabled: dto.enableYuukoPopup,
+      mode: normalizeNotificationMode(dto.notificationMode),
       workTimeRanges,
-      // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3（=「1日3回まで」）。
-      maxPerDay: dto.notifyMaxPerDay,
-      frequency: maxPerDayToFrequency(dto.notifyMaxPerDay),
+      // 保存値（notifyMaxPerDay）から復元する。保存値が無い場合は Rust 既定の 3。
+      // 手編集などで上限（20）を超えていると Rust の検証で保存が毎回失敗するため、20 に丸めて表示・保存する
+      //（未保存の判定も丸めた値同士で比べるため、読み込んだだけでは「未保存」にならない）。
+      maxPerDay: Math.min(MAX_PER_DAY_MAX, dto.notifyMaxPerDay),
     },
     suppression: {
       ...base.suppression,
@@ -304,10 +285,6 @@ const mapSettingsFromDto = (
       // 解説レベル（explanationLevel）を「解説の詳しさ」ドロップダウン表示へ反映する。
       explanationDetail: explanationLevelToLabel(dto.explanationLevel),
       autoSummaryEnabled: dto.autoSummaryEnabled ?? false,
-    },
-    user: {
-      ...base.user,
-      nickname: dto.nickname || "",
     },
     news: {
       ...base.news,
@@ -341,6 +318,7 @@ const buildDtoForSave = (
     notifyStartTime: workTimeRanges[0].start,
     notifyEndTime: workTimeRanges[workTimeRanges.length - 1].end,
     workTimeRanges,
+    notificationMode: settingsState.notification.mode,
     notifyMaxPerDay: settingsState.notification.maxPerDay,
     enableYuukoPopup: settingsState.notification.enabled,
     suppressDuringMeeting: settingsState.suppression.suppressInMeeting,
@@ -352,7 +330,8 @@ const buildDtoForSave = (
     selectedThemeId: source.selectedThemeId,
     selectedToneId: source.selectedToneId,
     selectedPersonalityId: source.selectedPersonalityId,
-    nickname: settingsState.user.nickname,
+    // 呼び名はカスタマイズ画面（set_nickname）で変えるため、設定画面では読み込んだ値をそのまま書き戻す（D161）。
+    nickname: source.nickname,
     aiProvider: normalizedProvider,
     maxDailyRecommendations: settingsState.news.maxRecommendations,
     autoSummaryEnabled: settingsState.ai.autoSummaryEnabled,
@@ -392,8 +371,30 @@ const hasUnsavedSettingsChanges = (
 type AiConnectionTestView = {
   tone: "success" | "warning";
   message: string;
-  // Gemini で APIキー未設定のときだけ MockProvider を案内する（画面詳細設計書 SCR-003 §7.6/§7.7）。
-  recommendMock: boolean;
+  // Gemini で APIキー未設定のときだけ、キーの要らないローカルを案内する。主経路はローカル
+  // （判断台帳 D99 / D103）で、Mock は開発・デモ用のため勧めない。
+  recommendLocal: boolean;
+  // どの AI を確かめた結果か（見出しに出す短い表示名）。Provider 未確定のときは null。
+  providerLabel: string | null;
+};
+
+// 接続テストの見出し・案内に出す AI の短い表示名。選択欄の表示名（「ローカル（おすすめ）」など）から
+// 補足を除いたもの。openai は選択肢に無いが、保存済みなら Rust 側は未対応として確かめるため別名にする。
+const aiProviderShortLabel = (
+  provider: string | null | undefined
+): string | null => {
+  switch (provider) {
+    case "local":
+      return "ローカル";
+    case "gemini":
+      return "Gemini";
+    case "mock":
+      return "開発・デモ用";
+    case "openai":
+      return "未対応のAI";
+    default:
+      return null;
+  }
 };
 
 // 接続テスト結果 → 表示。Rust から受け取る status / errorKind を固定文言へ写像し、
@@ -401,21 +402,36 @@ type AiConnectionTestView = {
 // 特定 Provider 専用の分岐は持たず、未知の値・Provider未確定は安全側の「接続失敗」に倒す。
 const mapAiConnectionTestResult = (
   result: AiProviderConnectionTestResult
-): AiConnectionTestView => {
+): AiConnectionTestView => ({
+  ...mapAiConnectionTestStatus(result),
+  providerLabel: aiProviderShortLabel(result.checkedProvider),
+});
+
+const mapAiConnectionTestStatus = (
+  result: AiProviderConnectionTestResult
+): Omit<AiConnectionTestView, "providerLabel"> => {
   if (result.status === "available") {
-    return { tone: "success", message: "利用可能です", recommendMock: false };
+    return {
+      tone: "success",
+      // Mock は本物のAIではないため、「AIで作れる」と誤解させない文言にする。
+      message:
+        result.provider === "mock"
+          ? "動作確認用の決まった文で動きます（本物のAIは使いません）"
+          : "このAIで要約・解説を作れます",
+      recommendLocal: false,
+    };
   }
   if (result.errorKind === "api_key_missing") {
     return {
       tone: "warning",
       message: "APIキーが未設定です",
-      recommendMock: result.provider === "gemini",
+      recommendLocal: result.provider === "gemini",
     };
   }
   // ローカル（同梱AI）の失敗は種別ごとの固定文言にする（パス・番号などは Rust 側で落としてある）。
   const localMessage = localAiConnectionMessage(result);
   if (localMessage) {
-    return { tone: "warning", message: localMessage, recommendMock: false };
+    return { tone: "warning", message: localMessage, recommendLocal: false };
   }
   if (
     result.status === "not_implemented" ||
@@ -424,13 +440,13 @@ const mapAiConnectionTestResult = (
     return {
       tone: "warning",
       message: "未対応のAIプロバイダーです",
-      recommendMock: false,
+      recommendLocal: false,
     };
   }
   return {
     tone: "warning",
     message: "接続に失敗しました",
-    recommendMock: false,
+    recommendLocal: false,
   };
 };
 
@@ -457,20 +473,22 @@ const localAiConnectionMessage = (
 };
 
 // command 自体が reject した場合（通常は起きない）も、生エラーを出さず接続失敗として表示する。
-const aiConnectionTestFailedView: AiConnectionTestView = {
+// どの AI かはテスト開始時の保存済み Provider から付ける。
+const aiConnectionTestFailedView = (
+  providerLabel: string | null
+): AiConnectionTestView => ({
   tone: "warning",
   message: "接続に失敗しました",
-  recommendMock: false,
-};
+  recommendLocal: false,
+  providerLabel,
+});
 
 // Sub Components
 function SettingRow({
   label,
-  helpText,
   children,
 }: {
   label: string;
-  helpText?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -478,9 +496,6 @@ function SettingRow({
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 border-b border-border/50 last:border-b-0">
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
-        {helpText && (
-          <HelpCircle className="w-4 h-4 text-muted-foreground cursor-help" />
-        )}
       </div>
       <div>{children}</div>
     </div>
@@ -536,21 +551,99 @@ export default function SettingsScreen({
   );
   // state 更新前の連打でも二重実行しないよう、同期的に参照できる ref でも実行中を保持する。
   const isTestingAiRef = React.useRef(false);
+  // 実行中の接続テスト。開始時の保存済み Provider と通し番号を覚え、テスト中に選択を切り替えたら
+  // 番号を進めて、届いた結果を捨てる（切り替え後の AI の結果と誤解させないため）。
+  const aiTestRunRef = React.useRef<{ id: number; savedProvider: string | null }>({
+    id: 0,
+    savedProvider: null,
+  });
   const isUpdatingAutostartRef = React.useRef(false);
   const isMountedRef = React.useRef(true);
   // データ取り込み（全置き換え）の実行中か。settings.json には書き込みロックが無いため、
   // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
   const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
   const isMigrationImportingRef = React.useRef(false);
+  // 右サイドバー「ストレージ状況」: 保存データの大きさ（Rust の get_storage_usage）。
+  // 画面を開いたときと「最新にする」・データ取り込みの後にだけ読む（常時ポーリングはしない）。
+  // preview は Tauri 外（ブラウザでの開発表示）で、実データが無いことを示す。
+  const [storageUsage, setStorageUsage] = React.useState<StorageUsage | null>(
+    null
+  );
+  const [storageStatus, setStorageStatus] = React.useState<
+    "loading" | "ready" | "error" | "preview"
+  >("loading");
+  const storageRequestRef = React.useRef(0);
+  const loadStorageUsage = React.useCallback(async () => {
+    const requestId = ++storageRequestRef.current;
+    const isStale = () =>
+      !isMountedRef.current || requestId !== storageRequestRef.current;
+    setStorageStatus("loading");
+    try {
+      const usage = await getStorageUsage();
+      if (isStale()) return;
+      setStorageUsage(usage);
+      setStorageStatus(usage === null ? "preview" : "ready");
+    } catch (error) {
+      if (isStale()) return;
+      // 生のエラー文・パスは画面へ出さず、調査用に種別だけ残す。
+      console.warn(
+        "Failed to load storage usage:",
+        error instanceof Error ? error.name : typeof error
+      );
+      setStorageStatus("error");
+    }
+  }, []);
+  React.useEffect(() => {
+    void loadStorageUsage();
+  }, [loadStorageUsage]);
+
   const handleMigrationImportingChange = React.useCallback(
     (importing: boolean) => {
+      const finished = isMigrationImportingRef.current && !importing;
       isMigrationImportingRef.current = importing;
       setIsMigrationImporting(importing);
+      // 取り込みで保存データが置き換わったので、使用量を読み直す。
+      if (finished) {
+        void loadStorageUsage();
+      }
     },
-    []
+    [loadStorageUsage]
   );
 
+  // ゆうこ表示タブ: 適用中の模様（Rust の get_pattern_state）。吹き出し・飾りは YuukoDressupProvider が
+  // 読み込み済みの値を使い、テーマ・呼び名は保存済み設定（backendSettings）から出すため、追加で読むのは模様だけ。
+  // タブを開いたときにだけ読む。
+  const [patternLabel, setPatternLabel] = React.useState<string | null>(null);
+  const [patternLoadFailed, setPatternLoadFailed] = React.useState(false);
+
   const { toast } = useToast();
+  const { refreshDressup, balloonId, decoId } = useYuukoDressup();
+
+  React.useEffect(() => {
+    if (activeMenu !== "yuuko") {
+      return;
+    }
+    let cancelled = false;
+    setPatternLoadFailed(false);
+    getPatternState()
+      .then((state) => {
+        if (cancelled) return;
+        // Tauri 外（preview）は模様を敷かない（data-pattern は "none" のまま）ため「なし」を出す。
+        setPatternLabel(uiPatternLabel(state?.activePatternId ?? PATTERN_NONE_ID));
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn(
+          "Failed to load pattern state:",
+          error instanceof Error ? error.name : typeof error
+        );
+        setPatternLabel(null);
+        setPatternLoadFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMenu]);
 
   const handleNavigate = (screen: string) => {
     if (onNavigate) {
@@ -656,29 +749,9 @@ export default function SettingsScreen({
     }));
   };
 
-  // 通知頻度ドロップダウン: 表示文言と保存値(maxPerDay)を常に同期させる。
-  // これにより保存・再読み込みで選択値が維持される（maxPerDay として永続化）。
-  const updateNotificationFrequency = (frequency: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      notification: {
-        ...prev.notification,
-        frequency,
-        maxPerDay: frequencyToMaxPerDay(frequency),
-      },
-    }));
-  };
-
-  // 1日の最大通知件数スライダー: maxPerDay を更新し、頻度ドロップダウン表示も追従させる。
+  // 1日の最大通知件数スライダー: notifyMaxPerDay（notification.maxPerDay）だけを更新する（D159）。
   const updateNotificationMaxPerDay = (maxPerDay: number) => {
-    setSettings((prev) => ({
-      ...prev,
-      notification: {
-        ...prev.notification,
-        maxPerDay,
-        frequency: maxPerDayToFrequency(maxPerDay),
-      },
-    }));
+    updateNotification("maxPerDay", maxPerDay);
   };
 
   const updateNotificationRange = (
@@ -721,13 +794,6 @@ export default function SettingsScreen({
     setSettings((prev) => ({
       ...prev,
       ai: { ...prev.ai, [key]: value },
-    }));
-  };
-
-  const updateUser = (key: keyof UserProfileSettingsState, value: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      user: { ...prev.user, [key]: value },
     }));
   };
 
@@ -855,6 +921,10 @@ export default function SettingsScreen({
         setSettings(mapSettingsFromDto(mockSettings, dto));
         // テーマも初期値へ戻るため、開いている画面の配色をその場で揃える。
         applyUiTheme(dto.selectedThemeId);
+        // 模様（D152〜D154）も初期値「なし」へ戻るため、保存済みの値を読み直して画面の地を揃える。
+        void refreshUiPatternFromSettings();
+        // 着せかえ（D155）も初期値「いつもの」「なし」へ戻るため、保存済みの値を読み直してゆうこの見た目を揃える。
+        void refreshDressup();
         // リセットは OS の自動起動登録を変えないため、表示を OS 状態へ戻す。
         await refreshAutostartState();
       } else {
@@ -883,6 +953,13 @@ export default function SettingsScreen({
   };
 
   const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
+  // 接続テストは保存済みの Provider を確かめる。保存済みの openai は画面上 mock と表示するため、比較も同じ扱いにする。
+  const savedAiProvider = backendSettings?.aiProvider ?? null;
+  const savedAiProviderLabel = aiProviderShortLabel(savedAiProvider);
+  const isAiProviderSelectionUnsaved =
+    savedAiProvider !== null &&
+    settings.ai.provider !==
+      (savedAiProvider === "openai" ? "mock" : savedAiProvider);
 
   // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
   // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
@@ -906,13 +983,17 @@ export default function SettingsScreen({
       return;
     }
     isTestingAiRef.current = true;
+    const runId = aiTestRunRef.current.id + 1;
+    const savedProvider = backendSettings?.aiProvider ?? null;
+    aiTestRunRef.current = { id: runId, savedProvider };
+    const isStale = () => aiTestRunRef.current.id !== runId;
     setIsTestingAi(true);
     setAiTestView(null);
     setAiTestUnavailableInPreview(false);
 
     try {
       const result = await testAiProvider();
-      if (!isMountedRef.current) {
+      if (!isMountedRef.current || isStale()) {
         return;
       }
       if (!result) {
@@ -921,15 +1002,17 @@ export default function SettingsScreen({
       }
       setAiTestView(mapAiConnectionTestResult(result));
     } catch (error) {
-      if (!isMountedRef.current) {
-        return;
-      }
       // 調査用に種別だけ残す（生エラー文は画面へ出さない）。
       console.error(
         "Failed to test AI provider via tauri command:",
         error instanceof Error ? error.name : typeof error
       );
-      setAiTestView(aiConnectionTestFailedView);
+      if (!isMountedRef.current || isStale()) {
+        return;
+      }
+      setAiTestView(
+        aiConnectionTestFailedView(aiProviderShortLabel(savedProvider))
+      );
     } finally {
       isTestingAiRef.current = false;
       if (isMountedRef.current) {
@@ -953,7 +1036,7 @@ export default function SettingsScreen({
           <div className="p-3">
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+              className="w-full justify-start gap-2 text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
               onClick={() => handleNavigate("home")}
             >
               <Home className="w-4 h-4" />
@@ -962,18 +1045,20 @@ export default function SettingsScreen({
           </div>
 
           <div className="px-4 py-2">
-            <span className="text-xs font-medium text-[var(--yuuko-green)]">
+            <span className="text-xs font-medium text-[var(--yuuko-green-text)]">
               設定メニュー
             </span>
           </div>
 
-          <nav className="flex-1 px-2 space-y-1 overflow-y-auto">
+          <nav aria-label="設定メニュー" className="flex-1 px-2 space-y-1 overflow-y-auto">
             {settingsMenuItems.map((item) => (
               <SidebarNavItem
                 key={item.id}
                 label={item.label}
                 icon={item.icon}
                 isActive={activeMenu === item.id}
+                // 画面内の区分切替なので "page" ではなく "true" で選択中を伝える。
+                ariaCurrent="true"
                 onClick={() => setActiveMenu(item.id)}
               />
             ))}
@@ -986,8 +1071,8 @@ export default function SettingsScreen({
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-2">
-                  <Lightbulb className="w-4 h-4 text-[var(--yuuko-green)]" />
-                  <span className="text-xs font-medium text-[var(--yuuko-green)]">
+                  <Lightbulb className="w-4 h-4 text-[var(--yuuko-green-text)]" />
+                  <span className="text-xs font-medium text-[var(--yuuko-green-text)]">
                     設定のヒント
                   </span>
                 </div>
@@ -999,7 +1084,7 @@ export default function SettingsScreen({
                   ゆうこと過ごせるよ♪
                 </p>
                 <div className="flex justify-end mt-1">
-                  <span className="text-[var(--yuuko-green)]">🐾</span>
+                  <span className="text-[var(--yuuko-green-text)]">🐾</span>
                 </div>
               </CardContent>
             </Card>
@@ -1017,6 +1102,8 @@ export default function SettingsScreen({
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
             </Button>
+            {/* 他画面と同じく、常駐ごと終わらせる操作をサイドバー下部に置く（確認ダイアログ付きの共通部品）。 */}
+            <QuitResidentButton className="mt-2 w-full text-xs" />
           </div>
         </aside>
 
@@ -1033,8 +1120,8 @@ export default function SettingsScreen({
 
           {loadNotice && (
             <Alert role="presentation" className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm max-w-2xl">
-              <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">お知らせ</AlertTitle>
+              <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">お知らせ</AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span role={loadNoticeKind === "error" ? "alert" : "status"}>
                   {loadNotice}
@@ -1046,7 +1133,7 @@ export default function SettingsScreen({
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                        className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                         onClick={() => setResetDialogOpen(true)}
                         disabled={isLoading}
                       >
@@ -1056,7 +1143,7 @@ export default function SettingsScreen({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                      className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                       onClick={() => void loadSettings()}
                       disabled={isLoading}
                     >
@@ -1081,7 +1168,7 @@ export default function SettingsScreen({
             {activeMenu === "notification" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Bell className="w-5 h-5" />
                     通知設定
                   </CardTitle>
@@ -1094,6 +1181,50 @@ export default function SettingsScreen({
                         updateNotification("enabled", checked)
                       }
                     />
+                  </SettingRow>
+                  <SettingRow label="通知のタイミング">
+                    <div className="flex flex-col items-end gap-1">
+                      {/* 通知OFFのあいだはモードが効かないため選べなくする（値は保持する）。 */}
+                      <Select
+                        value={settings.notification.mode}
+                        disabled={!settings.notification.enabled}
+                        onValueChange={(v) =>
+                          updateNotification("mode", normalizeNotificationMode(v))
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-52"
+                          aria-label="通知のタイミング"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {NOTIFICATION_MODE_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p
+                        className="max-w-xs text-right text-xs text-muted-foreground"
+                        data-testid="notification-mode-description"
+                      >
+                        {
+                          NOTIFICATION_MODE_OPTIONS.find(
+                            (option) => option.value === settings.notification.mode
+                          )?.description
+                        }
+                      </p>
+                      {settings.notification.mode === "random" && (
+                        <p
+                          className="max-w-xs text-right text-xs text-muted-foreground"
+                          data-testid="notification-mode-random-note"
+                        >
+                          ランダムでは下の通知時間帯の設定は使わないよ。
+                        </p>
+                      )}
+                    </div>
                   </SettingRow>
                   <SettingRow label={settings.notification.workTimeRanges.length > 1 ? "午前の通知時間帯" : "通知時間帯"}>
                     <div className="flex items-center gap-2">
@@ -1123,37 +1254,37 @@ export default function SettingsScreen({
                       </div>
                     </SettingRow>
                   )}
-                  <SettingRow label="通知頻度">
-                    <Select
-                      value={settings.notification.frequency}
-                      onValueChange={(v) => updateNotificationFrequency(v)}
-                    >
-                      <SelectTrigger className="w-36">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1日1回まで">1日1回まで</SelectItem>
-                        <SelectItem value="1日3回まで">1日3回まで</SelectItem>
-                        <SelectItem value="1日5回まで">1日5回まで</SelectItem>
-                        <SelectItem value="制限なし">制限なし</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </SettingRow>
-                  <SettingRow label="1日の最大通知件数" helpText>
-                    <div className="flex items-center gap-3">
-                      <Slider
-                        value={[settings.notification.maxPerDay]}
-                        onValueChange={(v) =>
-                          updateNotificationMaxPerDay(v[0])
-                        }
-                        min={1}
-                        max={20}
-                        step={1}
-                        className="w-32"
-                      />
-                      <span className="text-sm text-foreground w-8">
-                        {settings.notification.maxPerDay}件
-                      </span>
+                  <SettingRow label="1日の最大通知件数">
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex items-center gap-3">
+                        <Slider
+                          data-testid="notify-max-per-day-slider"
+                          value={[
+                            Math.max(MAX_PER_DAY_MIN, settings.notification.maxPerDay),
+                          ]}
+                          onValueChange={(v) =>
+                            updateNotificationMaxPerDay(v[0])
+                          }
+                          min={MAX_PER_DAY_MIN}
+                          max={MAX_PER_DAY_MAX}
+                          step={1}
+                          className="w-32"
+                        />
+                        <span
+                          className="text-sm text-foreground w-10"
+                          data-testid="notify-max-per-day-value"
+                        >
+                          {settings.notification.maxPerDay}件
+                        </span>
+                      </div>
+                      <p
+                        className="max-w-xs text-right text-xs text-muted-foreground"
+                        data-testid="notify-max-per-day-help"
+                      >
+                        {settings.notification.maxPerDay < MAX_PER_DAY_MIN
+                          ? "いまは0件（自動では声をかけない）になっているよ。スライダーで1〜20件に変えられるよ。"
+                          : `自動で声をかけるのは1日${MAX_PER_DAY_MIN}〜${MAX_PER_DAY_MAX}件までで選べるよ。止めたいときは「ニュース通知を受け取る」をオフにしてね。`}
+                      </p>
                     </div>
                   </SettingRow>
                 </CardContent>
@@ -1164,47 +1295,93 @@ export default function SettingsScreen({
             {activeMenu === "yuuko" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <YuukoDisplayMenuIcon className="w-5 h-5" />
                     ゆうこ表示設定
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {/* テーマの切り替え・適用はカスタマイズ画面が担うため、ここでは selectedThemeId の表示名を読み取り専用で出し、
-                      カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。 */}
+                  {/* 着せかえ（テーマ・模様・吹き出し・飾り）の切り替えはカスタマイズ画面が担うため、ここでは今の値を
+                      読み取り専用で一覧にし、カスタマイズ画面への案内だけを置く（画面詳細設計書 §7.4.1）。
+                      表示名は ID から引き、生の ID・未知の ID は出さない（各 *Label が既定へ倒す）。 */}
                   {/* 他設定の保存でも selectedThemeId は buildDtoForSave が維持するため失われない。 */}
-                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
-                  <SettingRow label="現在のテーマ">
-                    <div className="flex flex-col items-end gap-1">
+                  {/* 呼び名は保存済みの値を出す（変更はカスタマイズ画面の「呼び名」タブ。保存先は同じ settings.json の nickname。D161）。 */}
+                  <div data-testid="yuuko-dressup-summary">
+                    <SettingRow label="テーマ">
                       <span
                         className="text-sm text-foreground"
                         data-testid="current-theme-id"
                       >
                         {currentThemeLabel}
                       </span>
+                    </SettingRow>
+                    <SettingRow label="模様">
                       <span
-                        id="theme-customize-guide"
-                        className="text-[10px] text-muted-foreground"
-                        data-testid="theme-customize-guide"
+                        className="text-sm text-foreground"
+                        data-testid="current-pattern"
                       >
-                        {hasUnsavedChanges
-                          ? "テーマはカスタマイズ画面で変えられるよ。先に設定を保存してね"
-                          : "テーマはカスタマイズ画面で変えられるよ"}
+                        {patternLoadFailed
+                          ? "読み込めなかったよ"
+                          : patternLabel ?? "読み込み中…"}
                       </span>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 gap-1 text-xs text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
-                        disabled={hasUnsavedChanges}
-                        aria-describedby="theme-customize-guide"
-                        onClick={() => handleNavigate("customize")}
+                    </SettingRow>
+                    <SettingRow label="吹き出し">
+                      <span
+                        className="text-sm text-foreground"
+                        data-testid="current-balloon"
                       >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        カスタマイズを開く
-                      </Button>
-                    </div>
-                  </SettingRow>
+                        {balloonLabel(balloonId)}
+                      </span>
+                    </SettingRow>
+                    <SettingRow label="飾り">
+                      <span
+                        className="text-sm text-foreground"
+                        data-testid="current-deco"
+                      >
+                        {decoLabel(decoId)}
+                      </span>
+                    </SettingRow>
+                    <SettingRow label="呼び名">
+                      <span
+                        className="text-sm text-foreground break-all text-right max-w-48"
+                        data-testid="current-nickname"
+                      >
+                        {backendSettings
+                          ? backendSettings.nickname.trim() !== ""
+                            ? backendSettings.nickname
+                            : "まだ決めていないよ"
+                          : isLoading
+                            ? "読み込み中…"
+                            : isTauriRuntime()
+                              ? "読み込めなかったよ"
+                              : "アプリで設定した呼び名が表示されるよ"}
+                      </span>
+                    </SettingRow>
+                  </div>
+                  {/* 画面を移ると未保存の設定変更は消えるため、未保存の変更があるあいだは移動ボタンを止めて先に保存を促す。 */}
+                  <div className="flex flex-col items-end gap-1 pt-3">
+                    <span
+                      id="theme-customize-guide"
+                      className="text-[10px] text-muted-foreground"
+                      data-testid="theme-customize-guide"
+                    >
+                      {hasUnsavedChanges
+                        ? "着せかえと呼び名はカスタマイズ画面で変えられるよ。先に設定を保存してね"
+                        : "着せかえと呼び名はカスタマイズ画面で変えられるよ"}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 text-xs text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 hover:bg-[var(--yuuko-green-light)]"
+                      disabled={hasUnsavedChanges}
+                      aria-describedby="theme-customize-guide"
+                      onClick={() => handleNavigate("customize")}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      カスタマイズを開く
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -1213,7 +1390,7 @@ export default function SettingsScreen({
             {activeMenu === "suppression" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <ShieldOff className="w-5 h-5" />
                     抑制条件設定
                   </CardTitle>
@@ -1259,7 +1436,7 @@ export default function SettingsScreen({
             {activeMenu === "ai" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Sparkles className="w-5 h-5" />
                     解説・AI設定
                   </CardTitle>
@@ -1270,29 +1447,38 @@ export default function SettingsScreen({
                       value={settings.ai.provider}
                       onValueChange={(v) => {
                         // 前回の接続テスト結果を新しいプロバイダーの結果と誤解させないため、切替時に消す。
+                        // テスト中なら、届く結果も捨てる（通し番号を進める）。
+                        aiTestRunRef.current = {
+                          ...aiTestRunRef.current,
+                          id: aiTestRunRef.current.id + 1,
+                        };
                         setAiTestView(null);
+                        setAiTestUnavailableInPreview(false);
                         updateAi("provider", v);
                       }}
                     >
-                      <SelectTrigger className="w-48">
+                      <SelectTrigger className="w-72 max-w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="mock">MockProvider（APIキー不要）</SelectItem>
-                        <SelectItem value="gemini">Gemini</SelectItem>
-                        {/* local は同梱の llama-server（このパソコンの中で動くAI・判断台帳 D99）で生成する。 */}
+                        {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
+                            おすすめと分かる名前にする。Gemini は任意、Mock は開発・デモ用なので最後。
+                            保存値（value）は従来のまま変えない。 */}
+                        <SelectItem value="local">ローカル（おすすめ）</SelectItem>
+                        <SelectItem value="gemini">Gemini（APIキーが必要）</SelectItem>
                         {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
-                        <SelectItem value="local">ローカル</SelectItem>
+                        <SelectItem value="mock">開発・デモ用（本物のAIは使いません）</SelectItem>
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。 */}
+                  {/* Mock 選択中は開発・デモ用であることを示す（画面詳細設計書 SCR-003 §7.7）。
+                      以前から Mock のままの利用者にも、ここでローカルへの切り替えを案内する（自動では切り替えない）。 */}
                   {settings.ai.provider === "mock" && (
                     <p
-                      className="text-xs text-muted-foreground py-2"
+                      className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-2 my-2 leading-relaxed"
                       data-testid="mock-provider-note"
                     >
-                      MockProvider は開発・デモ用です（外部AIは使いません）。
+                      いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。
                     </p>
                   )}
                   {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
@@ -1308,9 +1494,23 @@ export default function SettingsScreen({
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-0.5">
                         <span className="text-sm text-foreground">AI接続テスト</span>
-                        <span className="text-xs text-muted-foreground">
-                          保存済みの設定でテストします（未保存の変更は反映されません）
+                        <span
+                          className="text-xs text-muted-foreground"
+                          data-testid="ai-connection-test-target"
+                        >
+                          {savedAiProviderLabel
+                            ? `保存済みの設定（${savedAiProviderLabel}）でテストします（未保存の変更は反映されません）`
+                            : "保存済みの設定でテストします（未保存の変更は反映されません）"}
                         </span>
+                        {/* 選択を変えて保存していないときは、押しても選んだ AI ではなく保存済みの AI を確かめることを伝える。 */}
+                        {isAiProviderSelectionUnsaved && (
+                          <span
+                            className="text-xs text-amber-800"
+                            data-testid="ai-connection-test-unsaved-note"
+                          >
+                            いま選んでいる「{aiProviderShortLabel(settings.ai.provider)}」をテストするには、先に保存してね。
+                          </span>
+                        )}
                       </div>
                       <Button
                         variant="outline"
@@ -1322,20 +1522,35 @@ export default function SettingsScreen({
                         {isTestingAi ? "テスト中…" : "接続テスト"}
                       </Button>
                     </div>
-                    {/* 結果は固定文言のみ表示（APIキー・生エラー文は出さない）。 */}
+                    {/* 進行中の案内と結果は固定文言のみ表示（APIキー・生エラー文は出さない）。
+                        ローカルは初回にモデルの照合とサーバー起動で30秒ほどかかるため、待っている理由を先に伝える。
+                        結果は次のテスト・プロバイダー切り替え・画面を離れるまで残す。 */}
                     <div role="status" aria-live="polite" data-testid="ai-connection-test-result">
+                      {isTestingAi && (
+                        <p
+                          className="mt-2 text-xs text-muted-foreground leading-relaxed"
+                          data-testid="ai-connection-test-progress"
+                        >
+                          テストしているよ。初めてのときは準備に30秒ほどかかるから、少し待っていてね。
+                        </p>
+                      )}
                       {aiTestView && (
                         <div
                           className={`mt-2 text-xs leading-relaxed p-2 rounded-lg border ${
                             aiTestView.tone === "success"
-                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green)]"
+                              ? "border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/40 text-[var(--yuuko-green-text)]"
                               : "border-amber-300 bg-amber-50 text-amber-800"
                           }`}
                         >
+                          <p className="font-medium">
+                            {`テスト結果${aiTestView.providerLabel ? `（${aiTestView.providerLabel}）` : ""}：${
+                              aiTestView.tone === "success" ? "使えます" : "使えません"
+                            }`}
+                          </p>
                           <p>{aiTestView.message}</p>
-                          {aiTestView.recommendMock && (
+                          {aiTestView.recommendLocal && (
                             <p className="mt-1">
-                              Gemini を使うにはAPIキーの設定が必要です。キーを設定するまでは <strong>MockProvider</strong> の利用をおすすめします。
+                              Gemini を使うにはAPIキーの設定が必要です。キーを用意しない場合は、APIキーの要らない <strong>ローカル（おすすめ）</strong> を選んでください。
                             </p>
                           )}
                         </div>
@@ -1372,7 +1587,7 @@ export default function SettingsScreen({
                           className="text-xs text-muted-foreground"
                           data-testid="auto-summary-help"
                         >
-                          AIの設定がMockのときは動きません（実AIのときだけ、1件ずつ順番に要約します）
+                          AIの設定が開発・デモ用のときは動きません（ローカル・Gemini のときだけ、1件ずつ順番に要約します）
                         </span>
                       </div>
                       <Switch
@@ -1384,24 +1599,24 @@ export default function SettingsScreen({
                       />
                     </div>
                   </div>
-                  {/* 長文要点説明の自動候補は保存DTOに対応フィールドが無く永続化されないため非活性＋「準備中」。
-                      AIプロバイダー(aiProvider)・解説の詳しさ(explanationLevel)はDTO保存されるため操作可能のまま。 */}
-                  <SettingRow label="長文要点説明の自動候補（準備中）">
-                    <Switch
-                      aria-label="長文要点説明の自動候補（準備中）"
-                      checked={settings.ai.autoSuggestLongSummary}
-                      disabled
-                      aria-disabled
-                      onCheckedChange={(checked) =>
-                        updateAi("autoSuggestLongSummary", checked)
-                      }
-                    />
-                  </SettingRow>
                   {/* APIキー安全案内（CLAUDE.md §7 セキュリティ / §4.4 禁止事項）。 */}
-                  {/* APIキーはこの画面で扱わず表示・保存もしない。未設定時は MockProvider で安全に動く。 */}
-                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 APIキーが未設定の場合は <strong>MockProvider</strong> を推奨します。APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。外部AIを利用できるのは <strong>Gemini</strong>（APIキー設定時）のみで、Gemini でもキー未設定時は自動的に MockProvider で動作します。<strong>ローカル</strong>はこのパソコンの中だけで動くAIで、APIキーは要りません（記事の内容を外部へ送りません）。
-                  </p>
+                  {/* APIキーはこの画面で扱わず表示・保存もしない。方針（判断台帳 D99 / D103）に合わせ、
+                      ローカルを主経路・Gemini を任意・Mock を開発・デモ用として案内する。 */}
+                  <div
+                    className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50 space-y-1"
+                    data-testid="ai-provider-guide"
+                  >
+                    <p>
+                      💡 <strong>ローカル（おすすめ）</strong>：このパソコンの中で動くAIです。APIキーは要らず、記事の内容を外部へ送りません。
+                    </p>
+                    <p>
+                      <strong>Gemini</strong>：外部のAIです。APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります。キーが未設定のときは開発・デモ用の文で動きます。
+                    </p>
+                    <p>
+                      <strong>開発・デモ用</strong>：動作確認のための設定です。本物のAIは使いません。要約は記事の先頭を少し抜き出したもの、解説・ゆうこの一言などは決まった文です。
+                    </p>
+                    <p>APIキーはこの画面には表示・保存されません（安全のため別途管理されます）。</p>
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -1410,27 +1625,12 @@ export default function SettingsScreen({
             {activeMenu === "other" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Settings className="w-5 h-5" />
                     ユーザー・ニュース設定
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <SettingRow label="ニックネーム">
-                    <div className="flex flex-col items-end gap-1">
-                      <Input
-                        value={settings.user.nickname}
-                        onChange={(e) => updateUser("nickname", e.target.value)}
-                        placeholder="ゆうこに呼んでほしい名前"
-                        className="w-48"
-                        maxLength={NICKNAME_MAX_LENGTH}
-                      />
-                      <span className="text-[10px] text-muted-foreground">
-                        {NICKNAME_MAX_LENGTH}文字以内
-                      </span>
-                    </div>
-                  </SettingRow>
-
                   <SettingRow label="ホームに表示するおすすめ記事数">
                     <div className="flex items-center gap-3">
                       <Slider
@@ -1494,13 +1694,16 @@ export default function SettingsScreen({
             )}
 
             {/* データ管理: データ移行（ZIPの書き出し・読み込み）とアーカイブ管理（古い月の削除。判断台帳 D26）。
-                ストレージ状況は右サイドバーで準備中のまま。 */}
+                ストレージ状況（使用量）は右サイドバーに出す。 */}
             {activeMenu === "data" && (
               <>
+                <ImmediateApplyNote testId="data-immediate-note">
+                  書き出し・読み込み・アーカイブの削除は、ボタンを押して確かめた時点で行うよ。
+                </ImmediateApplyNote>
                 <DataMigrationPanel
                   onImportingChange={handleMigrationImportingChange}
                 />
-                <ArchiveManagePanel />
+                <ArchiveManagePanel onDeleted={() => void loadStorageUsage()} />
               </>
             )}
 
@@ -1508,7 +1711,7 @@ export default function SettingsScreen({
             {activeMenu === "integration" && (
               <Card className="border-0 shadow-sm">
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green)]">
+                  <CardTitle className="flex items-center gap-2 text-base text-[var(--yuuko-green-text)]">
                     <Link2 className="w-5 h-5" />
                     起動・連携設定
                   </CardTitle>
@@ -1533,9 +1736,10 @@ export default function SettingsScreen({
                       {autostartError}
                     </p>
                   )}
-                  <p className="text-xs text-muted-foreground mt-4 leading-relaxed bg-muted/40 p-3 rounded-lg border border-border/50">
-                    💡 この設定は切り替えるとすぐに反映されるよ（「保存する」は不要）。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
-                  </p>
+                  {/* すぐ反映される欄の注記は D160 でデータ管理・初期化とそろえる。 */}
+                  <ImmediateApplyNote className="mt-4" testId="integration-immediate-note">
+                    スイッチを切り替えた時点でPCに登録・解除するよ。PC起動時はメイン画面を出さず、トレイで待機して始まるよ。
+                  </ImmediateApplyNote>
                 </CardContent>
               </Card>
             )}
@@ -1555,7 +1759,16 @@ export default function SettingsScreen({
               </span>
             </div>
             <CardContent className="p-4">
-              <div className="relative bg-white rounded-xl p-3 border border-border shadow-sm mb-3">
+              {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はもともとの形（白地・細いふち・右下のしっぽ）。 */}
+              <YuukoBalloon
+                className="mb-3"
+                tail="bottom-right"
+                defaultClassName="bg-white rounded-xl p-3 border border-border shadow-sm"
+                defaultTail={
+                  <div className="absolute -bottom-2 right-4 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                }
+                data-testid="settings-yuuko-balloon"
+              >
                 {/* 狭い右列（lg 未満）では文字を一段小さくし、<br /> で区切った行がさらに折り返さないようにする。 */}
                 <p className="text-xs lg:text-sm text-foreground leading-relaxed">
                   この設定で今日も
@@ -1564,11 +1777,10 @@ export default function SettingsScreen({
                   <br />
                   ニュースをお届けするね！
                 </p>
-                <div className="absolute -bottom-2 right-4 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
-                <span className="absolute top-2 right-2 text-[var(--yuuko-green)]">
+                <span className="absolute top-2 right-2 text-[var(--yuuko-green-text)]">
                   🐾
                 </span>
-              </div>
+              </YuukoBalloon>
             </CardContent>
           </Card>
 
@@ -1580,32 +1792,85 @@ export default function SettingsScreen({
             <div className="absolute bottom-4 left-2 text-[var(--yuuko-green-light)] opacity-50">
               🐾
             </div>
-            <Image
-              src="/assets/yuuko.png"
+            <YuukoFigure
               width={963}
               height={1174}
-              alt="ゆうこ"
-              className="w-48 h-auto object-contain animate-[float_3s_ease-in-out_infinite]"
-              onError={(e) => {
-                const target = e.target as HTMLImageElement;
-                target.style.display = "none";
-              }}
+              imageClassName="w-48 h-auto object-contain"
+              className="animate-[float_3s_ease-in-out_infinite]"
             />
           </div>
 
           {/* Data Management Card */}
           <Card className="border-0 shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green)]">
+              <CardTitle className="flex items-center gap-2 text-sm text-[var(--yuuko-green-text)]">
                 <Database className="w-4 h-4" />
                 ストレージ状況
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* 実容量の取得は新しい command が要るため別途判断。固定の仮値は実値と誤認されるので出さない（SCR-003）。 */}
-              <p className="text-xs text-muted-foreground" data-testid="storage-status-placeholder">
-                保存データの使用状況の表示は準備中です。
-              </p>
+              {/* 実容量は Rust（get_storage_usage）が保存データの区分ごとの合計だけを返す。パスは扱わない。
+                  読めないときに固定の仮値は出さない（実値と誤認されるため。SCR-003）。 */}
+              <div data-testid="storage-status" aria-live="polite">
+                {storageStatus === "ready" && storageUsage ? (
+                  <div className="space-y-1.5">
+                    <p className="text-sm text-foreground">
+                      合計{" "}
+                      <span
+                        className="font-medium"
+                        data-testid="storage-total"
+                      >
+                        {formatMigrationBytes(storageUsage.totalBytes)}
+                      </span>
+                    </p>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                      <dt>記事</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.articleBytes)}
+                      </dd>
+                      <dt>アーカイブ</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.archiveBytes)}
+                      </dd>
+                      <dt>辞書</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.dictionaryBytes)}
+                      </dd>
+                      <dt>設定など</dt>
+                      <dd className="text-right">
+                        {formatMigrationBytes(storageUsage.otherBytes)}
+                      </dd>
+                    </dl>
+                    {/* 数える範囲を誤解しないよう、移行ZIPと同じ「持ち運ぶ保存データ」だけだと示す。 */}
+                    <p
+                      className="text-[10px] text-muted-foreground leading-relaxed"
+                      data-testid="storage-scope-note"
+                    >
+                      引っ越しで持ち運ぶ保存データの合計だよ（ログ・書き出したZIP・AIモデルは含まないよ）。
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {storageStatus === "error"
+                      ? "使用量を読み込めなかったよ。"
+                      : storageStatus === "preview"
+                        ? "アプリで開くと使用量が表示されるよ。"
+                        : "読み込み中…"}
+                  </p>
+                )}
+                {storageStatus !== "preview" && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 mt-1 px-2 gap-1 text-xs text-muted-foreground"
+                    disabled={storageStatus === "loading"}
+                    onClick={() => void loadStorageUsage()}
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                    {storageStatus === "error" ? "もう一度読み込む" : "最新にする"}
+                  </Button>
+                )}
+              </div>
               <div className="space-y-2">
                 {/* 辞書の単独書き出しは作らず、データ移行（ZIP 書き出し）で兼ねるため項目を置かない（判断台帳 D24） */}
                 {/* アーカイブ管理の本体は「データ管理」タブに置き、ここからはそこへ移動するだけにする（判断台帳 D26） */}
@@ -1617,9 +1882,6 @@ export default function SettingsScreen({
                   <Archive className="w-4 h-4" />
                   アーカイブを管理
                 </Button>
-                <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
-                  「準備中」の機能は今後のアップデートで対応予定です。
-                </p>
               </div>
             </CardContent>
           </Card>
@@ -1642,7 +1904,7 @@ export default function SettingsScreen({
             ) : (
               <Badge
                 variant="outline"
-                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green)] border-[var(--yuuko-green)]/30 gap-1"
+                className="bg-[var(--yuuko-green-light)] text-[var(--yuuko-green-text)] border-[var(--yuuko-green)]/30 gap-1"
               >
                 <Check className="w-3 h-3" />
                 保存済み
@@ -1687,6 +1949,9 @@ export default function SettingsScreen({
                 ? "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。壊れた設定ファイルは、初期化の前に別名でコピーを1つだけ残します。"
                 : "通知・ゆうこ表示・抑制条件・解説/AI設定などが既定値に戻ります。保存済みの設定も上書きされ、この操作は取り消せません。"}
             </AlertDialogDescription>
+            <ImmediateApplyNote testId="reset-immediate-note">
+              「初期状態に戻す」を押した時点で戻すよ。画面の未保存の変更も消えるよ。
+            </ImmediateApplyNote>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>キャンセル</AlertDialogCancel>

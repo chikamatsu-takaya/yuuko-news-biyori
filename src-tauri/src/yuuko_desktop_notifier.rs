@@ -20,6 +20,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::app_lifecycle::MAIN_WINDOW_LABEL;
+use crate::domain::dressup::{ActiveDressupIds, BALLOON_DEFAULT_ID, DECO_NONE_ID};
 use crate::domain::fullscreen_suppression::FullscreenGate;
 use crate::domain::yuuko::{
     RequestYuukoNotificationResult, SummonSurface, YuukoNotificationState, YuukoResidentState,
@@ -93,9 +94,22 @@ pub struct YuukoDesktopNotification {
     /// dismiss_yuuko_notification を通り、表示中の通知が無いため状態は変えずにウィンドウだけを隠す。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub message: bool,
+    /// その時点で適用する吹き出しの ID（着せかえ。判断台帳 D156・案2）。未所持・未知は既定 `balloon_default`。
+    /// 常駐ゆうこウィンドウには get_dressup_state を許可しないため、通知のデータに載せて渡す。
+    /// 表示直前（[`present`]）に設定から読み直して詰める。ページ側も既知の ID か確かめてから使う。
+    pub balloon_id: String,
+    /// その時点で適用する飾りの ID（未所持・未知は既定 `deco_none`）。balloon_id と同じく表示直前に詰める。
+    pub deco_id: String,
 }
 
 impl YuukoDesktopNotification {
+    /// 着せかえの ID を差し替える（表示直前に、その時点で有効な ID を載せる）。
+    fn with_dressup(mut self, dressup: ActiveDressupIds) -> Self {
+        self.balloon_id = dressup.balloon_id;
+        self.deco_id = dressup.deco_id;
+        self
+    }
+
     fn stage(&self) -> YuukoWindowStage {
         // 報酬通知は吹き出し段階だけ（軽量プレビューは無い）。
         if self.preview_visible && !self.reward {
@@ -182,6 +196,8 @@ fn desktop_notification_from_state(
             preview_visible: false,
             reward: true,
             message: false,
+            balloon_id: BALLOON_DEFAULT_ID.to_string(),
+            deco_id: DECO_NONE_ID.to_string(),
         });
     }
     let is_active_news = matches!(
@@ -207,6 +223,8 @@ fn desktop_notification_from_state(
         preview_visible: state.state == YuukoResidentState::PreviewVisible,
         reward: false,
         message: false,
+        balloon_id: BALLOON_DEFAULT_ID.to_string(),
+        deco_id: DECO_NONE_ID.to_string(),
     })
 }
 
@@ -221,6 +239,8 @@ fn message_notification(text: String) -> YuukoDesktopNotification {
         preview_visible: false,
         reward: false,
         message: true,
+        balloon_id: BALLOON_DEFAULT_ID.to_string(),
+        deco_id: DECO_NONE_ID.to_string(),
     }
 }
 
@@ -357,18 +377,28 @@ fn present_if_needed<R: Runtime>(
 ///
 /// 初回生成直後はページがまだ購読していないためイベントが届かない。その場合に備え、
 /// ページはマウント時に既存の get_yuuko_notification_state で現在の active 通知を取得する契約とする。
+///
+/// 着せかえ（吹き出し・飾り）はメイン画面で切り替わり得るため、送る直前に設定から読み直して載せる
+/// （判断台帳 D156）。状態の初期化前などで読めないときは既定のまま送る（見た目だけの機能のため止めない）。
 fn present<R: Runtime>(
     app: &AppHandle<R>,
     notification: &YuukoDesktopNotification,
 ) -> tauri::Result<()> {
+    let dressup = app
+        .try_state::<crate::state::AppState>()
+        .map(|state| state.dressup_service.active_dressup_ids())
+        .unwrap_or_default();
+    // 着せかえを付けているときは、ウィンドウを少し高くして飾り・厚い吹き出しが切れないようにする。
+    let dressed = !dressup.is_default();
+    let notification = notification.clone().with_dressup(dressup);
     yuuko_window::ensure_yuuko_window(app)?;
     // メインウィンドウへは送らず、ゆうこ用ウィンドウだけに届ける。
     app.emit_to(
         YUUKO_WINDOW_LABEL,
         YUUKO_DESKTOP_NOTIFICATION_EVENT,
-        notification,
+        &notification,
     )?;
-    yuuko_window::show_yuuko_window(app, notification.stage())
+    yuuko_window::show_yuuko_window(app, notification.stage(), dressed)
 }
 
 /// トレイ「ゆうこを呼ぶ」の表示先。
@@ -686,6 +716,8 @@ mod tests {
             reward_notification: None,
             preview_short_summary: with_article.then(|| "保存済みの要約".to_string()),
             summon_message: None,
+            balloon_id: None,
+            deco_id: None,
         }
     }
 
@@ -845,6 +877,9 @@ mod tests {
                 preview_visible: false,
                 reward: false,
                 message: false,
+                // 着せかえは表示直前（present）に詰めるため、判定結果からは既定で作る。
+                balloon_id: "balloon_default".to_string(),
+                deco_id: "deco_none".to_string(),
             })
         );
     }
@@ -970,18 +1005,70 @@ mod tests {
             preview_visible: false,
             reward: false,
             message: false,
+            balloon_id: "balloon_default".to_string(),
+            deco_id: "deco_none".to_string(),
         })
         .unwrap();
         // 本文・URL などの欄は持たない。要約が無いときは summary 自体を送らない。
+        // 着せかえ（D156）は常に送る（既定でも省略しない）。
         assert_eq!(
             json,
             serde_json::json!({
                 "articleId": "a",
                 "title": "t",
                 "sourceName": "s",
-                "previewVisible": false
+                "previewVisible": false,
+                "balloonId": "balloon_default",
+                "decoId": "deco_none"
             })
         );
+    }
+
+    #[test]
+    fn dressup_is_attached_to_every_kind_of_payload() {
+        let dressup = ActiveDressupIds {
+            balloon_id: "gacha_balloon_game".to_string(),
+            deco_id: "gacha_deco_crown".to_string(),
+        };
+        let news =
+            desktop_notification_from_state(&state(YuukoResidentState::BalloonVisible, true))
+                .unwrap();
+        let reward = desktop_notification_from_state(&reward_state()).unwrap();
+        let message = message_notification("一言".to_string());
+        for payload in [news, reward, message] {
+            // 判定結果から作った直後は既定（着せかえを読む前に送っても今の見た目のまま）。
+            assert_eq!(payload.balloon_id, "balloon_default");
+            assert_eq!(payload.deco_id, "deco_none");
+            let dressed = payload.clone().with_dressup(dressup.clone());
+            assert_eq!(dressed.balloon_id, "gacha_balloon_game");
+            assert_eq!(dressed.deco_id, "gacha_deco_crown");
+            // 着せかえ以外の欄・表示段階は変えない。
+            assert_eq!(dressed.stage(), payload.stage());
+            assert_eq!(
+                YuukoDesktopNotification {
+                    balloon_id: payload.balloon_id.clone(),
+                    deco_id: payload.deco_id.clone(),
+                    ..dressed
+                },
+                payload
+            );
+        }
+        // 既定（読めないとき）は balloon_default / deco_none。
+        assert_eq!(
+            ActiveDressupIds::default(),
+            ActiveDressupIds {
+                balloon_id: "balloon_default".to_string(),
+                deco_id: "deco_none".to_string(),
+            }
+        );
+        // 既定のときだけウィンドウの大きさを今までのままにする（どちらか一方でも付けていれば着せかえあり）。
+        assert!(ActiveDressupIds::default().is_default());
+        assert!(!dressup.is_default());
+        assert!(!ActiveDressupIds {
+            deco_id: "gacha_deco_ribbon".to_string(),
+            ..ActiveDressupIds::default()
+        }
+        .is_default());
     }
 
     #[test]
@@ -1138,7 +1225,9 @@ mod tests {
                 "balloonText": SUMMON_NO_ARTICLE_MESSAGE,
                 "sourceName": "",
                 "previewVisible": false,
-                "message": true
+                "message": true,
+                "balloonId": "balloon_default",
+                "decoId": "deco_none"
             })
         );
     }

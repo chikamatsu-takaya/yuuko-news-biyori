@@ -8,24 +8,24 @@
 
 import * as React from "react";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  CLICKABLE_CARD_FOCUS_CLASS,
+  activateOnEnterOrSpace,
+} from "@/lib/keyboard-activation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
+import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert";
 import {
-  Home,
   Newspaper,
-  History,
-  BookOpen,
-  Palette,
-  Gift,
-  Settings,
   ArrowLeft,
   Sparkles,
   Info,
@@ -41,6 +41,10 @@ import {
   ArticleTagList,
   normalizeArticleTags,
 } from "@/components/news/ArticleTagList";
+import {
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
 
 // 当日ニュースカードの表示モデル（履歴とは別目的のため独自に持つ）。
 type TodayArticle = {
@@ -57,24 +61,6 @@ type TodayArticle = {
   // 記事のタグ（表示のみ。絞り込みはニュース履歴画面で行う）。
   tags: string[];
 };
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
-
-// ニュース一覧表示中はサイドバー「ニュースを見る」を選択状態にする。
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: true },
-  { id: "history", label: "ニュース履歴", icon: History, isActive: false },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Palette, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
 
 const toThumbnailType = (genre: string): TodayArticle["thumbnailType"] => {
   if (genre.includes("AI")) {
@@ -122,12 +108,14 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   title: article.title,
   source: article.sourceName,
   // 表示は媒体の公開日時テキストを優先し、無ければ取得日時を出す（判定は fetchedAt のみで行う）。
-  datetime: article.publishedAtText || article.fetchedAt,
+  // RFC3339 のまま出さず「YYYY/MM/DD HH:mm」（端末ローカル）に整える。
+  datetime: formatArticleDateTime(article.publishedAtText || article.fetchedAt),
   description:
     article.summary ??
     "概要はまだありません。記事を開くと保存済みの内容を確認できます。",
   genre: article.genre || "未分類",
-  isNew: article.readState === "unread",
+  // 未読でも公開（無ければ取得）から24時間を過ぎた記事には NEW を付けない。
+  isNew: isArticleNew(article),
   isFavorite: article.isFavorite,
   thumbnailType: toThumbnailType(article.genre),
   summaryState: article.summaryState,
@@ -178,16 +166,22 @@ function TodayArticleCard({
   article: TodayArticle;
   onClick: () => void;
 }) {
+  // キーボード操作（Tab で移動・Enter/Space で開く）に対応する。読み上げ名は記事タイトル。
+  const titleId = React.useId();
   return (
     <Card
-      className="cursor-pointer transition-all py-3 px-0 border-0 shadow-sm hover:shadow-md"
+      role="button"
+      tabIndex={0}
+      aria-labelledby={titleId}
+      className={`cursor-pointer transition-all py-3 px-0 border-0 shadow-sm hover:shadow-md ${CLICKABLE_CARD_FOCUS_CLASS}`}
       onClick={onClick}
+      onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
         <TodayThumbnail type={article.thumbnailType} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="font-semibold text-sm text-foreground truncate">
+            <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">
               {article.title}
             </h3>
           </div>
@@ -204,7 +198,7 @@ function TodayArticleCard({
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <Badge className="bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green)] border-0 text-[10px] px-1.5 py-0">
+            <Badge className="bg-[var(--yuuko-green)]/15 text-[var(--yuuko-green-text)] border-0 text-[10px] px-1.5 py-0">
               {article.genre}
             </Badge>
             {article.isNew && (
@@ -310,28 +304,23 @@ export default function NewsListScreen({
         <aside className="w-52 bg-white border-r border-border flex flex-col p-3 flex-shrink-0">
           <Button
             variant="outline"
-            className="mb-4 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
+            className="mb-4 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
             onClick={() => handleNavigate("home")}
           >
             <ArrowLeft className="w-4 h-4" />
             ホームへ戻る
           </Button>
 
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="news"
+            onNavigate={handleNavigate}
+          />
 
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
-              <h4 className="text-xs font-semibold text-[var(--yuuko-green)] mb-2">
+              <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">
                 ゆうこの一言
               </h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -344,12 +333,18 @@ export default function NewsListScreen({
                 のぞいてみてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
                   🐾
                 </span>
               </div>
             </CardContent>
           </Card>
+
+          {/* 他画面と同じく、自動起動の状態と常駐終了をサイドバー下部に置く */}
+          <div className="mt-4 space-y-2">
+            <AutostartStatus />
+            <QuitResidentButton className="w-full text-xs" />
+          </div>
         </aside>
 
         {/* Center - Today's News List */}
@@ -357,7 +352,7 @@ export default function NewsListScreen({
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
             <button
-              className="hover:text-[var(--yuuko-green)]"
+              className="hover:text-[var(--yuuko-green-text)]"
               onClick={() => handleNavigate("home")}
             >
               ホーム
@@ -369,7 +364,7 @@ export default function NewsListScreen({
           {/* Title + count */}
           <div className="flex items-center gap-2 mb-1">
             <Sparkles
-              className="w-6 h-6 text-[var(--yuuko-green)]"
+              className="w-6 h-6 text-[var(--yuuko-green-text)]"
               aria-hidden="true"
             />
             <h1 className="text-xl font-bold text-foreground">
@@ -392,10 +387,10 @@ export default function NewsListScreen({
               className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm"
             >
               <Info
-                className="h-4 w-4 text-[var(--yuuko-green)]"
+                className="h-4 w-4 text-[var(--yuuko-green-text)]"
                 aria-hidden="true"
               />
-              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">
+              <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">
                 お知らせ
               </AlertTitle>
               <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -406,7 +401,7 @@ export default function NewsListScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+                    className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
                     onClick={() => void loadTodayArticles()}
                     disabled={isLoading}
                   >
@@ -453,7 +448,7 @@ export default function NewsListScreen({
             ? "読み込み中..."
             : `今日取得したニュース ${articles.length}件`}
         </span>
-        <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+        <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
           🐾
         </span>
       </footer>

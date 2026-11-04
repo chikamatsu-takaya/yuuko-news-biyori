@@ -6,6 +6,7 @@
 // - 記事を開くときは、ニュース履歴画面（#303）と同じく確認してからアーカイブを1記事だけ取り出す。
 //   復元の確認ロジックは NewsHistoryScreen と同じ流れを最小限で複製している（共通化は履歴画面の変更を伴うため見送り）。
 // - 古い形式（catalogComplete=false）の月は記事一覧を持たないため、開けない旨だけを案内する。
+// - 右列には他画面（ニュース履歴など）と同じくゆうこを置く。この画面だけゆうこがいなかったため（実機テスト B14）。
 
 import * as React from "react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,8 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
-import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
+import { AppSidebarNav } from "@/components/layout/AppSidebarNav";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
+import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
+import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
 import {
   Alert,
   AlertDescription,
@@ -31,14 +35,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Home,
-  Newspaper,
-  History,
   Archive,
-  BookOpen,
-  Palette,
-  Gift,
-  Settings,
   ArrowLeft,
   ChevronRight,
   Info,
@@ -51,25 +48,7 @@ import {
   type ArchiveMonthDto,
   type ArticleHistoryItemDto,
 } from "@/lib/tauri/articles";
-
-type NavigationItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  isActive: boolean;
-};
-
-// 過去ニュース表示中はサイドバー「過去ニュース」を選択状態にする。
-const navigationItems: NavigationItem[] = [
-  { id: "home", label: "ホーム", icon: Home, isActive: false },
-  { id: "news", label: "ニュースを見る", icon: Newspaper, isActive: false },
-  { id: "history", label: "ニュース履歴", icon: History, isActive: false },
-  { id: "past-news", label: "過去ニュース", icon: Archive, isActive: true },
-  { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen, isActive: false },
-  { id: "customize", label: "カスタマイズ", icon: Palette, isActive: false },
-  { id: "gacha", label: "ガチャ", icon: Gift, isActive: false },
-  { id: "settings", label: "設定", icon: Settings, isActive: false },
-];
+import { formatArticleDateTime } from "@/lib/article-date-display.mjs";
 
 // 記事詳細から「戻る」で再表示したとき、同じ月の記事一覧へ戻すための記憶。
 // 画面は記事詳細の表示中にアンマウントされるため、共有ファイル（app/page.tsx）へ state を足さずに
@@ -119,8 +98,8 @@ function PastNewsNotice({
       role="presentation"
       className="mb-4 border-[var(--yuuko-green)]/30 bg-white shadow-sm"
     >
-      <Info className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
-      <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green)]">
+      <Info className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
+      <AlertTitle className="text-xs font-semibold text-[var(--yuuko-green-text)]">
         お知らせ
       </AlertTitle>
       <AlertDescription className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -129,7 +108,7 @@ function PastNewsNotice({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
+            className="h-7 shrink-0 px-3 text-[10px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] self-start sm:self-auto"
             onClick={onRetry}
             disabled={isRetrying}
           >
@@ -180,7 +159,7 @@ function PastNewsMonthList({
           {entry.catalogComplete ? (
             <button
               type="button"
-              className="w-full text-left rounded-xl bg-white shadow-sm border border-transparent px-4 py-3 flex items-center justify-between gap-3 transition-colors hover:border-[var(--yuuko-green)]/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              className="w-full text-left rounded-xl bg-white shadow-sm border border-transparent px-4 py-3 flex items-center justify-between gap-3 transition-colors hover:border-[var(--yuuko-green)]/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
               onClick={() => onSelectMonth(entry.month)}
             >
               <span className="font-medium text-foreground">
@@ -261,7 +240,7 @@ function PastNewsArticleList({
         <li key={article.articleId}>
           <button
             type="button"
-            className="w-full text-left rounded-xl bg-white shadow-sm border border-transparent px-4 py-3 transition-colors hover:border-[var(--yuuko-green)]/40 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+            className="w-full text-left rounded-xl bg-white shadow-sm border border-transparent px-4 py-3 transition-colors hover:border-[var(--yuuko-green)]/40 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
             onClick={() => onSelectArticle(article)}
             disabled={isRestoring}
           >
@@ -288,7 +267,9 @@ function PastNewsArticleList({
             </span>
             <span className="mt-1 block text-xs text-muted-foreground">
               {article.sourceName}
-              {article.publishedAtText ? ` ・ 公開日: ${article.publishedAtText}` : ""}
+              {article.publishedAtText
+                ? ` ・ 公開日: ${formatArticleDateTime(article.publishedAtText)}`
+                : ""}
             </span>
           </button>
         </li>
@@ -523,28 +504,23 @@ export default function PastNewsScreen({
         <aside className="w-52 bg-white border-r border-border flex flex-col p-3 flex-shrink-0">
           <Button
             variant="outline"
-            className="mb-4 border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
+            className="mb-4 border-[var(--yuuko-green-text)] text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)] justify-start gap-2"
             onClick={() => handleNavigate("home")}
           >
             <ArrowLeft className="w-4 h-4" />
             ホームへ戻る
           </Button>
 
-          <nav className="space-y-1 flex-1 overflow-y-auto">
-            {navigationItems.map((item) => (
-              <SidebarNavItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                isActive={item.isActive}
-                onClick={() => handleNavigate(item.id)}
-              />
-            ))}
-          </nav>
+          <AppSidebarNav
+            className="space-y-1 flex-1 overflow-y-auto"
+            activeId="past-news"
+            onNavigate={handleNavigate}
+          />
 
-          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3">
+          {/* 高さが足りないとき（起動時の 800×600 など）は「ゆうこの一言」を隠して、画面ナビを全部見せる（実機テスト B8）。 */}
+          <Card className="mt-4 border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)]/30 py-3 [@media(max-height:739px)]:hidden">
             <CardContent className="p-3">
-              <h4 className="text-xs font-semibold text-[var(--yuuko-green)] mb-2">
+              <h4 className="text-xs font-semibold text-[var(--yuuko-green-text)] mb-2">
                 ゆうこの一言
               </h4>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -555,7 +531,7 @@ export default function PastNewsScreen({
                 ふり返ってみてねっ♪
               </p>
               <div className="flex justify-end mt-1">
-                <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+                <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
                   🐾
                 </span>
               </div>
@@ -564,6 +540,7 @@ export default function PastNewsScreen({
 
           <div className="mt-4 space-y-2">
             <AutostartStatus />
+            <QuitResidentButton className="w-full text-xs" />
           </div>
         </aside>
 
@@ -573,7 +550,7 @@ export default function PastNewsScreen({
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-3">
             <button
               type="button"
-              className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+              className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
               onClick={() => handleNavigate("home")}
             >
               ホーム
@@ -583,7 +560,7 @@ export default function PastNewsScreen({
               <>
                 <button
                   type="button"
-                  className="rounded-sm transition-colors hover:text-[var(--yuuko-green)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green)]"
+                  className="rounded-sm transition-colors hover:text-[var(--yuuko-green-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--yuuko-green-text)]"
                   onClick={handleBackToMonths}
                 >
                   過去ニュース
@@ -598,7 +575,7 @@ export default function PastNewsScreen({
 
           {/* Title */}
           <div className="flex items-center gap-2 mb-1">
-            <Archive className="w-6 h-6 text-[var(--yuuko-green)]" aria-hidden="true" />
+            <Archive className="w-6 h-6 text-[var(--yuuko-green-text)]" aria-hidden="true" />
             <h1 className="text-xl font-bold text-foreground">
               {selectedMonth ? `${selectedMonthLabel}の過去ニュース` : "過去ニュース"}
             </h1>
@@ -623,7 +600,7 @@ export default function PastNewsScreen({
               <Button
                 variant="outline"
                 size="sm"
-                className="gap-1 border-[var(--yuuko-green)]/40 text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
+                className="gap-1 border-[var(--yuuko-green)]/40 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
                 onClick={handleBackToMonths}
                 disabled={isRestoring}
               >
@@ -675,6 +652,41 @@ export default function PastNewsScreen({
             )}
           </div>
         </main>
+
+        {/* Right Sidebar: ニュース履歴と同じゆうこ列。lg 未満（既定ウィンドウ 800px 等）は w-60 に狭める（D109）。 */}
+        <aside
+          className="w-60 lg:w-72 bg-[var(--yuuko-cream-dark)] border-l border-border flex flex-col p-3 flex-shrink-0 overflow-y-auto"
+          data-testid="past-news-yuuko-column"
+        >
+          {/* 吹き出しは着せかえ（D155）に従う。「いつもの」はニュース履歴と同じカードの形。 */}
+          <YuukoBalloon
+            className="mb-2"
+            tail="none"
+            data-testid="past-news-yuuko-balloon"
+            defaultRender={(content) => (
+              <Card className="border-[var(--yuuko-green)]/30 bg-white mb-2 py-2">
+                <CardContent className="p-3">{content}</CardContent>
+              </Card>
+            )}
+          >
+            <p className="text-xs text-foreground leading-relaxed">
+              {selectedMonth
+                ? "開きたい記事を選んでね。しまってある記事は、取り出してから見せるよ〜！"
+                : "30日より前のニュースは、月ごとにしまってあるよ。見たい月を選んでねっ♪"}
+            </p>
+            <div className="flex justify-end">
+              <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">🐾</span>
+            </div>
+          </YuukoBalloon>
+
+          <div className="flex justify-center">
+            <YuukoFigure
+              width={160}
+              height={160}
+              imageClassName="w-40 h-40 object-contain"
+            />
+          </div>
+        </aside>
       </div>
 
       {/* Status Bar */}
@@ -686,7 +698,7 @@ export default function PastNewsScreen({
               ? "読み込み中..."
               : `アーカイブ ${months.length}か月分`}
         </span>
-        <span className="text-[var(--yuuko-green)]" aria-hidden="true">
+        <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
           🐾
         </span>
       </footer>

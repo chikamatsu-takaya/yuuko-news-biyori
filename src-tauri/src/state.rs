@@ -4,10 +4,12 @@ use crate::services::auto_summary_queue::AutoSummaryQueue;
 use crate::services::data_export_service::DataExportService;
 use crate::services::data_import_service::DataImportService;
 use crate::services::dictionary_service::DictionaryService;
+use crate::services::dressup_service::DressupService;
 use crate::services::friendship_service::FriendshipService;
 use crate::services::gacha_service::GachaService;
 use crate::services::local_llm_service::LocalLlmService;
 use crate::services::news_service::NewsService;
+use crate::services::pattern_service::PatternService;
 use crate::services::reward_service::RewardService;
 use crate::services::settings_service::SettingsService;
 use crate::services::summary_service::SummaryService;
@@ -26,6 +28,10 @@ pub struct AppState {
     /// 同梱ローカルLLM。AiProviderService と同じ状態を共有し、終了時にここから止める。
     pub local_llm_service: LocalLlmService,
     pub news_service: NewsService,
+    /// テーマの地に敷く模様（設定 ui.patternId とガチャ所持から判定する）。
+    pub pattern_service: PatternService,
+    /// ゆうこの着せかえ（設定 ui.balloonId / ui.decoId とガチャ所持から判定する。D155）。
+    pub dressup_service: DressupService,
     pub reward_service: RewardService,
     pub settings_service: SettingsService,
     pub summary_service: SummaryService,

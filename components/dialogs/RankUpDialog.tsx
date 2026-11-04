@@ -86,7 +86,7 @@ export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
       <DialogContent className="sm:max-w-sm" showCloseButton={false}>
         <DialogHeader>
           <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--yuuko-green-light)]">
-            <Sparkles className="h-6 w-6 text-[var(--yuuko-green)]" />
+            <Sparkles className="h-6 w-6 text-[var(--yuuko-green-text)]" />
           </div>
           <DialogTitle className="text-center">ランクアップ！</DialogTitle>
           <DialogDescription className="text-center">
@@ -99,7 +99,7 @@ export function RankUpDialog({ open, newRank, onClose }: RankUpDialogProps) {
             className="rounded-lg border border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)] p-3 text-sm"
           >
             <p className="flex items-center gap-1.5 font-medium">
-              <Gift className="h-4 w-4 text-[var(--yuuko-green)]" aria-hidden="true" />
+              <Gift className="h-4 w-4 text-[var(--yuuko-green-text)]" aria-hidden="true" />
               新しい報酬が解放されたよ！
             </p>
             <ul className="mt-2 space-y-1">

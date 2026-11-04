@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::notification_mode::NotificationMode;
 use crate::error::AppError;
 
 // 入力値の上限（セキュリティ詳細設計書 §15.2 / §15.3）。
@@ -10,14 +11,28 @@ pub(crate) const NICKNAME_MAX_CHARS: usize = 32;
 const GENRES_MAX_ITEMS: usize = 20;
 /// 関心ジャンル1件の最大文字数。選択肢は短いラベル（最長「セキュリティ」6文字）なので、呼び名と同じ32に揃える。
 const GENRE_MAX_CHARS: usize = 32;
-/// 通知を抑止するアプリの最大件数。手動管理する一覧として十分な量に絞り、判定時の走査負荷を抑える。
-const SUPPRESSED_APPS_MAX_ITEMS: usize = 50;
-/// 抑止アプリ1件の最大文字数。実行ファイルのフルパス指定を想定し、Windows の MAX_PATH（260）に合わせる。
-const SUPPRESSED_APP_MAX_CHARS: usize = 260;
 
 /// 改行・タブを含むすべての制御文字を含むかを判定する（1行のラベル・名前向け）。
 fn contains_control_char(text: &str) -> bool {
     text.chars().any(char::is_control)
+}
+
+/// 呼び名の保存時の検証（設定画面・初回案内の `save_user_settings` と、カスタマイズ画面の `set_nickname` で共用）。
+/// 32文字（char 数）を超えるもの・制御文字（改行・タブを含む）を含むものを拒否する。
+/// 呼び名はゆうこの台詞に1行で埋め込むため制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
+/// `<` などは拒否せず入力どおり保存し、台詞へ差し込む直前に `display_nickname` で無害化する。
+pub(crate) fn validate_nickname(nickname: &str) -> Result<(), AppError> {
+    if nickname.chars().count() > NICKNAME_MAX_CHARS {
+        return Err(AppError::Validation(
+            "nickname must be 32 characters or fewer".to_string(),
+        ));
+    }
+    if contains_control_char(nickname) {
+        return Err(AppError::Validation(
+            "nickname must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -87,6 +102,10 @@ pub struct UserSettingsDto {
     pub notify_end_time: String,
     #[serde(default)]
     pub work_time_ranges: Option<Vec<WorkTimeRange>>,
+    /// 通知モード（`random_in_work_time` / `random` / `fixed_time` / `none`。判断台帳 D143）。
+    /// 旧画面・旧データとの互換のため任意。読み込み時は常に Some を返し、保存時に None なら既存値のまま。
+    #[serde(default)]
+    pub notification_mode: Option<String>,
     pub notify_max_per_day: u32,
     pub enable_yuuko_popup: bool,
     pub suppress_during_meeting: bool,
@@ -123,6 +142,7 @@ impl Default for UserSettingsDto {
             notify_start_time: "09:00".to_string(),
             notify_end_time: "18:00".to_string(),
             work_time_ranges: Some(default_work_time_ranges()),
+            notification_mode: Some(NotificationMode::RandomInWorkTime.as_storage().to_string()),
             notify_max_per_day: 3,
             enable_yuuko_popup: true,
             suppress_during_meeting: true,
@@ -144,13 +164,32 @@ impl Default for UserSettingsDto {
 }
 
 impl UserSettingsDto {
+    /// 呼び名を含む全項目の検証（テスト用）。本番の保存は `SettingsService::save_user_settings` が
+    /// `validate_except_nickname` と、呼び名を変えるときだけの `validate_nickname` を組み合わせて行う。
+    #[cfg(test)]
     pub fn validate(&self) -> Result<(), AppError> {
+        self.validate_except_nickname()?;
+        validate_nickname(&self.nickname)
+    }
+
+    /// 呼び名以外の検証。設定画面の保存は呼び名を読み込んだ値のまま書き戻すため、
+    /// 呼び名が保存済みと同じときは呼び名の検証を省けるよう分けている（`SettingsService::save_user_settings`）。
+    pub fn validate_except_nickname(&self) -> Result<(), AppError> {
         validate_time(&self.notify_start_time)?;
         validate_time(&self.notify_end_time)?;
         if let Some(ranges) = &self.work_time_ranges {
             for range in ranges {
                 validate_time(&range.start)?;
                 validate_time(&range.end)?;
+            }
+        }
+
+        if let Some(mode) = &self.notification_mode {
+            if NotificationMode::parse_storage(mode).is_none() {
+                return Err(AppError::Validation(
+                    "notificationMode must be one of random_in_work_time, random, fixed_time, none"
+                        .to_string(),
+                ));
             }
         }
 
@@ -192,19 +231,6 @@ impl UserSettingsDto {
         if self.genres.iter().any(|genre| contains_control_char(genre)) {
             return Err(AppError::Validation(
                 "genres must not contain control characters".to_string(),
-            ));
-        }
-
-        if self.nickname.chars().count() > NICKNAME_MAX_CHARS {
-            return Err(AppError::Validation(
-                "nickname must be 32 characters or fewer".to_string(),
-            ));
-        }
-
-        // 呼び名はゆうこの台詞に1行で埋め込むため、改行・タブも含めて制御文字を拒否する（セキュリティ詳細設計書 §15.3）。
-        if contains_control_char(&self.nickname) {
-            return Err(AppError::Validation(
-                "nickname must not contain control characters".to_string(),
             ));
         }
 
@@ -283,6 +309,12 @@ impl PersistedSettings {
             notify_start_time,
             notify_end_time,
             work_time_ranges: Some(work_time_ranges),
+            // 未知の保存値（手編集など）は判定と同じ既定値として画面へ渡す。
+            notification_mode: Some(
+                NotificationMode::from_storage(&self.notification.mode)
+                    .as_storage()
+                    .to_string(),
+            ),
             notify_max_per_day: self.notification.max_per_day,
             enable_yuuko_popup: self.notification.enabled,
             suppress_during_meeting: self.notification.suppress_during_meeting,
@@ -309,6 +341,10 @@ impl PersistedSettings {
         self.news.max_daily_recommendations = dto.max_daily_recommendations;
         self.notification.enabled = dto.enable_yuuko_popup;
         self.notification.max_per_day = dto.notify_max_per_day;
+        // 未指定（旧画面など）は既存のモードを変えない。値は validate で検証済み。
+        if let Some(mode) = dto.notification_mode {
+            self.notification.mode = mode;
+        }
         self.notification.suppress_during_meeting = dto.suppress_during_meeting;
         self.notification.suppress_when_mic_in_use = dto.suppress_during_mic_use;
         self.notification.suppress_in_fullscreen = dto.suppress_during_fullscreen;
@@ -368,6 +404,10 @@ impl Default for NewsSettings {
     }
 }
 
+/// 通知設定。
+/// 旧版にあった `suppressedApps`（通知を抑止するアプリ一覧）は入力UIも判定処理も無かったため廃止した（D146）。
+/// 本構造体は `deny_unknown_fields` を付けていないので、旧 settings.json に残る `suppressedApps` は
+/// 読み込み時に無視され、次回保存時に自然に消える。会議中・全画面時の自動抑止（下記 suppress_* ）は残す。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -380,7 +420,6 @@ pub struct NotificationSettings {
     pub suppress_in_fullscreen: bool,
     pub suppress_when_mic_in_use: bool,
     pub suppress_during_meeting: bool,
-    pub suppressed_apps: Vec<String>,
 }
 
 impl Default for NotificationSettings {
@@ -393,45 +432,7 @@ impl Default for NotificationSettings {
             suppress_in_fullscreen: true,
             suppress_when_mic_in_use: true,
             suppress_during_meeting: true,
-            suppressed_apps: vec![],
         }
-    }
-}
-
-impl NotificationSettings {
-    /// 通知を抑止するアプリ一覧の保存前検証（件数・1件の文字数・空値・制御文字）。
-    /// 現時点では抑止アプリを編集する入力経路（DTO / Tauri command）が無いため未配線。
-    /// 入力経路を追加するときは、保存前にこれを呼ぶ。読み込み時には呼ばない（既存データを読めなくしないため）。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn validate_suppressed_apps(apps: &[String]) -> Result<(), AppError> {
-        if apps.len() > SUPPRESSED_APPS_MAX_ITEMS {
-            return Err(AppError::Validation(
-                "suppressedApps must contain 50 items or fewer".to_string(),
-            ));
-        }
-
-        if apps.iter().any(|app| app.trim().is_empty()) {
-            return Err(AppError::Validation(
-                "suppressedApps must not contain empty values".to_string(),
-            ));
-        }
-
-        if apps
-            .iter()
-            .any(|app| app.chars().count() > SUPPRESSED_APP_MAX_CHARS)
-        {
-            return Err(AppError::Validation(
-                "each suppressedApps item must be 260 characters or fewer".to_string(),
-            ));
-        }
-
-        if apps.iter().any(|app| contains_control_char(app)) {
-            return Err(AppError::Validation(
-                "suppressedApps must not contain control characters".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -529,6 +530,15 @@ impl Default for ExplanationSettings {
 #[serde(rename_all = "camelCase")]
 pub struct UiSettings {
     pub theme_id: String,
+    /// テーマの地に敷く模様の ID（判断台帳 D152〜D154）。欄が無い既存ファイルは "none"（模様なし）で読む。
+    /// 設定画面の DTO には含めず、所持判定を通す `set_active_pattern`（カスタマイズ画面）からだけ変える。
+    pub pattern_id: String,
+    /// ゆうこの吹き出しの ID（判断台帳 D155）。欄が無い既存ファイルは "balloon_default"（いつもの）で読む。
+    /// 模様と同じく設定画面の DTO には含めず、所持判定を通す `set_active_balloon`（カスタマイズ画面）からだけ変える。
+    pub balloon_id: String,
+    /// ゆうこの飾り（アクセサリー）の ID（判断台帳 D155）。欄が無い既存ファイルは "deco_none"（なし）で読む。
+    /// 変えるのは所持判定を通す `set_active_deco`（カスタマイズ画面）だけ。
+    pub deco_id: String,
     pub tone_id: String,
     pub personality_id: String,
     pub yuuko_position: String,
@@ -545,6 +555,9 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             theme_id: "default".to_string(),
+            pattern_id: crate::domain::pattern::PATTERN_NONE_ID.to_string(),
+            balloon_id: crate::domain::dressup::BALLOON_DEFAULT_ID.to_string(),
+            deco_id: crate::domain::dressup::DECO_NONE_ID.to_string(),
             tone_id: "gentle".to_string(),
             personality_id: "standard".to_string(),
             yuuko_position: "bottom_center".to_string(),
@@ -654,6 +667,48 @@ mod tests {
     }
 
     #[test]
+    fn legacy_settings_without_pattern_field_load_as_none() {
+        // 模様の欄が無い既存の settings.json は「模様なし」で読む（D152〜D154。今の見た目を変えない）。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "themeId": "theme_001" } }"#).unwrap();
+        assert_eq!(legacy.ui.pattern_id, "none");
+        assert_eq!(legacy.ui.theme_id, "theme_001");
+        assert_eq!(PersistedSettings::initial().ui.pattern_id, "none");
+
+        let saved: PersistedSettings =
+            serde_json::from_str(r#"{ "ui": { "patternId": "gacha_pattern_snow" } }"#).unwrap();
+        assert_eq!(saved.ui.pattern_id, "gacha_pattern_snow");
+        let raw = serde_json::to_string(&saved).unwrap();
+        assert!(raw.contains("\"patternId\":\"gacha_pattern_snow\""));
+    }
+
+    #[test]
+    fn legacy_settings_without_dressup_fields_load_as_defaults() {
+        // 着せかえの欄が無い既存の settings.json は「いつもの」「なし」で読む（D155。今の見た目を変えない）。
+        let legacy: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ui": { "patternId": "pattern_dots" } }"#)
+                .unwrap();
+        assert_eq!(legacy.ui.balloon_id, "balloon_default");
+        assert_eq!(legacy.ui.deco_id, "deco_none");
+        assert_eq!(legacy.ui.pattern_id, "pattern_dots");
+        let initial = PersistedSettings::initial();
+        assert_eq!(
+            (initial.ui.balloon_id.as_str(), initial.ui.deco_id.as_str()),
+            ("balloon_default", "deco_none")
+        );
+
+        let saved: PersistedSettings = serde_json::from_str(
+            r#"{ "ui": { "balloonId": "gacha_balloon_cloud", "decoId": "gacha_deco_crown" } }"#,
+        )
+        .unwrap();
+        assert_eq!(saved.ui.balloon_id, "gacha_balloon_cloud");
+        assert_eq!(saved.ui.deco_id, "gacha_deco_crown");
+        let raw = serde_json::to_string(&saved).unwrap();
+        assert!(raw.contains("\"balloonId\":\"gacha_balloon_cloud\""));
+        assert!(raw.contains("\"decoId\":\"gacha_deco_crown\""));
+    }
+
+    #[test]
     fn legacy_settings_without_onboarding_field_are_treated_as_completed() {
         // 既存ユーザーの settings.json（ui.onboardingCompleted なし / ui 自体なし）は完了扱い。
         let without_field: PersistedSettings =
@@ -719,6 +774,64 @@ mod tests {
         assert!(settings.to_dto().auto_summary_enabled);
         let stored = serde_json::to_value(&settings).unwrap();
         assert_eq!(stored["ai"]["autoSummaryEnabled"], true);
+    }
+
+    #[test]
+    fn notification_mode_round_trips_and_is_kept_when_omitted() {
+        let mut settings = PersistedSettings::default();
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("random_in_work_time")
+        );
+
+        settings.apply_from_dto(UserSettingsDto {
+            notification_mode: Some("fixed_time".to_string()),
+            ..UserSettingsDto::default()
+        });
+        assert_eq!(settings.notification.mode, "fixed_time");
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("fixed_time")
+        );
+
+        // 旧画面など notificationMode を送らない保存では、既存のモードを変えない。
+        settings.apply_from_dto(UserSettingsDto {
+            notification_mode: None,
+            ..UserSettingsDto::default()
+        });
+        assert_eq!(settings.notification.mode, "fixed_time");
+
+        // 手編集などの未知の保存値は、判定と同じ既定値として画面へ渡す。
+        settings.notification.mode = "unknown".to_string();
+        assert_eq!(
+            settings.to_dto().notification_mode.as_deref(),
+            Some("random_in_work_time")
+        );
+    }
+
+    #[test]
+    fn notification_mode_is_validated_and_optional_in_json() {
+        for mode in ["random_in_work_time", "random", "fixed_time", "none"] {
+            let dto = UserSettingsDto {
+                notification_mode: Some(mode.to_string()),
+                ..UserSettingsDto::default()
+            };
+            assert!(dto.validate().is_ok(), "{mode}");
+        }
+        for mode in ["", "RANDOM", "off", "random "] {
+            let dto = UserSettingsDto {
+                notification_mode: Some(mode.to_string()),
+                ..UserSettingsDto::default()
+            };
+            assert!(dto.validate().is_err(), "{mode:?}");
+        }
+
+        // 欄が無い JSON（旧画面）も読み込め、None（既存値のまま）になる。
+        let mut value = serde_json::to_value(UserSettingsDto::default()).unwrap();
+        value.as_object_mut().unwrap().remove("notificationMode");
+        let dto: UserSettingsDto = serde_json::from_value(value).unwrap();
+        assert!(dto.notification_mode.is_none());
+        assert!(dto.validate().is_ok());
     }
 
     #[test]
@@ -1117,7 +1230,7 @@ mod tests {
                 "notification": {{ "suppressedApps": ["{}"] }}
             }}"#,
             "あ".repeat(GENRE_MAX_CHARS + 1),
-            "a".repeat(SUPPRESSED_APP_MAX_CHARS + 1)
+            "a".repeat(300)
         );
 
         let mut settings: PersistedSettings = serde_json::from_str(&legacy).unwrap();
@@ -1125,50 +1238,30 @@ mod tests {
         let dto = settings.to_dto();
 
         assert_eq!(dto.nickname, "ゆう\nこ");
-        assert_eq!(settings.notification.suppressed_apps.len(), 1);
         assert!(dto.validate().is_err());
     }
 
     #[test]
-    fn suppressed_apps_accept_values_within_limits() {
-        let apps: Vec<String> = (0..SUPPRESSED_APPS_MAX_ITEMS)
-            .map(|i| format!(r"C:\Apps\app{i}.exe"))
-            .collect();
-        assert!(NotificationSettings::validate_suppressed_apps(&apps).is_ok());
-        assert!(NotificationSettings::validate_suppressed_apps(&[
-            "a".repeat(SUPPRESSED_APP_MAX_CHARS)
-        ])
-        .is_ok());
-        assert!(NotificationSettings::validate_suppressed_apps(&[]).is_ok());
-    }
+    fn legacy_settings_with_suppressed_apps_still_load_and_drop_on_save() {
+        // D146 で廃止した suppressedApps を含む旧 settings.json でも読み込みに失敗せず、
+        // 他の通知設定（会議中・全画面時の自動抑止）はそのまま引き継ぐ。再保存時には出力しない。
+        let legacy = r#"{
+            "version": 1,
+            "notification": {
+                "enabled": false,
+                "suppressInFullscreen": false,
+                "suppressDuringMeeting": true,
+                "suppressedApps": ["C:\\Apps\\zoom.exe", "teams.exe"]
+            }
+        }"#;
 
-    #[test]
-    fn suppressed_apps_reject_values_over_limits() {
-        let too_many: Vec<String> = (0..=SUPPRESSED_APPS_MAX_ITEMS)
-            .map(|i| format!("app{i}.exe"))
-            .collect();
-        assert_eq!(
-            validation_message(NotificationSettings::validate_suppressed_apps(&too_many)),
-            "suppressedApps must contain 50 items or fewer"
-        );
+        let settings: PersistedSettings = serde_json::from_str(legacy).unwrap();
+        assert!(!settings.notification.enabled);
+        assert!(!settings.notification.suppress_in_fullscreen);
+        assert!(settings.notification.suppress_during_meeting);
 
-        let too_long = format!("秘密{}", "a".repeat(SUPPRESSED_APP_MAX_CHARS));
-        let message =
-            validation_message(NotificationSettings::validate_suppressed_apps(&[too_long]));
-        assert_eq!(
-            message,
-            "each suppressedApps item must be 260 characters or fewer"
-        );
-        assert!(!message.contains("秘密"));
-
-        assert!(NotificationSettings::validate_suppressed_apps(&["  ".to_string()]).is_err());
-        for app in ["app\n.exe", "app\t.exe", "app\u{0}.exe"] {
-            assert_eq!(
-                validation_message(NotificationSettings::validate_suppressed_apps(&[
-                    app.to_string()
-                ])),
-                "suppressedApps must not contain control characters"
-            );
-        }
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(!saved.contains("suppressedApps"));
+        assert!(saved.contains("suppressDuringMeeting"));
     }
 }

@@ -22,7 +22,8 @@
   --destructive-foreground: oklch(0.577 0.245 27.325);
   --border: #E5E2D8;
   --input: #E5E2D8;
-  --ring: #5DBB72;
+  /* フォーカスの輪は意味を持つ線なので、文字用の濃い草色（--yuuko-green-text と同じ値）にする（D148）。 */
+  --ring: #2D7A40;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -36,10 +37,18 @@
   --sidebar-accent: #EAF7EA;
   --sidebar-accent-foreground: #3D3D3D;
   --sidebar-border: #E5E2D8;
-  --sidebar-ring: #5DBB72;
+  --sidebar-ring: #2D7A40;
   
   /* Custom Yuuko theme colors */
   --yuuko-green: #5DBB72;
+  /*
+   * 文字・細い線（枠線・フォーカス枠・意味を持つアイコン）用の草色（D148）。
+   * --yuuko-green（#5DBB72）は白地で 2.38:1 と WCAG AA に届かないため、背景・塗り・装飾だけに使い、
+   * 文字や細い線にはこちらを使う。#2D7A40 は 白 5.29:1 / クリーム背景 #FFFDF5 5.19:1 /
+   * --yuuko-green-light 4.78:1 / --yuuko-cream-dark 4.68:1（いずれも本文 4.5:1 以上）。
+   * 値は lib/theme-contrast.test.mjs で検査している。
+   */
+  --yuuko-green-text: #2D7A40;
   --yuuko-green-light: #EAF7EA;
   --yuuko-cream: #FFFDF5;
   --yuuko-cream-dark: #F4F1E7;
@@ -53,6 +62,7 @@
  */
 [data-theme="default"] {
   --yuuko-green: #5DBB72;
+  --yuuko-green-text: #2D7A40;
   --yuuko-green-light: #EAF7EA;
   --yuuko-cream: #FFFDF5;
 }
@@ -65,6 +75,7 @@
  *   本文 foreground/背景 ≒ 10.8:1、muted-foreground/背景・muted ≧ 5.2:1、
  *   primary ボタン（白文字）≧ 5.2:1、サイドバー選択中（--yuuko-green 文字/--yuuko-green-light）≧ 4.6:1。
  * --yuuko-green 系は名前に反してアプリのアクセント色として使われているため、テーマ色で上書きする。
+ * 報酬・ガチャテーマの --yuuko-green は最初から文字に使える濃さなので、--yuuko-green-text は同じ値にする。
  * 夜間（.dark）は報酬テーマではないため、ここには含めない。
  */
 [data-theme="theme_001"] {
@@ -95,6 +106,7 @@
   --sidebar-border: #D6E4F0;
   --sidebar-ring: #2B70AD;
   --yuuko-green: #2B70AD;
+  --yuuko-green-text: #2B70AD;
   --yuuko-green-light: #E6F2FC;
   --yuuko-cream: #F3F9FE;
   --yuuko-cream-dark: #EAF2F9;
@@ -130,6 +142,7 @@
   --sidebar-border: #F0DCE2;
   --sidebar-ring: #B53F61;
   --yuuko-green: #B53F61;
+  --yuuko-green-text: #B53F61;
   --yuuko-green-light: #FCEBF0;
   --yuuko-cream: #FFF7F9;
   --yuuko-cream-dark: #F9EEF1;
@@ -170,6 +183,7 @@
   --sidebar-border: #CDE8DF;
   --sidebar-ring: #1B7565;
   --yuuko-green: #1B7565;
+  --yuuko-green-text: #1B7565;
   --yuuko-green-light: #DFF3EC;
   --yuuko-cream: #F1FAF7;
   --yuuko-cream-dark: #E7F4EF;
@@ -205,6 +219,7 @@
   --sidebar-border: #F0E1B0;
   --sidebar-ring: #B25000;
   --yuuko-green: #B25000;
+  --yuuko-green-text: #B25000;
   --yuuko-green-light: #FFEFC2;
   --yuuko-cream: #FFFAE6;
   --yuuko-cream-dark: #FBF2D6;
@@ -240,6 +255,7 @@
   --sidebar-border: #DED6F2;
   --sidebar-ring: #6B4FB3;
   --yuuko-green: #6B4FB3;
+  --yuuko-green-text: #6B4FB3;
   --yuuko-green-light: #EEE8FB;
   --yuuko-cream: #F8F5FE;
   --yuuko-cream-dark: #F0ECF9;
@@ -280,6 +296,8 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.439 0 0);
+  /* 夜間は暗い背景なので、元の明るい草色のままで文字に使える（#5DBB72 / oklch(0.145 0 0) ≒ 8.3:1、/ muted 6.4:1）。 */
+  --yuuko-green-text: #5DBB72;
 }
 
 @theme inline {
@@ -330,14 +348,183 @@
   body {
     @apply bg-background text-foreground;
   }
+  /*
+   * 画面の枠（タイトルバー・状態表示・左サイドバー）とボタン・タブの文字は、ドラッグで選択されないようにする
+   * （実機テスト B12。アプリの部品の文字が本文と一緒に青く選ばれて散らかって見えたため）。
+   * 左サイドバーは画面ナビ（nav）を含む aside として指す（各画面・ホーム・設定で共通に効かせるため）。
+   * 本文・要約・解説・辞書の説明などの読み物と入力欄は対象外で、これまでどおり選べる（用語解説の範囲選択もそのまま）。
+   */
+  header,
+  footer,
+  nav,
+  aside:has(nav),
+  button,
+  [role="tab"],
+  [role="tablist"] {
+    user-select: none;
+  }
 }
 
-/* Prevent Windows contrast themes (forced-colors) from overriding app colors. */
+/*
+ * Windows のハイコントラスト（forced-colors）では、OS の配色をそのまま使わせる（D148）。
+ * 以前は全要素に forced-color-adjust: none を当てて打ち消していたが、それではハイコントラストが効かず
+ * 文字が読めなくなる利用者がいるため撤去した。個別に打ち消しが必要な要素ができたら、その要素だけに当てる。
+ * 現在 forced-color-adjust: none（Tailwind の forced-color-adjust-none）を当てているのは次だけ:
+ *   - app/yuuko-window/page.tsx の html/body（透明な常駐ゆうこウィンドウが不透明な四角にならないように）
+ *   - components/screens/GachaScreen.tsx のガチャ機・背景装飾（文字を含まない絵）
+ *   - components/screens/CustomizeScreen.tsx のテーマ色見本（色そのものが情報）と模様の見本（components/PatternSwatch.tsx）
+ *   - components/ui/progress.tsx の進み具合の塗り、components/ui/switch.tsx（OS の Highlight 等で明示的に描く）
+ * 塗りの色だけで選択中を示すチップ・タブは、lib/forced-colors.ts の FORCED_COLORS_SELECTED で枠を出す。
+ */
+
+/*
+ * テーマの地に敷く模様（判断台帳 D152〜D154・docs/02_design/テーマ模様_素材受け入れ基準.md）。
+ * 色テーマとは独立に選び、<html data-pattern="<id>"> で切り替える（既定 "none" は今の見た目のまま）。
+ * 形は public/assets/patterns の黒1色 SVG を mask-image の型にし、色は各テーマの --yuuko-green-text、
+ * 濃さは opacity で決める（1つの SVG で全テーマに合う）。ID・濃さ・大きさは lib/ui-pattern.mjs の
+ * UI_PATTERNS と揃える（lib/ui-pattern.test.mjs で照合）。大きさ 100% = SVG の実寸で、継ぎ目が出ないよう整数 px に丸める。
+ *
+ * 敷き方: メイン画面の外枠（components/layout/PatternGround.tsx）に画面全体で1枚だけ敷く。
+ * 列ごとに別の層にすると境目で柄の並びがやり直しになり段差ができるため（ビューポート基準の fixed で1枚）。
+ * サイドバー・タイトルバー・カード・吹き出しは不透明な白のまま上に乗るので、文字の下には模様が出ない。
+ * 各画面の外側の div は地の色（--yuuko-cream）を不透明に塗っているため、模様があるときだけ透明にして、
+ * 同じ地の色を外枠（.app-ground）が受け持つ（--background と --yuuko-cream は全テーマで同じ値）。
+ * 印刷・Windows ハイコントラスト（forced-colors）では模様を出さない。
+ */
+[data-pattern="none"] {
+  --yuuko-pattern-image: none;
+  --yuuko-pattern-size: auto;
+  --yuuko-pattern-opacity: 0;
+}
+
+[data-pattern="pattern_dots"] {
+  --yuuko-pattern-image: url("/assets/patterns/dots.svg");
+  --yuuko-pattern-size: 36px 36px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="pattern_paw"] {
+  --yuuko-pattern-image: url("/assets/patterns/paw.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_sparkle"] {
+  --yuuko-pattern-image: url("/assets/patterns/sparkle.svg");
+  --yuuko-pattern-size: 60px 60px;
+  --yuuko-pattern-opacity: 0.13;
+}
+
+[data-pattern="gacha_pattern_gingham"] {
+  --yuuko-pattern-image: url("/assets/patterns/gingham.svg");
+  --yuuko-pattern-size: 32px 32px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_bone"] {
+  --yuuko-pattern-image: url("/assets/patterns/bone.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_grid"] {
+  --yuuko-pattern-image: url("/assets/patterns/grid.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.16;
+}
+
+[data-pattern="gacha_pattern_kotoba"] {
+  --yuuko-pattern-image: url("/assets/patterns/kotoba.svg");
+  --yuuko-pattern-size: 72px 72px;
+  --yuuko-pattern-opacity: 0.13;
+}
+
+[data-pattern="gacha_pattern_stripe"] {
+  --yuuko-pattern-image: url("/assets/patterns/stripe.svg");
+  --yuuko-pattern-size: 30px 30px;
+  --yuuko-pattern-opacity: 0.06;
+}
+
+[data-pattern="gacha_pattern_heart"] {
+  --yuuko-pattern-image: url("/assets/patterns/heart.svg");
+  --yuuko-pattern-size: 56px 56px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_cloud"] {
+  --yuuko-pattern-image: url("/assets/patterns/cloud.svg");
+  --yuuko-pattern-size: 72px 72px;
+  --yuuko-pattern-opacity: 0.11;
+}
+
+[data-pattern="gacha_pattern_sakura"] {
+  --yuuko-pattern-image: url("/assets/patterns/sakura.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_seigaiha"] {
+  --yuuko-pattern-image: url("/assets/patterns/seigaiha.svg");
+  --yuuko-pattern-size: 48px 24px;
+  --yuuko-pattern-opacity: 0.15;
+}
+
+[data-pattern="gacha_pattern_ginkgo"] {
+  --yuuko-pattern-image: url("/assets/patterns/ginkgo.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.12;
+}
+
+[data-pattern="gacha_pattern_snow"] {
+  --yuuko-pattern-image: url("/assets/patterns/snow.svg");
+  --yuuko-pattern-size: 64px 64px;
+  --yuuko-pattern-opacity: 0.16;
+}
+
+/* 型抜きで塗る部品（画面全体の層・カスタマイズ画面の見本で共通）。-webkit- 付きはビルド時に自動で足される。 */
+.yuuko-pattern-fill {
+  background-color: var(--yuuko-green-text);
+  mask-image: var(--yuuko-pattern-image);
+  mask-size: var(--yuuko-pattern-size);
+  mask-repeat: repeat;
+  mask-position: 0 0;
+  opacity: var(--yuuko-pattern-opacity);
+}
+
+.app-ground {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--yuuko-cream);
+}
+
+/* 模様の層は「なし」のとき描かない（全画面の合成を増やさない）。 */
+.app-pattern-layer {
+  display: none;
+}
+
+html[data-pattern]:not([data-pattern="none"]) .app-pattern-layer {
+  display: block;
+  position: fixed;
+  inset: 0;
+  /* .app-ground（isolation: isolate）の中で、地の色の上・各画面の中身の下に描く。 */
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* 模様があるときだけ、各画面の外側の地の塗りを外して下の模様を見せる（Tailwind の utilities より優先される層外の指定）。 */
+html[data-pattern]:not([data-pattern="none"]) .app-ground > :not(.app-pattern-layer) {
+  background-color: transparent;
+}
+
+@media print {
+  .app-pattern-layer {
+    display: none !important;
+  }
+}
+
 @media (forced-colors: active) {
-  :root,
-  body,
-  * {
-    forced-color-adjust: none;
+  .app-pattern-layer {
+    display: none !important;
   }
 }
 
@@ -380,10 +567,319 @@
   animation: yuuko-notification-pop-out 0.3s ease-in both;
 }
 
+/* ガチャをまわしたときに、ゆうこが3回跳ねてから結果を出す（実機テスト B16。0.3s×3 = GachaScreen の DRAW_REVEAL_DELAY_MS）。
+   動きを抑える設定では付けない（画面側も待たずに結果を出す）。transform だけを動かす軽い演出。 */
+@keyframes yuuko-gacha-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  45% {
+    transform: translateY(-18px);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .yuuko-gacha-hop {
+    animation: yuuko-gacha-hop 0.3s ease-in-out 3;
+  }
+}
+
 /* 動きを抑える設定では演出を止める（軽量性・アクセシビリティ）。 */
 @media (prefers-reduced-motion: reduce) {
   .yuuko-notification-enter,
   .yuuko-notification-leave {
     animation: none;
+  }
+}
+
+/*
+ * ゆうこの吹き出し（判断台帳 D155）。components/yuuko/YuukoBalloon.tsx が `.yuuko-bb .yuuko-bb-<形>` を付ける。
+ * 「いつもの」（既定）は各画面がもともと持つ形をそのまま使うため、ここには置かない（既定の見た目を変えない）。
+ * 画像は使わず CSS だけで描き、色は各テーマの変数から取る（--yuuko-green-text・--yuuko-green-light・--border・--foreground）。
+ * 本文の地は白かテーマの淡い色（--yuuko-green-light）にし、文字との対比は全テーマで WCAG AA（4.5:1）以上。
+ * 形は @layer components に置き、画面ごとの置き方（余白・幅）を Tailwind のユーティリティで上書きできるようにする。
+ * しっぽの向きは data-tail（bottom-left が基本。bottom-right / right / none）で切り替える。
+ * 素材の受け入れ基準は docs/02_design/ゆうこ着せかえ_素材受け入れ基準.md。
+ */
+@layer components {
+  .yuuko-bb {
+    position: relative;
+    padding: 10px 14px;
+    color: var(--foreground);
+  }
+
+  /* 共通: 白地のふち付き吹き出しの、45 度に回した四角のしっぽ（下向き）。 */
+  .yuuko-bb-rim::after,
+  .yuuko-bb-note::after,
+  .yuuko-bb-seal::after {
+    content: "";
+    position: absolute;
+    left: 32px;
+    top: 100%;
+    width: 12px;
+    height: 12px;
+    background: #fff;
+    transform: translateY(-6px) rotate(45deg);
+  }
+
+  /* 吹き出しの中に置く閉じるボタンの位置。形がふちを内側に描く（雲の丸など）ときは、その形が
+     --yuuko-bb-close-inset で内側へ下げ、ふちに重ならないようにする。既定（いつもの・他の形）は 8px。 */
+  .yuuko-bb-close {
+    top: var(--yuuko-bb-close-inset, 8px);
+    right: var(--yuuko-bb-close-inset, 8px);
+  }
+
+  /* テーマ色のふち */
+  .yuuko-bb-rim {
+    background: #fff;
+    border: 2px solid var(--yuuko-green-text);
+    border-radius: 14px;
+  }
+  .yuuko-bb-rim::after {
+    border-right: 2px solid var(--yuuko-green-text);
+    border-bottom: 2px solid var(--yuuko-green-text);
+  }
+
+  /* もこもこ雲: 四辺に丸を並べる。repeat: round で辺の長さに合わせて丸の間隔を整え、端で丸が切れないようにする。
+     ふちは drop-shadow を 4 方向に重ねて、もこもこの形に沿わせる。しっぽは考えごとの丸。 */
+  .yuuko-bb-cloud {
+    /* 閉じるボタン（.yuuko-bb-close）を、四辺の丸（22px）の内側の地へ下げる（実機テスト B15）。 */
+    --yuuko-bb-close-inset: 11px;
+    --yuuko-bb-fill: var(--yuuko-green-light);
+    --yuuko-bb-line: color-mix(in srgb, var(--yuuko-green-text) 45%, transparent);
+    background: transparent;
+    padding: 16px 20px;
+    isolation: isolate;
+  }
+  .yuuko-bb-cloud::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      linear-gradient(var(--yuuko-bb-fill), var(--yuuko-bb-fill)) 10px 10px / calc(100% - 20px) calc(100% - 20px) no-repeat,
+      radial-gradient(closest-side, var(--yuuko-bb-fill) 94%, transparent) 0 0 / 22px 22px round no-repeat,
+      radial-gradient(closest-side, var(--yuuko-bb-fill) 94%, transparent) 0 100% / 22px 22px round no-repeat,
+      radial-gradient(closest-side, var(--yuuko-bb-fill) 94%, transparent) 0 0 / 22px 22px no-repeat round,
+      radial-gradient(closest-side, var(--yuuko-bb-fill) 94%, transparent) 100% 0 / 22px 22px no-repeat round;
+    filter: drop-shadow(1px 0 0 var(--yuuko-bb-line)) drop-shadow(-1px 0 0 var(--yuuko-bb-line))
+      drop-shadow(0 1px 0 var(--yuuko-bb-line)) drop-shadow(0 -1px 0 var(--yuuko-bb-line));
+  }
+  .yuuko-bb-cloud::after {
+    content: "";
+    position: absolute;
+    left: 22px;
+    top: calc(100% + 1px);
+    width: 24px;
+    height: 24px;
+    background:
+      radial-gradient(circle at 70% 25%, var(--yuuko-bb-fill) 5px, var(--yuuko-bb-line) 5px 6px, transparent 6.5px),
+      radial-gradient(circle at 28% 78%, var(--yuuko-bb-fill) 3px, var(--yuuko-bb-line) 3px 4px, transparent 4.5px);
+  }
+
+  /* ノート: 罫線と余白線 */
+  .yuuko-bb-note {
+    background-color: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 14px 8px 26px;
+    line-height: 22px;
+    background-image:
+      linear-gradient(90deg, transparent 17px, color-mix(in srgb, var(--yuuko-green-text) 55%, transparent) 17px 19px, transparent 19px),
+      repeating-linear-gradient(transparent 0 21px, var(--border) 21px 22px);
+    background-position: 0 0, 0 8px;
+  }
+  .yuuko-bb-note::after {
+    width: 10px;
+    height: 10px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    transform: translateY(-5px) rotate(45deg);
+  }
+
+  /* 付箋: テープで貼り、少し傾けて角をめくる（しっぽは無い） */
+  .yuuko-bb-sticky {
+    background: var(--yuuko-green-light);
+    border-radius: 2px 2px 2px 14px;
+    transform: rotate(-1.5deg);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    padding: 16px 16px 12px;
+  }
+  .yuuko-bb-sticky::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: -7px;
+    width: 54px;
+    height: 15px;
+    transform: translateX(-50%) rotate(2deg);
+    background: rgba(255, 255, 255, 0.65);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  /* 点線 */
+  .yuuko-bb-dash {
+    background: #fff;
+    border: 2px dashed var(--yuuko-green-text);
+    border-radius: 16px;
+  }
+  .yuuko-bb-dash::after {
+    content: "";
+    position: absolute;
+    left: 34px;
+    top: 100%;
+    border: 7px solid transparent;
+    border-top-color: var(--yuuko-green-text);
+  }
+
+  /* エアメール: 手紙のしま模様のふち（しっぽは無い） */
+  .yuuko-bb-airmail {
+    background: #fff;
+    border: 6px solid transparent;
+    padding: 8px 12px;
+    border-image: repeating-linear-gradient(
+        -45deg,
+        var(--yuuko-green-text) 0 7px,
+        #fff 7px 12px,
+        #d9534f 12px 19px,
+        #fff 19px 24px
+      )
+      6;
+  }
+
+  /* ドット絵: ゆうこの絵柄に合わせ、角を欠いた黒ふちと段々のしっぽ（字体はふつうのまま。D155） */
+  .yuuko-bb-pixel {
+    background: #fff;
+    margin: 4px;
+    border-radius: 0;
+    box-shadow: 0 -4px 0 0 #1a1a1a, 0 4px 0 0 #1a1a1a, -4px 0 0 0 #1a1a1a, 4px 0 0 0 #1a1a1a;
+  }
+  .yuuko-bb-pixel::after {
+    content: "";
+    position: absolute;
+    left: 28px;
+    top: 100%;
+    width: 4px;
+    height: 4px;
+    background: transparent;
+    box-shadow:
+      4px 0 #fff, 8px 0 #fff,
+      0 4px #1a1a1a, 4px 4px #fff, 8px 4px #fff, 12px 4px #1a1a1a,
+      0 8px #1a1a1a, 4px 8px #fff, 8px 8px #1a1a1a,
+      0 12px #1a1a1a, 4px 12px #1a1a1a, 0 16px #1a1a1a;
+  }
+
+  /* ゲームのメッセージ窓: 地はテーマ色を暗くしたもの、文字は白。▼ は点滅（動きを抑える設定では止める） */
+  .yuuko-bb-game {
+    --yuuko-bb-window: color-mix(in srgb, var(--yuuko-green-text) 30%, #15172a);
+    background: var(--yuuko-bb-window);
+    color: #fff;
+    border: 3px solid #fff;
+    outline: 3px solid var(--yuuko-bb-window);
+    border-radius: 6px;
+    margin: 3px;
+    padding: 10px 26px 12px 14px;
+  }
+  .yuuko-bb-game::after {
+    content: "▼";
+    position: absolute;
+    right: 9px;
+    bottom: 4px;
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  /* シール: 濃いふちと、ずらしたテーマ色の影（平成レトロ風） */
+  .yuuko-bb-seal {
+    background: #fff;
+    border: 2px solid var(--foreground);
+    border-radius: 18px;
+    box-shadow: 3px 3px 0 var(--yuuko-green-text);
+  }
+  .yuuko-bb-seal::after {
+    border-right: 2px solid var(--foreground);
+    border-bottom: 2px solid var(--foreground);
+  }
+
+  /* --- しっぽの向き --- */
+  /* 下の右寄り: 位置を右へ寄せる。左右で形が違うしっぽ（雲・ドット絵）は左右反転する。 */
+  .yuuko-bb:not(.yuuko-bb-game)[data-tail="bottom-right"]::after {
+    left: auto;
+    right: 30px;
+  }
+  .yuuko-bb-cloud[data-tail="bottom-right"]::after,
+  .yuuko-bb-pixel[data-tail="bottom-right"]::after {
+    transform: scaleX(-1);
+  }
+
+  /* 右: 右の辺の下寄りから右へ出す（ゆうこが吹き出しの右にいる画面用）。 */
+  .yuuko-bb-rim[data-tail="right"]::after,
+  .yuuko-bb-seal[data-tail="right"]::after {
+    left: 100%;
+    top: auto;
+    bottom: 14px;
+    transform: translateX(-6px) rotate(-45deg);
+  }
+  .yuuko-bb-note[data-tail="right"]::after {
+    left: 100%;
+    top: auto;
+    bottom: 14px;
+    transform: translateX(-5px) rotate(-45deg);
+  }
+  .yuuko-bb-dash[data-tail="right"]::after {
+    left: 100%;
+    top: auto;
+    bottom: 14px;
+    border-top-color: transparent;
+    border-left-color: var(--yuuko-green-text);
+  }
+  .yuuko-bb-cloud[data-tail="right"]::after {
+    left: calc(100% - 2px);
+    top: auto;
+    bottom: -8px;
+    transform: rotate(-90deg);
+  }
+  .yuuko-bb-pixel[data-tail="right"]::after {
+    left: 100%;
+    top: auto;
+    bottom: 12px;
+    transform-origin: 0 0;
+    transform: rotate(-90deg);
+  }
+
+  /* なし: しっぽを描かない（ゲームの窓の ▼ はしっぽではないので残す）。 */
+  .yuuko-bb:not(.yuuko-bb-game)[data-tail="none"]::after {
+    display: none;
+  }
+}
+
+/* 罫線に合わせるため、ノートの中の文字の行の高さを罫線の間隔にそろえる（各画面の leading-relaxed より優先させるため層の外に置く）。 */
+.yuuko-bb-note :where(p) {
+  line-height: 22px;
+}
+
+/* ゲームの窓は地が暗いため、中の文字・アイコンを白にする（各画面の text-foreground などより優先させるため層の外に置く）。
+   自前の背景色を持つ部品（「詳しく見る」ボタンやバッジなど、bg-* を持つ要素）とその中身は、白地に白文字にならないよう対象外にする。
+   吹き出しの外側の親（画面やダイアログの bg-*）には反応しないよう、吹き出しの内側に限る。 */
+.yuuko-bb-game :where(p, span, h1, h2, h3, h4, svg, a):not(.yuuko-bb-game [class*="bg-"], .yuuko-bb-game [class*="bg-"] *) {
+  color: #fff;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .yuuko-bb-game::after {
+    animation: yuuko-bb-blink 1s steps(2, start) infinite;
+  }
+}
+
+@keyframes yuuko-bb-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/* Windows ハイコントラストでは影・背景の絵で描いたふちが消えるため、OS の文字色で輪郭を足す。 */
+@media (forced-colors: active) {
+  .yuuko-bb {
+    outline: 2px solid CanvasText;
   }
 }

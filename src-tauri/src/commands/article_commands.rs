@@ -8,7 +8,9 @@ use crate::domain::article::{
     ListArticleHistoryParams, OpenOriginalArticleParams, RestoreArchivedArticleParams,
     RestoreArchivedArticleResult, UpdateArticleFavoriteParams,
 };
-use crate::domain::summary::{GenerateArticleSummaryParams, GeneratedArticleSummaryDto};
+use crate::domain::summary::{
+    AutoSummaryStatusDto, GenerateArticleSummaryParams, GeneratedArticleSummaryDto,
+};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -103,6 +105,20 @@ pub async fn generate_article_summary(
         .await
         .map_err(|error| CommandError::join_error("generate-article-summary", error))?
         .map_err(CommandError::from)
+}
+
+/// 自動要約の今の状態の種類だけを返す読み取り専用 command（判断台帳 D158）。
+/// 記事画面が「なぜ自動で要約されないか」（ゲーム・発表中で休んでいる・設定で無効など）を出すために使う。
+/// 引数は取らず、キー・本文・パス・アプリ名は返さない。OS への問い合わせ・AI 呼び出しはしない
+/// （設定ファイルの読み取りと、キューのメモリ上の状態の参照だけ）。
+#[tauri::command]
+pub async fn get_auto_summary_status(
+    state: State<'_, AppState>,
+) -> CommandResult<AutoSummaryStatusDto> {
+    let auto_summary_queue = state.auto_summary_queue.clone();
+    tauri::async_runtime::spawn_blocking(move || auto_summary_queue.status())
+        .await
+        .map_err(|error| CommandError::join_error("auto-summary-status", error))
 }
 
 /// アーカイブ退避候補（取得から約1か月超・非お気に入り・非archived）を返す read-only command。

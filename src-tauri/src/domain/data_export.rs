@@ -6,6 +6,7 @@
 //! - `MigrationImportCandidateDto` / `MigrationImportResultDto`: 取り込み（§15.7）の候補一覧と結果。
 //!   こちらもフルパスは返さず、`imports/` 内のファイル名だけを扱う。
 //! - `MigrationFolderKind`: `open_migration_folder` で開ける固定フォルダの種類（`exports/` / `imports/` だけ）。
+//! - `StorageUsageDto`: `get_storage_usage` が返す保存データの大きさ（区分ごとのバイト数だけ。パスは返さない）。
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +95,25 @@ pub struct MigrationImportResultDto {
     /// 取り込み後はアプリの再起動を勧めるか。現状は常に true
     /// （画面が持つ表示中の値や自動要約キューの記事ID、起動時の報酬同期が取り込み前のデータに基づくため）。
     pub restart_required: bool,
+}
+
+/// `get_storage_usage` の戻り値（設定画面の「ストレージ状況」）。
+///
+/// 数えるのは移行ZIPと同じ許可リストのファイル（記事・月次アーカイブ・辞書・設定などの保存データ）だけ。
+/// ログ・キャッシュ・書き出したZIP・同梱AIモデルは含めない。パスやファイル名は返さず、区分ごとの合計だけを返す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsageDto {
+    /// 下の4区分の合計。
+    pub total_bytes: u64,
+    /// ニュース記事Markdown（`news/`）。
+    pub article_bytes: u64,
+    /// 月次アーカイブZIP（`archive/YYYY-MM.zip`）。
+    pub archive_bytes: u64,
+    /// ゆうこ辞書（`dictionary/entries.json`）。
+    pub dictionary_bytes: u64,
+    /// 設定・お気に入り・友情ランク・報酬・ガチャ・アーカイブ索引。
+    pub other_bytes: u64,
 }
 
 #[cfg(test)]

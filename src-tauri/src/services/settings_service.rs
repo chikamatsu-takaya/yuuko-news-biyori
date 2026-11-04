@@ -1,5 +1,7 @@
+use crate::domain::dressup::{BALLOON_DEFAULT_ID, DECO_NONE_ID};
+use crate::domain::pattern::PATTERN_NONE_ID;
 use crate::domain::reward::{resolve_known_theme_id, DEFAULT_THEME_ID};
-use crate::domain::settings::{PersistedSettings, UserSettingsDto};
+use crate::domain::settings::{validate_nickname, PersistedSettings, UserSettingsDto};
 use crate::error::AppError;
 use crate::repositories::settings_repository::SettingsRepository;
 
@@ -34,18 +36,45 @@ impl SettingsService {
     }
 
     /// 設定画面からの保存。適用中テーマ（`ui.themeId`）は保存済みの値を保ち、DTO の selectedThemeId では変えない。
+    /// 模様（`ui.patternId`）・着せかえ（`ui.balloonId` / `ui.decoId`）は DTO に含めないため、
+    /// `apply_from_dto` で変わらず保存済みの値のまま残る。
     /// テーマは解放・所持の判定を通す `set_active_theme`（カスタマイズ画面）からだけ変える
     /// （ここで受け付けると、未解放のテーマや、設定画面を開いた時点の古い値で上書きできてしまうため）。
+    ///
+    /// 呼び名は、保存済みの値と同じときは検証しない。呼び名の入力欄はカスタマイズ画面だけにあり（D161）、
+    /// 設定画面は読み込んだ値を書き戻すだけなので、検証の導入前に保存された呼び名（改行入り・33文字以上など）が
+    /// 残っていても、ほかの設定の保存まで失敗させないため。変える場合（初回案内など）は従来どおり検証する。
     pub fn save_user_settings(&self, dto: UserSettingsDto) -> Result<(), AppError> {
-        dto.validate()?;
+        dto.validate_except_nickname()?;
 
         let _guard = self.repository.lock_updates();
         let mut persisted = self.repository.load_or_default()?;
+        if dto.nickname != persisted.user.nickname {
+            validate_nickname(&dto.nickname)?;
+        }
         let current_theme_id = persisted.ui.theme_id.clone();
         persisted.apply_from_dto(dto);
         persisted.ui.theme_id = current_theme_id;
         self.repository.save(&persisted)?;
         Ok(())
+    }
+
+    /// 呼び名（`user.nickname`）だけを更新して保存し、保存した呼び名を返す（カスタマイズ画面の `set_nickname`。判断台帳 D161）。
+    /// 設定全体を上書きする `save_user_settings` を使わないのは、ほかの欄（通知・AI など）を
+    /// 呼び出し側が持っている古い値で上書きしないため。前後の空白は除き、空なら呼び名なしとして保存する。
+    /// 検証は `save_user_settings` と同じ `validate_nickname`（32文字・制御文字なし）。不正なら何も保存しない。
+    /// 設定ファイルが壊れているときは読み込みで失敗し、上書きしない（初期化は設定画面の操作に任せる）。
+    pub fn set_nickname(&self, nickname: &str) -> Result<String, AppError> {
+        let nickname = nickname.trim();
+        validate_nickname(nickname)?;
+
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.user.nickname != nickname || !self.repository.exists() {
+            persisted.user.nickname = nickname.to_string();
+            self.repository.save(&persisted)?;
+        }
+        Ok(persisted.user.nickname)
     }
 
     /// 適用中テーマ（`ui.themeId`）だけを更新して保存する。
@@ -57,6 +86,70 @@ impl SettingsService {
             return Ok(());
         }
         persisted.ui.theme_id = theme_id.to_string();
+        self.repository.save(&persisted)
+    }
+
+    /// 保存済みの模様 ID（`ui.patternId`）をそのまま返す。選べるかの判定は呼び出し側（PatternService）が行う。
+    /// 設定を読めないときは「なし」に倒す（模様は見た目だけの機能で、画面を止めない）。
+    pub fn saved_pattern_id(&self) -> String {
+        match self.repository.load_or_default() {
+            Ok(persisted) => persisted.ui.pattern_id,
+            Err(error) => {
+                log::warn!("設定を読めなかったため模様なしとして扱います: {error}");
+                PATTERN_NONE_ID.to_string()
+            }
+        }
+    }
+
+    /// 模様（`ui.patternId`）だけを更新して保存する。
+    /// 選んでよい模様かの判定は呼び出し側（PatternService::set_active_pattern）で済ませてから呼ぶ。
+    pub fn set_pattern_id(&self, pattern_id: &str) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        if persisted.ui.pattern_id == pattern_id && self.repository.exists() {
+            return Ok(());
+        }
+        persisted.ui.pattern_id = pattern_id.to_string();
+        self.repository.save(&persisted)
+    }
+
+    /// 保存済みの着せかえ ID（`ui.balloonId`, `ui.decoId`）をそのまま返す。選べるかの判定は呼び出し側
+    /// （DressupService）が行う。設定を読めないときは既定（いつもの・なし）に倒す（見た目だけの機能で、画面を止めない）。
+    pub fn saved_dressup_ids(&self) -> (String, String) {
+        match self.repository.load_or_default() {
+            Ok(persisted) => (persisted.ui.balloon_id, persisted.ui.deco_id),
+            Err(error) => {
+                log::warn!("設定を読めなかったため着せかえは既定として扱います: {error}");
+                (BALLOON_DEFAULT_ID.to_string(), DECO_NONE_ID.to_string())
+            }
+        }
+    }
+
+    /// 吹き出し（`ui.balloonId`）だけを更新して保存する。
+    /// 選んでよい吹き出しかの判定は呼び出し側（DressupService::set_active_balloon）で済ませてから呼ぶ。
+    pub fn set_balloon_id(&self, balloon_id: &str) -> Result<(), AppError> {
+        self.update_ui_field(balloon_id, |persisted| &mut persisted.ui.balloon_id)
+    }
+
+    /// 飾り（`ui.decoId`）だけを更新して保存する。
+    /// 選んでよい飾りかの判定は呼び出し側（DressupService::set_active_deco）で済ませてから呼ぶ。
+    pub fn set_deco_id(&self, deco_id: &str) -> Result<(), AppError> {
+        self.update_ui_field(deco_id, |persisted| &mut persisted.ui.deco_id)
+    }
+
+    /// 設定の文字列欄を 1 つだけ更新する（ロックを取り、同じ値でファイルがあれば書かない）。
+    fn update_ui_field(
+        &self,
+        value: &str,
+        field: impl FnOnce(&mut PersistedSettings) -> &mut String,
+    ) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        let target = field(&mut persisted);
+        if target == value && self.repository.exists() {
+            return Ok(());
+        }
+        *target = value.to_string();
         self.repository.save(&persisted)
     }
 
@@ -125,7 +218,7 @@ impl SettingsService {
 mod tests {
     use super::*;
     use crate::domain::settings::AiProvider;
-    use crate::domain::settings::{NotificationSettings, WorkTimeRange};
+    use crate::domain::settings::{NotificationSettings, WorkTimeRange, NICKNAME_MAX_CHARS};
     use crate::repositories::settings_repository::SettingsRepository;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -143,6 +236,89 @@ mod tests {
             SettingsService::new(SettingsRepository::with_path(path.clone())),
             path,
         )
+    }
+
+    #[test]
+    fn save_user_settings_keeps_a_legacy_invalid_nickname_when_unchanged() {
+        let (service, path) = temp_service();
+        // 検証の導入前・手編集で、今の検証に通らない呼び名が保存されている。
+        for legacy in ["ゆう\nこ".to_string(), "あ".repeat(NICKNAME_MAX_CHARS + 1)] {
+            let json = serde_json::json!({ "version": 1, "user": { "nickname": legacy } });
+            std::fs::write(&path, json.to_string()).unwrap();
+
+            // 設定画面は呼び名を読み込んだまま書き戻す。ほかの設定の保存は失敗させない。
+            let mut dto = service.get_user_settings().unwrap();
+            dto.notify_max_per_day = 9;
+            service.save_user_settings(dto).unwrap();
+            let reloaded = service.get_user_settings().unwrap();
+            assert_eq!(reloaded.notify_max_per_day, 9);
+            assert_eq!(reloaded.nickname, legacy);
+
+            // 呼び名を不正な値へ変える保存は従来どおり拒否し、何も保存しない。
+            let mut changed = service.get_user_settings().unwrap();
+            changed.nickname = "ゆう\tこ".to_string();
+            changed.notify_max_per_day = 4;
+            let error = service.save_user_settings(changed).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)));
+            assert_eq!(service.get_user_settings().unwrap().notify_max_per_day, 9);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_saves_only_the_nickname() {
+        let (service, path) = temp_service();
+        let mut dto = service.get_user_settings().unwrap();
+        dto.notify_max_per_day = 7;
+        dto.genres = vec!["AI".to_string()];
+        service.save_user_settings(dto).unwrap();
+
+        let saved = service.set_nickname("  ゆう<さん>  ").unwrap();
+        // 前後の空白だけ除き、`<` などは入力どおり保存する（台詞へ差し込む直前に無害化する）。
+        assert_eq!(saved, "ゆう<さん>");
+
+        let reloaded = service.get_user_settings().unwrap();
+        assert_eq!(reloaded.nickname, "ゆう<さん>");
+        // ほかの欄は変わらない。
+        assert_eq!(reloaded.notify_max_per_day, 7);
+        assert_eq!(reloaded.genres, vec!["AI".to_string()]);
+
+        // 空にすると呼び名なしとして保存する。
+        assert_eq!(service.set_nickname("   ").unwrap(), "");
+        assert_eq!(service.get_user_settings().unwrap().nickname, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_rejects_invalid_input_without_saving() {
+        let (service, path) = temp_service();
+        service.set_nickname("ゆう").unwrap();
+
+        for invalid in [
+            "あ".repeat(NICKNAME_MAX_CHARS + 1),
+            "ゆう\nこ".to_string(),
+            "ゆう\tこ".to_string(),
+            "ゆう\u{1b}こ".to_string(),
+        ] {
+            let error = service.set_nickname(&invalid).unwrap_err();
+            assert!(matches!(error, AppError::Validation(_)), "{invalid:?}");
+            // 不正な入力では何も保存しない。
+            assert_eq!(service.get_user_settings().unwrap().nickname, "ゆう");
+        }
+        // 上限ちょうどは受け付ける。前後の空白は除いてから数える。
+        let max = "あ".repeat(NICKNAME_MAX_CHARS);
+        assert_eq!(service.set_nickname(&max).unwrap(), max);
+        assert_eq!(service.set_nickname(&format!(" {max} ")).unwrap(), max);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_nickname_does_not_overwrite_corrupt_settings_file() {
+        let (service, path) = temp_service();
+        std::fs::write(&path, "{ broken json").unwrap();
+        assert!(service.set_nickname("ゆう").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken json");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -431,6 +607,74 @@ mod tests {
         assert_eq!(
             service.get_user_settings().unwrap().selected_theme_id,
             "default"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn pattern_id_defaults_to_none_and_survives_settings_save() {
+        // 模様は set_active_pattern からだけ変える。設定画面の保存では消えない。
+        let (service, path) = temp_service();
+        assert_eq!(service.saved_pattern_id(), "none");
+        service.set_pattern_id("pattern_paw").unwrap();
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+
+        let dto = UserSettingsDto {
+            nickname: "テスト".to_string(),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"patternId\": \"pattern_paw\"")
+                || raw.contains("\"patternId\":\"pattern_paw\"")
+        );
+
+        // リセットは他の見た目の設定と同じく既定（模様なし）へ戻す。
+        service.reset_user_settings().unwrap();
+        assert_eq!(service.saved_pattern_id(), "none");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn dressup_ids_default_and_survive_settings_save_but_reset_to_defaults() {
+        // 着せかえは set_active_balloon / set_active_deco からだけ変える。設定画面の保存では消えない（D155）。
+        let (service, path) = temp_service();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            ("balloon_default".to_string(), "deco_none".to_string())
+        );
+        service.set_balloon_id("gacha_balloon_cloud").unwrap();
+        service.set_deco_id("gacha_deco_crown").unwrap();
+        service.set_pattern_id("pattern_paw").unwrap();
+
+        let dto = UserSettingsDto {
+            nickname: "テスト".to_string(),
+            ..service.get_user_settings().unwrap()
+        };
+        service.save_user_settings(dto).unwrap();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            (
+                "gacha_balloon_cloud".to_string(),
+                "gacha_deco_crown".to_string()
+            )
+        );
+        // 片方だけ変えても、もう片方・模様は保たれる。
+        service.set_deco_id("deco_none").unwrap();
+        assert_eq!(service.saved_dressup_ids().0, "gacha_balloon_cloud");
+        assert_eq!(service.saved_pattern_id(), "pattern_paw");
+
+        // リセットは他の見た目の設定と同じく既定（いつもの・なし）へ戻す。
+        service.reset_user_settings().unwrap();
+        assert_eq!(
+            service.saved_dressup_ids(),
+            ("balloon_default".to_string(), "deco_none".to_string())
         );
 
         let _ = std::fs::remove_file(&path);

@@ -86,13 +86,29 @@ impl GachaService {
     /// 所持済みの色違いテーマの ID（ガチャマスタにあるテーマ種別だけ）。
     /// カスタマイズ画面のテーマ切り替えで「選んでよいか」を Rust 側で判定するために使う（読み取りのみ）。
     pub fn owned_theme_ids(&self) -> Result<Vec<String>, AppError> {
+        self.owned_ids_of_kinds(&[GachaItemKind::Theme])
+    }
+
+    /// 所持済みの模様の ID（ガチャマスタにある模様種別だけ）。
+    /// カスタマイズ画面の模様切り替えで「選んでよいか」を Rust 側で判定するために使う（読み取りのみ）。
+    pub fn owned_pattern_ids(&self) -> Result<Vec<String>, AppError> {
+        self.owned_ids_of_kinds(&[GachaItemKind::Pattern])
+    }
+
+    /// 所持済みの着せかえ（吹き出し・飾り）の ID（ガチャマスタにある吹き出し・飾り種別だけ。D155）。
+    /// カスタマイズ画面の着せかえで「選んでよいか」を Rust 側で判定するために使う（読み取りのみ）。
+    /// 吹き出しと飾りを一度の読み込みで返し、種別の振り分けは domain/dressup.rs が行う。
+    pub fn owned_dressup_ids(&self) -> Result<Vec<String>, AppError> {
+        self.owned_ids_of_kinds(&[GachaItemKind::Balloon, GachaItemKind::Deco])
+    }
+
+    /// 所持済みの ID のうち、ガチャマスタにある指定種別のものだけを返す（保存ファイル由来の未知 ID は捨てる）。
+    fn owned_ids_of_kinds(&self, kinds: &[GachaItemKind]) -> Result<Vec<String>, AppError> {
         self.update(|state| {
             let ids = state
                 .owned_item_ids
                 .iter()
-                .filter(|id| {
-                    find_gacha_item(id).is_some_and(|def| def.kind == GachaItemKind::Theme)
-                })
+                .filter(|id| find_gacha_item(id).is_some_and(|def| kinds.contains(&def.kind)))
                 .cloned()
                 .collect();
             (ids, false)
@@ -283,7 +299,7 @@ mod tests {
         assert_eq!(dto.star_fragments, INITIAL_FRAGMENTS);
         assert_eq!(dto.cost, GACHA_COST);
         assert!(dto.can_draw && !dto.is_complete);
-        assert_eq!((dto.owned_count, dto.total_count), (0, 43));
+        assert_eq!((dto.owned_count, dto.total_count), (0, 74));
     }
 
     #[test]
@@ -298,6 +314,48 @@ mod tests {
         assert_eq!(
             ctx.service.owned_theme_ids().unwrap(),
             ids(&["gacha_theme_003", "gacha_theme_001"])
+        );
+    }
+
+    #[test]
+    fn owned_pattern_ids_lists_only_owned_master_patterns() {
+        let ctx = ctx();
+        assert!(ctx.service.owned_pattern_ids().unwrap().is_empty());
+        let state = GachaState {
+            owned_item_ids: ids(&[
+                "gacha_pattern_snow",
+                "gacha_theme_001",
+                "pattern_paw",
+                "gacha_pattern_unknown",
+                "gacha_pattern_bone",
+            ]),
+            ..GachaState::default()
+        };
+        ctx.repository.save(&state).unwrap();
+        assert_eq!(
+            ctx.service.owned_pattern_ids().unwrap(),
+            ids(&["gacha_pattern_snow", "gacha_pattern_bone"])
+        );
+    }
+
+    #[test]
+    fn owned_dressup_ids_lists_only_owned_master_balloons_and_decos() {
+        let ctx = ctx();
+        assert!(ctx.service.owned_dressup_ids().unwrap().is_empty());
+        let state = GachaState {
+            owned_item_ids: ids(&[
+                "gacha_deco_crown",
+                "gacha_pattern_snow",
+                "balloon_default",
+                "gacha_balloon_unknown",
+                "gacha_balloon_cloud",
+            ]),
+            ..GachaState::default()
+        };
+        ctx.repository.save(&state).unwrap();
+        assert_eq!(
+            ctx.service.owned_dressup_ids().unwrap(),
+            ids(&["gacha_deco_crown", "gacha_balloon_cloud"])
         );
     }
 
@@ -364,21 +422,21 @@ mod tests {
         ));
         let paths = AppPaths::new(root.clone());
         let repository = GachaRepository::new(&paths);
-        // 実際の乱数で最後まで引いても重複せず、43 回でコンプリートする。
+        // 実際の乱数で最後まで引いても重複せず、74 回でコンプリートする。
         let service = GachaService::new(repository.clone());
         let mut state = GachaState::default();
-        state.add_fragments(GACHA_COST * 43);
+        state.add_fragments(GACHA_COST * 74);
         repository.save(&state).unwrap();
 
         let mut drawn = Vec::new();
-        for _ in 0..43 {
+        for _ in 0..74 {
             let result = service.draw_once().unwrap();
             assert_eq!(result.status, GachaDrawStatus::Drawn);
             drawn.push(result.item.unwrap().item_id);
         }
         drawn.sort();
         drawn.dedup();
-        assert_eq!(drawn.len(), 43);
+        assert_eq!(drawn.len(), 74);
         assert_eq!(
             service.draw_once().unwrap().status,
             GachaDrawStatus::Complete
