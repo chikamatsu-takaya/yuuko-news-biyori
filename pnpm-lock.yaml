@@ -6,7 +6,7 @@ settings:
 
 overrides:
   sharp: 0.35.5
-  postcss: ^8.5.12
+  postcss: ^8.5.32
   zod: ^4.6.6
 
 importers:
