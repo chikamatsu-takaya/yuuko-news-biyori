@@ -28,8 +28,8 @@ overrides:
   sharp: 0.35.5
   # postcss<8.5.12 に High 脆弱性（GHSA）。直接依存(devDependency)は ^8.5.12 へ更新済みだが、
   # next 経由の transitive postcss が 8.4.31（<8.5.12）で残り Node Audit(High) が解消しない。
-  # よって全 postcss を ^8.5.12 以上（実解決 8.5.22）へ統一する。8.5.x は minor 互換。
-  postcss: ^8.5.12
+  # よって全 postcss を ^8.5.32 以上（直接依存と同じ下限）へ統一する。8.5.x は minor 互換。
+  postcss: ^8.5.32
   # zod<4.6.6 に High 脆弱性（GHSA-mrhx-c7xc-m3w5: 大きな配列等の検証でメモリを使い果たす）。
   # eslint-config-next > eslint-plugin-react-hooks（と zod-validation-error）経由の開発時（lint）のみの依存で、
   # アプリ本体には入らない。react-hooks 7.1.1 は zod "^3.25.0 || ^4.0.0" を許容するが既定では 3.x に解決されるため、
