@@ -10,6 +10,8 @@
 # - 変更は developタスクチェックリスト.md の1ファイルのみ（add 対象を限定）。
 # - 自動マージは dry-run/apply の safeAutoMerge=true・両レポート一致・「変更が当該ファイルのみ」のときだけ。
 #   さらに手動実行の enable_auto_merge=true を明示したときのみ実行する。既定では同期PR作成で停止する。
+# - safeAutoMerge の判定内容（D145: Firestore 正本）は task-management/sync-firestore-to-markdown.mjs 冒頭を参照。
+#   Firestore にだけあるタスク（manual-poc 等）は Markdown へ書き込まないため、件数があっても自動マージを止めない。
 # - サービスアカウント JSON は Secret から $RUNNER_TEMP へ書き出し、リポジトリには絶対に含めない。
 #
 # 必要な GitHub Secret:
@@ -200,7 +202,7 @@ jobs:
       # 7.5 マージ可否判定: dry-run と apply の両方が safeAutoMerge=true で、かつ
       #     実行ごとに変わる値（generatedAt/mode/パス等）を除いた内容が完全一致する
       #     ときだけ merge_ok=true にする。件数一致だけでは内容のすり替わりを検知できないため、
-      #     summary / changes / manualCandidates / skipped / warnings を丸ごと比較する。
+      #     summary / changes / manualCandidates / skipped / warnings / notices を丸ごと比較する。
       #     dry-run と apply の間に DB が変わって内容がズレた場合は自動マージしない。
       - name: Evaluate merge gate
         id: eval
@@ -221,6 +223,7 @@ jobs:
               manualCandidates: r.manualCandidates,
               skipped: r.skipped,
               warnings: r.warnings,
+              notices: r.notices,
             });
           }
           const drySafe = dry.safeAutoMerge === true;
@@ -334,11 +337,14 @@ jobs:
             echo "既存の open 同期PRを更新しました（新規作成しない）: $EXISTING"
             PR_URL="$EXISTING"
           else
+            # 安全判定に影響しない報告件数（manualCandidates / notices）も、artifact を開かずに見えるよう本文へ出す。
+            REPORT_COUNTS="$(node -e "const s=require('./'+process.env.APPLY_OUT).summary||{};process.stdout.write('manualCandidates='+(s.manualCandidates??0)+' / notices='+(s.notices??0)+' / warnings='+(s.warnings??0))")"
             PR_BODY="$(printf '%s\n' \
               "Firestore tasks を \`${MARKDOWN_PATH}\` へ反映した自動同期PRです。" \
               "" \
               "- base: develop" \
               "- merge_ok (dry/apply 両方 safeAutoMerge かつ レポート完全一致): ${MERGE_OK}" \
+              "- 件数（apply）: ${REPORT_COUNTS}（manualCandidates / notices は Firestore のみのタスクの報告で、自動マージは止めない）" \
               "- dry-run / apply 結果は Actions の artifact (firestore-to-markdown-reports) を参照。" \
               "" \
               "merge_ok=false の場合は自動マージせず、人手レビューで取り込んでください。")"
