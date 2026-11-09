@@ -252,6 +252,7 @@ fn message_notification(text: String) -> YuukoDesktopNotification {
 /// 判定の理由は前回から変わったときだけログに出す。全画面中に出さない（fullscreen）のか、
 /// まだ出す時刻でない（cooling_down 等）のかを実機で見分けるため。同じ理由が続く間は出さず、
 /// 全画面中の短い再確認間隔でもログが増えすぎないようにする。理由名は固定の文字列だけで、記事の情報は含めない。
+/// 判定しなかった周期（判定の失敗・通知機能の無効化）は前回の理由を保ち、同じ理由を出し直さない。
 pub fn start<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
     std::thread::spawn(move || {
         let mut delay = CHECK_INTERVAL;
@@ -715,23 +716,20 @@ fn is_yuuko_window_visible<R: Runtime>(app: &AppHandle<R>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn reason_is_logged_only_when_it_changes() {
-        // 初回は必ず出す。
-        assert!(super::reason_changed(None, "cooling_down"));
-        // 同じ理由が続く間は出さない（全画面中の短い再確認でもログを増やさない）。
-        assert!(!super::reason_changed(Some("fullscreen"), "fullscreen"));
-        // 理由が変わったら出す（全画面の開始・解除を見分けるため）。
-        assert!(super::reason_changed(Some("cooling_down"), "fullscreen"));
-        assert!(super::reason_changed(
-            Some("fullscreen"),
-            "fullscreen_grace"
-        ));
-    }
-
     use super::*;
     use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
     use crate::domain::yuuko::YuukoPositionMode;
+
+    #[test]
+    fn reason_is_logged_only_when_it_changes() {
+        // 初回は必ず出す。
+        assert!(reason_changed(None, "cooling_down"));
+        // 同じ理由が続く間は出さない（全画面中の短い再確認でもログを増やさない）。
+        assert!(!reason_changed(Some("fullscreen"), "fullscreen"));
+        // 理由が変わったら出す（全画面の開始・解除を見分けるため）。
+        assert!(reason_changed(Some("cooling_down"), "fullscreen"));
+        assert!(reason_changed(Some("fullscreen"), "fullscreen_grace"));
+    }
 
     fn article(id: &str, title: &str) -> ArticleSummaryDto {
         ArticleSummaryDto {
