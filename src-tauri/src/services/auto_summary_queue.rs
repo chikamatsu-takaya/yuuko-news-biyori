@@ -1032,6 +1032,15 @@ mod tests {
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
 
+    #[test]
+    fn local_item_interval_is_shorter_than_llm_idle_stop() {
+        // まとめて要約する間に llama-server を止めて起動し直さないため、記事ごとの間隔と手動優先の待ちは
+        // ローカルLLMの「しばらく使わなければ止める」（既定 2 分）より十分短くしておく。
+        let idle_stop = crate::services::local_llm_service::LocalLlmConfig::default().idle_stop;
+        assert!(LOCAL_ITEM_INTERVAL * 4 < idle_stop);
+        assert!(crate::services::local_llm_service::MANUAL_PRIORITY_GRACE < idle_stop);
+    }
+
     const SAVED: AutoSummaryOutcome = AutoSummaryOutcome::Saved;
 
     fn ids(values: &[&str]) -> Vec<String> {
