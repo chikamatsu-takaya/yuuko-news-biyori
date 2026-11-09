@@ -248,32 +248,56 @@ fn message_notification(text: String) -> YuukoDesktopNotification {
 ///
 /// 各周期の最初にスリープ復帰を検知し（前回の心拍から想定より大幅に時間が空いていたら復帰とみなす）、
 /// 周期の最後に次の待ち時間を心拍として記録する。判定処理そのものにかかった時間は空白に含めない。
+///
+/// 判定の理由は前回から変わったときだけログに出す。全画面中に出さない（fullscreen）のか、
+/// まだ出す時刻でない（cooling_down 等）のかを実機で見分けるため。同じ理由が続く間は出さず、
+/// 全画面中の短い再確認間隔でもログが増えすぎないようにする。理由名は固定の文字列だけで、記事の情報は含めない。
+/// 判定しなかった周期（判定の失敗・通知機能の無効化）は前回の理由を保ち、同じ理由を出し直さない。
 pub fn start<R: Runtime>(app: AppHandle<R>, yuuko_service: YuukoService) {
     std::thread::spawn(move || {
         let mut delay = CHECK_INTERVAL;
+        let mut last_reason: Option<String> = None;
         yuuko_service.record_notifier_heartbeat(delay);
         loop {
             std::thread::sleep(delay);
             yuuko_service.observe_resume();
-            delay = tick(&app, &yuuko_service);
+            let (next_delay, reason) = tick(&app, &yuuko_service);
+            delay = next_delay;
+            if let Some(reason) = reason {
+                if reason_changed(last_reason.as_deref(), &reason) {
+                    log::info!(
+                        "非表示中のゆうこ通知判定: reason={reason} next_check_secs={}",
+                        delay.as_secs()
+                    );
+                }
+                last_reason = Some(reason);
+            }
             yuuko_service.record_notifier_heartbeat(delay);
         }
     });
 }
 
-/// 1周期分を実行し、次の判定までの待ち時間を返す。
-fn tick<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duration {
+/// 前回の判定理由から変わったか（ログに出すかの判定）。初回は必ず出す。
+fn reason_changed(last: Option<&str>, current: &str) -> bool {
+    last != Some(current)
+}
+
+/// 1周期分を実行し、次の判定までの待ち時間と判定の理由を返す（理由はログ用。判定しなかったときは None）。
+fn tick<R: Runtime>(
+    app: &AppHandle<R>,
+    yuuko_service: &YuukoService,
+) -> (Duration, Option<String>) {
     match gate_tick(
         DESKTOP_NOTIFICATION_ENABLED,
         decide_tick(main_window_visibility(app)),
     ) {
-        TickAction::Skip => CHECK_INTERVAL,
+        TickAction::Skip => (CHECK_INTERVAL, None),
         TickAction::HideDesktop => {
             // ウィンドウイベントでの非表示に失敗した場合の取りこぼし対策も兼ねる。
             if let Err(error) = yuuko_window::hide_yuuko_window(app) {
                 log::warn!("メイン表示中にゆうこ用ウィンドウを隠せませんでした: {error}");
             }
-            CHECK_INTERVAL
+            (CHECK_INTERVAL, Some("main_visible".to_string()))
         }
         TickAction::RunJudgement => run_judgement(app, yuuko_service),
     }
@@ -296,21 +320,25 @@ fn next_check_delay(reason: &str, grace_remaining: Option<Duration>) -> Duration
     }
 }
 
-fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -> Duration {
+fn run_judgement<R: Runtime>(
+    app: &AppHandle<R>,
+    yuuko_service: &YuukoService,
+) -> (Duration, Option<String>) {
     let mut result = match yuuko_service.request_yuuko_notification() {
         Ok(result) => result,
         Err(error) => {
             log::warn!("非表示中のゆうこ通知判定に失敗しました。次回に再試行します: {error}");
-            return CHECK_INTERVAL;
+            return (CHECK_INTERVAL, None);
         }
     };
     // 出すものが無いときは、出し直し用の全画面判定（猶予の記録を余計に動かさない）も
     // 記事の読み込み（短い要約）も行わず、理由に応じた間隔だけ返す。
     if desktop_notification_from(&result).is_none() {
-        return next_check_delay(
+        let delay = next_check_delay(
             &result.reason,
             grace_remaining_for(yuuko_service, &result.reason),
         );
+        return (delay, Some(result.reason));
     }
     // already_active は全画面・会議中の判定より先に返る理由なので、出し直す前にここで同じ順
     // （全画面 → 会議中 → マイク使用中）に判定を通す。
@@ -320,13 +348,15 @@ fn run_judgement<R: Runtime>(app: &AppHandle<R>, yuuko_service: &YuukoService) -
         redisplay_block_reason(yuuko_service.fullscreen_gate_for_redisplay())
             .or_else(|| yuuko_service.meeting_block_for_redisplay())
     };
-    let reason = redisplay_block.unwrap_or(result.reason.as_str());
-    let next_delay = next_check_delay(reason, grace_remaining_for(yuuko_service, reason));
+    let reason = redisplay_block
+        .map(str::to_string)
+        .unwrap_or_else(|| result.reason.clone());
+    let next_delay = next_check_delay(&reason, grace_remaining_for(yuuko_service, &reason));
     // 全画面で止めた場合は表示しないため、要約のための記事読み込みも行わない。
     if redisplay_block.is_none() {
         present_if_needed(app, yuuko_service, &mut result);
     }
-    next_delay
+    (next_delay, Some(reason))
 }
 
 /// 理由に対応する猶予の残り時間（次回判定の間隔用）。
@@ -689,6 +719,17 @@ mod tests {
     use super::*;
     use crate::domain::article::{ArticleReadState, ArticleSummaryDto};
     use crate::domain::yuuko::YuukoPositionMode;
+
+    #[test]
+    fn reason_is_logged_only_when_it_changes() {
+        // 初回は必ず出す。
+        assert!(reason_changed(None, "cooling_down"));
+        // 同じ理由が続く間は出さない（全画面中の短い再確認でもログを増やさない）。
+        assert!(!reason_changed(Some("fullscreen"), "fullscreen"));
+        // 理由が変わったら出す（全画面の開始・解除を見分けるため）。
+        assert!(reason_changed(Some("cooling_down"), "fullscreen"));
+        assert!(reason_changed(Some("fullscreen"), "fullscreen_grace"));
+    }
 
     fn article(id: &str, title: &str) -> ArticleSummaryDto {
         ArticleSummaryDto {
