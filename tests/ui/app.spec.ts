@@ -8657,13 +8657,15 @@ test("does not generate candidates while the window is hidden and generates afte
 
 // Rust の news_scheduler が refresh 成功時に送る news-refreshed を模擬する。
 // 戻り値は届いたハンドラ数（購読済みかの確認に使う）。
-function emitNewsRefreshed(page: Page) {
-  return page.evaluate(() =>
-    (
-      window as unknown as {
-        __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
-      }
-    ).__E2E_EMIT_EVENT__("news-refreshed", { savedCount: 2 })
+function emitNewsRefreshed(page: Page, startup = false) {
+  return page.evaluate(
+    (isStartup) =>
+      (
+        window as unknown as {
+          __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+        }
+      ).__E2E_EMIT_EVENT__("news-refreshed", { savedCount: 2, startup: isStartup }),
+    startup
   );
 }
 
@@ -8851,6 +8853,43 @@ test("yuuko-summoned message is dropped when the window is hidden and does not c
   await setVisible(true);
   await page.waitForTimeout(200);
   await expect(page.getByText(message)).toHaveCount(0);
+});
+
+test("news list reloads right away for the startup news refresh even while shown", async ({
+  page,
+}) => {
+  // 起動直後の一覧は取得前の古い内容のため、起動時の取得（startup）は表示中でもすぐ読み直す。
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const initialLoads = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+
+  await expect.poll(() => emitNewsRefreshed(page, true)).toBeGreaterThan(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(initialLoads);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await page.waitForTimeout(200);
+  const afterStartupReload = await readCount(
+    page,
+    "__E2E_RECOMMENDED_CALL_COUNT__"
+  );
+
+  // 反映済みなので、次の再表示で二重に読み直さない。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, (visible: boolean) => void>;
+    w.__E2E_SET_WINDOW_VISIBLE__(false);
+    w.__E2E_SET_WINDOW_VISIBLE__(true);
+  });
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    afterStartupReload
+  );
 });
 
 test("news list reloads on the next re-show after a scheduled news refresh", async ({

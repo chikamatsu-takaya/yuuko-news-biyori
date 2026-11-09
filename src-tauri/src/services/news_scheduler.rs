@@ -51,12 +51,15 @@ const REFRESH_INTERVAL: chrono::TimeDelta = chrono::TimeDelta::hours(3);
 /// lib/tauri/news.ts の NEWS_REFRESHED_EVENT と一致させる。
 pub const NEWS_REFRESHED_EVENT: &str = "news-refreshed";
 
-/// `news-refreshed` のペイロード。URL・本文など外部由来の情報は含めず、件数だけを渡す。
+/// `news-refreshed` のペイロード。URL・本文など外部由来の情報は含めず、件数と契機だけを渡す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewsRefreshedPayload {
     /// 今回の取得で新たに保存した記事数。
     pub saved_count: usize,
+    /// 起動時の取得か。起動直後のホーム一覧は取得前の古い内容のため、画面側は表示中でもすぐ読み直す
+    /// （定期取得は表示中の一覧を急に入れ替えないよう、次の再表示まで待つ。hooks/use-news-list-revision.ts）。
+    pub startup: bool,
 }
 
 /// 取得タイミング状態。`state/news_refresh_state.json` に保存する。
@@ -172,7 +175,7 @@ impl NewsScheduler {
 
         // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
         if let Some(saved_count) = tauri::async_runtime::block_on(self.tick_news(kind, &today)) {
-            notify_news_refreshed(app, saved_count);
+            notify_news_refreshed(app, saved_count, matches!(kind, TickKind::Startup));
             self.auto_summary_queue.enqueue_unsummarized();
         }
     }
@@ -230,11 +233,14 @@ impl NewsScheduler {
 /// ゆうこ用ウィンドウへは送らない（非表示中の判定は yuuko_desktop_notifier の担当）。
 /// 通知は「候補生成を早める」補助にすぎないため、送れなくてもログだけ残し refresh の成否には影響させない。
 /// メインが非表示でも WebView と購読は生きているが、React 側は非表示中のイベントでは候補生成しない。
-fn notify_news_refreshed<R: Runtime>(app: &AppHandle<R>, saved_count: usize) {
+fn notify_news_refreshed<R: Runtime>(app: &AppHandle<R>, saved_count: usize, startup: bool) {
     if let Err(error) = app.emit_to(
         MAIN_WINDOW_LABEL,
         NEWS_REFRESHED_EVENT,
-        NewsRefreshedPayload { saved_count },
+        NewsRefreshedPayload {
+            saved_count,
+            startup,
+        },
     ) {
         log::warn!("failed to notify main window of news refresh: {error}");
     }
@@ -550,10 +556,17 @@ mod tests {
     }
 
     #[test]
-    fn news_refreshed_payload_contains_only_the_count() {
-        // URL・本文などを載せないことをシリアライズ結果で固定する。
-        let payload = serde_json::to_value(NewsRefreshedPayload { saved_count: 3 }).unwrap();
-        assert_eq!(payload, serde_json::json!({ "savedCount": 3 }));
+    fn news_refreshed_payload_contains_only_the_count_and_trigger() {
+        // URL・本文などを載せず、件数と起動時の取得かだけであることをシリアライズ結果で固定する。
+        let payload = serde_json::to_value(NewsRefreshedPayload {
+            saved_count: 3,
+            startup: true,
+        })
+        .unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({ "savedCount": 3, "startup": true })
+        );
     }
 
     #[test]

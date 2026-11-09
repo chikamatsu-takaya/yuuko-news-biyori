@@ -8,6 +8,8 @@
  * - `news-refreshed` を受けても、その場では作り直さない。表示中の一覧が急に読み込み直しになると
  *   操作の邪魔になるため、「次にウィンドウが表示に戻ったとき」に1回だけ反映する。
  *   非表示中に届いた場合も同じで、再表示した時点で最新になる。
+ * - 例外として、起動時の取得（ペイロードの startup）は表示中でもすぐ反映する。起動直後の一覧は取得前の
+ *   古い内容で、まだ読み始めてもいないため、入れ替えても操作の邪魔になりにくい。
  * - 画面を切り替えた場合は一覧が作り直されるため、その時点で最新が読み込まれる。
  * - タイマーやポーリングは持たない（イベント購読と表示切替の検知だけ）。
  */
@@ -18,14 +20,25 @@ export const useNewsListRevision = (isWindowVisible: boolean): number => {
   const [revision, setRevision] = useState(0);
   // 未反映の取得完了があるか。再描画は不要なので ref で持つ。
   const pendingRef = useRef(false);
+  // イベントの購読は初回だけ張るため、表示状態は ref で参照する。
+  const visibleRef = useRef(isWindowVisible);
+  useEffect(() => {
+    visibleRef.current = isWindowVisible;
+  }, [isWindowVisible]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    listenNewsRefreshed(() => {
-      if (!disposed) {
-        pendingRef.current = true;
+    listenNewsRefreshed(({ startup }) => {
+      if (disposed) {
+        return;
       }
+      if (startup && visibleRef.current) {
+        pendingRef.current = false;
+        setRevision((current) => current + 1);
+        return;
+      }
+      pendingRef.current = true;
     })
       .then((stop) => {
         if (disposed) {
