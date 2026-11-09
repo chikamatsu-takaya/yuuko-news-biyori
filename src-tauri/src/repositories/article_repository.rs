@@ -1720,6 +1720,16 @@ impl ArticleRepository {
         for path in markdown_paths {
             match self.load_article_record(&path) {
                 Ok(record) => loaded.records.push(record),
+                // 走査後・読み込み前に消えたファイルは飛ばす。この寛容ローダーは書き込みロックを取らないため、
+                // 起動時の日次アーカイブ保守（検証済みMarkdownの退避＝移動）と並行すると起きる。
+                // 一覧全体をエラーにすると起動直後のおすすめ読み込みが失敗するため。破損ではないので
+                // skipped_paths には入れない（保存先を塞ぐ破損ファイルの判定を変えない）。
+                Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    log::debug!(
+                        "Article markdown vanished while listing: {}",
+                        path.display()
+                    );
+                }
                 Err(error) => {
                     let Some(reason) = corrupt_article_reason(&error) else {
                         return Err(error);
@@ -2224,11 +2234,15 @@ fn corrupt_article_reason(error: &AppError) -> Option<&'static str> {
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
-    if !dir.exists() {
-        return Ok(());
-    }
+    // 無いフォルダは空として扱う。走査中に消えた月フォルダ（起動時の旧サンプル記事の掃除など、
+    // 書き込みロック下の削除と並行した一覧）も同じ扱いにするため、事前の存在確認ではなく NotFound で判定する。
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
 
-    for entry in std::fs::read_dir(dir)? {
+    for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
@@ -6696,5 +6710,91 @@ mod tests {
 
         println!("N={count}: 全件走査 {scan:?} / 直接検索 {direct:?}");
         assert!(direct < scan);
+    }
+
+    // ---- 日次アーカイブ保守と一覧の並行実行 ----
+
+    /// 起動直後のおすすめ読み込み失敗の回帰テスト。一覧（書き込みロックを取らない寛容ローダー）が、
+    /// 日次アーカイブ保守（archived 印の保存→検証済みMarkdownの退避）と並行しても失敗しないことを確かめる。
+    /// 修正前は、走査後に退避されたファイルの読み込みが NotFound になり、一覧全体がエラーになっていた。
+    #[test]
+    fn listing_survives_concurrent_archive_maintenance() {
+        use chrono::{TimeZone, Utc};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const ARTICLE_COUNT: usize = 80;
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        for _round in 0..3 {
+            let context = TestRepositoryContext::new();
+            for index in 0..ARTICLE_COUNT {
+                let article = PersistedArticleRecord {
+                    article_id: format!("race-{index:03}"),
+                    fetched_at: "2026-05-01T00:00:00Z".to_string(),
+                    published_at_text: "2026-05-01T00:00:00Z".to_string(),
+                    favorite: false,
+                    is_archived: false,
+                    ..super::legacy_seed_articles().remove(0)
+                };
+                context.repository.save_article_record(&article).unwrap();
+            }
+
+            let done = AtomicBool::new(false);
+            let (failures, listings) = std::thread::scope(|scope| {
+                let reader = scope.spawn(|| {
+                    let mut failures = Vec::new();
+                    let mut listings = 0usize;
+                    while !done.load(Ordering::SeqCst) {
+                        match context.repository.list_recommendation_candidates() {
+                            Ok(candidates) => assert!(candidates.len() <= ARTICLE_COUNT),
+                            Err(error) => failures.push(format!("recommended: {error:?}")),
+                        }
+                        if let Err(error) = context
+                            .repository
+                            .list_history(ArticleHistoryFilter::All, ARTICLE_COUNT)
+                        {
+                            failures.push(format!("history: {error:?}"));
+                        }
+                        listings += 1;
+                    }
+                    (failures, listings)
+                });
+                // 保守本体（archive_scheduler::run_if_due と同じ順）。
+                context.repository.archive_candidates(now).unwrap();
+                let retired = context.repository.retire_archived_markdown().unwrap();
+                assert_eq!(retired.retired_article_count, ARTICLE_COUNT);
+                done.store(true, Ordering::SeqCst);
+                reader.join().unwrap()
+            });
+
+            assert!(listings > 0);
+            assert!(
+                failures.is_empty(),
+                "{} listing failures, first: {:?}",
+                failures.len(),
+                failures.first()
+            );
+            // 保守後は退避済みの記事がおすすめから消え、アーカイブ履歴には残る。
+            assert!(context
+                .repository
+                .list_recommendation_candidates()
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                context
+                    .repository
+                    .list_history(ArticleHistoryFilter::Archived, ARTICLE_COUNT)
+                    .unwrap()
+                    .len(),
+                ARTICLE_COUNT
+            );
+        }
+    }
+
+    #[test]
+    fn collect_markdown_files_treats_missing_dir_as_empty() {
+        let context = TestRepositoryContext::new();
+        let mut files = Vec::new();
+        super::collect_markdown_files(&context.news_dir.join("missing"), &mut files).unwrap();
+        assert!(files.is_empty());
     }
 }
