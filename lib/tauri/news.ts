@@ -30,15 +30,23 @@ export const refreshNews = async (): Promise<RefreshNewsResult | null> => {
  */
 export const NEWS_REFRESHED_EVENT = "news-refreshed";
 
+/** ニュース取得成功イベントのうち、受信側が使う情報（Rust 側 NewsRefreshedPayload）。 */
+export type NewsRefreshedInfo = {
+  /** 起動時の取得か（起動直後のホーム一覧はすぐ読み直すために使う）。 */
+  startup: boolean;
+};
+
 /**
- * ニュース取得成功イベントを購読する。ペイロードは件数のみのため、ハンドラへは何も渡さない
- * （受信側は「取得が終わった」契機としてだけ使う）。非Tauri（ブラウザプレビュー）では何もしない解除関数を返す。
+ * ニュース取得成功イベントを購読する。受信側は「取得が終わった」契機と、起動時の取得かだけを使う
+ * （件数は渡さない）。非Tauri（ブラウザプレビュー）では何もしない解除関数を返す。
  */
 export const listenNewsRefreshed = async (
-  handler: () => void
+  handler: (info: NewsRefreshedInfo) => void
 ): Promise<() => void> => {
   if (!isTauriRuntime()) {
     return () => undefined;
   }
-  return listen(NEWS_REFRESHED_EVENT, () => handler());
+  return listen<{ startup?: unknown }>(NEWS_REFRESHED_EVENT, (event) =>
+    handler({ startup: event.payload?.startup === true })
+  );
 };
