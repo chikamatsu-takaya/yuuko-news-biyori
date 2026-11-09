@@ -171,7 +171,9 @@ const SERVER_EXE: &str = "llama-server";
 /// 文脈の長さ（トークン）。入力は 3000 文字未満のため、参照アプリ（8192）より小さくしてメモリを抑える。
 pub const CONTEXT_TOKENS: u32 = 4096;
 /// 使うCPUスレッドの上限。常駐アプリなので、生成中もパソコンの操作が重くならないよう抑える。
-const MAX_THREADS: usize = 4;
+/// 2026-11-09 の製品版の計測（論理14コア）で、4→2 にすると要約1件の時間は 60〜62秒→63〜82秒とほぼ変わらず、
+/// 生成中の CPU は平均 27〜28%→14〜15% に半減したため 2 にした（4 スレッドでは速さがほとんど伸びていなかった）。
+const MAX_THREADS: usize = 2;
 /// 合言葉の付いた要求1回の応答本文の受信上限（256 KiB。Gemini の成功本文と同じ）。
 const MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 /// 繰り返し（止まらずに書き続ける回）を抑える値。`build_chat_body` を参照。
@@ -286,7 +288,7 @@ pub fn runtime_manifest() -> Vec<(String, String)> {
         .collect()
 }
 
-/// 生成に使うスレッド数。論理コア数の半分（1〜4）。常駐中のほかの作業を重くしないため。
+/// 生成に使うスレッド数。論理コア数の半分（1〜2）。常駐中のほかの作業を重くしないため。
 pub fn thread_count() -> usize {
     let logical = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -1062,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_count_is_between_one_and_four() {
+    fn thread_count_is_between_one_and_the_cap() {
         let threads = thread_count();
         assert!((1..=MAX_THREADS).contains(&threads));
     }
