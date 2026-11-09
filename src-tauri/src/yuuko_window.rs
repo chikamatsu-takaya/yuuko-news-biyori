@@ -112,7 +112,14 @@ pub fn ensure_yuuko_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Webv
     .focusable(false)
     // 吹き出しからの window.open / target="_blank" で新しいウィンドウを作らない。
     // ページ移動の判定は全 WebView 共通の webview_guard プラグインが行う。
-    .on_new_window(|_url, _features| NewWindowResponse::Deny);
+    .on_new_window(|_url, _features| NewWindowResponse::Deny)
+    // WebView2 の GPU を使わない（--disable-gpu）。常駐中の GPU プロセスと描画用メモリを減らすため
+    // （計測は docs/01_setup/軽量常駐性能確認手順.md §11.2）。前半は Tauri の既定値で、指定すると
+    // 置き換わるため併記する。同じデータフォルダの WebView2 は引数が一致しないと生成に失敗するため、
+    // メイン画面（tauri.conf.json の additionalBrowserArgs）と必ず同じ値にする。
+    .additional_browser_args(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu",
+    );
 
     // macOS の透明化は macos-private-api 機能が必要で、MVP の対象（Windows）外のため付けない。
     #[cfg(not(target_os = "macos"))]
