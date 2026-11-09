@@ -10,6 +10,13 @@
 //! - **refresh 成功時のみ** 取得日・取得時刻を更新する。失敗時は更新せず次回確認で再試行。
 //! - 手動取得の実行中は定期取得を見送り（NewsService の RefreshLock）、次回確認で再試行する。
 //! - 深夜0時ぴったりの厳密実行は行わない（スリープ復帰・OS時刻変更にも比較的強い）。
+//! - 次の確認時刻は壁時計（UTC）で決める。スレッドは約1分ごとに起きて時刻を比べるだけで、
+//!   30分を1回の sleep で待たない（単調時計はスリープ中に止まる環境があり、復帰後の確認が遅れるため）。
+//!   起きる間隔より大幅に長い空白（`domain::resume_grace::is_resume_gap`）があればスリープ復帰とみなし、
+//!   次の確認時刻を待たずに通常の確認（アーカイブ保守・日付変更時取得・周期取得）を1回行う。
+//!   取得するかどうかは通常の確認と同じ `should_refresh` で決めるため、取得回数は増えない。
+//! - 復帰直後はネットワークがまだ使えないことがあるため、復帰直後の取得が失敗したときだけ、
+//!   30分を待たずに数分後（RESUME_RETRY_DELAY）にもう1回だけ確認する。
 //! - 同じtickで日次アーカイブ保守も確認し、追加の常駐スレッドを作らない。
 //! - アーカイブ保守はニュース取得設定とは独立し、完全成功した日だけ完了状態を保存する。
 //! - refresh 成功時はメインウィンドウへ `news-refreshed` を通知し、アプリ内通知の候補生成を
@@ -25,11 +32,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, TimeDelta, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::app_lifecycle::MAIN_WINDOW_LABEL;
+use crate::domain::resume_grace::is_resume_gap;
 use crate::domain::settings::PersistedSettings;
 use crate::domain::yuuko::is_within_any_notification_time_range;
 use crate::error::AppError;
@@ -38,10 +46,17 @@ use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::archive_scheduler::{ArchiveMaintenanceOutcome, ArchiveScheduler};
 use crate::services::article_service::ArticleService;
 use crate::services::auto_summary_queue::AutoSummaryQueue;
-use crate::services::news_service::NewsService;
+use crate::services::news_service::{NewsService, RefreshNewsResult};
 
-/// 取得すべきかを確認する間隔（低頻度）。まずは30分とする。
-const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// 取得すべきかを確認する間隔（低頻度）。まずは30分とする。壁時計で次の確認時刻を決める。
+const CHECK_INTERVAL: TimeDelta = TimeDelta::minutes(30);
+
+/// スレッドが起きて壁時計を見る間隔。処理は時刻の比較だけで、通信もファイル読み込みもしない。
+/// スリープ復帰後は、この間隔以内に確認が始まる。
+const WAKE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 復帰直後の取得が失敗したときに、もう1回確認するまでの待ち時間（ネットワーク復旧待ち）。
+const RESUME_RETRY_DELAY: TimeDelta = TimeDelta::minutes(3);
 
 /// 常駐中の定期取得の周期。前回の取得成功からこれ以上たっていれば、通知の時間帯内で取得する。
 /// 利用者向け設定は設けず、調整はこの定数で行う（D16: 数時間おき、例として3時間）。
@@ -111,6 +126,123 @@ enum TickKind {
     Periodic,
 }
 
+/// 定期確認の契機。復帰直後の確認だけ、取得失敗時に早めの再確認を予約する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckTrigger {
+    /// 壁時計で次の確認時刻に達した（通常の30分ごとの確認、または復帰後の再確認）。
+    Due,
+    /// 起きる間隔より大幅に長い空白があった（スリープ復帰・OS時刻の大きな前進）。
+    Resume,
+}
+
+/// 1回の確認でのニュース取得の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewsTickOutcome {
+    /// 取得しなかった（取得不要・設定読込失敗・手動取得の実行中）。
+    Skipped,
+    /// 取得に成功した（新規保存件数）。
+    Refreshed(usize),
+    /// 取得を試みて失敗した。
+    Failed,
+}
+
+/// 次の確認時刻を壁時計（UTC）で管理する。メモリだけに持つ（非永続）。
+///
+/// 単調時計（`Instant` / `thread::sleep` の経過）はスリープ中に進まない環境があるため、
+/// 毎回 `Utc::now()` を渡して判定する。判定を純粋にしてテストできるようにしている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckClock {
+    /// 直近に起きて時刻を見た（または確認を終えた）時刻。スリープ復帰の判定の基準（心拍）。
+    last_seen: DateTime<Utc>,
+    /// 次に通常の確認を行う時刻。
+    next_due: DateTime<Utc>,
+}
+
+impl CheckClock {
+    /// 起動時の確認を終えた時刻から始める。
+    fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            last_seen: now,
+            next_due: now + CHECK_INTERVAL,
+        }
+    }
+
+    /// 起きるたびに呼ぶ。確認すべきなら契機を返す。
+    ///
+    /// - 前回から「起きる間隔＋余裕（10分）」を超えて空いていれば復帰とみなし、すぐ確認する
+    ///   （判定は通知の復帰猶予と同じ `is_resume_gap`）。
+    /// - 時計が巻き戻って次の確認時刻が確認間隔より先になった場合は、今から確認間隔後に詰め直し、
+    ///   確認が長く止まらないようにする（巻き戻しは復帰とはみなさない）。
+    fn poll(&mut self, now: DateTime<Utc>) -> Option<CheckTrigger> {
+        let resumed = is_resume_gap(self.last_seen, now, wake_interval());
+        self.last_seen = now;
+        if resumed {
+            return Some(CheckTrigger::Resume);
+        }
+        if self.next_due - now > CHECK_INTERVAL {
+            self.next_due = now + CHECK_INTERVAL;
+        }
+        (now >= self.next_due).then_some(CheckTrigger::Due)
+    }
+
+    /// 確認を終えた時刻 `now` で次の確認時刻を決める。
+    ///
+    /// 復帰直後の取得が失敗したときだけ、数分後にもう1回確認する。その再確認は `Due` 契機のため、
+    /// それも失敗したら通常の30分後に戻る（再試行は1回だけ）。取得しなかった（Skipped）場合は
+    /// ネットワークを使っていないので再確認しない。
+    fn finish(&mut self, now: DateTime<Utc>, trigger: CheckTrigger, outcome: NewsTickOutcome) {
+        self.last_seen = now;
+        let delay = if trigger == CheckTrigger::Resume && outcome == NewsTickOutcome::Failed {
+            RESUME_RETRY_DELAY
+        } else {
+            CHECK_INTERVAL
+        };
+        self.next_due = now + delay;
+    }
+
+    /// ループ1回分（poll → 確認 → finish）。確認したら（実際の契機, 取得結果）を返す。
+    ///
+    /// `now` は呼ぶたびに壁時計を返す。確認の最中にスリープした（開始から終了までに復帰とみなす
+    /// 空白がある）場合も、復帰直後と同じく取得失敗時に早めの再確認を予約する
+    /// （取得そのものに11分超かかった場合も同じ扱いになるが、早まるのは失敗時の1回だけ）。
+    fn step(
+        &mut self,
+        mut now: impl FnMut() -> DateTime<Utc>,
+        run: impl FnOnce(CheckTrigger) -> NewsTickOutcome,
+    ) -> Option<(CheckTrigger, NewsTickOutcome)> {
+        let started = now();
+        let trigger = self.poll(started)?;
+        let outcome = run(trigger);
+        let finished = now();
+        let trigger = if is_resume_gap(started, finished, wake_interval()) {
+            CheckTrigger::Resume
+        } else {
+            trigger
+        };
+        self.finish(finished, trigger, outcome);
+        Some((trigger, outcome))
+    }
+}
+
+/// 取得結果を確認の結果に分類する。
+///
+/// 取得元が1つ以上あり、その全部がフィードの段階で失敗した（ネットワーク未接続など）場合は、
+/// `refresh` が Ok を返しても失敗（Failed）として扱い、取得日・取得時刻を更新しない
+/// （更新すると日付変更時の取得を使い切り、朝のニュースが最大3時間遅れるため）。
+/// 一部の取得元だけの失敗や、取得元が0件の場合は従来どおり成功扱いにする。
+fn classify_refresh(result: &RefreshNewsResult) -> NewsTickOutcome {
+    if result.all_feeds_failed() {
+        NewsTickOutcome::Failed
+    } else {
+        NewsTickOutcome::Refreshed(result.saved)
+    }
+}
+
+/// 起きる間隔を復帰判定（chrono）用に変換する。
+fn wake_interval() -> TimeDelta {
+    TimeDelta::from_std(WAKE_INTERVAL).unwrap_or(TimeDelta::minutes(1))
+}
+
 /// 低頻度チェック方式のニュース取得・アーカイブ保守スケジューラ。
 pub struct NewsScheduler {
     archive_scheduler: ArchiveScheduler,
@@ -118,7 +250,6 @@ pub struct NewsScheduler {
     news_service: NewsService,
     settings_repository: SettingsRepository,
     state_path: PathBuf,
-    interval: Duration,
 }
 
 impl NewsScheduler {
@@ -135,24 +266,39 @@ impl NewsScheduler {
             news_service,
             settings_repository,
             state_path: paths.news_refresh_state_path.clone(),
-            interval: CHECK_INTERVAL,
         }
     }
 
-    /// 専用スレッドでチェックを開始する。起動時に1回、その後 interval ごとに確認する。
+    /// 専用スレッドでチェックを開始する。起動時に1回、その後は壁時計で30分ごと（スリープ復帰時は
+    /// 復帰後すぐ）に確認する。スレッドは約1分ごとに起きるが、確認時刻でなければ時刻比較だけで眠り直す。
     /// 取得は非同期だが UI/メインスレッドは阻害しない（別スレッドで実行）。
     /// `app` は refresh 成功の通知（emit）にだけ使う。
     pub fn start<R: Runtime>(self, app: AppHandle<R>) {
         std::thread::spawn(move || {
             self.tick_blocking(&app, TickKind::Startup);
+            let mut clock = CheckClock::new(Utc::now());
             loop {
-                std::thread::sleep(self.interval);
-                self.tick_blocking(&app, TickKind::Periodic);
+                std::thread::sleep(WAKE_INTERVAL);
+                let Some((trigger, outcome)) = clock.step(Utc::now, |trigger| {
+                    if trigger == CheckTrigger::Resume {
+                        log::info!("resume from sleep detected; running news scheduler check now");
+                    }
+                    // 復帰直後でも取得するかは通常の確認と同じ判定（Periodic）に従う。
+                    self.tick_blocking(&app, TickKind::Periodic)
+                }) else {
+                    continue;
+                };
+                if trigger == CheckTrigger::Resume && outcome == NewsTickOutcome::Failed {
+                    log::info!(
+                        "news refresh right after resume failed; will retry once in {} minute(s)",
+                        RESUME_RETRY_DELAY.num_minutes()
+                    );
+                }
             }
         });
     }
 
-    fn tick_blocking<R: Runtime>(&self, app: &AppHandle<R>, kind: TickKind) {
+    fn tick_blocking<R: Runtime>(&self, app: &AppHandle<R>, kind: TickKind) -> NewsTickOutcome {
         let today = local_today();
         match self.archive_scheduler.run_if_due(&today) {
             Ok(ArchiveMaintenanceOutcome::Skipped) => {}
@@ -174,19 +320,21 @@ impl NewsScheduler {
         }
 
         // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
-        if let Some(saved_count) = tauri::async_runtime::block_on(self.tick_news(kind, &today)) {
+        let outcome = tauri::async_runtime::block_on(self.tick_news(kind, &today));
+        if let NewsTickOutcome::Refreshed(saved_count) = outcome {
             notify_news_refreshed(app, saved_count, matches!(kind, TickKind::Startup));
             self.auto_summary_queue.enqueue_unsummarized();
         }
+        outcome
     }
 
-    /// 必要なら refresh する。成功した場合だけ新規保存件数を返す（未実行・失敗は None）。
-    async fn tick_news(&self, kind: TickKind, today: &str) -> Option<usize> {
+    /// 必要なら refresh する。成功時は新規保存件数、取得を試みて失敗したら Failed を返す。
+    async fn tick_news(&self, kind: TickKind, today: &str) -> NewsTickOutcome {
         let settings = match self.settings_repository.load_or_default() {
             Ok(settings) => settings,
             Err(error) => {
                 log::warn!("failed to load settings for news scheduler: {error}");
-                return None; // 設定が読めない場合は自動取得しない（安全側）
+                return NewsTickOutcome::Skipped; // 設定が読めない場合は自動取得しない（安全側）
             }
         };
 
@@ -194,22 +342,32 @@ impl NewsScheduler {
         let now = Utc::now();
         let within_work_hours = is_within_work_hours(&settings, now);
         if !should_refresh(kind, &settings, &state, today, now, within_work_hours) {
-            return None;
+            return NewsTickOutcome::Skipped;
         }
 
         // 手動取得の実行中は待たずに見送る。取得時刻は更新しないため次回確認で再試行される。
         let Some(outcome) = self.news_service.try_refresh().await else {
             log::info!("scheduled news refresh skipped because another refresh is running");
-            return None;
+            return NewsTickOutcome::Skipped;
         };
 
         match outcome {
             Ok(result) => {
+                let outcome = classify_refresh(&result);
+                if outcome == NewsTickOutcome::Failed {
+                    // 全取得元のフィード取得が失敗（ネットワーク未接続など）。取得日・取得時刻を
+                    // 更新せず、次回確認（復帰直後なら数分後の再確認）で再試行する。
+                    log::warn!(
+                        "scheduled news refresh failed for all {} source(s); will retry on next check",
+                        result.sources_processed
+                    );
+                    return outcome;
+                }
                 log::info!(
                     "scheduled news refresh saved {} new article(s)",
                     result.saved
                 );
-                // 成功時のみ取得日・取得時刻を更新する。
+                // 成功時のみ取得日・取得時刻を更新する（状態ファイルを書くのはここだけ）。
                 let updated = NewsRefreshState {
                     last_news_refresh_date: Some(today.to_string()),
                     last_news_refresh_at: Some(now.to_rfc3339()),
@@ -217,12 +375,12 @@ impl NewsScheduler {
                 if let Err(error) = updated.save(&self.state_path) {
                     log::warn!("failed to persist news refresh state: {error}");
                 }
-                Some(result.saved)
+                outcome
             }
             Err(error) => {
                 // 失敗時は日付を更新せず、次回チェックで再試行できるようにする。
                 log::warn!("scheduled news refresh failed; will retry on next check: {error}");
-                None
+                NewsTickOutcome::Failed
             }
         }
     }
@@ -587,6 +745,265 @@ mod tests {
         let loaded = NewsRefreshState::load(&path);
         assert_eq!(loaded, NewsRefreshState::default());
         assert!(loaded.last_news_refresh_date.is_none());
+    }
+
+    /// `start` から `minutes` 分後まで、1分ごとに起きて時刻を見る（途中で確認が来たら返す）。
+    fn poll_every_minute(
+        clock: &mut CheckClock,
+        start: DateTime<Utc>,
+        minutes: i64,
+    ) -> Option<(i64, CheckTrigger)> {
+        (1..=minutes).find_map(|minute| {
+            clock
+                .poll(start + TimeDelta::minutes(minute))
+                .map(|trigger| (minute, trigger))
+        })
+    }
+
+    #[test]
+    fn check_clock_runs_every_check_interval_while_awake() {
+        let start = at("2026-06-04T01:00:00Z");
+        let mut clock = CheckClock::new(start);
+        // 起きている間は30分後に通常の確認が来る（それまでは時刻比較だけ）。
+        assert_eq!(
+            poll_every_minute(&mut clock, start, 40),
+            Some((30, CheckTrigger::Due))
+        );
+        let finished = start + TimeDelta::minutes(31);
+        clock.finish(finished, CheckTrigger::Due, NewsTickOutcome::Skipped);
+        assert_eq!(clock.next_due, finished + CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn check_clock_runs_check_right_after_resume() {
+        // 23:00 JST（14:00Z）に起きた直後にスリープし、翌 08:00 JST（23:00Z）に復帰した。
+        let slept = at("2026-06-04T14:00:00Z");
+        let mut clock = CheckClock::new(slept);
+        let woke = at("2026-06-04T23:00:00Z");
+        assert_eq!(clock.poll(woke), Some(CheckTrigger::Resume));
+        // 次の確認時刻（14:30Z）はとうに過ぎているが、同じ空白で二度確認しない。
+        clock.finish(woke, CheckTrigger::Resume, NewsTickOutcome::Refreshed(5));
+        assert_eq!(clock.poll(woke + TimeDelta::minutes(1)), None);
+        assert_eq!(clock.next_due, woke + CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn check_clock_runs_resume_check_even_before_next_due() {
+        // 確認の直後に15分だけスリープした場合も、次の確認時刻を待たずに確認する
+        // （取得するかは should_refresh が決めるため、取得回数は増えない）。
+        let start = at("2026-06-04T01:00:00Z");
+        let mut clock = CheckClock::new(start);
+        assert_eq!(
+            clock.poll(start + TimeDelta::minutes(16)),
+            Some(CheckTrigger::Resume)
+        );
+    }
+
+    #[test]
+    fn check_clock_does_not_treat_short_delays_as_resume() {
+        // 起きる間隔（1分）＋余裕（10分）以内の遅れは復帰とみなさない。
+        let start = at("2026-06-04T01:00:00Z");
+        let mut clock = CheckClock::new(start);
+        let delayed = start + TimeDelta::minutes(11);
+        assert_eq!(clock.poll(delayed), None);
+        // 以降は1分ごとに起き、当初の確認時刻（開始から30分後）に通常の確認が来る。
+        assert_eq!(
+            poll_every_minute(&mut clock, delayed, 30),
+            Some((19, CheckTrigger::Due))
+        );
+    }
+
+    #[test]
+    fn resume_fetch_failure_retries_once_after_a_few_minutes() {
+        let slept = at("2026-06-04T14:00:00Z");
+        let mut clock = CheckClock::new(slept);
+        let woke = at("2026-06-04T23:00:00Z");
+        assert_eq!(clock.poll(woke), Some(CheckTrigger::Resume));
+        // 復帰直後の取得が失敗（ネットワーク未接続など）→ 数分後に再確認する。
+        let finished = woke + TimeDelta::seconds(20);
+        clock.finish(finished, CheckTrigger::Resume, NewsTickOutcome::Failed);
+        assert_eq!(clock.next_due, finished + RESUME_RETRY_DELAY);
+        assert_eq!(
+            poll_every_minute(&mut clock, finished, 10),
+            Some((3, CheckTrigger::Due))
+        );
+        // 再確認も失敗したら、それ以上早めず通常の30分後に戻る（再試行は1回だけ）。
+        let retried = finished + TimeDelta::minutes(3);
+        clock.finish(retried, CheckTrigger::Due, NewsTickOutcome::Failed);
+        assert_eq!(clock.next_due, retried + CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn early_retry_is_only_for_failed_fetch_right_after_resume() {
+        let now = at("2026-06-04T23:00:00Z");
+        for (trigger, outcome) in [
+            (CheckTrigger::Resume, NewsTickOutcome::Skipped),
+            (CheckTrigger::Resume, NewsTickOutcome::Refreshed(0)),
+            (CheckTrigger::Due, NewsTickOutcome::Failed),
+        ] {
+            let mut clock = CheckClock::new(now);
+            clock.finish(now, trigger, outcome);
+            assert_eq!(
+                clock.next_due,
+                now + CHECK_INTERVAL,
+                "{trigger:?} {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_clock_recovers_when_clock_moves_backwards() {
+        let start = at("2026-06-04T03:00:00Z");
+        let mut clock = CheckClock::new(start);
+        // 時計が2時間巻き戻っても復帰とはみなさず、次の確認時刻を「今から30分後」に詰め直す
+        // （2時間半止まり続けない）。
+        let rolled_back = start - TimeDelta::hours(2);
+        assert_eq!(clock.poll(rolled_back), None);
+        assert_eq!(clock.next_due, rolled_back + CHECK_INTERVAL);
+        assert_eq!(
+            poll_every_minute(&mut clock, rolled_back, 40),
+            Some((30, CheckTrigger::Due))
+        );
+    }
+
+    #[test]
+    fn resume_check_follows_the_same_refresh_rules() {
+        // 23:00 JST にスリープし、翌 08:00 JST に復帰。08:00 は通知の時間帯（09:00〜）の外。
+        let yesterday = refreshed("2026-06-04", "2026-06-04T09:00:00Z");
+        let woke = at("2026-06-04T23:00:00Z");
+        let today = "2026-06-05";
+        let check = |settings: &PersistedSettings, now, within_work_hours| {
+            should_refresh(
+                TickKind::Periodic,
+                settings,
+                &yesterday,
+                today,
+                now,
+                within_work_hours,
+            )
+        };
+        // 日付変更時の取得が ON なら、時間帯外でも復帰直後に取得する。
+        assert!(check(&settings(true, true), woke, false));
+        // OFF なら時間帯外では取得せず、時間帯（09:00 JST = 00:00Z）に入った確認で周期取得する。
+        assert!(!check(&settings(true, false), woke, false));
+        assert!(check(
+            &settings(true, false),
+            at("2026-06-05T00:00:00Z"),
+            true
+        ));
+    }
+
+    fn refresh_result(
+        sources: usize,
+        fetched: usize,
+        saved: usize,
+        error_kinds: &[&str],
+    ) -> RefreshNewsResult {
+        use crate::services::news_service::RefreshError;
+        RefreshNewsResult {
+            sources_processed: sources,
+            fetched,
+            saved,
+            errors: error_kinds
+                .iter()
+                .map(|kind| RefreshError {
+                    url: "https://example.com/feed".to_string(),
+                    kind: (*kind).to_string(),
+                })
+                .collect(),
+            genre_filter_fallback: false,
+        }
+    }
+
+    #[test]
+    fn all_feeds_failing_is_classified_as_failed() {
+        // ネットワーク未接続: 全取得元のフィード取得が失敗し、Ok(saved=0) が返る。
+        let offline = refresh_result(3, 0, 0, &["feed_fetch_failed"; 3]);
+        assert_eq!(classify_refresh(&offline), NewsTickOutcome::Failed);
+        // URL拒否と取得失敗が混ざっていても、全取得元が失敗していれば失敗。
+        let mixed = refresh_result(2, 0, 0, &["feed_url_rejected", "feed_fetch_failed"]);
+        assert_eq!(classify_refresh(&mixed), NewsTickOutcome::Failed);
+    }
+
+    #[test]
+    fn partial_or_empty_refresh_stays_refreshed() {
+        // 一部の取得元だけ失敗 → 従来どおり成功。
+        let partial = refresh_result(3, 10, 4, &["feed_fetch_failed"; 2]);
+        assert_eq!(classify_refresh(&partial), NewsTickOutcome::Refreshed(4));
+        // 取得できたが新着なし（本文取得の失敗はフィード段階の失敗ではない）→ 成功。
+        let no_new = refresh_result(2, 5, 0, &["article_fetch_failed"; 2]);
+        assert_eq!(classify_refresh(&no_new), NewsTickOutcome::Refreshed(0));
+        // 取得元が0件 → 従来どおり成功。
+        let empty = refresh_result(0, 0, 0, &[]);
+        assert_eq!(classify_refresh(&empty), NewsTickOutcome::Refreshed(0));
+        // 全部が URL 拒否（通信していない設定の問題）→ 再試行しても直らないため従来どおり。
+        let rejected = refresh_result(2, 0, 0, &["feed_url_rejected"; 2]);
+        assert_eq!(classify_refresh(&rejected), NewsTickOutcome::Refreshed(0));
+    }
+
+    /// 呼ぶたびに順に時刻を返す壁時計（step のテスト用）。
+    fn clock_sequence(times: Vec<DateTime<Utc>>) -> impl FnMut() -> DateTime<Utc> {
+        let mut iter = times.into_iter();
+        move || iter.next().expect("no more clock readings")
+    }
+
+    #[test]
+    fn step_after_resume_with_all_feeds_failing_schedules_retry_in_a_few_minutes() {
+        let slept = at("2026-06-04T14:00:00Z");
+        let woke = at("2026-06-04T23:00:00Z");
+        let finished = woke + TimeDelta::seconds(40);
+        let mut clock = CheckClock::new(slept);
+        let offline = refresh_result(3, 0, 0, &["feed_fetch_failed"; 3]);
+
+        let result = clock.step(clock_sequence(vec![woke, finished]), |trigger| {
+            assert_eq!(trigger, CheckTrigger::Resume);
+            classify_refresh(&offline)
+        });
+        assert_eq!(
+            result,
+            Some((CheckTrigger::Resume, NewsTickOutcome::Failed))
+        );
+        assert_eq!(clock.next_due, finished + RESUME_RETRY_DELAY);
+
+        // 3分後の再確認でも失敗したら、通常の30分後へ戻る。
+        let retry_at = finished + RESUME_RETRY_DELAY;
+        let retried = retry_at + TimeDelta::seconds(40);
+        let result = clock.step(clock_sequence(vec![retry_at, retried]), |_| {
+            classify_refresh(&offline)
+        });
+        assert_eq!(result, Some((CheckTrigger::Due, NewsTickOutcome::Failed)));
+        assert_eq!(clock.next_due, retried + CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn step_does_nothing_until_due() {
+        let start = at("2026-06-04T01:00:00Z");
+        let mut clock = CheckClock::new(start);
+        let result = clock.step(
+            clock_sequence(vec![start + TimeDelta::minutes(1)]),
+            |_| -> NewsTickOutcome { panic!("must not run before due") },
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn step_treats_sleep_during_check_like_resume() {
+        // 通常の確認の最中にスリープし、8時間後に戻った。取得は失敗していた。
+        let start = at("2026-06-04T01:00:00Z");
+        let due = start + CHECK_INTERVAL;
+        let finished = due + TimeDelta::hours(8);
+        let mut clock = CheckClock::new(start);
+        // 確認時刻の直前までは1分ごとに起きて何もしない。
+        assert_eq!(poll_every_minute(&mut clock, start, 29), None);
+        let result = clock.step(clock_sequence(vec![due, finished]), |trigger| {
+            assert_eq!(trigger, CheckTrigger::Due);
+            NewsTickOutcome::Failed
+        });
+        assert_eq!(
+            result,
+            Some((CheckTrigger::Resume, NewsTickOutcome::Failed))
+        );
+        assert_eq!(clock.next_due, finished + RESUME_RETRY_DELAY);
     }
 
     #[test]
