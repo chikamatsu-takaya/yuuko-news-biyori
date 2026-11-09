@@ -133,8 +133,8 @@ impl SummaryService {
     /// 手動と同じく `AiOutputRejected` で止まる（D104）。記事は未要約のまま残り、
     /// キューの再試行に回る。AI 呼び出し中に手動要約で要約済みになっていた場合は上書きせず
     /// `AutoSummaryOutcome::AlreadySummarized` を返す。
-    /// 手動の `generate_article_summary` は Gemini の通信失敗などによる Mock の結果を従来どおり保存し、
-    /// 要約済みでも作り直す。
+    /// 手動の `generate_article_summary` は Mock を選んでいるときの Mock の結果を保存し、要約済みでも作り直す
+    /// （Gemini の通信失敗・キー未設定では Mock に切り替わらず、手動・自動とも `AiUnavailable` で止まる）。
     /// 各段（要点・要約・再説明・感想）の AI 呼び出しの前に、同じ記事の手動要約が始まっていないか・
     /// 要約済みになっていないかを確かめ、そうなら残りの段をやめる（`generate_auto_summary_with`）。
     pub fn generate_article_summary_without_fallback(
@@ -926,6 +926,7 @@ fn error_label(error: &AppError) -> &'static str {
     match error {
         AppError::AiOutputRejected => "output_rejected",
         AppError::LocalAi(_) => "local_ai_failed",
+        AppError::AiUnavailable => "ai_unavailable",
         _ => "other",
     }
 }
@@ -1172,7 +1173,8 @@ fn combined_provider(responses: &[&AiResponse]) -> String {
         .unwrap_or_else(|| PROVIDER_MOCK.to_string())
 }
 
-/// Mock への切り替え結果（Gemini の通信失敗・キー未設定による代替）を保存してよいか。
+/// Mock の結果を保存してよいか。Mock の結果が返るのは設定で Mock を明示的に選んだときだけ
+/// （Gemini の通信失敗・キー未設定では `AiProviderService` が Mock へ切り替えず `AiUnavailable` を返す）。
 /// 手動生成は保存し、自動要約は保存しない。実AIの出力の検証落ちはどちらも保存しない（D104）。
 /// 自動要約（RejectFallback）は、要約済みの記事を上書きしない保存も兼ねる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1201,7 +1203,7 @@ enum SummaryGeneration {
 }
 
 /// 自動要約で、出力が Mock の代替に切り替わっていたら直ちにエラーを返す（残りの AI 呼び出しをしない）。
-/// 手動生成（SaveFallback）では何もしない（Gemini の通信失敗などによる Mock の結果は従来どおり保存する）。
+/// 手動生成（SaveFallback）では何もしない（Mock を選んでいるときの Mock の結果は保存する）。
 fn reject_fallback_early(
     fallback_policy: FallbackPolicy,
     article_id: &str,
@@ -1539,7 +1541,7 @@ fn is_markdown_separator_line(line: &str) -> bool {
 /// 保存すると、利用者が作り直す理由に気づけないため。
 /// Mock を選んでいる利用者（provider = "mock"）の出力は、従来どおり検証に通れば使う。
 /// 落ちた場合は `AppError::Parse`（Mock の種は無害化済みのため通常は起きない）。
-/// なお、Gemini の通信失敗・キー未設定による Mock への切り替え（`AiProviderService`）は従来どおり。
+/// なお、Gemini の通信失敗・キー未設定でも Mock へは切り替えず、`AppError::AiUnavailable` で止まる（`AiProviderService`）。
 ///
 /// 実AIの再説明・一言は、検証の前にト書き・中国語の助詞・挨拶を取り除く（`clean_ai_speech`）。
 /// 重いニュース（`SpeechTone::Calm`・D122）では、絵文字・「！」なども取り除く。

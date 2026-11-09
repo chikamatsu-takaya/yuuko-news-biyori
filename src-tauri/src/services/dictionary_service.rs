@@ -48,7 +48,7 @@ impl TermExplanationAi for AiProviderService {
         provider: AiProvider,
         explanation_level: ExplanationLevel,
     ) -> Result<AiResponse, AppError> {
-        // 既存経路（Provider選択・Gemini可否・Mock fallback・エラー安全化）へそのまま委譲する。
+        // 既存経路（Provider選択・Gemini可否・AI が使えないときの AiUnavailable・エラー安全化）へそのまま委譲する。
         self.request_text(request, provider, explanation_level)
     }
 }
