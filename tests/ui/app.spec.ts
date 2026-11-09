@@ -8892,6 +8892,50 @@ test("news list reloads right away for the startup news refresh even while shown
   );
 });
 
+test("startup news refresh while hidden or arriving late waits for the next re-show", async ({
+  page,
+}) => {
+  // 起動時の取得でも、非表示中に届いたもの・起動から時間がたって届いたものは、操作中の一覧を作り直さない。
+  await page.clock.install();
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const initialLoads = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // 非表示中に届いた起動時の取得は、再表示で1回だけ反映する。
+  await setVisible(false);
+  await expect.poll(() => emitNewsRefreshed(page, true)).toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    initialLoads
+  );
+  await setVisible(true);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(initialLoads);
+  await page.waitForTimeout(200);
+  const afterReshow = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+
+  // 起動から時間がたってから届いた起動時の取得は、表示中でもその場では読み直さない。
+  await page.clock.fastForward(31_000);
+  await emitNewsRefreshed(page, true);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    afterReshow
+  );
+});
+
 test("news list reloads on the next re-show after a scheduled news refresh", async ({
   page,
 }) => {
