@@ -26,10 +26,10 @@
 //!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使うが、全画面の種類の
 //!   見方は分ける（通知は種類を問わず抑制、自動要約は `FullscreenStatus::pauses_auto_summary` のときだけ止める）。
 //!   通知の抑制設定には左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
-//! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から5分で止まる（`local_llm_service`）。
+//! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から2分で止まる（`local_llm_service`）。
 //!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
 //!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
-//!   5分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約2GBを長く握らないため）。
+//!   2分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約2GBを長く握らないため）。
 //!   自動要約からの要求は `for_background` の窓口を通し、利用者の操作とは別に数える（summary_service）。
 //!   要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
@@ -100,7 +100,7 @@ const STARTUP_DELAY: Duration = Duration::from_secs(60);
 const GEMINI_ITEM_INTERVAL: Duration = Duration::from_secs(30);
 
 /// ローカルLLMで1件処理するごとに空ける間隔。利用枠は無いが、1件の生成中は CPU を使い続けるため、
-/// 10秒だけ空けて他の操作に CPU を返す。ローカルLLMの「5分使わなければ止める」より十分短いので、
+/// 10秒だけ空けて他の操作に CPU を返す。ローカルLLMの「2分使わなければ止める」より十分短いので、
 /// まとめて要約する間にモデルを読み込み直すことはない。
 const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -526,7 +526,7 @@ impl AutoSummaryQueue {
 
     /// 同梱ローカルLLMとつなぐ（lib.rs で、要約・用語解説に使うのと同じ窓口を渡す）。
     /// - 待機列が空になったら早めの停止を頼む。動いていなければ何もしない。直近の手動操作があるときに
-    ///   いつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
+    ///   いつ止めるか（手動操作から2分たつまでは止めない）は `LocalLlmService` が決める。
     /// - 次の記事を取り出す前に、手動の要求の最中・直後か、起動を控えている間かを尋ね、その間は待つ。
     pub fn with_local_llm(mut self, local_llm: LocalLlmService) -> Self {
         let release = local_llm.clone();
@@ -1031,6 +1031,15 @@ mod tests {
     use crate::domain::ai_connection::LocalAiFailure;
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
+
+    #[test]
+    fn local_item_interval_is_shorter_than_llm_idle_stop() {
+        // まとめて要約する間に llama-server を止めて起動し直さないため、記事ごとの間隔と手動優先の待ちは
+        // ローカルLLMの「しばらく使わなければ止める」（既定 2 分）より十分短くしておく。
+        let idle_stop = crate::services::local_llm_service::LocalLlmConfig::default().idle_stop;
+        assert!(LOCAL_ITEM_INTERVAL * 4 < idle_stop);
+        assert!(crate::services::local_llm_service::MANUAL_PRIORITY_GRACE < idle_stop);
+    }
 
     const SAVED: AutoSummaryOutcome = AutoSummaryOutcome::Saved;
 

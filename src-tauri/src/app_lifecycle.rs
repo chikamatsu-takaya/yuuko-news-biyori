@@ -29,8 +29,9 @@ const SUMMON_YUUKO_MENU_ID: &str = "resident-summon-yuuko";
 const QUIT_MENU_ID: &str = "resident-quit-application";
 
 /// 非表示待機のメインウィンドウを破棄するまでの時間（D133）。
-/// 短すぎると再表示のたびに読み込み直しが増え、長すぎると約300MBの WebView を抱え続けるため10分にする。
-pub(crate) const MAIN_WINDOW_RELEASE_DELAY: Duration = Duration::from_secs(10 * 60);
+/// 短すぎると再表示のたびに読み込み直しが増え、長すぎると約500MB（うち専用約320MB）の WebView を抱え続ける。
+/// 2026-11-09 の製品版の計測で、解放後は約36MB・作り直しも一瞬だったため、10分から5分に縮めた。
+pub(crate) const MAIN_WINDOW_RELEASE_DELAY: Duration = Duration::from_secs(5 * 60);
 
 /// 再生成時、破棄要求を出した旧ウィンドウが登録から外れるのを待つ間隔と回数（合計約2秒）。
 /// 解放の直後に再表示が重なった場合だけ待つ。通常は旧ウィンドウが既に無いため待たない。

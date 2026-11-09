@@ -172,7 +172,7 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             // 自動要約キュー（設定で有効なときだけ動く）。ニュース取得後に NewsScheduler から投入する。
-            // 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（直近に手動操作があれば、その操作から5分たってから止まる）。
+            // 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（直近に手動操作があれば、その操作から2分たってから止まる）。
             // 手動の要求の最中・直後と、llama-server の起動を控えている間は、次の記事を取り出さない。
             let auto_summary_queue = AutoSummaryQueue::new(
                 article_service.clone(),
