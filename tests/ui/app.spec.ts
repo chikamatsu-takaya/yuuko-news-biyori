@@ -6614,6 +6614,9 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   await expect(guide).toContainText("ローカル（おすすめ）：このパソコンの中で動くAIです");
   await expect(guide).toContainText("記事の内容を外部へ送りません");
   await expect(guide).toContainText("APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります");
+  // キー未設定でも Mock の文では動かない（Mock は明示的に選んだときだけ）。
+  await expect(guide).toContainText("キーが未設定のときは要約・解説は作れません（記事は読めます）");
+  await expect(guide).not.toContainText("開発・デモ用の文で動きます");
   await expect(guide).toContainText("開発・デモ用：動作確認のための設定です");
   await expect(guide).not.toContainText("推奨します");
   await expect(guide).not.toContainText("MockProvider");

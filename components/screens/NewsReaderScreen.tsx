@@ -72,7 +72,7 @@ import {
   readCommandErrorCode,
   termExplainFailureMessage,
   isAiUnavailableErrorCode,
-  SUMMARY_AI_UNAVAILABLE_MESSAGE,
+  summaryAiUnavailableMessage,
 } from "@/lib/explain-selection.mjs";
 // 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
 import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
@@ -1881,7 +1881,7 @@ export default function NewsReaderScreen({
           isOutputRejected
             ? "うまくまとめられなかったよ。もう一度試してね"
             : isAiUnavailable
-              ? SUMMARY_AI_UNAVAILABLE_MESSAGE
+              ? summaryAiUnavailableMessage(errorCode)
               : "要約の作成ができなかったよ。時間をおいてもう一度試してみてね。"
         );
         toast({
@@ -1890,7 +1890,7 @@ export default function NewsReaderScreen({
           description: isOutputRejected
             ? "うまくまとめられなかったよ。もう一度試してね"
             : isAiUnavailable
-              ? SUMMARY_AI_UNAVAILABLE_MESSAGE
+              ? summaryAiUnavailableMessage(errorCode)
               : "要約の作成ができなかったよ。もう一度試してみてね。",
         });
       }
