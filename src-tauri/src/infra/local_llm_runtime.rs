@@ -444,7 +444,7 @@ impl ServerLauncher for ChildProcessLauncher {
             command.current_dir(parent);
         }
         let child = command.spawn()?;
-        // アプリが異常終了しても llama-server（約2GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
+        // アプリが異常終了しても llama-server（生成中は約1.5GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
         // 入れられなくても生成はできる（通常の終了経路では shutdown が止める）ため、記録だけ残して続ける。
         if !exit_job::attach(&child) {
             log::warn!("could not attach llama-server to the kill-on-exit job");

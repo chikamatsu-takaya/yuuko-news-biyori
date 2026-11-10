@@ -33,14 +33,14 @@
 //!   起動済みのときは、そのサーバーが既に使っている分（`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して比べる
 //!   （足し戻さないと、1件目で読み込んだモデルの分だけ2件目から毎回止まり、止まって解放→再開して読み込み直し、を繰り返すため）。
 //!   ただし起動済みでも、空きそのものが `MIN_AVAILABLE_WHILE_LLM_RUNNING`（1GiB）未満なら待つ（足し戻しの二重計上への下限）。
-//!   このメモリ不足で止めたときだけ `LocalLlmService::release_soon` を頼み、モデルの約2GB を2分待たずに返す
+//!   このメモリ不足で止めたときだけ `LocalLlmService::release_soon` を頼み、llama-server の約1.5GB を2分待たずに返す
 //!   （ゲーム・発表・マイクで止めたときは従来どおり頼まない）。
 //!   OS への問い合わせ（`user_activity_detector`）は全画面・マイクで止めないときだけ、取り出しの前と
 //!   確かめ直し（`PAUSE_RECHECK_INTERVAL`）のときに行う。値が取れないときは止めない（fail-open）。手動の要約には関係しない。
 //! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から2分で止まる（`local_llm_service`）。
 //!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
 //!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
-//!   2分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約2GBを長く握らないため）。
+//!   2分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約1.5GBを長く握らないため）。
 //!   自動要約からの要求は `for_background` の窓口を通し、利用者の操作とは別に数える（summary_service）。
 //!   要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
@@ -125,20 +125,25 @@ const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// 再開まで最長で約 4 分。
 const ACTIVE_INPUT_WINDOW: Duration = Duration::from_secs(3 * 60);
 
-/// 操作中に、物理メモリの空きがこれ未満なら自動要約を待たせる（2.5GiB〔2560MiB〕）。llama-server は生成中に
-/// ワーキングセット約 2.0〜2.3GB（うちプライベート約 1.3〜1.5GB。詳細設計書の実測）を使うため、その約 2GiB に、
-/// 利用者のアプリと OS のファイルキャッシュが押し出されないための余裕 0.5GiB を足した値。
-const MIN_AVAILABLE_MEMORY_WHILE_ACTIVE: u64 = 2_560 * 1024 * 1024;
+/// 操作中に、llama-server が止まっているとき物理メモリの空きがこれ未満なら自動要約を待たせる（2GiB〔2048MiB〕）。
+/// llama-server は `--no-repack` で起動し（#442）、生成中のワーキングセットは最大約 1.49GB（うちプライベート約 0.69GB。
+/// 残り約 1.2GB は mmap のモデルのページ。軽量常駐性能確認手順 §11.3 の実測）。その約 1.5GiB に、利用者のアプリと
+/// OS のファイルキャッシュが押し出されないための余裕 0.5GiB を足した値（repack していた頃は約 2GiB＋0.5GiB＝2.5GiB）。
+const MIN_AVAILABLE_MEMORY_WHILE_ACTIVE: u64 = 2_048 * 1024 * 1024;
 
-/// llama-server を起動済みのときに、空きへ足し戻す「既に使っている分」の見積もり（2GiB〔2048MiB〕。
-/// 生成中のワーキングセット約 2GB）。起動済みならモデルの分は既に空きから引かれているため、そのまま比べると
-/// 2件目から毎回止まってしまう。
-const LOCAL_LLM_RESIDENT_ESTIMATE: u64 = 2_048 * 1024 * 1024;
+/// llama-server を起動済みのときに、空きへ足し戻す「既に使っている分」の見積もり（1.5GiB〔1536MiB〕。
+/// `--no-repack` 後の生成中のワーキングセット最大約 1.49GB）。起動済みならその分は既に空きから引かれているため、
+/// そのまま比べると2件目から毎回止まってしまう。
+const LOCAL_LLM_RESIDENT_ESTIMATE: u64 = 1_536 * 1024 * 1024;
 
 /// llama-server を起動済みのときでも、物理メモリの空きそのものに求める下限（1GiB〔1024MiB〕）。
 /// llama.cpp はモデルを mmap で読むため、OS に削られたモデルのページは standby に移って空き（ullAvailPhys）にも
-/// 数えられる。そこへ見積もり 2GiB を足し戻すと二重に数え、実質「空き 0.5GiB」まで進めてしまうため、
-/// 生成で削られたページを読み戻し・KV キャッシュを確保しても利用者のアプリを押し出さない余裕として 1GiB を残す。
+/// 数えられる。そこへ見積もり 1.5GiB を足し戻すと二重に数え、足し戻しだけでは実質「空き 0.5GiB」
+/// （2GiB − 1.5GiB）まで進めてしまうため、生成で削られたページを読み戻し・KV キャッシュを確保しても
+/// 利用者のアプリを押し出さない余裕として 1GiB を残す。起動中の実質の基準は max(1GiB, 0.5GiB)＝1GiB で、
+/// この下限が決める（足し戻しは下限より緩いので矛盾しない）。
+/// そのため起動前の空きが 2〜2.5GiB 付近だと、読み込み後に下限へかかって2件目で止まり、解放→再開→読み込み直し
+/// （約2秒）を繰り返しうる（操作中のときだけ。変更前の 2.5〜3GiB 付近と同じ幅で、悪くはなっていない）。
 const MIN_AVAILABLE_WHILE_LLM_RUNNING: u64 = 1_024 * 1024 * 1024;
 
 /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待つときの、1回の待ちの上限。
@@ -478,8 +483,9 @@ fn low_memory_while_active_on(
 /// 操作中（最後の入力から `ACTIVE_INPUT_WINDOW` 未満）かつ物理メモリの空きが足りないなら true（純粋関数）。
 /// - 操作していない（画面ロック中を含む。入力が無いので経過が延びる）なら、空きが少なくても止めない。
 /// - 操作中でも空きが足りていれば止めない。llama-server を起動済みなら、既に使っている分
-///   （`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して 2.5GiB と比べ、あわせて空きそのものが
-///   `MIN_AVAILABLE_WHILE_LLM_RUNNING`（1GiB）以上であることも求める（mmap のページの二重計上への下限）。
+///   （`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して 2GiB と比べ、あわせて空きそのものが
+///   `MIN_AVAILABLE_WHILE_LLM_RUNNING`（1GiB）以上であることも求める（mmap のページの二重計上への下限。
+///   今の値では起動中は下限 1GiB のほうが厳しく、実質この下限で決まる）。
 /// - 入力の経過・空きが取れないとき（Windows 以外・OS 判定の失敗）は止めない（fail-open。他の一時停止と同じ）。
 fn low_memory_while_active(
     idle_time: Option<Duration>,
@@ -882,7 +888,7 @@ impl AutoSummaryQueue {
         match (self.user_busy)() {
             Some(cause) => {
                 let newly_paused = self.note(QueueNotice::Paused(cause));
-                // 操作中のメモリ不足で止めたときだけ、早めの停止を頼んでモデルの約2GB を返す。止まり始めの1回だけ頼む
+                // 操作中のメモリ不足で止めたときだけ、早めの停止を頼んで llama-server の約1.5GB を返す。止まり始めの1回だけ頼む
                 // （60 秒ごとの確かめ直しのたびに頼むと、予約の時刻が延び続けて止まらなくなるため）。
                 if newly_paused && cause == BusyCause::LowMemoryWhileActive {
                     (self.on_low_memory_pause)();
@@ -2372,10 +2378,10 @@ mod tests {
         ));
     }
 
-    /// 空きの境目は 2.5GB。ちょうど 2.5GB あれば進める。
+    /// llama-server が止まっているときの空きの境目は 2GiB。ちょうど 2GiB あれば進める（1 バイト足りなければ待つ）。
     #[test]
-    fn memory_threshold_boundary_is_two_and_a_half_gigabytes() {
-        assert_eq!(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE, 2_560 * 1024 * 1024);
+    fn memory_threshold_boundary_is_two_gibibytes() {
+        assert_eq!(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE, 2 * GIB);
         assert!(low_memory_while_active(
             active(),
             || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE - 1),
@@ -2410,14 +2416,15 @@ mod tests {
         assert!(!low_memory_while_active(active(), || None, not_running));
     }
 
-    /// llama-server を起動済みなら、既に使っている分（約 2GB）を空きへ足し戻して比べる
+    /// llama-server を起動済みなら、既に使っている分（約 1.5GiB）を空きへ足し戻して比べる
     /// （2件目から毎回止まって、解放→読み込み直しを繰り返さないため）。
     #[test]
     fn running_local_llm_memory_is_counted_as_available() {
+        assert_eq!(LOCAL_LLM_RESIDENT_ESTIMATE, GIB + GIB / 2);
         let after_load = || Some(GIB + GIB / 2);
         assert!(low_memory_while_active(active(), after_load, || false));
         assert!(!low_memory_while_active(active(), after_load, || true));
-        // 起動済みでも、足し戻して 2.5GB に届かないほど空きが無ければ待つ。
+        // 起動済みでも、空きが下限にも足し戻し後の 2GiB にも届かないほど無ければ待つ。
         assert!(low_memory_while_active(
             active(),
             || Some(256 * 1024 * 1024),
@@ -2426,9 +2433,16 @@ mod tests {
     }
 
     /// 起動済みでも、空きそのものが 1GiB 未満なら待つ（mmap のページを足し戻しで二重に数えないための下限）。
+    /// 足し戻しだけなら 0.5GiB（2GiB − 1.5GiB）まで進めてしまうので、起動中の実質の境目はこの下限 1GiB になる。
     #[test]
     fn running_local_llm_still_needs_one_gibibyte_free() {
         assert_eq!(MIN_AVAILABLE_WHILE_LLM_RUNNING, GIB);
+        // 足し戻しだけなら通る境目（0.5GiB）ちょうどでも、下限を下回るので待つ。
+        assert!(low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE - LOCAL_LLM_RESIDENT_ESTIMATE),
+            || true
+        ));
         assert!(low_memory_while_active(
             active(),
             || Some(MIN_AVAILABLE_WHILE_LLM_RUNNING - 1),
@@ -2439,10 +2453,15 @@ mod tests {
             || Some(MIN_AVAILABLE_WHILE_LLM_RUNNING),
             || true
         ));
-        // 足し戻すと 2.5GiB を超える 0.6GiB でも、下限を下回るので待つ。
+        // 足し戻すと 2GiB を超える 0.6GiB・0.9GiB でも、下限を下回るので待つ。
         assert!(low_memory_while_active(
             active(),
             || Some(GIB * 6 / 10),
+            || true
+        ));
+        assert!(low_memory_while_active(
+            active(),
+            || Some(GIB * 9 / 10),
             || true
         ));
     }
