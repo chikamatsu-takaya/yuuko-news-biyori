@@ -1021,9 +1021,8 @@ fn select_strict_blocks(
     let mut selected_chars = 0;
     // 本文途中の【PR】の囲み・関連記事の囲み。この要素の内側のブロックは飛ばす。
     let mut skipped_pr_box: Option<ElementRef> = None;
-    // 直前に選んだブロックの要素と、selected の中の位置（常に末尾）。入れ子の重複を段落に分け直すのに使う。
-    // selected[位置] は、外側のブロックの文のうち、まだ内側のブロックへ分けていない残り。
-    let mut open_outer: Option<(ElementRef, usize)> = None;
+    // 直前に選んだブロック（入れ子の重複を段落に分け直すのに使う。`NestedSplit`）。
+    let mut open_outer: Option<NestedSplit> = None;
     for (index, block) in candidates.iter().enumerate() {
         let text = &block.text;
         if skipped_pr_box.is_some_and(|pr_box| is_inside(&block.element, &pr_box)) {
@@ -1094,30 +1093,82 @@ fn select_strict_blocks(
             continue;
         }
         // 直前に選んだブロック（埋め込み投稿の blockquote・li など）の内側にあり、その残りの文に含まれるブロック（中の p）は、
-        // 外側と同じ文の重複。外側の文を「内側より前の部分・内側・内側より後ろの部分」に分け直し、内側の段落の区切りを保つ
-        // （外側にしかない文〔投稿者の表示など〕は別のブロックとして残る）。文は増えも減りもしない。
-        if let Some((outer, slot)) = open_outer {
-            if outer.id() != block.element.id() && is_inside(&block.element, &outer) {
-                if let Some(pos) = selected[slot].find(text.as_str()) {
-                    let after = selected[slot][pos + text.len()..].trim().to_string();
-                    let before = selected[slot][..pos].trim().to_string();
-                    selected[slot] = before;
-                    selected.push(text.clone());
-                    selected.push(after);
-                    open_outer = Some((outer, selected.len() - 1));
-                    continue;
-                }
+        // 外側と同じ文の重複。外側のブロックを内側の段落ごとに分け直す（`NestedSplit::split`）。
+        if let Some(split) = open_outer.as_mut() {
+            if split.outer.id() != block.element.id()
+                && is_inside(&block.element, &split.outer)
+                && split.split(&mut selected, text)
+            {
+                continue;
             }
         }
         selected_chars += text.chars().count();
         selected.push(text.clone());
-        open_outer = Some((block.element, selected.len() - 1));
+        open_outer = Some(NestedSplit {
+            outer: block.element,
+            remainder: text.clone(),
+            last_inner: None,
+        });
     }
-    // 分け直しで空になった外側の残りを除く。
-    selected.retain(|text| !text.is_empty());
     trim_edge_label_blocks(&mut selected);
     trim_trailing_meta_blocks(&mut selected);
     selected
+}
+
+/// 入れ子の重複の分け直し（strict のみ）。埋め込み投稿の `blockquote` と中の `p` のように、外側と内側の両方がブロックとして
+/// 拾われると同じ文が 2 回入る。外側のブロックを内側の段落ごとに分け直し、内側の段落の区切りと順序を保つ。
+/// 外側にしかない文（前置き・投稿者の表示など）は、隣の内側の段落につなぐ（最初の内側より前の文はその頭へ、
+/// 内側の間と最後の内側より後ろの文は直前の内側の末尾へ）。別のブロックにしないのは、同じ投稿者の表示が
+/// 複数の投稿で同じ文になり、`join_body_blocks` の重複除去や短いノイズの除去で落ちるため。文は増えも減りもしない。
+struct NestedSplit<'a> {
+    /// 外側のブロックの要素。
+    outer: ElementRef<'a>,
+    /// 外側の文のうち、まだ内側の段落に分けていない残り。
+    remainder: String,
+    /// 最後に分けた内側の段落の selected の中の位置と、その段落の（残りをつなぐ前の）文。
+    /// None のときは、外側のブロックがそのまま selected の末尾にある。
+    last_inner: Option<(usize, String)>,
+}
+
+impl NestedSplit<'_> {
+    /// 内側のブロックの文 `inner` が残りに含まれれば分け直して true を返す。含まれなければ何もせず false。
+    /// selected の末尾は常にこの外側（または最後に分けた内側）のブロック（間に別のブロックが選ばれると、そのブロックが新しい外側になる）。
+    fn split(&mut self, selected: &mut Vec<String>, inner: &str) -> bool {
+        let Some(pos) = self.remainder.find(inner) else {
+            return false;
+        };
+        let before = self.remainder[..pos].trim().to_string();
+        let after = self.remainder[pos + inner.len()..].trim().to_string();
+        let base = match self.last_inner.take() {
+            None => {
+                // 最初の内側: 外側のブロックを「前の文＋内側」に置き換える。
+                let base = join_with_space(&before, inner);
+                let slot = selected.len() - 1;
+                selected[slot] = join_with_space(&base, &after);
+                self.last_inner = Some((slot, base));
+                self.remainder = after;
+                return true;
+            }
+            Some((slot, base)) => {
+                // 2 つ目以降の内側: 間の文を直前の内側の末尾につなぎ、内側を新しい段落として足す。
+                selected[slot] = join_with_space(&base, &before);
+                inner.to_string()
+            }
+        };
+        selected.push(join_with_space(&base, &after));
+        self.last_inner = Some((selected.len() - 1, base));
+        self.remainder = after;
+        true
+    }
+}
+
+/// 2 つの文を空白 1 つでつなぐ（片方が空ならもう片方だけ）。
+fn join_with_space(head: &str, tail: &str) -> String {
+    match (head.is_empty(), tail.is_empty()) {
+        (true, _) => tail.to_string(),
+        (_, true) => head.to_string(),
+        _ => format!("{head} {tail}"),
+    }
 }
 
 /// 選んだブロックの末尾から、本文でない定型のブロック（`is_trailing_meta_block`）が続く間を除く（strict のみ）。
@@ -3434,16 +3485,14 @@ mod tests {
     #[test]
     fn drops_nested_duplicate_of_embedded_post_only() {
         // 埋め込み投稿（blockquote の中の p）は、外側と内側の両方がブロックとして拾われて同じ文が 2 回入っていた。
-        // 内側の p を段落として残し、外側にしかない投稿者の表示は別のブロックとして残す。
+        // 内側の p を 1 つの段落として残し、外側にしかない投稿者の表示はその末尾につなぐ。
         let post = "新しい料金体系を来月から導入します。詳しくは公式サイトをご覧ください。";
         let excerpt = extract_body(&format!(
             r#"<p>{BODY_1}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
         ));
         assert_eq!(
             excerpt,
-            format!(
-                "{BODY_1}\n\n{post}\n\n— 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}"
-            )
+            format!("{BODY_1}\n\n{post} — 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}")
         );
         // 本文の段落が投稿の文を引用しているだけ（入れ子でない）なら、同じ文が含まれていても残す。
         let quoting = format!("同社は「{post}」とXに投稿した。");
@@ -3548,18 +3597,33 @@ mod tests {
     #[test]
     fn splits_quote_box_into_inner_paragraphs_in_order() {
         // 引用の囲み（前置き＋英文の投稿＋訳の 2 段落＋投稿者の表示）。変更前は外側の 1 ブロック＋内側の 2 段落の重複だった。
-        // 内側の 2 段落をそのままの順で残し、外側にしかない文（前置き・投稿者の表示）を別のブロックとして残す。
+        // 内側の 2 段落をそのままの順で 2 つの段落として残し、外側にしかない文（前置き・間の文・投稿者の表示）は隣の段落につなぐ。
         let english = "We are launching a new pricing plan next month for all existing customers.";
         let japanese =
             "来月から既存のすべての利用者を対象に新しい料金体系を導入すると投稿しました。";
         let excerpt = extract_body(&format!(
-            r#"<p>{BODY_1}</p><blockquote>投稿の引用 <p>{english}</p><p>{japanese}</p>— Example Corp (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
+            r#"<p>{BODY_1}</p><blockquote>投稿の引用 <p>{english}</p>（訳） <p>{japanese}</p>— Example Corp (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
         ));
         assert_eq!(
             excerpt,
             format!(
-                "{BODY_1}\n\n投稿の引用\n\n{english}\n\n{japanese}\n\n— Example Corp (@example) November 10, 2026\n\n{LONG_BODY}"
+                "{BODY_1}\n\n投稿の引用 {english} （訳）\n\n{japanese} — Example Corp (@example) November 10, 2026\n\n{LONG_BODY}"
             )
+        );
+    }
+
+    #[test]
+    fn keeps_each_post_attribution_when_posts_share_the_same_author() {
+        // 同じ投稿者の埋め込み投稿が 2 つ並ぶと、投稿者の表示が同じ文になる。重複除去で片方の表示が落ちないこと。
+        let post_a = "一つ目の投稿です。新しい料金体系を来月から導入します。";
+        let post_b = "二つ目の投稿です。既存の利用者には移行期間を設けます。";
+        let credit = "— 架空の会社 (@example) November 10, 2026";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote><p>{post_a}</p>{credit}</blockquote><blockquote><p>{post_b}</p>{credit}</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{post_a} {credit}\n\n{post_b} {credit}\n\n{LONG_BODY}")
         );
     }
 }
