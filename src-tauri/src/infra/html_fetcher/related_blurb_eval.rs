@@ -4,7 +4,7 @@
 //! - `YUUKO_RELSTRIP_EVAL_OUT`（一時フォルダ）が無ければ何もしない。実際のアプリデータ（app-data）には書かない。
 //! - `fetch` 段は、`YUUKO_RELSTRIP_EVAL_CONFIG_DIR`（app-data の config）の取得元・許可リストを**読むだけ**で、
 //!   一時フォルダへ複写した許可リスト（＋同梱の既定取得元の許可ホスト）で、製品と同じ URL 検証・取得の部品を使う。
-//! - 取得した HTML・抽出結果は一時フォルダにだけ置き、評価の後でフォルダごと消す。リポジトリへ入れない。
+//! - 取得した HTML・抽出結果は一時フォルダにだけ置く（このハーネスは消さない。評価の後で実行者がフォルダごと消す）。リポジトリへ入れない。
 //!
 //! 段（`YUUKO_RELSTRIP_EVAL_PHASE`）:
 //! - `fetch`: 取得元ごとに RSS の先頭から `YUUKO_RELSTRIP_EVAL_PER_SOURCE` 件（既定 4）の HTML を `<OUT>/html/` へ保存する。

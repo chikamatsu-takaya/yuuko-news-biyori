@@ -187,14 +187,10 @@ const END_MARKER_BULLETS: &[char] = &[
 ];
 /// 「この連載の記事をもっと見る」のような、他記事の一覧へ誘うリンクの文言（リンクの文字に含まれるか）。
 /// 記事末尾の見出し付きの囲みに、本文の段落の外に置かれたこのリンクがあれば、その囲みを連載・関連記事の紹介とみなす
-/// （`trailing_more_articles_box`）。どの媒体でも他記事の一覧へ誘うときだけ使う言い回しに絞る。
-const MORE_ARTICLES_LINK_LABELS: &[&str] = &[
-    "記事をもっと見る",
-    "連載の記事",
-    "連載一覧",
-    "記事一覧",
-    "バックナンバー",
-];
+/// （`trailing_more_articles_box`）。実記事（ITmedia の連載記事）で確かめた言い回しだけを入れる。
+/// 「記事一覧」「バックナンバー」などは、本文の最後の節の「記事一覧へ」ボタンにも付きうるため入れない
+/// （段落の外かどうかを祖先の要素名だけで見るので、その節が丸ごと消えるのを避ける）。
+const MORE_ARTICLES_LINK_LABELS: &[&str] = &["記事をもっと見る"];
 /// 上のリンクとみなすリンク文字の最大文字数（空白を除く）。ボタン・テキストリンクのラベルはこれに収まる。
 const MORE_ARTICLES_LINK_MAX_CHARS: usize = 30;
 /// 記事末尾の見出し付きの囲み（連載の紹介など）とみなす見出しの最大文字数。連載名・コーナー名はこれに収まる。
@@ -1015,12 +1011,7 @@ fn select_strict_blocks(
             let section = if index == 0 {
                 block.element
             } else {
-                pr_section_box(
-                    container,
-                    &block.element,
-                    &candidates[index - 1].element,
-                    selectors,
-                )
+                related_section_box(container, candidates, index, selectors)
             };
             let body_continues = candidates[index + 1..].iter().any(|later| {
                 later.is_long_paragraph
@@ -1589,19 +1580,68 @@ fn split_identifier_tokens(identifier: &str) -> Vec<String> {
     tokens
 }
 
-/// 短いブロックが本文の終わりの目印（「関連記事」「・関連記事」等）で始まるか。
+/// 短いブロックが本文の終わりの目印か。目印（「関連記事」等）で始まるか、箇条書きの記号を除くと目印だけ
+/// （「・関連記事」「■ 関連リンク：」）のとき。記号付きで後ろに文が続くもの（「・関連記事も参照。」）は本文の文として残す。
 fn is_end_of_article_marker(text: &str) -> bool {
-    text.chars().count() <= NOISE_PATTERN_MAX_BLOCK_CHARS && starts_with_end_of_article_marker(text)
+    if text.chars().count() > NOISE_PATTERN_MAX_BLOCK_CHARS {
+        return false;
+    }
+    if END_OF_ARTICLE_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+    {
+        return true;
+    }
+    let bare = strip_end_marker_bullets(text)
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '：'));
+    END_OF_ARTICLE_MARKERS.contains(&bare)
+}
+
+fn strip_end_marker_bullets(text: &str) -> &str {
+    text.trim_start_matches(|ch: char| END_MARKER_BULLETS.contains(&ch) || ch.is_whitespace())
 }
 
 /// ブロックが（箇条書きの記号を除いて）終端の目印で始まるか。長さは見ない。
 /// 長いブロックに当てるのは、リンクが大半のとき（「・関連記事」の見出しと他記事のリンクを 1 つの段落に並べた形）だけにする。
 fn starts_with_end_of_article_marker(text: &str) -> bool {
-    let text =
-        text.trim_start_matches(|ch: char| END_MARKER_BULLETS.contains(&ch) || ch.is_whitespace());
+    let text = strip_end_marker_bullets(text);
     END_OF_ARTICLE_MARKERS
         .iter()
         .any(|marker| text.starts_with(marker))
+}
+
+/// 終端の目印（index のブロック）を含む囲み。`pr_section_box` と同じ広げ方をしたうえで、囲みが本文の入れ物まで
+/// 広がった形を目印のブロックだけに戻す（変更前と同じ動き。本文を落とさない側）。次のどちらかなら戻す。
+/// - 囲みの中にリンクがない（他記事の一覧・紹介ならリンクがある）。
+/// - 囲みの中の、リンクでない長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上・リンクが大半でない p / blockquote）の数が、
+///   囲みの中のリンクの数を超える（他記事の紹介文はふつう 1 件に 1 つ以上のリンクが付く）。
+fn related_section_box<'a>(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock<'a>],
+    index: usize,
+    selectors: &BlockSelectors,
+) -> ElementRef<'a> {
+    let marker = candidates[index].element;
+    let section = pr_section_box(
+        container,
+        &marker,
+        &candidates[index - 1].element,
+        selectors,
+    );
+    if section.id() == marker.id() {
+        return section;
+    }
+    let links = section.select(&selectors.links).count();
+    let body_paragraphs = candidates[index + 1..]
+        .iter()
+        .filter(|later| {
+            later.is_long_paragraph && !later.is_link_dense && is_inside(&later.element, &section)
+        })
+        .count();
+    if links == 0 || body_paragraphs > links {
+        return marker;
+    }
+    section
 }
 
 /// index のブロックが、記事末尾の連載・関連記事の紹介の囲みの見出しなら、その囲みを返す。次のすべてに当たるときだけ。
@@ -3045,9 +3085,57 @@ mod tests {
         ] {
             assert!(is_end_of_article_marker(text), "{text}");
         }
-        for text in ["関連会社の株価も下落", "・関連する法案", "おすすめの使い方"]
-        {
+        for text in [
+            "関連会社の株価も下落",
+            "・関連する法案",
+            "おすすめの使い方",
+            "・関連記事も参照。",
+        ] {
             assert!(!is_end_of_article_marker(text), "{text}");
         }
+    }
+
+    #[test]
+    fn keeps_last_body_section_with_article_list_button() {
+        // 本文の最後の節（見出し＋段落 2 つ）の後ろに「記事一覧へ」のボタンがあっても、節を残す。
+        let excerpt = extract_body(&format!(
+            r#"{}<section><h2>今後の予定</h2><p>{LONG_BODY}</p><p>{BLURB_1}</p>
+<div class="btn"><a href="/list">記事一覧へ</a></div></section>"#,
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains("今後の予定"));
+        assert!(excerpt.contains(LONG_BODY));
+        assert!(excerpt.ends_with(BLURB_1));
+    }
+
+    #[test]
+    fn keeps_body_wrapped_together_with_related_marker_box() {
+        // 目印の囲みを祖先へ広げると本文の入れ物まで包む形。リンクより本文の段落が多いので、
+        // 囲みを目印だけに戻し、包まれた本文の 2 段落を残す。
+        let body_a = "四つ目の段落です。同社は新しい料金体系を来月から導入し、既存の利用者には三か月の移行期間を設けると記者会見で説明しています。";
+        let body_b = "五つ目の段落です。業界団体は今回の値下げについて、ほかの事業者にも同様の動きが広がる可能性があるとの見方を示しています。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div><div><h3>関連記事</h3><ul><li><a href="/a/1">他の記事の見出し</a></li></ul></div>
+<div class="txt"><p>{body_a}</p><p>{body_b}</p></div></div>"#
+        ));
+        // どちらも長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上）として数えられる長さにしておく。
+        assert!(body_a.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(body_b.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(excerpt.contains(body_a));
+        assert!(excerpt.contains(body_b));
+        assert!(!excerpt.contains("関連記事"));
+    }
+
+    #[test]
+    fn keeps_body_after_short_sentence_starting_with_bulleted_related_word() {
+        // 「・関連記事も参照。」のような短い本文の文は終端の目印にしない（後ろの本文を打ち切らない）。
+        // この文自体は、変更前からある短いノイズ文言の除去（「関連記事」を含む 30 文字以下のブロック）で除かれる。
+        let note = "・関連記事も参照。";
+        assert!(!is_end_of_article_marker(note));
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{note}</p><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}"));
     }
 }
