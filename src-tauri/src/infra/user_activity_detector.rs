@@ -50,9 +50,15 @@ impl UserActivityDetector for SystemUserActivityDetector {
 
 /// 最後の入力時刻と今の時刻（どちらも起動からのミリ秒・32bit で約 49.7 日ごとに一周する）から経過を求める。
 /// 一周をまたいでも正しく引けるよう wrapping_sub で引く（Windows の GetLastInputInfo / GetTickCount の値）。
+/// 差が半周（`u32::MAX / 2`）を超えるのは、2つの値を読む間に入力があって最後の入力時刻のほうがわずかに先に
+/// なったときなので、0（たった今の入力＝操作中）として扱う（約 24.8 日の経過と取り違えないため）。
 #[cfg_attr(not(windows), allow(dead_code))]
 fn elapsed_since_tick(now_tick: u32, last_input_tick: u32) -> Duration {
-    Duration::from_millis(u64::from(now_tick.wrapping_sub(last_input_tick)))
+    let elapsed = now_tick.wrapping_sub(last_input_tick);
+    if elapsed > u32::MAX / 2 {
+        return Duration::ZERO;
+    }
+    Duration::from_millis(u64::from(elapsed))
 }
 
 #[cfg(windows)]
@@ -122,6 +128,19 @@ mod tests {
             elapsed_since_tick(500, u32::MAX - 499),
             Duration::from_millis(1_000)
         );
+    }
+
+    #[test]
+    fn last_input_slightly_after_now_is_treated_as_just_now() {
+        // 今の時刻を読んだ直後に入力があり、最後の入力時刻が 5 ミリ秒先になった。
+        assert_eq!(elapsed_since_tick(1_000, 1_005), Duration::ZERO);
+        assert_eq!(elapsed_since_tick(0, 1), Duration::ZERO);
+        // 半周ちょうどまでは経過として扱い、それを超えたら 0。
+        assert_eq!(
+            elapsed_since_tick(u32::MAX / 2, 0),
+            Duration::from_millis(u64::from(u32::MAX / 2))
+        );
+        assert_eq!(elapsed_since_tick(u32::MAX / 2 + 1, 0), Duration::ZERO);
     }
 
     #[cfg(not(windows))]
