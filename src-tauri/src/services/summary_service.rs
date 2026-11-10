@@ -5112,6 +5112,10 @@ mod tests {
 #[cfg(test)]
 mod local_llm_quality_eval;
 
+/// 段落ごとに1行ずつまとめる方式（記事の最後まで扱う）の評価ハーネス（Firestore タスク t3JFzB。`#[ignore]`・手動実行専用）。
+#[cfg(test)]
+mod paragraph_points_eval;
+
 /// 評価ハーネス専用のモデル・llama-server の差し替え（D168 のモデル比較。テストビルド専用）。
 #[cfg(test)]
 mod eval_model_override;
