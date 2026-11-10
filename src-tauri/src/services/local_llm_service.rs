@@ -645,6 +645,17 @@ impl LocalLlmService {
         manual.max(cooldown)
     }
 
+    /// llama-server を起動済み（モデルを読み込んだまま）か。自動要約キューが物理メモリの空きを見るときに、
+    /// 起動済みのサーバーが既に使っている分を差し引いて考えるために使う（状態の参照だけで起動・通信はしない）。
+    /// 子プロセスが異常終了していて見張りがまだ片付けていないときは、メモリを使っていないので false にする。
+    pub fn is_running(&self) -> bool {
+        self.shared
+            .lock_state()
+            .process
+            .as_mut()
+            .is_some_and(|process| !process.has_exited())
+    }
+
     /// 接続テスト。起動（必要なら）＋固定の最小プロンプトで1回生成できるかを確かめる。
     pub fn check_connection(&self) -> Result<(), LocalAiFailure> {
         self.generate(CONNECTION_CHECK_PROMPT, CONNECTION_CHECK_MAX_TOKENS)
@@ -970,11 +981,6 @@ impl LocalLlmService {
             self.shared.watcher_started.store(false, Ordering::SeqCst);
             log::warn!("failed to start the local llm idle watcher");
         }
-    }
-
-    #[cfg(test)]
-    fn is_running(&self) -> bool {
-        self.shared.lock_state().process.is_some()
     }
 }
 
@@ -1317,6 +1323,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         condition()
+    }
+
+    /// 子プロセスが終了していれば（見張りが片付ける前でも）起動済みとは扱わない
+    /// （自動要約キューが、使っていないメモリを空きへ足し戻さないため）。
+    #[test]
+    fn exited_process_is_not_reported_as_running() {
+        let service = LocalLlmService::unavailable();
+        let fake = |mode| -> Box<dyn ServerProcess> {
+            Box::new(FakeProcess {
+                mode,
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                stops: Arc::new(AtomicUsize::new(0)),
+                server: None,
+                stopped: false,
+            })
+        };
+        service.shared.lock_state().process = Some(fake(FakeMode::Healthy));
+        assert!(service.is_running());
+        service.shared.lock_state().process = Some(fake(FakeMode::ExitImmediately));
+        assert!(!service.is_running());
+        service.shared.lock_state().process = None;
+        assert!(!service.is_running());
     }
 
     // --- 起動 → health → 生成 ---

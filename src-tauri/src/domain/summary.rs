@@ -47,6 +47,8 @@ pub enum AutoSummaryStatusKind {
     PausedGameOrPresentation,
     /// マイク使用中（会議中を含む）のため、ローカルLLMの自動要約を休んでいる。
     PausedMicInUse,
+    /// 利用者がPCを操作中で物理メモリに余裕がないため、ローカルLLMの自動要約を待たせている。
+    PausedLowMemoryWhileActive,
     /// 手動の要求を優先している・ローカルLLMの起動を控えている間のため待っている。
     WaitingForLocalAi,
     /// 設定で自動要約が無効。
