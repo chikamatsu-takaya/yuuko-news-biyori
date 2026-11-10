@@ -96,6 +96,7 @@ enum Mode {
 
 /// 後ろの本文: 先頭 `HEAD_CHARS` 字をまたぐ段落は、後ろ側が半分以上ならその段落から含める（読み落としを避ける）。
 /// 返すのは（後ろの本文の全部, 本文の中での開始位置）。短すぎるときは None。
+/// 開始位置は trim で落とした先頭の空白の分だけ進め、返す本文の先頭と揃える（記録の `position` がずれないように）。
 fn tail_text(body: &str) -> Option<(String, usize)> {
     let mut offset = 0;
     let mut start = None;
@@ -112,8 +113,9 @@ fn tail_text(body: &str) -> Option<(String, usize)> {
     }
     let start = start?;
     let tail: String = body.chars().skip(start).collect();
+    let leading = tail.chars().take_while(|c| c.is_whitespace()).count();
     let tail = tail.trim().to_string();
-    (tail.chars().count() >= TAIL_MIN_CHARS).then_some((tail, start))
+    (tail.chars().count() >= TAIL_MIN_CHARS).then_some((tail, start + leading))
 }
 
 /// `block` で渡す分: 段落の切れ目で `TAIL_BLOCK_MAX_CHARS` 字まで。最初の段落だけで超えるときは「。」で切る。
@@ -394,6 +396,20 @@ mod tests {
         let body = format!("{first}\n\n{second}\n\n{}", "う".repeat(300));
         let (tail, _) = tail_text(&body).unwrap();
         assert!(tail.starts_with('う'));
+    }
+
+    #[test]
+    fn tail_start_skips_the_trimmed_leading_spaces() {
+        // 段落の頭の全角空白は trim で落とすので、開始位置もその分だけ進める。
+        let body = format!(
+            "{}\n\n\u{3000}\u{3000}{}",
+            "あ".repeat(1_400),
+            "い".repeat(300)
+        );
+        let (tail, start) = tail_text(&body).unwrap();
+        assert!(tail.starts_with('い'));
+        assert_eq!(start, 1_404);
+        assert_eq!(body.chars().nth(start), Some('い'));
     }
 
     #[test]
