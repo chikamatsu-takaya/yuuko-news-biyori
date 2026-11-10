@@ -178,7 +178,23 @@ const END_OF_ARTICLE_MARKERS: &[&str] = &[
     "この記事を書いた人",
     "Related articles",
     "Related Articles",
+    "関連コンテンツ",
+    "オススメ記事",
 ];
+/// 終端の目印の前に付く箇条書きの記号（「・関連記事」「■関連リンク」）。目印の照合の前に外す。
+const END_MARKER_BULLETS: &[char] = &[
+    '・', '■', '□', '●', '○', '◆', '◇', '▼', '▽', '▶', '►', '≫', '»',
+];
+/// 「この連載の記事をもっと見る」のような、他記事の一覧へ誘うリンクの文言（リンクの文字に含まれるか）。
+/// 記事末尾の見出し付きの囲みに、本文の段落の外に置かれたこのリンクがあれば、その囲みを連載・関連記事の紹介とみなす
+/// （`trailing_more_articles_box`）。実記事（ITmedia の連載記事）で確かめた言い回しだけを入れる。
+/// 「記事一覧」「バックナンバー」などは、本文の最後の節の「記事一覧へ」ボタンにも付きうるため入れない
+/// （段落の外かどうかを祖先の要素名だけで見るので、その節が丸ごと消えるのを避ける）。
+const MORE_ARTICLES_LINK_LABELS: &[&str] = &["記事をもっと見る"];
+/// 上のリンクとみなすリンク文字の最大文字数（空白を除く）。ボタン・テキストリンクのラベルはこれに収まる。
+const MORE_ARTICLES_LINK_MAX_CHARS: usize = 30;
+/// 記事末尾の見出し付きの囲み（連載の紹介など）とみなす見出しの最大文字数。連載名・コーナー名はこれに収まる。
+const TRAILING_BOX_HEADING_MAX_CHARS: usize = 60;
 /// 本文の先頭・末尾に付く操作ボタンのラベル（ブロック全体がこの文言と一致するときだけ）。
 /// 「3D プリンターで印刷する技術」のような本文の文を落とさないため、部分一致にしない。
 const EDGE_ACTION_LABELS: &[&str] = &[
@@ -206,6 +222,8 @@ const TRAILING_SITE_NAV_LABELS: &[&str] = &[
     "ページの先頭へ",
     "このページの先頭へ",
     "トップへ戻る",
+    "RECOMMEND",
+    "Recommend",
 ];
 /// 末尾のサイト案内のうち「ITmedia NEWS SNS」のような SNS への案内とみなす行の最大文字数。
 const TRAILING_SNS_LABEL_MAX_CHARS: usize = 20;
@@ -978,21 +996,47 @@ fn select_strict_blocks(
 ) -> Vec<String> {
     let mut selected = Vec::new();
     let mut selected_chars = 0;
-    // 本文途中の【PR】の囲み。この要素の内側のブロックは飛ばす。
+    // 本文途中の【PR】の囲み・関連記事の囲み。この要素の内側のブロックは飛ばす。
     let mut skipped_pr_box: Option<ElementRef> = None;
     for (index, block) in candidates.iter().enumerate() {
         let text = &block.text;
         if skipped_pr_box.is_some_and(|pr_box| is_inside(&block.element, &pr_box)) {
             continue;
         }
-        if is_end_of_article_marker(text) {
-            let body_continues = candidates[index + 1..]
-                .iter()
-                .any(|later| later.is_long_paragraph);
+        if is_end_of_article_marker(text)
+            || (block.is_link_dense && starts_with_end_of_article_marker(text))
+        {
+            // 目印を含む囲み（見出し＋他記事の一覧・紹介文）の外に本文の段落が続くかを先読みする。
+            // 囲みの中の長い紹介文や、リンクが大半の段落（他記事の見出し＋紹介文のリンク）は本文に数えない。
+            let section = if index == 0 {
+                block.element
+            } else {
+                related_section_box(container, candidates, index, selectors)
+            };
+            let body_continues = candidates[index + 1..].iter().any(|later| {
+                later.is_long_paragraph
+                    && !later.is_link_dense
+                    && !is_inside(&later.element, &section)
+            });
             if body_continues {
+                skipped_pr_box = Some(section);
                 continue;
             }
             break;
+        }
+        if selected_chars >= PR_SECTION_MIN_PRECEDING_CHARS && index > 0 {
+            if let Some(section) =
+                trailing_more_articles_box(container, candidates, index, selectors)
+            {
+                let body_continues = candidates[index + 1..].iter().any(|later| {
+                    later.is_long_paragraph
+                        && !later.is_link_dense
+                        && !is_inside(&later.element, &section)
+                });
+                if !body_continues {
+                    break;
+                }
+            }
         }
         if is_pr_section_header(text) {
             if selected_chars < PR_SECTION_MIN_PRECEDING_CHARS || index == 0 {
@@ -1536,12 +1580,123 @@ fn split_identifier_tokens(identifier: &str) -> Vec<String> {
     tokens
 }
 
-/// 短いブロックが本文の終わりの目印（「関連記事」等）で始まるか。
+/// 短いブロックが本文の終わりの目印か。目印（「関連記事」等）で始まるか、箇条書きの記号を除くと目印だけ
+/// （「・関連記事」「■ 関連リンク：」）のとき。記号付きで後ろに文が続くもの（「・関連記事も参照。」）は本文の文として残す。
 fn is_end_of_article_marker(text: &str) -> bool {
-    text.chars().count() <= NOISE_PATTERN_MAX_BLOCK_CHARS
-        && END_OF_ARTICLE_MARKERS
+    if text.chars().count() > NOISE_PATTERN_MAX_BLOCK_CHARS {
+        return false;
+    }
+    if END_OF_ARTICLE_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+    {
+        return true;
+    }
+    let bare = strip_end_marker_bullets(text)
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '：'));
+    END_OF_ARTICLE_MARKERS.contains(&bare)
+}
+
+fn strip_end_marker_bullets(text: &str) -> &str {
+    text.trim_start_matches(|ch: char| END_MARKER_BULLETS.contains(&ch) || ch.is_whitespace())
+}
+
+/// ブロックが（箇条書きの記号を除いて）終端の目印で始まるか。長さは見ない。
+/// 長いブロックに当てるのは、リンクが大半のとき（「・関連記事」の見出しと他記事のリンクを 1 つの段落に並べた形）だけにする。
+fn starts_with_end_of_article_marker(text: &str) -> bool {
+    let text = strip_end_marker_bullets(text);
+    END_OF_ARTICLE_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+/// 終端の目印（index のブロック）を含む囲み。`pr_section_box` と同じ広げ方をしたうえで、囲みが本文の入れ物まで
+/// 広がった形を目印のブロックだけに戻す（変更前と同じ動き。本文を落とさない側）。次のどちらかなら戻す。
+/// - 囲みの中にリンクがない（他記事の一覧・紹介ならリンクがある）。
+/// - 囲みの中の、リンクでない長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上・リンクが大半でない p / blockquote）の数が、
+///   囲みの中のリンクの数を超える（他記事の紹介文はふつう 1 件に 1 つ以上のリンクが付く）。
+fn related_section_box<'a>(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock<'a>],
+    index: usize,
+    selectors: &BlockSelectors,
+) -> ElementRef<'a> {
+    let marker = candidates[index].element;
+    let section = pr_section_box(
+        container,
+        &marker,
+        &candidates[index - 1].element,
+        selectors,
+    );
+    if section.id() == marker.id() {
+        return section;
+    }
+    let links = section.select(&selectors.links).count();
+    let body_paragraphs = candidates[index + 1..]
+        .iter()
+        .filter(|later| {
+            later.is_long_paragraph && !later.is_link_dense && is_inside(&later.element, &section)
+        })
+        .count();
+    if links == 0 || body_paragraphs > links {
+        return marker;
+    }
+    section
+}
+
+/// index のブロックが、記事末尾の連載・関連記事の紹介の囲みの見出しなら、その囲みを返す。次のすべてに当たるときだけ。
+/// - h2 / h3 で、TRAILING_BOX_HEADING_MAX_CHARS 以下（連載名・コーナー名の見出し）。
+/// - 見出しを含む囲み（`pr_section_box` と同じ広げ方。直前の本文を含まず、本文の区画ほど大きくない）に、
+///   他記事の一覧へ誘うリンク（`is_more_articles_link`）が、本文のブロック（p / li / blockquote / 見出し）の外に置かれている。
+///
+/// 本文の最後の節（見出し＋段落）と形が同じなので、リンクの文言と置き場所の両方を条件にする。
+fn trailing_more_articles_box<'a>(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock<'a>],
+    index: usize,
+    selectors: &BlockSelectors,
+) -> Option<ElementRef<'a>> {
+    let heading = &candidates[index];
+    if !matches!(heading.element.value().name(), "h2" | "h3")
+        || heading.text.chars().count() > TRAILING_BOX_HEADING_MAX_CHARS
+    {
+        return None;
+    }
+    let section = pr_section_box(
+        container,
+        &heading.element,
+        &candidates[index - 1].element,
+        selectors,
+    );
+    if section.id() == heading.element.id() {
+        return None;
+    }
+    section
+        .select(&selectors.links)
+        .any(|link| is_more_articles_link(&link, &section))
+        .then_some(section)
+}
+
+/// 他記事の一覧へ誘うリンク（「この連載の記事をもっと見る」など）が、本文のブロックの外にあるか。
+/// 本文の段落の中の「過去の記事一覧はこちら」のようなリンクは数えない。
+fn is_more_articles_link(link: &ElementRef<'_>, section: &ElementRef<'_>) -> bool {
+    let label: String = link
+        .text()
+        .flat_map(|text| text.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if label.chars().count() > MORE_ARTICLES_LINK_MAX_CHARS
+        || !MORE_ARTICLES_LINK_LABELS
             .iter()
-            .any(|marker| text.starts_with(marker))
+            .any(|word| label.contains(word))
+    {
+        return false;
+    }
+    !link
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .take_while(|node| node.id() != section.id())
+        .any(|node| matches!(node.value().name(), "p" | "li" | "blockquote" | "h2" | "h3"))
 }
 
 fn extract_meta_description(document: &Html) -> Option<String> {
@@ -1653,6 +1808,9 @@ enum NormalizedRequestHost {
     Domain(String),
     Ip(IpAddr),
 }
+
+#[cfg(test)]
+mod related_blurb_eval;
 
 #[cfg(test)]
 mod tests {
@@ -2399,7 +2557,8 @@ mod tests {
 <p><a href="https://example.org/ref">ESO - Ribbons and pearls</a></p>
 <p>RECOMMEND</p><p><a href="/r">オススメ記事</a></p><p><a href="/k">注目のタグ</a></p>"#
         ));
-        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}\n\nRECOMMEND"));
+        // 末尾に残る「RECOMMEND」の見出しも、末尾のサイト案内のラベルとして除く。
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
     }
 
     #[test]
@@ -2773,5 +2932,210 @@ mod tests {
         for text in ["若者の間で広がるSNS", "ITmediaSNS", "人気のSNS"] {
             assert!(!is_sns_nav_label(text), "{text}");
         }
+    }
+
+    /// 他記事の紹介文（60 文字以上。長い段落とみなされる長さ）。
+    const BLURB_1: &str = "別の記事の紹介文その一です。新しい端末の発売日と価格が明らかになり、予約の受け付けも始まったことを紹介しています。";
+    const BLURB_2: &str = "別の記事の紹介文その二です。昨年の不具合をめぐる裁判で判決が出て、同社が控訴する方針を示したことを紹介しています。";
+
+    #[test]
+    fn drops_trailing_related_cards_with_long_blurbs() {
+        // 「関連記事」の見出しの後ろに、他記事の見出し＋長い紹介文のカードが並ぶ形。
+        // 以前は紹介文が長い段落として数えられ、目印だけを飛ばして紹介文が本文に残っていた。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{BODY_2}</p><p>{LONG_BODY}</p>
+<div class="box"><h2>関連記事</h2><ul>
+<li><h3><a href="/a/1">他の記事の見出しその一</a></h3><p>{BLURB_1}</p></li>
+<li><h3><a href="/a/2">他の記事の見出しその二</a></h3><p>{BLURB_2}</p></li>
+</ul></div>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_related_links_with_linked_blurbs_in_flat_body() {
+        // 囲みの要素がない平らな構造でも、目印の後ろがリンクだけの紹介文なら本文に数えず打ち切る。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p><h3>関連リンク</h3>
+<p><a href="/a/1">{BLURB_1}</a></p><p><a href="/a/2">{BLURB_2}</a></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_bulleted_related_paragraph_made_of_links() {
+        // 「・関連記事」の見出しと他記事のリンクを 1 つの段落に並べた形（見出し＋リンクで 30 文字を超える）。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<p><b>・関連記事</b><br><b><a href="/a/1">他の記事の見出しその一が入ります - 媒体名</a></b><br><br><b><a href="/a/2">他の記事の見出しその二が入ります - 媒体名</a></b></p>
+<p><b>・関連コンテンツ</b></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn skips_mid_article_related_box_with_blurbs_and_keeps_following_body() {
+        // 本文の途中の関連記事の囲み（紹介文つき）は囲みごと飛ばし、後ろの本文は残す。
+        let tail = "四つ目の段落です。関連の囲みの後にも本文が続き、この段落は六十文字を超える長さで今後の提供予定と価格について説明しています。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div class="box"><h3>関連記事</h3><ul><li><a href="/a/1">他の記事の見出し</a><p>{BLURB_1}</p></li></ul></div>
+<p>{BODY_2}</p><p>{tail}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}\n\n{tail}")
+        );
+    }
+
+    #[test]
+    fn keeps_body_paragraphs_after_related_heading_in_body_section() {
+        // 「関連記事」で始まる短い見出しの後ろに、本文の段落（リンクでない長い段落）が続くときは、見出しだけを飛ばす
+        // （囲みは本文の区画ほど大きくならないように広げるので、本文の段落を囲みに含めない）。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><div><h2>関連記事</h2>{}</div>",
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains(BODY_1));
+        for i in 0..3 {
+            assert!(excerpt.contains(&format!("本文の段落{i}です。")), "{i}");
+        }
+        assert!(!excerpt.contains("関連記事"));
+    }
+
+    #[test]
+    fn keeps_body_blocks_that_mention_related_words() {
+        // 「関連」で始まる・「関連記事」を含む本文の文は、リンクでなければ長さによらず残す。
+        let blocks = [
+            "関連会社の株価も大きく下落した。",
+            "関連する法改正は来年4月に施行される予定で、事業者は準備を急いでいる。",
+            "・関連記事でも触れたとおり、同社は昨年から段階的にこの機能を提供してきた。利用者は国内で100万人を超える。",
+            "この問題に関連して、総務省は事業者への聞き取りを始めた。",
+        ];
+        for block in blocks {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{block}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{block}"),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_trailing_series_box_with_more_articles_link() {
+        // ITmedia の連載記事の末尾の形（連載名の見出し＋連載の紹介文＋「この連載の記事をもっと見る」のボタン）。
+        let series_blurb = "本連載は、世界中の幅広い分野から最先端の研究を独自の視点で選んで解説する。執筆は研究メディアを主宰する筆者が担当している。";
+        let excerpt = extract_body(&format!(
+            r#"{}<div><h2>研究の最前線</h2><p class="c-label">{series_blurb}</p>
+<div><a href="/alert">連載新着通知を受け取る</a></div><ul class="series-list"></ul>
+<a href="/series/1/" class="c-button"><span>この連載の記事をもっと見る</span></a></div>
+<h2>この記事の著者</h2><h2>関連記事</h2><ul><li><h3><a href="/a/1">他の記事の見出し</a></h3></li></ul>"#,
+            long_paragraphs(3)
+        ));
+        assert!(!excerpt.contains(series_blurb));
+        assert!(!excerpt.contains("研究の最前線"));
+        for i in 0..3 {
+            assert!(excerpt.contains(&format!("本文の段落{i}です。")), "{i}");
+        }
+    }
+
+    #[test]
+    fn keeps_last_body_section_without_standalone_more_articles_link() {
+        // 本文の最後の節（見出し＋段落）は、他記事の一覧へのリンクが本文の段落の中にあるだけなら残す。
+        let last = "まとめの段落です。今回の変更で、利用者はこれまでより安く使えるようになる。過去の記事一覧はこちらから読める。";
+        let excerpt = extract_body(&format!(
+            r#"{}<section><h2>まとめ</h2><p>{}</p></section>"#,
+            long_paragraphs(3),
+            last.replace("過去の記事一覧", r#"<a href="/list">過去の記事一覧</a>"#)
+        ));
+        assert!(excerpt.contains("まとめ"));
+        // リンクの前後には抽出で空白が入るので、段落の頭と終わりで確かめる。
+        assert!(excerpt.contains("まとめの段落です。"));
+        assert!(excerpt.ends_with("はこちらから読める。"));
+        // 見出し＋段落だけの最後の節も残す。
+        let excerpt = extract_body(&format!(
+            "{}<section><h2>今後の予定</h2><p>{LONG_BODY}</p></section>",
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains("今後の予定"));
+        assert!(excerpt.ends_with(LONG_BODY));
+    }
+
+    #[test]
+    fn keeps_series_box_when_body_continues_after_it() {
+        // 連載の紹介の囲みの後ろに本文が続くなら（記事の冒頭・途中の囲み）、この規則では何も除かない。
+        let series_blurb = "本連載は、世界中の幅広い分野から最先端の研究を独自の視点で選んで解説する。執筆は研究メディアを主宰する筆者が担当している。";
+        let excerpt = extract_body(&format!(
+            r#"{}<div><h2>研究の最前線</h2><p>{series_blurb}</p><a href="/series/1/">この連載の記事をもっと見る</a></div><p>{LONG_BODY}</p>"#,
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains(series_blurb));
+        assert!(excerpt.ends_with(LONG_BODY));
+    }
+
+    #[test]
+    fn end_marker_accepts_leading_bullets() {
+        for text in [
+            "・関連記事",
+            "■関連リンク",
+            "▼ 関連ニュース",
+            "・関連コンテンツ",
+            "オススメ記事",
+        ] {
+            assert!(is_end_of_article_marker(text), "{text}");
+        }
+        for text in [
+            "関連会社の株価も下落",
+            "・関連する法案",
+            "おすすめの使い方",
+            "・関連記事も参照。",
+        ] {
+            assert!(!is_end_of_article_marker(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn keeps_last_body_section_with_article_list_button() {
+        // 本文の最後の節（見出し＋段落 2 つ）の後ろに「記事一覧へ」のボタンがあっても、節を残す。
+        let excerpt = extract_body(&format!(
+            r#"{}<section><h2>今後の予定</h2><p>{LONG_BODY}</p><p>{BLURB_1}</p>
+<div class="btn"><a href="/list">記事一覧へ</a></div></section>"#,
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains("今後の予定"));
+        assert!(excerpt.contains(LONG_BODY));
+        assert!(excerpt.ends_with(BLURB_1));
+    }
+
+    #[test]
+    fn keeps_body_wrapped_together_with_related_marker_box() {
+        // 目印の囲みを祖先へ広げると本文の入れ物まで包む形。リンクより本文の段落が多いので、
+        // 囲みを目印だけに戻し、包まれた本文の 2 段落を残す。
+        let body_a = "四つ目の段落です。同社は新しい料金体系を来月から導入し、既存の利用者には三か月の移行期間を設けると記者会見で説明しています。";
+        let body_b = "五つ目の段落です。業界団体は今回の値下げについて、ほかの事業者にも同様の動きが広がる可能性があるとの見方を示しています。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div><div><h3>関連記事</h3><ul><li><a href="/a/1">他の記事の見出し</a></li></ul></div>
+<div class="txt"><p>{body_a}</p><p>{body_b}</p></div></div>"#
+        ));
+        // どちらも長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上）として数えられる長さにしておく。
+        assert!(body_a.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(body_b.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(excerpt.contains(body_a));
+        assert!(excerpt.contains(body_b));
+        assert!(!excerpt.contains("関連記事"));
+    }
+
+    #[test]
+    fn keeps_body_after_short_sentence_starting_with_bulleted_related_word() {
+        // 「・関連記事も参照。」のような短い本文の文は終端の目印にしない（後ろの本文を打ち切らない）。
+        // この文自体は、変更前からある短いノイズ文言の除去（「関連記事」を含む 30 文字以下のブロック）で除かれる。
+        let note = "・関連記事も参照。";
+        assert!(!is_end_of_article_marker(note));
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{note}</p><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}"));
     }
 }
