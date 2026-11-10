@@ -14,7 +14,7 @@
 //! - `YUUKO_LLM_EVAL_SERVER_EXE`: 候補で使う llama-server.exe のパス（同梱の b11269 で動かないモデルだけ）。
 //! - `YUUKO_LLM_EVAL_SERVER_LOG`: llama-server の標準エラーを書くファイル（読み込み失敗の原因調べ用）。
 //! - `YUUKO_LLM_EVAL_PROFILE`: 候補ごとの調整の名前（`ModelProfile::from_name`）。省略時は調整なし。
-//! - `YUUKO_LLM_EVAL_SERVER_EXTRA_ARGS`: llama-server の起動の引数の後ろに足す引数（空白区切り。例 `-c 2048 --no-repack`）。
+//! - `YUUKO_LLM_EVAL_SERVER_EXTRA_ARGS`: llama-server の起動の引数の後ろに足す引数（空白区切り。例 `-c 2048 --repack`。本番は `--no-repack` なので、`--repack` で並べ替えありの元の設定と比べられる）。
 //!   値を1つ取る引数（`-c` など）は後ろの指定が効く（llama.cpp の引数解析は前から順に上書きするため。複数指定で積み上がる引数は除く）ので、文脈長などを評価のときだけ変えて品質・速度・メモリを比べられる
 //!   （`docs/01_setup/軽量常駐性能確認手順.md` §11.3）。これだけを指定したときは同梱のモデルで動く。
 

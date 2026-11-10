@@ -303,6 +303,11 @@ pub fn thread_count() -> usize {
 /// - `--cache-ram 0`: 要求をまたぐプロンプトのキャッシュ（既定は最大 8GB）を切る。既定のままだと
 ///   要約などの1回ごとにメモリが 45〜64MB ずつ増え続ける（実測）。要求ごとに文面が違い再利用も
 ///   起きていないため、切っても速さは変わらない。
+/// - `--no-repack`: CPU 向けに重みを並べ替えた専用の写し（約590MB）を作らず、モデルファイルの mmap の
+///   ページのまま使う。生成中の専用メモリ（Private）が約1.28→0.69GB に減り、残りのページは他のアプリが
+///   メモリを使うときに OS が書き出しなしで手放せる。この PC（AVX-VNNI/AVX2）では遅くならず、
+///   架空の記事 30 件の評価で誤りが増えたとは言えなかった
+///   （`docs/01_setup/軽量常駐性能確認手順.md` §11.3。AVX-512・AMX の CPU では未確認）。
 pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Vec<String> {
     vec![
         "-m".to_string(),
@@ -323,6 +328,7 @@ pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Ve
         "--offline".to_string(),
         "--cache-ram".to_string(),
         "0".to_string(),
+        "--no-repack".to_string(),
     ]
 }
 
@@ -1049,6 +1055,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--no-slots"));
         assert!(args.iter().any(|arg| arg == "--offline"));
         assert_eq!(value_of("--cache-ram"), "0");
+        assert!(args.iter().any(|arg| arg == "--no-repack"));
         assert!(!args.iter().any(|arg| arg == "--mmproj"));
     }
 
