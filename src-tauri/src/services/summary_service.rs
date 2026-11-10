@@ -5116,6 +5116,10 @@ mod local_llm_quality_eval;
 #[cfg(test)]
 mod paragraph_points_eval;
 
+/// 要約に記事の後半を少しだけ足す方式の評価ハーネス（Firestore タスク Oy5uHSDgQnwYOaGdJQ4m。`#[ignore]`・手動実行専用）。
+#[cfg(test)]
+mod tail_lines_eval;
+
 /// 評価ハーネス専用のモデル・llama-server の差し替え（D168 のモデル比較。テストビルド専用）。
 #[cfg(test)]
 mod eval_model_override;

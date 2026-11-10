@@ -89,14 +89,14 @@ const LINE_INSTRUCTIONS: [&str; 8] = [
 
 /// 1行にまとめる単位（段落、または長い段落を分けたかたまり）。
 #[derive(Debug, Clone, PartialEq)]
-struct Chunk {
-    text: String,
+pub(super) struct Chunk {
+    pub(super) text: String,
     /// 本文の中での開始位置（文字数）。記事の前半・後半を分けるため。
-    start_char: usize,
+    pub(super) start_char: usize,
 }
 
 /// 本文を1行にまとめる単位へ分ける（純粋関数）。段落は空行区切り（`HtmlFetcher` のブロックのつなぎ方）。
-fn split_chunks(body: &str) -> Vec<Chunk> {
+pub(super) fn split_chunks(body: &str) -> Vec<Chunk> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut pending = String::new();
     let mut pending_start = None;
@@ -230,7 +230,7 @@ fn build_line_prompt(title: &str, previous: Option<&str>, chunk: &str) -> String
 }
 
 /// 生出力から1行を取り出す: 最初の空でない行の、見出し・箇条書きの記号を外し、空白をつめる。
-fn clean_line(raw: &str) -> String {
+pub(super) fn clean_line(raw: &str) -> String {
     let first = raw
         .lines()
         .map(str::trim)
@@ -254,7 +254,7 @@ fn unknown_names(source: &str, line: &str) -> Vec<String> {
         .collect()
 }
 
-fn names_in(text: &str) -> Vec<String> {
+pub(super) fn names_in(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().map(to_halfwidth).collect();
     let mut names = Vec::new();
     let mut index = 0;
@@ -291,7 +291,7 @@ fn is_katakana(c: char) -> bool {
     matches!(c, 'ァ'..='ヺ' | 'ー')
 }
 
-fn normalize_name(text: &str) -> String {
+pub(super) fn normalize_name(text: &str) -> String {
     text.chars()
         .map(to_halfwidth)
         .filter(|c| !c.is_whitespace() && *c != '・')
@@ -300,7 +300,7 @@ fn normalize_name(text: &str) -> String {
 }
 
 /// 行と材料が共有する、いちばん長い連続した文字列の長さ（段落の文の写しの度合いを見るため。落とす理由にはしない）。
-fn longest_common_run(source: &str, line: &str) -> usize {
+pub(super) fn longest_common_run(source: &str, line: &str) -> usize {
     let a: Vec<char> = source.chars().collect();
     let b: Vec<char> = line.chars().collect();
     let mut previous = vec![0usize; b.len() + 1];
