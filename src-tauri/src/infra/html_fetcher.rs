@@ -1017,12 +1017,13 @@ fn select_strict_blocks(
     candidates: &[StrictBlock],
     selectors: &BlockSelectors,
 ) -> Vec<String> {
-    let mut selected = Vec::new();
+    let mut selected: Vec<String> = Vec::new();
     let mut selected_chars = 0;
     // 本文途中の【PR】の囲み・関連記事の囲み。この要素の内側のブロックは飛ばす。
     let mut skipped_pr_box: Option<ElementRef> = None;
-    // 直前に選んだブロック（入れ子の重複を見分けるのに使う）。
-    let mut last_selected: Option<(ElementRef, &String)> = None;
+    // 直前に選んだブロックの要素と、selected の中の位置（常に末尾）。入れ子の重複を段落に分け直すのに使う。
+    // selected[位置] は、外側のブロックの文のうち、まだ内側のブロックへ分けていない残り。
+    let mut open_outer: Option<(ElementRef, usize)> = None;
     for (index, block) in candidates.iter().enumerate() {
         let text = &block.text;
         if skipped_pr_box.is_some_and(|pr_box| is_inside(&block.element, &pr_box)) {
@@ -1092,19 +1093,28 @@ fn select_strict_blocks(
         if block.is_link_dense && is_in_link_run(candidates, index) {
             continue;
         }
-        // 直前に選んだブロックの内側にあり、その文字に丸ごと含まれるブロック（埋め込み投稿の blockquote の中の p など）は、
-        // 同じ文の重複なので飛ばす。外側のブロックに同じ文が入っているため、文は失われない。
-        if last_selected.is_some_and(|(outer, outer_text)| {
-            outer.id() != block.element.id()
-                && is_inside(&block.element, &outer)
-                && outer_text.contains(text.as_str())
-        }) {
-            continue;
+        // 直前に選んだブロック（埋め込み投稿の blockquote・li など）の内側にあり、その残りの文に含まれるブロック（中の p）は、
+        // 外側と同じ文の重複。外側の文を「内側より前の部分・内側・内側より後ろの部分」に分け直し、内側の段落の区切りを保つ
+        // （外側にしかない文〔投稿者の表示など〕は別のブロックとして残る）。文は増えも減りもしない。
+        if let Some((outer, slot)) = open_outer {
+            if outer.id() != block.element.id() && is_inside(&block.element, &outer) {
+                if let Some(pos) = selected[slot].find(text.as_str()) {
+                    let after = selected[slot][pos + text.len()..].trim().to_string();
+                    let before = selected[slot][..pos].trim().to_string();
+                    selected[slot] = before;
+                    selected.push(text.clone());
+                    selected.push(after);
+                    open_outer = Some((outer, selected.len() - 1));
+                    continue;
+                }
+            }
         }
         selected_chars += text.chars().count();
         selected.push(text.clone());
-        last_selected = Some((block.element, text));
+        open_outer = Some((block.element, selected.len() - 1));
     }
+    // 分け直しで空になった外側の残りを除く。
+    selected.retain(|text| !text.is_empty());
     trim_edge_label_blocks(&mut selected);
     trim_trailing_meta_blocks(&mut selected);
     selected
@@ -1132,7 +1142,7 @@ fn trim_trailing_meta_blocks(blocks: &mut Vec<String>) {
 }
 
 /// 記事末尾に付く、本文でない定型のブロックか（末尾の並びの中だけで使う）。どれも短く、実記事で確かめた定型の語か形に限る。
-/// - 日付の行（`is_dateline`）。
+/// - 日付・投稿者の行（`is_dateline`）。
 /// - 他言語版への案内（TRAILING_OTHER_LANGUAGE_PREFIXES で始まる）。
 /// - 支援の呼びかけ（`is_trailing_support_appeal`）。
 /// - 著者紹介（「（詳しいプロフィール）」のリンクで終わる）。
@@ -1187,7 +1197,8 @@ fn is_author_bio(text: &str) -> bool {
 
 /// 署名の行か。次のどちらか。どちらも句読点を含まない短い行に限り、「〜と同社の担当者は話した。」のような本文の文は当たらない。
 /// - 「By 」＋名前（「By サッカーキング編集部」）。名前に数字・句読点がなく、英文の文（`is_sentence_like_english`）でない。
-/// - 括弧で囲んだ名前だけの行で、「編集部」で終わるか「 / 」で名前の表記を並べたもの（「（Full-Count編集部）」「（山田太郎 / Taro Yamada）」）。
+/// - 括弧で囲んだ名前だけの行（数字・コロンを含まない）で、「編集部」で終わるか「 / 」で名前の表記を並べたもの
+///   （「（Full-Count編集部）」「（山田太郎 / Taro Yamada）」）。「（出典：総務省 / 経済産業省）」は当たらない。
 fn is_byline(text: &str) -> bool {
     let text = text.trim();
     let has_sentence_marks =
@@ -1214,7 +1225,8 @@ fn is_byline(text: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= BYLINE_MAX_NAME_CHARS
         && !has_sentence_marks(name)
-        && !name.contains(['（', '(', '）', ')'])
+        && !name.contains(['（', '(', '）', ')', '：', ':'])
+        && !name.chars().any(|ch| ch.is_ascii_digit())
         && (name.ends_with("編集部") || name.contains(" / "))
 }
 
@@ -1228,78 +1240,39 @@ fn is_site_tagline(text: &str) -> bool {
             .any(|suffix| text.ends_with(suffix))
 }
 
-/// 日付の行か。日付（時刻を伴ってよい）だけの行か、日付の後ろが投稿者・分類の案内（「in メモ , Posted by …」）だけの行。
-/// 「2026年11月10日、同社は発表した。」のように日付で始まる本文の文は、日付の後ろが案内でないため当たらない。
+/// 日付の行か。GIGAZINE の記事末尾で確かめた「2026年11月10日 15時00分00秒 in メモ , Posted by …」の形だけを当てる:
+/// 年月日＋時分秒の日時で始まり、その後ろが「Posted by」を含む投稿者・分類の案内で、「。」「」を含まない行。
+/// 日付・日時だけの行（イベント告知の末尾の「2026年11月10日（火） 14:00」など）や、
+/// 「2026年11月10日、同社は発表した。」のような本文の文は当たらない。
 fn is_dateline(text: &str) -> bool {
-    let Some(rest) = strip_leading_date(text) else {
+    let Some(rest) = strip_leading_datetime(text) else {
         return false;
     };
     let rest = rest.trim();
-    rest.is_empty() || (rest.contains(DATELINE_POSTED_BY) && !rest.contains(['。', '「', '」']))
+    rest.contains(DATELINE_POSTED_BY) && !rest.contains(['。', '「', '」'])
 }
 
-/// 先頭の日付（と時刻）を外した残りを返す。日付で始まらなければ None。
-/// 受け付ける形: 「2026年11月10日」「2026.11.10」「2026/11/10」「2026-11-10」。後ろに曜日の括弧
-/// （「（火）」「(Tue)」）と時刻（「15時00分00秒」「15:00」「15:00:00」）が続いてよい。
-fn strip_leading_date(text: &str) -> Option<&str> {
-    let text = text.trim_start();
-    let (year, rest) = take_digits(text, 4, 4)?;
+/// 先頭の「YYYY年M月D日 H時M分S秒」を外した残りを返す（日付と時刻の間は空白 1 つ以上）。この形で始まらなければ None。
+fn strip_leading_datetime(text: &str) -> Option<&str> {
+    let (year, rest) = take_digits(text.trim_start(), 4, 4)?;
     if !(year.starts_with("19") || year.starts_with("20")) {
         return None;
     }
-    let rest = if let Some(rest) = rest.strip_prefix('年') {
-        let (_, rest) = take_digits(rest, 1, 2)?;
-        let rest = rest.strip_prefix('月')?;
-        let (_, rest) = take_digits(rest, 1, 2)?;
-        rest.strip_prefix('日')?
-    } else {
-        let separator = rest
-            .chars()
-            .next()
-            .filter(|ch| matches!(ch, '.' | '/' | '-'))?;
-        let rest = &rest[separator.len_utf8()..];
-        let (_, rest) = take_digits(rest, 1, 2)?;
-        let rest = rest.strip_prefix(separator)?;
-        let (_, rest) = take_digits(rest, 1, 2)?;
-        // 「2026.11.105」のような数字の続きは日付とみなさない。
-        if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
-            return None;
-        }
-        rest
-    };
-    let mut rest = rest.trim_start();
-    // 曜日の括弧（短いものだけ）。
-    for (open, close) in [('（', '）'), ('(', ')')] {
-        if let Some(inner) = rest.strip_prefix(open) {
-            if let Some((weekday, after)) = inner.split_once(close) {
-                if weekday.chars().count() <= 3 {
-                    rest = after.trim_start();
-                }
-            }
-        }
+    let rest = rest.strip_prefix('年')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('月')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('日')?;
+    let trimmed = rest.trim_start();
+    if trimmed.len() == rest.len() {
+        return None;
     }
-    Some(strip_leading_time(rest).unwrap_or(rest))
-}
-
-/// 先頭の時刻（「15時00分00秒」「15時00分」「15:00」「15:00:00」）を外した残り。時刻で始まらなければ None。
-fn strip_leading_time(text: &str) -> Option<&str> {
-    let (_, rest) = take_digits(text, 1, 2)?;
-    if let Some(rest) = rest.strip_prefix('時') {
-        let (_, rest) = take_digits(rest, 1, 2)?;
-        let rest = rest.strip_prefix('分')?;
-        return Some(
-            take_digits(rest, 1, 2)
-                .and_then(|(_, after)| after.strip_prefix('秒'))
-                .unwrap_or(rest),
-        );
-    }
-    let rest = rest.strip_prefix(':')?;
-    let (_, rest) = take_digits(rest, 2, 2)?;
-    Some(
-        rest.strip_prefix(':')
-            .and_then(|after| take_digits(after, 2, 2))
-            .map_or(rest, |(_, after)| after),
-    )
+    let (_, rest) = take_digits(trimmed, 1, 2)?;
+    let rest = rest.strip_prefix('時')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('分')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    rest.strip_prefix('秒')
 }
 
 /// 先頭の ASCII 数字を min〜max 桁取り、(数字, 残り) を返す。桁数が範囲外なら None。
@@ -3461,14 +3434,16 @@ mod tests {
     #[test]
     fn drops_nested_duplicate_of_embedded_post_only() {
         // 埋め込み投稿（blockquote の中の p）は、外側と内側の両方がブロックとして拾われて同じ文が 2 回入っていた。
-        // 内側の重複だけを除き、外側（投稿者の表示を含む）は残す。
+        // 内側の p を段落として残し、外側にしかない投稿者の表示は別のブロックとして残す。
         let post = "新しい料金体系を来月から導入します。詳しくは公式サイトをご覧ください。";
         let excerpt = extract_body(&format!(
             r#"<p>{BODY_1}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
         ));
         assert_eq!(
             excerpt,
-            format!("{BODY_1}\n\n{post} — 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}")
+            format!(
+                "{BODY_1}\n\n{post}\n\n— 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}"
+            )
         );
         // 本文の段落が投稿の文を引用しているだけ（入れ子でない）なら、同じ文が含まれていても残す。
         let quoting = format!("同社は「{post}」とXに投稿した。");
@@ -3493,17 +3468,21 @@ mod tests {
 
     #[test]
     fn dateline_and_byline_shapes() {
+        // 当たるのは、実記事（GIGAZINE）で確かめた「年月日 時分秒 … Posted by …」の形だけ。
+        for text in [
+            "2026年11月10日 15時00分00秒 in AI , ハードウェア , Posted by writer_a",
+            "2026年1月5日 9時05分00秒 in メモ , Posted by writer_b",
+        ] {
+            assert!(is_dateline(text), "{text}");
+        }
         for text in [
             "2026年11月10日",
             "2026.11.10",
             "2026/11/10 12:30",
             "2026-11-10 12:30:05",
-            "2026年11月10日（火） 15時00分",
-            "2026年11月10日 15時00分00秒 in AI , ハードウェア , Posted by writer_a",
-        ] {
-            assert!(is_dateline(text), "{text}");
-        }
-        for text in [
+            "2026年11月10日（火） 14:00",
+            "2026年11月10日（予定）",
+            "2026年11月10日 15時00分00秒",
             "2026年11月10日、同社は発表した。",
             "2026.11.10に開かれた会見",
             "20261110",
@@ -3524,10 +3503,63 @@ mod tests {
             "By the end of the year",
             "（写真は本人提供）",
             "（編集部注：価格は税込み）",
+            "（編集部注：価格は税込み / 送料別）",
+            "（出典：総務省 / 経済産業省）",
+            "（2026年 / 架空編集部）",
             "（了）",
             "By 編集部、取材は東京で",
         ] {
             assert!(!is_byline(text), "{text}");
         }
+    }
+
+    #[test]
+    fn keeps_trailing_date_only_lines() {
+        // イベント告知の末尾の日時・日付だけの行は、末尾にあっても残す（日付の行として当てない）。
+        for last in [
+            "2026年11月10日（火） 14:00",
+            "2026年11月10日（予定）",
+            "2026.11.10",
+        ] {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_trailing_parenthesized_notes_with_slash() {
+        for last in [
+            "（編集部注：価格は税込み / 送料別）",
+            "（出典：総務省 / 経済産業省）",
+        ] {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn splits_quote_box_into_inner_paragraphs_in_order() {
+        // 引用の囲み（前置き＋英文の投稿＋訳の 2 段落＋投稿者の表示）。変更前は外側の 1 ブロック＋内側の 2 段落の重複だった。
+        // 内側の 2 段落をそのままの順で残し、外側にしかない文（前置き・投稿者の表示）を別のブロックとして残す。
+        let english = "We are launching a new pricing plan next month for all existing customers.";
+        let japanese =
+            "来月から既存のすべての利用者を対象に新しい料金体系を導入すると投稿しました。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote>投稿の引用 <p>{english}</p><p>{japanese}</p>— Example Corp (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!(
+                "{BODY_1}\n\n投稿の引用\n\n{english}\n\n{japanese}\n\n— Example Corp (@example) November 10, 2026\n\n{LONG_BODY}"
+            )
+        );
     }
 }
