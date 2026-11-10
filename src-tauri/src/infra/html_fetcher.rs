@@ -222,7 +222,7 @@ const END_MARKER_BODY_PARAGRAPH_CHARS: usize = 60;
 const LENIENT_RATIO: usize = 4;
 const LENIENT_MAX_STRICT_CHARS: usize = 400;
 /// 1 つのコンテナから集める文字数の目安。抜粋の上限の 2 倍あれば、抜粋の組み立てにも比率の判定にも足りる。
-const EXTRACTION_COLLECT_LIMIT_CHARS: usize = MAX_EXCERPT_CHARS * 2;
+const EXTRACTION_COLLECT_LIMIT_FACTOR: usize = 2;
 /// 【…】で始まる誘導・告知の行（「【画像】…」「【あわせて読みたい】…」）。この文字数以下の
 /// ブロックが BRACKET_NOISE_LABELS のどれかの見出しで始まるときだけ除く（strict のみ）。
 /// 誘導行は見出し＋他記事のタイトル程度の長さに収まり、本文の段落はふつうこれより長い。
@@ -341,6 +341,26 @@ impl HtmlFetcher {
         let (_final_url, html) = self.fetch_html(article_url, &allowlist).await?;
         let (excerpt, excerpt_source) = extract_excerpt_with_source(&html);
 
+        Ok(HtmlFetchResult {
+            html_extracted: excerpt.is_some(),
+            excerpt,
+            excerpt_source,
+        })
+    }
+
+    /// 評価専用（テストのビルドだけ）: 取得・URL 検証は `fetch_and_extract` と同じで、抜粋の上限だけを
+    /// `limit` 文字にする（記事の最後までの本文を評価ハーネスのメモリ上で扱うため。保存はしない）。
+    #[cfg(test)]
+    pub async fn fetch_and_extract_with_limit(
+        &self,
+        article_url: &str,
+        limit: usize,
+    ) -> Result<HtmlFetchResult, AppError> {
+        let allowlist = NetworkAllowlist::load(&self.allowlist_path)?;
+        let article_url =
+            canonicalize_request_url(validate_url(article_url, UrlPurpose::Article, &allowlist)?)?;
+        let (_final_url, html) = self.fetch_html(article_url, &allowlist).await?;
+        let (excerpt, excerpt_source) = extract_excerpt_with_limit(&html, limit);
         Ok(HtmlFetchResult {
             html_extracted: excerpt.is_some(),
             excerpt,
@@ -568,7 +588,7 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 //    - 判定あり（strict）: 要素名による除外 ＋ class / id の語による除外 ＋ 終端の目印での打ち切り。
 //    - 判定なし（lenient）: 要素名による除外だけ（class / id の語と終端の目印は使わない）。
 //    どちらも空・画像だけのブロックは飛ばし、短いノイズ文言と重複を除く。
-//    集めた文字数が EXTRACTION_COLLECT_LIMIT_CHARS を超えたら走査をやめる（巨大ページの負荷対策）。
+//    集めた文字数が抜粋の上限の EXTRACTION_COLLECT_LIMIT_FACTOR 倍を超えたら走査をやめる（巨大ページの負荷対策）。
 //    strict ではさらに、テキストだけで分かる定型ブロックを除く（いずれも短いブロックに限る）:
 //    「【画像】」「【あわせて読みたい】」などの誘導行、本文の後ろの「【PR】」の囲み（後ろに本文が続けば囲みだけ）、
 //    リンクが大半のブロックの連続（関連記事・参考リンクの一覧）、寄付・会員登録・メルマガの呼びかけ、ページ送り、
@@ -590,6 +610,40 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 // 追加の取得が要るため、この関数では扱わない。
 // ---------------------------------------------------------------------------
 
+/// 抜粋の上限（本番は常に MAX_EXCERPT_CHARS）。テストのビルドでだけ、評価ハーネス
+/// （段落ごとの1行まとめの評価・Firestore タスク t3JFzB）が記事の最後までの本文を得るために一時的に引き上げられる。
+fn excerpt_limit() -> usize {
+    excerpt_limit_override().unwrap_or(MAX_EXCERPT_CHARS)
+}
+
+#[cfg(not(test))]
+fn excerpt_limit_override() -> Option<usize> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXCERPT_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn excerpt_limit_override() -> Option<usize> {
+    EXCERPT_LIMIT_OVERRIDE.with(std::cell::Cell::get)
+}
+
+/// 評価専用（テストのビルドだけ）: 抜粋の上限を `limit` 文字にして本文を抽出する。
+/// 抽出の規則は本番と同じで、上限（と、それに比例する集める文字数の目安）だけを変える。
+#[cfg(test)]
+pub(crate) fn extract_excerpt_with_limit(
+    html: &str,
+    limit: usize,
+) -> (Option<String>, ExcerptSource) {
+    let previous = EXCERPT_LIMIT_OVERRIDE.with(|cell| cell.replace(Some(limit)));
+    let extracted = extract_excerpt_with_source(html);
+    EXCERPT_LIMIT_OVERRIDE.with(|cell| cell.set(previous));
+    extracted
+}
+
 fn extract_excerpt(html: &str) -> Option<String> {
     extract_excerpt_with_source(html).0
 }
@@ -600,13 +654,13 @@ fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
     let document = Html::parse_document(html);
     if let Some(excerpt) = find_best_candidate_excerpt(&document) {
         return (
-            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            Some(truncate_text(&excerpt, excerpt_limit())),
             ExcerptSource::Body,
         );
     }
     match extract_meta_description(&document) {
         Some(excerpt) => (
-            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            Some(truncate_text(&excerpt, excerpt_limit())),
             ExcerptSource::MetaDescription,
         ),
         None => (None, ExcerptSource::None),
@@ -855,10 +909,11 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
     // リンク密度は空白を除いた文字数で数える（lenient に入れたブロックだけ）。
     let mut lenient_dense_chars = 0usize;
     let mut lenient_link_chars = 0usize;
+    let collect_limit = excerpt_limit() * EXTRACTION_COLLECT_LIMIT_FACTOR;
 
     for block in container.select(&selectors.blocks) {
         // strict は lenient の部分集合なので、strict が上限に届けば lenient も届いている。
-        if strict_chars >= EXTRACTION_COLLECT_LIMIT_CHARS {
+        if strict_chars >= collect_limit {
             break;
         }
         let region = cache.region_of(&block, Some(container));
@@ -883,7 +938,7 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
             });
         }
         // lenient は比率の判定に足りる分だけ持てばよい。
-        if lenient_chars < EXTRACTION_COLLECT_LIMIT_CHARS {
+        if lenient_chars < collect_limit {
             lenient_chars += text_chars;
             lenient_dense_chars += dense_chars;
             lenient_link_chars += link_chars;
@@ -1301,7 +1356,7 @@ fn join_body_blocks(texts: Vec<String>) -> Option<String> {
     if blocks.is_empty() {
         return None;
     }
-    Some(join_excerpt_blocks(&blocks, MAX_EXCERPT_CHARS))
+    Some(join_excerpt_blocks(&blocks, excerpt_limit()))
 }
 
 /// ブロック（または候補コンテナ）がどの領域にあるか。
@@ -1703,6 +1758,27 @@ mod tests {
         assert!(excerpt.contains("二つ目の段落です。重要な背景情報をここに含めます。"));
         assert!(!excerpt.contains("alert"));
         assert!(!excerpt.contains("シェア"));
+    }
+
+    #[test]
+    fn eval_only_limit_extracts_the_whole_body_and_restores_the_default() {
+        // 評価専用の上限の引き上げ（テストのビルドだけ）: 記事の最後まで取れ、終われば本番の上限に戻る。
+        let paragraphs: Vec<String> = (0..40)
+            .map(|i| format!("<p>段落{i}の本文です。{}</p>", "あ".repeat(90)))
+            .collect();
+        let html = format!(
+            "<!doctype html><html><body><article>{}</article></body></html>",
+            paragraphs.concat()
+        );
+        let (full, source) = extract_excerpt_with_limit(&html, 30_000);
+        assert_eq!(source, ExcerptSource::Body);
+        let full = full.unwrap();
+        assert!(full.chars().count() > MAX_EXCERPT_CHARS);
+        assert!(full.contains("段落39の本文です。"));
+        assert_eq!(full.split("\n\n").count(), 40);
+        let default = extract_excerpt(&html).unwrap();
+        assert!(default.chars().count() <= MAX_EXCERPT_CHARS);
+        assert!(!default.contains("段落39の本文です。"));
     }
 
     #[test]
