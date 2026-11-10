@@ -227,6 +227,29 @@ const TRAILING_SITE_NAV_LABELS: &[&str] = &[
 ];
 /// 末尾のサイト案内のうち「ITmedia NEWS SNS」のような SNS への案内とみなす行の最大文字数。
 const TRAILING_SNS_LABEL_MAX_CHARS: usize = 20;
+/// 記事末尾の定型のブロック（`is_trailing_meta_block`）とみなす最大文字数。著者紹介・支援の呼びかけはこれに収まる。
+const TRAILING_META_MAX_CHARS: usize = 300;
+/// 他言語版への案内の書き出し（GIGAZINE の英語版への案内で確かめた文言だけ）。
+const TRAILING_OTHER_LANGUAGE_PREFIXES: &[&str] =
+    &["You can read the machine translated English article"];
+/// 支援・購読の呼びかけで、読者へ依頼する言い回し（APPEAL_KEYWORDS と両方を含むときだけ。GIGAZINE で確かめた文言だけ）。
+/// APPEAL_CALL_MARKERS（本文の途中でも当てる）より弱い言い回しなので、記事末尾の並びの中で、引用を含まないときだけ当てる。
+const TRAILING_APPEAL_REQUESTS: &[&str] = &["いただけないでしょうか"];
+/// 支援の呼びかけの後に添える定型の一文（GIGAZINE で確かめた文言だけ）。
+const TRAILING_APPEAL_FOLLOWUPS: &[&str] = &["引き続き記事をお読みください"];
+const TRAILING_APPEAL_FOLLOWUP_MAX_CHARS: usize = 100;
+/// 著者紹介の末尾に付くリンクのラベル（Publickey で確かめた文言）。
+const AUTHOR_BIO_LINK_LABEL: &str = "詳しいプロフィール";
+/// 新着情報・SNS のフォローの案内に特有の言い回し（Publickey で確かめた文言だけ）。
+const TRAILING_FOLLOW_PHRASES: &[&str] = &["新着情報をチェックしませんか"];
+const TRAILING_FOLLOW_MAX_CHARS: usize = 150;
+/// 署名（「By サッカーキング編集部」「（Full-Count編集部）」）の名前の部分の最大文字数。
+const BYLINE_MAX_NAME_CHARS: usize = 40;
+/// 署名の後ろに置かれるサイトの紹介文の語尾（サッカーキングで確かめた形）と、その最大文字数。
+const SITE_TAGLINE_SUFFIXES: &[&str] = &["情報サイト"];
+const SITE_TAGLINE_MAX_CHARS: usize = 20;
+/// 日付の行の後ろに付く投稿者の案内（GIGAZINE で確かめた形）。
+const DATELINE_POSTED_BY: &str = "Posted by";
 /// 著作権表示の行（「Copyright © …」「(C) …」「… All Rights Reserved.」）とみなす最大文字数。
 /// 著作権表示に一言の注記（生成 AI の利用の断りなど）が続く行もこの長さに収まり、
 /// 著作権に触れる本文の段落はふつうこれより長い。末尾の並びの中にあるときだけ除く
@@ -998,6 +1021,8 @@ fn select_strict_blocks(
     let mut selected_chars = 0;
     // 本文途中の【PR】の囲み・関連記事の囲み。この要素の内側のブロックは飛ばす。
     let mut skipped_pr_box: Option<ElementRef> = None;
+    // 直前に選んだブロック（入れ子の重複を見分けるのに使う）。
+    let mut last_selected: Option<(ElementRef, &String)> = None;
     for (index, block) in candidates.iter().enumerate() {
         let text = &block.text;
         if skipped_pr_box.is_some_and(|pr_box| is_inside(&block.element, &pr_box)) {
@@ -1067,11 +1092,223 @@ fn select_strict_blocks(
         if block.is_link_dense && is_in_link_run(candidates, index) {
             continue;
         }
+        // 直前に選んだブロックの内側にあり、その文字に丸ごと含まれるブロック（埋め込み投稿の blockquote の中の p など）は、
+        // 同じ文の重複なので飛ばす。外側のブロックに同じ文が入っているため、文は失われない。
+        if last_selected.is_some_and(|(outer, outer_text)| {
+            outer.id() != block.element.id()
+                && is_inside(&block.element, &outer)
+                && outer_text.contains(text.as_str())
+        }) {
+            continue;
+        }
         selected_chars += text.chars().count();
         selected.push(text.clone());
+        last_selected = Some((block.element, text));
     }
     trim_edge_label_blocks(&mut selected);
+    trim_trailing_meta_blocks(&mut selected);
     selected
+}
+
+/// 選んだブロックの末尾から、本文でない定型のブロック（`is_trailing_meta_block`）が続く間を除く（strict のみ）。
+/// 末尾から見て最初の本文のブロックで止めるので、本文の途中にある同じ形のブロックは残す。
+/// サイトの紹介文（`is_site_tagline`）は、署名（`is_byline`）のすぐ後ろにあるときだけ署名と一緒に除く。
+/// 除いた後の末尾にサイト案内のラベルなどが現れたときのため、`trim_edge_label_blocks` の末尾の判定も続けて当てる。
+fn trim_trailing_meta_blocks(blocks: &mut Vec<String>) {
+    loop {
+        let Some(last) = blocks.last() else {
+            return;
+        };
+        if is_trailing_meta_block(last) || is_trailing_label_block(last) {
+            blocks.pop();
+            continue;
+        }
+        if is_site_tagline(last) && blocks.len() >= 2 && is_byline(&blocks[blocks.len() - 2]) {
+            blocks.truncate(blocks.len() - 2);
+            continue;
+        }
+        return;
+    }
+}
+
+/// 記事末尾に付く、本文でない定型のブロックか（末尾の並びの中だけで使う）。どれも短く、実記事で確かめた定型の語か形に限る。
+/// - 日付の行（`is_dateline`）。
+/// - 他言語版への案内（TRAILING_OTHER_LANGUAGE_PREFIXES で始まる）。
+/// - 支援の呼びかけ（`is_trailing_support_appeal`）。
+/// - 著者紹介（「（詳しいプロフィール）」のリンクで終わる）。
+/// - 新着情報・SNS のフォローの案内（TRAILING_FOLLOW_PHRASES を含む）。
+/// - 署名（`is_byline`）。
+fn is_trailing_meta_block(text: &str) -> bool {
+    let text = text.trim();
+    let chars = text.chars().count();
+    if chars > TRAILING_META_MAX_CHARS {
+        return false;
+    }
+    is_dateline(text)
+        || TRAILING_OTHER_LANGUAGE_PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+        || is_trailing_support_appeal(text)
+        || is_author_bio(text)
+        || (chars <= TRAILING_FOLLOW_MAX_CHARS
+            && TRAILING_FOLLOW_PHRASES
+                .iter()
+                .any(|phrase| text.contains(phrase)))
+        || is_byline(text)
+}
+
+/// 本文の引用（「」『』）を含むか。引用を含むブロックは、呼びかけの語があっても記事の本文（発言の紹介）とみなして残す。
+fn has_quotation(text: &str) -> bool {
+    text.contains(['「', '」', '『', '』'])
+}
+
+/// 記事末尾の支援・購読の呼びかけか。引用を含まず、次のどちらかに当たるときだけ。
+/// - 呼びかけの話題の語（APPEAL_KEYWORDS）と、読者への依頼の言い回し（TRAILING_APPEAL_REQUESTS）の両方を含む。
+/// - 呼びかけの後に添える定型の一文（TRAILING_APPEAL_FOLLOWUPS）を含み、TRAILING_APPEAL_FOLLOWUP_MAX_CHARS 以下。
+fn is_trailing_support_appeal(text: &str) -> bool {
+    if has_quotation(text) {
+        return false;
+    }
+    (APPEAL_KEYWORDS.iter().any(|word| text.contains(word))
+        && TRAILING_APPEAL_REQUESTS
+            .iter()
+            .any(|request| text.contains(request)))
+        || (text.chars().count() <= TRAILING_APPEAL_FOLLOWUP_MAX_CHARS
+            && TRAILING_APPEAL_FOLLOWUPS
+                .iter()
+                .any(|phrase| text.contains(phrase)))
+}
+
+/// 著者紹介か。「（詳しいプロフィール）」のようなリンクのラベルで終わる（閉じ括弧・空白は除いて見る）。
+fn is_author_bio(text: &str) -> bool {
+    text.trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, '）' | ')' | '】' | ']'))
+        .ends_with(AUTHOR_BIO_LINK_LABEL)
+}
+
+/// 署名の行か。次のどちらか。どちらも句読点を含まない短い行に限り、「〜と同社の担当者は話した。」のような本文の文は当たらない。
+/// - 「By 」＋名前（「By サッカーキング編集部」）。名前に数字・句読点がなく、英文の文（`is_sentence_like_english`）でない。
+/// - 括弧で囲んだ名前だけの行で、「編集部」で終わるか「 / 」で名前の表記を並べたもの（「（Full-Count編集部）」「（山田太郎 / Taro Yamada）」）。
+fn is_byline(text: &str) -> bool {
+    let text = text.trim();
+    let has_sentence_marks =
+        |name: &str| name.contains(['。', '、', '，', '．', ',', '.', '!', '?', '！', '？']);
+    if let Some(name) = text.strip_prefix("By ") {
+        let name = name.trim();
+        return !name.is_empty()
+            && name.chars().count() <= BYLINE_MAX_NAME_CHARS
+            && !has_sentence_marks(name)
+            && !name.chars().any(|ch| ch.is_ascii_digit())
+            && !is_sentence_like_english(name);
+    }
+    let inner = ['（', '(']
+        .iter()
+        .find_map(|open| text.strip_prefix(*open))
+        .and_then(|rest| {
+            ['）', ')']
+                .iter()
+                .find_map(|close| rest.strip_suffix(*close))
+        });
+    let Some(name) = inner.map(str::trim) else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().count() <= BYLINE_MAX_NAME_CHARS
+        && !has_sentence_marks(name)
+        && !name.contains(['（', '(', '）', ')'])
+        && (name.ends_with("編集部") || name.contains(" / "))
+}
+
+/// 署名のすぐ後ろに置かれるサイトの紹介文か（「サッカー総合情報サイト」）。句読点のない短い行で、SITE_TAGLINE_SUFFIXES で終わる。
+fn is_site_tagline(text: &str) -> bool {
+    let text = text.trim();
+    text.chars().count() <= SITE_TAGLINE_MAX_CHARS
+        && !text.contains(['。', '、'])
+        && SITE_TAGLINE_SUFFIXES
+            .iter()
+            .any(|suffix| text.ends_with(suffix))
+}
+
+/// 日付の行か。日付（時刻を伴ってよい）だけの行か、日付の後ろが投稿者・分類の案内（「in メモ , Posted by …」）だけの行。
+/// 「2026年11月10日、同社は発表した。」のように日付で始まる本文の文は、日付の後ろが案内でないため当たらない。
+fn is_dateline(text: &str) -> bool {
+    let Some(rest) = strip_leading_date(text) else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.is_empty() || (rest.contains(DATELINE_POSTED_BY) && !rest.contains(['。', '「', '」']))
+}
+
+/// 先頭の日付（と時刻）を外した残りを返す。日付で始まらなければ None。
+/// 受け付ける形: 「2026年11月10日」「2026.11.10」「2026/11/10」「2026-11-10」。後ろに曜日の括弧
+/// （「（火）」「(Tue)」）と時刻（「15時00分00秒」「15:00」「15:00:00」）が続いてよい。
+fn strip_leading_date(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let (year, rest) = take_digits(text, 4, 4)?;
+    if !(year.starts_with("19") || year.starts_with("20")) {
+        return None;
+    }
+    let rest = if let Some(rest) = rest.strip_prefix('年') {
+        let (_, rest) = take_digits(rest, 1, 2)?;
+        let rest = rest.strip_prefix('月')?;
+        let (_, rest) = take_digits(rest, 1, 2)?;
+        rest.strip_prefix('日')?
+    } else {
+        let separator = rest
+            .chars()
+            .next()
+            .filter(|ch| matches!(ch, '.' | '/' | '-'))?;
+        let rest = &rest[separator.len_utf8()..];
+        let (_, rest) = take_digits(rest, 1, 2)?;
+        let rest = rest.strip_prefix(separator)?;
+        let (_, rest) = take_digits(rest, 1, 2)?;
+        // 「2026.11.105」のような数字の続きは日付とみなさない。
+        if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
+            return None;
+        }
+        rest
+    };
+    let mut rest = rest.trim_start();
+    // 曜日の括弧（短いものだけ）。
+    for (open, close) in [('（', '）'), ('(', ')')] {
+        if let Some(inner) = rest.strip_prefix(open) {
+            if let Some((weekday, after)) = inner.split_once(close) {
+                if weekday.chars().count() <= 3 {
+                    rest = after.trim_start();
+                }
+            }
+        }
+    }
+    Some(strip_leading_time(rest).unwrap_or(rest))
+}
+
+/// 先頭の時刻（「15時00分00秒」「15時00分」「15:00」「15:00:00」）を外した残り。時刻で始まらなければ None。
+fn strip_leading_time(text: &str) -> Option<&str> {
+    let (_, rest) = take_digits(text, 1, 2)?;
+    if let Some(rest) = rest.strip_prefix('時') {
+        let (_, rest) = take_digits(rest, 1, 2)?;
+        let rest = rest.strip_prefix('分')?;
+        return Some(
+            take_digits(rest, 1, 2)
+                .and_then(|(_, after)| after.strip_prefix('秒'))
+                .unwrap_or(rest),
+        );
+    }
+    let rest = rest.strip_prefix(':')?;
+    let (_, rest) = take_digits(rest, 2, 2)?;
+    Some(
+        rest.strip_prefix(':')
+            .and_then(|after| take_digits(after, 2, 2))
+            .map_or(rest, |(_, after)| after),
+    )
+}
+
+/// 先頭の ASCII 数字を min〜max 桁取り、(数字, 残り) を返す。桁数が範囲外なら None。
+fn take_digits(text: &str, min: usize, max: usize) -> Option<(&str, &str)> {
+    let len = text
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (min..=max).contains(&len).then(|| text.split_at(len))
 }
 
 /// 選んだブロックの先頭・末尾にある短いラベルを除く（strict のみ。まとめの 2）。
@@ -3137,5 +3374,160 @@ mod tests {
             "<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{note}</p><p>{BODY_2}</p>"
         ));
         assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_trailing_dateline_language_guide_and_support_appeal() {
+        // GIGAZINE の記事末尾の形（日付・分類・投稿者の行、英語版への案内、サーバー代の支援の呼びかけと添え書き）。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{LONG_BODY}</p>\
+<p>2026年11月10日 15時00分00秒 in メモ , Posted by example_writer</p>\
+<p>You can read the machine translated English article A new service was launched… .</p>\
+<p>お邪魔して申し訳ないです。読者のための記事を掲載し続けるため、どうかサーバー代として300円をご寄付いただけないでしょうか。</p>\
+<p>喜んでメールでリマインドさせていただきます。 引き続き記事をお読みください。</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_trailing_author_bio_and_follow_guide() {
+        // Publickey の記事末尾の形（著者紹介＋「詳しいプロフィール」のリンク、新着情報のフォローの案内）。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div class="author"><p>山田太郎（yamada） 雑誌の編集者を経て独立。2010年にこのサイトを開始しました。 （ <a href="/profile">詳しいプロフィール</a> ）</p></div>
+<p>このサイトの新着情報をチェックしませんか？ Twitterで ： <a href="/x">@example</a> RSSリーダーで ： <a href="/feed">Feed</a></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_trailing_bylines() {
+        // 「By 〜編集部」＋サイトの紹介文（サッカーキング）、括弧の署名（Full-Count）。
+        let cases = [
+            "<p>By 架空スポーツ編集部</p><p>スポーツ総合情報サイト</p>",
+            "<p>（架空スポーツ編集部）</p>",
+            "<p>（山田太郎 / Taro Yamada）</p>",
+        ];
+        for tail in cases {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p>{tail}"));
+            assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"), "{tail}");
+        }
+    }
+
+    #[test]
+    fn keeps_trailing_body_sentences_that_resemble_meta_blocks() {
+        // 末尾にあっても、本文の文（日付で始まる文・発言の紹介・引用・投稿の紹介）は残す。
+        let lasts = [
+            "サービスは来月から始まる予定だと同社の担当者は話した。",
+            "2026年11月10日、同社は新しい料金体系を発表した。",
+            "2026.11.10に開かれた会見で、社長は値下げの理由を説明した。",
+            "同団体は「活動を続けるため、ご寄付をいただけないでしょうか」と呼びかけた。",
+            "選手は「引き続き記事をお読みください」と冗談めかしてXに投稿した。",
+            "監督は試合後、「チームはまだ成長できる」とX（旧Twitter）に投稿した。",
+            "By 2027, the company plans to expand the service to all regions.",
+            "（写真は本人提供）",
+            "（編集部注：価格は税込み）",
+            "国内最大級の情報サイト",
+            "新着情報は公式サイトで確認できる。",
+        ];
+        for last in lasts {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_meta_like_blocks_in_the_middle_of_body() {
+        // 末尾の並びにない日付の行・署名は残す（本文の途中の小見出し・クレジットなど）。
+        for middle in [
+            "2026年11月10日",
+            "（架空スポーツ編集部）",
+            "By 架空スポーツ編集部",
+        ] {
+            let excerpt =
+                extract_body(&format!("<p>{BODY_1}</p><p>{middle}</p><p>{LONG_BODY}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{middle}\n\n{LONG_BODY}"),
+                "{middle}"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_nested_duplicate_of_embedded_post_only() {
+        // 埋め込み投稿（blockquote の中の p）は、外側と内側の両方がブロックとして拾われて同じ文が 2 回入っていた。
+        // 内側の重複だけを除き、外側（投稿者の表示を含む）は残す。
+        let post = "新しい料金体系を来月から導入します。詳しくは公式サイトをご覧ください。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{post} — 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}")
+        );
+        // 本文の段落が投稿の文を引用しているだけ（入れ子でない）なら、同じ文が含まれていても残す。
+        let quoting = format!("同社は「{post}」とXに投稿した。");
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{quoting}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote>"#
+        ));
+        assert!(excerpt.contains(&quoting));
+        assert!(excerpt.ends_with("November 10, 2026"));
+        assert_eq!(excerpt.matches(post).count(), 2);
+    }
+
+    #[test]
+    fn keeps_single_copy_of_nested_list_paragraph() {
+        // 外側の li に p が入る形では外側の文が内側を含むため、内側の重複だけを除き、文は 1 回だけ残る。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><ul><li><p>{LONG_BODY}</p></li></ul><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt.matches(LONG_BODY).count(), 1);
+        assert!(excerpt.contains(BODY_1));
+        assert!(excerpt.ends_with(BODY_2));
+    }
+
+    #[test]
+    fn dateline_and_byline_shapes() {
+        for text in [
+            "2026年11月10日",
+            "2026.11.10",
+            "2026/11/10 12:30",
+            "2026-11-10 12:30:05",
+            "2026年11月10日（火） 15時00分",
+            "2026年11月10日 15時00分00秒 in AI , ハードウェア , Posted by writer_a",
+        ] {
+            assert!(is_dateline(text), "{text}");
+        }
+        for text in [
+            "2026年11月10日、同社は発表した。",
+            "2026.11.10に開かれた会見",
+            "20261110",
+            "2026年11月10日 15時00分 in 東京、Posted by の表示を廃止した。",
+            "1億2000万円の赤字",
+        ] {
+            assert!(!is_dateline(text), "{text}");
+        }
+        for text in [
+            "By 架空スポーツ編集部",
+            "（架空編集部）",
+            "(山田太郎 / Taro Yamada)",
+        ] {
+            assert!(is_byline(text), "{text}");
+        }
+        for text in [
+            "By 2027",
+            "By the end of the year",
+            "（写真は本人提供）",
+            "（編集部注：価格は税込み）",
+            "（了）",
+            "By 編集部、取材は東京で",
+        ] {
+            assert!(!is_byline(text), "{text}");
+        }
     }
 }
