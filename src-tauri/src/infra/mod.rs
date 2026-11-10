@@ -24,3 +24,5 @@ pub mod local_llm_runtime;
 pub mod meeting_detector;
 pub mod rss_client;
 pub mod url_guard;
+/// OS 連携（最後の入力からの経過・物理メモリの空き。自動要約の待ち判定用）。外部通信は行わない。
+pub mod user_activity_detector;

@@ -3987,6 +3987,28 @@ test("reader summary: a waiting article explains that auto summary is resting du
   );
 });
 
+test("reader summary: a waiting article explains that auto summary is waiting while the pc is busy with low memory", async ({
+  page,
+}) => {
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedLowMemoryWhileActive");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  // 作業中でメモリに余裕がないときは、その理由を添える。手動の「今すぐ要約」はそのまま使える。
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    "いまはパソコンで作業中で、メモリに余裕がないみたいだから、自動の要約はひと休みしているよ。手が空いたら続きを作るね。"
+  );
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toBeVisible();
+
+  // 手が空いて動き出した → ニュース取得の完了時に読み直し、一言を消す。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = "running";
+  });
+  await emitNewsRefreshed(page);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+});
+
 test("reader summary: an unsummarized article outside the queue explains why auto summary is off", async ({
   page,
 }) => {

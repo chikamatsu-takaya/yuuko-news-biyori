@@ -77,6 +77,11 @@ sha2 = "0.10"
 #   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
 # - Win32_Security: CreateJobObjectW の引数型（SECURITY_ATTRIBUTES）が、この feature の下にある。
 # - Win32_System_Threading: JOBOBJECT_EXTENDED_LIMIT_INFORMATION の項目型（IO_COUNTERS）が、この feature の下にある。
+# ローカルLLMの自動要約を「PCを操作中で物理メモリに余裕がないとき」だけ待たせるため、次の 2 feature だけを追加する
+# （新規クレート・取得物の追加なし。判定は自動要約の記事を取り出す前と 60 秒ごとの確かめ直しのときだけで、常駐スレッド・フックなし）。
+# - Win32_UI_Input_KeyboardAndMouse: 最後のキーボード・マウス入力の時刻を読む GetLastInputInfo（LASTINPUTINFO）。
+# - Win32_System_SystemInformation: 物理メモリの空きを読む GlobalMemoryStatusEx（MEMORYSTATUSEX）と、
+#   最後の入力からの経過を求める GetTickCount。
 windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -85,4 +90,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_Security",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
 ] }
