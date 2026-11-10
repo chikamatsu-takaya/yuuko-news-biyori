@@ -26,6 +26,14 @@
 //!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使うが、全画面の種類の
 //!   見方は分ける（通知は種類を問わず抑制、自動要約は `FullscreenStatus::pauses_auto_summary` のときだけ止める）。
 //!   通知の抑制設定には左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
+//! - ローカルLLMの自動要約は「PCを触っていない時間」に進める。利用者が操作中（最後のキーボード・マウス入力から
+//!   `ACTIVE_INPUT_WINDOW` 未満）で、かつ物理メモリの空きが `MIN_AVAILABLE_MEMORY_WHILE_ACTIVE` 未満のときだけ
+//!   取り出しを止めて待つ（`BusyCause::LowMemoryWhileActive`）。操作していない・画面ロック中（入力が無いので
+//!   経過が延びる）なら空きが少なくても進め、操作中でも空きが足りていれば従来どおり進める。llama-server を
+//!   起動済みのときは、そのサーバーが既に使っている分（`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して比べる
+//!   （足し戻さないと、1件目で読み込んだモデルの分だけ2件目から毎回止まり、止まって解放→再開して読み込み直し、を繰り返すため）。
+//!   OS への問い合わせ（`user_activity_detector`）は全画面・マイクで止めないときだけ、取り出しの前と
+//!   確かめ直し（`PAUSE_RECHECK_INTERVAL`）のときに行う。値が取れないときは止めない（fail-open）。手動の要約には関係しない。
 //! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から2分で止まる（`local_llm_service`）。
 //!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
 //!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
@@ -83,6 +91,7 @@ use crate::infra::fullscreen_detector::{
     FullscreenDetector, FullscreenKind, FullscreenStatus, SystemFullscreenDetector,
 };
 use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
+use crate::infra::user_activity_detector::{SystemUserActivityDetector, UserActivityDetector};
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::article_service::ArticleService;
 use crate::services::local_llm_service::LocalLlmService;
@@ -104,8 +113,23 @@ const GEMINI_ITEM_INTERVAL: Duration = Duration::from_secs(30);
 /// まとめて要約する間にモデルを読み込み直すことはない。
 const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
 
-/// ゲーム・発表中・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
+/// ゲーム・発表中・マイク使用中・操作中のメモリ不足で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
 const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 最後のキーボード・マウス入力からこの時間未満なら「操作中」とみなす。記事を読んで手を止める・考えるといった
+/// 1〜2分の間は操作中のままにし、席を外したときは数分で「触っていない」に移れる長さとして 3 分にする
+/// （Windows の画面オフ・ロックの既定〔5〜15 分〕より短い）。確かめ直しは 60 秒ごとなので、席を外してから
+/// 再開まで最長で約 4 分。
+const ACTIVE_INPUT_WINDOW: Duration = Duration::from_secs(3 * 60);
+
+/// 操作中に、物理メモリの空きがこれ未満なら自動要約を待たせる。llama-server は生成中にワーキングセット
+/// 約 2.0〜2.3GB（うちプライベート約 1.3〜1.5GB。詳細設計書の実測）を使うため、その約 2GB に、利用者のアプリと
+/// OS のファイルキャッシュが押し出されないための余裕 0.5GB を足して 2.5GB とする。
+const MIN_AVAILABLE_MEMORY_WHILE_ACTIVE: u64 = 2_560 * 1024 * 1024;
+
+/// llama-server を起動済みのときに、空きへ足し戻す「既に使っている分」の見積もり（生成中のワーキングセット約 2GB）。
+/// 起動済みならモデルの分は既に空きから引かれているため、そのまま比べると2件目から毎回止まってしまう。
+const LOCAL_LLM_RESIDENT_ESTIMATE: u64 = 2_048 * 1024 * 1024;
 
 /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待つときの、1回の待ちの上限。
 /// 起動を控える 10 分を1回で待たず、設定の切り替え（Gemini への変更など）に追いつけるようにする。
@@ -382,7 +406,7 @@ impl QueueCore {
 /// 実AIを呼べる見込みがあるかの判定（Gemini はキーの有無、ローカルは同梱物の有無）。AI は呼ばない。
 type AiReadyCheck = Arc<dyn Fn(AiProvider) -> bool + Send + Sync>;
 
-/// ゲーム・発表中・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
+/// ゲーム・発表中・マイク使用中（会議中を含む）・操作中のメモリ不足かの判定。ローカルLLMの自動要約を止めるために使う。
 type UserBusyCheck = Arc<dyn Fn() -> Option<BusyCause> + Send + Sync>;
 
 /// 待機列が空になったときの知らせ。本番は `LocalLlmService::release_soon`（早めの停止の予約）。
@@ -395,17 +419,22 @@ type LocalLlmWait = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 /// 「会議アプリ起動中 かつ マイク使用中」なので、マイク使用中を見れば含まれる。
 /// OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
 /// どのアプリかは扱わず、どの理由かだけを返す（ログと画面の状態表示に理由を出すため）。
-fn user_busy_cause_on_this_pc() -> Option<BusyCause> {
-    busy_cause_from(SystemFullscreenDetector.detect(), || {
-        SystemMeetingDetector.is_mic_in_use()
-    })
+/// `local_llm_running` は llama-server を起動済みか（メモリの空きの見方に使う。操作中のときだけ尋ねる）。
+fn user_busy_cause_on_this_pc(local_llm_running: impl FnOnce() -> bool) -> Option<BusyCause> {
+    busy_cause_from(
+        SystemFullscreenDetector.detect(),
+        || SystemMeetingDetector.is_mic_in_use(),
+        || low_memory_while_active_on(&SystemUserActivityDetector, local_llm_running),
+    )
 }
 
-/// 全画面の判定結果とマイク使用中の判定から、自動要約を止める理由を決める（純粋関数・D158）。
-/// ふつうの全画面（`FullscreenKind::App`）では止めない。マイクは全画面で止めないときだけ尋ねる。
+/// 全画面の判定結果・マイク使用中・操作中のメモリ不足の判定から、自動要約を止める理由を決める（純粋関数・D158）。
+/// ふつうの全画面（`FullscreenKind::App`）では止めない。マイクは全画面で止めないときだけ、
+/// メモリはマイクでも止めないときだけ尋ねる（OS への問い合わせを要るものだけにする）。
 fn busy_cause_from(
     fullscreen: FullscreenStatus,
     mic_in_use: impl FnOnce() -> bool,
+    low_memory_while_active: impl FnOnce() -> bool,
 ) -> Option<BusyCause> {
     // 止める全画面かどうかは `pauses_auto_summary` だけで決める（通知側の判定と混ぜないため）。
     if fullscreen.pauses_auto_summary() {
@@ -417,10 +446,53 @@ fn busy_cause_from(
             },
         );
     }
-    mic_in_use().then_some(BusyCause::MicInUse)
+    if mic_in_use() {
+        return Some(BusyCause::MicInUse);
+    }
+    low_memory_while_active().then_some(BusyCause::LowMemoryWhileActive)
 }
 
-/// ローカルLLMの自動要約を止める理由（ゲーム・発表中・マイク使用中）。
+/// `detector` の値で、操作中かつ物理メモリに余裕がないかを決める。入力の経過を先に見て、
+/// 操作中のときだけメモリの空きと llama-server の起動状態を尋ねる。
+fn low_memory_while_active_on(
+    detector: &dyn UserActivityDetector,
+    local_llm_running: impl FnOnce() -> bool,
+) -> bool {
+    low_memory_while_active(
+        detector.idle_time(),
+        || detector.available_memory_bytes(),
+        local_llm_running,
+    )
+}
+
+/// 操作中（最後の入力から `ACTIVE_INPUT_WINDOW` 未満）かつ物理メモリの空きが足りないなら true（純粋関数）。
+/// - 操作していない（画面ロック中を含む。入力が無いので経過が延びる）なら、空きが少なくても止めない。
+/// - 操作中でも空きが足りていれば止めない。llama-server を起動済みなら、既に使っている分
+///   （`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して比べる。
+/// - 入力の経過・空きが取れないとき（Windows 以外・OS 判定の失敗）は止めない（fail-open。他の一時停止と同じ）。
+fn low_memory_while_active(
+    idle_time: Option<Duration>,
+    available_memory: impl FnOnce() -> Option<u64>,
+    local_llm_running: impl FnOnce() -> bool,
+) -> bool {
+    let Some(idle) = idle_time else {
+        return false;
+    };
+    if idle >= ACTIVE_INPUT_WINDOW {
+        return false;
+    }
+    let Some(available) = available_memory() else {
+        return false;
+    };
+    let usable = if local_llm_running() {
+        available.saturating_add(LOCAL_LLM_RESIDENT_ESTIMATE)
+    } else {
+        available
+    };
+    usable < MIN_AVAILABLE_MEMORY_WHILE_ACTIVE
+}
+
+/// ローカルLLMの自動要約を止める理由（ゲーム・発表中・マイク使用中・操作中のメモリ不足）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyCause {
     /// Direct3D 全画面（主にゲーム）。
@@ -428,6 +500,8 @@ enum BusyCause {
     /// プレゼンテーションモード（発表中）。
     Presentation,
     MicInUse,
+    /// 利用者が操作中で、物理メモリに余裕がない（`low_memory_while_active`）。
+    LowMemoryWhileActive,
     /// テストで差し替えた判定（理由を区別しない）。
     #[cfg(test)]
     Test,
@@ -439,6 +513,7 @@ impl BusyCause {
             Self::Game => "d3d_fullscreen",
             Self::Presentation => "presentation",
             Self::MicInUse => "mic_in_use",
+            Self::LowMemoryWhileActive => "low_memory_while_active",
             #[cfg(test)]
             Self::Test => "test",
         }
@@ -471,7 +546,7 @@ impl OffReason {
 enum QueueNotice {
     /// 動かさないと決めた（理由付き）。
     Off(OffReason),
-    /// ゲーム・発表中・マイク使用中のため取り出しを止めている。
+    /// ゲーム・発表中・マイク使用中・操作中のメモリ不足のため取り出しを止めている。
     Paused(BusyCause),
     /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待っている。
     WaitingForLocalLlm,
@@ -491,7 +566,8 @@ pub struct AutoSummaryQueue {
     /// 本番は `SummaryService::is_real_ai_ready`。テストでは環境変数・同梱物を用意せずに差し替える
     /// （並列テストで環境変数を書き換えると互いに干渉するため）。
     ai_ready: AiReadyCheck,
-    /// 本番は `user_busy_cause_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
+    /// 本番は `user_busy_cause_on_this_pc`（`with_local_llm` で llama-server の起動状態をつなぐ）。
+    /// テストでは OS に依存しない判定へ差し替える。
     user_busy: UserBusyCheck,
     /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm` で差し込む）。
     on_drained: DrainedHook,
@@ -516,7 +592,8 @@ impl AutoSummaryQueue {
             summary_service,
             settings_repository,
             ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
-            user_busy: Arc::new(user_busy_cause_on_this_pc),
+            // ローカルLLMとつなぐまでは、llama-server は起動していないものとして空きを見る。
+            user_busy: Arc::new(|| user_busy_cause_on_this_pc(|| false)),
             on_drained: Arc::new(|| {}),
             local_llm_wait: Arc::new(|| None),
             settings_unreadable: Arc::new(AtomicBool::new(false)),
@@ -528,9 +605,12 @@ impl AutoSummaryQueue {
     /// - 待機列が空になったら早めの停止を頼む。動いていなければ何もしない。直近の手動操作があるときに
     ///   いつ止めるか（手動操作から2分たつまでは止めない）は `LocalLlmService` が決める。
     /// - 次の記事を取り出す前に、手動の要求の最中・直後か、起動を控えている間かを尋ね、その間は待つ。
+    /// - 操作中のメモリ不足を見るときに、llama-server を起動済みか（既に使っている分を足し戻すか）を尋ねる。
     pub fn with_local_llm(mut self, local_llm: LocalLlmService) -> Self {
         let release = local_llm.clone();
         self.on_drained = Arc::new(move || release.release_soon());
+        let running = local_llm.clone();
+        self.user_busy = Arc::new(move || user_busy_cause_on_this_pc(|| running.is_running()));
         self.local_llm_wait = Arc::new(move || local_llm.background_wait());
         self
     }
@@ -562,7 +642,7 @@ impl AutoSummaryQueue {
         self
     }
 
-    /// ゲーム・発表中・マイク使用中の判定を差し替える（テスト用）。
+    /// ゲーム・発表中・マイク使用中・操作中のメモリ不足の判定を差し替える（テスト用）。
     #[cfg(test)]
     fn with_busy_check(mut self, user_busy: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         self.user_busy = Arc::new(move || user_busy().then_some(BusyCause::Test));
@@ -758,9 +838,9 @@ impl AutoSummaryQueue {
         local_llm_wait_for(provider, || (self.local_llm_wait)())
     }
 
-    /// ローカルLLMで要約する設定のときだけ、ゲーム・発表中・マイク使用中なら止める。
+    /// ローカルLLMで要約する設定のときだけ、ゲーム・発表中・マイク使用中・操作中のメモリ不足なら止める。
     /// Gemini は このパソコンの CPU をほとんど使わないため止めない。
-    /// 止めたときは理由（ゲーム・発表・マイク使用中）を INFO ログへ1回だけ残す（画面の状態表示にも使う）。
+    /// 止めたときは理由（ゲーム・発表・マイク使用中・操作中のメモリ不足）を INFO ログへ1回だけ残す（画面の状態表示にも使う）。
     fn is_paused(&self) -> bool {
         let is_local = self
             .load_settings()
@@ -939,6 +1019,9 @@ fn status_kind_for(
         match last_notice {
             Some(QueueNotice::Paused(BusyCause::MicInUse)) => {
                 return AutoSummaryStatusKind::PausedMicInUse;
+            }
+            Some(QueueNotice::Paused(BusyCause::LowMemoryWhileActive)) => {
+                return AutoSummaryStatusKind::PausedLowMemoryWhileActive;
             }
             Some(QueueNotice::Paused(_)) => {
                 return AutoSummaryStatusKind::PausedGameOrPresentation;
@@ -2117,41 +2200,221 @@ mod tests {
         assert_eq!(secs(u32::MAX), 600);
     }
 
-    /// D158: 自動要約はゲーム（D3D 全画面）・発表（プレゼンモード）・マイク使用中だけで止め、
+    /// D158: 自動要約はゲーム（D3D 全画面）・発表（プレゼンモード）・マイク使用中・操作中のメモリ不足だけで止め、
     /// ふつうの全画面（QUNS_BUSY）では止めない。OS 判定に失敗したときも止めない（fail-open）。
     #[test]
-    fn auto_summary_pauses_only_for_games_presentations_and_the_mic() {
+    fn auto_summary_pauses_only_for_games_presentations_the_mic_and_low_memory() {
         let no_mic = || false;
+        let enough_memory = || false;
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Game),
+                no_mic,
+                enough_memory
+            ),
             Some(BusyCause::Game)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Presentation), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Presentation),
+                no_mic,
+                enough_memory
+            ),
             Some(BusyCause::Presentation)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::App),
+                no_mic,
+                enough_memory
+            ),
             None
         );
-        assert_eq!(busy_cause_from(FullscreenStatus::Free, no_mic), None);
-        assert_eq!(busy_cause_from(FullscreenStatus::Unknown, no_mic), None);
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Free, no_mic, enough_memory),
+            None
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Unknown, no_mic, enough_memory),
+            None
+        );
         // ふつうの全画面でも、マイク使用中なら止める。
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), || true),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::App),
+                || true,
+                enough_memory
+            ),
             Some(BusyCause::MicInUse)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Free, || true),
+            busy_cause_from(FullscreenStatus::Free, || true, enough_memory),
             Some(BusyCause::MicInUse)
         );
-        // ゲーム・発表で止めるときは、マイクを尋ねない（OS への問い合わせを1回で済ませる）。
+        // 全画面・マイクで止めないとき、操作中のメモリ不足なら止める。
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), || {
-                panic!("mic must not be queried")
-            }),
+            busy_cause_from(FullscreenStatus::Free, no_mic, || true),
+            Some(BusyCause::LowMemoryWhileActive)
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Unknown, no_mic, || true),
+            Some(BusyCause::LowMemoryWhileActive)
+        );
+        // ゲーム・発表で止めるときは、マイク・メモリを尋ねない（OS への問い合わせを1回で済ませる）。
+        assert_eq!(
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Game),
+                || panic!("mic must not be queried"),
+                || panic!("memory must not be queried")
+            ),
             Some(BusyCause::Game)
         );
+        // マイクで止めるときは、メモリを尋ねない。
+        assert_eq!(
+            busy_cause_from(
+                FullscreenStatus::Free,
+                || true,
+                || { panic!("memory must not be queried") }
+            ),
+            Some(BusyCause::MicInUse)
+        );
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn active() -> Option<Duration> {
+        Some(Duration::from_secs(10))
+    }
+
+    fn not_running() -> bool {
+        false
+    }
+
+    /// 待たせるのは「操作中 かつ 空きが足りない」ときだけ（決定表）。
+    #[test]
+    fn low_memory_pause_needs_both_activity_and_low_memory() {
+        let low = || Some(GIB);
+        let enough = || Some(4 * GIB);
+        // 操作中 × 空きが少ない → 待つ（例: Chrome を開いて作業中）。
+        assert!(low_memory_while_active(active(), low, not_running));
+        // 操作中 × 空きが足りている → 従来どおり進める。
+        assert!(!low_memory_while_active(active(), enough, not_running));
+        // 席を外して 5 分 × 空きが少ない → 進める。
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(5 * 60)),
+            low,
+            not_running
+        ));
+        // 席を外して 5 分 × 空きが足りている → 進める。
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(5 * 60)),
+            enough,
+            not_running
+        ));
+    }
+
+    /// 「操作中」の境目は最後の入力から 3 分。ちょうど 3 分たったら操作していない側。
+    #[test]
+    fn active_window_boundary_is_three_minutes() {
+        let low = || Some(GIB);
+        assert_eq!(ACTIVE_INPUT_WINDOW, Duration::from_secs(180));
+        assert!(low_memory_while_active(
+            Some(ACTIVE_INPUT_WINDOW - Duration::from_secs(1)),
+            low,
+            not_running
+        ));
+        assert!(!low_memory_while_active(
+            Some(ACTIVE_INPUT_WINDOW),
+            low,
+            not_running
+        ));
+        // 入力の直後（経過 0）も操作中。
+        assert!(low_memory_while_active(
+            Some(Duration::ZERO),
+            low,
+            not_running
+        ));
+    }
+
+    /// 空きの境目は 2.5GB。ちょうど 2.5GB あれば進める。
+    #[test]
+    fn memory_threshold_boundary_is_two_and_a_half_gigabytes() {
+        assert_eq!(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE, 2_560 * 1024 * 1024);
+        assert!(low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE - 1),
+            not_running
+        ));
+        assert!(!low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE),
+            not_running
+        ));
+    }
+
+    /// 画面ロック中は入力が無いので経過が延び、3 分を過ぎれば空きが少なくても進める。
+    /// 操作していないときは、メモリ・llama-server の状態を尋ねない（OS への問い合わせを減らす）。
+    #[test]
+    fn idle_or_locked_pc_proceeds_without_asking_memory() {
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(30 * 60)),
+            || panic!("memory must not be queried while idle"),
+            || panic!("llm state must not be queried while idle")
+        ));
+    }
+
+    /// 入力の経過・空きが取れない（Windows 以外・OS 判定の失敗）ときは待たせない（fail-open）。
+    #[test]
+    fn unknown_activity_or_memory_does_not_pause() {
+        assert!(!low_memory_while_active(
+            None,
+            || panic!("memory must not be queried without activity"),
+            not_running
+        ));
+        assert!(!low_memory_while_active(active(), || None, not_running));
+    }
+
+    /// llama-server を起動済みなら、既に使っている分（約 2GB）を空きへ足し戻して比べる
+    /// （2件目から毎回止まって、解放→読み込み直しを繰り返さないため）。
+    #[test]
+    fn running_local_llm_memory_is_counted_as_available() {
+        let after_load = || Some(GIB);
+        assert!(low_memory_while_active(active(), after_load, || false));
+        assert!(!low_memory_while_active(active(), after_load, || true));
+        // 起動済みでも、足し戻して 2.5GB に届かないほど空きが無ければ待つ。
+        assert!(low_memory_while_active(
+            active(),
+            || Some(256 * 1024 * 1024),
+            || true
+        ));
+    }
+
+    /// 差し替えた OS の値（trait 実装）が判定へそのまま渡る。
+    #[test]
+    fn detector_values_feed_the_low_memory_decision() {
+        #[derive(Debug)]
+        struct Fixed(Option<Duration>, Option<u64>);
+        impl UserActivityDetector for Fixed {
+            fn idle_time(&self) -> Option<Duration> {
+                self.0
+            }
+            fn available_memory_bytes(&self) -> Option<u64> {
+                self.1
+            }
+        }
+        assert!(low_memory_while_active_on(
+            &Fixed(active(), Some(GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(
+            &Fixed(Some(Duration::from_secs(600)), Some(GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(
+            &Fixed(active(), Some(8 * GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(&Fixed(None, None), not_running));
     }
 
     /// 状態の種類は「設定で動かさない理由」→「待機列が空」→「一時停止・待ち（ローカルのみ）」→「動いている」の順。
@@ -2163,6 +2426,7 @@ mod tests {
         let paused_game = Some(QueueNotice::Paused(BusyCause::Game));
         let paused_presentation = Some(QueueNotice::Paused(BusyCause::Presentation));
         let paused_mic = Some(QueueNotice::Paused(BusyCause::MicInUse));
+        let paused_low_memory = Some(QueueNotice::Paused(BusyCause::LowMemoryWhileActive));
 
         // 設定で動かさない理由が最優先（待機列・知らせより先）。
         assert_eq!(
@@ -2203,6 +2467,19 @@ mod tests {
         assert_eq!(
             status_kind_for(&local, with_key, false, paused_mic),
             K::PausedMicInUse
+        );
+        assert_eq!(
+            status_kind_for(&local, with_key, false, paused_low_memory),
+            K::PausedLowMemoryWhileActive
+        );
+        // 待機列が空なら、メモリ不足の古い知らせが残っていても休みとは言わない。Gemini では使わない。
+        assert_eq!(
+            status_kind_for(&local, with_key, true, paused_low_memory),
+            K::Idle
+        );
+        assert_eq!(
+            status_kind_for(&gemini, with_key, false, paused_low_memory),
+            K::Running
         );
         assert_eq!(
             status_kind_for(
@@ -2254,6 +2531,12 @@ mod tests {
 
         queue.note(QueueNotice::Paused(BusyCause::MicInUse));
         assert_eq!(queue.status().kind, AutoSummaryStatusKind::PausedMicInUse);
+
+        queue.note(QueueNotice::Paused(BusyCause::LowMemoryWhileActive));
+        assert_eq!(
+            queue.status().kind,
+            AutoSummaryStatusKind::PausedLowMemoryWhileActive
+        );
     }
 
     #[test]
@@ -2271,5 +2554,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, serde_json::json!({ "kind": "waitingForLocalAi" }));
+        let json = serde_json::to_value(AutoSummaryStatusDto {
+            kind: AutoSummaryStatusKind::PausedLowMemoryWhileActive,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "pausedLowMemoryWhileActive" })
+        );
     }
 }

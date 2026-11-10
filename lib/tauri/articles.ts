@@ -245,6 +245,7 @@ export type AutoSummaryStatusKind =
   | "idle"
   | "pausedGameOrPresentation"
   | "pausedMicInUse"
+  | "pausedLowMemoryWhileActive"
   | "waitingForLocalAi"
   | "disabledInSettings"
   | "notRealAi"

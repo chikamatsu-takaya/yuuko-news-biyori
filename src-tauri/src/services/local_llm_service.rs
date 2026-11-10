@@ -645,6 +645,12 @@ impl LocalLlmService {
         manual.max(cooldown)
     }
 
+    /// llama-server を起動済み（モデルを読み込んだまま）か。自動要約キューが物理メモリの空きを見るときに、
+    /// 起動済みのサーバーが既に使っている分を差し引いて考えるために使う（状態の参照だけで起動・通信はしない）。
+    pub fn is_running(&self) -> bool {
+        self.shared.lock_state().process.is_some()
+    }
+
     /// 接続テスト。起動（必要なら）＋固定の最小プロンプトで1回生成できるかを確かめる。
     pub fn check_connection(&self) -> Result<(), LocalAiFailure> {
         self.generate(CONNECTION_CHECK_PROMPT, CONNECTION_CHECK_MAX_TOKENS)
@@ -970,11 +976,6 @@ impl LocalLlmService {
             self.shared.watcher_started.store(false, Ordering::SeqCst);
             log::warn!("failed to start the local llm idle watcher");
         }
-    }
-
-    #[cfg(test)]
-    fn is_running(&self) -> bool {
-        self.shared.lock_state().process.is_some()
     }
 }
 
