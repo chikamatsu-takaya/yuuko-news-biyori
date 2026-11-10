@@ -14,13 +14,16 @@
 //! - `YUUKO_LLM_EVAL_SERVER_EXE`: 候補で使う llama-server.exe のパス（同梱の b11269 で動かないモデルだけ）。
 //! - `YUUKO_LLM_EVAL_SERVER_LOG`: llama-server の標準エラーを書くファイル（読み込み失敗の原因調べ用）。
 //! - `YUUKO_LLM_EVAL_PROFILE`: 候補ごとの調整の名前（`ModelProfile::from_name`）。省略時は調整なし。
+//! - `YUUKO_LLM_EVAL_SERVER_EXTRA_ARGS`: llama-server の起動の引数の後ろに足す引数（空白区切り。例 `-c 2048 --no-repack`）。
+//!   値を1つ取る引数（`-c` など）は後ろの指定が効く（llama.cpp の引数解析は前から順に上書きするため。複数指定で積み上がる引数は除く）ので、文脈長などを評価のときだけ変えて品質・速度・メモリを比べられる
+//!   （`docs/01_setup/軽量常駐性能確認手順.md` §11.3）。これだけを指定したときは同梱のモデルで動く。
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
 use crate::infra::local_llm_runtime::{
-    no_window_command, server_args, LaunchSpec, ServerLauncher, ServerProcess,
+    no_window_command, server_args, LaunchSpec, LocalLlmBundle, ServerLauncher, ServerProcess,
 };
 use crate::services::local_llm_service::{LocalLlmConfig, LocalLlmService};
 
@@ -28,20 +31,31 @@ const MODEL_ENV: &str = "YUUKO_LLM_EVAL_MODEL";
 const SERVER_EXE_ENV: &str = "YUUKO_LLM_EVAL_SERVER_EXE";
 const SERVER_LOG_ENV: &str = "YUUKO_LLM_EVAL_SERVER_LOG";
 const PROFILE_ENV: &str = "YUUKO_LLM_EVAL_PROFILE";
+const EXTRA_ARGS_ENV: &str = "YUUKO_LLM_EVAL_SERVER_EXTRA_ARGS";
 
 /// 評価で使う窓口。環境変数でモデルが指定されていれば、起動だけをそのモデルへ向ける。
 pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
-    let Some(model) = std::env::var_os(MODEL_ENV).map(PathBuf::from) else {
-        return LocalLlmService::new(Some(bundle_dir));
+    let env_extra_args = split_extra_args(&std::env::var(EXTRA_ARGS_ENV).unwrap_or_default());
+    let model = match std::env::var_os(MODEL_ENV).map(PathBuf::from) {
+        Some(model) => model,
+        // 引数だけを変えるときは同梱のモデルのまま（照合は従来どおり同梱物に対して行われる）。
+        None if !env_extra_args.is_empty() => LocalLlmBundle::in_dir(&bundle_dir).model,
+        None => return LocalLlmService::new(Some(bundle_dir)),
     };
-    assert!(model.is_file(), "{MODEL_ENV} must point to a GGUF file");
+    assert!(
+        model.is_file(),
+        "model not found: {} (set {MODEL_ENV} or place the bundled model)",
+        model.display()
+    );
     let exe = std::env::var_os(SERVER_EXE_ENV).map(PathBuf::from);
     if let Some(exe) = &exe {
         assert!(exe.is_file(), "{SERVER_EXE_ENV} must point to llama-server");
     }
     let profile = ModelProfile::from_env();
+    let mut extra_args = profile.extra_server_args();
+    extra_args.extend(env_extra_args);
     eprintln!(
-        "eval model override: model={} exe={} profile={profile:?}",
+        "eval model override: model={} exe={} profile={profile:?} extra_args={extra_args:?}",
         model.display(),
         exe.as_deref()
             .map_or_else(|| "bundled".to_string(), |exe| exe.display().to_string()),
@@ -50,13 +64,18 @@ pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
         model,
         exe,
         log: std::env::var_os(SERVER_LOG_ENV).map(PathBuf::from),
-        extra_args: profile.extra_server_args(),
+        extra_args,
     };
     LocalLlmService::with_parts(
         Some(bundle_dir),
         Arc::new(launcher),
         LocalLlmConfig::default(),
     )
+}
+
+/// `YUUKO_LLM_EVAL_SERVER_EXTRA_ARGS` を空白で区切る（評価用。パスなど空白を含む値は渡せない）。
+fn split_extra_args(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_string).collect()
 }
 
 /// Sarashina2.2 で使う chat テンプレート（GGUF に入っている版から道具〔tools〕の部分だけを除いたもの。
@@ -178,6 +197,16 @@ mod tests {
         let args = ModelProfile::from_name("sarashina").extra_server_args();
         assert_eq!(args[0], "--chat-template-file");
         assert!(Path::new(&args[1]).is_file(), "{}", args[1]);
+    }
+
+    #[test]
+    fn extra_args_split_on_whitespace() {
+        assert!(split_extra_args("").is_empty());
+        assert!(split_extra_args("   ").is_empty());
+        assert_eq!(
+            split_extra_args(" -c 2048  --no-repack "),
+            vec!["-c", "2048", "--no-repack"]
+        );
     }
 
     #[test]
