@@ -20,6 +20,8 @@
 //! - `YUUKO_LLM_EVAL_PER_SOURCE`: 取得元1件あたりの記事数（既定 4。追加取得元の `maxArticles` が優先）。
 //! - `YUUKO_LLM_EVAL_MAX_ARTICLES`: 全体の上限（既定 30）。
 //! - `YUUKO_LLM_EVAL_TERMS`: 用語の指定ファイル（既定 `<RUN>/terms.json`）。
+//! - `YUUKO_METHOD_EVAL_VARIANT`: 要約・再説明の作り方の案（`rules` / `extract` / `short`。省略・`base` は本番のまま。
+//!   `ai_provider_service::method_variants`）。要約・要約の作り直し・再説明の指示だけを案の文にする。
 //! - `YUUKO_LLM_EVAL_FORCE_TERM_PROMPT`: 指定すると、フレーズも用語解説のプロンプトで作らせる
 //!   （フレーズ対応 D21 の前の挙動との比較用。後処理前の出力は記録の `raw` にある）。
 //!
@@ -64,6 +66,7 @@ use serde_json::{json, Value};
 
 use super::eval_model_override::{eval_local_llm, ModelProfile};
 use super::output_check::{check_japanese_summary, IssueKind};
+use super::paragraph_points_eval::longest_common_run;
 use super::{
     clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
     FallbackPolicy, SummaryGeneration, SummaryOutputKind, SummaryService,
@@ -84,6 +87,7 @@ use crate::paths::{AppPaths, NETWORK_ALLOWLIST_RELATIVE_PATH, NEWS_SOURCES_RELAT
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::ai_provider_service::method_variants::MethodVariant;
 use crate::services::ai_provider_service::summary_fixed_prompt_texts;
 use crate::services::ai_provider_service::AiProviderService;
 use crate::services::dictionary_service::{DictionaryService, TermExplanationAi};
@@ -608,9 +612,11 @@ fn record_stage(
     )
     .then(|| request.input_text.clone());
     let started = Instant::now();
+    // 作り方の案の評価（`method_variants`）。案が指定されていなければ本番の request_text と同じ。
+    let variant = MethodVariant::from_env();
     let raw = service
         .ai_provider_service
-        .request_text(request, provider, level);
+        .request_text_with_variant(request, provider, level, variant);
     let elapsed_ms = started.elapsed().as_millis();
     let mut stage = json!({
         "kind": kind.label(),
@@ -619,6 +625,7 @@ fn record_stage(
         "inputChars": input_chars,
         "speechInput": speech_input,
         "calmTone": tone == SpeechTone::Calm,
+        "variant": variant.map(MethodVariant::label),
     });
     let raw = match raw {
         Ok(raw) => raw,
@@ -653,6 +660,21 @@ fn record_stage(
     let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
+        if matches!(
+            kind,
+            SummaryOutputKind::Summary | SummaryOutputKind::Explanation
+        ) {
+            // 本文の写しの度合い（記事とのいちばん長い共通の文字列）と、案の指示の写し（案のときだけ）。
+            stage["sourceCopyRun"] = json!(longest_common_run(&source_text, &response.text));
+            if let Some(variant) = variant {
+                stage["variantEchoRun"] = json!(variant
+                    .fixed_texts()
+                    .iter()
+                    .map(|text| longest_common_run(text, &response.text))
+                    .max()
+                    .unwrap_or(0));
+            }
+        }
         // 機械点検（D166）の結果。要約は作り直しの判断と同じ点検、要点・注目ポイントは記録だけ（作り直さない）。
         let checked = match kind {
             SummaryOutputKind::Summary => Some(response.text.clone()),
