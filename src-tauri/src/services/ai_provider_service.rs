@@ -36,6 +36,10 @@ use crate::util::url_text::remove_urls;
 
 use super::local_llm_service::LocalLlmService;
 
+/// 評価専用: 要約・再説明の作り方の案を評価の経路だけで試す（テストビルド専用・本番のプロンプトは変えない）。
+#[cfg(test)]
+pub(crate) mod method_variants;
+
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// 永続化メタ（ai_provider）用：実際に応答を生成したプロバイダ名。
 const PROVIDER_GEMINI: &str = "gemini";
