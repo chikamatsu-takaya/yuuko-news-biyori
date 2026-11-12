@@ -20,8 +20,9 @@
 //! - `YUUKO_LLM_EVAL_PER_SOURCE`: 取得元1件あたりの記事数（既定 4。追加取得元の `maxArticles` が優先）。
 //! - `YUUKO_LLM_EVAL_MAX_ARTICLES`: 全体の上限（既定 30）。
 //! - `YUUKO_LLM_EVAL_TERMS`: 用語の指定ファイル（既定 `<RUN>/terms.json`）。
-//! - `YUUKO_METHOD_EVAL_VARIANT`: 要約・再説明の作り方の案（`rules` / `extract` / `short`。省略・`base` は本番のまま。
-//!   `ai_provider_service::method_variants`）。要約・要約の作り直し・再説明の指示だけを案の文にする。
+//! - `YUUKO_METHOD_EVAL_VARIANT`: 要約・再説明の作り方の案（`rules` / `extract` / `short` / `rules_speech`。
+//!   省略・`base` は本番のまま。`ai_provider_service::method_variants`）。要約・要約の作り直し・再説明の指示
+//!   だけを案の文にする（`rules_speech` は再説明だけ）。開始時に1回だけ読み、未知の値ならそこで止める。
 //! - `YUUKO_LLM_EVAL_FORCE_TERM_PROMPT`: 指定すると、フレーズも用語解説のプロンプトで作らせる
 //!   （フレーズ対応 D21 の前の挙動との比較用。後処理前の出力は記録の `raw` にある）。
 //!
@@ -142,6 +143,8 @@ fn local_llm_quality_eval() {
 
     let phase = std::env::var(PHASE_ENV).unwrap_or_default();
     let run_all = phase.is_empty();
+    // 作り方の案は開始時に1回だけ読んで確かめる（未知の値は llama-server を起動する前に止める）。
+    let variant = MethodVariant::from_env();
     if let Some(articles_file) = std::env::var_os(ARTICLES_ENV).map(PathBuf::from) {
         // 保存済みの記事を使う回は通信しない（fetch 段を指定していても取得し直さない）。
         import_articles(&articles_file, &run_dir, &paths);
@@ -162,7 +165,7 @@ fn local_llm_quality_eval() {
         check.status
     );
     if run_all || phase == "summary" {
-        run_summaries(&run_dir, &paths, &ai);
+        run_summaries(&run_dir, &paths, &ai, variant);
     }
     if run_all || phase == "terms" {
         run_terms(&run_dir, &paths, &ai);
@@ -529,7 +532,12 @@ pub(super) fn error_label(error: &AppError) -> String {
 
 /// 要約生成の本体（generate_article_summary_with）を、本番と同じ取得手段（request_text → 検証）で呼ぶ。
 /// 差し替えるのは「段ごとの生出力・検証結果・所要時間を記録する」ことだけで、入力・順序・検証・保存は本番のまま。
-fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
+fn run_summaries(
+    out_dir: &Path,
+    paths: &AppPaths,
+    ai: &AiProviderService,
+    variant: Option<MethodVariant>,
+) {
     let service = SummaryService::new(
         ai.clone(),
         ArticleRepository::new(paths),
@@ -557,7 +565,9 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
                 if kind == SummaryOutputKind::Points && source.borrow().is_none() {
                     source.replace(Some(request.input_text.clone()));
                 }
-                record_stage(&service, &stages, &source, request, kind, provider, level)
+                record_stage(
+                    &service, &stages, &source, variant, request, kind, provider, level,
+                )
             },
         );
         let total_ms = started.elapsed().as_millis();
@@ -589,10 +599,12 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_stage(
     service: &SummaryService,
     stages: &RefCell<Vec<Value>>,
     source: &RefCell<Option<String>>,
+    variant: Option<MethodVariant>,
     request: AiRequest,
     kind: SummaryOutputKind,
     provider: AiProvider,
@@ -612,8 +624,7 @@ fn record_stage(
     )
     .then(|| request.input_text.clone());
     let started = Instant::now();
-    // 作り方の案の評価（`method_variants`）。案が指定されていなければ本番の request_text と同じ。
-    let variant = MethodVariant::from_env();
+    // 作り方の案の評価（`method_variants`。案は開始時に1回だけ読んだもの）。案が無ければ本番の request_text と同じ。
     let raw = service
         .ai_provider_service
         .request_text_with_variant(request, provider, level, variant);

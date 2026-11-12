@@ -11,6 +11,8 @@
 //! - `extract`: 本文抜粋の文の言葉をなるべくそのまま使わせ、言い換え・新しいつなぎをさせない。
 //!   再説明は要約の中身を変えずに語尾と言い回しだけを直させる。
 //! - `short`: 1 文に 1 つの事実だけ・各文の初めに主語を書かせ、文どうしを理由でつながせない（文の数も減らす）。
+//! - `rules_speech`: 再説明（と再説明の作り直し）だけを `rules` の文にし、要約・要約の作り直しは本番のまま
+//!   （Firestore タスク pdXmOHeGbC9FTNFkjz9r。§20 で `rules` の再説明の改善が要約の文の変化によるものかを分けるため）。
 //!
 //! 禁じる語の例（理由のつなぎの語など）は、小さいモデルがまねて出しやすいので書かない（本番と同じ方針）。
 
@@ -57,10 +59,13 @@ pub(crate) enum MethodVariant {
     Rules,
     Extract,
     Short,
+    /// 再説明だけ `Rules` の文にする（要約・要約の作り直しは本番のまま）。
+    RulesSpeech,
 }
 
 impl MethodVariant {
-    /// `YUUKO_METHOD_EVAL_VARIANT`（`rules` / `extract` / `short`）。空・`base` は本番のまま（None）。
+    /// `YUUKO_METHOD_EVAL_VARIANT`（`rules` / `extract` / `short` / `rules_speech`）。空・`base` は本番のまま（None）。
+    /// 未知の値は panic する。評価のハーネスは開始時に1回だけ呼ぶ（段ごとに読み直さない）。
     pub(crate) fn from_env() -> Option<Self> {
         Self::from_name(&std::env::var(VARIANT_ENV).unwrap_or_default())
     }
@@ -71,6 +76,7 @@ impl MethodVariant {
             "rules" => Some(Self::Rules),
             "extract" => Some(Self::Extract),
             "short" => Some(Self::Short),
+            "rules_speech" => Some(Self::RulesSpeech),
             other => panic!("unknown {VARIANT_ENV}: {other}"),
         }
     }
@@ -80,7 +86,13 @@ impl MethodVariant {
             Self::Rules => "rules",
             Self::Extract => "extract",
             Self::Short => "short",
+            Self::RulesSpeech => "rules_speech",
         }
+    }
+
+    /// 要約・要約の作り直しの指示を案の文に替えるか（`rules_speech` は再説明だけを替える）。
+    fn replaces_summary(self) -> bool {
+        !matches!(self, Self::RulesSpeech)
     }
 
     /// 要約（と作り直し）の指示。入力に要点があるかで、本番と同じく要点に触れるかを変える。
@@ -126,6 +138,7 @@ impl MethodVariant {
                      各文は40文字程度にしてください。{SHORT_SENTENCE_RULE}{base}{FACTS_ONLY_RULE}"
                 )
             }
+            Self::RulesSpeech => unreachable!("rules_speech keeps the production summary prompt"),
         }
     }
 
@@ -133,7 +146,7 @@ impl MethodVariant {
     fn summary_reminder(self) -> Option<String> {
         match self {
             Self::Rules => Some(format!("要約の本文だけを書いてください。{RULES_REMINDER}")),
-            Self::Extract | Self::Short => None,
+            Self::Extract | Self::Short | Self::RulesSpeech => None,
         }
     }
 
@@ -153,7 +166,8 @@ impl MethodVariant {
             (_, ExplanationLevel::Detailed) => "4〜5文、全体で300文字以内",
         };
         match self {
-            Self::Rules => format!(
+            // `rules_speech` の再説明は `rules` と同じ文（§20 の案1）。
+            Self::Rules | Self::RulesSpeech => format!(
                 "次のニュースの内容を、日本語で{level}読者にやさしく再説明してください。\
                  {length}の1段落にしてください。{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}\n{RULES_TEXT}{calm_instruction}"
             ),
@@ -177,18 +191,27 @@ impl MethodVariant {
     /// 再説明の念押し。本番の念押しの後ろに、案 `rules` だけが短いきまりを足す。
     fn explanation_reminder(self) -> String {
         match self {
-            Self::Rules => format!("{YUUKO_EXPLANATION_REMINDER}{RULES_REMINDER}"),
+            Self::Rules | Self::RulesSpeech => {
+                format!("{YUUKO_EXPLANATION_REMINDER}{RULES_REMINDER}")
+            }
             Self::Extract | Self::Short => YUUKO_EXPLANATION_REMINDER.to_string(),
         }
     }
 
     /// 案で足した固定文（出力に指示の写しが混ざっていないかを評価の記録で確かめるため）。
+    /// 再説明の指示は解説レベル ふつう・通常の口調の文だけを含む（評価はふつうで回す）。
     pub(crate) fn fixed_texts(self) -> Vec<String> {
-        let mut texts: Vec<String> = ["分かりやすく", "やさしく簡潔に", "詳しく"]
-            .into_iter()
-            .flat_map(|level| [true, false].map(|with| self.summary_instruction(level, with)))
-            .collect();
-        texts.extend(self.summary_reminder());
+        let mut texts: Vec<String> = Vec::new();
+        if self.replaces_summary() {
+            texts.extend(
+                ["分かりやすく", "やさしく簡潔に", "詳しく"]
+                    .into_iter()
+                    .flat_map(|level| {
+                        [true, false].map(|with| self.summary_instruction(level, with))
+                    }),
+            );
+            texts.extend(self.summary_reminder());
+        }
         texts.push(self.explanation_reminder());
         texts.push(self.explanation_instruction("分かりやすく", ExplanationLevel::Normal, ""));
         texts
@@ -209,6 +232,7 @@ impl MethodVariant {
         };
         let with_key_points = summary_input_has_key_points(&request.input_text);
         let (instruction, reminder) = match request.prompt_id.as_str() {
+            SUMMARY_PROMPT_ID | SUMMARY_RETRY_PROMPT_ID if !self.replaces_summary() => return None,
             SUMMARY_PROMPT_ID => (
                 self.summary_instruction(level, with_key_points),
                 self.summary_reminder(),
@@ -294,6 +318,7 @@ mod tests {
         }
     }
 
+    /// 要約・作り直し・再説明の 3 段を替える案。
     const ALL: [MethodVariant; 3] = [
         MethodVariant::Rules,
         MethodVariant::Extract,
@@ -304,9 +329,59 @@ mod tests {
     fn names_map_to_variants_and_base_is_none() {
         assert_eq!(MethodVariant::from_name(""), None);
         assert_eq!(MethodVariant::from_name("base"), None);
-        for variant in ALL {
+        for variant in ALL.into_iter().chain([MethodVariant::RulesSpeech]) {
             assert_eq!(MethodVariant::from_name(variant.label()), Some(variant));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown YUUKO_METHOD_EVAL_VARIANT")]
+    fn unknown_name_panics() {
+        MethodVariant::from_name("rules-speech");
+    }
+
+    #[test]
+    fn rules_speech_keeps_the_summary_and_uses_the_rules_explanation() {
+        let input = format!(
+            "タイトル: t
+本文抜粋:
+本文
+{SUMMARY_INPUT_KEY_POINTS_LABEL}
+・要点"
+        );
+        for prompt_id in [
+            SUMMARY_PROMPT_ID,
+            SUMMARY_RETRY_PROMPT_ID,
+            "article_points_v2",
+            "yuuko_comment_v1",
+            "term_explanation_v1",
+        ] {
+            assert!(MethodVariant::RulesSpeech
+                .prompt(&request(prompt_id, &input), ExplanationLevel::Normal)
+                .is_none());
+        }
+        let speech_input = "タイトル: t
+要約: 要約の文。
+要点:
+・要点";
+        for level in [
+            ExplanationLevel::Simple,
+            ExplanationLevel::Normal,
+            ExplanationLevel::Detailed,
+        ] {
+            let speech = MethodVariant::RulesSpeech
+                .prompt(&request(YUUKO_EXPLANATION_PROMPT_ID, speech_input), level)
+                .expect("explanation");
+            let rules = MethodVariant::Rules
+                .prompt(&request(YUUKO_EXPLANATION_PROMPT_ID, speech_input), level)
+                .expect("explanation");
+            assert_eq!(speech, rules);
+            assert!(speech.contains(RULES_TEXT) && speech.contains(RULES_REMINDER));
+        }
+        // 写しの確認に使う固定文は再説明の文だけ（要約の案の文は含めない）。
+        let texts = MethodVariant::RulesSpeech.fixed_texts();
+        assert_eq!(texts.len(), 2);
+        assert!(texts.iter().all(|text| !text.contains("要約してください")));
     }
 
     #[test]
