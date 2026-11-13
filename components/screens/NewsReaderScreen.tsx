@@ -71,6 +71,8 @@ import {
   SELECTION_TOO_LONG_MESSAGE,
   readCommandErrorCode,
   termExplainFailureMessage,
+  isAiUnavailableErrorCode,
+  summaryAiUnavailableMessage,
 } from "@/lib/explain-selection.mjs";
 // 用語解説ダイアログのドラッグ位置補正（DOM非依存・node --test 済み）。
 import { clampTermPopupOffset } from "@/lib/term-popup-drag.mjs";
@@ -1869,20 +1871,27 @@ export default function NewsReaderScreen({
     } catch (error) {
       // AI_OUTPUT_REJECTED: 実AIの出力が検証に落ち、代わりの固定文（Mock）も保存しなかった（判断台帳 D104）。
       // 記事は要約前のまま（保存済みの要約も上書きしない）なので、もう一度試すよう案内する。
-      const isOutputRejected =
-        readCommandErrorCode(error) === "AI_OUTPUT_REJECTED";
+      // AI_UNAVAILABLE / LOCAL_AI_*: 選んだAI（ローカル・Gemini）がいま使えない。Rust は Mock の文面に
+      // 切り替えないので、記事は読めるまま「いまはAIが使えない」と案内する。
+      const errorCode = readCommandErrorCode(error);
+      const isOutputRejected = errorCode === "AI_OUTPUT_REJECTED";
+      const isAiUnavailable = isAiUnavailableErrorCode(errorCode);
       if (isMountedRef.current) {
         setSummaryNotice(
           isOutputRejected
             ? "うまくまとめられなかったよ。もう一度試してね"
-            : "要約の作成ができなかったよ。時間をおいてもう一度試してみてね。"
+            : isAiUnavailable
+              ? summaryAiUnavailableMessage(errorCode)
+              : "要約の作成ができなかったよ。時間をおいてもう一度試してみてね。"
         );
         toast({
           variant: "destructive",
-          title: "作成に失敗しちゃった",
+          title: isAiUnavailable ? "いまはAIが使えないみたい" : "作成に失敗しちゃった",
           description: isOutputRejected
             ? "うまくまとめられなかったよ。もう一度試してね"
-            : "要約の作成ができなかったよ。もう一度試してみてね。",
+            : isAiUnavailable
+              ? summaryAiUnavailableMessage(errorCode)
+              : "要約の作成ができなかったよ。もう一度試してみてね。",
         });
       }
       console.warn("Failed to generate article summary:", error);

@@ -2,7 +2,9 @@
 //!
 //! - provider が `Gemini` かつ環境変数 `GEMINI_API_KEY` が設定されている場合のみ実AI（GeminiClient）を呼ぶ。
 //! - APIキーは **Rust側でのみ** 読み、フロントへ渡さない・ログに出さない。
-//! - キー未設定／他プロバイダ／Gemini呼び出し失敗時は MockProvider へフォールバックする（安全側）。
+//! - Mock（開発・動作確認用）の文面は、設定で Mock を明示的に選んだときだけ返す。Gemini のキー未設定・
+//!   呼び出し失敗・未実装の openai では Mock の文面に切り替えず、`AppError::AiUnavailable` を返す
+//!   （Mock の定型文が本物の要約・解説のように画面に出るのを防ぐ。2026-11-09 実機テスト）。
 //! - provider が `Local` の場合は同梱ローカルLLM（llama-server・判断台帳 D99）で生成する。
 //!   失敗は固定分類（`AppError::LocalAi`）で返し、**黙って Gemini / Mock へ切り替えない**
 //!   （利用者が「ローカルで動いた」と誤解しないため）。出力検証（summary_service 等）は従来どおり。
@@ -207,80 +209,91 @@ impl AiProviderService {
             ));
         }
 
-        // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
-        if provider == AiProvider::Local {
-            let prompt = build_prompt(&request, explanation_level);
-            let result = match local_output_shape(&request) {
-                // 用語解説は、short が選択語とは別の言葉を定義していたら1回だけ作り直す（§12.4）。
-                (max_tokens, Some(format)) if request.prompt_id == TERM_EXPLANATION_PROMPT_ID => {
-                    let retry_prompt =
-                        build_term_explanation_subject_retry_prompt(&request, explanation_level);
-                    generate_term_explanation_with_subject_retry(
-                        &request.input_text,
-                        &prompt,
-                        &retry_prompt,
-                        TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET,
-                        |prompt| {
-                            self.local_llm.generate_with_format_timed(
-                                prompt,
-                                max_tokens,
-                                format.clone(),
-                            )
-                        },
-                    )
-                }
-                (max_tokens, Some(format)) => self
-                    .local_llm
-                    .generate_with_format(&prompt, max_tokens, format),
-                (max_tokens, None) => self.local_llm.generate(&prompt, max_tokens),
-            };
-            return result
-                .map(|text| AiResponse {
-                    text,
-                    provider: PROVIDER_LOCAL.to_string(),
-                })
-                .map_err(|failure| {
-                    // 本文・プロンプトは出さず、固定の分類だけを残す。
-                    // アプリ終了で llama-server を止めたための中断は失敗ではないので WARN にしない。
-                    if self.local_llm.is_shut_down() {
-                        log::info!("local AI request interrupted by app exit ({failure:?})");
-                    } else {
-                        log::warn!("local AI request failed ({failure:?})");
-                    }
-                    AppError::LocalAi(failure)
-                });
-        }
-
-        // Gemini かつ APIキーが設定されている場合のみ実AIを呼ぶ。
-        // それ以外（キー未設定・他プロバイダ・実AI呼び出し失敗）は mock フォールバック。
-        if provider == AiProvider::Gemini {
-            if let Some(api_key) = resolve_gemini_api_key() {
+        match provider {
+            // Mock は設定で明示的に選んだときだけ（開発・動作確認・E2E 用）。外部通信はしない。
+            AiProvider::Mock => Ok(AiResponse {
+                text: self.mock_response(request, explanation_level),
+                provider: PROVIDER_MOCK.to_string(),
+            }),
+            // Gemini は APIキーが設定されている場合のみ実AIを呼ぶ。キー未設定・呼び出し失敗は
+            // Mock へ切り替えず AiUnavailable で返す（呼び出し側は記事を表示したまま「いまは使えない」と案内する）。
+            AiProvider::Gemini => {
+                let Some(api_key) = resolve_gemini_api_key() else {
+                    // キーはログに出さない。未設定の事実のみ記録する。
+                    log::info!("GEMINI_API_KEY is not set; the AI request was not made");
+                    return Err(AppError::AiUnavailable);
+                };
                 let prompt = build_prompt(&request, explanation_level);
-                match self.gemini_client.generate(&api_key, &prompt) {
-                    Ok(text) => {
-                        return Ok(AiResponse {
-                            text,
-                            provider: PROVIDER_GEMINI.to_string(),
-                        })
-                    }
-                    // 通信・解析失敗時はアプリを止めず mock へフォールバック（CLAUDE.md §10「安全側へ倒す」）。
-                    // 失敗理由は調査用にログへ残す。APIキーは generate 側で URL・ログに出さない設計。
-                    Err(error) => {
-                        log::warn!(
-                            "Gemini request failed; falling back to the mock provider: {error}"
-                        );
-                    }
-                }
-            } else {
-                // キーはログに出さない。未設定の事実のみ記録する。
-                log::info!("GEMINI_API_KEY is not set; falling back to the mock provider");
+                self.gemini_client
+                    .generate(&api_key, &prompt)
+                    .map(|text| AiResponse {
+                        text,
+                        provider: PROVIDER_GEMINI.to_string(),
+                    })
+                    .map_err(|error| {
+                        // 失敗理由は調査用にログへ残す。APIキーは generate 側で URL・ログに出さない設計。
+                        log::warn!("Gemini request failed: {error}");
+                        AppError::AiUnavailable
+                    })
             }
+            // openai は実AI呼び出しが未実装。Mock の文面を本物の結果のように返さない。
+            AiProvider::Openai => {
+                log::info!(
+                    "the selected AI provider is not implemented; the AI request was not made"
+                );
+                Err(AppError::AiUnavailable)
+            }
+            // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
+            AiProvider::Local => self.request_local(request, explanation_level),
         }
+    }
 
-        Ok(AiResponse {
-            text: self.mock_response(request, explanation_level),
-            provider: PROVIDER_MOCK.to_string(),
-        })
+    /// 同梱ローカルLLMでの生成。失敗は固定分類（`AppError::LocalAi`）で返す。
+    fn request_local(
+        &self,
+        request: AiRequest,
+        explanation_level: ExplanationLevel,
+    ) -> Result<AiResponse, AppError> {
+        let prompt = build_prompt(&request, explanation_level);
+        let result = match local_output_shape(&request) {
+            // 用語解説は、short が選択語とは別の言葉を定義していたら1回だけ作り直す（§12.4）。
+            (max_tokens, Some(format)) if request.prompt_id == TERM_EXPLANATION_PROMPT_ID => {
+                let retry_prompt =
+                    build_term_explanation_subject_retry_prompt(&request, explanation_level);
+                generate_term_explanation_with_subject_retry(
+                    &request.input_text,
+                    &prompt,
+                    &retry_prompt,
+                    TERM_SUBJECT_RETRY_FIRST_CALL_BUDGET,
+                    |prompt| {
+                        self.local_llm.generate_with_format_timed(
+                            prompt,
+                            max_tokens,
+                            format.clone(),
+                        )
+                    },
+                )
+            }
+            (max_tokens, Some(format)) => self
+                .local_llm
+                .generate_with_format(&prompt, max_tokens, format),
+            (max_tokens, None) => self.local_llm.generate(&prompt, max_tokens),
+        };
+        result
+            .map(|text| AiResponse {
+                text,
+                provider: PROVIDER_LOCAL.to_string(),
+            })
+            .map_err(|failure| {
+                // 本文・プロンプトは出さず、固定の分類だけを残す。
+                // アプリ終了で llama-server を止めたための中断は失敗ではないので WARN にしない。
+                if self.local_llm.is_shut_down() {
+                    log::info!("local AI request interrupted by app exit ({failure:?})");
+                } else {
+                    log::warn!("local AI request failed ({failure:?})");
+                }
+                AppError::LocalAi(failure)
+            })
     }
 
     /// AIプロバイダ接続テストの最小処理（接続確認専用）。通常の要約・用語解説処理には影響しない。
@@ -2203,20 +2216,63 @@ mod tests {
     #[test]
     fn term_explanation_mock_returns_parseable_short_detail_json_without_network() {
         // 用語解説の Mock 応答は、外部通信なしで short/detail を持つ解析可能な JSON。
-        // Openai 選択でも実通信せず Mock（provider="mock"）で返す（Gemini以外は Mock fallback）。
+        // 以前は Openai 選択でも Mock の文面を返していたが、Mock は設定で明示的に選んだときだけにしたため
+        // （2026-11-09）、Mock を選んだときの応答で確かめる。Openai は
+        // `unimplemented_provider_does_not_substitute_mock_text` で確かめる。
         let request = AiRequest {
             prompt_id: TERM_EXPLANATION_PROMPT_ID.to_string(),
             input_text: "生成AI".to_string(),
             context: Some("タイトル: X\n抜粋: Y".to_string()),
         };
         let response = service()
-            .request_text(request, AiProvider::Openai, ExplanationLevel::Normal)
+            .request_text(request, AiProvider::Mock, ExplanationLevel::Normal)
             .unwrap();
 
         assert_eq!(response.provider, "mock");
         let parsed: serde_json::Value = serde_json::from_str(&response.text).unwrap();
         assert!(!parsed["short"].as_str().unwrap_or("").is_empty());
         assert!(!parsed["detail"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn unimplemented_provider_does_not_substitute_mock_text() {
+        // 未実装の openai を選んでいても、Mock の文面を本物の結果のように返さない（Mock は明示選択時だけ）。
+        let error = service()
+            .request_text(
+                request_for(TERM_EXPLANATION_PROMPT_ID, "生成AI"),
+                AiProvider::Openai,
+                ExplanationLevel::Normal,
+            )
+            .unwrap_err();
+        assert!(matches!(error, AppError::AiUnavailable), "{error:?}");
+    }
+
+    #[test]
+    fn gemini_without_api_key_does_not_substitute_mock_text() {
+        // 2026-11-09 実機テスト: Gemini 選択・キー未設定で Mock の定型文が本物の要約のように出ていた。
+        // キー未設定なら Mock へ切り替えず AiUnavailable を返す（画面は「いまはAIが使えない」と案内する）。
+        // 開発機などでキーが設定されている場合は実通信になるため確かめない（環境変数は書き換えない）。
+        if is_gemini_key_configured() {
+            return;
+        }
+        for prompt_id in [
+            SUMMARY_PROMPT_ID,
+            ARTICLE_POINTS_PROMPT_ID,
+            TERM_EXPLANATION_PROMPT_ID,
+            YUUKO_EXPLANATION_PROMPT_ID,
+        ] {
+            let error = service()
+                .request_text(
+                    request_for(prompt_id, "本文"),
+                    AiProvider::Gemini,
+                    ExplanationLevel::Normal,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::AiUnavailable),
+                "{prompt_id}: {error:?}"
+            );
+        }
     }
 
     // --- フレーズ（約200字までの文章）の説明（D21）---

@@ -77,6 +77,12 @@ pub enum AppError {
     /// Mock の代替出力は保存せず、画面は「うまくまとめられなかった」と再試行を案内する。
     #[error("ai output failed validation and was not saved")]
     AiOutputRejected,
+
+    /// 設定で選んだAI（Gemini・未実装の openai）がいま使えない（キー未設定・呼び出し失敗）。
+    /// Mock の文面を本物の結果のように出さないため、Mock へは切り替えずにこのエラーで返す。
+    /// 画面は記事を表示したまま「いまはAIが使えない」と案内する。理由の詳細はログにだけ残す。
+    #[error("the selected ai is not available right now")]
+    AiUnavailable,
 }
 
 impl AppError {
@@ -99,6 +105,7 @@ impl AppError {
             Self::LocalAi(LocalAiFailure::Timeout) => "LOCAL_AI_TIMEOUT",
             Self::LocalAi(LocalAiFailure::RequestFailed) => "LOCAL_AI_REQUEST_FAILED",
             Self::AiOutputRejected => "AI_OUTPUT_REJECTED",
+            Self::AiUnavailable => "AI_UNAVAILABLE",
         }
     }
 }
@@ -135,6 +142,7 @@ impl AppError {
             .to_string(),
             // 出力本文・記事本文は含めない。
             Self::AiOutputRejected => "ai output could not be used".to_string(),
+            Self::AiUnavailable => "ai is not available right now".to_string(),
         }
     }
 }
@@ -237,6 +245,14 @@ mod tests {
         assert_eq!(error.message, "network request failed");
         assert!(!error.message.contains("example.com"));
         assert!(!error.message.contains("connection refused"));
+    }
+
+    #[test]
+    fn ai_unavailable_error_has_its_own_code() {
+        // 画面が「いまはAIが使えない」と言い分けられるよう、専用コードで返す（Mock の文面には切り替えない）。
+        let error = command_error(AppError::AiUnavailable);
+        assert_eq!(error.code, "AI_UNAVAILABLE");
+        assert_eq!(error.message, "ai is not available right now");
     }
 
     #[test]
