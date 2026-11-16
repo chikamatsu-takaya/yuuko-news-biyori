@@ -825,6 +825,13 @@ mod tests {
         f.service.start(false).unwrap();
         assert!(wait_for(&f, LocalModelPhase::Ready));
         assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        // 「使える」の状態は、並べ直しのフックより先に見えるようになる（worker は状態を
+        // 先に公開してからフックを呼ぶ）。CI の遅い環境では状態だけ見えている瞬間があるので、
+        // フックが呼ばれるまで待ってから回数を確かめる。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while f.ready_hooks.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(f.ready_hooks.load(Ordering::SeqCst), 1);
         assert!(lock(&f.events).contains(&LocalModelPhase::Ready));
         let status = f.service.status();
