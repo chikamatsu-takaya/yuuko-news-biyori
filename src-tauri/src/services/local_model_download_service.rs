@@ -341,16 +341,27 @@ impl LocalModelDownloadService {
     }
 
     /// キャンセル（`.part` を残す。待っている自動のやり直しと照合も止める）。止まっている取得は「未取得」へ戻す。
-    pub fn cancel(&self) -> LocalModelStatus {
+    /// 走っていないときも「自動で始めた」記録を書く（画面のことわりの待ちの間のキャンセル。次の起動から
+    /// 自動では始めず、案内だけにする。設計案 U10）。保存できなければエラーを返す。取得元が無ければ何もしない。
+    pub fn cancel(&self) -> Result<LocalModelStatus, AppError> {
+        if self.inner.spec.source.is_none() {
+            return Ok(self.status());
+        }
         if !self.request_stop(StopRequest::Cancel) {
             let mut run = lock(&self.inner.run);
+            if !run.auto_started && run.phase != LocalModelPhase::Ready {
+                self.inner
+                    .settings
+                    .record_local_model_auto_download_started()?;
+                run.auto_started = true;
+            }
             if matches!(run.phase, LocalModelPhase::Paused | LocalModelPhase::Failed) {
                 run.phase = LocalModelPhase::NotDownloaded;
                 run.failure = None;
                 run.needed_more = None;
             }
         }
-        self.notify_status()
+        Ok(self.notify_status())
     }
 
     /// 取得中なら止め、llama-server を止めてから、取得先のモデル・途中のファイルを消し、照合済みの印を下ろす。
@@ -874,6 +885,35 @@ mod tests {
     }
 
     #[test]
+    fn cancel_before_any_start_records_and_blocks_a_later_auto_start() {
+        let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        assert!(!f.service.status().auto_download_started);
+        let status = f.service.cancel().unwrap();
+        assert!(status.auto_download_started);
+        assert!(f.service.inner.settings.local_model_auto_download_started());
+        f.service.start(true).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.service.status().phase, LocalModelPhase::NotDownloaded);
+    }
+
+    #[test]
+    fn cancel_without_source_does_nothing_and_errors_when_the_record_cannot_be_saved() {
+        let spec = ModelSpec {
+            source: None,
+            ..SPEC
+        };
+        let f = fixture(spec, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        assert!(!f.service.cancel().unwrap().auto_download_started);
+        assert!(!f.service.inner.settings.local_model_auto_download_started());
+
+        let g = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        std::fs::remove_file(g.root.join("settings.json")).unwrap();
+        std::fs::create_dir_all(g.root.join("settings.json")).unwrap();
+        assert!(g.service.cancel().is_err());
+    }
+
+    #[test]
     fn auto_start_does_not_fetch_when_the_record_cannot_be_read_or_saved() {
         let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
         // 設定ファイルの場所をフォルダにして、読み書きできなくする。
@@ -955,7 +995,7 @@ mod tests {
         );
         f.service.start(false).unwrap();
         assert!(wait_for(&f, LocalModelPhase::RetryWaiting));
-        f.service.cancel();
+        f.service.cancel().unwrap();
         assert!(wait_for(&f, LocalModelPhase::NotDownloaded));
         assert_eq!(f.calls.load(Ordering::SeqCst), 1);
 

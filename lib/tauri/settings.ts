@@ -93,7 +93,21 @@ export const saveUserSettings = async (
     return null;
   }
 
-  return invoke<CommandOk>("save_user_settings", { params: { settings } });
+  const result = await invoke<CommandOk>("save_user_settings", { params: { settings } });
+  notifyUserSettingsSaved(settings.aiProvider);
+  return result;
+};
+
+/**
+ * 設定を保存・初期化した後に、同じウィンドウの中へ知らせる DOM イベント（Tauri のイベントではない）。
+ * AI の設定で表示を変える部品（ローカルAIのモデルの案内）が、ポーリングせずに追うために使う。
+ */
+export const USER_SETTINGS_SAVED_EVENT = "yuuko:user-settings-saved";
+
+const notifyUserSettingsSaved = (aiProvider: AiProvider) => {
+  window.dispatchEvent(
+    new CustomEvent(USER_SETTINGS_SAVED_EVENT, { detail: { aiProvider } })
+  );
 };
 
 /**
@@ -126,6 +140,8 @@ export type AiProviderConnectionErrorKind =
   | "invalid_response"
   | "provider_not_implemented"
   | "local_ai_missing"
+  // モデルをまだダウンロードしていない（初回ダウンロードの前・途中・失敗）。
+  | "local_ai_not_ready"
   | "local_ai_broken"
   | "local_ai_start_failed"
   | "local_ai_request_failed"
@@ -158,7 +174,9 @@ export const resetUserSettings = async (): Promise<UserSettingsDto | null> => {
     return null;
   }
 
-  return invoke<UserSettingsDto>("reset_user_settings");
+  const settings = await invoke<UserSettingsDto>("reset_user_settings");
+  notifyUserSettingsSaved(settings.aiProvider);
+  return settings;
 };
 
 // PC起動時の自動起動（要件定義書 §7.1.6）。OS の登録状態を正とし、Rust 側 command からだけ操作する
