@@ -14,6 +14,9 @@
 //! - `rules_speech`: 再説明（と再説明の作り直し）だけを `rules` の文にし、要約・要約の作り直しは本番のまま
 //!   （Firestore タスク pdXmOHeGbC9FTNFkjz9r。§20 で `rules` の再説明の改善が要約の文の変化によるものかを分けるため）。
 //!
+//! - `checks` / `checks_summary`: 指示文は本番のまま、再説明に追加の点検（`summary_service::explain_check`）を
+//!   かける（Firestore タスク 722cmK。`checks_summary` は要約との照合も足す）。プロンプトは差し替えない。
+//!
 //! 禁じる語の例（理由のつなぎの語など）は、小さいモデルがまねて出しやすいので書かない（本番と同じ方針）。
 
 use crate::domain::settings::{AiProvider, ExplanationLevel};
@@ -22,6 +25,7 @@ use crate::domain::summary::{
     AiRequest, AiResponse, SUMMARY_PROMPT_ID, SUMMARY_RETRY_PROMPT_ID, YUUKO_EXPLANATION_PROMPT_ID,
 };
 use crate::error::AppError;
+use crate::services::summary_service::explain_check::ExplanationChecks;
 
 use super::{
     local_output_shape, summary_input_has_key_points, summary_retry_reason_lines,
@@ -61,6 +65,10 @@ pub(crate) enum MethodVariant {
     Short,
     /// 再説明だけ `Rules` の文にする（要約・要約の作り直しは本番のまま）。
     RulesSpeech,
+    /// 指示文は本番のまま、再説明に追加の点検をかける。
+    Checks,
+    /// `Checks` に加え、再説明の文を要約と照らす。
+    ChecksSummary,
 }
 
 impl MethodVariant {
@@ -77,6 +85,8 @@ impl MethodVariant {
             "extract" => Some(Self::Extract),
             "short" => Some(Self::Short),
             "rules_speech" => Some(Self::RulesSpeech),
+            "checks" => Some(Self::Checks),
+            "checks_summary" => Some(Self::ChecksSummary),
             other => panic!("unknown {VARIANT_ENV}: {other}"),
         }
     }
@@ -87,12 +97,28 @@ impl MethodVariant {
             Self::Extract => "extract",
             Self::Short => "short",
             Self::RulesSpeech => "rules_speech",
+            Self::Checks => "checks",
+            Self::ChecksSummary => "checks_summary",
         }
+    }
+
+    /// 再説明の追加の点検（`checks` / `checks_summary` だけ。ほかの案は本番と同じ `Off`）。
+    pub(crate) fn explanation_checks(self) -> ExplanationChecks {
+        match self {
+            Self::Checks => ExplanationChecks::Checks,
+            Self::ChecksSummary => ExplanationChecks::ChecksSummary,
+            _ => ExplanationChecks::Off,
+        }
+    }
+
+    /// 指示文を差し替える案か（点検だけの案は差し替えない）。
+    fn replaces_prompts(self) -> bool {
+        self.explanation_checks() == ExplanationChecks::Off
     }
 
     /// 要約・要約の作り直しの指示を案の文に替えるか（`rules_speech` は再説明だけを替える）。
     fn replaces_summary(self) -> bool {
-        !matches!(self, Self::RulesSpeech)
+        !matches!(self, Self::RulesSpeech) && self.replaces_prompts()
     }
 
     /// 要約（と作り直し）の指示。入力に要点があるかで、本番と同じく要点に触れるかを変える。
@@ -138,7 +164,9 @@ impl MethodVariant {
                      各文は40文字程度にしてください。{SHORT_SENTENCE_RULE}{base}{FACTS_ONLY_RULE}"
                 )
             }
-            Self::RulesSpeech => unreachable!("rules_speech keeps the production summary prompt"),
+            Self::RulesSpeech | Self::Checks | Self::ChecksSummary => {
+                unreachable!("this variant keeps the production summary prompt")
+            }
         }
     }
 
@@ -146,7 +174,11 @@ impl MethodVariant {
     fn summary_reminder(self) -> Option<String> {
         match self {
             Self::Rules => Some(format!("要約の本文だけを書いてください。{RULES_REMINDER}")),
-            Self::Extract | Self::Short | Self::RulesSpeech => None,
+            Self::Extract
+            | Self::Short
+            | Self::RulesSpeech
+            | Self::Checks
+            | Self::ChecksSummary => None,
         }
     }
 
@@ -185,6 +217,9 @@ impl MethodVariant {
                 "次のニュースの内容を、日本語で{level}読者にやさしく再説明してください。\
                  {length}の1段落にしてください。{SHORT_SENTENCE_RULE}{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}{calm_instruction}"
             ),
+            Self::Checks | Self::ChecksSummary => {
+                unreachable!("this variant keeps the production explanation prompt")
+            }
         }
     }
 
@@ -194,7 +229,9 @@ impl MethodVariant {
             Self::Rules | Self::RulesSpeech => {
                 format!("{YUUKO_EXPLANATION_REMINDER}{RULES_REMINDER}")
             }
-            Self::Extract | Self::Short => YUUKO_EXPLANATION_REMINDER.to_string(),
+            Self::Extract | Self::Short | Self::Checks | Self::ChecksSummary => {
+                YUUKO_EXPLANATION_REMINDER.to_string()
+            }
         }
     }
 
@@ -202,6 +239,9 @@ impl MethodVariant {
     /// 再説明の指示は解説レベル ふつう・通常の口調の文だけを含む（評価はふつうで回す）。
     pub(crate) fn fixed_texts(self) -> Vec<String> {
         let mut texts: Vec<String> = Vec::new();
+        if !self.replaces_prompts() {
+            return texts;
+        }
         if self.replaces_summary() {
             texts.extend(
                 ["分かりやすく", "やさしく簡潔に", "詳しく"]
@@ -219,6 +259,9 @@ impl MethodVariant {
 
     /// 案の指示で組んだプロンプト。要約・作り直し・再説明以外の段は None（本番のプロンプトを使う）。
     fn prompt(self, request: &AiRequest, explanation_level: ExplanationLevel) -> Option<String> {
+        if !self.replaces_prompts() {
+            return None;
+        }
         // 解説レベルの言い回しは本番の `build_prompt` と同じ。
         let level = match explanation_level {
             ExplanationLevel::Simple => "やさしく簡潔に",
@@ -329,7 +372,11 @@ mod tests {
     fn names_map_to_variants_and_base_is_none() {
         assert_eq!(MethodVariant::from_name(""), None);
         assert_eq!(MethodVariant::from_name("base"), None);
-        for variant in ALL.into_iter().chain([MethodVariant::RulesSpeech]) {
+        for variant in ALL.into_iter().chain([
+            MethodVariant::RulesSpeech,
+            MethodVariant::Checks,
+            MethodVariant::ChecksSummary,
+        ]) {
             assert_eq!(MethodVariant::from_name(variant.label()), Some(variant));
         }
     }
@@ -382,6 +429,33 @@ mod tests {
         let texts = MethodVariant::RulesSpeech.fixed_texts();
         assert_eq!(texts.len(), 2);
         assert!(texts.iter().all(|text| !text.contains("要約してください")));
+    }
+
+    #[test]
+    fn check_variants_keep_every_production_prompt() {
+        for (variant, checks) in [
+            (MethodVariant::Checks, ExplanationChecks::Checks),
+            (
+                MethodVariant::ChecksSummary,
+                ExplanationChecks::ChecksSummary,
+            ),
+        ] {
+            assert_eq!(variant.explanation_checks(), checks);
+            assert!(variant.fixed_texts().is_empty());
+            for prompt_id in [
+                SUMMARY_PROMPT_ID,
+                SUMMARY_RETRY_PROMPT_ID,
+                YUUKO_EXPLANATION_PROMPT_ID,
+            ] {
+                assert!(variant
+                    .prompt(&request(prompt_id, "タイトル: t"), ExplanationLevel::Normal)
+                    .is_none());
+            }
+        }
+        assert_eq!(
+            MethodVariant::Rules.explanation_checks(),
+            ExplanationChecks::Off
+        );
     }
 
     #[test]

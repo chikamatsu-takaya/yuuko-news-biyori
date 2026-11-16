@@ -31,6 +31,7 @@ use super::ai_provider_service::{
     summary_fixed_prompt_texts, yuuko_speech_fixed_prompt_texts, AiProviderService,
 };
 use consistency_check::{check_speech_consistency, check_stage_consistency, strip_heading_labels};
+use explain_check::ExplanationChecks;
 use leading_connector::strip_leading_connectors;
 use output_check::{check_japanese_summary, CheckIssue, CheckReport, IssueKind};
 
@@ -89,6 +90,8 @@ pub struct SummaryService {
     article_repository: ArticleRepository,
     settings_repository: SettingsRepository,
     manual_summaries: ManualSummaryRegistry,
+    /// 再説明の追加の点検（Firestore タスク 722cmK）。本番は常に `Off`（評価のハーネスだけが変える）。
+    explanation_checks: ExplanationChecks,
 }
 
 impl SummaryService {
@@ -102,7 +105,15 @@ impl SummaryService {
             article_repository,
             settings_repository,
             manual_summaries: ManualSummaryRegistry::default(),
+            explanation_checks: ExplanationChecks::Off,
         }
+    }
+
+    /// 評価用: 再説明の追加の点検を有効にする（本番では呼ばない）。
+    #[cfg(test)]
+    pub(super) fn with_explanation_checks(mut self, checks: ExplanationChecks) -> Self {
+        self.explanation_checks = checks;
+        self
     }
 
     /// 手動の要約。生成中は記事IDを `manual_summaries` に載せ、自動要約キューに同じ記事を生成させない。
@@ -389,16 +400,30 @@ impl SummaryService {
             explanation_level,
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
-        let yuuko_explanation_response = check_and_retry_speech(
-            yuuko_explanation_response,
-            yuuko_explanation_request,
-            SummaryOutputKind::Explanation,
-            &check_source,
-            provider,
-            explanation_level,
-            fallback_policy,
-            &request_validated,
-        )?;
+        let yuuko_explanation_response = if self.explanation_checks == ExplanationChecks::Off {
+            check_and_retry_speech(
+                yuuko_explanation_response,
+                yuuko_explanation_request,
+                SummaryOutputKind::Explanation,
+                &check_source,
+                provider,
+                explanation_level,
+                fallback_policy,
+                &request_validated,
+            )?
+        } else {
+            check_and_retry_explanation(
+                yuuko_explanation_response,
+                yuuko_explanation_request,
+                &check_source,
+                speech_summary.unwrap_or(""),
+                self.explanation_checks,
+                provider,
+                explanation_level,
+                fallback_policy,
+                &request_validated,
+            )?
+        };
 
         let yuuko_comment_request = AiRequest {
             prompt_id: YUUKO_COMMENT_PROMPT_ID.to_string(),
@@ -851,6 +876,85 @@ where
     Ok(AiResponse {
         text,
         provider: first.provider,
+    })
+}
+
+/// 再説明の追加の点検（Firestore タスク 722cmK。評価の版 `checks` / `checks_summary` でだけ使う。本番の既定は
+/// `check_and_retry_speech`）。
+///
+/// - 文ごとに、既存の点検（`check_speech_consistency`）と (a) 理由のつながり・(b) 記事にない名前
+///   （`explain_check`）をかける。どれかの文にあれば、同じ依頼で1回だけ作り直す。
+/// - 作り直し（失敗したときは最初の出力）に残った文は落とす。`ChecksSummary` では、要約にない評価の語の文も落とす
+///   （作り直しの理由にはしない）。(c) 言い切りは記録だけ（評価のハーネスが記録する）。
+/// - 全部の文が落ちたら定型文（`check_and_retry_speech` と同じ）。
+#[allow(clippy::too_many_arguments)]
+fn check_and_retry_explanation<F>(
+    first: AiResponse,
+    request: AiRequest,
+    source: &str,
+    summary: &str,
+    checks: ExplanationChecks,
+    provider: AiProvider,
+    explanation_level: ExplanationLevel,
+    fallback_policy: FallbackPolicy,
+    request_validated: &F,
+) -> Result<AiResponse, AppError>
+where
+    F: Fn(
+        AiRequest,
+        SummaryOutputKind,
+        AiProvider,
+        ExplanationLevel,
+    ) -> Result<AiResponse, AppError>,
+{
+    let kind = SummaryOutputKind::Explanation;
+    if first.provider == PROVIDER_MOCK {
+        return Ok(first);
+    }
+    let flagged = |sentence: &str| {
+        !check_speech_consistency(source, sentence).is_empty()
+            || explain_check::check_sentence(source, summary, sentence).flagged()
+    };
+    let any_flagged = |text: &str| {
+        explain_check::split_keeping_ends(text)
+            .into_iter()
+            .any(flagged)
+    };
+    let template = request.context.clone().unwrap_or_default();
+    let mut current = first;
+    if any_flagged(&current.text) {
+        log::info!("the explanation checks found issues; regenerating it once");
+        match request_validated(request, kind, provider, explanation_level) {
+            Ok(retried) if retried.provider == PROVIDER_MOCK => {
+                reject_fallback_early_with_label(fallback_policy, kind.label(), &retried)?;
+                return Ok(retried);
+            }
+            Ok(retried) => current = retried,
+            Err(error @ AppError::Validation(_)) => return Err(error),
+            Err(error) => log::info!(
+                "the explanation regeneration failed ({}); checking the first output",
+                error_label(&error)
+            ),
+        }
+    }
+    let kept: String = explain_check::split_keeping_ends(&current.text)
+        .into_iter()
+        .filter(|sentence| {
+            !flagged(sentence)
+                && (checks != ExplanationChecks::ChecksSummary
+                    || explain_check::unsupported_by_summary(summary, sentence).is_empty())
+        })
+        .collect();
+    let text = if kept.trim().is_empty() {
+        log::info!("every explanation sentence was dropped; used the fixed text instead");
+        template
+    } else {
+        kept.trim().to_string()
+    };
+    let text = validate_summary_output(kind, &text).map_err(|_| AppError::AiOutputRejected)?;
+    Ok(AiResponse {
+        text,
+        provider: current.provider,
     })
 }
 
@@ -2073,6 +2177,72 @@ mod tests {
     use std::cell::RefCell;
 
     const ARTICLE_ID: &str = "rss-20261007-tech-01";
+
+    /// 再説明の追加の点検（Firestore タスク 722cmK）: 1回作り直し、残った文を落とし、全部落ちたら定型文。
+    #[test]
+    fn explanation_checks_retry_once_then_drop_sentences_then_use_the_fixed_text() {
+        use super::check_and_retry_explanation;
+        use super::explain_check::ExplanationChecks;
+        use crate::domain::settings::AiProvider;
+        use crate::domain::summary::AiRequest;
+        let source = "タイトル: 新型機を発表
+本文抜粋:
+あおば社は新型機を発表した。価格は5000円高い。";
+        let summary = "あおば社が新型機を発表した。";
+        let request = AiRequest {
+            prompt_id: "yuuko_explanation_v1".to_string(),
+            input_text: format!(
+                "タイトル: t
+要約: {summary}"
+            ),
+            context: Some("定型文だよ。".to_string()),
+        };
+        let run = |first: &str, retried: &str, checks: ExplanationChecks| {
+            let calls = RefCell::new(0);
+            let text = check_and_retry_explanation(
+                response(first, "local"),
+                request.clone(),
+                source,
+                summary,
+                checks,
+                AiProvider::Local,
+                ExplanationLevel::Normal,
+                FallbackPolicy::SaveFallback,
+                &|_, _, _, _| {
+                    *calls.borrow_mut() += 1;
+                    Ok(response(retried, "local"))
+                },
+            )
+            .expect("explanation")
+            .text;
+            (text, calls.into_inner())
+        };
+        let clean = "あおば社が新型機を発表したよ。価格は5000円高いんだって。";
+        assert_eq!(
+            run(clean, "-", ExplanationChecks::Checks),
+            (clean.to_string(), 0)
+        );
+        // 記事にない名前の文は、作り直しにも残れば落とす。
+        let named = "あおば社が新型機を発表したよ。ソニーより安いんだって。";
+        assert_eq!(
+            run(named, named, ExplanationChecks::Checks),
+            ("あおば社が新型機を発表したよ。".to_string(), 1)
+        );
+        assert_eq!(
+            run(named, "ソニーより安いんだって。", ExplanationChecks::Checks),
+            ("定型文だよ。".to_string(), 1)
+        );
+        // 要約との照合（checks_summary だけ）: 要約にない評価の語の文を落とす。作り直しの理由にはしない。
+        let judged = "あおば社が新型機を発表したよ。注目だね！";
+        assert_eq!(
+            run(judged, "-", ExplanationChecks::Checks),
+            (judged.to_string(), 0)
+        );
+        assert_eq!(
+            run(judged, "-", ExplanationChecks::ChecksSummary),
+            ("あおば社が新型機を発表したよ。".to_string(), 0)
+        );
+    }
 
     /// ふだんの口調で出力を選ぶ（重いニュースの判定を通さない既存のテスト用）。
     fn select_valid_output(
@@ -5140,6 +5310,9 @@ mod leading_connector;
 
 /// 文の途中の因果のつなぎ（「〜したため」「その結果」）で記事にない因果を結んだ出力の点検（Firestore タスク 6jL23k）。
 mod causal_check;
+
+/// 再説明の追加の点検（理由のつながり・記事にない名前・言い切り・要約との照合。Firestore タスク 722cmK。本番の既定は無効）。
+pub(crate) mod explain_check;
 
 /// 要約の機械点検と作り直しの評価ハーネス（D166。`#[ignore]`・手動実行専用）。
 #[cfg(test)]

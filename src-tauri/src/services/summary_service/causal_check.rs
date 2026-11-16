@@ -168,6 +168,24 @@ const SENTENCE_ENDS: [char; 5] = ['。', '！', '？', '!', '?'];
 
 /// 文の途中の因果のつなぎで、記事にない因果を結んだ出力の点検（`IssueKind::UnsupportedCause`）。
 pub(super) fn find_unsupported_causes(source: &str, output: &str) -> Vec<CheckIssue> {
+    find_causes(source, output, false)
+}
+
+/// 再説明の追加の点検（`explain_check` の (a)。評価の版でだけ使う）: 出力の側のつなぎを広げる
+/// （`BROAD_LINKS`: 「〜したので」「〜するから、」と目的の「〜するため」）。材料の側の照らし方は同じ。
+pub(super) fn find_unsupported_causes_broad(source: &str, output: &str) -> Vec<CheckIssue> {
+    find_causes(source, output, true)
+}
+
+/// 広げたつなぎ（語・直前の字の決まり・直後の字の決まり〔空なら見ない〕）。場所・起点の「から」
+/// （「3月から」「東京から」）を見ないよう、「から」は動詞・形容詞の後ろで読点が続くときだけにする。
+const BROAD_LINKS: [(&str, &[char], &[&str]); 3] = [
+    ("ので", &['る', 'た', 'い', 'だ', 'な'], &[]),
+    ("から", &['る', 'た', 'い', 'だ'], COMMA),
+    ("ため", &['る'], &[]),
+];
+
+fn find_causes(source: &str, output: &str, broad: bool) -> Vec<CheckIssue> {
     let source_norm = normalize(source);
     let units: Vec<Vec<String>> = causal_units(source)
         .into_iter()
@@ -178,7 +196,7 @@ pub(super) fn find_unsupported_causes(source: &str, output: &str) -> Vec<CheckIs
     for sentence in split_sentences(output) {
         let sentence = normalize(sentence);
         let sentence = sentence.as_str();
-        let links = links_in(sentence);
+        let links = links_in(sentence, broad);
         for (i, (word, start, end)) in links.iter().enumerate() {
             let segment_start = if i == 0 { 0 } else { links[i - 1].2 };
             let segment_end = links.get(i + 1).map_or(sentence.len(), |next| next.1);
@@ -282,7 +300,7 @@ fn causal_units(source: &str) -> Vec<String> {
 }
 
 /// 文の中の因果のつなぎ（語・始まり・終わりのバイト位置）。かぎかっこの中と文頭は見ない。
-fn links_in(sentence: &str) -> Vec<(&'static str, usize, usize)> {
+fn links_in(sentence: &str, broad: bool) -> Vec<(&'static str, usize, usize)> {
     let mut links: Vec<(&'static str, usize, usize)> = Vec::new();
     let mut quote_depth = 0usize;
     let mut index = 0;
@@ -293,7 +311,7 @@ fn links_in(sentence: &str) -> Vec<(&'static str, usize, usize)> {
             _ => {}
         }
         if quote_depth == 0 && index > 0 {
-            if let Some((word, len)) = link_at(sentence, index) {
+            if let Some((word, len)) = link_at(sentence, index, broad) {
                 links.push((word, index, index + len));
                 index += len;
                 continue;
@@ -305,13 +323,13 @@ fn links_in(sentence: &str) -> Vec<(&'static str, usize, usize)> {
 }
 
 /// `sentence` の `index` から因果のつなぎが始まるなら、その語と長さ（バイト数。直後の読点は含めない）。
-fn link_at(sentence: &str, index: usize) -> Option<(&'static str, usize)> {
+fn link_at(sentence: &str, index: usize, broad: bool) -> Option<(&'static str, usize)> {
     let rest = &sentence[index..];
     let previous = sentence[..index].chars().next_back();
     if let Some((word, _)) = connector_at(rest) {
         return Some((word, word.len()));
     }
-    OUTPUT_LINKS.iter().find_map(|link| {
+    let base = OUTPUT_LINKS.iter().find_map(|link| {
         let after = rest.strip_prefix(link.word)?;
         if link.word == "ため" && !cause_tame_at(&sentence[..index]) {
             return None;
@@ -322,6 +340,18 @@ fn link_at(sentence: &str, index: usize) -> Option<(&'static str, usize)> {
             link.followed_by.is_empty() || link.followed_by.iter().any(|f| after.starts_with(f));
         let not_excluded = !link.not_followed_by.iter().any(|f| after.starts_with(f));
         (previous_ok && followed_ok && not_excluded).then_some((link.word, link.word.len()))
+    });
+    base.or_else(|| {
+        let (word, _, followed_by) =
+            *BROAD_LINKS
+                .iter()
+                .filter(|_| broad)
+                .find(|(word, after_chars, _)| {
+                    rest.starts_with(word) && previous.is_some_and(|c| after_chars.contains(&c))
+                })?;
+        let after = &rest[word.len()..];
+        (followed_by.is_empty() || followed_by.iter().any(|f| after.starts_with(f)))
+            .then_some((word, word.len()))
     })
 }
 

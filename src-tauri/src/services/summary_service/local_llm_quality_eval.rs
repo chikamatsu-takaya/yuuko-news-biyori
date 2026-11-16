@@ -66,7 +66,9 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::consistency_check::check_speech_consistency;
 use super::eval_model_override::{eval_local_llm, ModelProfile};
+use super::explain_check::{self, ExplanationChecks};
 use super::output_check::{check_japanese_summary, IssueKind};
 use super::paragraph_points_eval::longest_common_run;
 use super::{
@@ -543,6 +545,10 @@ fn run_summaries(
         ai.clone(),
         ArticleRepository::new(paths),
         SettingsRepository::new(paths),
+    )
+    // 再説明の追加の点検（Firestore タスク 722cmK。案 `checks` / `checks_summary` のときだけ有効）。
+    .with_explanation_checks(
+        variant.map_or(ExplanationChecks::Off, MethodVariant::explanation_checks),
     );
     let jsonl = out_dir.join("summaries.jsonl");
     let done = recorded_keys(&jsonl, |value| {
@@ -701,6 +707,38 @@ fn record_stage(
         if let Some(checked) = checked {
             // 点検の材料はアプリと同じ記事そのもの（タイトル＋本文抜粋）。
             stage["check"] = check_json(&source_text, &checked);
+        }
+        // 再説明の追加の点検（Firestore タスク 722cmK）を、どの案でも文ごとに記録する（作り直し・文を落とす判断は
+        // 本番のコード〔`check_and_retry_explanation`〕が行う。ここは記録だけ）。要約は記事にない名前だけを記録する。
+        match kind {
+            SummaryOutputKind::Explanation => {
+                let summary = input_text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("要約: "))
+                    .unwrap_or("");
+                stage["explainCheck"] = json!(explain_check::split_keeping_ends(&response.text)
+                    .into_iter()
+                    .map(|sentence| {
+                        let found = explain_check::check_sentence(&source_text, summary, sentence);
+                        json!({
+                            "sentence": sentence,
+                            "speechIssues": check_speech_consistency(&source_text, sentence)
+                                .iter()
+                                .map(|issue| issue.kind.label())
+                                .collect::<Vec<_>>(),
+                            "link": found.unsupported_link,
+                            "names": found.unknown_names,
+                            "asserted": found.asserted,
+                            "notInSummary": found.unsupported_by_summary,
+                        })
+                    })
+                    .collect::<Vec<_>>());
+            }
+            SummaryOutputKind::Summary => {
+                stage["unknownNames"] =
+                    json!(explain_check::unknown_names(&source_text, &response.text));
+            }
+            _ => {}
         }
         // D170 の点検（要点・注目ポイントは1件ずつ、タグ、再説明・一言）。アプリと同じ材料で照らす。
         stage["consistency"] = consistency_json(kind, &source_text, &response.text);
