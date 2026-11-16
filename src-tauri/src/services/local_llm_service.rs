@@ -717,6 +717,14 @@ impl LocalLlmService {
     /// 状態へ入れるときに印が下りていれば起動を取りやめる（`launch_and_wait`）。
     /// 走っている生成は、止めたことで失敗として返る。
     pub fn forget_model(&self) {
+        self.forget_model_while(|| ());
+    }
+
+    /// `forget_model` の後、照合を待たせたまま `work`（モデルを消す・置き直す）を行う。
+    /// 印を下ろした直後に、待っていた照合が取っ手を開くと、消すことが共有の違反で失敗するため、
+    /// `work` が終わるまで次の照合を始めさせない（`work` の後の照合は、消した後・置き直した後のファイルを見る）。
+    /// `work` の中でこの窓口の生成・`forget_model` を呼ばないこと（照合の待ちと重なって止まる）。
+    pub fn forget_model_while<T>(&self, work: impl FnOnce() -> T) -> T {
         let _verifying = self
             .shared
             .verifying
@@ -734,6 +742,7 @@ impl LocalLlmService {
         }
         // llama-server を止めた後に閉じる（閉じた時点で、消す・置き直すことができるようになる）。
         drop(handle);
+        work()
     }
 
     /// モデルが無いときの失敗（取得する版は `NotReady`）。
@@ -1017,12 +1026,17 @@ impl LocalLlmService {
                     return Err(self.model_missing());
                 }
                 Err(error) => {
-                    // ほかのプログラムが書き込みで開いている（共有の違反）など。壊れているとは限らないため
-                    // 「壊れていた」の印は立てず、照合も起動もしない（次の要求で開き直す）。
+                    // ほかのプログラムが書き込みで開いている（共有の違反）・消している途中（PermissionDenied）など。
+                    // 壊れているとは限らないため「壊れていた」の印は立てず、照合も起動もしない。
+                    // 起動の失敗として数え、続けば自動要約からの試行を控えさせる（記事を次々と失敗にしない）。
                     log::warn!(
                         "local llm model could not be opened for verification: {:?}",
                         error.kind()
                     );
+                    self.record_start_failure(StartFailure::counted(
+                        LocalAiFailure::StartFailed,
+                        "model_open_failed",
+                    ));
                     return Err(LocalAiFailure::StartFailed);
                 }
             };
@@ -1117,6 +1131,8 @@ mod tests {
         launches: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
         bodies: Arc<Mutex<Vec<String>>>,
+        /// 起動の中で止まる所（入った・進めてよい）。起動の途中に別の操作を挟むテストで使う。
+        gate: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     }
 
     impl FakeLauncher {
@@ -1132,7 +1148,24 @@ mod tests {
                 launches: Arc::new(AtomicUsize::new(0)),
                 stops: Arc::new(AtomicUsize::new(0)),
                 bodies: Arc::new(Mutex::new(Vec::new())),
+                gate: None,
             })
+        }
+
+        /// 起動の中で止まる版。1 つ目の待ち合わせで起動に入ったことを知らせ、2 つ目で進めてよいのを待つ。
+        fn gated(mode: FakeMode) -> (Arc<Self>, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+            let entered = Arc::new(std::sync::Barrier::new(2));
+            let release = Arc::new(std::sync::Barrier::new(2));
+            let launcher = Arc::new(Self {
+                mode,
+                reply: "要約だよ".to_string(),
+                generate_delay: Duration::ZERO,
+                launches: Arc::new(AtomicUsize::new(0)),
+                stops: Arc::new(AtomicUsize::new(0)),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+                gate: Some((entered.clone(), release.clone())),
+            });
+            (launcher, entered, release)
         }
 
         /// 受け取った生成要求の本文（JSON として読んだもの）。
@@ -1183,6 +1216,10 @@ mod tests {
     impl ServerLauncher for FakeLauncher {
         fn launch(&self, spec: &LaunchSpec) -> std::io::Result<Box<dyn ServerProcess>> {
             self.launches.fetch_add(1, Ordering::SeqCst);
+            if let Some((entered, release)) = &self.gate {
+                entered.wait();
+                release.wait();
+            }
             // 本番と同じく、渡された引数の守り（127.0.0.1・合言葉）は実物の引数組み立てで確かめる。
             let args = crate::infra::local_llm_runtime::server_args(
                 &spec.bundle.model,
@@ -1641,6 +1678,88 @@ mod tests {
         assert_eq!(launcher.launches(), 2);
     }
 
+    /// 照合の後・子プロセスを状態へ入れる前に `forget_model` が来たら、起動を取りやめる
+    /// （印を下ろした後に、取っ手の無いモデルで llama-server を動かさない）。
+    #[test]
+    fn forget_during_launch_cancels_the_start_and_keeps_no_handle() {
+        let (launcher, entered, release) = FakeLauncher::gated(FakeMode::Healthy);
+        let bundle = temp_bundle("forget-launch", true, Some(MODEL_BYTES));
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        let worker = {
+            let service = service.clone();
+            std::thread::spawn(move || service.generate("p", 8))
+        };
+        entered.wait();
+        assert!(service.shared.lock_state().model_handle.is_some());
+        service.forget_model();
+        release.wait();
+        assert_eq!(worker.join().unwrap(), Err(LocalAiFailure::StartFailed));
+        let state = service.shared.lock_state();
+        assert!(state.process.is_none());
+        assert!(state.model_handle.is_none());
+        assert!(!state.verified);
+        // 取りやめは起動の失敗に数えない。
+        assert_eq!(state.start_failures, 0);
+        drop(state);
+        assert_eq!(launcher.launches(), 1);
+        assert_eq!(launcher.stops(), 1);
+    }
+
+    /// 照合の途中の `forget_model` は、照合が終わるのを待ってから印と取っ手を下ろす
+    /// （照合の終わりに入れた印・取っ手が残らない）。照合の途中は `verifying` を持つことで再現する。
+    #[test]
+    fn forget_waits_for_a_running_verification() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("forget-verify", true, Some(MODEL_BYTES));
+        let model = LocalLlmBundle::in_dir(&bundle.0).model;
+        let service = service_with(&bundle, launcher, test_config());
+        let verifying = service.shared.verifying.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let forgetter = {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                service.forget_model();
+                sender.send(()).unwrap();
+            })
+        };
+        assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+        {
+            // 照合の終わり（印と取っ手を入れる）。
+            let mut state = service.shared.lock_state();
+            state.verified = true;
+            state.model_handle = Some(std::fs::File::open(&model).unwrap());
+        }
+        drop(verifying);
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        forgetter.join().unwrap();
+        let state = service.shared.lock_state();
+        assert!(!state.verified);
+        assert!(state.model_handle.is_none());
+    }
+
+    /// `forget_model_while` の間は次の照合が待たされ、取っ手を開かれずに消せる（`discard_local_model` の流れ）。
+    #[test]
+    fn verification_waits_until_the_model_is_removed() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("forget-while", true, Some(MODEL_BYTES));
+        let model = LocalLlmBundle::in_dir(&bundle.0).model;
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        assert!(service.generate("p", 8).is_ok());
+        let (removed, waiting) = service.forget_model_while(|| {
+            let waiting = {
+                let service = service.clone();
+                std::thread::spawn(move || service.generate("p", 8))
+            };
+            // 待っている照合が先に取っ手を開いていれば、ここで消せない。
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(service.shared.lock_state().model_handle.is_none());
+            (std::fs::remove_file(&model), waiting)
+        });
+        assert!(removed.is_ok());
+        assert_eq!(waiting.join().unwrap(), Err(LocalAiFailure::Missing));
+        assert_eq!(launcher.launches(), 1);
+    }
+
     /// 照合した後は、ほかから書き換え・削除・改名できない（設計案 §3.2 の取っ手）。読み取りはできる。
     /// `forget_model` で取っ手を閉じれば消せる（`discard_local_model` の流れ）。
     #[cfg(windows)]
@@ -1722,16 +1841,35 @@ mod tests {
         let launcher = FakeLauncher::new(FakeMode::Healthy);
         let bundle = temp_bundle("held", true, Some(MODEL_BYTES));
         let model = LocalLlmBundle::in_dir(&bundle.0).model;
-        let service = service_with(&bundle, launcher.clone(), test_config());
+        // 手動のやり直しの間隔は 0 にし、閉じた後の手動の要求がすぐ試せるようにする。
+        let config = LocalLlmConfig {
+            manual_start_retry_gap: Duration::ZERO,
+            ..test_config()
+        };
+        let service = service_with(&bundle, launcher.clone(), config);
         let writer = std::fs::OpenOptions::new()
             .write(true)
             .open(&model)
             .unwrap();
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::StartFailed));
+        let background = service.for_background();
+        assert_eq!(
+            background.generate("p", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        // 起動の失敗として数える。続いたので、自動要約からは試さない（数が増えない）。
+        assert_eq!(service.shared.lock_state().start_failures, 2);
+        assert_eq!(
+            background.generate("p", 8),
+            Err(LocalAiFailure::StartFailed)
+        );
+        assert_eq!(service.shared.lock_state().start_failures, 2);
+        // 「壊れていた」の印は立てない。
         assert!(service.is_bundle_present());
         assert_eq!(launcher.launches(), 0);
         drop(writer);
         assert!(service.generate("p", 8).is_ok());
+        assert_eq!(service.shared.lock_state().start_failures, 0);
     }
 
     #[test]

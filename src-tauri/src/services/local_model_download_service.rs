@@ -372,8 +372,11 @@ impl LocalModelDownloadService {
                 .wait(run)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        self.inner.local_llm.forget_model();
-        if let Some(dir) = &self.inner.model_dir {
+        // 照合の印と取っ手を下ろし、消し終わるまで次の照合を待たせる（間に照合が取っ手を開くと消せないため）。
+        self.inner.local_llm.forget_model_while(|| {
+            let Some(dir) = &self.inner.model_dir else {
+                return Ok(());
+            };
             let name = self.inner.spec.file_name;
             for file in [
                 name.to_string(),
@@ -391,9 +394,8 @@ impl LocalModelDownloadService {
             }
             // 空になったフォルダだけを消す（ほかのファイルがあれば残す）。
             let _ = std::fs::remove_dir(dir);
-        }
-        // 消した後に、古い照合の結果で起動しないよう、もう一度印を下ろす。
-        self.inner.local_llm.forget_model();
+            Ok(())
+        })?;
         run.phase = self.idle_phase();
         run.failure = None;
         run.needed_more = None;
