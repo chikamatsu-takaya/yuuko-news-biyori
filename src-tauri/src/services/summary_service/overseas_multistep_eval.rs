@@ -441,7 +441,7 @@ fn overseas_multistep_eval() {
     let jsonl = out_dir.join("results.jsonl");
     let skip_v2 = std::env::var_os(SKIP_V2_ENV).is_some();
 
-    let local = LocalLlmService::new(Some(LocalLlmBundle::in_dir(&bundle_dir())));
+    let local = LocalLlmService::new(Some(LocalLlmBundle::from_manual_env(&bundle_dir())));
     // 1件目に起動・モデルの照合時間が乗らないよう、先に短い生成で起動を済ませて別に記録する。
     let warmup = generate(&local, "「はい」とだけ答えてください。", 8);
     eprintln!(

@@ -69,16 +69,23 @@ impl ModelSpec {
     }
 }
 
-/// 使うモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
+/// 使うモデル（藤井さん 2026-11-16: Gemma 4 E2B Q4_K_M に替える。前は D100 の Qwen3.5-2B）。
 /// どのモデルを使うかはビルドに入れたこの定数だけで決め、設定ファイル・画面からは選ばせない。
-/// 値を変えたら `scripts/local-llm/bundle-manifest.mjs` が読む形（`ACTIVE_MODEL` の 3 項目）を保ち、
-/// 開発環境構築手順書も一緒に直す。
+/// 取得元のあるモデルはインストーラーに入れず、初回に取得する（`scripts/local-llm/*.mjs` は同梱物として求めない）。
+/// 値を変えたら `scripts/local-llm/bundle-manifest.mjs` が読む形（`ACTIVE_MODEL` の 3 項目と `source: Some(`）を保ち、
+/// 開発環境構築手順書・`LICENSES/README.txt` も一緒に直す。
 pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
-    file_name: "stario-qwen3.5-2b-q4_k_m.gguf",
-    size: 1_312_164_800,
-    sha256: "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35",
-    // 今の 2B は自前の量子化で公開の置き場が無いため、取得元は持たない（Gemma への差し替えの PR で入れる）。
-    source: None,
+    file_name: "gemma-4-E2B-it-Q4_K_M.gguf",
+    size: 3_106_738_272,
+    sha256: "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
+    // Hugging Face の unsloth/gemma-4-E2B-it-GGUF を、コミットで版を固定して取る（main は使わない。設計案 §2.2）。
+    // コミットのファイルの大きさ・LFS の oid が上の値と一致することを公開 API で確かめた（2026-11-16）。
+    // 転送先は、実際に送った HEAD・Range 0-0 の GET で返った配信用のホストだけを許す（設計案 §3.1）。
+    source: Some(ModelSource {
+        host: "huggingface.co",
+        path: "/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf",
+        redirect_hosts: &["us.aws.cdn.hf.co"],
+    }),
 };
 
 /// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。
@@ -250,6 +257,25 @@ impl LocalLlmBundle {
         )
     }
 
+    /// 手動の確認・評価（`#[ignore]`）で使う場所。実行の部品は `<dir>/runtime/`、モデルは `model` があればそこ
+    /// （取得したモデルは同梱物のフォルダに無いため。開発環境構築手順書 §17）、無ければ `in_dir` と同じ。
+    #[cfg(test)]
+    pub fn for_manual_runs(dir: &Path, model: Option<PathBuf>) -> Self {
+        match model {
+            Some(model) => Self::new(&bundled_runtime_dir(dir), model),
+            None => Self::in_dir(dir),
+        }
+    }
+
+    /// `for_manual_runs` に環境変数 `YUUKO_LOCAL_LLM_MODEL`（モデルのファイルのパス）を渡す。
+    #[cfg(test)]
+    pub fn from_manual_env(dir: &Path) -> Self {
+        Self::for_manual_runs(
+            dir,
+            std::env::var_os("YUUKO_LOCAL_LLM_MODEL").map(PathBuf::from),
+        )
+    }
+
     /// 実行の部品のフォルダ（実行ファイルの親）。部品の照合に使う。
     pub fn runtime_dir(&self) -> Option<&Path> {
         self.exe.parent()
@@ -346,7 +372,7 @@ pub fn check_model_size(path: &Path, expected: u64) -> ModelCheck {
     }
 }
 
-/// SHA-256 を見る（1.3GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
+/// SHA-256 を見る（3.1GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
 pub fn check_model_sha256(path: &Path, expected_hex: &str) -> ModelCheck {
     let Ok(mut file) = File::open(path) else {
         return ModelCheck::Missing;
@@ -1142,14 +1168,35 @@ mod tests {
     }
 
     #[test]
-    fn active_model_keeps_the_bundled_values() {
-        // 表へまとめる前の MODEL_FILE / MODEL_SIZE / MODEL_SHA256 と同じ値（照合の期待値を変えていない）。
-        assert_eq!(ACTIVE_MODEL.file_name, "stario-qwen3.5-2b-q4_k_m.gguf");
-        assert_eq!(ACTIVE_MODEL.size, 1_312_164_800);
+    fn active_model_is_gemma_fetched_from_a_pinned_commit() {
+        assert_eq!(ACTIVE_MODEL.file_name, "gemma-4-E2B-it-Q4_K_M.gguf");
+        assert_eq!(ACTIVE_MODEL.size, 3_106_738_272);
         assert_eq!(
             ACTIVE_MODEL.sha256,
-            "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35"
+            "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8"
         );
+        assert_eq!(ACTIVE_MODEL.version_id(), "gemma-4-e2b-it-q4-k-m-740185b2");
+        let source = ACTIVE_MODEL.source.expect("Gemma is fetched on first run");
+        let url = crate::infra::url_guard::model_download_url(&source).unwrap();
+        // 版はコミットのハッシュ（40 桁）で固定し、動く名前（main など）は使わない。
+        let revision = url.path().split('/').nth(4).unwrap();
+        assert_eq!(url.host_str(), Some("huggingface.co"));
+        assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(url.path().ends_with(ACTIVE_MODEL.file_name));
+        assert_eq!(source.redirect_hosts, ["us.aws.cdn.hf.co"]);
+    }
+
+    /// 手動の確認（`#[ignore]`）で使う場所: `YUUKO_LOCAL_LLM_MODEL` があればモデルだけをそこへ向ける。
+    #[test]
+    fn manual_bundle_takes_the_model_from_the_environment_only_when_set() {
+        let dir = Path::new("res/local_llm");
+        assert_eq!(
+            LocalLlmBundle::for_manual_runs(dir, None),
+            LocalLlmBundle::in_dir(dir)
+        );
+        let bundle = LocalLlmBundle::for_manual_runs(dir, Some(PathBuf::from("dl/m.gguf")));
+        assert_eq!(bundle.exe, LocalLlmBundle::in_dir(dir).exe);
+        assert_eq!(bundle.model, PathBuf::from("dl/m.gguf"));
     }
 
     /// 分けた 2 つの関数で組み立てた場所（lib.rs と同じ組み立て方）。
@@ -1195,7 +1242,7 @@ mod tests {
         let (local, resources) = (root.join("local"), root.join("res"));
         let downloaded = downloaded_model_dir(&ACTIVE_MODEL, &local).join(ACTIVE_MODEL.file_name);
         assert!(downloaded.ends_with(
-            Path::new("local_llm/models/stario-qwen3.5-2b-q4-k-m-5405508f")
+            Path::new("local_llm/models/gemma-4-e2b-it-q4-k-m-740185b2")
                 .join(ACTIVE_MODEL.file_name)
         ));
         let bundled = LocalLlmBundle::in_dir(&resources.join(BUNDLE_DIR_NAME)).model;

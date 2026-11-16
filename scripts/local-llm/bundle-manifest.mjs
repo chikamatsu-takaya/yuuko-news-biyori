@@ -2,7 +2,7 @@
 // 値の持ち主は Rust の src-tauri/src/infra/local_llm_runtime.rs（ACTIVE_MODEL と RUNTIME_FILES / VC_RUNTIME_FILES）で、
 // ここはそれを読むだけ。
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,9 @@ export function readBundleManifest(rustSource) {
     file: field("file_name", /^\s*file_name:\s*"([^"]+)",/m),
     size: Number(field("size", /^\s*size:\s*([0-9_]+),/m).replaceAll("_", "")),
     sha256: field("sha256", /^\s*sha256:\s*"([0-9a-f]{64})",/m),
+    // 取得元（`source: Some(...)`）のあるモデルは初回に取得し、インストーラーには入れない
+    // （設計案 §0.1・Q3）。そのため同梱物としては求めない・写さない。
+    downloadable: /^\s*source:\s*Some\(/m.test(activeModel),
   };
   // (ファイル名, SHA-256) の表を読む。source は写し元の区別
   // （llama: 同梱物のフォルダの runtime/、vc: VC++ ランタイムのフォルダ）。
@@ -114,7 +117,7 @@ export async function verifyRuntimeFiles(entries) {
 
 /**
  * `<dir>/runtime/*` と `<dir>/models/<model>` が表どおりか確かめ、問題の一覧を返す（空なら合格）。
- * 大きさが違うモデルは SHA-256 を読まずに不合格にする。
+ * 大きさが違うモデルは SHA-256 を読まずに不合格にする。初回に取得するモデルは見ない。
  */
 export async function verifyBundleDir(dir, manifest) {
   const problems = await verifyRuntimeFiles(
@@ -124,7 +127,16 @@ export async function verifyBundleDir(dir, manifest) {
       label: `runtime/${entry.name}`,
     }))
   );
-  problems.push(...(await verifyModelFile(dir, manifest)));
+  if (!manifest.model.downloadable) {
+    problems.push(...(await verifyModelFile(dir, manifest)));
+  } else {
+    // 初回に取得する版では、前に置いた古いモデル（例: 2B）をインストーラーに入れない（大きさと、ライセンス表記の食い違いを防ぐ）。
+    const modelsDir = join(dir, "models");
+    const leftovers = existsSync(modelsDir)
+      ? readdirSync(modelsDir).filter((name) => name.toLowerCase().endsWith(".gguf"))
+      : [];
+    problems.push(...leftovers.map((name) => `初回に取得する版なので、同梱物にモデルを置かないでください: models/${name}`));
+  }
   return problems;
 }
 
