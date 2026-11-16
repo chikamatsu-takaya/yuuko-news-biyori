@@ -12401,3 +12401,31 @@ test("local model: after a cancel or failure, a thin banner is shown on every st
   await banner.getByRole("button", { name: "閉じる" }).click();
   await expect(banner).toHaveCount(0);
 });
+
+test("local model: settings section shows the state, starts, and deletes after confirmation", async ({
+  page,
+}, testInfo) => {
+  await setLocalModel(page, {
+    phase: "ready",
+    receivedBytes: 3_100_000_000,
+    autoDownloadStarted: true,
+  });
+  await openHome(page);
+  await expect(page.getByTestId("local-model-banner")).toHaveCount(0);
+  await openAiSettings(page);
+  const section = page.getByTestId("local-model-panel");
+  await expect(section).toContainText("ダウンロード済み（3.1GB）");
+  await captureScreen(page, testInfo, "local-model-settings");
+  await section.getByRole("button", { name: "削除" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("削除すると、もう一度ダウンロードするまでローカルAIは使えません。");
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await section.getByRole("button", { name: "削除" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "削除する" }).click();
+  await expect(section).toContainText("AIの準備がまだです。");
+  await section.getByRole("button", { name: "始める" }).click();
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual(["discard_local_model", "start_local_model_download"]);
+});

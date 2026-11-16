@@ -78,6 +78,7 @@ import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
+import { LocalModelPanel } from "@/components/settings/LocalModelPanel";
 import { ImmediateApplyNote } from "@/components/settings/ImmediateApplyNote";
 import {
   DEFAULT_NOTIFICATION_MODE,
@@ -1564,6 +1565,8 @@ export default function SettingsScreen({
                       )}
                     </div>
                   </div>
+                  {/* ローカルAIのモデルの初回ダウンロード（設計案 §4.3）。取得元が無い配布物では出ない。 */}
+                  <LocalModelPanel />
                   <SettingRow label="解説の詳しさ">
                     <Select
                       value={settings.ai.explanationDetail}
