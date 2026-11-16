@@ -11,7 +11,7 @@
 //!   redirect following.
 #![allow(dead_code)]
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use url::{Host, Url};
 
@@ -356,6 +356,90 @@ pub fn local_llm_url(port: SpawnedLocalLlmPort, route: LocalLlmRoute) -> Url {
         .expect("http URL must accept a port");
     url.set_path(route.path());
     url
+}
+
+// --- ローカルLLMモデルの取得（セキュリティ詳細設計書 §6.2・§6.3 の例外。藤井 2026-11-16） ---
+//
+// 許可リストを通らずに外へ出る唯一の経路。取得先はコードのモデルの表（ModelSource）に固定し、
+// 文字列の URL は外から受け取らない。UrlPurpose・許可リストとは混ぜない（どちらからも広げられない）。
+
+/// 転送（リダイレクト）の上限（設計案 §3.1）。
+pub const MODEL_DOWNLOAD_MAX_REDIRECTS: usize = 5;
+
+/// モデルの取得元（コードの表に固定する値）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSource {
+    /// 最初に問い合わせるホスト（`https` 固定・既定の番号）。
+    pub host: &'static str,
+    /// 版を固定した経路（`/` で始まる）。
+    pub path: &'static str,
+    /// 転送を許すホスト（完全一致。親ドメインの一括許可はしない）。
+    pub redirect_hosts: &'static [&'static str],
+}
+
+/// 取得元の表の値から最初の URL を作る。
+pub fn model_download_url(source: &ModelSource) -> Result<Url, AppError> {
+    let url = Url::parse(&format!("https://{}{}", source.host, source.path))
+        .map_err(|_| AppError::Validation("model source is invalid".to_string()))?;
+    check_model_url(&url, &[source.host])?;
+    Ok(url)
+}
+
+/// 転送先を確かめて次の URL を返す。`Location` は外部由来なので、エラー・ログに値を出さない
+/// （転送先には署名などの問い合わせ部分が付くため）。
+pub fn model_redirect_url(
+    current: &Url,
+    location: &str,
+    source: &ModelSource,
+) -> Result<Url, AppError> {
+    let next = current
+        .join(location.trim())
+        .map_err(|_| AppError::Validation("model redirect is invalid".to_string()))?;
+    let mut allowed = vec![source.host];
+    allowed.extend_from_slice(source.redirect_hosts);
+    check_model_url(&next, &allowed)?;
+    Ok(next)
+}
+
+/// `https`・利用者情報なし・既定の番号・ホスト名の完全一致だけを通す。
+/// IP のリテラルや localhost は表に載らないので、完全一致で自然に落ちる。
+fn check_model_url(url: &Url, allowed_hosts: &[&str]) -> Result<(), AppError> {
+    let rejected = || AppError::Validation("model download target is not allowed".to_string());
+    if url.scheme() != "https" || url.port().is_some() {
+        return Err(rejected());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(rejected());
+    }
+    match url.host() {
+        Some(Host::Domain(domain)) if allowed_hosts.contains(&domain) => Ok(()),
+        _ => Err(rejected()),
+    }
+}
+
+/// DNS の答えを確かめ、接続先として固定する IP の一覧を返す（RSS・記事取得と同じ拒否帯）。
+/// 1 つでも拒否帯が混ざれば全体を拒否する（どれにつながるかを相手に選ばせないため）。
+pub fn check_model_download_addrs<I>(addrs: I) -> Result<Vec<SocketAddr>, AppError>
+where
+    I: IntoIterator<Item = SocketAddr>,
+{
+    let mut validated: Vec<SocketAddr> = Vec::new();
+    for addr in addrs {
+        if is_disallowed_ip_addr(addr.ip()) {
+            return Err(AppError::Validation(
+                "model download host resolved to a disallowed IP".to_string(),
+            ));
+        }
+        if !validated.iter().any(|seen| seen.ip() == addr.ip()) {
+            validated.push(SocketAddr::new(addr.ip(), 0));
+        }
+    }
+    if validated.is_empty() {
+        return Err(AppError::Network(
+            "model download host did not resolve".to_string(),
+        ));
+    }
+    Ok(validated)
 }
 
 #[cfg(test)]
@@ -801,5 +885,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- ローカルLLMモデルの取得（固定の取得経路と転送の確認） ---
+
+    const SOURCE: super::ModelSource = super::ModelSource {
+        host: "models.example.test",
+        path: "/repo/resolve/0123abcd/model.gguf",
+        redirect_hosts: &["cdn.example.test"],
+    };
+
+    #[test]
+    fn model_download_url_is_built_from_the_fixed_source() {
+        let url = super::model_download_url(&SOURCE).expect("fixed source must build");
+        assert_eq!(
+            url.as_str(),
+            "https://models.example.test/repo/resolve/0123abcd/model.gguf"
+        );
+    }
+
+    #[test]
+    fn model_redirect_accepts_only_https_and_exact_hosts_from_the_table() {
+        use super::model_redirect_url;
+        let current = super::model_download_url(&SOURCE).unwrap();
+        let next = model_redirect_url(&current, "https://cdn.example.test/x?sig=abc", &SOURCE)
+            .expect("listed CDN host must pass");
+        assert_eq!(next.host_str(), Some("cdn.example.test"));
+        model_redirect_url(&current, "/other/path", &SOURCE).expect("same host relative path");
+
+        for location in [
+            "http://cdn.example.test/x",          // https 以外
+            "https://a.cdn.example.test/x",       // サブドメインは一括許可しない
+            "https://example.test/x",             // 親ドメインも許さない
+            "https://evil.example.com/x",         // 表に無いホスト
+            "https://cdn.example.test:8443/x",    // 既定以外の番号
+            "https://user:pw@cdn.example.test/x", // 利用者情報
+            "https://127.0.0.1/x",                // IP のリテラル
+            "https://localhost/x",
+            "file:///C:/Windows/win.ini",
+        ] {
+            let error = model_redirect_url(&current, location, &SOURCE)
+                .expect_err("redirect outside the fixed table must be rejected");
+            assert!(!error.to_string().contains("example"), "{error}");
+            assert!(!error.to_string().contains("sig"), "{error}");
+        }
+    }
+
+    #[test]
+    fn model_download_addrs_reject_disallowed_ips() {
+        use super::check_model_download_addrs;
+        use std::net::SocketAddr;
+        let addr = |text: &str| -> SocketAddr { text.parse().unwrap() };
+        let ok = check_model_download_addrs([addr("8.8.8.8:443"), addr("8.8.8.8:443")])
+            .expect("public IP must pass");
+        assert_eq!(ok.len(), 1);
+        for bad in [
+            "10.0.0.1:443",
+            "127.0.0.1:443",
+            "[::1]:443",
+            "169.254.169.254:443",
+        ] {
+            check_model_download_addrs([addr("1.1.1.1:443"), addr(bad)])
+                .expect_err("a disallowed IP in the answer must reject the whole host");
+        }
+        check_model_download_addrs(Vec::new()).expect_err("empty answer must fail");
     }
 }

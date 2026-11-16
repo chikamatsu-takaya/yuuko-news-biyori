@@ -82,6 +82,9 @@ sha2 = "0.10"
 # - Win32_UI_Input_KeyboardAndMouse: 最後のキーボード・マウス入力の時刻を読む GetLastInputInfo（LASTINPUTINFO）。
 # - Win32_System_SystemInformation: 物理メモリの空きを読む GlobalMemoryStatusEx（MEMORYSTATUSEX）と、
 #   最後の入力からの経過を求める GetTickCount。
+# ローカルLLMモデルの初回ダウンロード（設計案 §2.5）で、始める前に置き場所のドライブの空きを確かめるため、
+# 次の 1 feature だけを追加する（新規クレート・取得物の追加なし。取得を始めるときに 1 回だけ呼ぶ）。
+# - Win32_Storage_FileSystem: GetDiskFreeSpaceExW。
 windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -92,4 +95,5 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_SystemInformation",
+    "Win32_Storage_FileSystem",
 ] }

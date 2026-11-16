@@ -26,7 +26,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::http_body::declared_length_exceeds;
-use super::url_guard::{local_llm_url, LocalLlmRoute, SpawnedLocalLlmPort};
+use super::url_guard::{local_llm_url, LocalLlmRoute, ModelSource, SpawnedLocalLlmPort};
 use crate::domain::summary::{
     ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
@@ -41,6 +41,8 @@ pub struct ModelSpec {
     pub file_name: &'static str,
     pub size: u64,
     pub sha256: &'static str,
+    /// 取得元（設計案 §2.2）。無いモデルは初回ダウンロードできない（同梱だけで使う）。
+    pub source: Option<ModelSource>,
 }
 
 /// 使うモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
@@ -51,6 +53,8 @@ pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
     file_name: "stario-qwen3.5-2b-q4_k_m.gguf",
     size: 1_312_164_800,
     sha256: "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35",
+    // 今の 2B は自前の量子化で公開の置き場が無いため、取得元は持たない（Gemma への差し替えの PR で入れる）。
+    source: None,
 };
 
 /// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。

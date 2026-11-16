@@ -199,7 +199,13 @@
 - SHA-256: 最初から取るときは、受け取りながら計算する。再開したときは、既存の `.part` を読み直してから続きを足す（ハッシュの途中の状態は保存しない。3GB の読み直しは release で数秒の見込みだが **未計測**）。
 - 不一致: 大きさが合って SHA-256 が合わない → `.part` を消し、自動で 1 回だけ最初から取り直す。2 回目も合わなければ「失敗（中身が合わない）」にして止め、利用者の「やり直す」を待つ（同じ取得元から壊れたものを取り続けない）。取得元が複数あるとき（Q1 で C）は次の取得元へ移る。
 - 自動のやり直し（通信の失敗・時間切れ）: 1 分 → 5 分 → 30 分と間をあけて、アプリの起動中に最大 3 回。それでも失敗したら止め、利用者の「やり直す」を待つ。待つ間は、決まった時刻に 1 回起きるだけにし、常時の見張りはしない。
-- 時間切れ: 接続は 30 秒。本文は「一定の時間（例: 60 秒）何も届かなければ切る」形にする。`reqwest` の `blocking` のクライアントには **既定で 30 秒の時間切れがある**ため、取得用のクライアントでは `timeout(None)` を明示して全体の時間切れを外す（明示しないと、3GB の取得が 30 秒で切れる）。そのうえで、読み取りごとの時間切れを付けられるかは **未確認**（§8）。付けられない場合は、読み取りのたびに経過を見て止める。
+- 時間切れ: 接続は 30 秒（`connect_timeout`）。本文は「60 秒何も届かなければ切る」形にし、取得用のクライアントで `timeout(60 秒)` を設定する。
+  - `reqwest` 0.12（確かめた版は 0.12.28）の `blocking` の `timeout` は、全体の時間切れではなく、**要求の送信と本文の読み取り 1 回ごとにかかる時間切れ**である（ソース: `src/blocking/client.rs` の要求の送信〔`wait::timeout(f, timeout)`〕と、`src/blocking/response.rs` の `impl Read for Response`）。既定は 30 秒。データが届き続けている限り、3GB の取得でも切れない。
+  - `timeout(None)` にすると、黙ったまま接続を切らない相手を永久に待ち、止める合図も届かなくなるため使わない（`blocking` には読み取りだけの時間切れ `read_timeout` が無い）。
+  - 止める合図は、本文の読み取りと SHA-256 の読み直し（1MB ごと）の区切りで見る。合図が届かない区間は次のとおり。
+    - 本文の読み取り 1 回の待ち（時間切れの 60 秒まで）。
+    - 応答のヘッダーを待つ間（接続の 30 秒を含めて、最大 60 秒）。
+    - OS の DNS の問い合わせの間（時間切れなし。OS 任せ）。
 - アプリの終了: 終了の要求で読み取りの繰り返しを抜け、`.part` と記録を残す（続きから取れる。次の起動で自動で始めるかは U7）。
 
 ### 2.5 空き容量の確認と一時ファイル
@@ -419,7 +425,7 @@ React は表示とボタンだけを持ち、取得・確認・保存はすべ�
 |---|---|---|---|
 | 1. モデルの表と置き場所の分離（動きは変えない） | `MODEL_*` を `ModelSpec` の表へまとめる。`resolve_bundle_dir` を `resolve_runtime_dir` と `resolve_model_path` に分け、`LocalLlmBundle` を実行の部品の場所とモデルの場所の 2 つから作る。この PR の時点では、モデルは今と同じ同梱の場所を見る。`place-bundle.mjs` / `bundle-manifest.mjs` が読む値の場所も合わせる | `infra/local_llm_runtime.rs`・`services/local_llm_service.rs`・`lib.rs`・`scripts/local-llm/*.mjs` | 300〜400 行 |
 | 2. 取得の部品（infra） | `url_guard` に固定の取得経路と転送の確認を足す。`infra/model_download.rs`: `Range` での再開、大きさの上限、受け取りながらの SHA-256、`.part` と記録、完成時の名前の変更、空き容量の確認。通信はテストで差し替えられる形にする | `infra/url_guard.rs`・`infra/model_download.rs`（新規）・`Cargo.toml`（`windows-sys` の feature を足す場合） | 500〜600 行 |
-| 3. 取得の制御と command | `services/local_model_download_service.rs`（新規）: 状態・やり直しの間隔・一時停止・終了時の止め方・イベント・古いファイルの削除。command 5 つ（`pause_local_model_download` は Q7 次第）と `APP_COMMANDS`・`main-window.toml`。`LocalAiFailure::NotReady` と `is_bundle_present` の連携。取得が終わったら `AutoSummaryQueue::enqueue_unsummarized` を呼んで待機列を並べ直す（準備ができていない間に待機列が空にされるため）。`error.rs` の固定コード（例 `LOCAL_AI_NOT_READY`）とそのテスト。既存の `AutoSummaryStatusKind::LocalAiNotReady`（同梱物が無い・壊れている）と取り違えないよう、種類と文言を見直す。§3.2 のモデルのファイルを開き続ける取っ手。自動で始めたことの記録（設定の項目） | 上記の新規ファイル・`commands/`・`lib.rs`・`command_manifest.rs`・`permissions/main-window.toml`・`domain/ai_connection.rs`・`error.rs`・`services/auto_summary_queue.rs`・`domain/summary.rs` | 500〜600 行（超えそうなら、取っ手と自動要約の連携を別の PR に分ける） |
+| 3. 取得の制御と command | `services/local_model_download_service.rs`（新規）: 状態・やり直しの間隔・一時停止・終了時の止め方・イベント・古いファイルの削除。command 5 つ（`pause_local_model_download` は Q7 次第）と `APP_COMMANDS`・`main-window.toml`。`LocalAiFailure::NotReady` と `is_bundle_present` の連携。取得が終わったら `AutoSummaryQueue::enqueue_unsummarized` を呼んで待機列を並べ直す（準備ができていない間に待機列が空にされるため）。`error.rs` の固定コード（例 `LOCAL_AI_NOT_READY`）とそのテスト。既存の `AutoSummaryStatusKind::LocalAiNotReady`（同梱物が無い・壊れている）と取り違えないよう、種類と文言を見直す。§3.2 のモデルのファイルを開き続ける取っ手。自動で始めたことの記録（設定の項目）。PR 2 のレビューで出た次の点も扱う: ハッシュ不一致の取り直し回数を制御側で通算して数える（部品の `download_model` は呼び出しごとに 1 回の取り直しへ戻るため）／`200` で最初からになったときの空き容量の不足分（始める前の確認は残りの大きさで行うため）／`206` で `Content-Length` が無いときの扱い（今は大きさの不一致として止める）／`model_dir` は利用者の値ではなく、置き場所の規則（§2.3）で決める | 上記の新規ファイル・`commands/`・`lib.rs`・`command_manifest.rs`・`permissions/main-window.toml`・`domain/ai_connection.rs`・`error.rs`・`services/auto_summary_queue.rs`・`domain/summary.rs` | 500〜600 行（超えそうなら、取っ手と自動要約の連携を別の PR に分ける） |
 | 4. 画面 | 初期セッティング中の表示（U3 の推奨では初回起動の案内 `components/onboarding/OnboardingOverlay.tsx` への追加）、メイン画面の案内（場所は U5。`components/screens/MainScreen.tsx` を触る場合は要判断）、設定画面の欄、接続テストの文言、`lib/tauri` の呼び出し。Playwright | `components/`・`app/page.tsx`（U5 で B の場合）・`lib/tauri/`・`tests/ui/` | 400〜600 行 |
 | 5. 配布物の変更 | `bundle.resources` からモデルを外す（実行の部品と LICENSES だけ）。`check-bundle.mjs` がモデルを求めないようにする。配布手順書・詳細設計書 §5.4.5.1・セキュリティ詳細設計書 §6・データ設計書の更新。ライセンス表記（取得したモデルのライセンス本文をどこに置くか） | `tauri.conf.json`・`scripts/local-llm/`・`docs/` | 200〜400 行 |
 | （別判断）モデルの差し替え | Gemma などへ替える場合。モデルの表の 1 行・ライセンス表記・自動要約のメモリの基準・写す長さの点検（§23.5） | — | 本書の対象外 |
@@ -431,7 +437,7 @@ React は表示とボタンだけを持ち、取得・確認・保存はすべ�
 
 - 再開: `206` で正しい `Content-Range` → 続きに書く／`200` → 最初から／`416`・始まりの違う `Content-Range`・`ETag` の違い → `.part` を消して最初から。`.part` が全体の大きさに達していれば、通信せずに照合へ進む。
 - 大きさ: `200` で全体と違う・`206` で「全体−N」と違う `Content-Length`、期待より大きい本文 → 止めて `.part` を消す。
-- 時間切れ: 取得用のクライアントが `timeout(None)` で作られ、30 秒を超える取得が切れないこと。何も届かない時間が上限を超えたら切れること。
+- 時間切れ: 取得用のクライアントが読み取りごとの時間切れ 60 秒（`timeout`）・接続 30 秒（`connect_timeout`）で作られること。全体の時間切れを持たないこと（`reqwest` の `blocking` の `timeout` は読み取り 1 回ごと。§2.4）。
 - 記録: `.part.json` に転送先の URL・問い合わせの部分が入らないこと。
 - すり替え: 照合の後、モデルのファイルをほかから書き換え・削除できないこと（§3.2 の取っ手）。`discard_local_model` の後は `verified` が下りていること。
 - 自動要約: 取得が終わった後に待機列が並べ直されること。
@@ -470,12 +476,14 @@ React は表示とボタンだけを持ち、取得・確認・保存はすべ�
 2. **URL が変わらずに使えるか**: `/resolve/<コミット>/<ファイル名>` の形で版を固定できるか、置き場（リポジトリ）が消されたり名前が変わったりする可能性、転送先のホスト名（固定の一覧に入れる値）。
 3. **今の 2B の取得元**: `stario-qwen3.5-2b-q4_k_m.gguf` は自前の量子化で、公開の置き場が無い。2B のまま取得に切り替えるなら、チームの配布場所（Q1 の B）が要る。配布場所の候補（例: GitHub Releases）の 1 ファイルの大きさの上限も未確認。→ 2026-11-16 に Q1 は A、配るモデルは Gemma 4 E2B に決まったため、この点は調べなくてよくなった（記録として残す）。
 4. **2GB の上限**: MSI・NSIS の 2GB の上限は配布手順書 §4 の記載に基づく見込みで、インストーラーを作って確かめていない。
-5. **`reqwest`（0.12・`blocking`）の時間切れ**: `timeout` が本文の読み取りまで含むか、読み取りごとの時間切れを付けられるか。
+5. **`reqwest`（0.12・`blocking`）の時間切れ**: → 確かめた（0.12.28 のソース）。`timeout` は要求の送信と本文の読み取り 1 回ごとにかかる時間切れで、全体の時間切れではない。§2.4 のとおり 60 秒を設定する（記録として残す）。
 6. **空き容量・優先度の API**: `GetDiskFreeSpaceExW` は `windows-sys` の `Win32_Storage_FileSystem` の feature にある見込み（実装のときに確かめる）。`THREAD_MODE_BACKGROUND_BEGIN` はどの feature にあるか未確認。どちらも新しいクレートは要らない見込み。
 7. **従量制の回線の判定**（Q7 の C）: 既存の依存で判定できるか。
 8. **`app_local_data_dir()` の実際のパス**（Windows で `%LOCALAPPDATA%\jp.star-system.yuuko-news` になるか）。
 9. **アンインストール時の動き**: Tauri の NSIS のアンインストーラーが `%LOCALAPPDATA%` のアプリのデータを消すか・消す選択肢があるか（Q10）。
-10. **プロキシ**: 会社のネットワークで、`reqwest` が Windows のプロキシ設定を使うか（RSS 取得と同じ動きになるはずだが、大きな取得で確かめていない）。プロキシを通すときは、接続先はプロキシになり、`resolve_to_addrs` で固定した IP は使われず、取得元の IP の拒否帯の確かめもプロキシ任せになる。RSS・記事取得のプロキシ経由のときの今の扱いを確かめ、それに合わせるか、取得ではプロキシを通さないかを決める。
+10. **プロキシ**: 会社のネットワークで、`reqwest` が Windows のプロキシ設定を使うか（RSS 取得と同じ動きになるはずだが、大きな取得で確かめていない）。
+    - 確かめた事実（reqwest 0.12.28・hyper-util のソース、2026-11-16）: 本アプリは `reqwest` を `default-features = false` で使っており、`system-proxy` の feature が無いため、**Windows のシステムのプロキシ設定（レジストリ）は読まない**。ただし環境変数（`HTTPS_PROXY` など）は読む。環境変数でプロキシが設定されているときは、`resolve_to_addrs` の固定と IP の拒否帯の確かめが効かず、守りは TLS の証明書の確認だけになる（RSS・記事取得も同じ）。
+    - 選択肢（**未決**。PR 3 の前に決める）: A. 取得用のクライアントに `.no_proxy()` を付ける（前例: `local_llm_runtime.rs` の 127.0.0.1 への接続）。プロキシが必須の会社のネットワークでは取得できなくなる／B. 今のまま（環境変数のプロキシを使う）。プロキシを通すときは、接続先はプロキシになり、`resolve_to_addrs` で固定した IP は使われず、取得元の IP の拒否帯の確かめもプロキシ任せになる。RSS・記事取得のプロキシ経由のときの今の扱いを確かめ、それに合わせるか、取得ではプロキシを通さないかを決める。
 11. **時間・負荷**: 3.1GB の取得にかかる時間、取得中の CPU・ディスクの負荷、取得後の SHA-256 の照合の時間（キャッシュに無い初回）。どれも未計測。
 12. **ライセンス表記**: 取得したモデルのライセンス本文と改変の告知（今は `local_llm/LICENSES/` に同梱）を、取得の形でどう示すか（インストーラーに入れておくか、取得と一緒に置くか）。Gemma の Apache-2.0 は評価資料の記載で、本書では確かめ直していない。
 13. **モデルの差し替え**: Gemma 4 E2B に替えることに決まった（藤井さん 2026-11-16）。差し替えは別の PR で行う。その PR で、§23.5 の判断材料（作り話は減ったとは言えず、記事の文を長く写す傾向もある）への対応・ライセンス表記・自動要約のメモリの基準を扱う。
