@@ -10,6 +10,7 @@
 
 // 本番からの呼び出し（取得の制御・Tauri command）は後続の PR で足すため、それまでは本番ビルドで使われない。
 // テストでは全部を使うので、本番ビルドのときだけ未使用の警告を止める。
+// TODO: 3/5（取得の制御と command）で本番から呼ぶようになったら、この許可を外す。
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fs::{self, File, OpenOptions};
@@ -37,7 +38,8 @@ use super::url_guard::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 何も届かない時間の上限（設計案 §2.4）。reqwest 0.12 の blocking の `timeout` は全体の時間ではなく、
 /// 要求の送信と本文の読み取り 1 回ごとにかかる。そのため、これで「黙った相手」を切れる。
-/// 止める合図は読み取りの区切りごとに見るので、届くまでの遅れは最大でこの時間になる。
+/// 止める合図は読み取り・ハッシュの読み直しの区切りごとに見る。合図が届かない区間は、読み取り 1 回の待ち
+/// （最大この時間）・ヘッダーを待つ間（接続の 30 秒を含めて最大この時間）・OS の DNS の問い合わせの間（時間切れなし）。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 始める前に確かめる空きの余裕（設計案 §2.5）。
 const FREE_SPACE_MARGIN: u64 = 1 << 30;
@@ -192,7 +194,10 @@ fn download_with(
         let digest = match fetch_part(spec, source, &paths, transport, free_space, stop)? {
             Fetched::Stopped => return Ok(DownloadOutcome::Stopped),
             Fetched::Full(Some(digest)) => digest,
-            Fetched::Full(None) => hash_file(&paths.part)?,
+            Fetched::Full(None) => match hash_file(&paths.part, stop)? {
+                Some(digest) => digest,
+                None => return Ok(DownloadOutcome::Stopped),
+            },
         };
         if hex(&digest).eq_ignore_ascii_case(spec.sha256) {
             fs::rename(&paths.part, &paths.complete).map_err(|_| DownloadError::Io)?;
@@ -271,6 +276,11 @@ fn fetch_part(
             continue;
         }
         validator = reply.validator.clone();
+        if have == 0 {
+            // 最初から書くときは、新しい記録より先に古い .part を消す
+            // （古い中身の .part と新しい ETag の記録が組になって残る隙間を作らない）。
+            paths.discard()?;
+        }
         write_json_atomic(
             &paths.record,
             &PartRecord::new(spec, validator.clone()),
@@ -367,7 +377,9 @@ fn stream_body(
     let mut file = if have == 0 {
         File::create(&paths.part).map_err(|_| DownloadError::Io)?
     } else {
-        hash_into(&paths.part, have, &mut hasher)?;
+        if !hash_into(&paths.part, have, &mut hasher, stop)? {
+            return Ok(Fetched::Stopped);
+        }
         OpenOptions::new()
             .append(true)
             .open(&paths.part)
@@ -412,24 +424,36 @@ fn write_error(error: io::Error) -> DownloadError {
     }
 }
 
-/// ファイルの先頭 `len` バイトをハッシュへ足す。
-fn hash_into(path: &Path, len: u64, hasher: &mut Sha256) -> Result<(), DownloadError> {
+/// ファイルの先頭 `len` バイトをハッシュへ足す。3GB の読み直しは数秒かかりうるため、
+/// 1MB ごとに止める合図を見る。止まったら false（.part と記録は残す）。
+fn hash_into(
+    path: &Path,
+    len: u64,
+    hasher: &mut Sha256,
+    stop: &AtomicBool,
+) -> Result<bool, DownloadError> {
     let file = File::open(path).map_err(|_| DownloadError::Io)?;
     let mut limited = file.take(len);
     let mut buf = vec![0u8; 1 << 20];
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         match limited.read(&mut buf) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(true),
             Ok(read) => hasher.update(&buf[..read]),
             Err(_) => return Err(DownloadError::Io),
         }
     }
 }
 
-fn hash_file(path: &Path) -> Result<[u8; 32], DownloadError> {
+/// ファイル全体の SHA-256。止まったら None。
+fn hash_file(path: &Path, stop: &AtomicBool) -> Result<Option<[u8; 32]>, DownloadError> {
     let mut hasher = Sha256::new();
-    hash_into(path, u64::MAX, &mut hasher)?;
-    Ok(hasher.finalize().into())
+    if !hash_into(path, u64::MAX, &mut hasher, stop)? {
+        return Ok(None);
+    }
+    Ok(Some(hasher.finalize().into()))
 }
 
 fn hex(digest: &[u8; 32]) -> String {
@@ -789,6 +813,25 @@ mod tests {
         assert_eq!(run(&spec, &dir, &transport), Ok(DownloadOutcome::Completed));
         assert_completed(&dir, &spec, &full);
         assert!(transport.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn stops_while_rehashing_the_part_and_keeps_it() {
+        let (full, dir) = (body(), temp_dir());
+        let spec = spec_for(&full);
+        seed_part(&dir, &spec, &full, Some("\"v1\""));
+        let transport = FakeTransport::new(Vec::new());
+        let stop = AtomicBool::new(true);
+        let outcome = download_with(&spec, &SOURCE, &dir, &transport, &plenty, &stop);
+        assert_eq!(outcome, Ok(DownloadOutcome::Stopped));
+        let paths = Paths::new(&dir, &spec);
+        assert_eq!(fs::read(&paths.part).unwrap(), full);
+        assert!(paths.record.exists() && !paths.complete.exists());
+        assert!(transport.requests.borrow().is_empty());
+
+        // 再開の読み直し（続きを取る前）でも止まる。
+        let mut hasher = Sha256::new();
+        assert_eq!(hash_into(&paths.part, 10, &mut hasher, &stop), Ok(false));
     }
 
     #[test]
