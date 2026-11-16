@@ -22,6 +22,8 @@ pub mod http_body;
 pub mod local_llm_runtime;
 /// OS 連携（マイク使用中・会議アプリ起動中の判定）。外部通信は行わない。
 pub mod meeting_detector;
+/// 同梱ローカルLLMのモデルの取得（固定の取得元・再開・SHA-256 照合。設計案 §2.4・§3.1）。
+pub mod model_download;
 pub mod rss_client;
 pub mod url_guard;
 /// OS 連携（最後の入力からの経過・物理メモリの空き。自動要約の待ち判定用）。外部通信は行わない。
