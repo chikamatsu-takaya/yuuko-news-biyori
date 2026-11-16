@@ -183,22 +183,41 @@ impl SettingsService {
     /// 初回起動の案内の完了状態も引き継ぐ（リセットで案内を再表示しない）。読めない場合は完了扱い。
     pub fn reset_user_settings(&self) -> Result<UserSettingsDto, AppError> {
         let _guard = self.repository.lock_updates();
-        let (current_auto_start, onboarding_completed) = match self.repository.load_or_default() {
-            Ok(persisted) => (
-                persisted.ui.auto_start_on_pc_boot,
-                persisted.ui.onboarding_completed,
-            ),
-            Err(AppError::Json(_)) => {
-                self.repository.backup_corrupt_file()?;
-                (false, true)
-            }
-            Err(_) => (false, true),
-        };
+        let (current_auto_start, onboarding_completed, local_model) =
+            match self.repository.load_or_default() {
+                Ok(persisted) => (
+                    persisted.ui.auto_start_on_pc_boot,
+                    persisted.ui.onboarding_completed,
+                    persisted.local_model,
+                ),
+                Err(AppError::Json(_)) => {
+                    self.repository.backup_corrupt_file()?;
+                    (false, true, Default::default())
+                }
+                Err(_) => (false, true, Default::default()),
+            };
         let mut defaults = PersistedSettings::initial();
         defaults.ui.auto_start_on_pc_boot = current_auto_start;
         defaults.ui.onboarding_completed = onboarding_completed;
+        // モデルの取得を自動で始めた記録も引き継ぐ（初期化で自動の取得がもう一度始まらないように。設計案 §2.1）。
+        defaults.local_model = local_model;
         self.repository.save(&defaults)?;
         Ok(defaults.to_dto())
+    }
+
+    /// モデルの取得を自動で始めたことがあるか（読めなければ「ある」とみなし、自動では始めない）。
+    pub fn local_model_auto_download_started(&self) -> bool {
+        self.repository.load_or_default().map_or(true, |persisted| {
+            persisted.local_model.auto_download_started_at.is_some()
+        })
+    }
+
+    /// モデルの取得を自動で始めることを記録する（通信の前に呼ぶ。失敗したら呼び出し側は始めない）。
+    pub fn record_local_model_auto_download_started(&self) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        persisted.local_model.auto_download_started_at = Some(chrono::Local::now().to_rfc3339());
+        self.repository.save(&persisted)
     }
 
     /// 自動起動の設定値（OS 登録状態の写し）だけを更新する。値が同じなら書き込まない。
@@ -565,6 +584,20 @@ mod tests {
         let reset = service.reset_user_settings().unwrap();
         assert!(reset.auto_start_on_pc_boot);
         assert!(service.get_user_settings().unwrap().auto_start_on_pc_boot);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn local_model_auto_download_record_survives_reset() {
+        let (service, path) = temp_service();
+        service.initialize_default_if_missing().unwrap();
+        assert!(!service.local_model_auto_download_started());
+        service.record_local_model_auto_download_started().unwrap();
+        assert!(service.local_model_auto_download_started());
+        service.reset_user_settings().unwrap();
+        assert!(service.local_model_auto_download_started());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));

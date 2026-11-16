@@ -1,23 +1,19 @@
 //! 同梱ローカルLLMのモデル（GGUF）の取得の部品（設計案 §2.4・§2.5・§3.1・§3.2、
 //! セキュリティ詳細設計書 §6.2・§6.3 の例外）。
 //!
-//! この層は「1 回の取得」だけを持つ。いつ始め・何回やり直し・どう見せるかは取得の制御（後続の PR）が持つ。
+//! この層は「1 回の取得」だけを持つ。いつ始め・何回やり直し・どう見せるかは取得の制御
+//! （`services::local_model_download_service`）が持つ。
 //! - 取得先は `ModelSpec::source`（コードの表）から `url_guard` が作る URL だけ。任意の URL は受け取らない。
 //! - 転送は自動で従わず、1 回ずつ `url_guard::model_redirect_url` で確かめる（最大 5 回）。
 //! - 途中のファイルは `<file_name>.part`、記録は `<file_name>.part.json`。記録に転送先の URL は残さない。
 //! - SHA-256 が合ったときだけ完成の名前へ変える。合わなければ 1 回だけ最初から取り直す。
 //! - ログ・エラーに URL（転送先の署名を含む問い合わせ部分）・本文を出さない。エラーは固定の分類で返す。
 
-// 本番からの呼び出し（取得の制御・Tauri command）は後続の PR で足すため、それまでは本番ビルドで使われない。
-// テストでは全部を使うので、本番ビルドのときだけ未使用の警告を止める。
-// TODO: 3/5（取得の制御と command）で本番から呼ぶようになったら、この許可を外す。
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -75,6 +71,27 @@ pub enum DownloadOutcome {
     Completed,
     /// 止める合図で止まった（`.part` と記録は残す）。
     Stopped,
+}
+
+/// 取得の進み具合と、呼び出しをまたいで数える値。取得の制御が 1 つ持ち、呼び出しのたびに渡す。
+#[derive(Default)]
+pub struct DownloadProgress {
+    /// `.part` に書いた大きさ（バイト）。
+    pub received: AtomicU64,
+    /// SHA-256 が合わなかった回数の通算。自動の取り直しは通算で 1 回だけ（呼び出しのたびに 1 回へ
+    /// 戻ると、通信の失敗の後の自動のやり直しで、壊れたものを取り続けるため）。利用者の「やり直す」で 0 に戻す。
+    pub hash_mismatches: AtomicU32,
+    /// 書き進めたときに呼ぶ（取得の制御がイベントを間引いて送る）。
+    pub on_progress: Option<Box<dyn Fn(u64) + Send + Sync>>,
+}
+
+impl DownloadProgress {
+    fn report(&self, received: u64) {
+        self.received.store(received, Ordering::Relaxed);
+        if let Some(notify) = &self.on_progress {
+            notify(received);
+        }
+    }
 }
 
 /// 1 回の要求で送る範囲（再開のとき）。
@@ -167,6 +184,7 @@ pub fn download_model(
     spec: &ModelSpec,
     model_dir: &Path,
     stop: &AtomicBool,
+    progress: &DownloadProgress,
 ) -> Result<DownloadOutcome, DownloadError> {
     let source = spec.source.ok_or(DownloadError::NoSource)?;
     download_with(
@@ -176,6 +194,7 @@ pub fn download_model(
         &ReqwestTransport,
         &available_space,
         stop,
+        progress,
     )
 }
 
@@ -186,12 +205,13 @@ fn download_with(
     transport: &dyn ModelTransport,
     free_space: &dyn Fn(&Path) -> Option<u64>,
     stop: &AtomicBool,
+    progress: &DownloadProgress,
 ) -> Result<DownloadOutcome, DownloadError> {
     fs::create_dir_all(model_dir).map_err(|_| DownloadError::Io)?;
     let paths = Paths::new(model_dir, spec);
-    let mut retried_after_mismatch = false;
     loop {
-        let digest = match fetch_part(spec, source, &paths, transport, free_space, stop)? {
+        let fetched = fetch_part(spec, source, &paths, transport, free_space, stop, progress)?;
+        let digest = match fetched {
             Fetched::Stopped => return Ok(DownloadOutcome::Stopped),
             Fetched::Full(Some(digest)) => digest,
             Fetched::Full(None) => match hash_file(&paths.part, stop)? {
@@ -208,12 +228,12 @@ fn download_with(
         }
         // 壊れたものを完成にしない。同じ取得元から取り続けないよう、自動の取り直しは 1 回だけ。
         paths.discard()?;
-        if retried_after_mismatch {
+        progress.report(0);
+        if progress.hash_mismatches.fetch_add(1, Ordering::Relaxed) >= 1 {
             log::warn!("local model download hash mismatch again; giving up");
             return Err(DownloadError::HashMismatch);
         }
         log::warn!("local model download hash mismatch; retrying once from the start");
-        retried_after_mismatch = true;
     }
 }
 
@@ -225,8 +245,10 @@ fn fetch_part(
     transport: &dyn ModelTransport,
     free_space: &dyn Fn(&Path) -> Option<u64>,
     stop: &AtomicBool,
+    progress: &DownloadProgress,
 ) -> Result<Fetched, DownloadError> {
     let (mut have, mut validator) = prepare_part(spec, paths)?;
+    progress.report(have);
     // 全部そろっているのに Range を送ると 416 になり、丸ごと取り直しになるため通信しない。
     if have == spec.size {
         return Ok(Fetched::Full(None));
@@ -287,7 +309,7 @@ fn fetch_part(
             "model download record",
         )
         .map_err(|_| DownloadError::Io)?;
-        return stream_body(reply.body, paths, have, spec.size, stop);
+        return stream_body(reply.body, paths, have, spec.size, stop, progress);
     }
 }
 
@@ -372,6 +394,7 @@ fn stream_body(
     have: u64,
     size: u64,
     stop: &AtomicBool,
+    progress: &DownloadProgress,
 ) -> Result<Fetched, DownloadError> {
     let mut hasher = Sha256::new();
     let mut file = if have == 0 {
@@ -407,6 +430,7 @@ fn stream_body(
         file.write_all(&buf[..read]).map_err(write_error)?;
         hasher.update(&buf[..read]);
         total += read as u64;
+        progress.report(total);
     }
     file.sync_all().map_err(write_error)?;
     if total < size {
@@ -477,6 +501,9 @@ struct ReqwestTransport;
 fn client_builder() -> reqwest::blocking::ClientBuilder {
     Client::builder()
         .redirect(Policy::none())
+        // 環境変数のプロキシを使わない（設計案 §8 の 10。藤井 2026-11-16）。プロキシを通すと、確かめた IP への
+        // 固定（`resolve_to_addrs`）と拒否帯の確認が効かなくなるため。前例は local_llm_runtime の 127.0.0.1 への接続。
+        .no_proxy()
         .timeout(IDLE_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .referer(false)
@@ -721,7 +748,15 @@ mod tests {
         transport: &FakeTransport,
     ) -> Result<DownloadOutcome, DownloadError> {
         let stop = AtomicBool::new(false);
-        download_with(spec, &SOURCE, dir, transport, &plenty, &stop)
+        download_with(
+            spec,
+            &SOURCE,
+            dir,
+            transport,
+            &plenty,
+            &stop,
+            &DownloadProgress::default(),
+        )
     }
 
     /// 途中までの `.part` と記録を置く。
@@ -822,7 +857,15 @@ mod tests {
         seed_part(&dir, &spec, &full, Some("\"v1\""));
         let transport = FakeTransport::new(Vec::new());
         let stop = AtomicBool::new(true);
-        let outcome = download_with(&spec, &SOURCE, &dir, &transport, &plenty, &stop);
+        let outcome = download_with(
+            &spec,
+            &SOURCE,
+            &dir,
+            &transport,
+            &plenty,
+            &stop,
+            &DownloadProgress::default(),
+        );
         assert_eq!(outcome, Ok(DownloadOutcome::Stopped));
         let paths = Paths::new(&dir, &spec);
         assert_eq!(fs::read(&paths.part).unwrap(), full);
@@ -893,6 +936,17 @@ mod tests {
         );
         assert_nothing_left(&dir, &spec);
         assert_eq!(transport.requests.borrow().len(), 2);
+
+        // 前の呼び出しで 1 回合わなかった（通算 1）なら、次の呼び出しでは取り直さずに止める。
+        let dir = temp_dir();
+        let transport = FakeTransport::new(vec![ok(&broken)]);
+        let progress = DownloadProgress::default();
+        progress.hash_mismatches.store(1, Ordering::Relaxed);
+        let stop = AtomicBool::new(false);
+        let outcome = download_with(&spec, &SOURCE, &dir, &transport, &plenty, &stop, &progress);
+        assert_eq!(outcome, Err(DownloadError::HashMismatch));
+        assert_eq!(progress.hash_mismatches.load(Ordering::Relaxed), 2);
+        assert_eq!(transport.requests.borrow().len(), 1);
     }
 
     #[test]
@@ -949,7 +1003,15 @@ mod tests {
             stop_on_read: Some(stop.clone()),
             ..FakeTransport::new(vec![ok(&full)])
         };
-        let outcome = download_with(&spec, &SOURCE, &dir, &transport, &plenty, &stop);
+        let outcome = download_with(
+            &spec,
+            &SOURCE,
+            &dir,
+            &transport,
+            &plenty,
+            &stop,
+            &DownloadProgress::default(),
+        );
         assert_eq!(outcome, Ok(DownloadOutcome::Stopped));
         let paths = Paths::new(&dir, &spec);
         assert_eq!(fs::metadata(&paths.part).unwrap().len(), 1000);
@@ -957,7 +1019,15 @@ mod tests {
 
         // 合図が立ったままなら通信を始めない。
         let transport = FakeTransport::new(Vec::new());
-        let outcome = download_with(&spec, &SOURCE, &temp_dir(), &transport, &plenty, &stop);
+        let outcome = download_with(
+            &spec,
+            &SOURCE,
+            &temp_dir(),
+            &transport,
+            &plenty,
+            &stop,
+            &DownloadProgress::default(),
+        );
         assert_eq!(outcome, Ok(DownloadOutcome::Stopped));
     }
 
@@ -968,7 +1038,15 @@ mod tests {
         let transport = FakeTransport::new(Vec::new());
         let small = |_: &Path| Some(FREE_SPACE_MARGIN);
         let stop = AtomicBool::new(false);
-        let outcome = download_with(&spec, &SOURCE, &dir, &transport, &small, &stop);
+        let outcome = download_with(
+            &spec,
+            &SOURCE,
+            &dir,
+            &transport,
+            &small,
+            &stop,
+            &DownloadProgress::default(),
+        );
         assert_eq!(
             outcome,
             Err(DownloadError::InsufficientSpace {
@@ -984,6 +1062,7 @@ mod tests {
             &crate::infra::local_llm_runtime::ACTIVE_MODEL,
             &temp_dir(),
             &AtomicBool::new(false),
+            &DownloadProgress::default(),
         );
         assert_eq!(outcome, Err(DownloadError::NoSource));
     }

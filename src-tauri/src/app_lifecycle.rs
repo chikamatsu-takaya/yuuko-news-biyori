@@ -693,6 +693,8 @@ pub(crate) fn stop_side_processes<R: Runtime>(app: &AppHandle<R>) {
         // llama-server を止める前に終了要求を立てる＝止めたために処理中の要求が失敗しても、
         // キューはそれを終了による中断とみなし、失敗に数えない（auto_summary_queue）。
         state.auto_summary_queue.request_stop();
+        // モデルの取得も止める（途中のファイルは残し、次は続きから取る）。終わるのは待たない。
+        state.local_model_download_service.shutdown();
         state.local_llm_service.shutdown();
     }
 }

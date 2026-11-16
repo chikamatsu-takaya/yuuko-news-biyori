@@ -84,6 +84,9 @@ pub struct LocalLlmConfig {
     pub manual_start_retry_gap: Duration,
     pub model_size: u64,
     pub model_sha256: String,
+    /// モデルを初回に取得する版か（`ACTIVE_MODEL.source` がある）。そうならモデルの欠けは `NotReady`
+    /// （取得の前・途中・失敗）、そうでなければ従来どおり `Missing`（同梱物の欠け）。
+    pub model_downloadable: bool,
     /// 実行の部品（ファイル名と SHA-256）。本番は `RUNTIME_FILES`。
     pub runtime_files: Vec<(String, String)>,
 }
@@ -103,6 +106,7 @@ impl Default for LocalLlmConfig {
             manual_start_retry_gap: MANUAL_START_RETRY_GAP,
             model_size: ACTIVE_MODEL.size,
             model_sha256: ACTIVE_MODEL.sha256.to_string(),
+            model_downloadable: ACTIVE_MODEL.source.is_some(),
             runtime_files: runtime_manifest(),
         }
     }
@@ -681,6 +685,28 @@ impl LocalLlmService {
             )
     }
 
+    /// モデルのファイルを消す・置き直す前後に呼ぶ（取得の制御から。設計案 §3.4 の `discard_local_model`）。
+    /// 動いていれば llama-server を止め、照合済みの印と「壊れていた」の印を下ろす
+    /// （消した後に古い照合の結果で起動しない・取り直したものを改めて照合するため）。
+    /// 走っている生成は、止めたことで失敗として返る。
+    pub fn forget_model(&self) {
+        if self.shared.stop_process() {
+            log::info!("stopped llama-server to replace the local model");
+        }
+        let mut state = self.shared.lock_state();
+        state.verified = false;
+        state.found_broken = false;
+    }
+
+    /// モデルが無いときの失敗（取得する版は `NotReady`）。
+    fn model_missing(&self) -> LocalAiFailure {
+        if self.shared.config.model_downloadable {
+            LocalAiFailure::NotReady
+        } else {
+            LocalAiFailure::Missing
+        }
+    }
+
     /// アプリ終了時に呼ぶ。動いていれば止め、以後は起動しない。
     pub fn shutdown(&self) {
         self.shared.shut_down.store(true, Ordering::SeqCst);
@@ -912,7 +938,7 @@ impl LocalLlmService {
             ModelCheck::Ok => {}
             ModelCheck::Missing => {
                 log::warn!("local llm model is missing");
-                return Err(LocalAiFailure::Missing);
+                return Err(self.model_missing());
             }
             ModelCheck::Broken => {
                 log::warn!("local llm model size does not match");
@@ -946,7 +972,7 @@ impl LocalLlmService {
                         started.elapsed().as_secs_f32()
                     );
                 }
-                ModelCheck::Missing => return Err(LocalAiFailure::Missing),
+                ModelCheck::Missing => return Err(self.model_missing()),
                 ModelCheck::Broken => {
                     log::warn!("local llm model SHA-256 does not match");
                     self.shared.lock_state().found_broken = true;
@@ -1303,6 +1329,7 @@ mod tests {
             manual_start_retry_gap: MANUAL_START_RETRY_GAP,
             model_size: MODEL_BYTES.len() as u64,
             model_sha256: sha256_hex(MODEL_BYTES),
+            model_downloadable: false,
             runtime_files: vec![(exe_name(), sha256_hex(EXE_BYTES))],
         }
     }
@@ -1501,6 +1528,38 @@ mod tests {
             LocalLlmService::unavailable().check_connection(),
             Err(LocalAiFailure::Missing)
         );
+    }
+
+    #[test]
+    fn downloadable_model_missing_is_not_ready_but_missing_runtime_stays_missing() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let config = LocalLlmConfig {
+            model_downloadable: true,
+            ..test_config()
+        };
+        let no_model = temp_bundle("dl-no-model", true, None);
+        let service = service_with(&no_model, launcher.clone(), config.clone());
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::NotReady));
+        let no_exe = temp_bundle("dl-no-exe", false, Some(MODEL_BYTES));
+        let service = service_with(&no_exe, launcher.clone(), config);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
+        assert_eq!(launcher.launches(), 0);
+    }
+
+    #[test]
+    fn forget_model_stops_the_server_and_drops_the_verification() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("forget", true, Some(MODEL_BYTES));
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        assert!(service.generate("p", 8).is_ok());
+        // 同じ大きさの別の中身へ替える。照合済みのままなら見逃すが、印を下ろせば照合し直して止める。
+        let mut other = MODEL_BYTES.to_vec();
+        other[0] ^= 1;
+        std::fs::write(LocalLlmBundle::in_dir(&bundle.0).model, &other).unwrap();
+        service.forget_model();
+        assert_eq!(launcher.stops(), 1);
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
+        assert_eq!(launcher.launches(), 1);
     }
 
     #[test]

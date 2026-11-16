@@ -45,6 +45,29 @@ pub struct ModelSpec {
     pub source: Option<ModelSource>,
 }
 
+impl ModelSpec {
+    /// 版の名前（設計案 §2.2 の `id`）。取得したモデルの置き場所のフォルダ名に使う。
+    /// ファイル名（拡張子を除く）と SHA-256 の先頭 8 桁から作り、英数字・`.`・`-` だけにする
+    /// （古いファイルの削除で、本アプリが作った名前の形だけを消すため。設計案 §5.2）。
+    pub fn version_id(&self) -> String {
+        let stem = self
+            .file_name
+            .strip_suffix(".gguf")
+            .unwrap_or(self.file_name);
+        let hash = self.sha256.get(..8).unwrap_or(self.sha256);
+        format!("{stem}-{hash}")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+}
+
 /// 使うモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
 /// どのモデルを使うかはビルドに入れたこの定数だけで決め、設定ファイル・画面からは選ばせない。
 /// 値を変えたら `scripts/local-llm/bundle-manifest.mjs` が読む形（`ACTIVE_MODEL` の 3 項目）を保ち、
@@ -271,21 +294,38 @@ pub fn resolve_runtime_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
         .or(bundled)
 }
 
+/// 取得したモデルの置き場所（`<local_data_dir>/local_llm/models/<版の名前>`。設計案 §2.3）。
+/// `local_data_dir` は Tauri の `app_local_data_dir()`（端末ごとのデータの置き場）で、利用者の値は使わない。
+fn downloaded_models_root(local_data_dir: &Path) -> PathBuf {
+    local_data_dir.join(BUNDLE_DIR_NAME).join(MODELS_DIR_NAME)
+}
+
+/// 取得したモデルのフォルダ（`downloaded_models_root` の下の版の名前のフォルダ）。
+pub fn downloaded_model_dir(spec: &ModelSpec, local_data_dir: &Path) -> PathBuf {
+    downloaded_models_root(local_data_dir).join(spec.version_id())
+}
+
 /// モデルのファイルの場所を決める（ファイルがまだ無くてもパスは返す）。
 ///
-/// モデルの場所はこの関数だけで決める。今は同梱の場所（`resource_dir/local_llm/models/<file_name>`）で、
-/// debug ビルドだけは、そこに無ければ `src-tauri/resources/local_llm/models/<file_name>` を使う。
-/// 初回にダウンロードする形へ替えるときは、ここで取得先（端末ごとのデータの置き場）を先に探すようにする（D101）。
-/// そのときは、どこにも無ければ取得先（%LOCALAPPDATA%）のパスを返すこと（`LocalLlmService` は起動時に 1 回だけ
-/// パスを決めるので、同梱の場所を返すと、取得を終えてもアプリを再起動するまで見つけられない）。
-pub fn resolve_model_path(spec: &ModelSpec, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+/// モデルの場所はこの関数だけで決める。取得先（`downloaded_model_dir`）→ 同梱の場所
+/// （`resource_dir/local_llm/models/<file_name>`）→ debug ビルドだけ `src-tauri/resources/local_llm/models/` の順に探す。
+/// どこにも無ければ取得先のパスを返す（`LocalLlmService` は起動時に 1 回だけパスを決めるので、
+/// 同梱の場所を返すと、取得を終えてもアプリを再起動するまで見つけられない）。
+/// 取得先を決められないとき（`local_data_dir` が None）だけ、従来どおり同梱の場所を返す。
+pub fn resolve_model_path(
+    spec: &ModelSpec,
+    local_data_dir: Option<&Path>,
+    resource_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let downloaded = local_data_dir.map(|dir| downloaded_model_dir(spec, dir).join(spec.file_name));
     let bundled = resource_dir.map(|dir| bundled_model_path(&dir.join(BUNDLE_DIR_NAME), spec));
-    if bundled.as_deref().is_some_and(Path::is_file) {
-        return bundled;
-    }
-    dev_bundle_dir()
-        .map(|dir| bundled_model_path(&dir, spec))
-        .or(bundled)
+    let dev = dev_bundle_dir().map(|dir| bundled_model_path(&dir, spec));
+    let found = [&downloaded, &bundled, &dev]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+        .cloned();
+    found.or(downloaded).or(dev).or(bundled)
 }
 
 /// モデルの照合の結果。
@@ -1081,7 +1121,7 @@ mod tests {
     /// 分けた 2 つの関数で組み立てた場所（lib.rs と同じ組み立て方）。
     fn resolved_bundle(resource_dir: Option<PathBuf>) -> Option<LocalLlmBundle> {
         let runtime = resolve_runtime_dir(resource_dir.clone())?;
-        let model = resolve_model_path(&ACTIVE_MODEL, resource_dir)?;
+        let model = resolve_model_path(&ACTIVE_MODEL, None, resource_dir)?;
         Some(LocalLlmBundle::new(&runtime, model))
     }
 
@@ -1113,6 +1153,33 @@ mod tests {
         let empty = std::env::temp_dir().join(format!("yuuko-llm-empty-{}", std::process::id()));
         assert_eq!(resolved_bundle(Some(empty)), expected);
         assert_eq!(resolved_bundle(None), expected);
+    }
+
+    #[test]
+    fn model_path_prefers_downloaded_then_bundled_then_returns_download_path() {
+        let root = std::env::temp_dir().join(format!("yuuko-llm-dl-{}", std::process::id()));
+        let (local, resources) = (root.join("local"), root.join("res"));
+        let downloaded = downloaded_model_dir(&ACTIVE_MODEL, &local).join(ACTIVE_MODEL.file_name);
+        assert!(downloaded.ends_with(
+            Path::new("local_llm/models/stario-qwen3.5-2b-q4-k-m-5405508f")
+                .join(ACTIVE_MODEL.file_name)
+        ));
+        let bundled = LocalLlmBundle::in_dir(&resources.join(BUNDLE_DIR_NAME)).model;
+        for path in [&downloaded, &bundled] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"m").unwrap();
+        }
+        let resolve = || resolve_model_path(&ACTIVE_MODEL, Some(&local), Some(resources.clone()));
+        assert_eq!(resolve(), Some(downloaded.clone()));
+        std::fs::remove_file(&downloaded).unwrap();
+        assert_eq!(resolve(), Some(bundled.clone()));
+        std::fs::remove_file(&bundled).unwrap();
+        // どこにも無ければ取得先（開発用の同梱物を置いている環境ではそちらが見つかる）。
+        let dev = dev_bundle_dir().map(|dir| bundled_model_path(&dir, &ACTIVE_MODEL));
+        if !dev.as_deref().is_some_and(Path::is_file) {
+            assert_eq!(resolve(), Some(downloaded));
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
