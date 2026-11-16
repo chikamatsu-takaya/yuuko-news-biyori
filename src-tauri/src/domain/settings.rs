@@ -258,6 +258,18 @@ pub struct PersistedSettings {
     pub ai: AiSettings,
     pub explanation: ExplanationSettings,
     pub ui: UiSettings,
+    pub local_model: LocalModelSettings,
+}
+
+/// ローカルLLMのモデルの初回ダウンロードについて、アプリが覚える値（設計案 §2.1）。
+/// 設定画面の DTO には含めず、取得の制御（`start_local_model_download`）からだけ書く。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelSettings {
+    /// 取得を自動で始めた時刻（RFC 3339）。自動で始める直前（通信の前）に書く。値があれば次の起動からは
+    /// 自動で始めず案内だけにする（キャンセルした人の意思を守る。設計案 U7 の推奨 A）。設定の初期化でも引き継ぐ。
+    pub auto_download_started_at: Option<String>,
 }
 
 impl Default for PersistedSettings {
@@ -270,6 +282,7 @@ impl Default for PersistedSettings {
             ai: AiSettings::default(),
             explanation: ExplanationSettings::default(),
             ui: UiSettings::default(),
+            local_model: LocalModelSettings::default(),
         }
     }
 }

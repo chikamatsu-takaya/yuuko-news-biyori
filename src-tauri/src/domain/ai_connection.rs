@@ -46,6 +46,8 @@ pub enum AiProviderConnectionErrorKind {
     ProviderNotImplemented,
     /// ローカルAI: 同梱の部品（llama-server・モデル）が見つからない。
     LocalAiMissing,
+    /// ローカルAI: モデルをまだ取得していない・取得中・取得に失敗した（初回ダウンロード。設計案 §2.6）。
+    LocalAiNotReady,
     /// ローカルAI: モデルの大きさ・SHA-256 が合わない（壊れている・差し替えられている）。
     LocalAiBroken,
     /// ローカルAI: llama-server を起動できなかった・起動の途中で止まった。
@@ -82,8 +84,10 @@ pub struct AiProviderConnectionTestResult {
 /// 黙って Gemini / Mock へ切り替えない（失敗は失敗として返す）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAiFailure {
-    /// 実行ファイルまたはモデルが無い。
+    /// 実行ファイルまたはモデルが無い（モデルを取得できない版では、モデルの欠けもここ）。
     Missing,
+    /// 取得するモデルがまだ無い（未取得・取得中・失敗。設計案 §2.6）。実行の部品の欠けは `Missing`。
+    NotReady,
     /// モデルの大きさ・SHA-256 が合わない。
     Broken,
     /// 起動できない・起動の途中で止まった・止められた。
@@ -99,6 +103,7 @@ impl LocalAiFailure {
     pub fn connection_error_kind(self) -> AiProviderConnectionErrorKind {
         match self {
             Self::Missing => AiProviderConnectionErrorKind::LocalAiMissing,
+            Self::NotReady => AiProviderConnectionErrorKind::LocalAiNotReady,
             Self::Broken => AiProviderConnectionErrorKind::LocalAiBroken,
             Self::StartFailed => AiProviderConnectionErrorKind::LocalAiStartFailed,
             Self::Timeout => AiProviderConnectionErrorKind::Timeout,
@@ -155,6 +160,7 @@ mod tests {
     fn local_ai_failures_map_to_fixed_snake_case_kinds() {
         let cases = [
             (LocalAiFailure::Missing, "local_ai_missing"),
+            (LocalAiFailure::NotReady, "local_ai_not_ready"),
             (LocalAiFailure::Broken, "local_ai_broken"),
             (LocalAiFailure::StartFailed, "local_ai_start_failed"),
             (LocalAiFailure::Timeout, "timeout"),

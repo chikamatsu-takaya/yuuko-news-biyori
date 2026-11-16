@@ -11,6 +11,7 @@ pub mod dressup_service;
 pub mod friendship_service;
 pub mod gacha_service;
 pub mod local_llm_service;
+pub mod local_model_download_service;
 pub mod news_scheduler;
 pub mod news_service;
 pub mod pattern_service;
