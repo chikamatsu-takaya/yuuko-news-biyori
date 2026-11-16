@@ -106,9 +106,11 @@ struct Run {
     worker_active: bool,
     stop: Arc<AtomicBool>,
     stop_request: Option<StopRequest>,
-    /// 止めている途中に「始める」が来た。止まったら続けて取る。
+    /// 止めている途中に「始める」が来た。止まったら続けて取る（一時停止・キャンセルのときだけ。削除・終了では見ない）。
     restart: bool,
     shut_down: bool,
+    /// 自動で始めた記録があるか（設定から起動時に 1 回読み、記録を書いたときに更新する。状態を返すたびに読まない）。
+    auto_started: bool,
 }
 
 struct Inner {
@@ -198,13 +200,19 @@ impl LocalModelDownloadService {
                 stop_request: None,
                 restart: false,
                 shut_down: false,
+                auto_started: false,
             }),
             wake: Condvar::new(),
         };
         let service = Self {
             inner: Arc::new(inner),
         };
-        lock(&service.inner.run).phase = service.idle_phase();
+        {
+            let mut run = lock(&service.inner.run);
+            run.phase = service.idle_phase();
+            // 読めなければ「ある」とみなす（自動では始めない＝安全側）。
+            run.auto_started = service.inner.settings.local_model_auto_download_started();
+        }
         service
     }
 
@@ -250,7 +258,7 @@ impl LocalModelDownloadService {
             received_bytes: received,
             total_bytes: self.inner.spec.size,
             needed_more_bytes: run.needed_more,
-            auto_download_started: self.inner.settings.local_model_auto_download_started(),
+            auto_download_started: run.auto_started,
         }
     }
 
@@ -273,10 +281,10 @@ impl LocalModelDownloadService {
             };
             if run.worker_active {
                 // 止めている途中なら、止まった後に続けて取る（キャンセル・一時停止の直後の再開）。
-                if run
-                    .stop_request
-                    .is_some_and(|request| request != StopRequest::Shutdown)
-                    && !auto_started
+                if matches!(
+                    run.stop_request,
+                    Some(StopRequest::Pause | StopRequest::Cancel)
+                ) && !auto_started
                 {
                     run.restart = true;
                 }
@@ -290,13 +298,16 @@ impl LocalModelDownloadService {
                 return Ok(self.notify_status());
             }
             if auto_started {
-                if self.inner.settings.local_model_auto_download_started() {
+                // 自動で始めた記録がある、またはこのモデルの途中のファイル・記録がある（手動で始めて止めた・
+                // 記録が消えた）ときは、自動では始めない（安全側。設計案 §2.1）。
+                if run.auto_started || self.has_partial() {
                     drop(run);
                     return Ok(self.status());
                 }
                 self.inner
                     .settings
                     .record_local_model_auto_download_started()?;
+                run.auto_started = true;
             }
             run.worker_active = true;
             run.stop.store(false, Ordering::SeqCst);
@@ -345,8 +356,14 @@ impl LocalModelDownloadService {
     /// 取得中なら止め、llama-server を止めてから、取得先のモデル・途中のファイルを消し、照合済みの印を下ろす。
     /// 消すのは本アプリの取得先の中の、今のモデルの名前に合うものだけ（同梱のモデルは消さない）。
     pub fn discard(&self) -> Result<LocalModelStatus, AppError> {
+        // 取得元が無いモデル（同梱だけで使う）は消さない。llama-server も止めない。
+        if self.inner.spec.source.is_none() {
+            return Ok(self.status());
+        }
         self.request_stop(StopRequest::Discard);
-        // 消し終わるまで状態のロックを持ち、その間に「始める」で取得が走り出さないようにする。
+        // 取得のスレッドが終わるのを待つ。待つ間はロックが外れるが、止める理由が「削除」の間は
+        // 「始める」が来ても続けて取らない（start と worker の両方で restart を立てない・見ない）。
+        // 待ち終えた後は消し終わるまでロックを持ち、その間に新しい取得が走り出さないようにする。
         let mut run = lock(&self.inner.run);
         while run.worker_active {
             run = self
@@ -437,6 +454,15 @@ impl LocalModelDownloadService {
 
     fn blocked(&self) -> bool {
         NetworkAllowlist::model_download_blocked(&self.inner.allowlist_path)
+    }
+
+    /// このモデルの途中のファイル（`.part`）か、その記録（`.part.json`）があるか。
+    fn has_partial(&self) -> bool {
+        let Some(dir) = self.inner.model_dir.as_ref() else {
+            return false;
+        };
+        let name = self.inner.spec.file_name;
+        dir.join(format!("{name}.part")).exists() || dir.join(format!("{name}.part.json")).exists()
     }
 
     fn part_len(&self) -> u64 {
@@ -556,7 +582,14 @@ fn worker(weak: Weak<Inner>, model_dir: PathBuf, stop: Arc<AtomicBool>) {
         }
         // 止める合図で止まった。
         let mut run = lock(&inner.run);
-        if run.restart && !run.shut_down && !service.blocked() {
+        let resumable = matches!(
+            run.stop_request,
+            Some(StopRequest::Pause | StopRequest::Cancel)
+        );
+        if run.restart && resumable && !run.shut_down && !service.blocked() {
+            // 利用者の操作で始め直したので、別のスレッドで始めた場合とそろえて数え直す。
+            retries = 0;
+            progress.hash_mismatches.store(0, Ordering::SeqCst);
             run.restart = false;
             run.stop_request = None;
             run.phase = LocalModelPhase::Downloading;
@@ -951,6 +984,71 @@ mod tests {
             LocalModelPhase::NotDownloaded
         );
         assert!(!dir.join("m.gguf").exists());
+    }
+
+    #[test]
+    fn start_during_discard_does_not_fetch_again() {
+        // 止める合図の後、止まるまで少し時間がかかる取得（その間に「始める」を押す）。
+        let f = fixture(
+            SPEC,
+            Vec::new(),
+            Box::new(|_, dir, stop, _| {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(dir.join("m.gguf.part"), b"da").unwrap();
+                let outcome = until_stopped(stop);
+                std::thread::sleep(Duration::from_millis(150));
+                outcome
+            }),
+        );
+        let dir = downloaded_model_dir(&SPEC, &f.root.join("local"));
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Downloading));
+        std::thread::sleep(Duration::from_millis(20));
+        let discarding = {
+            let service = f.service.clone();
+            std::thread::spawn(move || service.discard().unwrap())
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        f.service.start(false).unwrap();
+        let status = discarding.join().unwrap();
+        assert_eq!(status.phase, LocalModelPhase::NotDownloaded);
+        assert!(wait_for(&f, LocalModelPhase::NotDownloaded));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        assert!(!dir.join("m.gguf.part").exists());
+    }
+
+    #[test]
+    fn auto_start_is_skipped_when_a_partial_download_exists() {
+        let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        let dir = downloaded_model_dir(&SPEC, &f.root.join("local"));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 記録（.part.json）だけが残っていても、自動では始めない。
+        std::fs::write(dir.join("m.gguf.part.json"), b"{}").unwrap();
+        f.service.start(true).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+        assert!(!f.service.status().auto_download_started);
+        // 手動なら始める。
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn discard_does_nothing_for_a_model_without_source() {
+        let spec = ModelSpec {
+            source: None,
+            ..SPEC
+        };
+        let f = fixture(spec, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        let dir = downloaded_model_dir(&spec, &f.root.join("local"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.gguf.part"), b"da").unwrap();
+        assert_eq!(
+            f.service.discard().unwrap().phase,
+            LocalModelPhase::NoSource
+        );
+        assert!(dir.join("m.gguf.part").exists());
     }
 
     #[test]
