@@ -387,12 +387,35 @@ fn request_following_redirects(
         }
         let location = reply.location.as_deref().ok_or(DownloadError::Blocked)?;
         url = model_redirect_url(&url, location, source).map_err(|_| {
-            log::warn!("local model download redirect rejected");
+            // 許すホストを見直せるよう、弾いたホスト名だけを残す（経路・問い合わせ・署名は出さない）。
+            log::warn!(
+                "local model download redirect rejected (host: {})",
+                rejected_redirect_host(&url, location)
+            );
             DownloadError::Blocked
         })?;
     }
     log::warn!("local model download exceeded the redirect limit");
     Err(DownloadError::Blocked)
+}
+
+/// 弾いた転送先のログ用のホスト名。`Location` は外部由来なので、ホスト名だけを取り出し、
+/// ホスト名に使う文字（英数字・`.`・`-`・`:`・`[`・`]`）以外は落として長さも抑える。読めなければ固定の印。
+fn rejected_redirect_host(current: &Url, location: &str) -> String {
+    let host: String = current
+        .join(location.trim())
+        .ok()
+        .and_then(|next| next.host_str().map(str::to_string))
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        .take(253)
+        .collect();
+    if host.is_empty() {
+        "(none)".to_string()
+    } else {
+        host
+    }
 }
 
 /// 本文を `.part` へ書き足しながら SHA-256 を計算する。再開のときは既存の `.part` を読み直して
@@ -1102,6 +1125,32 @@ mod tests {
             })
         );
         assert!(transport.requests.borrow().is_empty());
+    }
+
+    /// 弾いた転送先のログには、ホスト名だけを出す（経路・問い合わせ・署名・利用者情報は出さない）。
+    #[test]
+    fn rejected_redirect_log_keeps_only_the_host() {
+        let current = model_download_url(&SOURCE).unwrap();
+        for (location, expected) in [
+            (
+                "https://eu.cdn.example.test/xet/abc?X-Amz-Signature=secret&exp=1",
+                "eu.cdn.example.test",
+            ),
+            (
+                "https://user:pw@other.example.test:8443/p?sig=s",
+                "other.example.test",
+            ),
+            ("http://plain.example.test/path", "plain.example.test"),
+            ("https://127.0.0.1/x", "127.0.0.1"),
+            ("/relative/path?sig=s", "models.example.test"),
+            ("file:///C:/Windows/win.ini", "(none)"),
+        ] {
+            let host = rejected_redirect_host(&current, location);
+            assert_eq!(host, expected, "{location}");
+            for secret in ["sig", "Signature", "secret", "pw", "user", "path", "8443"] {
+                assert!(!host.contains(secret), "{location}: {host}");
+            }
+        }
     }
 
     #[test]
