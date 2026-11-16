@@ -12,6 +12,7 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
+import LocalModelSetupNotice from "@/components/layout/LocalModelSetupNotice";
 import PatternGround from "@/components/layout/PatternGround";
 import { YuukoDressupProvider } from "@/components/yuuko/YuukoDressupProvider";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
@@ -600,6 +601,9 @@ export default function Page() {
           onIgnore={clearSummonMessage}
         />
       )}
+      {/* ローカルAIのモデルの初期セッティング・起動のたびの帯（設計案 §4.1・§4.2）。MainScreen は変えずに全画面の上へ出す。
+          ことわりを見せられない間（ウィンドウ非表示・初回起動の案内の表示中）は出さず、自動でも始めない。 */}
+      <LocalModelSetupNotice active={isWindowVisible && !isOnboardingOpen} />
       {/* 初回起動時、または「オンボーディングを見る」で案内を重ねる（表示判定・保存は OnboardingOverlay 内で完結）。 */}
       <OnboardingOverlay
         onOpenChange={setIsOnboardingOpen}

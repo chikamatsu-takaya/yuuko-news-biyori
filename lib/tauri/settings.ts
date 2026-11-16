@@ -126,6 +126,8 @@ export type AiProviderConnectionErrorKind =
   | "invalid_response"
   | "provider_not_implemented"
   | "local_ai_missing"
+  // モデルをまだダウンロードしていない（初回ダウンロードの前・途中・失敗）。
+  | "local_ai_not_ready"
   | "local_ai_broken"
   | "local_ai_start_failed"
   | "local_ai_request_failed"

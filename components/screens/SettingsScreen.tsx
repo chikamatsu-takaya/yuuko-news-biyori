@@ -457,6 +457,8 @@ const localAiConnectionMessage = (
   switch (result.errorKind) {
     case "local_ai_missing":
       return "ローカルAIの部品が見つかりません";
+    case "local_ai_not_ready":
+      return "ローカルAIの準備がまだ終わっていません（AIのデータのダウンロードが必要です）";
     case "local_ai_broken":
       return "ローカルAIの部品が壊れています";
     case "local_ai_start_failed":

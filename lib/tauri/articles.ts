@@ -250,6 +250,8 @@ export type AutoSummaryStatusKind =
   | "disabledInSettings"
   | "notRealAi"
   | "localAiNotReady"
+  // ローカルAIのモデルをまだダウンロードしていない（初回ダウンロードの前・途中・失敗）。
+  | "localModelNotDownloaded"
   | "geminiNotReady"
   | "unknown";
 

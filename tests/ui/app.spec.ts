@@ -10777,6 +10777,41 @@ async function installTauriMocks(page: Page) {
               hasNotification: false,
             };
           }
+          // ローカルAIのモデルの初回ダウンロード（設計案 §3.4）。既定は取得元なし（今の同梱の配布物）。
+          // __E2E_LOCAL_MODEL__ で状態を差し替え、呼ばれた command と引数を __E2E_LOCAL_MODEL_CALLS__ に記録する。
+          case "get_local_model_status":
+          case "start_local_model_download":
+          case "pause_local_model_download":
+          case "cancel_local_model_download":
+          case "discard_local_model": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const lmWin = window as any;
+            const current = (lmWin.__E2E_LOCAL_MODEL__ ||= {
+              phase: "no_source",
+              failure: null,
+              receivedBytes: 0,
+              totalBytes: 3_100_000_000,
+              neededMoreBytes: null,
+              autoDownloadStarted: false,
+            });
+            (lmWin.__E2E_LOCAL_MODEL_CALLS__ ||= []).push({ cmd, args: args ?? null });
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            const autoStarted = (args as { autoStarted?: boolean } | undefined)?.autoStarted;
+            if (cmd === "start_local_model_download" && !(autoStarted && current.autoDownloadStarted)) {
+              Object.assign(current, {
+                phase: "downloading",
+                failure: null,
+                autoDownloadStarted: current.autoDownloadStarted || Boolean(autoStarted),
+              });
+            } else if (cmd === "pause_local_model_download") {
+              current.phase = "paused";
+            } else if (cmd === "cancel_local_model_download") {
+              current.phase = "not_downloaded";
+            } else if (cmd === "discard_local_model") {
+              Object.assign(current, { phase: "not_downloaded", receivedBytes: 0 });
+            }
+            return { ...current };
+          }
           case "get_user_settings": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const settingsWin = window as any;
@@ -12197,4 +12232,172 @@ test("notification Escape closes it when focus is inside the notification", asyn
   await expect
     .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
     .toBeGreaterThanOrEqual(1);
+});
+
+// ローカルAIのモデルの初回ダウンロードの案内（設計案 §4。藤井さんの判断 U1・U5・U7、推奨 U3・U6）。
+const setLocalModel = (page: Page, status: Record<string, unknown>) =>
+  page.addInitScript((value) => {
+    // 案内は AI がローカルのときだけ出す（設計案 §4.2）。
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      aiProvider: "local",
+    };
+    (window as unknown as Record<string, unknown>).__E2E_LOCAL_MODEL__ = {
+      phase: "not_downloaded",
+      failure: null,
+      receivedBytes: 0,
+      totalBytes: 3_100_000_000,
+      neededMoreBytes: null,
+      autoDownloadStarted: false,
+      ...value,
+    };
+  }, status);
+
+const readLocalModelCalls = (page: Page) =>
+  page.evaluate(() =>
+    (
+      ((window as unknown as Record<string, unknown>).__E2E_LOCAL_MODEL_CALLS__ ?? []) as {
+        cmd: string;
+        args: unknown;
+      }[]
+    ).filter((call) => call.cmd !== "get_local_model_status")
+  );
+
+const emitLocalModel = (page: Page, status: Record<string, unknown>) =>
+  page.evaluate((value) => {
+    const w = window as unknown as {
+      __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+    };
+    w.__E2E_EMIT_EVENT__("local-model-download-progress", {
+      failure: null,
+      totalBytes: 3_100_000_000,
+      neededMoreBytes: null,
+      autoDownloadStarted: true,
+      ...value,
+    });
+  }, status);
+
+const openAiSettings = async (page: Page) => {
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await openSettingsMenu(page, "解説・AI設定");
+};
+
+test("local model: no source (bundled 2B) shows neither the setup panel, the banner nor the settings section", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await openHome(page);
+  await page.clock.runFor(11_000);
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  await expect(page.getByTestId("local-model-banner")).toHaveCount(0);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await openAiSettings(page);
+  await expect(page.getByTestId("local-model-panel")).toHaveCount(0);
+});
+
+test("local model: first run shows the notice, waits 10 seconds, then starts; pause, resume and cancel", async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await expect(panel.getByRole("heading", { name: "初期セッティング中" })).toBeVisible();
+  await expect(panel).toContainText("インターネットからAIのデータ（約 3.1GB）をダウンロードします");
+  await expect(panel).toContainText("秒後にダウンロードを始めます。");
+  await captureScreen(page, testInfo, "local-model-setup-countdown");
+  // ことわりを出してすぐには始めない。
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await page.clock.runFor(11_000);
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: true } }]);
+
+  await emitLocalModel(page, { phase: "downloading", receivedBytes: 1_200_000_000 });
+  await expect(panel).toContainText("1.2GB / 3.1GB（38%）");
+  await captureScreen(page, testInfo, "local-model-setup-downloading");
+  await panel.getByRole("button", { name: "一時停止" }).click();
+  await emitLocalModel(page, { phase: "paused", receivedBytes: 1_200_000_000 });
+  await expect(panel).toContainText("ダウンロードを一時停止しています");
+  await panel.getByRole("button", { name: "再開する" }).click();
+  await expect(panel.getByRole("button", { name: "キャンセル" })).toBeVisible();
+  await panel.getByRole("button", { name: "キャンセル" }).click();
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual([
+      "start_local_model_download",
+      "pause_local_model_download",
+      "start_local_model_download",
+      "cancel_local_model_download",
+    ]);
+  // 再開は利用者の操作なので、自動の印は付けない。
+  expect((await readLocalModelCalls(page))[2].args).toEqual({ autoStarted: false });
+});
+
+test("local model: cancel during the countdown does not start; start now starts at once", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await panel.getByRole("button", { name: "キャンセル" }).click();
+  await expect(panel).toContainText("ダウンロードを止めました。設定画面から、いつでも始められます。");
+  await page.clock.runFor(15_000);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await panel.getByRole("button", { name: "閉じる" }).click();
+  await expect(panel).toHaveCount(0);
+
+  await page.reload();
+  await panel.getByRole("button", { name: "すぐ始める" }).click();
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: true } }]);
+});
+
+test("local model: hidden window does not count down until the main window is shown", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installVisibilityControl(page, true);
+  await setLocalModel(page, {});
+  await page.goto("/");
+  await page.clock.runFor(30_000);
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await page.evaluate(() =>
+    (
+      window as unknown as { __E2E_SET_WINDOW_VISIBLE__: (visible: boolean) => void }
+    ).__E2E_SET_WINDOW_VISIBLE__(true)
+  );
+  await expect(page.getByTestId("local-model-setup")).toContainText(
+    "10 秒後にダウンロードを始めます。"
+  );
+});
+
+test("local model: after a cancel or failure, a thin banner is shown on every start and is dismissible", async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  await setLocalModel(page, { autoDownloadStarted: true });
+  await openHome(page);
+  const banner = page.getByTestId("local-model-banner");
+  await expect(banner).toContainText("AIの準備がまだです。");
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  await captureScreen(page, testInfo, "local-model-banner");
+  await page.clock.runFor(11_000);
+  // 自動では始めない（U7）。
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await banner.getByRole("button", { name: "始める" }).click();
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: false } }]);
+  await emitLocalModel(page, { phase: "failed", failure: "network", receivedBytes: 0 });
+  await expect(banner).toContainText("インターネットにつながらないため、ダウンロードできませんでした。");
+  await expect(banner.getByRole("button", { name: "もう一度試す" })).toBeVisible();
+  await banner.getByRole("button", { name: "閉じる" }).click();
+  await expect(banner).toHaveCount(0);
 });
