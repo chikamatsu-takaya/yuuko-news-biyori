@@ -388,6 +388,26 @@ mod tests {
     }
 
     #[test]
+    fn production_check_does_not_read_the_broadened_links() {
+        // 広げたつなぎ（評価の版だけ）は、本番の点検では見ない。広げた点検では見る。
+        for output in [
+            "図面が流出したので、被害は確認されていない。",
+            "図面が流出するから、被害は確認されていない。",
+            "図面を公開するため、被害は確認されていない。",
+        ] {
+            assert!(kinds(LEAK, output).is_empty(), "{output}");
+            assert_eq!(
+                find_unsupported_causes_broad(LEAK, output)
+                    .into_iter()
+                    .map(|issue| issue.kind)
+                    .collect::<Vec<_>>(),
+                vec![IssueKind::UnsupportedCause],
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
     fn a_cause_that_joins_two_separate_facts_is_reported() {
         for output in [
             "あおば重工の図面が流出したが、部品は公開済みのものだったため、被害はなかった。",

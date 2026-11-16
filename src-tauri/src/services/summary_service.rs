@@ -2178,6 +2178,21 @@ mod tests {
 
     const ARTICLE_ID: &str = "rss-20261007-tech-01";
 
+    /// 本番の SummaryService は再説明の追加の点検を使わない（Firestore タスク 722cmK）。
+    #[test]
+    fn summary_service_defaults_to_no_explanation_checks() {
+        let paths = AppPaths::new(std::env::temp_dir().join("yuuko-explain-checks-default"));
+        let service = SummaryService::new(
+            AiProviderService::new(&paths),
+            ArticleRepository::new(&paths),
+            SettingsRepository::new(&paths),
+        );
+        assert_eq!(
+            service.explanation_checks,
+            super::explain_check::ExplanationChecks::Off
+        );
+    }
+
     /// 再説明の追加の点検（Firestore タスク 722cmK）: 1回作り直し、残った文を落とし、全部落ちたら定型文。
     #[test]
     fn explanation_checks_retry_once_then_drop_sentences_then_use_the_fixed_text() {

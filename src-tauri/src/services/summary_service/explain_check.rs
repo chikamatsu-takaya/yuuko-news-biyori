@@ -282,6 +282,11 @@ mod tests {
             ]
         );
         assert_eq!(split_keeping_ends(text).concat(), text);
+        assert!(split_keeping_ends("").is_empty());
+        assert_eq!(
+            split_keeping_ends("終わりの字がない文"),
+            vec!["終わりの字がない文"]
+        );
     }
 
     #[test]
