@@ -430,6 +430,9 @@ type DrainedHook = Arc<dyn Fn() + Send + Sync>;
 /// ローカルLLMの都合で取り出しを待つ長さ。本番は `LocalLlmService::background_wait`。
 type LocalLlmWait = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 
+/// ローカルAIのモデルをまだ取得していないか。本番は `LocalLlmService::is_model_not_downloaded`。
+type LocalModelNotDownloadedCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// ゲーム（Direct3D 全画面）・発表（プレゼンモード）中、またはマイク使用中か。会議中は
 /// 「会議アプリ起動中 かつ マイク使用中」なので、マイク使用中を見れば含まれる。
 /// OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
@@ -546,7 +549,7 @@ enum OffReason {
     DisabledInSettings,
     /// AI プロバイダが実AI（Gemini・ローカル）ではない（Mock・未実装の openai）。
     NotRealAi(AiProvider),
-    /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている）。
+    /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている・モデルをまだ取得していない）。
     AiNotReady(AiProvider),
 }
 
@@ -594,6 +597,9 @@ pub struct AutoSummaryQueue {
     on_low_memory_pause: DrainedHook,
     /// 取り出す前に待つ長さ（ローカルLLMの設定のときだけ見る）。既定は待たない（`with_local_llm` で差し込む）。
     local_llm_wait: LocalLlmWait,
+    /// 状態の種類で「同梱物が無い・壊れている」と「モデルをまだ取得していない」を分けるための確認。
+    /// 既定は常に false（`with_local_llm` で差し込む）。
+    local_model_not_downloaded: LocalModelNotDownloadedCheck,
     /// 設定が読めない状態か。警告を状態が変わったときだけ出すために持つ（clone しても同じ値を指す）。
     settings_unreadable: Arc<AtomicBool>,
     /// 最後に INFO ログへ出した状態の知らせ。同じ知らせを繰り返さないために持つ（clone しても同じ値を指す）。
@@ -618,6 +624,7 @@ impl AutoSummaryQueue {
             on_drained: Arc::new(|| {}),
             on_low_memory_pause: Arc::new(|| {}),
             local_llm_wait: Arc::new(|| None),
+            local_model_not_downloaded: Arc::new(|| false),
             settings_unreadable: Arc::new(AtomicBool::new(false)),
             last_notice: Arc::new(Mutex::new(None)),
         }
@@ -636,7 +643,19 @@ impl AutoSummaryQueue {
         self.on_low_memory_pause = Arc::new(move || release.release_soon());
         let running = local_llm.clone();
         self.user_busy = Arc::new(move || user_busy_cause_on_this_pc(|| running.is_running()));
+        let model = local_llm.clone();
+        self.local_model_not_downloaded = Arc::new(move || model.is_model_not_downloaded());
         self.local_llm_wait = Arc::new(move || local_llm.background_wait());
+        self
+    }
+
+    /// 「モデルをまだ取得していない」の判定を差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_local_model_not_downloaded(
+        mut self,
+        check: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.local_model_not_downloaded = Arc::new(check);
         self
     }
 
@@ -912,11 +931,14 @@ impl AutoSummaryQueue {
                     .last_notice
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                status_kind_for(
-                    &settings,
-                    |provider| (self.ai_ready)(provider),
-                    self.core.is_drained(),
-                    last_notice,
+                split_local_not_ready(
+                    status_kind_for(
+                        &settings,
+                        |provider| (self.ai_ready)(provider),
+                        self.core.is_drained(),
+                        last_notice,
+                    ),
+                    || (self.local_model_not_downloaded)(),
                 )
             }
         };
@@ -1075,6 +1097,21 @@ fn status_kind_for(
         }
     }
     AutoSummaryStatusKind::Running
+}
+
+/// 「ローカルAIを使えない」を、モデルをまだ取得していないとき（初回ダウンロードの前・途中・失敗）だけ
+/// `LocalModelNotDownloaded` へ分ける（純粋関数）。同梱物が無い・壊れているときとは案内が違うため。
+/// 自動要約を動かすかの判定（`auto_summary_off_reason`）は変えない（どちらも動かさない）。
+/// 確かめるのは `LocalAiNotReady` のときだけ（ほかの種類ではファイルを見ない）。
+fn split_local_not_ready(
+    kind: AutoSummaryStatusKind,
+    model_not_downloaded: impl FnOnce() -> bool,
+) -> AutoSummaryStatusKind {
+    if kind == AutoSummaryStatusKind::LocalAiNotReady && model_not_downloaded() {
+        AutoSummaryStatusKind::LocalModelNotDownloaded
+    } else {
+        kind
+    }
 }
 
 /// 待機列から記事を取り出した（または無効で捨てた）結果か。取り出していない
@@ -1437,6 +1474,43 @@ mod tests {
         let ctx = queue_context_with("local-missing", "local", false);
         ctx.queue.enqueue_unsummarized();
         assert!(ctx.queue.core.lock().pending.is_empty());
+    }
+
+    /// ローカルAIを使えないとき、モデルをまだ取得していなければ別の種類で返す（同梱物が無い・壊れているとは分ける）。
+    /// どちらでも待機列には並べない。
+    #[test]
+    fn status_separates_a_model_not_yet_downloaded_from_a_missing_or_broken_bundle() {
+        use AutoSummaryStatusKind as K;
+        let ctx = queue_context_with("local-not-downloaded", "local", false);
+        assert_eq!(ctx.queue.status().kind, K::LocalAiNotReady);
+        let queue = ctx.queue.clone().with_local_model_not_downloaded(|| true);
+        queue.enqueue_unsummarized();
+        assert!(queue.core.lock().pending.is_empty());
+        assert_eq!(queue.status().kind, K::LocalModelNotDownloaded);
+
+        // 確かめるのは LocalAiNotReady のときだけ。ほかの種類はそのまま。
+        let must_not_check = || -> bool { panic!("must not check the model file") };
+        assert_eq!(
+            split_local_not_ready(K::GeminiNotReady, must_not_check),
+            K::GeminiNotReady
+        );
+        assert_eq!(
+            split_local_not_ready(K::Running, must_not_check),
+            K::Running
+        );
+        assert_eq!(
+            split_local_not_ready(K::LocalAiNotReady, || false),
+            K::LocalAiNotReady
+        );
+        // 新しい種類は camelCase の新しい値で返す（既存の値は変えない）。
+        assert_eq!(
+            serde_json::to_string(&K::LocalModelNotDownloaded).unwrap(),
+            "\"localModelNotDownloaded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&K::LocalAiNotReady).unwrap(),
+            "\"localAiNotReady\""
+        );
     }
 
     #[test]

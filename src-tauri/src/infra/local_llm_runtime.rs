@@ -12,7 +12,8 @@
 //! - `--offline`（モデル等を取りに行かない）・`--no-slots`（直前の処理内容を見せる口を閉じる）で起動する。
 //! - 応答本文はメモリへ全量展開する前に受信バイト上限を適用する。
 
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -347,9 +348,42 @@ pub fn check_model_size(path: &Path, expected: u64) -> ModelCheck {
 
 /// SHA-256 を見る（1.3GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
 pub fn check_model_sha256(path: &Path, expected_hex: &str) -> ModelCheck {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(mut file) = File::open(path) else {
         return ModelCheck::Missing;
     };
+    sha256_matches(&mut file, expected_hex)
+}
+
+/// 照合するモデルを、ほかのプログラムが書き換え・削除・名前の変更をできない形で開く（設計案 §3.2）。
+/// Windows では共有モードを読み取りだけにする。照合した後に同じ大きさの別のファイルへすり替えられて、
+/// 次の llama-server の起動でそのまま読み込まれる（大きさしか見ない）ことを防ぐため、呼び出し側は
+/// 照合が通った取っ手をアプリの終了まで（消す・置き直す前まで）持ち続ける。
+/// llama-server（`--no-repack`）の読み取り・mmap は妨げない（設計案 §8 の 14 で確認済み）。
+/// ほかのプログラムが書き込みで開いている間は、共有の違反で開けない（呼び出し側は照合しない）。
+pub fn open_model_locked(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
+}
+
+/// 開いた取っ手から大きさと SHA-256 を見る。取っ手を持ったまま読むので、照合した中身と、
+/// その後に llama-server が読む中身が同じになる（パスで開き直すと、その間にすり替えられうる）。
+pub fn check_model_file(file: &mut File, expected_size: u64, expected_hex: &str) -> ModelCheck {
+    match file.metadata() {
+        Ok(meta) if meta.len() == expected_size => {}
+        Ok(_) => return ModelCheck::Broken,
+        Err(_) => return ModelCheck::Missing,
+    }
+    sha256_matches(file, expected_hex)
+}
+
+fn sha256_matches(file: &mut File, expected_hex: &str) -> ModelCheck {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
