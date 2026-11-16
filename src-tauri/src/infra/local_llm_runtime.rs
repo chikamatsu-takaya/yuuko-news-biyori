@@ -272,6 +272,8 @@ pub fn resolve_runtime_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
 /// モデルの場所はこの関数だけで決める。今は同梱の場所（`resource_dir/local_llm/models/<file_name>`）で、
 /// debug ビルドだけは、そこに無ければ `src-tauri/resources/local_llm/models/<file_name>` を使う。
 /// 初回にダウンロードする形へ替えるときは、ここで取得先（端末ごとのデータの置き場）を先に探すようにする（D101）。
+/// そのときは、どこにも無ければ取得先（%LOCALAPPDATA%）のパスを返すこと（`LocalLlmService` は起動時に 1 回だけ
+/// パスを決めるので、同梱の場所を返すと、取得を終えてもアプリを再起動するまで見つけられない）。
 pub fn resolve_model_path(spec: &ModelSpec, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     let bundled = resource_dir.map(|dir| bundled_model_path(&dir.join(BUNDLE_DIR_NAME), spec));
     if bundled.as_deref().is_some_and(Path::is_file) {

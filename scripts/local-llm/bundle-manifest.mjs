@@ -39,9 +39,10 @@ export function readBundleManifest(rustSource) {
     return match[1];
   };
   const model = {
-    file: field("file_name", /\bfile_name:\s*"([^"]+)",/),
-    size: Number(field("size", /\bsize:\s*([0-9_]+),/).replaceAll("_", "")),
-    sha256: field("sha256", /\bsha256:\s*"([0-9a-f]{64})",/),
+    // 行頭に固定し、`// size: 1,` のような行コメントを拾わない。
+    file: field("file_name", /^\s*file_name:\s*"([^"]+)",/m),
+    size: Number(field("size", /^\s*size:\s*([0-9_]+),/m).replaceAll("_", "")),
+    sha256: field("sha256", /^\s*sha256:\s*"([0-9a-f]{64})",/m),
   };
   // (ファイル名, SHA-256) の表を読む。source は写し元の区別
   // （llama: 同梱物のフォルダの runtime/、vc: VC++ ランタイムのフォルダ）。

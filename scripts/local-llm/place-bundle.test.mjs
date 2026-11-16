@@ -46,6 +46,25 @@ test("fails loudly when a constant is missing", () => {
   assert.throws(() => readBundleManifest(noSha), /ACTIVE_MODEL の sha256/);
 });
 
+test("ACTIVE_MODEL fields ignore line comments", () => {
+  // 前に置いた行コメントの値ではなく、実際の項目の値を読む。
+  const commented = MODEL_ROW.replace(
+    "    size: 3,",
+    `    // size: 1,\n    // sha256: "${"0".repeat(64)}",\n    size: 3,`
+  );
+  const rust = [
+    commented,
+    `pub const RUNTIME_FILES: &[(&str, &str)] = &[\n    ("llama-server.exe", "${ABC_SHA256}"),\n];`,
+    `pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[\n    ("vcruntime140.dll", "${ABC_SHA256}"),\n];`,
+  ].join("\n");
+  const { model } = readBundleManifest(rust);
+  assert.equal(model.size, 3);
+  assert.equal(model.sha256, ABC_SHA256);
+  // 項目がコメントの中にしか無ければ止める。
+  const onlyComment = MODEL_ROW.replace("    size: 3,", "    // size: 3,");
+  assert.throws(() => readBundleManifest(onlyComment), /ACTIVE_MODEL の size/);
+});
+
 test("hashes a file with SHA-256", async () => {
   const dir = mkdtempSync(join(tmpdir(), "place-bundle-"));
   try {
