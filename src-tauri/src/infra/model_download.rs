@@ -272,12 +272,21 @@ fn fetch_part(
                 // 記録した ETag と違う → 中身が変わった。続きをつなげない。
                 let same_content = validator.is_none() || reply.validator == validator;
                 if range_ok && same_content {
-                    expect_length(&reply, spec.size - have, paths)?;
+                    // `Content-Length` が無い 206（chunked など）は、`Content-Range` の始まりと全体の大きさが
+                    // 合っていれば受け入れる。長さは受け取りの上限（全体を 1 バイトでも超えたら止めて消す）で守れ、
+                    // 短ければ途中で切れた扱い（`.part` を残して次は続きから）になるため、取り終えた分を捨てて
+                    // 最初から取り直すより損が少ない。宣言があって合わないときは従来どおり止めて消す。
+                    if reply.content_length.is_some() {
+                        expect_length(&reply, spec.size - have, paths)?;
+                    }
                     false
                 } else {
                     true
                 }
             }
+            // 空きは確かめ直さない: 始める前の確認は「空き ≥ 残り（全体 − `.part`）＋余裕」で、200 では
+            // `.part` を消してから全体を書くため、要るのは「空き＋`.part` ≥ 全体＋余裕」となり同じ条件になる
+            // （設計案 §7.1）。その後にほかの所が空きを使ったときは、書き込みの途中の `DiskFull` で止まる。
             200 => {
                 expect_length(&reply, spec.size, paths)?;
                 have = 0;
@@ -914,6 +923,45 @@ mod tests {
             );
             assert_nothing_left(&dir, &spec);
         }
+    }
+
+    /// `Content-Length` の無い 206 は、`Content-Range` が合えば続きを書く（取り終えた分を捨てない）。
+    /// 大きすぎる本文は上限で止めて消し、短い本文は途中で切れた扱いで `.part` を残す。
+    #[test]
+    fn resumes_on_206_without_content_length_within_the_size_limit() {
+        let full = body();
+        let spec = spec_for(&full);
+        let without_length = |extra: &[u8], cut: usize| {
+            let mut reply = partial(&full, 70_000, "\"v1\"");
+            reply.length = None;
+            reply.body.truncate(reply.body.len() - cut);
+            reply.body.extend_from_slice(extra);
+            reply
+        };
+
+        let dir = temp_dir();
+        seed_part(&dir, &spec, &full[..70_000], Some("\"v1\""));
+        let transport = FakeTransport::new(vec![without_length(&[], 0)]);
+        assert_eq!(run(&spec, &dir, &transport), Ok(DownloadOutcome::Completed));
+        assert_completed(&dir, &spec, &full);
+        assert_eq!(transport.requests.borrow().len(), 1);
+
+        let dir = temp_dir();
+        seed_part(&dir, &spec, &full[..70_000], Some("\"v1\""));
+        let transport = FakeTransport::new(vec![without_length(&[0], 0)]);
+        assert_eq!(
+            run(&spec, &dir, &transport),
+            Err(DownloadError::SizeMismatch)
+        );
+        assert_nothing_left(&dir, &spec);
+
+        let dir = temp_dir();
+        seed_part(&dir, &spec, &full[..70_000], Some("\"v1\""));
+        let transport = FakeTransport::new(vec![without_length(&[], 30_000)]);
+        assert_eq!(run(&spec, &dir, &transport), Err(DownloadError::Network));
+        let paths = Paths::new(&dir, &spec);
+        assert_eq!(fs::read(&paths.part).unwrap(), &full[..BODY_LEN - 30_000]);
+        assert!(paths.record.exists() && !paths.complete.exists());
     }
 
     #[test]

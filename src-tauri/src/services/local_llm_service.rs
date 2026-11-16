@@ -25,6 +25,9 @@
 //! - **アプリ終了で必ず止める**: `app_lifecycle` の終了経路から `shutdown` を呼ぶ。
 //! - 失敗は `LocalAiFailure` の固定分類で返し、黙って Gemini / Mock へ切り替えない。
 //! - モデルの SHA-256 は 1.3GB を読むため、アプリの起動中に1度だけ確かめる（大きさは毎回見る）。
+//!   照合するときはモデルを書き込み・削除を拒む共有モードで開き、その取っ手を持ち続ける（設計案 §3.2）。
+//!   照合が1度きりでも、照合した後に同じ大きさの別のファイルへすり替えられて読み込まれないようにするため。
+//!   取っ手は `forget_model`（消す・置き直す前）で閉じ、次の照合で開き直す。
 //!
 //! プロンプト・応答本文・合言葉はログへ出さない（所要時間と固定の分類だけを残す）。
 
@@ -34,10 +37,10 @@ use std::time::{Duration, Instant};
 
 use crate::domain::ai_connection::LocalAiFailure;
 use crate::infra::local_llm_runtime::{
-    build_chat_body, build_http_client, chat, check_model_sha256, check_model_size,
-    check_runtime_files, health_ok, new_api_key, pick_free_port, runtime_manifest, thread_count,
-    ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle, ModelCheck, ResponseFormat,
-    ServerLauncher, ServerProcess, ACTIVE_MODEL,
+    build_chat_body, build_http_client, chat, check_model_file, check_model_size,
+    check_runtime_files, health_ok, new_api_key, open_model_locked, pick_free_port,
+    runtime_manifest, thread_count, ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle,
+    ModelCheck, ResponseFormat, ServerLauncher, ServerProcess, ACTIVE_MODEL,
 };
 use crate::infra::url_guard::SpawnedLocalLlmPort;
 
@@ -291,8 +294,11 @@ struct Inner {
     last_manual_used: Option<Instant>,
     /// 早めの停止の予約時刻（`release_soon`）。次の要求の開始・停止で消す。
     release_requested: Option<Instant>,
-    /// この回のアプリ起動中に、モデルの SHA-256 を確かめ済みか。
+    /// この回のアプリ起動中に、モデルの SHA-256 を確かめ済みか。true の間は `model_handle` を持つ。
     verified: bool,
+    /// 照合したモデルの取っ手（書き込み・削除を拒む共有モード。設計案 §3.2）。照合が通ったときに入れ、
+    /// `forget_model` で閉じる。持っている間は、ほかのプログラムがモデルを書き換え・削除・改名できない。
+    model_handle: Option<std::fs::File>,
     /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わない（または部品が欠けている）と分かったか。
     /// 自動要約の安い確認（`is_bundle_present`）が、使えない同梱物のために照合（1.3GB 読み）や失敗を繰り返させないため。
     /// 置き直して照合が通れば false に戻す。
@@ -327,6 +333,9 @@ struct Shared {
     state: Mutex<Inner>,
     /// 起動を1本にまとめる（同時に2つ要求が来ても2つ起動しない）。
     starting: Mutex<()>,
+    /// モデルの照合（取っ手を開いて読む間）と `forget_model` を前後どちらかに決める。
+    /// 照合の途中で印を下ろされ、照合が終わった後に古い取っ手と印が残ることを防ぐ。
+    verifying: Mutex<()>,
     /// 手動の要求が終わった・アプリ終了の合図。自動要約の要求の待ち（`state` と組で使う）を起こす。
     priority: Condvar,
     watcher_started: AtomicBool,
@@ -485,6 +494,7 @@ impl LocalLlmService {
                 config,
                 state: Mutex::new(Inner::default()),
                 starting: Mutex::new(()),
+                verifying: Mutex::new(()),
                 priority: Condvar::new(),
                 watcher_started: AtomicBool::new(false),
                 shut_down: AtomicBool::new(false),
@@ -685,17 +695,45 @@ impl LocalLlmService {
             )
     }
 
+    /// モデルをまだ取得していないか（取得前・取得中・取得に失敗した）。自動要約の状態の種類を
+    /// 「同梱物が無い・壊れている」と分けるためだけの安い確認で、生成の `LocalAiFailure::NotReady` と同じ条件
+    /// （取得する版で、実行の部品があり、モデルのファイルが無い）を見る。照合も起動もしない。
+    pub fn is_model_not_downloaded(&self) -> bool {
+        if !self.shared.config.model_downloadable {
+            return false;
+        }
+        let Some(bundle) = self.shared.bundle.as_ref() else {
+            return false;
+        };
+        bundle.exe.is_file()
+            && check_model_size(&bundle.model, self.shared.config.model_size) == ModelCheck::Missing
+    }
+
     /// モデルのファイルを消す・置き直す前後に呼ぶ（取得の制御から。設計案 §3.4 の `discard_local_model`）。
-    /// 動いていれば llama-server を止め、照合済みの印と「壊れていた」の印を下ろす
-    /// （消した後に古い照合の結果で起動しない・取り直したものを改めて照合するため）。
+    /// 動いていれば llama-server を止め、照合済みの印と「壊れていた」の印を下ろし、モデルの取っ手を閉じる
+    /// （取っ手を持ったままでは消せない。消した後に古い照合の結果で起動しない・取り直したものを改めて照合するため）。
+    /// 照合の途中なら、その照合が終わるのを待ってから下ろす（数秒。1.3GB の読み取りの残り）。
+    /// 印を下ろすことと子プロセスを外すことは同じロックの中で行う。起動の途中の要求は、子プロセスを
+    /// 状態へ入れるときに印が下りていれば起動を取りやめる（`launch_and_wait`）。
     /// 走っている生成は、止めたことで失敗として返る。
     pub fn forget_model(&self) {
-        if self.shared.stop_process() {
+        let _verifying = self
+            .shared
+            .verifying
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (process, handle) = {
+            let mut state = self.shared.lock_state();
+            state.verified = false;
+            state.found_broken = false;
+            (state.take_process(), state.model_handle.take())
+        };
+        if let Some(mut process) = process {
+            process.stop();
             log::info!("stopped llama-server to replace the local model");
         }
-        let mut state = self.shared.lock_state();
-        state.verified = false;
-        state.found_broken = false;
+        // llama-server を止めた後に閉じる（閉じた時点で、消す・置き直すことができるようになる）。
+        drop(handle);
     }
 
     /// モデルが無いときの失敗（取得する版は `NotReady`）。
@@ -855,6 +893,12 @@ impl LocalLlmService {
                 process.stop();
                 return Err(StartFailure::not_counted("shut_down"));
             }
+            // 照合の後に `forget_model`（消す・置き直す）が来ていたら、取っ手の無いモデルで動かさない。
+            if !state.verified {
+                drop(state);
+                process.stop();
+                return Err(StartFailure::not_counted("model_forgotten"));
+            }
             state.process = Some(process);
             state.port = Some(port);
             state.api_key = Some(api_key.clone());
@@ -946,6 +990,11 @@ impl LocalLlmService {
             }
         }
         if !self.shared.lock_state().verified {
+            let _verifying = self
+                .shared
+                .verifying
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let started = Instant::now();
             match check_runtime_files(runtime_dir, &config.runtime_files) {
                 ModelCheck::Ok => {}
@@ -961,11 +1010,29 @@ impl LocalLlmService {
                     return Err(LocalAiFailure::Broken);
                 }
             }
-            match check_model_sha256(&bundle.model, &config.model_sha256) {
+            // 取っ手を開いてから、その取っ手で照合する（照合した中身を、そのまま使わせるため）。
+            let mut file = match open_model_locked(&bundle.model) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(self.model_missing());
+                }
+                Err(error) => {
+                    // ほかのプログラムが書き込みで開いている（共有の違反）など。壊れているとは限らないため
+                    // 「壊れていた」の印は立てず、照合も起動もしない（次の要求で開き直す）。
+                    log::warn!(
+                        "local llm model could not be opened for verification: {:?}",
+                        error.kind()
+                    );
+                    return Err(LocalAiFailure::StartFailed);
+                }
+            };
+            match check_model_file(&mut file, config.model_size, &config.model_sha256) {
                 ModelCheck::Ok => {
                     let mut state = self.shared.lock_state();
                     state.verified = true;
                     state.found_broken = false;
+                    // 前の取っ手が残っていれば差し替える（同じファイルを開き直しただけ）。
+                    state.model_handle = Some(file);
                     drop(state);
                     log::info!(
                         "local llm model verified in {:.1}s",
@@ -974,7 +1041,8 @@ impl LocalLlmService {
                 }
                 ModelCheck::Missing => return Err(self.model_missing()),
                 ModelCheck::Broken => {
-                    log::warn!("local llm model SHA-256 does not match");
+                    // 合わないファイルの取っ手は持たない（ここで閉じる。利用者・取得の制御が消せるように）。
+                    log::warn!("local llm model size or SHA-256 does not match");
                     self.shared.lock_state().found_broken = true;
                     return Err(LocalAiFailure::Broken);
                 }
@@ -1540,9 +1608,15 @@ mod tests {
         let no_model = temp_bundle("dl-no-model", true, None);
         let service = service_with(&no_model, launcher.clone(), config.clone());
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::NotReady));
+        assert!(service.is_model_not_downloaded());
         let no_exe = temp_bundle("dl-no-exe", false, Some(MODEL_BYTES));
-        let service = service_with(&no_exe, launcher.clone(), config);
+        let service = service_with(&no_exe, launcher.clone(), config.clone());
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
+        assert!(!service.is_model_not_downloaded());
+        // 取得済みのモデル・同梱だけの版のモデルの欠けは「まだ取得していない」に入れない。
+        let present = temp_bundle("dl-present", true, Some(MODEL_BYTES));
+        assert!(!service_with(&present, launcher.clone(), config).is_model_not_downloaded());
+        assert!(!service_with(&no_model, launcher.clone(), test_config()).is_model_not_downloaded());
         assert_eq!(launcher.launches(), 0);
     }
 
@@ -1552,14 +1626,112 @@ mod tests {
         let bundle = temp_bundle("forget", true, Some(MODEL_BYTES));
         let service = service_with(&bundle, launcher.clone(), test_config());
         assert!(service.generate("p", 8).is_ok());
-        // 同じ大きさの別の中身へ替える。照合済みのままなら見逃すが、印を下ろせば照合し直して止める。
+        service.forget_model();
+        assert_eq!(launcher.stops(), 1);
+        // 印と取っ手を下ろした後は置き直せる。同じ大きさの別の中身は、照合し直して止める。
         let mut other = MODEL_BYTES.to_vec();
         other[0] ^= 1;
         std::fs::write(LocalLlmBundle::in_dir(&bundle.0).model, &other).unwrap();
-        service.forget_model();
-        assert_eq!(launcher.stops(), 1);
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Broken));
         assert_eq!(launcher.launches(), 1);
+        // 合わないファイルの取っ手は持たない（消せる）。正しい中身へ戻せば、照合し直して取っ手を開き直す。
+        std::fs::write(LocalLlmBundle::in_dir(&bundle.0).model, MODEL_BYTES).unwrap();
+        service.forget_model();
+        assert!(service.generate("p", 8).is_ok());
+        assert_eq!(launcher.launches(), 2);
+    }
+
+    /// 照合した後は、ほかから書き換え・削除・改名できない（設計案 §3.2 の取っ手）。読み取りはできる。
+    /// `forget_model` で取っ手を閉じれば消せる（`discard_local_model` の流れ）。
+    #[cfg(windows)]
+    #[test]
+    fn verified_model_is_locked_against_writes_and_deletion_until_forgotten() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("lock", true, Some(MODEL_BYTES));
+        let model = LocalLlmBundle::in_dir(&bundle.0).model;
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        assert!(service.generate("p", 8).is_ok());
+
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(&model)
+            .is_err());
+        assert!(std::fs::remove_file(&model).is_err());
+        assert!(std::fs::rename(&model, model.with_extension("moved")).is_err());
+        assert_eq!(std::fs::read(&model).unwrap(), MODEL_BYTES);
+        // 2 回目の生成は照合し直さず、取っ手も持ったまま。
+        assert!(service.generate("p", 8).is_ok());
+        assert!(std::fs::remove_file(&model).is_err());
+
+        service.forget_model();
+        std::fs::remove_file(&model).unwrap();
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
+    }
+
+    /// 実物の llama-server と同梱の 2B での手動確認（CI では動かさない。設計案 §3.2 / §8 の 14）。
+    /// 照合したモデルの取っ手を持ったまま llama-server（`--no-repack`）が起動・生成でき、その間はほかから
+    /// 書き込みで開けず・改名（削除と同じ権限）もできないことを確かめる。
+    /// 同梱物の場所は `YUUKO_LOCAL_LLM_DIR`（無ければ `src-tauri/resources/local_llm`）。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_llama_server -- --ignored --nocapture` で動かす。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the real llama-server and model placed by scripts/local-llm/place-bundle.mjs"]
+    fn real_llama_server_runs_while_the_model_is_locked() {
+        let dir = std::env::var_os("YUUKO_LOCAL_LLM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/local_llm"));
+        let model = LocalLlmBundle::in_dir(&dir).model;
+        let service = LocalLlmService::new(Some(LocalLlmBundle::in_dir(&dir)));
+        let started = Instant::now();
+        assert_eq!(service.check_connection(), Ok(()));
+        eprintln!(
+            "verify + start + tiny generation: {:.1}s",
+            started.elapsed().as_secs_f32()
+        );
+        assert!(service.shared.lock_state().model_handle.is_some());
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(&model)
+            .is_err());
+        let moved = model.with_extension("moved");
+        if std::fs::rename(&model, &moved).is_ok() {
+            std::fs::rename(&moved, &model).unwrap();
+            panic!("the verified model must not be renamed while locked");
+        }
+        let text = service
+            .generate("日本の首都を一語で答えてください。", 32)
+            .expect("generate while the model is locked");
+        eprintln!("generated {} chars", text.chars().count());
+        assert!(!text.trim().is_empty());
+        service.forget_model();
+        assert!(service.shared.lock_state().model_handle.is_none());
+        // 取っ手を閉じ、llama-server も止めた後は書き込みで開ける（中身は変えない）。
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&model)
+                .unwrap(),
+        );
+        service.shutdown();
+    }
+
+    /// ほかのプログラムが書き込みで開いている間は照合しない（壊れていた印も立てない）。閉じれば照合して使える。
+    #[cfg(windows)]
+    #[test]
+    fn model_held_for_writing_elsewhere_is_not_verified_or_marked_broken() {
+        let launcher = FakeLauncher::new(FakeMode::Healthy);
+        let bundle = temp_bundle("held", true, Some(MODEL_BYTES));
+        let model = LocalLlmBundle::in_dir(&bundle.0).model;
+        let service = service_with(&bundle, launcher.clone(), test_config());
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&model)
+            .unwrap();
+        assert_eq!(service.generate("p", 8), Err(LocalAiFailure::StartFailed));
+        assert!(service.is_bundle_present());
+        assert_eq!(launcher.launches(), 0);
+        drop(writer);
+        assert!(service.generate("p", 8).is_ok());
     }
 
     #[test]
