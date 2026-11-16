@@ -13,6 +13,12 @@ import {
 import { parseArgs, runtimeSources } from "./place-bundle.mjs";
 
 const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+// Rust の `ACTIVE_MODEL`（モデルの表の 1 行）と同じ形の最小の例。
+const MODEL_ROW = `pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
+    file_name: "m.gguf",
+    size: 3,
+    sha256: "${ABC_SHA256}",
+};`;
 
 test("reads the model constants and the runtime allowlist from the Rust source", () => {
   const manifest = loadBundleManifest();
@@ -34,7 +40,10 @@ test("reads the model constants and the runtime allowlist from the Rust source",
 });
 
 test("fails loudly when a constant is missing", () => {
-  assert.throws(() => readBundleManifest("// nothing here"), /MODEL_FILE/);
+  assert.throws(() => readBundleManifest("// nothing here"), /ACTIVE_MODEL/);
+  // ACTIVE_MODEL の中の項目が欠けていても止める（ほかの定数の値で埋めない）。
+  const noSha = MODEL_ROW.replace(/\s*sha256: "[0-9a-f]{64}",/, "");
+  assert.throws(() => readBundleManifest(noSha), /ACTIVE_MODEL の sha256/);
 });
 
 test("hashes a file with SHA-256", async () => {
@@ -86,9 +95,7 @@ test("the runtime allowlist includes the VC++ runtime as a separate source (D112
 
 test("fails loudly when the VC++ runtime table is missing", () => {
   const rust = [
-    'pub const MODEL_FILE: &str = "m.gguf";',
-    "pub const MODEL_SIZE: u64 = 3;",
-    `pub const MODEL_SHA256: &str = "${ABC_SHA256}";`,
+    MODEL_ROW,
     `pub const RUNTIME_FILES: &[(&str, &str)] = &[\n    ("llama-server.exe", "${ABC_SHA256}"),\n];`,
   ].join("\n");
   assert.throws(() => readBundleManifest(rust), /VC_RUNTIME_FILES/);
@@ -120,9 +127,7 @@ test("runtimeSources takes the VC++ runtime from --vc-crt, else from <bundle>/ru
 test("runtime tables accept uppercase SHA-256 and reject rows that cannot be read", () => {
   const rust = (exeSha) =>
     [
-      'pub const MODEL_FILE: &str = "m.gguf";',
-      "pub const MODEL_SIZE: u64 = 3;",
-      `pub const MODEL_SHA256: &str = "${ABC_SHA256}";`,
+      MODEL_ROW,
       `pub const RUNTIME_FILES: &[(&str, &str)] = &[\n    ("llama-server.exe", "${exeSha}"),\n    ("ggml.dll", "${ABC_SHA256}"),\n];`,
       `pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[\n    ("vcruntime140.dll", "${ABC_SHA256}"),\n];`,
     ].join("\n");

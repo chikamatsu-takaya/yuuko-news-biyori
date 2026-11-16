@@ -131,9 +131,20 @@ pub fn run() {
             );
             // 同梱ローカルLLM（D99）。ここでは場所を決めるだけで起動しない（初めて使うときに起動する）。
             // リソースフォルダを決められなくてもアプリは起動を続け、「ローカル」の利用時に Missing を返す。
-            let local_llm_service = LocalLlmService::new(
-                infra::local_llm_runtime::resolve_bundle_dir(app.path().resource_dir().ok()),
-            );
+            // 実行の部品とモデルの場所は別々に決める（モデルだけを後から別の置き場へ替えられるように）。
+            let local_llm_service = {
+                use infra::local_llm_runtime::{
+                    resolve_model_path, resolve_runtime_dir, LocalLlmBundle, ACTIVE_MODEL,
+                };
+                let resource_dir = app.path().resource_dir().ok();
+                let runtime_dir = resolve_runtime_dir(resource_dir.clone());
+                let model_path = resolve_model_path(&ACTIVE_MODEL, resource_dir);
+                LocalLlmService::new(
+                    runtime_dir
+                        .zip(model_path)
+                        .map(|(runtime_dir, model)| LocalLlmBundle::new(&runtime_dir, model)),
+                )
+            };
             // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
             let ai_provider_service =
                 AiProviderService::new(&paths).with_local_llm(local_llm_service.clone());

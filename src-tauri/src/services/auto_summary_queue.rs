@@ -2121,7 +2121,7 @@ mod tests {
         std::fs::write(&bundle.exe, b"exe").unwrap();
         std::fs::write(&bundle.model, b"model").unwrap();
         let local_llm = LocalLlmService::with_parts(
-            Some(bundle_dir),
+            Some(bundle),
             Arc::new(ChildProcessLauncher),
             LocalLlmConfig {
                 model_size: 5,
