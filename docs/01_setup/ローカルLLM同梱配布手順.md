@@ -13,7 +13,7 @@
 | 置き場所（`src-tauri/resources/local_llm/` 配下） | 中身 | 大きさ | git |
 |---|---|---|---|
 | `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`）＋ Visual C++ ランタイム 3 個（`vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`。判断台帳 D112。表は同じファイルの `VC_RUNTIME_FILES`） | 計 44,453,280 B（約 42.4 MiB。うち VC++ ランタイム 732,064 B） | 追跡しない（`.gitignore`） |
-| `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（`MODEL_FILE` / `MODEL_SIZE` / `MODEL_SHA256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
+| `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（モデルの表 `ACTIVE_MODEL` の `file_name` / `size` / `sha256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
 | `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
 合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
@@ -26,7 +26,7 @@
 - Windows は、実行ファイルと同じフォルダの DLL を先に探す。`runtime/`（`llama-server.exe` の隣）に置くことで、VC++ 再頒布可能パッケージが入っていないパソコンでも起動できる。入っているパソコンでも、`llama-server` は隣に置いた版を使う。
 - 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。
 
-`tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_bundle_dir` でここを見る。
+`tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_runtime_dir`（実行の部品）と `resolve_model_path`（モデル）でここを見る。
 
 ## 2. 同梱物を置く・確かめる
 
@@ -42,7 +42,7 @@ node scripts/local-llm/place-bundle.mjs C:/WS/saiyou_creater/src-tauri/resources
 node scripts/local-llm/check-bundle.mjs
 ```
 
-- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `VC_RUNTIME_FILES` / `MODEL_*`）にあるファイルだけを写す。llama.cpp の部品は `<同梱物のフォルダ>/runtime/` から、VC++ ランタイムは `--vc-crt` のフォルダから写す（`--vc-crt` を省くと `<同梱物のフォルダ>/runtime/` を探し、無ければ指定のしかたを示して止める）。別のプロジェクトの同梱物のフォルダへ VC++ ランタイムを写し足す必要はない。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
+- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `VC_RUNTIME_FILES` / `ACTIVE_MODEL`）にあるファイルだけを写す。llama.cpp の部品は `<同梱物のフォルダ>/runtime/` から、VC++ ランタイムは `--vc-crt` のフォルダから写す（`--vc-crt` を省くと `<同梱物のフォルダ>/runtime/` を探し、無ければ指定のしかたを示して止める）。別のプロジェクトの同梱物のフォルダへ VC++ ランタイムを写し足す必要はない。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
 - `check-bundle.mjs`: 置いてあるものを同じ表と照合する。`tauri.conf.json` の `build.beforeBundleCommand` に入っているため、`pnpm tauri build` のときはインストーラーを作る直前に必ず走り、欠け・不一致があればバンドルを止める（`tauri dev`・cargo のビルド・テスト・CI では走らない）。
 - 置いたファイル（runtime・モデル）は **コミットしない**。`git status` に出ないことを確かめる（`LICENSES/` は追跡対象）。
 
@@ -104,7 +104,7 @@ pnpm tauri build --bundles nsis
 
 - Windows Installer（MSI）と WiX には、1 ファイル・1 キャビネット（CAB）・MSI ファイル自体についておおむね **2GB の上限** がある。Tauri の WiX テンプレートは同梱物を 1 つの CAB にまとめて MSI へ埋め込む（`EmbedCab`）ため、**同梱物の合計が 2GB に近づくと MSI が作れない・壊れる** おそれがある（Tauri の公開資料・既知の不具合報告からの知識。本プロジェクトでは未検証）。
 - 現在の同梱物は約 1.36GB（§1）で、2GB には収まる見込み。ただし余裕は 0.6GB ほどしかなく、**モデルを大きくする（例: 4B 級の Q4 は約 2.5GB）と MSI は確実に上限を超える**。
-- NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_bundle_dir` の差し替え・D101 の将来案）を検討する。
+- NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_model_path` の差し替え・D101 の将来案）を検討する。
 - WiX は 1.3GB の CAB を高圧縮で作るため、ビルドに時間がかかる（GGUF はほぼ縮まない）。NSIS は `bundle.windows.nsis.compression` で圧縮方式（`lzma` / `zlib` / `bzip2` / `none`）を選べる（未検証）。
 
 ### 4.2 決定した運用（判断台帳 D111・2026-10-13）

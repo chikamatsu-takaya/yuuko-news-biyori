@@ -33,11 +33,25 @@ use crate::domain::summary::{
     SHORT_INPUT_FOCUS_POINTS_ITEMS, SHORT_INPUT_KEY_POINTS_ITEMS,
 };
 
-/// 同梱するモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
-/// 値を変えたら `scripts/local-llm/place-bundle.mjs` が読む値と開発環境構築手順書も一緒に直す。
-pub const MODEL_FILE: &str = "stario-qwen3.5-2b-q4_k_m.gguf";
-pub const MODEL_SIZE: u64 = 1_312_164_800;
-pub const MODEL_SHA256: &str = "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35";
+/// モデルの表の 1 行（ファイル名・大きさ・SHA-256）。
+/// ファイル名と照合の期待値を 1 か所にまとめ、モデルを差し替えるときに組で替えられるようにする
+/// （場所だけ・期待値だけを替えると、別のモデルの値で照合して壊れていると判定してしまうため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub file_name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+}
+
+/// 使うモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
+/// どのモデルを使うかはビルドに入れたこの定数だけで決め、設定ファイル・画面からは選ばせない。
+/// 値を変えたら `scripts/local-llm/bundle-manifest.mjs` が読む形（`ACTIVE_MODEL` の 3 項目）を保ち、
+/// 開発環境構築手順書も一緒に直す。
+pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
+    file_name: "stario-qwen3.5-2b-q4_k_m.gguf",
+    size: 1_312_164_800,
+    sha256: "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35",
+};
 
 /// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。
 /// `ggml-cpu-*.dll` は CPU の種類ごとの部品で、llama-server が起動時に合うものを選んで読む。
@@ -181,7 +195,9 @@ const PRESENCE_PENALTY: f64 = 1.5;
 /// 起動待ちの間の `/health` 1回の待ち上限。
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// 同梱物の場所（実行ファイル・モデル）。
+/// 起動に使う場所（実行ファイル・モデル）。
+/// 実行の部品（インストール先）とモデルは別の場所に置けるよう、それぞれ別に受け取って組み立てる
+/// （モデルを初回にダウンロードする形へ替えるとき、モデルの場所だけを差し替えるため）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalLlmBundle {
     pub exe: PathBuf,
@@ -189,38 +205,83 @@ pub struct LocalLlmBundle {
 }
 
 impl LocalLlmBundle {
-    /// `<dir>/runtime/llama-server(.exe)` と `<dir>/models/<MODEL_FILE>`。
-    pub fn in_dir(dir: &Path) -> Self {
+    /// `<runtime_dir>/llama-server(.exe)` と、`model`（ファイルがまだ無くてもよい）。
+    pub fn new(runtime_dir: &Path, model: PathBuf) -> Self {
         Self {
-            exe: dir.join(RUNTIME_DIR_NAME).join(SERVER_EXE),
-            model: dir.join(MODELS_DIR_NAME).join(MODEL_FILE),
+            exe: runtime_dir.join(SERVER_EXE),
+            model,
         }
+    }
+
+    /// 同梱の並び（`<dir>/runtime/` と `<dir>/models/<ACTIVE_MODEL>`）。テスト・評価で同梱物の形を作るときに使う。
+    #[cfg(test)]
+    pub fn in_dir(dir: &Path) -> Self {
+        Self::new(
+            &bundled_runtime_dir(dir),
+            bundled_model_path(dir, &ACTIVE_MODEL),
+        )
+    }
+
+    /// 実行の部品のフォルダ（実行ファイルの親）。部品の照合に使う。
+    pub fn runtime_dir(&self) -> Option<&Path> {
+        self.exe.parent()
     }
 }
 
-/// 同梱物のフォルダを決める。
-///
-/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm`）。
+/// 同梱物のフォルダの中の、実行の部品のフォルダ（`<dir>/runtime`）。
+fn bundled_runtime_dir(dir: &Path) -> PathBuf {
+    dir.join(RUNTIME_DIR_NAME)
+}
+
+/// 同梱物のフォルダの中の、モデルのファイル（`<dir>/models/<file_name>`）。
+fn bundled_model_path(dir: &Path, spec: &ModelSpec) -> PathBuf {
+    dir.join(MODELS_DIR_NAME).join(spec.file_name)
+}
+
+/// 開発中（debug ビルド）だけ使う、ソースツリー側の同梱物のフォルダ（`src-tauri/resources/local_llm`）。
 /// tauri-build はビルドし直すたびに `src-tauri/resources/local_llm` を `target/<profile>/local_llm` へ写すため、
 /// 開発中もふつうはリソースフォルダ側に揃っている。ただし同梱物を置いた後にまだビルドし直していない
-/// （写されていない）ことがあるので、開発中（debug ビルド）だけは、リソースフォルダに実行ファイルが
-/// 無ければ `src-tauri/resources/local_llm` を直接使う。配布版（release）ではこの代わりを使わない。
-/// 将来「初回にダウンロード」へ替える場合も、この関数の返す場所を差し替えるだけで済む（D101）。
-pub fn resolve_bundle_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
-    let bundled = resource_dir.map(|dir| dir.join(BUNDLE_DIR_NAME));
-    if cfg!(debug_assertions) {
-        let has_exe = bundled
-            .as_deref()
-            .is_some_and(|dir| LocalLlmBundle::in_dir(dir).exe.is_file());
-        if !has_exe {
-            return Some(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("resources")
-                    .join(BUNDLE_DIR_NAME),
-            );
-        }
+/// （写されていない）ことがあるので、リソースフォルダに無いときの代わりにする。配布版（release）では使わない。
+fn dev_bundle_dir() -> Option<PathBuf> {
+    cfg!(debug_assertions).then(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLE_DIR_NAME)
+    })
+}
+
+/// 実行の部品（llama-server と DLL）のフォルダを決める。
+///
+/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm/runtime`）。
+/// debug ビルドだけは、そこに実行ファイルが無ければ `src-tauri/resources/local_llm/runtime` を使う。
+pub fn resolve_runtime_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let bundled = resource_dir.map(|dir| bundled_runtime_dir(&dir.join(BUNDLE_DIR_NAME)));
+    if bundled
+        .as_deref()
+        .is_some_and(|dir| dir.join(SERVER_EXE).is_file())
+    {
+        return bundled;
     }
-    bundled
+    dev_bundle_dir()
+        .map(|dir| bundled_runtime_dir(&dir))
+        .or(bundled)
+}
+
+/// モデルのファイルの場所を決める（ファイルがまだ無くてもパスは返す）。
+///
+/// モデルの場所はこの関数だけで決める。今は同梱の場所（`resource_dir/local_llm/models/<file_name>`）で、
+/// debug ビルドだけは、そこに無ければ `src-tauri/resources/local_llm/models/<file_name>` を使う。
+/// 初回にダウンロードする形へ替えるときは、ここで取得先（端末ごとのデータの置き場）を先に探すようにする（D101）。
+/// そのときは、どこにも無ければ取得先（%LOCALAPPDATA%）のパスを返すこと（`LocalLlmService` は起動時に 1 回だけ
+/// パスを決めるので、同梱の場所を返すと、取得を終えてもアプリを再起動するまで見つけられない）。
+pub fn resolve_model_path(spec: &ModelSpec, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let bundled = resource_dir.map(|dir| bundled_model_path(&dir.join(BUNDLE_DIR_NAME), spec));
+    if bundled.as_deref().is_some_and(Path::is_file) {
+        return bundled;
+    }
+    dev_bundle_dir()
+        .map(|dir| bundled_model_path(&dir, spec))
+        .or(bundled)
 }
 
 /// モデルの照合の結果。
@@ -989,20 +1050,65 @@ mod tests {
     fn bundle_paths_point_to_runtime_and_models() {
         let bundle = LocalLlmBundle::in_dir(Path::new("res/local_llm"));
         assert!(bundle.exe.ends_with(Path::new("runtime").join(SERVER_EXE)));
-        assert!(bundle.model.ends_with(Path::new("models").join(MODEL_FILE)));
+        assert!(bundle
+            .model
+            .ends_with(Path::new("models").join(ACTIVE_MODEL.file_name)));
+        assert_eq!(
+            bundle.runtime_dir(),
+            Some(Path::new("res/local_llm/runtime"))
+        );
+        // 2 つの場所から作ると、実行ファイルは実行の部品のフォルダ、モデルは渡したパスのまま。
+        let split = LocalLlmBundle::new(Path::new("rt"), PathBuf::from("data/m.gguf"));
+        assert_eq!(split.exe, Path::new("rt").join(SERVER_EXE));
+        assert_eq!(split.model, PathBuf::from("data/m.gguf"));
     }
 
     #[test]
-    fn resolve_bundle_dir_uses_resource_dir_when_runtime_exists() {
+    fn active_model_keeps_the_bundled_values() {
+        // 表へまとめる前の MODEL_FILE / MODEL_SIZE / MODEL_SHA256 と同じ値（照合の期待値を変えていない）。
+        assert_eq!(ACTIVE_MODEL.file_name, "stario-qwen3.5-2b-q4_k_m.gguf");
+        assert_eq!(ACTIVE_MODEL.size, 1_312_164_800);
+        assert_eq!(
+            ACTIVE_MODEL.sha256,
+            "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35"
+        );
+    }
+
+    /// 分けた 2 つの関数で組み立てた場所（lib.rs と同じ組み立て方）。
+    fn resolved_bundle(resource_dir: Option<PathBuf>) -> Option<LocalLlmBundle> {
+        let runtime = resolve_runtime_dir(resource_dir.clone())?;
+        let model = resolve_model_path(&ACTIVE_MODEL, resource_dir)?;
+        Some(LocalLlmBundle::new(&runtime, model))
+    }
+
+    #[test]
+    fn resolved_paths_use_resource_dir_when_bundle_exists() {
         let root = std::env::temp_dir().join(format!("yuuko-llm-res-{}", std::process::id()));
         let bundle = LocalLlmBundle::in_dir(&root.join(BUNDLE_DIR_NAME));
         std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
         std::fs::write(&bundle.exe, b"exe").unwrap();
+        std::fs::write(&bundle.model, b"model").unwrap();
         assert_eq!(
-            resolve_bundle_dir(Some(root.clone())),
-            Some(root.join(BUNDLE_DIR_NAME))
+            resolve_runtime_dir(Some(root.clone())),
+            Some(root.join(BUNDLE_DIR_NAME).join("runtime"))
         );
+        // 分ける前（`resolve_bundle_dir` → `in_dir`）と同じ場所になる。
+        assert_eq!(resolved_bundle(Some(root.clone())), Some(bundle));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolved_paths_fall_back_to_source_tree_in_debug_builds() {
+        // リソースフォルダに同梱物が無い・リソースフォルダを決められない（テストは debug ビルド）→
+        // 分ける前と同じく `src-tauri/resources/local_llm` の下を見る。
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLE_DIR_NAME);
+        let expected = Some(LocalLlmBundle::in_dir(&source));
+        let empty = std::env::temp_dir().join(format!("yuuko-llm-empty-{}", std::process::id()));
+        assert_eq!(resolved_bundle(Some(empty)), expected);
+        assert_eq!(resolved_bundle(None), expected);
     }
 
     #[test]

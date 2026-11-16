@@ -1,5 +1,5 @@
 // 同梱ローカルLLMの「何を置くか・中身は正しいか」の共通部品（place-bundle.mjs / check-bundle.mjs が使う）。
-// 値の持ち主は Rust の src-tauri/src/infra/local_llm_runtime.rs（MODEL_* と RUNTIME_FILES / VC_RUNTIME_FILES）で、
+// 値の持ち主は Rust の src-tauri/src/infra/local_llm_runtime.rs（ACTIVE_MODEL と RUNTIME_FILES / VC_RUNTIME_FILES）で、
 // ここはそれを読むだけ。
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
@@ -25,12 +25,24 @@ export function readBundleManifest(rustSource) {
     }
     return match[1];
   };
+  // 使うモデルは `pub const ACTIVE_MODEL: ModelSpec = ModelSpec { ... };` の 1 行。項目はその中だけから読む
+  // （ほかの定数や、将来ほかのモデルの行が増えたときにその値を拾わないため）。
+  const activeModel = pick(
+    "ACTIVE_MODEL",
+    /pub const ACTIVE_MODEL: ModelSpec = ModelSpec \{([\s\S]*?)\n\};/
+  );
+  const field = (name, pattern) => {
+    const match = activeModel.match(pattern);
+    if (!match) {
+      throw new Error(`ACTIVE_MODEL の ${name} が ${RUST_CONSTANTS_PATH} に見つかりません`);
+    }
+    return match[1];
+  };
   const model = {
-    file: pick("MODEL_FILE", /pub const MODEL_FILE: &str = "([^"]+)";/),
-    size: Number(
-      pick("MODEL_SIZE", /pub const MODEL_SIZE: u64 = ([0-9_]+);/).replaceAll("_", "")
-    ),
-    sha256: pick("MODEL_SHA256", /pub const MODEL_SHA256: &str =\s*"([0-9a-f]{64})";/),
+    // 行頭に固定し、`// size: 1,` のような行コメントを拾わない。
+    file: field("file_name", /^\s*file_name:\s*"([^"]+)",/m),
+    size: Number(field("size", /^\s*size:\s*([0-9_]+),/m).replaceAll("_", "")),
+    sha256: field("sha256", /^\s*sha256:\s*"([0-9a-f]{64})",/m),
   };
   // (ファイル名, SHA-256) の表を読む。source は写し元の区別
   // （llama: 同梱物のフォルダの runtime/、vc: VC++ ランタイムのフォルダ）。

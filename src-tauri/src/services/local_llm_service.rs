@@ -28,7 +28,6 @@
 //!
 //! プロンプト・応答本文・合言葉はログへ出さない（所要時間と固定の分類だけを残す）。
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -38,7 +37,7 @@ use crate::infra::local_llm_runtime::{
     build_chat_body, build_http_client, chat, check_model_sha256, check_model_size,
     check_runtime_files, health_ok, new_api_key, pick_free_port, runtime_manifest, thread_count,
     ChatError, ChildProcessLauncher, LaunchSpec, LocalLlmBundle, ModelCheck, ResponseFormat,
-    ServerLauncher, ServerProcess, MODEL_SHA256, MODEL_SIZE,
+    ServerLauncher, ServerProcess, ACTIVE_MODEL,
 };
 use crate::infra::url_guard::SpawnedLocalLlmPort;
 
@@ -102,8 +101,8 @@ impl Default for LocalLlmConfig {
             start_failure_threshold: START_FAILURE_THRESHOLD,
             start_failure_cooldown: START_FAILURE_COOLDOWN,
             manual_start_retry_gap: MANUAL_START_RETRY_GAP,
-            model_size: MODEL_SIZE,
-            model_sha256: MODEL_SHA256.to_string(),
+            model_size: ACTIVE_MODEL.size,
+            model_sha256: ACTIVE_MODEL.sha256.to_string(),
             runtime_files: runtime_manifest(),
         }
     }
@@ -317,7 +316,8 @@ impl Inner {
 }
 
 struct Shared {
-    bundle_dir: Option<PathBuf>,
+    /// 実行の部品とモデルの場所（ファイルは後からできてもよい。使うたびに有無を確かめる）。
+    bundle: Option<LocalLlmBundle>,
     launcher: Arc<dyn ServerLauncher>,
     config: LocalLlmConfig,
     state: Mutex<Inner>,
@@ -447,17 +447,18 @@ impl std::fmt::Debug for LocalLlmService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 合言葉・番号は出さない。
         f.debug_struct("LocalLlmService")
-            .field("bundle_dir", &self.shared.bundle_dir)
+            .field("bundle", &self.shared.bundle)
             .field("usage", &self.usage)
             .finish_non_exhaustive()
     }
 }
 
 impl LocalLlmService {
-    /// 本番用。`bundle_dir` は `local_llm_runtime::resolve_bundle_dir` で決めた同梱物のフォルダ。
-    pub fn new(bundle_dir: Option<PathBuf>) -> Self {
+    /// 本番用。`bundle` は `local_llm_runtime::resolve_runtime_dir`（実行の部品）と
+    /// `resolve_model_path`（モデル）で決めた場所から作る。
+    pub fn new(bundle: Option<LocalLlmBundle>) -> Self {
         Self::with_parts(
-            bundle_dir,
+            bundle,
             Arc::new(ChildProcessLauncher),
             LocalLlmConfig::default(),
         )
@@ -469,13 +470,13 @@ impl LocalLlmService {
     }
 
     pub(crate) fn with_parts(
-        bundle_dir: Option<PathBuf>,
+        bundle: Option<LocalLlmBundle>,
         launcher: Arc<dyn ServerLauncher>,
         config: LocalLlmConfig,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
-                bundle_dir,
+                bundle,
                 launcher,
                 config,
                 state: Mutex::new(Inner::default()),
@@ -670,10 +671,9 @@ impl LocalLlmService {
         if self.shared.shut_down.load(Ordering::SeqCst) || self.shared.lock_state().found_broken {
             return false;
         }
-        let Some(dir) = self.shared.bundle_dir.as_deref() else {
+        let Some(bundle) = self.shared.bundle.as_ref() else {
             return false;
         };
-        let bundle = LocalLlmBundle::in_dir(dir);
         bundle.exe.is_file()
             && matches!(
                 check_model_size(&bundle.model, self.shared.config.model_size),
@@ -896,15 +896,17 @@ impl LocalLlmService {
     /// 同梱物があり、モデルの大きさ（毎回）と、モデル・実行の部品（exe と DLL）の SHA-256（初回だけ）が
     /// 合うかを確かめる。差し替えられた実行ファイルを起動しないため、部品もモデルと同じく照合する。
     fn verified_bundle(&self) -> Result<LocalLlmBundle, LocalAiFailure> {
-        let Some(dir) = self.shared.bundle_dir.as_deref() else {
+        let Some(bundle) = self.shared.bundle.clone() else {
             log::warn!("local llm bundle directory is not available");
             return Err(LocalAiFailure::Missing);
         };
-        let bundle = LocalLlmBundle::in_dir(dir);
-        if !bundle.exe.is_file() {
-            log::warn!("llama-server executable is missing");
-            return Err(LocalAiFailure::Missing);
-        }
+        let runtime_dir = match bundle.runtime_dir() {
+            Some(dir) if bundle.exe.is_file() => dir,
+            _ => {
+                log::warn!("llama-server executable is missing");
+                return Err(LocalAiFailure::Missing);
+            }
+        };
         let config = &self.shared.config;
         match check_model_size(&bundle.model, config.model_size) {
             ModelCheck::Ok => {}
@@ -919,7 +921,6 @@ impl LocalLlmService {
         }
         if !self.shared.lock_state().verified {
             let started = Instant::now();
-            let runtime_dir = bundle.exe.parent().unwrap_or(dir);
             match check_runtime_files(runtime_dir, &config.runtime_files) {
                 ModelCheck::Ok => {}
                 ModelCheck::Missing => {
@@ -991,7 +992,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicUsize;
     use std::thread::JoinHandle;
 
@@ -1311,7 +1312,7 @@ mod tests {
         launcher: Arc<FakeLauncher>,
         config: LocalLlmConfig,
     ) -> LocalLlmService {
-        LocalLlmService::with_parts(Some(bundle.0.clone()), launcher, config)
+        LocalLlmService::with_parts(Some(LocalLlmBundle::in_dir(&bundle.0)), launcher, config)
     }
 
     fn wait_until(condition: impl Fn() -> bool, limit: Duration) -> bool {

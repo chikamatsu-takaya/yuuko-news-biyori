@@ -10,7 +10,7 @@
 // --vc-crt には Visual Studio の再頒布用フォルダ（vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll がある所）を
 // 渡す（D112。VC++ 再頒布可能パッケージが無いパソコンでも llama-server が起動できるよう runtime/ に一緒に置く）。
 // --vc-crt を省いた場合は <同梱物のフォルダ>/runtime/ に同じファイルがあればそれを使い、無ければ止める。
-// 写すのは Rust の表（src-tauri/src/infra/local_llm_runtime.rs の RUNTIME_FILES / VC_RUNTIME_FILES / MODEL_*）に
+// 写すのは Rust の表（src-tauri/src/infra/local_llm_runtime.rs の RUNTIME_FILES / VC_RUNTIME_FILES / ACTIVE_MODEL）に
 // あるものだけ（CLI・ベンチマーク・量子化用の DLL などは写さない）。写す前に元のファイルを、写した後に置いたファイルを
 // 表の SHA-256 と照合し、1つでも合わなければ止める（写す前に止めた場合は何も置かない）。
 // 置いたファイルは .gitignore で除外されている（コミットしない）。

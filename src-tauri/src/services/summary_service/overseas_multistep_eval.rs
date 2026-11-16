@@ -45,6 +45,7 @@ use super::overseas_summary_eval::{
     ARTICLE_DATA_HEADING,
 };
 use super::{neutralize_seed_text, SEED_EXCERPT_MAX_CHARS, SEED_TITLE_MAX_CHARS};
+use crate::infra::local_llm_runtime::LocalLlmBundle;
 use crate::services::local_llm_service::LocalLlmService;
 
 const OUT_ENV: &str = "YUUKO_OVERSEAS_MULTISTEP_OUT";
@@ -440,7 +441,7 @@ fn overseas_multistep_eval() {
     let jsonl = out_dir.join("results.jsonl");
     let skip_v2 = std::env::var_os(SKIP_V2_ENV).is_some();
 
-    let local = LocalLlmService::new(Some(bundle_dir()));
+    let local = LocalLlmService::new(Some(LocalLlmBundle::in_dir(&bundle_dir())));
     // 1件目に起動・モデルの照合時間が乗らないよう、先に短い生成で起動を済ませて別に記録する。
     let warmup = generate(&local, "「はい」とだけ答えてください。", 8);
     eprintln!(

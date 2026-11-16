@@ -40,7 +40,7 @@ pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
         Some(model) => model,
         // 引数だけを変えるときは同梱のモデルのまま（照合は従来どおり同梱物に対して行われる）。
         None if !env_extra_args.is_empty() => LocalLlmBundle::in_dir(&bundle_dir).model,
-        None => return LocalLlmService::new(Some(bundle_dir)),
+        None => return LocalLlmService::new(Some(LocalLlmBundle::in_dir(&bundle_dir))),
     };
     assert!(
         model.is_file(),
@@ -67,7 +67,7 @@ pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
         extra_args,
     };
     LocalLlmService::with_parts(
-        Some(bundle_dir),
+        Some(LocalLlmBundle::in_dir(&bundle_dir)),
         Arc::new(launcher),
         LocalLlmConfig::default(),
     )
