@@ -54,12 +54,13 @@ pub async fn pause_local_model_download(
 }
 
 /// キャンセルする（待っている自動のやり直しも止める。途中のファイルは残し、次は続きから取る）。
+/// 取得前（画面のことわりの待ちの間）でも「自動で始めた」記録を書き、次の起動から自動では始めない。
 #[tauri::command]
 pub async fn cancel_local_model_download(
     state: State<'_, AppState>,
 ) -> CommandResult<LocalModelStatus> {
     run_blocking(state.local_model_download_service.clone(), |service| {
-        Ok(service.cancel())
+        service.cancel()
     })
     .await
 }

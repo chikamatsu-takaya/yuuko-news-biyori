@@ -10806,7 +10806,8 @@ async function installTauriMocks(page: Page) {
             } else if (cmd === "pause_local_model_download") {
               current.phase = "paused";
             } else if (cmd === "cancel_local_model_download") {
-              current.phase = "not_downloaded";
+              // 取得前のキャンセルでも、Rust は「自動で始めた」記録を書く（設計案 U10）。
+              Object.assign(current, { phase: "not_downloaded", autoDownloadStarted: true });
             } else if (cmd === "discard_local_model") {
               Object.assign(current, { phase: "not_downloaded", receivedBytes: 0 });
             }
@@ -12345,9 +12346,12 @@ test("local model: cancel during the countdown does not start; start now starts 
   await openHome(page);
   const panel = page.getByTestId("local-model-setup");
   await panel.getByRole("button", { name: "キャンセル" }).click();
-  await expect(panel).toContainText("ダウンロードを止めました。設定画面から、いつでも始められます。");
+  await expect(panel).toContainText("今はダウンロードしません。設定画面から、いつでも始められます。");
   await page.clock.runFor(15_000);
-  expect(await readLocalModelCalls(page)).toEqual([]);
+  // 待ちの間のキャンセルは Rust に記録させ（次の起動から自動では始めない）、取得は始めない。
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual(["cancel_local_model_download"]);
   await panel.getByRole("button", { name: "閉じる" }).click();
   await expect(panel).toHaveCount(0);
 
@@ -12356,6 +12360,24 @@ test("local model: cancel during the countdown does not start; start now starts 
   await expect
     .poll(() => readLocalModelCalls(page))
     .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: true } }]);
+});
+
+test("local model: the countdown stops when the AI setting is saved as non-local", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await expect(panel).toBeVisible();
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent("yuuko:user-settings-saved", { detail: { aiProvider: "gemini" } })
+    )
+  );
+  await expect(panel).toHaveCount(0);
+  await page.clock.runFor(15_000);
+  expect(await readLocalModelCalls(page)).toEqual([]);
 });
 
 test("local model: hidden window does not count down until the main window is shown", async ({
@@ -12414,7 +12436,7 @@ test("local model: settings section shows the state, starts, and deletes after c
   await expect(page.getByTestId("local-model-banner")).toHaveCount(0);
   await openAiSettings(page);
   const section = page.getByTestId("local-model-panel");
-  await expect(section).toContainText("ダウンロード済み（3.1GB）");
+  await expect(section).toContainText("ダウンロード済み（約 3.1GB）");
   await captureScreen(page, testInfo, "local-model-settings");
   await section.getByRole("button", { name: "削除" }).click();
   const dialog = page.getByRole("alertdialog");

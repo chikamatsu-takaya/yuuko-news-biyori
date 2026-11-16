@@ -20,10 +20,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { LocalModelActionButtons } from "@/components/layout/LocalModelSetupNotice";
+import { LocalModelActionButtons } from "@/components/settings/LocalModelActionButtons";
 import { useLocalModelStatus } from "@/hooks/use-local-model-status";
 import { discardLocalModel } from "@/lib/tauri/local-model";
-import { formatModelBytes, localModelView } from "@/lib/local-model-display.mjs";
+import { formatModelSizeNote, localModelView } from "@/lib/local-model-display.mjs";
 
 export function LocalModelPanel() {
   const [status, setStatus] = useLocalModelStatus();
@@ -50,7 +50,7 @@ export function LocalModelPanel() {
     <div className="py-3 border-b border-border/50" data-testid="local-model-panel">
       <span className="text-sm text-foreground">ローカルAIのモデル</span>
       <p role="status" className="mt-1 text-xs text-muted-foreground leading-relaxed">
-        {isReady ? `ダウンロード済み（${formatModelBytes(status.totalBytes)}）` : view.text}
+        {isReady ? `ダウンロード済み${formatModelSizeNote(status.totalBytes)}` : view.text}
       </p>
       {discardFailed && (
         <p className="mt-1 text-xs text-amber-800">削除できませんでした。少し待ってから、もう一度試してください。</p>

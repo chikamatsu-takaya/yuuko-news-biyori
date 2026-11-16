@@ -10,66 +10,52 @@
  *   各画面のタイトルバー（高さ 40px）の右の空いた所に重ね、画面の操作を隠さない。閉じたら、その起動中は出さない。
  * - 自動で始めてよいかの最終判断は Rust（記録・途中のファイル）。React は表示とボタンだけを持つ。
  * - ことわりを実際に表示している間だけ数える（メイン画面が隠れている・初回起動の案内が開いている間は数えず、
- *   最初から数え直す。§2.1 の不変条件・U6）。
+ *   最初から数え直す。§2.1 の不変条件・U6）。ほかの Dialog が開いている間も数えない。
+ * - 待つ間の［キャンセル］は cancel_local_model_download を呼び、Rust に記録させる（次の起動から帯だけ。U10）。
  * - 取得元が無い（今の同梱の配布物）・状態を読めない・AI がローカルでないときは何も出さない。
  */
 
 import * as React from "react";
 import { Button } from "@/components/ui/button";
+import { LocalModelActionButtons } from "@/components/settings/LocalModelActionButtons";
 import { useLocalModelStatus } from "@/hooks/use-local-model-status";
-import {
-  runLocalModelAction,
-  startLocalModelDownload,
-  type LocalModelStatus,
-} from "@/lib/tauri/local-model";
-import { getUserSettings } from "@/lib/tauri/settings";
-import {
-  formatModelBytes,
-  LOCAL_MODEL_ACTION_LABEL,
-  localModelView,
-} from "@/lib/local-model-display.mjs";
+import { cancelLocalModelDownload, startLocalModelDownload } from "@/lib/tauri/local-model";
+import { getUserSettings, USER_SETTINGS_SAVED_EVENT } from "@/lib/tauri/settings";
+import { formatModelSizeNote, localModelView } from "@/lib/local-model-display.mjs";
 
 const COUNTDOWN_SECONDS = 10;
 const READY_HIDE_MS = 5_000;
+// 初回起動の案内（SCR-010）が設定を読んで開くまでの間に、パネルを一瞬出して数え始めないための一呼吸。
+const SETTLE_MS = 1_000;
 
 type Stage = "countdown" | "cancelled" | "panel" | "banner" | "hidden";
-type Action = keyof typeof LOCAL_MODEL_ACTION_LABEL;
 
-/** 状態に応じたボタン（設定画面の欄と共通）。押した結果の状態は onStatus へ渡す。 */
-export function LocalModelActionButtons({
-  actions,
-  onStatus,
-}: {
-  actions: Action[];
-  onStatus: (status: LocalModelStatus | null) => void;
-}) {
-  const [busy, setBusy] = React.useState(false);
-  const run = (action: Action) => {
-    setBusy(true);
-    runLocalModelAction(action)
-      .then(onStatus)
-      .catch(() => console.warn("Local model action failed"))
-      .finally(() => setBusy(false));
-  };
-  return (
-    <>
-      {actions.map((action) => (
-        <Button
-          key={action}
-          size="sm"
-          variant={action === "cancel" || action === "pause" ? "outline" : "default"}
-          disabled={busy}
-          onClick={() => run(action)}
-        >
-          {LOCAL_MODEL_ACTION_LABEL[action]}
-        </Button>
-      ))}
-    </>
-  );
+/**
+ * Radix の Dialog・AlertDialog（role="dialog" / "alertdialog"）が開いているか。開いている間は外の要素を押せないため、
+ * ことわりを見せられないものとして数えない。Radix は body の直下へ描くので、body の子の増減だけを見る。
+ */
+function useAnyDialogOpen() {
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => {
+    const check = () =>
+      setOpen(document.querySelector('[role="dialog"], [role="alertdialog"]') !== null);
+    check();
+    const observer = new MutationObserver(check);
+    observer.observe(document.body, { childList: true });
+    return () => observer.disconnect();
+  }, []);
+  return open;
 }
 
-export default function LocalModelSetupNotice({ active }: { active: boolean }) {
+export default function LocalModelSetupNotice({ active: frameActive }: { active: boolean }) {
   const [status, setStatus] = useLocalModelStatus();
+  const dialogOpen = useAnyDialogOpen();
+  const [settled, setSettled] = React.useState(false);
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(true), SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+  const active = frameActive && settled && !dialogOpen;
   // undefined: 読み込み中 / null: 読めなかった（自動では始めず、帯だけにする）。
   const [provider, setProvider] = React.useState<string | null | undefined>(undefined);
   const [stage, setStage] = React.useState<Stage | null>(null);
@@ -80,8 +66,17 @@ export default function LocalModelSetupNotice({ active }: { active: boolean }) {
     getUserSettings()
       .then((settings) => !disposed && setProvider(settings?.aiProvider ?? null))
       .catch(() => !disposed && setProvider(null));
+    // 設定画面で AI を保存し直したら追う（ポーリングはしない）。
+    const onSaved = (event: Event) => {
+      const next = (event as CustomEvent<{ aiProvider?: string }>).detail?.aiProvider;
+      if (typeof next === "string") {
+        setProvider(next);
+      }
+    };
+    window.addEventListener(USER_SETTINGS_SAVED_EVENT, onSaved);
     return () => {
       disposed = true;
+      window.removeEventListener(USER_SETTINGS_SAVED_EVENT, onSaved);
     };
   }, []);
 
@@ -126,13 +121,26 @@ export default function LocalModelSetupNotice({ active }: { active: boolean }) {
       startNow();
     }
   }, [counting, secondsLeft, startNow]);
-  // 待っている間に設定画面などから始まった・状態が変わったら、数えるのをやめて状態を出す。
+  // 待っている間・待ちをキャンセルした後に、設定画面などから始まった・状態が変わったら、状態を出す。
   const phase = status?.phase;
   React.useEffect(() => {
-    if (stage === "countdown" && phase && phase !== "not_downloaded") {
+    if ((stage === "countdown" || stage === "cancelled") && phase && phase !== "not_downloaded") {
       setStage("panel");
     }
   }, [stage, phase]);
+  // 待っている間に AI の設定がローカルでなくなったら、パネルを隠して数えるのをやめる。
+  React.useEffect(() => {
+    if (stage === "countdown" && typeof provider === "string" && provider !== "local") {
+      setStage("hidden");
+    }
+  }, [stage, provider]);
+
+  const cancelCountdown = () => {
+    setStage("cancelled");
+    cancelLocalModelDownload()
+      .then((next) => next && setStatus(next))
+      .catch(() => console.warn("Failed to record the local model download cancel"));
+  };
 
   // 使えるようになったら、一言を数秒だけ出して消す。
   const isReady = status?.phase === "ready";
@@ -186,20 +194,21 @@ export default function LocalModelSetupNotice({ active }: { active: boolean }) {
       </h2>
       <div role="status" className="space-y-1 text-xs leading-relaxed text-foreground">
         {stage === "countdown" && (
-          <>
-            <p>
-              ゆうこのAIを使えるようにするため、インターネットからAIのデータ（約 {formatModelBytes(status.totalBytes)}）をダウンロードします。通信量が気になるときは［キャンセル］を押してください。あとで設定画面から始められます。
-            </p>
-            <p className="font-medium">{secondsLeft} 秒後にダウンロードを始めます。</p>
-          </>
+          <p>
+            ゆうこのAIを使えるようにするため、インターネットからAIのデータ{formatModelSizeNote(status.totalBytes)}をダウンロードします。通信量が気になるときは［キャンセル］を押してください。あとで設定画面から始められます。
+          </p>
         )}
-        {stage === "cancelled" && <p>ダウンロードを止めました。設定画面から、いつでも始められます。</p>}
+        {stage === "cancelled" && <p>今はダウンロードしません。設定画面から、いつでも始められます。</p>}
         {view && <p>{view.text}</p>}
       </div>
+      {/* 秒の表示は読み上げの対象（role="status"）の外に置き、毎秒読み上げられないようにする。 */}
+      {stage === "countdown" && (
+        <p className="mt-1 text-xs font-medium text-foreground">{secondsLeft} 秒後にダウンロードを始めます。</p>
+      )}
       <div className="mt-3 flex flex-wrap justify-end gap-2">
         {stage === "countdown" ? (
           <>
-            <Button size="sm" variant="outline" onClick={() => setStage("cancelled")}>
+            <Button size="sm" variant="outline" onClick={cancelCountdown}>
               キャンセル
             </Button>
             <Button size="sm" onClick={startNow}>

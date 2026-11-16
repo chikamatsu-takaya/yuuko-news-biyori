@@ -492,6 +492,62 @@ for (const viewport of VIEWPORTS) {
 }
 
 // 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
+// ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、タイトルバーの右に重ねて出す。
+// 帯がはみ出さず、ボタンに届き、ホームの見出し・主要ボタンを隠さないこと。
+for (const viewport of VIEWPORTS) {
+  test(`local model banner @ ${viewport.width}x${viewport.height}: fits in the title bar without hiding home controls`, async ({
+    page,
+  }, testInfo) => {
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const w = window as any;
+      const original = w.__TAURI_INTERNALS__.invoke;
+      w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === "get_local_model_status") {
+          return {
+            phase: "not_downloaded",
+            failure: null,
+            receivedBytes: 0,
+            totalBytes: 3_100_000_000,
+            neededMoreBytes: null,
+            autoDownloadStarted: true,
+          };
+        }
+        const result = await original(cmd, args);
+        return cmd === "get_user_settings" ? { ...result, aiProvider: "local" } : result;
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await page.setViewportSize(viewport);
+    await openHome(page);
+    const banner = page.getByTestId("local-model-banner");
+    await expect(banner).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`local-model-banner-${viewport.width}x${viewport.height}.png`),
+    });
+
+    const failures: string[] = [];
+    for (const [name, locator] of [
+      ["帯の［始める］", banner.getByRole("button", { name: "始める" })],
+      ["帯の［閉じる］", banner.getByRole("button", { name: "閉じる" })],
+      ["ホームの見出し", page.getByRole("heading", { name: "今日のおすすめニュース" })],
+      ["ニュースを更新", page.getByRole("button", { name: "ニュースを更新" })],
+    ] as const) {
+      const problem = await checkReachable(page, locator);
+      if (problem) {
+        failures.push(`${name}: ${problem}`);
+      }
+    }
+    const scroll = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+    );
+    if (scroll > 1) {
+      failures.push(`horizontal-scroll: ${scroll}`);
+    }
+    expect(failures).toEqual([]);
+  });
+}
+
 async function checkReachable(
   page: Page,
   locator: Locator,
