@@ -101,7 +101,11 @@ pub(crate) fn join_without_leading_connectors(sentences: &[&str]) -> String {
         .iter()
         .map(|sentence| {
             let trimmed = sentence.trim_start();
-            connector_at(trimmed).map_or(trimmed, |(_, body)| body)
+            // 消すと中身の字が残らない文（「その結果、！」）は、そのまま残す。
+            connector_at(trimmed)
+                .map(|(_, body)| body)
+                .filter(|body| body.chars().any(char::is_alphanumeric))
+                .unwrap_or(trimmed)
         })
         .collect::<String>()
         .trim()
@@ -405,6 +409,11 @@ mod tests {
         assert_eq!(
             join_without_leading_connectors(&["これにより、値段が上がったよ。"]),
             "値段が上がったよ。"
+        );
+        // 消すと中身の字が残らない文は、そのまま残す。
+        assert_eq!(
+            join_without_leading_connectors(&["その結果、！"]),
+            "その結果、！"
         );
         // 語の一部（「この結果発表」）は消さない。
         assert_eq!(
