@@ -28,6 +28,9 @@ pub(crate) enum ExplanationChecks {
     Checks,
     /// `Checks` に加え、要約に裏付けのない評価の語の文を落とす。
     ChecksSummary,
+    /// 今の点検と作り直しは本番のまま（`Off` と同じ）にし、その後で要約にない評価の語の文だけを落とす
+    /// （Firestore タスク UZd4u4。(a)(b) の点検はかけない。つなぎの語を消し、100 字未満になるなら落とさない）。
+    SummaryOnly,
 }
 
 /// カタカナ語・英字の語のうち、記事になくても作り話とみなさない一般の語・ゆうこの話し言葉（小文字で照合）。
@@ -110,6 +113,22 @@ pub(crate) fn join_without_leading_connectors(sentences: &[&str]) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// 要約にない評価の語（`unsupported_by_summary`）を含む文を落とした再説明（評価の版 summary_only）。
+/// 落とした後は残した文の頭のつなぎの語を消す。残りが `MIN_KEPT_CHARS` 未満になるなら、落とさずに元の文のまま返す。
+pub(crate) fn keep_summary_supported(summary: &str, text: &str) -> String {
+    let (kept, dropped): (Vec<&str>, Vec<&str>) = split_keeping_ends(text)
+        .into_iter()
+        .partition(|sentence| unsupported_by_summary(summary, sentence).is_empty());
+    if dropped.is_empty() {
+        return text.to_string();
+    }
+    let kept = join_without_leading_connectors(&kept);
+    if content_chars(&kept) < MIN_KEPT_CHARS {
+        return text.to_string();
+    }
+    kept
 }
 
 /// 1文の点検の結果。
@@ -377,6 +396,14 @@ mod tests {
         );
         // 全角の英字は半角と同じとみなす。
         assert!(unknown_names("AIの新機能", "ＡＩの新しい機能だよ。").is_empty());
+    }
+
+    #[test]
+    fn summary_only_keeps_text_without_unsupported_judgment_words() {
+        let text = "あおば社が新型機を発表したよ。";
+        assert_eq!(keep_summary_supported(SUMMARY, text), text);
+        // 全部の文が落ちるときも、短くなりすぎるので元のまま。
+        assert_eq!(keep_summary_supported(SUMMARY, "注目だね！"), "注目だね！");
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub(crate) enum MethodVariant {
     Checks,
     /// `Checks` に加え、再説明の文を要約と照らす。
     ChecksSummary,
+    /// 指示文・今の点検は本番のまま、要約との照合だけで再説明の文を落とす（Firestore タスク UZd4u4）。
+    SummaryOnly,
 }
 
 impl MethodVariant {
@@ -87,6 +89,7 @@ impl MethodVariant {
             "rules_speech" => Some(Self::RulesSpeech),
             "checks" => Some(Self::Checks),
             "checks_summary" => Some(Self::ChecksSummary),
+            "summary_only" => Some(Self::SummaryOnly),
             other => panic!("unknown {VARIANT_ENV}: {other}"),
         }
     }
@@ -99,6 +102,7 @@ impl MethodVariant {
             Self::RulesSpeech => "rules_speech",
             Self::Checks => "checks",
             Self::ChecksSummary => "checks_summary",
+            Self::SummaryOnly => "summary_only",
         }
     }
 
@@ -107,6 +111,7 @@ impl MethodVariant {
         match self {
             Self::Checks => ExplanationChecks::Checks,
             Self::ChecksSummary => ExplanationChecks::ChecksSummary,
+            Self::SummaryOnly => ExplanationChecks::SummaryOnly,
             _ => ExplanationChecks::Off,
         }
     }
@@ -164,7 +169,7 @@ impl MethodVariant {
                      各文は40文字程度にしてください。{SHORT_SENTENCE_RULE}{base}{FACTS_ONLY_RULE}"
                 )
             }
-            Self::RulesSpeech | Self::Checks | Self::ChecksSummary => {
+            Self::RulesSpeech | Self::Checks | Self::ChecksSummary | Self::SummaryOnly => {
                 unreachable!("this variant keeps the production summary prompt")
             }
         }
@@ -178,7 +183,8 @@ impl MethodVariant {
             | Self::Short
             | Self::RulesSpeech
             | Self::Checks
-            | Self::ChecksSummary => None,
+            | Self::ChecksSummary
+            | Self::SummaryOnly => None,
         }
     }
 
@@ -217,7 +223,7 @@ impl MethodVariant {
                 "次のニュースの内容を、日本語で{level}読者にやさしく再説明してください。\
                  {length}の1段落にしてください。{SHORT_SENTENCE_RULE}{YUUKO_TONE_INSTRUCTION}\n{YUUKO_SPEECH_RULES}{calm_instruction}"
             ),
-            Self::Checks | Self::ChecksSummary => {
+            Self::Checks | Self::ChecksSummary | Self::SummaryOnly => {
                 unreachable!("this variant keeps the production explanation prompt")
             }
         }
@@ -229,9 +235,11 @@ impl MethodVariant {
             Self::Rules | Self::RulesSpeech => {
                 format!("{YUUKO_EXPLANATION_REMINDER}{RULES_REMINDER}")
             }
-            Self::Extract | Self::Short | Self::Checks | Self::ChecksSummary => {
-                YUUKO_EXPLANATION_REMINDER.to_string()
-            }
+            Self::Extract
+            | Self::Short
+            | Self::Checks
+            | Self::ChecksSummary
+            | Self::SummaryOnly => YUUKO_EXPLANATION_REMINDER.to_string(),
         }
     }
 
@@ -376,6 +384,7 @@ mod tests {
             MethodVariant::RulesSpeech,
             MethodVariant::Checks,
             MethodVariant::ChecksSummary,
+            MethodVariant::SummaryOnly,
         ]) {
             assert_eq!(MethodVariant::from_name(variant.label()), Some(variant));
         }
@@ -439,6 +448,7 @@ mod tests {
                 MethodVariant::ChecksSummary,
                 ExplanationChecks::ChecksSummary,
             ),
+            (MethodVariant::SummaryOnly, ExplanationChecks::SummaryOnly),
         ] {
             assert_eq!(variant.explanation_checks(), checks);
             assert!(variant.fixed_texts().is_empty());

@@ -400,8 +400,12 @@ impl SummaryService {
             explanation_level,
         )?;
         reject_fallback_early(fallback_policy, &article_id, &yuuko_explanation_response)?;
-        let yuuko_explanation_response = if self.explanation_checks == ExplanationChecks::Off {
-            check_and_retry_speech(
+        let yuuko_explanation_response = if matches!(
+            self.explanation_checks,
+            ExplanationChecks::Off | ExplanationChecks::SummaryOnly
+        ) {
+            let template = yuuko_explanation_request.context.clone();
+            let response = check_and_retry_speech(
                 yuuko_explanation_response,
                 yuuko_explanation_request,
                 SummaryOutputKind::Explanation,
@@ -410,7 +414,17 @@ impl SummaryService {
                 explanation_level,
                 fallback_policy,
                 &request_validated,
-            )?
+            )?;
+            // 評価の版 summary_only（Firestore タスク UZd4u4）: 今の点検と作り直しの後に、要約との照合だけで文を落とす。
+            // 定型文・Mock の結果には当てない。
+            if self.explanation_checks == ExplanationChecks::SummaryOnly
+                && response.provider != PROVIDER_MOCK
+                && Some(&response.text) != template.as_ref()
+            {
+                summary_only_drop(response, speech_summary.unwrap_or(""))?
+            } else {
+                response
+            }
         } else {
             check_and_retry_explanation(
                 yuuko_explanation_response,
@@ -972,6 +986,18 @@ where
     Ok(AiResponse {
         text,
         provider: current.provider,
+    })
+}
+
+/// 評価の版 summary_only（Firestore タスク UZd4u4）: 要約にない評価の語の文を落とした再説明（`explain_check::keep_summary_supported`。
+/// つなぎの語を消し、100 字未満になるなら落とさない）を、保存前の検証にかけ直して返す。
+fn summary_only_drop(response: AiResponse, summary: &str) -> Result<AiResponse, AppError> {
+    let text = explain_check::keep_summary_supported(summary, &response.text);
+    let text = validate_summary_output(SummaryOutputKind::Explanation, &text)
+        .map_err(|_| AppError::AiOutputRejected)?;
+    Ok(AiResponse {
+        text,
+        provider: response.provider,
     })
 }
 
@@ -2194,6 +2220,39 @@ mod tests {
     use std::cell::RefCell;
 
     const ARTICLE_ID: &str = "rss-20261007-tech-01";
+
+    /// summary_only（Firestore タスク UZd4u4）: 要約にない評価の語の文だけを落とす。100 字未満になるなら落とさない。
+    #[test]
+    fn summary_only_drops_only_sentences_with_judgment_words_not_in_the_summary() {
+        use super::summary_only_drop;
+        let summary = "あおば社が新型機を発表した。";
+        let long =
+            "あおば社が新型機を発表して、価格は従来の機械より5000円高くなると発表したんだって。"
+                .repeat(2);
+        let text = format!("{long}注目だね！その結果、価格は5000円高いんだって。");
+        assert_eq!(
+            summary_only_drop(response(&text, "local"), summary)
+                .unwrap()
+                .text,
+            format!("{long}価格は5000円高いんだって。")
+        );
+        // 短くなりすぎるなら落とさない。
+        let short = "あおば社が新型機を発表したよ。注目だね！";
+        assert_eq!(
+            summary_only_drop(response(short, "local"), summary)
+                .unwrap()
+                .text,
+            short
+        );
+        // 記事にない名前は見ない（summary_only は要約との照合だけ）。
+        let named = "あおば社が新型機を発表したよ。ソニーより安いんだって。";
+        assert_eq!(
+            summary_only_drop(response(named, "local"), summary)
+                .unwrap()
+                .text,
+            named
+        );
+    }
 
     /// 本番の SummaryService は再説明の追加の点検を使わない（Firestore タスク 722cmK）。
     #[test]
