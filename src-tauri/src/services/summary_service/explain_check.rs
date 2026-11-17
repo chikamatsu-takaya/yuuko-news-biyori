@@ -15,7 +15,7 @@
 //!   保留の点検と同じ一覧）が要約にない文を落とす。
 
 use super::causal_check::find_unsupported_causes_broad;
-use super::leading_connector::{content_bigrams, normalize};
+use super::leading_connector::{connector_at, content_bigrams, normalize};
 
 /// 再説明の追加の点検の使い方。本番の既定は `Off`（評価のハーネスだけが変える）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,6 +44,17 @@ const COMMON_WORDS: &[&str] = &[
     "web", "cpu", "gpu",
 ];
 
+/// §24 の評価で (b) が誤って拾った一般の語（Firestore タスク 47wIoW）。§24 の出力だけから作り、確かめの評価（§25）の
+/// 出力を見る前に決めた（§12 の教訓）。「メールベース」は「メール」「ベース」をつないだ語として通す。
+#[rustfmt::skip]
+const COMMON_WORDS_FROM_EVAL: &[&str] = &[
+    "オープンソース", "ログイン", "アーキテクチャ", "コントロール", "フォーマット", "メール", "ベース", "ok",
+];
+
+fn is_common_word(word: &str) -> bool {
+    COMMON_WORDS.contains(&word) || COMMON_WORDS_FROM_EVAL.contains(&word)
+}
+
 /// 名前の後ろに付く語（この前の漢字の連なりを人・団体の名前とみなす）。
 const NAME_SUFFIXES: &[&str] = &["氏", "さん", "選手", "監督", "社長", "容疑者", "被告"];
 
@@ -71,6 +82,31 @@ const JUDGMENT_WORDS: &[&str] = &[
 ];
 /// 評価の語を含むが別の意味の複合語。
 const JUDGMENT_COMPOUND_EXCEPTIONS: &[&str] = &["不安定", "危機管理", "目的地"];
+
+/// checks_summary で文を落とした後に残す最小の字数（空白を除く）。これ未満になるなら落とさない（Firestore タスク 47wIoW）。
+/// 100 字にした理由: §24 の base の再説明の下位 10% が 113 字で、ふつうの短い解説はこれより長い。§24 で
+/// 「役に立たない」「少し」になった痩せた例は 73〜79 字で、100 字未満だった。元の長さの 70% にしなかったのは、
+/// 元が短い（120 字前後）ときに 84 字まで落とせてしまい、痩せた例と同じ長さになるため。
+pub(crate) const MIN_KEPT_CHARS: usize = 100;
+
+/// 空白を除いた字数。
+pub(crate) fn content_chars(text: &str) -> usize {
+    text.chars().filter(|c| !c.is_whitespace()).count()
+}
+
+/// 文を落とした後に残した文をつなぐ。各文の頭のつなぎの語（「その結果、」「これにより、」）と直後の読点は、
+/// 記事にあるかどうかに関わらず消す（前の文が落ちると、つなぎが別の文を指して記事にない因果に読めるため）。
+pub(crate) fn join_without_leading_connectors(sentences: &[&str]) -> String {
+    sentences
+        .iter()
+        .map(|sentence| {
+            let trimmed = sentence.trim_start();
+            connector_at(trimmed).map_or(trimmed, |(_, body)| body)
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
 
 /// 1文の点検の結果。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -138,9 +174,8 @@ pub(crate) fn unknown_names(source: &str, text: &str) -> Vec<String> {
     let source = normalize(source);
     let mut names: Vec<String> = Vec::new();
     for name in name_candidates(&normalize(text)) {
-        let known = source.contains(&name)
-            || COMMON_WORDS.contains(&name.as_str())
-            || is_compound_of_known(&source, &name);
+        let known =
+            source.contains(&name) || is_common_word(&name) || is_compound_of_known(&source, &name);
         if !known && !names.contains(&name) {
             names.push(name);
         }
@@ -207,7 +242,7 @@ fn is_compound_of_known(source: &str, name: &str) -> bool {
     (2..chars.len().saturating_sub(1)).any(|cut| {
         let (head, tail): (String, String) =
             (chars[..cut].iter().collect(), chars[cut..].iter().collect());
-        let known = |part: &str| source.contains(part) || COMMON_WORDS.contains(&part);
+        let known = |part: &str| source.contains(part) || is_common_word(part);
         known(head.trim_end_matches('・')) && known(tail.trim_start_matches('・'))
     })
 }
@@ -338,6 +373,51 @@ mod tests {
         );
         // 全角の英字は半角と同じとみなす。
         assert!(unknown_names("AIの新機能", "ＡＩの新しい機能だよ。").is_empty());
+    }
+
+    #[test]
+    fn general_words_found_in_the_first_evaluation_are_not_names() {
+        for text in [
+            "オープンソースで公開されたんだって。",
+            "ログインの情報が固定されていたんだよ。",
+            "新しいアーキテクチャのモデルだよ。",
+            "メールベースの仕組みでコントロールするんだね。",
+            "ファイルのフォーマットが変わるよ。OKだね！",
+        ] {
+            assert!(unknown_names(SOURCE, text).is_empty(), "{text}");
+        }
+        // 記事にない社名は、引き続き拾う。
+        assert_eq!(
+            unknown_names(SOURCE, "アルリババが発表したよ。"),
+            vec!["アルリババ".to_string()]
+        );
+    }
+
+    #[test]
+    fn leading_connectors_are_removed_from_kept_sentences() {
+        assert_eq!(
+            join_without_leading_connectors(&[
+                "ベルギーは攻めたんだね。",
+                "その結果、イタリアは3位だよ。"
+            ]),
+            "ベルギーは攻めたんだね。イタリアは3位だよ。"
+        );
+        assert_eq!(
+            join_without_leading_connectors(&["これにより、値段が上がったよ。"]),
+            "値段が上がったよ。"
+        );
+        // 語の一部（「この結果発表」）は消さない。
+        assert_eq!(
+            join_without_leading_connectors(&["この結果発表は来月だよ。"]),
+            "この結果発表は来月だよ。"
+        );
+        assert_eq!(
+            content_chars(
+                "あい う
+え"
+            ),
+            4
+        );
     }
 
     #[test]

@@ -887,6 +887,9 @@ where
 /// - 作り直し（失敗したときは最初の出力）に残った文は落とす。`ChecksSummary` では、要約にない評価の語の文も落とす
 ///   （作り直しの理由にはしない）。(c) 言い切りは記録だけ（評価のハーネスが記録する）。
 /// - 全部の文が落ちたら定型文（`check_and_retry_speech` と同じ）。
+/// - `ChecksSummary` で文を落としたとき（Firestore タスク 47wIoW）: 残した文の頭のつなぎの語（「その結果、」）を消す
+///   （前の文が落ちて、つなぎの指す先が変わるため）。残りが `MIN_KEPT_CHARS` 未満なら落とさず、出力に (a)(b)・今の点検の
+///   指摘が無ければそのまま使い、あれば定型文にする（解説が痩せて役に立たなくなる失敗を防ぐ。§24 の例 1・2）。
 #[allow(clippy::too_many_arguments)]
 fn check_and_retry_explanation<F>(
     first: AiResponse,
@@ -937,19 +940,33 @@ where
             ),
         }
     }
-    let kept: String = explain_check::split_keeping_ends(&current.text)
+    let with_summary = checks == ExplanationChecks::ChecksSummary;
+    let (kept, dropped): (Vec<&str>, Vec<&str>) = explain_check::split_keeping_ends(&current.text)
         .into_iter()
-        .filter(|sentence| {
+        .partition(|sentence| {
             !flagged(sentence)
-                && (checks != ExplanationChecks::ChecksSummary
+                && (!with_summary
                     || explain_check::unsupported_by_summary(summary, sentence).is_empty())
-        })
-        .collect();
-    let text = if kept.trim().is_empty() {
+        });
+    let text = if with_summary && !dropped.is_empty() {
+        // checks_summary（Firestore タスク 47wIoW）: 落とした後の文頭のつなぎの語を消し、痩せすぎたら落とさない。
+        let kept = explain_check::join_without_leading_connectors(&kept);
+        if explain_check::content_chars(&kept) >= explain_check::MIN_KEPT_CHARS {
+            kept
+        } else if !any_flagged(&current.text) {
+            log::info!("dropping would leave the explanation too short; kept it as generated");
+            current.text.trim().to_string()
+        } else {
+            log::info!(
+                "dropping would leave the explanation too short; used the fixed text instead"
+            );
+            template
+        }
+    } else if kept.concat().trim().is_empty() {
         log::info!("every explanation sentence was dropped; used the fixed text instead");
         template
     } else {
-        kept.trim().to_string()
+        kept.concat().trim().to_string()
     };
     let text = validate_summary_output(kind, &text).map_err(|_| AppError::AiOutputRejected)?;
     Ok(AiResponse {
@@ -2253,9 +2270,24 @@ mod tests {
             run(judged, "-", ExplanationChecks::Checks),
             (judged.to_string(), 0)
         );
+        // 落とすと MIN_KEPT_CHARS 未満になるときは落とさない（指摘が無ければ出力のまま、あれば定型文）。
         assert_eq!(
             run(judged, "-", ExplanationChecks::ChecksSummary),
-            ("あおば社が新型機を発表したよ。".to_string(), 0)
+            (judged.to_string(), 0)
+        );
+        assert_eq!(
+            run(named, named, ExplanationChecks::ChecksSummary),
+            ("定型文だよ。".to_string(), 1)
+        );
+        // 十分に残るときは落とし、残した文の頭のつなぎの語を消す。
+        let long =
+            "あおば社が新型機を発表して、価格は従来の機械より5000円高くなると発表したんだって。"
+                .repeat(2);
+        let text = format!("{long}注目だね！その結果、価格は5000円高いんだって。");
+        let (kept, calls) = run(&text, "-", ExplanationChecks::ChecksSummary);
+        assert_eq!(
+            (kept, calls),
+            (format!("{long}価格は5000円高いんだって。"), 0)
         );
     }
 
