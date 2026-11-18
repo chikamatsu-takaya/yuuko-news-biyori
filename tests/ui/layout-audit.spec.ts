@@ -492,69 +492,169 @@ for (const viewport of VIEWPORTS) {
   });
 }
 
-// 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
-// ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、右上（右列の上端）に重ねて出す。
-// 帯がはみ出さず、ボタンに届き、ホームの見出し・主要ボタンを隠さず、中央列へかぶらないこと。
-for (const viewport of VIEWPORTS) {
-  test(`local model banner @ ${viewport.width}x${viewport.height}: fits over the right column without hiding home controls`, async ({
-    page,
-  }, testInfo) => {
-    await page.addInitScript(() => {
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      const w = window as any;
-      const original = w.__TAURI_INTERNALS__.invoke;
-      w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
-        if (cmd === "get_local_model_status") {
-          return {
-            phase: "not_downloaded",
-            failure: null,
-            receivedBytes: 0,
-            totalBytes: 3_100_000_000,
-            neededMoreBytes: null,
-            autoDownloadStarted: true,
-          };
-        }
-        const result = await original(cmd, args);
-        return cmd === "get_user_settings" ? { ...result, aiProvider: "local" } : result;
-      };
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-    });
-    await page.setViewportSize(viewport);
-    await openHome(page);
-    const banner = page.getByTestId("local-model-banner");
-    await expect(banner).toBeVisible();
-    await page.screenshot({
-      path: testInfo.outputPath(`local-model-banner-${viewport.width}x${viewport.height}.png`),
-    });
+// ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、画面の外枠の一番上に出す。
+// 帯は画面に重ねず、その高さの分だけ画面を下へ押し下げる（2026-11-18 に画面内のタイトルバーを廃止したため）。
+// 全画面・最小ウィンドウを含む 3 サイズで、帯がどの画面のボタン・リンク・見出し・画像・カードにも重ならず、
+// 画面の一番上が帯の下から始まり、見出し・主要ボタン・サイドバーのメニューに届き、帯のボタンも押せることを確かめる。
+const BANNER_VIEWPORTS = [...VIEWPORTS, { width: 800, height: 440 }] as const;
+for (const viewport of BANNER_VIEWPORTS) {
+  const viewportKey = `${viewport.width}x${viewport.height}`;
+  for (const screen of SCREENS) {
+    test(`local model banner on ${screen.id} @ ${viewportKey}: pushes the screen down and covers nothing`, async ({
+      page,
+    }, testInfo) => {
+      await page.addInitScript(() => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const w = window as any;
+        const original = w.__TAURI_INTERNALS__.invoke;
+        w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+          if (cmd === "get_local_model_status") {
+            return {
+              phase: "not_downloaded",
+              failure: null,
+              receivedBytes: 0,
+              totalBytes: 3_100_000_000,
+              neededMoreBytes: null,
+              autoDownloadStarted: true,
+            };
+          }
+          const result = await original(cmd, args);
+          return cmd === "get_user_settings" ? { ...result, aiProvider: "local" } : result;
+        };
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      });
+      await page.setViewportSize(viewport);
+      await screen.open(page);
+      const banner = page.getByTestId("local-model-banner");
+      await expect(banner).toBeVisible();
+      await page.waitForLoadState("networkidle");
+      await page.waitForTimeout(300);
+      await page.screenshot({
+        path: testInfo.outputPath(`local-model-banner-${screen.id}-${viewportKey}.png`),
+      });
 
-    const failures: string[] = [];
-    for (const [name, locator] of [
-      ["帯の［始める］", banner.getByRole("button", { name: "始める" })],
-      ["帯の［閉じる］", banner.getByRole("button", { name: "閉じる" })],
-      ["ホームの見出し", page.getByRole("heading", { name: "今日のおすすめニュース" })],
-      ["ニュースを更新", page.getByRole("button", { name: "ニュースを更新" })],
-    ] as const) {
-      const problem = await checkReachable(page, locator);
-      if (problem) {
-        failures.push(`${name}: ${problem}`);
+      const failures: string[] = [];
+      // 帯の矩形と、画面側の部品（帯の外）の矩形が重ならないこと。
+      const overlaps = await page.evaluate(() => {
+        const bannerNode = document.querySelector('[data-testid="local-model-banner"]');
+        const ground = document.querySelector(".app-ground");
+        if (!bannerNode || !ground) {
+          return ["帯または画面の外枠が見つからない"];
+        }
+        const b = bannerNode.getBoundingClientRect();
+        const problems: string[] = [];
+        const screenRoot = ground.querySelector(":scope > :not(.app-pattern-layer)");
+        if (!screenRoot || screenRoot.getBoundingClientRect().top < b.bottom - 0.5) {
+          problems.push(`画面の上端が帯の下に来ていない (screen.top=${screenRoot?.getBoundingClientRect().top} banner.bottom=${b.bottom})`);
+        }
+        const selector = [
+          "button",
+          "a[href]",
+          "input",
+          "select",
+          "textarea",
+          "[role=button]",
+          "[role=tab]",
+          "[role=link]",
+          "h1",
+          "h2",
+          "h3",
+          "h4",
+          "img",
+          "[data-slot=card]",
+          "[data-testid]",
+          "nav",
+          "aside",
+          "main",
+          "footer",
+        ].join(",");
+        for (const node of Array.from(ground.querySelectorAll(selector))) {
+          if (node.classList.contains("app-pattern-layer")) {
+            continue;
+          }
+          // スクロール領域の中で上へスクロールして見えなくなった部分は除き、実際に見えている範囲だけで比べる。
+          const rect = node.getBoundingClientRect();
+          let r = { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+          for (let a = node.parentElement; a && a !== ground; a = a.parentElement) {
+            const style = getComputedStyle(a);
+            if (style.overflowX === "visible" && style.overflowY === "visible") {
+              continue;
+            }
+            const c = a.getBoundingClientRect();
+            r = {
+              left: Math.max(r.left, c.left),
+              top: Math.max(r.top, c.top),
+              right: Math.min(r.right, c.right),
+              bottom: Math.min(r.bottom, c.bottom),
+            };
+          }
+          if (r.right - r.left <= 0.5 || r.bottom - r.top <= 0.5) {
+            continue;
+          }
+          const overlapX = Math.min(r.right, b.right) - Math.max(r.left, b.left);
+          const overlapY = Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top);
+          if (overlapX > 0.5 && overlapY > 0.5) {
+            const label = (node.getAttribute("aria-label") || node.textContent || "").trim().slice(0, 20);
+            problems.push(`${node.tagName.toLowerCase()}「${label}」に重なる (top=${Math.round(r.top)} banner.bottom=${Math.round(b.bottom)})`);
+          }
+        }
+        return problems;
+      });
+      failures.push(...overlaps);
+
+      // 見出し・主要ボタン（帯で押し下げても、画面内か縦スクロールで届く）と、サイドバーのメニュー。
+      // ホームの先頭の記事カードは、帯の分だけ低くなると、帯が無い高さ 600px 以下のときと同じ既知の崩れ
+      // （KNOWN_ISSUES.home。MainScreen の担当で直す）で欠けるため、ここでは既知として分ける。
+      const knownFailures: string[] = [];
+      for (const target of screen.keyTargets(page)) {
+        const problem = await checkReachable(page, target.locator);
+        if (problem) {
+          const known = screen.id === "home" && target.name === "先頭の記事カード" && viewport.height <= 600;
+          (known ? knownFailures : failures).push(`${target.name}: ${problem}`);
+        }
       }
-    }
-    const scroll = await page.evaluate(
-      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
-    );
-    if (scroll > 1) {
-      failures.push(`horizontal-scroll: ${scroll}`);
-    }
-    // 帯は右列（ゆうこの列。ホームでは最後の aside）の幅の中に収め、中央列（見出し・記事）へかぶせない。
-    const bannerBox = await banner.boundingBox();
-    const columnBox = await page.locator("aside").last().boundingBox();
-    if (!bannerBox || !columnBox || bannerBox.x < columnBox.x - 1) {
-      failures.push(`banner-over-center: banner.x=${bannerBox?.x} column.x=${columnBox?.x}`);
-    }
-    expect(failures).toEqual([]);
-  });
+      const navButtons = page.getByRole("navigation").first().getByRole("button");
+      for (let i = 0; i < (await navButtons.count()); i += 1) {
+        const problem = await checkReachable(page, navButtons.nth(i));
+        if (problem) {
+          failures.push(`サイドバー ${(await navButtons.nth(i).innerText()).trim()}: ${problem}`);
+        }
+      }
+      for (const [name, locator] of [
+        ["帯の［始める］", banner.getByRole("button", { name: "始める" })],
+        ["帯の［閉じる］", banner.getByRole("button", { name: "閉じる" })],
+      ] as const) {
+        const problem = await checkReachable(page, locator, true);
+        if (problem) {
+          failures.push(`${name}: ${problem}`);
+        }
+      }
+      const scroll = await page.evaluate(() => ({
+        x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        y: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+      }));
+      if (scroll.x > 1 || scroll.y > 1) {
+        failures.push(`ページ全体のスクロール: x=${scroll.x} y=${scroll.y}`);
+      }
+      expect(failures, `${screen.id} @ ${viewportKey}`).toEqual([]);
+
+      // 閉じたら帯が消え、画面は元の高さ（ビューポートいっぱい）に戻る。
+      await banner.getByRole("button", { name: "閉じる" }).click();
+      await expect(banner).toHaveCount(0);
+      const screenBox = await page.evaluate(() => {
+        const root = document.querySelector(".app-ground > :not(.app-pattern-layer)");
+        const r = root?.getBoundingClientRect();
+        return r ? { top: r.top, height: r.height } : null;
+      });
+      expect(screenBox).toEqual({ top: 0, height: viewport.height });
+      if (knownFailures.length > 0) {
+        test.fixme(true, `既知の崩れ（担当: ${KNOWN_ISSUES.home?.["800x600"]?.owner}）: ${knownFailures.join(" / ")}`);
+      }
+    });
+  }
 }
 
+// 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
 async function checkReachable(
   page: Page,
   locator: Locator,
