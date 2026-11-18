@@ -74,7 +74,7 @@ pnpm tauri build --bundles nsis
 - 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`、`src-tauri/target/release/bundle/msi/*.msi`。
 - ビルド前に、APIキー・`.env`・`app-data/` の実データが混入していないことを確かめる（`開発環境構築手順書.md` §15.3）。
 
-### 3.3 作った後に確かめること（初回は必ず実施。1・3・4 は 2026-11-18 に確かめた〔§3.3.1〕。2 は未検証。5 は実機で未確認〔§3.3.2〕）
+### 3.3 作った後に確かめること（初回は必ず実施。1・3・4 は 2026-11-18 に確かめた〔§3.3.1〕。2 は未検証。5 は 2026-11-18 に NSIS で確かめた〔§3.3.2〕）
 
 1. インストーラーの大きさ（約 30MiB 以下か。2026-11-16 からモデルを入れないため。結果は §3.3.1）。
 2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（手順は §3.4）。
@@ -110,7 +110,12 @@ pnpm tauri build --bundles nsis
 - 広く消さない守り: 識別子が空ならインストーラーを作らない（`!error`）。`$LOCALAPPDATA`（`SetShellVarContext current`）が `X:\...` の形で、フォルダとして在るときだけ使う。消すのは `$LOCALAPPDATA\<識別子>\local_llm\models` の固定の形で、在るときだけ。
 - MSI: **対応していない**。Tauri の WiX のテンプレートは全員向け（`perMachine`）で、アンインストールでアプリのデータに触れない（モデルを含めて残る）。WiX の断片（`bundle.windows.wix.fragmentPaths`）で利用者ごとのフォルダを消すことはできる見込みだが、(1) アンインストールした人の分しか消えない、(2) 版を上げるとき（`MajorUpgrade`）にも古い版のアンインストールが走るため `UPGRADINGPRODUCTCODE` で除く必要がある、(3) 管理者の確認（UAC）が要り、この PC で自動では確かめられない。MSI も配るなら、設定画面の［モデルを削除］を案内するか、上の断片を別に作って確かめる（提案）。
 - 確かめ方: 識別子と productName を替えた版（`jp.star-system.yuuko-news.installer-check` / `yuuko-news-uninstall-check`。`--config` で上書きし、コミットしない）を v0.1.0 と v0.1.1 で作り、エクスプローラーからインストールする。ダミーのモデル・`.part`・ほかのデータのダミーを置き、(a) v0.1.1 で版を上げてモデルが残るか、(b) 設定 → アプリ からチェックを外してアンインストールし `local_llm\models` だけが消えるか、(c) チェックを入れて全部消えるかを見る。ダミーはエクスプローラーで置く（Claude Desktop などの MSIX のアプリの中のシェルから `%LOCALAPPDATA%` に書くと、MSIX の仮想化〔`%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\Local\`〕に入り、本物の場所に置かれない。2026-11-18 に確かめた）。
-- 結果（2026-11-18）: 確かめ用のインストーラー（v0.1.0・v0.1.1）を作り、生成された `installer.nsi` にフックが入っていること（`!include ...installer-hooks.nsh`）までは確かめた。**実機でのインストール・アンインストールの確認はまだ**（PC を藤井さんが使っていたため。行ったら本節に追記する）。
+- 結果（2026-11-18・この PC〔Windows 11〕・NSIS・利用者ごと。確かめ用の版。生成された `installer.nsi` にフックが入っていることも確かめた）。ダミーは `local_llm\models\gemma-4-e2b-it-q4-k-m-740185b2\` に `.gguf`・`.part`・`.part.json`、ほかに `%LOCALAPPDATA%\<識別子>\keep-local.txt`・`local_llm\keep-in-local_llm.txt`・`%APPDATA%\<識別子>\keep-roaming.txt` を置いた。
+  1. **版を上げる（v0.1.0 → v0.1.1）**: エクスプローラーから v0.1.1 を開くと「Already Installed」で既定は「Uninstall before installing」だった。そのまま進むと古い版のアンインストーラーが `インストール先\uninstall.exe` のまま動き（一時フォルダへ写されない）、「Delete the application data」は外れたまま。詳細に `Local LLM model: kept (uninstall called by a newer installer)` が出て、**ダミーは全部残った**。版は 0.1.1 になった。
+  2. **アンインストール・チェックを外す**（設定 → アプリ → インストールされているアプリ → アンインストール）: アンインストーラーは `%TEMP%\~nsu1.tmp\Un.exe` に写されて動いた。詳細に `Local LLM model: removing ...\local_llm\models` が出て、**`local_llm\models` だけが消えた**。`keep-local.txt`・`local_llm\keep-in-local_llm.txt`（中身があるので `local_llm` は残る）・`keep-roaming.txt` は残った。インストール先も消えた。
+  3. **入れ直してアンインストール・チェックを入れる**: ダミーを置き直してから行った。`%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>`・インストール先・アンインストールのレジストリが**全部消えた**（モデルは Tauri のテンプレートが先に消すため、フックは何もしない）。
+  - 後片付け: 確かめ用のアプリ・データ・ダミーは残っていない。開発者の実データ（`jp.star-system.yuuko-news`）には触れていない。
+  - 注意: インストール後の画面の「Run ...」は外した（確かめ用の版を起動すると、実際のモデルの取得が始まるため）。
 
 ### 3.4 VC++ ランタイムが入っていないパソコンで確かめる（判断台帳 D112・未検証）
 
