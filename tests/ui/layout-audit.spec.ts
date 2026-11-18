@@ -410,7 +410,7 @@ for (const id of NAV_FIT_SCREENS) {
   });
 }
 
-// 本文以外の文字（タイトルバー・サイドバー・状態表示・ボタン・タブ）はドラッグで選択されず、
+// 本文以外の文字（サイドバー・状態表示・ボタン・タブ）はドラッグで選択されず、
 // 記事の本文（要約など）は選べるままであること（実機テスト B12）。
 test("UI chrome text is not selectable but article text stays selectable", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
@@ -418,7 +418,8 @@ test("UI chrome text is not selectable but article text stays selectable", async
   await expect(page.getByText("E2E用の要約です。").first()).toBeVisible();
   const userSelect = (locator: Locator) =>
     locator.first().evaluate((node) => getComputedStyle(node).userSelect);
-  expect(await userSelect(page.locator("header"))).toBe("none");
+  // 画面内のタイトルバー（header）は 2026-11-18 に廃止した（タイトルバーは OS のものだけ）。
+  await expect(page.locator("header")).toHaveCount(0);
   expect(await userSelect(page.locator("footer"))).toBe("none");
   expect(await userSelect(page.locator("aside").first())).toBe("none");
   expect(await userSelect(page.locator("aside").first().getByText("自動起動", { exact: false }))).toBe("none");
@@ -492,10 +493,10 @@ for (const viewport of VIEWPORTS) {
 }
 
 // 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
-// ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、タイトルバーの右に重ねて出す。
-// 帯がはみ出さず、ボタンに届き、ホームの見出し・主要ボタンを隠さないこと。
+// ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、右上（右列の上端）に重ねて出す。
+// 帯がはみ出さず、ボタンに届き、ホームの見出し・主要ボタンを隠さず、中央列へかぶらないこと。
 for (const viewport of VIEWPORTS) {
-  test(`local model banner @ ${viewport.width}x${viewport.height}: fits in the title bar without hiding home controls`, async ({
+  test(`local model banner @ ${viewport.width}x${viewport.height}: fits over the right column without hiding home controls`, async ({
     page,
   }, testInfo) => {
     await page.addInitScript(() => {
@@ -543,6 +544,12 @@ for (const viewport of VIEWPORTS) {
     );
     if (scroll > 1) {
       failures.push(`horizontal-scroll: ${scroll}`);
+    }
+    // 帯は右列（ゆうこの列。ホームでは最後の aside）の幅の中に収め、中央列（見出し・記事）へかぶせない。
+    const bannerBox = await banner.boundingBox();
+    const columnBox = await page.locator("aside").last().boundingBox();
+    if (!bannerBox || !columnBox || bannerBox.x < columnBox.x - 1) {
+      failures.push(`banner-over-center: banner.x=${bannerBox?.x} column.x=${columnBox?.x}`);
     }
     expect(failures).toEqual([]);
   });

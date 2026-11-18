@@ -7,7 +7,10 @@
  *   一言ことわりを出し、10 秒待ってから start_local_model_download(autoStarted) で始める（U1）。
  *   待つ間は［すぐ始める］［キャンセル］を押せる。始めた後は進み具合・一時停止・再開・キャンセル・失敗を出す。
  * - 細い帯: それ以外で、まだ使えないとき（キャンセル・オフライン・失敗の後など）に起動のたびに出す（U5・U7）。
- *   各画面のタイトルバー（高さ 40px）の右の空いた所に重ね、画面の操作を隠さない。閉じたら、その起動中は出さない。
+ *   右上の小さなカードとして、各画面の右列（ゆうこの列。幅 240px 以上）の上端に重ね、中央列の見出し・ボタンを隠さない。
+ *   以前は画面内のタイトルバー（AppTitleBar、高さ 40px）の右の空き所に重ねていたが、2026-11-18 にタイトルバーを
+ *   OS のものだけにしてその空き所が無くなったため、右列の上へ移した（右列の上端は説明やゆうこの吹き出しで、操作は無い）。
+ *   閉じたら、その起動中は出さない。
  * - 自動で始めてよいかの最終判断は Rust（記録・途中のファイル）。React は表示とボタンだけを持つ。
  * - ことわりを実際に表示している間だけ数える（メイン画面が隠れている・初回起動の案内が開いている間は数えず、
  *   最初から数え直す。§2.1 の不変条件・U6）。ほかの Dialog が開いている間も数えない。
@@ -168,16 +171,19 @@ export default function LocalModelSetupNotice({ active: frameActive }: { active:
       return null;
     }
     return (
+      // 幅 w-56（224px）+ 右の余白 8px は、右列の最小幅 240px（各画面の w-60）に収まり、中央列へはみ出さない。
       <div
         role="status"
         data-testid="local-model-banner"
-        className="fixed right-3 top-0.5 z-40 flex h-9 max-w-[calc(100%-18rem)] items-center gap-1 rounded-full border border-[var(--yuuko-green)]/30 bg-white/95 pl-3 text-xs text-foreground shadow-sm"
+        className="fixed right-2 top-2 z-40 w-56 rounded-xl border border-[var(--yuuko-green)]/30 bg-white/95 p-2 text-xs text-foreground shadow-sm"
       >
-        <span className="min-w-0 flex-1 truncate" title={view.text}>
+        <p className="line-clamp-3 px-1 leading-relaxed" title={view.text}>
           {view.text}
-        </span>
-        <LocalModelActionButtons actions={view.actions} onStatus={(s) => s && setStatus(s)} />
-        {closeButton}
+        </p>
+        <div className="mt-1 flex flex-wrap justify-end gap-1">
+          <LocalModelActionButtons actions={view.actions} onStatus={(s) => s && setStatus(s)} />
+          {closeButton}
+        </div>
       </div>
     );
   }
@@ -187,7 +193,7 @@ export default function LocalModelSetupNotice({ active: frameActive }: { active:
     <section
       aria-labelledby="local-model-setup-title"
       data-testid="local-model-setup"
-      className="fixed left-1/2 top-12 z-40 w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 rounded-xl border border-[var(--yuuko-green)]/30 bg-white p-4 text-sm shadow-lg"
+      className="fixed left-1/2 top-4 z-40 w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 rounded-xl border border-[var(--yuuko-green)]/30 bg-white p-4 text-sm shadow-lg"
     >
       <h2 id="local-model-setup-title" className="mb-1 font-medium text-[var(--yuuko-green-text)]">
         初期セッティング中
