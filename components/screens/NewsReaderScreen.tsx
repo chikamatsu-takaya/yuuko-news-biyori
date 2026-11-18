@@ -2307,7 +2307,8 @@ export default function NewsReaderScreen({
                 </p>
                 )}
                 {autoSummaryReason ? (
-                  /* 自動要約が進まない理由（ゲーム・発表中で休んでいる・設定で無効など。D158）。固定文言だけを出す。 */
+                  /* 自動要約が進まない理由（ゲーム・発表中で休んでいる・AIの準備ができていないなど。D158）。固定文言だけを出す。
+                     設定で無効のときは出さない（2026-11-18 藤井）。理由が無いときは要素ごと出さず、隙間を残さない。 */
                   <p
                     role="status"
                     data-testid="auto-summary-reason"
