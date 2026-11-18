@@ -416,15 +416,12 @@ impl SummaryService {
                 &request_validated,
             )?;
             // 評価の版 summary_only（Firestore タスク UZd4u4）: 今の点検と作り直しの後に、要約との照合だけで文を落とす。
-            // 定型文・Mock の結果には当てない。
-            if self.explanation_checks == ExplanationChecks::SummaryOnly
-                && response.provider != PROVIDER_MOCK
-                && Some(&response.text) != template.as_ref()
-            {
-                summary_only_drop(response, speech_summary.unwrap_or(""))?
-            } else {
-                response
-            }
+            summary_only_after_speech(
+                self.explanation_checks,
+                response,
+                template.as_deref(),
+                speech_summary.unwrap_or(""),
+            )?
         } else {
             check_and_retry_explanation(
                 yuuko_explanation_response,
@@ -987,6 +984,22 @@ where
         text,
         provider: current.provider,
     })
+}
+
+/// `SummaryOnly` のときだけ `summary_only_drop` をかける。定型文（前後の空白を除いて `template` と同じ文）と
+/// Mock の結果には当てない（記事の中身から作った文ではないため）。
+fn summary_only_after_speech(
+    checks: ExplanationChecks,
+    response: AiResponse,
+    template: Option<&str>,
+    summary: &str,
+) -> Result<AiResponse, AppError> {
+    let is_template = template.is_some_and(|template| template.trim() == response.text.trim());
+    if checks != ExplanationChecks::SummaryOnly || response.provider == PROVIDER_MOCK || is_template
+    {
+        return Ok(response);
+    }
+    summary_only_drop(response, summary)
 }
 
 /// 評価の版 summary_only（Firestore タスク UZd4u4）: 要約にない評価の語の文を落とした再説明（`explain_check::keep_summary_supported`。
@@ -2251,6 +2264,43 @@ mod tests {
                 .unwrap()
                 .text,
             named
+        );
+    }
+
+    /// summary_only は、定型文と Mock の結果からは文を落とさない。Off のときは何もしない。
+    #[test]
+    fn summary_only_skips_templates_mock_and_other_modes() {
+        use super::explain_check::ExplanationChecks;
+        use super::summary_only_after_speech;
+        let summary = "あおば社が新型機を発表した。";
+        let long =
+            "あおば社が新型機を発表して、価格は従来の機械より5000円高くなると発表したんだって。"
+                .repeat(3);
+        let text = format!("{long}注目だね！");
+        let run = |checks, provider: &str, template: Option<&str>| {
+            summary_only_after_speech(checks, response(&text, provider), template, summary)
+                .unwrap()
+                .text
+        };
+        // 定型文（前後の空白は無視して比べる）と Mock には当てない。
+        let padded = format!(
+            "  {text}
+"
+        );
+        assert_eq!(
+            run(ExplanationChecks::SummaryOnly, "local", Some(&padded)),
+            text
+        );
+        assert_eq!(run(ExplanationChecks::SummaryOnly, "mock", None), text);
+        assert_eq!(run(ExplanationChecks::Off, "local", None), text);
+        // 実AIの出力には当てる。
+        assert_eq!(
+            run(
+                ExplanationChecks::SummaryOnly,
+                "local",
+                Some("定型文だよ。")
+            ),
+            long
         );
     }
 
