@@ -34,12 +34,24 @@ type KnownIssue = { owner: string; note: string; checks: string[] };
 const KNOWN_ISSUES: Record<string, Partial<Record<ViewportKey, KnownIssue>>> = {
   home: {
     // MainScreen は小柳さんの「ホーム画面のレイアウト修正」（md-776e3776c75db0b8, Doing）で作り直し中のため直さない。
+    // 2026-11-18 時点で、画面内のタイトルバー（40px）を廃止したため、帯の無い 800x600 ではこの崩れは起きず検査は通る。
+    // ローカルAIの案内の帯が出て画面の高さが 560px 以下になったときの同じ崩れは HOME_BANNER_KNOWN_ISSUE に分けている。
     "800x600": {
       owner: "小柳（md-776e3776c75db0b8 ホーム画面のレイアウト修正）",
       note: "中央列が約336pxで、ゆうこ表示の分だけ記事一覧の領域が潰れ、先頭カードが最初から欠けて見える",
       checks: ["reach:先頭の記事カード"],
     },
   },
+};
+
+// ローカルAIの案内の帯（下の local model banner のテスト）が出たときだけ起きるホームの崩れ。
+// 帯が無ければ 800x600 のホームは崩れない（上の KNOWN_ISSUES.home["800x600"] の検査は今は通っている）。
+const HOME_BANNER_KNOWN_ISSUE: KnownIssue = {
+  owner: "小柳（md-776e3776c75db0b8 ホーム画面のレイアウト修正。帯による発生は未連絡のため要連絡）",
+  note:
+    "ローカルAIの案内の帯（高さ 40px）が出て画面の高さが 560px 以下になると、ゆうこ表示の分だけ記事一覧の領域が潰れ、" +
+    "先頭の記事カードが欠ける。帯が持ち込む崩れで、帯が無い 800x600 では起きない",
+  checks: ["先頭の記事カード"],
 };
 
 const sidebarButton = (page: Page, name: string) =>
@@ -518,6 +530,10 @@ for (const viewport of BANNER_VIEWPORTS) {
               autoDownloadStarted: true,
             };
           }
+          // 模様（テーマの地）を敷いた状態で確かめる。模様が帯の文字の上に描かれないこと（テーマ模様_素材受け入れ基準 §5）。
+          if (cmd === "get_pattern_state") {
+            return { activePatternId: "gacha_pattern_snow", selectablePatternIds: ["none", "gacha_pattern_snow"] };
+          }
           const result = await original(cmd, args);
           return cmd === "get_user_settings" ? { ...result, aiProvider: "local" } : result;
         };
@@ -527,6 +543,7 @@ for (const viewport of BANNER_VIEWPORTS) {
       await screen.open(page);
       const banner = page.getByTestId("local-model-banner");
       await expect(banner).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("data-pattern", "gacha_pattern_snow");
       await page.waitForLoadState("networkidle");
       await page.waitForTimeout(300);
       await page.screenshot({
@@ -602,14 +619,30 @@ for (const viewport of BANNER_VIEWPORTS) {
       });
       failures.push(...overlaps);
 
+      // 模様の層が帯の文字の上に来ていないこと（文字の中心で一番手前にあるのが帯の中の要素）。
+      const frontAtText = await banner.locator("span").first().evaluate((node) => {
+        const r = node.getBoundingClientRect();
+        const front = document.elementFromPoint(r.left + Math.min(r.width, 40) / 2, r.top + r.height / 2);
+        const bannerNode = node.closest('[data-testid="local-model-banner"]');
+        return front && bannerNode?.contains(front) ? null : `${front?.tagName.toLowerCase()}.${front?.className}`;
+      });
+      if (frontAtText) {
+        failures.push(`帯の文字の手前に別の要素がある (${frontAtText})`);
+      }
+
       // 見出し・主要ボタン（帯で押し下げても、画面内か縦スクロールで届く）と、サイドバーのメニュー。
-      // ホームの先頭の記事カードは、帯の分だけ低くなると、帯が無い高さ 600px 以下のときと同じ既知の崩れ
-      // （KNOWN_ISSUES.home。MainScreen の担当で直す）で欠けるため、ここでは既知として分ける。
+      // ホームの先頭の記事カードは、帯が出て画面の高さが 560px 以下になると欠ける（帯が無い 800x600 では欠けない）。
+      // 帯が持ち込む崩れだが、直すにはホームの縦の配分（MainScreen.tsx。担当は別）を変える必要があるため、
+      // KNOWN_ISSUES.home の banner として分けて fixme にする（担当者へ伝える）。
       const knownFailures: string[] = [];
       for (const target of screen.keyTargets(page)) {
         const problem = await checkReachable(page, target.locator);
         if (problem) {
-          const known = screen.id === "home" && target.name === "先頭の記事カード" && viewport.height <= 600;
+          // 帯の分（40px）を引いた画面の高さが 560px 以下のときだけ既知として扱う。
+          const known =
+            screen.id === "home" &&
+            HOME_BANNER_KNOWN_ISSUE.checks.includes(target.name) &&
+            viewport.height - 40 <= 560;
           (known ? knownFailures : failures).push(`${target.name}: ${problem}`);
         }
       }
@@ -648,7 +681,7 @@ for (const viewport of BANNER_VIEWPORTS) {
       });
       expect(screenBox).toEqual({ top: 0, height: viewport.height });
       if (knownFailures.length > 0) {
-        test.fixme(true, `既知の崩れ（担当: ${KNOWN_ISSUES.home?.["800x600"]?.owner}）: ${knownFailures.join(" / ")}`);
+        test.fixme(true, `既知の崩れ（担当: ${HOME_BANNER_KNOWN_ISSUE.owner}）: ${HOME_BANNER_KNOWN_ISSUE.note} / ${knownFailures.join(" / ")}`);
       }
     });
   }

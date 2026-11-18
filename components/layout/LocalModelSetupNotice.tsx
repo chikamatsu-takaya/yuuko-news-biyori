@@ -173,10 +173,13 @@ export default function LocalModelSetupNotice({ active: frameActive }: { active:
     }
     return (
       // 縦の並び（.app-shell）の一番上に入れる。高さは 1 行（h-10）で固定し、文が長いときは省略して title で全文を見せる。
+      // relative z-10: 模様の層（.app-ground の中の fixed・全画面）は .app-ground の重なりの中で描かれ、配置のない帯より
+      // 上に来てしまうため、帯にも重なりの順を持たせて模様の上に描く。地の色は不透明（--yuuko-green-light）にし、
+      // 模様を文字の下に透かさない（テーマ模様_素材受け入れ基準 §5）。
       <div
         role="status"
         data-testid="local-model-banner"
-        className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)] px-3 text-xs text-foreground"
+        className="relative z-10 flex h-10 shrink-0 items-center gap-2 border-b border-[var(--yuuko-green)]/30 bg-[var(--yuuko-green-light)] px-3 text-xs text-foreground"
       >
         <span className="min-w-0 flex-1 truncate" title={view.text}>
           {view.text}
