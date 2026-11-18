@@ -1,6 +1,8 @@
 # ローカルLLM同梱配布手順
 
-同梱ローカルLLM（llama.cpp の `llama-server` ＋ Qwen3.5-2B Q4_K_M。判断台帳 D99〜D102）を入れた配布用インストーラーを作る手順と、ライセンス本文の置き場所、実機での速度・メモリの実測結果をまとめる。
+同梱ローカルLLM（llama.cpp の `llama-server`。判断台帳 D99〜D102）を入れた配布用インストーラーを作る手順と、ライセンス本文の置き場所、実機での速度・メモリの実測結果をまとめる。
+
+- **2026-11-16 の変更**: モデルを Qwen3.5-2B から Gemma 4 E2B Q4_K_M（約3.1GB）に替え、**モデルはインストーラーに入れず、初回起動時に Hugging Face から取得する**ようにした（`docs/02_design/ローカルLLMモデル初回ダウンロード_設計案.md`）。インストーラーに入るのは `runtime/` と `LICENSES/` だけ。以下の大きさ・実測値のうち 2B に基づくものは当時の記録で、インストーラーを作っての確かめ直しは初回ダウンロードの 5/5 で行う。
 
 - 開発環境で「ローカル」を動かすだけなら `開発環境構築手順書.md` §17.5 で足りる。本書は **配布物を作る人** 向け。
 - 設計は `docs/02_design/詳細設計書.md` §5.4.5.1（LocalLlmService）。
@@ -13,7 +15,7 @@
 | 置き場所（`src-tauri/resources/local_llm/` 配下） | 中身 | 大きさ | git |
 |---|---|---|---|
 | `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`）＋ Visual C++ ランタイム 3 個（`vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`。判断台帳 D112。表は同じファイルの `VC_RUNTIME_FILES`） | 計 44,453,280 B（約 42.4 MiB。うち VC++ ランタイム 732,064 B） | 追跡しない（`.gitignore`） |
-| `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（モデルの表 `ACTIVE_MODEL` の `file_name` / `size` / `sha256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
+| `models/` | **空にする**（2026-11-16 から。モデル `gemma-4-E2B-it-Q4_K_M.gguf`〔3,106,738,272 B〕は初回起動時に `%LOCALAPPDATA%\<識別子>\local_llm\models\<版の名前>\` へ取得する。`.gguf` が残っていると `check-bundle.mjs` がバンドルを止める）。以前は `stario-qwen3.5-2b-q4_k_m.gguf`（1,312,164,800 B）を置いていた | 0 B | 追跡しない（`.gitignore`） |
 | `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
 合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
@@ -124,12 +126,12 @@ pnpm tauri build --bundles nsis
 ## 5. ライセンス表記
 
 - 置き場所: `src-tauri/resources/local_llm/LICENSES/`（git で追跡）。`bundle.resources` で `local_llm/LICENSES/` としてインストーラーへ同梱される。
-- `README.txt` に、各部品の入手元・版・ライセンス本文のファイル名と、Qwen の重みを GGUF へ変換・量子化した **改変の告知**（Apache License 2.0 第4条(b)）を書いている。文言は持ち主の確認対象のため、変更するときは持ち主に確認する。
+- `README.txt` に、各部品の入手元・版・ライセンス本文のファイル名と、モデル（Gemma 4 E2B）の出所・初回に取得すること・本アプリは改変しない旨（GGUF 化・量子化は unsloth。Apache License 2.0 第4条(b) の告知は本アプリとしては要らない見込み）を書いている。文言は持ち主の確認対象のため、変更するときは持ち主に確認する。
 - 同梱部品とライセンス本文の対応（2026-10-13 に `RUNTIME_FILES` と実物の DLL を突き合わせて確認）:
 
 | 同梱物 | ライセンス本文 |
 |---|---|
-| `models/stario-qwen3.5-2b-q4_k_m.gguf`（Qwen3.5-2B） | `Qwen3.5-Apache-2.0.txt`（改変の告知は `README.txt`） |
+| （同梱しない）初回に取得する `gemma-4-E2B-it-Q4_K_M.gguf`（Gemma 4 E2B） | `Gemma-4-Apache-2.0.txt`（出所は `README.txt` §1） |
 | `llama-server.exe` / `llama-server-impl.dll` / `llama-common.dll` / `llama.dll` / `mtmd.dll` / `ggml.dll` / `ggml-base.dll` / `ggml-cpu-*.dll`（CPU の種類ごとの 14 個） | `llama.cpp-MIT.txt`（ggml を含む） |
 | `libomp.dll` | `LLVM-OpenMP-Apache-2.0-with-LLVM-exception.txt` |
 | `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`（Microsoft Visual C++ ランタイム。D112） | 本文ファイルは置かない。`README.txt` §3 に「Visual Studio のライセンス条項（再頒布可能コードの条件）に従って再頒布する」旨を書いている（VS の再頒布用フォルダにライセンス本文のファイルは無い。2026-10-13 確認） |

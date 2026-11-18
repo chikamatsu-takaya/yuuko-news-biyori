@@ -43,7 +43,7 @@ const EVENT_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalModelPhase {
-    /// モデルの表に取得元が無い（今の 2B。同梱だけで使う）。
+    /// モデルの表に取得元が無い（同梱だけで使うモデル。今の `ACTIVE_MODEL`〔Gemma〕には取得元がある）。
     NoSource,
     NotDownloaded,
     Downloading,

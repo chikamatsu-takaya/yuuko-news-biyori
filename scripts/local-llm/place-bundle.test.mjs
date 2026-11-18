@@ -22,9 +22,11 @@ const MODEL_ROW = `pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
 
 test("reads the model constants and the runtime allowlist from the Rust source", () => {
   const manifest = loadBundleManifest();
-  assert.equal(manifest.model.file, "stario-qwen3.5-2b-q4_k_m.gguf");
-  assert.equal(manifest.model.size, 1_312_164_800);
+  assert.equal(manifest.model.file, "gemma-4-E2B-it-Q4_K_M.gguf");
+  assert.equal(manifest.model.size, 3_106_738_272);
   assert.match(manifest.model.sha256, /^[0-9a-f]{64}$/);
+  // Gemma は初回に取得するので、同梱物としては求めない。
+  assert.equal(manifest.model.downloadable, true);
   const names = manifest.runtime.map((entry) => entry.name);
   assert.ok(names.includes("llama-server.exe"));
   assert.ok(names.includes("llama-server-impl.dll"));
@@ -141,6 +143,39 @@ test("runtimeSources takes the VC++ runtime from --vc-crt, else from <bundle>/ru
   assert.equal(withFlag[1].path, join("crt", "vcruntime140.dll"));
   const withoutFlag = runtimeSources(manifest, "src", undefined);
   assert.equal(withoutFlag[1].path, join("src", "runtime", "vcruntime140.dll"));
+});
+
+test("a model with a source is downloadable and not required in the bundle", async () => {
+  const tables = [
+    `pub const RUNTIME_FILES: &[(&str, &str)] = &[\n    ("llama-server.exe", "${ABC_SHA256}"),\n];`,
+    `pub const VC_RUNTIME_FILES: &[(&str, &str)] = &[\n    ("vcruntime140.dll", "${ABC_SHA256}"),\n];`,
+  ];
+  const bundled = readBundleManifest([MODEL_ROW, ...tables].join("\n"));
+  assert.equal(bundled.model.downloadable, false);
+  // `// source: Some(` のような行コメントでは取得元ありにしない。
+  const commented = MODEL_ROW.replace("};", "    // source: Some(x),\n    source: None,\n};");
+  assert.equal(readBundleManifest([commented, ...tables].join("\n")).model.downloadable, false);
+  const withSource = MODEL_ROW.replace("};", "    source: Some(ModelSource {\n    }),\n};");
+  const downloadable = readBundleManifest([withSource, ...tables].join("\n"));
+  assert.equal(downloadable.model.downloadable, true);
+
+  const dir = mkdtempSync(join(tmpdir(), "check-bundle-dl-"));
+  try {
+    mkdirSync(join(dir, "runtime"));
+    writeFileSync(join(dir, "runtime", "llama-server.exe"), "abc");
+    writeFileSync(join(dir, "runtime", "vcruntime140.dll"), "abc");
+    assert.deepEqual(await verifyBundleDir(dir, downloadable), []);
+    assert.deepEqual(await verifyBundleDir(dir, bundled), ["モデルがありません: models/m.gguf"]);
+    // 取得する版で古いモデルが残っていれば、インストーラーに入れないよう止める。
+    mkdirSync(join(dir, "models"));
+    writeFileSync(join(dir, "models", ".gitignore"), "*");
+    writeFileSync(join(dir, "models", "old.gguf"), "x");
+    assert.deepEqual(await verifyBundleDir(dir, downloadable), [
+      "初回に取得する版なので、同梱物にモデルを置かないでください: models/old.gguf",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("runtime tables accept uppercase SHA-256 and reject rows that cannot be read", () => {

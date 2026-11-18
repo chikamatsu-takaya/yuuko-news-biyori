@@ -3368,7 +3368,7 @@ mod tests {
             .join("resources")
             .join("local_llm");
         let local = LocalLlmService::new(Some(
-            crate::infra::local_llm_runtime::LocalLlmBundle::in_dir(&dir),
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
         ));
         let service = service().with_local_llm(local.clone());
 
@@ -3485,7 +3485,7 @@ mod tests {
                     .join("local_llm")
             });
         let local = LocalLlmService::new(Some(
-            crate::infra::local_llm_runtime::LocalLlmBundle::in_dir(&dir),
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
         ));
         let service = service().with_local_llm(local.clone());
         let context = "タイトル: 中小企業のデジタル化に新補助金
@@ -3537,7 +3537,7 @@ mod tests {
                     .join("local_llm")
             });
         let local = LocalLlmService::new(Some(
-            crate::infra::local_llm_runtime::LocalLlmBundle::in_dir(&dir),
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
         ));
         let service = service().with_local_llm(local.clone());
         let fde = "タイトル: 米テック企業、FDE職の採用を拡大\n\

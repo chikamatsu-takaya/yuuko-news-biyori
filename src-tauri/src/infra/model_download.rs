@@ -387,12 +387,35 @@ fn request_following_redirects(
         }
         let location = reply.location.as_deref().ok_or(DownloadError::Blocked)?;
         url = model_redirect_url(&url, location, source).map_err(|_| {
-            log::warn!("local model download redirect rejected");
+            // 許すホストを見直せるよう、弾いたホスト名だけを残す（経路・問い合わせ・署名は出さない）。
+            log::warn!(
+                "local model download redirect rejected (host: {})",
+                rejected_redirect_host(&url, location)
+            );
             DownloadError::Blocked
         })?;
     }
     log::warn!("local model download exceeded the redirect limit");
     Err(DownloadError::Blocked)
+}
+
+/// 弾いた転送先のログ用のホスト名。`Location` は外部由来なので、ホスト名だけを取り出し、
+/// ホスト名に使う文字（英数字・`.`・`-`・`:`・`[`・`]`）以外は落として長さも抑える。読めなければ固定の印。
+fn rejected_redirect_host(current: &Url, location: &str) -> String {
+    let host: String = current
+        .join(location.trim())
+        .ok()
+        .and_then(|next| next.host_str().map(str::to_string))
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        .take(253)
+        .collect();
+    if host.is_empty() {
+        "(none)".to_string()
+    } else {
+        host
+    }
 }
 
 /// 本文を `.part` へ書き足しながら SHA-256 を計算する。再開のときは既存の `.part` を読み直して
@@ -1104,15 +1127,125 @@ mod tests {
         assert!(transport.requests.borrow().is_empty());
     }
 
+    /// 弾いた転送先のログには、ホスト名だけを出す（経路・問い合わせ・署名・利用者情報は出さない）。
     #[test]
-    fn active_model_has_no_source_yet() {
+    fn rejected_redirect_log_keeps_only_the_host() {
+        let current = model_download_url(&SOURCE).unwrap();
+        for (location, expected) in [
+            (
+                "https://eu.cdn.example.test/xet/abc?X-Amz-Signature=secret&exp=1",
+                "eu.cdn.example.test",
+            ),
+            (
+                "https://user:pw@other.example.test:8443/p?sig=s",
+                "other.example.test",
+            ),
+            ("http://plain.example.test/path", "plain.example.test"),
+            ("https://127.0.0.1/x", "127.0.0.1"),
+            ("/relative/path?sig=s", "models.example.test"),
+            ("file:///C:/Windows/win.ini", "(none)"),
+        ] {
+            let host = rejected_redirect_host(&current, location);
+            assert_eq!(host, expected, "{location}");
+            for secret in ["sig", "Signature", "secret", "pw", "user", "path", "8443"] {
+                assert!(!host.contains(secret), "{location}: {host}");
+            }
+        }
+    }
+
+    #[test]
+    fn model_without_a_source_is_not_downloaded() {
+        let spec = ModelSpec {
+            source: None,
+            ..spec_for(&body())
+        };
         let outcome = download_model(
-            &crate::infra::local_llm_runtime::ACTIVE_MODEL,
+            &spec,
             &temp_dir(),
             &AtomicBool::new(false),
             &DownloadProgress::default(),
         );
         assert_eq!(outcome, Err(DownloadError::NoSource));
+    }
+
+    /// 本物の Hugging Face から `ACTIVE_MODEL`（約 3.1GB）を取る手動確認（CI・ふだんの `cargo test` では動かさない）。
+    /// 途中で一度止め（一時停止と同じ合図）、もう一度呼んで続きから取れること、SHA-256 の照合が通って
+    /// 完成の名前になることを確かめる。取得先は `YUUKO_MODEL_DL_DIR`（`app_local_data_dir` の代わりの一時の
+    /// フォルダ）の下の、アプリと同じ規則のフォルダ（`downloaded_model_dir`）。アプリのデータには触れない。
+    /// `YUUKO_MODEL_DL_PAUSE_AT`（バイト。既定 300MB）まで取ったら止める。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml real_model_download -- --ignored --nocapture` で動かす。
+    #[test]
+    #[ignore = "manual: downloads about 3.1GB from Hugging Face into YUUKO_MODEL_DL_DIR"]
+    fn real_model_download_pauses_resumes_and_verifies() {
+        use crate::infra::local_llm_runtime::{downloaded_model_dir, ACTIVE_MODEL};
+        use std::time::Instant;
+        let root = PathBuf::from(
+            std::env::var_os("YUUKO_MODEL_DL_DIR")
+                .expect("set YUUKO_MODEL_DL_DIR to a temp folder"),
+        );
+        let pause_at: u64 = std::env::var("YUUKO_MODEL_DL_PAUSE_AT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300_000_000);
+        let dir = downloaded_model_dir(&ACTIVE_MODEL, &root);
+        let paths = Paths::new(&dir, &ACTIVE_MODEL);
+        assert!(
+            !paths.complete.exists(),
+            "start without the model: {}",
+            dir.display()
+        );
+
+        // 1 回目: pause_at を超えたら止める合図を立てる。
+        let stop = Arc::new(AtomicBool::new(false));
+        let signal = stop.clone();
+        let first = DownloadProgress {
+            on_progress: Some(Box::new(move |received| {
+                if received >= pause_at {
+                    signal.store(true, Ordering::Relaxed);
+                }
+            })),
+            ..DownloadProgress::default()
+        };
+        let started = Instant::now();
+        let outcome = download_model(&ACTIVE_MODEL, &dir, &stop, &first);
+        let paused = fs::metadata(&paths.part)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        eprintln!(
+            "first run: {outcome:?} after {:.1}s, part {paused} bytes",
+            started.elapsed().as_secs_f32()
+        );
+        assert_eq!(outcome, Ok(DownloadOutcome::Stopped));
+        assert!(paused >= pause_at && paused < ACTIVE_MODEL.size);
+
+        // 2 回目: 続きから（受け取った大きさが一度も paused を下回らない＝最初からやり直していない）。
+        let lowest = Arc::new(AtomicU64::new(u64::MAX));
+        let seen = lowest.clone();
+        let second = DownloadProgress {
+            on_progress: Some(Box::new(move |received| {
+                seen.fetch_min(received, Ordering::Relaxed);
+            })),
+            ..DownloadProgress::default()
+        };
+        let resumed = Instant::now();
+        let outcome = download_model(&ACTIVE_MODEL, &dir, &AtomicBool::new(false), &second);
+        eprintln!(
+            "second run: {outcome:?} after {:.1}s (lowest progress {} bytes)",
+            resumed.elapsed().as_secs_f32(),
+            lowest.load(Ordering::Relaxed)
+        );
+        assert_eq!(outcome, Ok(DownloadOutcome::Completed));
+        assert_eq!(lowest.load(Ordering::Relaxed), paused);
+        assert_eq!(
+            fs::metadata(&paths.complete).unwrap().len(),
+            ACTIVE_MODEL.size
+        );
+        assert!(!paths.part.exists() && !paths.record.exists());
+        eprintln!(
+            "total {:.1}s, model at {}",
+            started.elapsed().as_secs_f32(),
+            paths.complete.display()
+        );
     }
 
     #[test]

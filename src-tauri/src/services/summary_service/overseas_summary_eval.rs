@@ -281,7 +281,7 @@ fn overseas_summary_eval() {
         .save(&PersistedSettings::initial())
         .expect("save temp settings");
 
-    let local = LocalLlmService::new(Some(LocalLlmBundle::in_dir(&bundle_dir())));
+    let local = LocalLlmService::new(Some(LocalLlmBundle::from_manual_env(&bundle_dir())));
     let ai = AiProviderService::new(&paths).with_local_llm(local.clone());
     let jsonl = out_dir.join("results.jsonl");
     // 1回目の記事に起動・モデルの照合時間が乗らないよう、先に接続確認を済ませて別に記録する。

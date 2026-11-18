@@ -3,7 +3,8 @@
 //! アプリ本体の同梱物・照合・起動の引数・プロンプトは変えない。差し替えるのは「起動する実行ファイルとモデルの
 //! パス」と、候補ごとの調整（`ModelProfile`）だけで、どれも評価のテストからしか使われない。
 //!
-//! - 同梱物の照合（SHA-256）は同梱の Qwen3.5-2B と b11269 の部品に対して従来どおり行い、照合が通った後の
+//! - 同梱物の照合（SHA-256）は使うモデル（`ACTIVE_MODEL`。取得したものは `YUUKO_LOCAL_LLM_MODEL` で指す）と
+//!   b11269 の部品に対して従来どおり行い、照合が通った後の
 //!   起動だけを、環境変数で指したモデル・実行ファイルに向ける。候補のモデルの出所と SHA-256 は評価資料に記録する
 //!   （`docs/00_project/ローカルLLMモデル比較の試作評価_2026-10.md`）。
 //! - 起動の引数は同梱と同じ（`server_args`: CPU のみ・`-c 4096`・`-t`〔論理コア数の半分・上限 2〕・`-np 1`・
@@ -39,8 +40,8 @@ pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
     let model = match std::env::var_os(MODEL_ENV).map(PathBuf::from) {
         Some(model) => model,
         // 引数だけを変えるときは同梱のモデルのまま（照合は従来どおり同梱物に対して行われる）。
-        None if !env_extra_args.is_empty() => LocalLlmBundle::in_dir(&bundle_dir).model,
-        None => return LocalLlmService::new(Some(LocalLlmBundle::in_dir(&bundle_dir))),
+        None if !env_extra_args.is_empty() => LocalLlmBundle::from_manual_env(&bundle_dir).model,
+        None => return LocalLlmService::new(Some(LocalLlmBundle::from_manual_env(&bundle_dir))),
     };
     assert!(
         model.is_file(),
@@ -67,7 +68,7 @@ pub(super) fn eval_local_llm(bundle_dir: PathBuf) -> LocalLlmService {
         extra_args,
     };
     LocalLlmService::with_parts(
-        Some(LocalLlmBundle::in_dir(&bundle_dir)),
+        Some(LocalLlmBundle::from_manual_env(&bundle_dir)),
         Arc::new(launcher),
         LocalLlmConfig::default(),
     )
@@ -87,7 +88,7 @@ const SARASHINA_TEMPLATE: &str =
 /// 生出力の後始末（評価のテストの記録の前）だけをここに置く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelProfile {
-    /// 調整なし（同梱の Qwen3.5-2B と同じ扱い。Qwen3.5-4B・Gemma 4 E2B もこれで動いた）。
+    /// 調整なし（アプリと同じ扱い。Qwen3.5-2B・Qwen3.5-4B・Gemma 4 E2B はこれで動いた）。
     Default,
     /// Sarashina2.2。GGUF の chat テンプレートが道具の呼び出しに対応した形のため、llama-server（b11269）が
     /// 出力を道具の形として読み、終わりの印 `</s>` を本文に残す（JSON スキーマで縛る要点の段では

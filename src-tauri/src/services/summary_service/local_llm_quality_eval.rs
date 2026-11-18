@@ -51,8 +51,9 @@
 //! $env:YUUKO_LLM_EVAL_CONFIG_DIR = "$env:APPDATA\jp.star-system.yuuko-news\config"
 //! cargo test --manifest-path src-tauri/Cargo.toml local_llm_quality_eval -- --ignored --nocapture
 //! ```
-//! 同梱物（モデル・llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
-//! `YUUKO_LOCAL_LLM_DIR` で場所を指す。
+//! 実行の部品（llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
+//! `YUUKO_LOCAL_LLM_DIR` で場所を指す。初回に取得するモデル（`ACTIVE_MODEL` に取得元がある）は同梱物に無いため、
+//! `YUUKO_LOCAL_LLM_MODEL` で取得したファイルのパスを指す（開発環境構築手順書 §17）。
 //! 同梱と別のモデルで回すとき（D168 のモデル比較）は `YUUKO_LLM_EVAL_MODEL` などを指定する（`eval_model_override`）。
 
 use std::cell::RefCell;

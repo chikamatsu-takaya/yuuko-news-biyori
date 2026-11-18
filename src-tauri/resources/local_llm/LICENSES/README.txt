@@ -8,19 +8,27 @@ This folder contains the license texts of the bundled components.
 ---------------------------------------------------------------------
 1. AI モデル / AI model
 ---------------------------------------------------------------------
-- Qwen3.5-2B（Qwen Team, Alibaba Cloud）
-  入手元 / Source: https://huggingface.co/Qwen/Qwen3.5-2B
-  ライセンス / License: Apache License 2.0 → Qwen3.5-Apache-2.0.txt
+- Gemma 4 E2B（Google）の GGUF 版（Q4_K_M）
+  元のモデル / Original model: https://huggingface.co/google/gemma-4-E2B-it
+  GGUF 版の入手元 / GGUF source: https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF
+    （版 / revision 0314792d7f1f7e229411f620751375812bb9faf2）
+  ライセンス / License: Apache License 2.0 → Gemma-4-Apache-2.0.txt
+    （https://ai.google.dev/gemma/docs/gemma_4_license）
 
-  ★ 改変の告知 / Notice of modification (Apache License 2.0, Section 4(b)):
-  同梱している次のファイルは、上記の公式の重みを llama.cpp（b11269）で GGUF 形式に変換し、
-  量子化したものです（中身の追加学習はしていません）。変換は、同じ開発元のアプリ
-  「すたりお（stario）」のために行ったもので、そのファイルをそのまま使っています。
-  The following file was converted to GGUF and quantized from the official weights above,
-  using llama.cpp (b11269), originally for the "stario" app. No fine-tuning was applied.
+  このモデルはインストーラーには入っていません。アプリの初回の起動のときに、上の入手元から
+  直接ダウンロードし、大きさと SHA-256 を確かめてから使います。置き場所は
+  %LOCALAPPDATA%\<アプリの識別子>\local_llm\models\ の下です。
+  The model is not included in the installer. On first run, the app downloads it
+  directly from the source above and checks its size and SHA-256 before use.
 
-  - models/stario-qwen3.5-2b-q4_k_m.gguf （Q4_K_M）
-    SHA-256: 5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35
+  - gemma-4-E2B-it-Q4_K_M.gguf （3,106,738,272 bytes）
+    SHA-256: 740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8
+
+  改変の告知 / Notice of modification (Apache License 2.0, Section 4(b)):
+  本アプリはこのファイルを改変せず、入手元のファイルをそのまま使います（追加学習・変換・量子化を
+  していません）。GGUF 形式への変換と量子化は入手元（unsloth）が行ったものです。
+  This app uses the file as published, without modification (no fine-tuning, conversion
+  or quantization by us). The GGUF conversion and quantization were done by the source (unsloth).
 
 ---------------------------------------------------------------------
 2. AI を動かす部品 / AI runtime (runtime/)
@@ -52,3 +60,5 @@ This folder contains the license texts of the bundled components.
 ---------------------------------------------------------------------
 これらの部品は、このパソコンの中だけで動きます（127.0.0.1・ネットへの接続を切った状態で起動）。
 These components run only on this computer (127.0.0.1, started in offline mode).
+モデルの初回のダウンロードのときだけ、1. の入手元（huggingface.co と、その配信用のホスト）へ接続します。
+Only the first-run model download connects to the source in section 1 (huggingface.co and its CDN).

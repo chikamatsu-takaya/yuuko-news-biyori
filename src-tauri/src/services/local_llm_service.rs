@@ -18,13 +18,13 @@
 //!   送り済みの自動要約の段は止めない（手動の要求が待つのは、走っている1段の残りだけになる）。
 //!   待ちは条件変数で行い、手動の要求が終わったら起こす（常時ポーリングはしない）。
 //! - **起動失敗が続いたら起動を控える**: `START_FAILURE_THRESHOLD` 回続けて起動に失敗したら、最後の失敗から
-//!   `START_FAILURE_COOLDOWN` の間、自動要約からは起動しない（1.3GB の読み込みを繰り返さない）。手動の要求は、
+//!   `START_FAILURE_COOLDOWN` の間、自動要約からは起動しない（3.1GB の読み込みを繰り返さない）。手動の要求は、
 //!   最後の失敗から `MANUAL_START_RETRY_GAP` たっていれば1回試す（利用者が原因を取り除いてやり直せるように）。
 //!   それより短い間隔の手動の要求は、起動せずにすぐ `StartFailed` を返す（画面の文言は従来の起動失敗と同じ）。
 //!   起動に1度成功すれば数え直す。失敗はプロセスの終了コードと固定の分類だけをログへ残す。
 //! - **アプリ終了で必ず止める**: `app_lifecycle` の終了経路から `shutdown` を呼ぶ。
 //! - 失敗は `LocalAiFailure` の固定分類で返し、黙って Gemini / Mock へ切り替えない。
-//! - モデルの SHA-256 は 1.3GB を読むため、アプリの起動中に1度だけ確かめる（大きさは毎回見る）。
+//! - モデルの SHA-256 は 3.1GB を読むため、アプリの起動中に1度だけ確かめる（大きさは毎回見る）。
 //!   照合するときはモデルを書き込み・削除を拒む共有モードで開き、その取っ手を持ち続ける（設計案 §3.2）。
 //!   照合が1度きりでも、照合した後に同じ大きさの別のファイルへすり替えられて読み込まれないようにするため。
 //!   取っ手は `forget_model`（消す・置き直す前）で閉じ、次の照合で開き直す。
@@ -59,7 +59,7 @@ pub const START_FAILURE_THRESHOLD: u32 = 2;
 pub const START_FAILURE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 
 /// 起動を控えている間に、手動の要求が改めて起動を試してよい最短の間隔（最後の失敗から数える）。
-/// 用語を続けて選ぶたびに 1.3GB の読み込みと最大 120 秒の起動待ちを繰り返させないため。
+/// 用語を続けて選ぶたびに 3.1GB の読み込みと最大 120 秒の起動待ちを繰り返させないため。
 pub const MANUAL_START_RETRY_GAP: Duration = Duration::from_secs(60);
 
 /// 時間・照合値の設定。本番は `Default`、テストは短い値へ差し替える。
@@ -300,7 +300,7 @@ struct Inner {
     /// `forget_model` で閉じる。持っている間は、ほかのプログラムがモデルを書き換え・削除・改名できない。
     model_handle: Option<std::fs::File>,
     /// この回のアプリ起動中に、モデル・実行の部品の SHA-256 が合わない（または部品が欠けている）と分かったか。
-    /// 自動要約の安い確認（`is_bundle_present`）が、使えない同梱物のために照合（1.3GB 読み）や失敗を繰り返させないため。
+    /// 自動要約の安い確認（`is_bundle_present`）が、使えない同梱物のために照合（3.1GB 読み）や失敗を繰り返させないため。
     /// 置き直して照合が通れば false に戻す。
     found_broken: bool,
     /// 走っている生成・接続テストの数（起動待ちを含む）。
@@ -679,7 +679,7 @@ impl LocalLlmService {
 
     /// 同梱物がそろっていそうかの安い確認（自動要約の可否判定用・判断台帳 D103）。
     /// 起動も SHA-256 の照合もせず、実行ファイルの有無とモデルの大きさだけを見る
-    /// （自動要約は取り出しのたびに確かめるため、1.3GB を読む照合を毎回させない）。
+    /// （自動要約は取り出しのたびに確かめるため、3.1GB を読む照合を毎回させない）。
     /// 照合で壊れていると分かった後・アプリ終了後は false。照合そのものは初めて生成するときに従来どおり行う。
     pub fn is_bundle_present(&self) -> bool {
         if self.shared.shut_down.load(Ordering::SeqCst) || self.shared.lock_state().found_broken {
@@ -712,7 +712,7 @@ impl LocalLlmService {
     /// モデルのファイルを消す・置き直す前後に呼ぶ（取得の制御から。設計案 §3.4 の `discard_local_model`）。
     /// 動いていれば llama-server を止め、照合済みの印と「壊れていた」の印を下ろし、モデルの取っ手を閉じる
     /// （取っ手を持ったままでは消せない。消した後に古い照合の結果で起動しない・取り直したものを改めて照合するため）。
-    /// 照合の途中なら、その照合が終わるのを待ってから下ろす（数秒。1.3GB の読み取りの残り）。
+    /// 照合の途中なら、その照合が終わるのを待ってから下ろす（数秒。3.1GB の読み取りの残り）。
     /// 印を下ろすことと子プロセスを外すことは同じロックの中で行う。起動の途中の要求は、子プロセスを
     /// 状態へ入れるときに印が下りていれば起動を取りやめる（`launch_and_wait`）。
     /// 走っている生成は、止めたことで失敗として返る。
@@ -805,7 +805,7 @@ impl LocalLlmService {
         if self.shared.shut_down.load(Ordering::SeqCst) {
             return Err(LocalAiFailure::StartFailed);
         }
-        // 起動失敗が続いている間は、1.3GB の読み込みを繰り返さない（モジュール先頭の方針）。
+        // 起動失敗が続いている間は、3.1GB の読み込みを繰り返さない（モジュール先頭の方針）。
         {
             let config = &self.shared.config;
             let state = self.shared.lock_state();
@@ -1787,10 +1787,11 @@ mod tests {
         assert_eq!(service.generate("p", 8), Err(LocalAiFailure::Missing));
     }
 
-    /// 実物の llama-server と同梱の 2B での手動確認（CI では動かさない。設計案 §3.2 / §8 の 14）。
+    /// 実物の llama-server と実物のモデル（`ACTIVE_MODEL`）での手動確認（CI では動かさない。設計案 §3.2 / §8 の 14）。
     /// 照合したモデルの取っ手を持ったまま llama-server（`--no-repack`）が起動・生成でき、その間はほかから
     /// 書き込みで開けず・改名（削除と同じ権限）もできないことを確かめる。
-    /// 同梱物の場所は `YUUKO_LOCAL_LLM_DIR`（無ければ `src-tauri/resources/local_llm`）。
+    /// 実行の部品の場所は `YUUKO_LOCAL_LLM_DIR`（無ければ `src-tauri/resources/local_llm`）、
+    /// モデルは `YUUKO_LOCAL_LLM_MODEL`（取得したファイルのパス。無ければ `<dir>/models/`）。
     /// `cargo test --manifest-path src-tauri/Cargo.toml real_llama_server -- --ignored --nocapture` で動かす。
     #[cfg(windows)]
     #[test]
@@ -1799,8 +1800,9 @@ mod tests {
         let dir = std::env::var_os("YUUKO_LOCAL_LLM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/local_llm"));
-        let model = LocalLlmBundle::in_dir(&dir).model;
-        let service = LocalLlmService::new(Some(LocalLlmBundle::in_dir(&dir)));
+        let bundle = LocalLlmBundle::from_manual_env(&dir);
+        let model = bundle.model.clone();
+        let service = LocalLlmService::new(Some(bundle));
         let started = Instant::now();
         assert_eq!(service.check_connection(), Ok(()));
         eprintln!(
