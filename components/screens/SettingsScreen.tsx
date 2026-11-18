@@ -1582,7 +1582,7 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* 取得後の自動要約。新規インストールの初期値は有効（AIはローカル。判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
+                  {/* 取得後の自動要約。新規インストールの初期値は無効（2026-11-18 藤井。AIはローカル＝判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
                   {/* 実際に動くかは Rust 側が判定する（実AI＝Gemini・ローカルのときだけ）。ここでは案内だけ出す。 */}
                   <div className="py-3 border-b border-border/50">
                     <div className="flex items-center justify-between">
