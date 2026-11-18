@@ -4088,9 +4088,10 @@ test("reader summary: a waiting article explains that auto summary is waiting wh
   await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
 });
 
-test("reader summary: an unsummarized article outside the queue explains why auto summary is off", async ({
+test("reader summary: no reason is shown for an unsummarized article when auto summary is off in settings", async ({
   page,
 }) => {
+  // 設定で自動要約がオフのときは一言を出さない（2026-11-18 藤井）。空の要素も残さない。「要約を作成」はそのまま使える。
   await page.addInitScript(() => {
     (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ = true;
   });
@@ -4099,10 +4100,9 @@ test("reader summary: an unsummarized article outside the queue explains why aut
   const main = page.locator("main");
 
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
-  await expect(main.getByTestId("auto-summary-reason")).toContainText(
-    "自動の要約は設定でオフになっているよ。"
-  );
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(main.getByText("設定でオフになっている")).toHaveCount(0);
 });
 
 test("reader summary: no reason is shown for a pause unrelated to an article outside the queue", async ({
