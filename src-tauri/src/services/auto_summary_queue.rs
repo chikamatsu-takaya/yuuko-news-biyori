@@ -2135,6 +2135,7 @@ mod tests {
     /// 初回起動と同じ順序・同じ配線（lib.rs）で作った実キュー。同梱物は小さな偽物を一時フォルダへ置く。
     struct FirstRunContext {
         queue: AutoSummaryQueue,
+        local_llm: LocalLlmService,
         root: std::path::PathBuf,
     }
 
@@ -2145,6 +2146,11 @@ mod tests {
     }
 
     fn first_run_context(name: &str, fetched: usize) -> FirstRunContext {
+        first_run_context_with(name, fetched, true)
+    }
+
+    /// `model_present` が false のときは、モデルを取得する版で取得前（実行の部品だけある）の状態から始める。
+    fn first_run_context_with(name: &str, fetched: usize, model_present: bool) -> FirstRunContext {
         use crate::infra::local_llm_runtime::{ChildProcessLauncher, LocalLlmBundle};
         use crate::paths::AppPaths;
         use crate::repositories::article_repository::ArticleRepository;
@@ -2193,12 +2199,15 @@ mod tests {
         std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
         std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
         std::fs::write(&bundle.exe, b"exe").unwrap();
-        std::fs::write(&bundle.model, b"model").unwrap();
+        if model_present {
+            std::fs::write(&bundle.model, b"model").unwrap();
+        }
         let local_llm = LocalLlmService::with_parts(
             Some(bundle),
             Arc::new(ChildProcessLauncher),
             LocalLlmConfig {
                 model_size: 5,
+                model_downloadable: !model_present,
                 ..LocalLlmConfig::default()
             },
         );
@@ -2212,13 +2221,43 @@ mod tests {
             ),
             SettingsRepository::new(&paths),
         )
-        .with_local_llm(local_llm)
+        .with_local_llm(local_llm.clone())
         .with_busy_check(|| false);
-        FirstRunContext { queue, root }
+        FirstRunContext {
+            queue,
+            local_llm,
+            root,
+        }
     }
 
     #[test]
-    fn first_run_enqueues_fetched_articles_with_the_initial_local_settings() {
+    fn first_run_model_download_ready_hook_does_not_start_auto_summary_while_off() {
+        use crate::infra::local_llm_runtime::LocalLlmBundle;
+
+        // 新規インストール（自動要約オフの初期値）で、モデルの取得がまだの状態から始める。
+        let ctx = first_run_context_with("download-ready", 60, false);
+        assert!(ctx.local_llm.is_model_not_downloaded());
+        assert_eq!(*ctx.queue.last_notice.lock().unwrap(), None);
+
+        // 取得が終わった（モデルが置かれた）後、lib.rs と同じく取得の制御の on_ready から並べ直しを呼ぶ。
+        let bundle = LocalLlmBundle::in_dir(&ctx.root.join("local_llm"));
+        std::fs::write(&bundle.model, b"model").unwrap();
+        assert!(ctx.local_llm.is_bundle_present());
+        let queue = ctx.queue.clone();
+        let on_ready: Box<dyn Fn() + Send + Sync> = Box::new(move || queue.enqueue_unsummarized());
+        on_ready();
+
+        // 設定でオフのため並べず、理由を「設定で無効」として残す。llama-server も起動しない。
+        assert!(ctx.queue.core.lock().pending.is_empty());
+        assert_eq!(
+            *ctx.queue.last_notice.lock().unwrap(),
+            Some(QueueNotice::Off(OffReason::DisabledInSettings))
+        );
+        assert!(!ctx.local_llm.is_running());
+    }
+
+    #[test]
+    fn first_run_does_not_enqueue_until_auto_summary_is_turned_on() {
         let ctx = first_run_context("enqueue", 60);
         let queue = &ctx.queue;
         // 新規インストールの初期値では自動要約はオフ（2026-11-18 藤井）。取得しても並べない。
