@@ -3157,6 +3157,8 @@ const TERM_EXPLAIN_FAILURE_GENERIC =
   "うまく説明できなかったよ。別のところを選び直すか、再試行してみてね。";
 const TERM_EXPLAIN_FAILURE_VALIDATION =
   "この選び方だとうまく解説できなかったよ。もう少し短く選び直してみてね。";
+const TERM_EXPLAIN_FAILURE_AI_UNAVAILABLE =
+  "いまはAIが使えないみたい。少し時間をおいて、もう一度試してみてね。";
 
 test("reader: 解説 command failure shows a reselect hint and 再試行 without a savable provisional entry", async ({
   page,
@@ -3334,6 +3336,17 @@ test("reader: 解説 failure message is chosen by error code and the selected te
   await expect(page.getByText(TERM_EXPLAIN_FAILURE_GENERIC)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+  expect(await saveDictionaryCallCount(page)).toBe(0);
+
+  // 選んだAIがいま使えない（AI_UNAVAILABLE）→ 選び直しではなく「いまはAIが使えない」の案内。保存不可。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_EXPLAIN_TERM_FAIL_CODE__ =
+      "AI_UNAVAILABLE";
+  });
+  await page.getByRole("button", { name: "再試行" }).click();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_AI_UNAVAILABLE)).toBeVisible();
+  await expect(page.getByText(TERM_EXPLAIN_FAILURE_VALIDATION)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "辞書に保存" })).toHaveCount(0);
   expect(await saveDictionaryCallCount(page)).toBe(0);
 
   // console へは選択文字列もエラー本文も出さない（コードだけ）。
@@ -4160,6 +4173,27 @@ test("reader summary: rejected AI output leaves the article unsummarized and ask
   // D104: 代わりの固定文は保存されず、未要約のまま「もう一度」を案内する。
   await expect(
     main.getByText("うまくまとめられなかったよ。もう一度試してね").first()
+  ).toBeVisible();
+  await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
+  await expect(page.getByRole("button", { name: "要約を作成" })).toBeEnabled();
+  await expect(main.getByText("E2Eで生成された要約です。")).toHaveCount(0);
+});
+
+test("reader summary: when the AI is unavailable, says so without showing a substitute summary", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, boolean>).__E2E_GENERATE_SUMMARY_AI_UNAVAILABLE__ =
+      true;
+  });
+  await setReaderSummaryState(page, "none");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  await page.getByRole("button", { name: "要約を作成" }).click();
+  // Mock の定型文を本物の要約のように出さず、「いまはAIが使えない」と案内する。記事は読めるまま。
+  await expect(
+    main.getByText(/いまはAIが使えないみたい。記事はそのまま読めるよ/).first()
   ).toBeVisible();
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeEnabled();
@@ -6602,6 +6636,9 @@ test("settings postponed controls without a DTO field are disabled or removed", 
   await expect(guide).toContainText("ローカル（おすすめ）：このパソコンの中で動くAIです");
   await expect(guide).toContainText("記事の内容を外部へ送りません");
   await expect(guide).toContainText("APIキーの設定が必要で、要約・解説のために記事の一部を外部（Google）へ送ります");
+  // キー未設定でも Mock の文では動かない（Mock は明示的に選んだときだけ）。
+  await expect(guide).toContainText("キーが未設定のときは要約・解説は作れません（記事は読めます）");
+  await expect(guide).not.toContainText("開発・デモ用の文で動きます");
   await expect(guide).toContainText("開発・デモ用：動作確認のための設定です");
   await expect(guide).not.toContainText("推奨します");
   await expect(guide).not.toContainText("MockProvider");
@@ -10740,6 +10777,16 @@ async function installTauriMocks(page: Page) {
               throw {
                 code: "AI_OUTPUT_REJECTED",
                 message: "ai output could not be used",
+              };
+            }
+            // 失敗モード: 選んだAIがいま使えない（Gemini のキー未設定など。Mock へは切り替えない）。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_GENERATE_SUMMARY_AI_UNAVAILABLE__
+            ) {
+              throw {
+                code: "AI_UNAVAILABLE",
+                message: "ai is not available right now",
               };
             }
             return {

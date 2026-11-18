@@ -230,7 +230,7 @@ fn extract_google_error_status(body: &Value) -> Option<String> {
 
 /// 受信バイト上限超過の固定エラー（本文・断片・サイズ以外の可変情報・秘密情報を含めない）。
 /// AppError::Parse を用い、新しい公開エラー契約は増やさない。generate 経由なら
-/// AiProviderService::request_text の既存エラー経路で Mock フォールバックへ倒れる。
+/// AiProviderService::request_text で `AppError::AiUnavailable` に変わる（Mock へは切り替えない）。
 fn body_limit_error() -> AppError {
     AppError::Parse("Gemini response body exceeded the receive size limit".to_string())
 }
