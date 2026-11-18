@@ -9,8 +9,8 @@
 //!   起動時に残っている未要約記事をもう一度並べ直す。
 //! - 失敗した記事は他の記事の後ろへ回して再試行し、合計 `MAX_ATTEMPTS` 回失敗したら
 //!   再起動まで `Failed` のままにする（他の記事の処理は止めない）。
-//! - 設定 `ai.autoSummaryEnabled` が有効なときだけ動く（新規インストールの既定は有効・判断台帳 D103。
-//!   既存の設定ファイルで欄が無いときは従来どおり無効として読む）。
+//! - 設定 `ai.autoSummaryEnabled` が有効なときだけ動く（新規インストールの既定は無効・2026-11-18 藤井。
+//!   既存の設定ファイルで欄が無いときも従来どおり無効として読み、保存済みの値はそのまま使う）。
 //! - 設定の AI プロバイダが実装済みの実AI（Gemini・同梱ローカルLLM）以外のときは動かない（判断台帳 D56 / D103）。
 //!   固定応答で記事を「要約済み」にしてしまうと、後で実AIを使えるようになっても自動では作り直されないため。
 //! - 実AIを呼べる見込みが無いときも動かさない（投入・取り出しの両方で確かめる）。Gemini はキーの有無
@@ -2159,7 +2159,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let paths = AppPaths::new(root.join("app-data"));
         paths.ensure_storage_dirs().expect("create storage dirs");
-        // 起動時と同じく、設定ファイルが無ければ初期値（ローカル・自動要約オン）で作る。
+        // 起動時と同じく、設定ファイルが無ければ初期値（ローカル・自動要約オフ。2026-11-18 藤井）で作る。
         SettingsService::new(SettingsRepository::new(&paths))
             .initialize_default_if_missing()
             .expect("initialize settings");
@@ -2221,6 +2221,20 @@ mod tests {
     fn first_run_enqueues_fetched_articles_with_the_initial_local_settings() {
         let ctx = first_run_context("enqueue", 60);
         let queue = &ctx.queue;
+        // 新規インストールの初期値では自動要約はオフ（2026-11-18 藤井）。取得しても並べない。
+        queue.enqueue_unsummarized();
+        assert!(queue.core.lock().pending.is_empty());
+        assert_eq!(
+            *queue.last_notice.lock().unwrap(),
+            Some(QueueNotice::Off(OffReason::DisabledInSettings))
+        );
+
+        // 設定画面で自動要約をオンにすれば、初期値のローカル設定のまま並べて動く。
+        let repository =
+            SettingsRepository::new(&crate::paths::AppPaths::new(ctx.root.join("app-data")));
+        let mut settings = repository.load_or_default().unwrap();
+        settings.ai.auto_summary_enabled = true;
+        repository.save(&settings).unwrap();
         queue.enqueue_unsummarized();
         assert_eq!(queue.core.lock().pending.len(), 10);
         assert_eq!(*queue.last_notice.lock().unwrap(), None);

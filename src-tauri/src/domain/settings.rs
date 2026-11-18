@@ -119,7 +119,7 @@ pub struct UserSettingsDto {
     pub nickname: String,
     pub ai_provider: AiProvider,
     pub max_daily_recommendations: u32,
-    /// ニュース取得後の自動要約を有効にするか。外部AIの利用枠を使い切らないよう既定は無効。
+    /// ニュース取得後の自動要約を有効にするか。既定は無効（新規インストールも無効。2026-11-18 藤井）。
     /// 旧画面・旧データとの互換のため、欠落時は false とする。
     #[serde(default)]
     pub auto_summary_enabled: bool,
@@ -289,16 +289,17 @@ impl Default for PersistedSettings {
 
 impl PersistedSettings {
     /// 新しく設定ファイルを作るとき（初回起動）と、設定の「初期化」で使う初期値（判断台帳 D103）。
-    /// AI はこのパソコンの中で動く同梱ローカルLLM（`local`）にし、ニュース取得後の自動要約を有効にする。
+    /// AI はこのパソコンの中で動く同梱ローカルLLM（`local`）にする。
+    /// ニュース取得後の自動要約は無効のまま始める（2026-11-18 藤井。初回は取得したニュースから
+    /// 気になったものをすぐ要約したい想定のため。D103 当初の「有効」から変更）。
     ///
     /// `Default` とは分けている。`Default` は既存の settings.json に欄が無いときの読み込み値
     /// （serde の `#[serde(default)]`）でもあるため、そこを変えると、欄の無い旧ファイルの利用者まで
-    /// 黙って Mock → ローカル・自動要約 OFF → ON に切り替わってしまう。既存ファイルの値（欄が無い場合を含む）は
-    /// 従来どおり `mock` / 無効として読み、新しく作る設定だけをこの初期値にする。
+    /// 黙って Mock → ローカルに切り替わってしまう。既存ファイルの値（欄が無い場合を含む）は
+    /// 従来どおり `mock` / 自動要約無効として読み、新しく作る設定だけをこの初期値にする。
     pub fn initial() -> Self {
         let mut settings = Self::default();
         settings.ai.provider = AiProvider::Local.as_storage().to_string();
-        settings.ai.auto_summary_enabled = true;
         settings
     }
 
@@ -503,13 +504,14 @@ pub struct AiSettings {
     pub provider: String,
     pub allow_free_tier: bool,
     pub send_minimized_text_only: bool,
-    /// ニュース取得後に未要約記事を1件ずつ自動要約するか。新しく作る設定は有効
-    /// （`PersistedSettings::initial`・判断台帳 D103）。既存ファイルで欄が無いときは従来どおり無効として読む。
+    /// ニュース取得後に未要約記事を1件ずつ自動要約するか。新しく作る設定も無効
+    /// （`PersistedSettings::initial`・2026-11-18 藤井）。既存ファイルで欄が無いときも従来どおり無効として読み、
+    /// 保存済みの値（有効を含む）はそのまま使う。
     pub auto_summary_enabled: bool,
 }
 
 /// 既存の settings.json に欄が無いときの読み込み値（旧既定のまま）。新規作成の初期値は
-/// `PersistedSettings::initial`（ローカル・自動要約有効）。
+/// `PersistedSettings::initial`（ローカル・自動要約無効）。
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
@@ -642,13 +644,16 @@ mod tests {
     }
 
     #[test]
-    fn initial_settings_use_local_ai_with_auto_summary_on() {
-        // 新しく作る設定（初回起動・初期化）は、ローカル・自動要約有効（判断台帳 D103）。
+    fn initial_settings_use_local_ai_with_auto_summary_off() {
+        // 新しく作る設定（初回起動・初期化）は、ローカル・自動要約無効（D103、自動要約は 2026-11-18 藤井）。
         let initial = PersistedSettings::initial();
         assert_eq!(initial.ai.provider, "local");
-        assert!(initial.ai.auto_summary_enabled);
+        assert!(!initial.ai.auto_summary_enabled);
         assert_eq!(initial.to_dto().ai_provider, AiProvider::Local);
-        assert!(initial.to_dto().auto_summary_enabled);
+        assert!(!initial.to_dto().auto_summary_enabled);
+        // 新規作成時に書き出す settings.json にも無効として明記される。
+        let stored = serde_json::to_value(&initial).unwrap();
+        assert_eq!(stored["ai"]["autoSummaryEnabled"], false);
         // AI 以外は従来の既定と同じ。
         let default = PersistedSettings::default();
         assert_eq!(initial.news.categories, default.news.categories);
@@ -670,13 +675,18 @@ mod tests {
             assert_eq!(parsed.ai.provider, "mock", "{legacy}");
             assert!(!parsed.ai.auto_summary_enabled, "{legacy}");
         }
-        // 保存済みの値はそのまま読む。
+        // 保存済みの値はそのまま読む（新規の既定が無効になっても、有効で保存済みの利用者は有効のまま）。
         let saved: PersistedSettings = serde_json::from_str(
             r#"{ "version": 1, "ai": { "provider": "gemini", "autoSummaryEnabled": false } }"#,
         )
         .unwrap();
         assert_eq!(saved.ai.provider, "gemini");
         assert!(!saved.ai.auto_summary_enabled);
+        let saved_on: PersistedSettings = serde_json::from_str(
+            r#"{ "version": 1, "ai": { "provider": "local", "autoSummaryEnabled": true } }"#,
+        )
+        .unwrap();
+        assert!(saved_on.ai.auto_summary_enabled);
     }
 
     #[test]
