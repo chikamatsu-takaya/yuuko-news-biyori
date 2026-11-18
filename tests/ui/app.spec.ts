@@ -96,6 +96,85 @@ test("home screen renders and primary controls are hittable", async ({
   await captureScreen(page, testInfo, "home");
 });
 
+// 手動更新の結果はカードにせず1行の通知だけにする（一覧を押し下げない。藤井判断・選択肢1）。
+// 800x600 で更新の前後に見えている記事の数と先頭記事の位置を比べる。
+async function measureHomeArticles(page: Page) {
+  return page.evaluate(() => {
+    const titles = Array.from(document.querySelectorAll("h3")).filter((el) =>
+      /^件数記事\d+$/.test(el.textContent?.trim() ?? "")
+    );
+    // 一覧はスクロール領域の中にあるため、その領域に収まっている見出しを数える。
+    const list = titles[0]?.closest(".overflow-y-auto");
+    const listRect = list?.getBoundingClientRect();
+    const bottom = Math.min(listRect?.bottom ?? window.innerHeight, window.innerHeight);
+    const tops = titles.map((el) => el.getBoundingClientRect().top);
+    const visible = titles.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.top >= (listRect?.top ?? 0) && rect.bottom <= bottom;
+    }).length;
+    return { firstTop: Math.min(...tops), visible };
+  });
+}
+
+test("home refresh success shows only a one-line notice and keeps the article list in place", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_RECOMMENDED_POOL__ = 10;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText("ニュースを更新しました。");
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("更新成功", { exact: true })).toHaveCount(0);
+  for (const label of ["sources", "fetched", "saved", "errors"]) {
+    await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  }
+
+  const after = await measureHomeArticles(page);
+  // 通知1行ぶん（文字＋余白）を超えて下がらず、見えている記事の数も減らない。
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(32);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible);
+});
+
+test("home refresh with partial errors shows a short amber line instead of a card", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_RECOMMENDED_POOL__ = 10;
+    win.__E2E_REFRESH_PARTIAL_ERRORS__ = true;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText(
+    "ニュースを更新しました（一部の取得元でエラー 2 件：フィード取得失敗 / 記事取得失敗）。"
+  );
+  await expect(notice).toHaveClass(/text-amber-700/);
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("一部エラーあり", { exact: true })).toHaveCount(0);
+  // 取得元の URL は画面に出さない。
+  await expect(page.getByText("example.invalid")).toHaveCount(0);
+
+  // 2行までに収まる（text-xs の行の高さ 16px × 2 まで。超える分は line-clamp で切る）。
+  const box = await notice.boundingBox();
+  expect(box?.height ?? 0).toBeLessThanOrEqual(34);
+
+  const after = await measureHomeArticles(page);
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(48);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible - 1);
+});
+
 for (const screen of majorScreens) {
   test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
@@ -10752,6 +10831,22 @@ async function installTauriMocks(page: Page) {
             };
           }
           case "refresh_news":
+            // 一部ソース失敗の表示確認用: フラグ時は2種類のエラーを返す（URL はダミー）。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_REFRESH_PARTIAL_ERRORS__
+            ) {
+              return {
+                sourcesProcessed: 2,
+                fetched: 1,
+                saved: 1,
+                errors: [
+                  { url: "https://example.invalid/feed", kind: "feed_fetch_failed" },
+                  { url: "https://example.invalid/a", kind: "article_fetch_failed" },
+                ],
+                genreFilterFallback: false,
+              };
+            }
             return {
               sourcesProcessed: 1,
               fetched: 1,

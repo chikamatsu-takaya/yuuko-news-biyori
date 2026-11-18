@@ -85,11 +85,6 @@ type UserStats = {
   unclaimedRewards: number;
 };
 
-type RefreshMetricProps = {
-  label: string;
-  value: number;
-};
-
 // ============================================
 // Mock Data
 // ============================================
@@ -236,7 +231,8 @@ const summarizeRefreshErrors = (
     new Set(result.errors.map((error) => toRefreshErrorLabel(error.kind)))
   );
 
-  return `エラー ${result.errors.length} 件（${kinds.join(" / ")}）`;
+  // ホームの通知1行の括弧内に入れるため、ここでは括弧を重ねない。
+  return `一部の取得元でエラー ${result.errors.length} 件：${kinds.join(" / ")}`;
 };
 
 // ============================================
@@ -430,17 +426,6 @@ function QuickAccessButton({
   );
 }
 
-function RefreshMetric({ label, value }: RefreshMetricProps) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-center">
-      <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="text-sm font-semibold text-foreground">{value}</div>
-    </div>
-  );
-}
-
 function YuukoSpeechBubble({ message }: { message: string }) {
   return (
     <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px]">
@@ -496,8 +481,11 @@ export default function MainScreen({
     React.useState<string | null>(null);
   const [articleNotice, setArticleNotice] = React.useState<string | null>(null);
   const [refreshNotice, setRefreshNotice] = React.useState<string | null>(null);
-  const [refreshResult, setRefreshResult] =
-    React.useState<TauriRefreshNewsResult | null>(null);
+  // 一部ソースでエラーがあった更新だけ注意色（amber）の1行にする。
+  // 取得件数のカードは一覧を押し下げるため出さない（藤井判断・選択肢1）。
+  const [refreshNoticeKind, setRefreshNoticeKind] = React.useState<
+    "info" | "warning"
+  >("info");
   const [isRefreshingNews, setIsRefreshingNews] = React.useState(false);
   const [isLoadingArticles, setIsLoadingArticles] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -661,18 +649,17 @@ export default function MainScreen({
   const handleRefreshNews = React.useCallback(async () => {
     setIsRefreshingNews(true);
     setRefreshNotice(null);
+    setRefreshNoticeKind("info");
 
     try {
       const result = await refreshNews();
       if (!result) {
-        setRefreshResult(null);
         setRefreshNotice(
           "ニュース更新はTauriデスクトップ実行時にのみ利用できます。"
         );
         return;
       }
 
-      setRefreshResult(result);
       const reloaded = await loadRecommendedArticles();
       if (!reloaded) {
         setRefreshNotice(
@@ -686,9 +673,11 @@ export default function MainScreen({
         return;
       }
 
-      setRefreshNotice("ニュース更新は完了しましたが、一部ソースでエラーがありました。");
+      setRefreshNoticeKind("warning");
+      setRefreshNotice(
+        `ニュースを更新しました（${summarizeRefreshErrors(result)}）。`
+      );
     } catch (error) {
-      setRefreshResult(null);
       setRefreshNotice(
         "ニュース更新に失敗しました。設定ファイルやネットワークを確認してください。"
       );
@@ -823,52 +812,18 @@ export default function MainScreen({
               ) : null}
 
               {refreshNotice ? (
-                <p className="mb-3 text-xs text-[var(--yuuko-green)]">
+                <p
+                  data-testid="home-refresh-notice"
+                  // エラーの種類が多くても一覧を押し下げないよう2行で切り、全文は title で読めるようにする。
+                  title={refreshNotice}
+                  className={
+                    refreshNoticeKind === "warning"
+                      ? "mb-3 line-clamp-2 text-xs text-amber-700"
+                      : "mb-3 line-clamp-2 text-xs text-[var(--yuuko-green)]"
+                  }
+                >
                   {refreshNotice}
                 </p>
-              ) : null}
-
-              {refreshResult ? (
-                <Card className="mb-4 border border-[var(--yuuko-green)]/20 bg-white/90 py-0 shadow-none">
-                  <CardContent className="flex flex-col gap-3 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
-                          取得結果を反映しました
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {refreshResult.errors.length === 0
-                            ? "すべての対象ソースを処理できました。"
-                            : summarizeRefreshErrors(refreshResult)}
-                        </p>
-                      </div>
-                      <Badge
-                        className={
-                          refreshResult.errors.length === 0
-                            ? "border-0 bg-[var(--yuuko-green)] text-white"
-                            : "border-0 bg-amber-500 text-white"
-                        }
-                      >
-                        {refreshResult.errors.length === 0
-                          ? "更新成功"
-                          : "一部エラーあり"}
-                      </Badge>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <RefreshMetric
-                        label="sources"
-                        value={refreshResult.sourcesProcessed}
-                      />
-                      <RefreshMetric label="fetched" value={refreshResult.fetched} />
-                      <RefreshMetric label="saved" value={refreshResult.saved} />
-                      <RefreshMetric
-                        label="errors"
-                        value={refreshResult.errors.length}
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
               ) : null}
             </div>
 
