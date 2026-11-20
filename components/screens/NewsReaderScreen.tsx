@@ -342,6 +342,7 @@ const toRelatedFallback = (article: ReaderArticleDetail): RelatedArticle => ({
     source: article.source,
     genre: article.category,
     title: article.title,
+    tags: article.tags,
   }),
 });
 
@@ -432,6 +433,7 @@ const mapSummaryToRelated = (
     source: article.sourceName,
     genre: article.genre,
     title: article.title,
+    tags: article.tags,
   }),
 });
 

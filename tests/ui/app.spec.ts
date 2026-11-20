@@ -1222,7 +1222,7 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
 });
 
 // 記事サムネイルは全画面共通のルール（lib/article-thumbnail.mjs）で決める（2026-11-20 藤井判断）。
-// 同じ記事はホームとニュース一覧で同じ絵（ジャンル→アイコン）と色（媒体名→色）になり、
+// 同じ記事はホームとニュース一覧で同じ絵（タグ→題名→ジャンル→アイコン）と色（媒体名→色）になり、
 // 媒体が違えば色が分かれることを確かめる。
 test("article thumbnails match between home and today-news list, and differ by source", async ({
   page,
@@ -1241,7 +1241,8 @@ test("article thumbnails match between home and today-news list, and differ by s
       isArchived: false,
     };
     const items = [
-      { ...base, articleId: "thumb-1", title: "サムネ記事テック", sourceName: "E2E News", genre: "テクノロジー" },
+      // タグがあればタグで絵が決まる（ホームの記事・一覧の記事のどちらにも同じタグを返す）。
+      { ...base, articleId: "thumb-1", title: "サムネ記事テック", sourceName: "E2E News", genre: "テクノロジー", tags: ["半導体", "AI"] },
       { ...base, articleId: "thumb-2", title: "サムネ記事経済", sourceName: "経済ニュースB", genre: "ビジネス・経済" },
       { ...base, articleId: "thumb-3", title: "サムネ記事スポーツ", sourceName: "サイエンス通信", genre: "Sports" },
     ];
@@ -1273,8 +1274,8 @@ test("article thumbnails match between home and today-news list, and differ by s
       await readThumbnail(page.getByTestId("home-article-card").filter({ hasText: title }))
     );
   }
-  // ジャンルのキーワードで絵が決まる（英語のジャンルも当たる）。
-  expect(home.map((t) => t.kind)).toEqual(["tech", "business", "sports"]);
+  // タグ → 題名 → ジャンルの順で絵が決まる（1件目はタグ「半導体」、2・3件目は題名の「経済」「スポーツ」）。
+  expect(home.map((t) => t.kind)).toEqual(["semiconductor", "business", "sports"]);
   // 媒体が違えば色が分かれる。
   expect(new Set(home.map((t) => t.palette)).size).toBe(3);
   for (const thumb of home) {

@@ -213,6 +213,7 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
     source: article.sourceName,
     genre: article.genre,
     title: article.title,
+    tags: article.tags,
   }),
 });
 

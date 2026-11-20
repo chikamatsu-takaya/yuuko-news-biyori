@@ -108,6 +108,7 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
     source: article.sourceName,
     genre: article.genre,
     title: article.title,
+    tags: article.tags,
   }),
   summaryState: article.summaryState,
   tags: normalizeArticleTags(article.tags),
