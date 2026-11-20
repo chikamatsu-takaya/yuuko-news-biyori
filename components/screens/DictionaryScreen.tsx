@@ -62,6 +62,8 @@ import { useToast } from "@/hooks/use-toast";
 import { FORCED_COLORS_SELECTED } from "@/lib/forced-colors";
 import { YuukoBalloon } from "@/components/yuuko/YuukoBalloon";
 import { YuukoFigure } from "@/components/yuuko/YuukoFigure";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import { resolveArticleThumbnail } from "@/lib/article-thumbnail.mjs";
 
 type FilterType = "all" | TauriDictionaryEntryType | "favorite";
 type SortOption = "recent" | "name" | "favorite";
@@ -537,25 +539,9 @@ function Pagination({
   );
 }
 
-function RelatedNewsThumbnail() {
-  return (
-    <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-blue-900 to-indigo-900">
-      <svg viewBox="0 0 40 40" className="h-8 w-8">
-        <circle cx="20" cy="20" r="8" fill="rgba(100,200,255,0.3)" />
-        <circle cx="20" cy="20" r="4" fill="rgba(150,220,255,0.5)" />
-        {[0, 60, 120, 180, 240, 300].map((angle) => (
-          <circle
-            key={angle}
-            cx={20 + 12 * Math.cos((angle * Math.PI) / 180)}
-            cy={20 + 12 * Math.sin((angle * Math.PI) / 180)}
-            r="2"
-            fill="rgba(200,230,255,0.6)"
-          />
-        ))}
-      </svg>
-    </div>
-  );
-}
+// 関連ニュースのサムネイル。辞書項目は関連記事の題名しか持たず媒体名・ジャンルが分からないため、
+// 共通ルール（lib/article-thumbnail.mjs）の既定（新聞アイコン・空文字の色）で描く。
+const RELATED_NEWS_THUMBNAIL = resolveArticleThumbnail({ source: "", genre: "" });
 
 export default function DictionaryScreen({
   onNavigate,
@@ -1161,7 +1147,11 @@ export default function DictionaryScreen({
                     </div>
                     {selectedEntry.relatedArticle ? (
                       <div className="flex items-start gap-2">
-                        <RelatedNewsThumbnail />
+                        <ArticleThumbnail
+                          thumbnail={RELATED_NEWS_THUMBNAIL}
+                          className="h-14 w-14"
+                          iconClassName="h-8 w-8"
+                        />
                         <div className="min-w-0 flex-1">
                           <h5 className="line-clamp-2 text-xs font-medium text-foreground">
                             {selectedEntry.relatedArticle}

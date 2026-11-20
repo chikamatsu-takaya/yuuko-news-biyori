@@ -24,6 +24,11 @@ import {
   type ArticleSummaryState,
 } from "@/lib/tauri/articles";
 import { SummaryStateTag } from "@/components/news/SummaryStateTag";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import {
+  resolveArticleThumbnail,
+  type ArticleThumbnailStyle,
+} from "@/lib/article-thumbnail.mjs";
 import {
   ArticleTagList,
   normalizeArticleTags,
@@ -81,7 +86,8 @@ interface HistoryItem {
   isNew: boolean;
   isArchived: boolean;
   category: NewsCategory;
-  thumbnailType: "ai" | "energy" | "mobile" | "business" | "robot" | "space" | "lifestyle";
+  // ホーム・ニュース一覧と同じ共通ルール（lib/article-thumbnail.mjs）で決める。
+  thumbnail: ArticleThumbnailStyle;
   summaryState?: ArticleSummaryState;
   // 記事のタグ（整形済み）。タグでの絞り込みに使う。タグの無い記事は空配列。
   tags: string[];
@@ -107,7 +113,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: true,
     isArchived: false,
     category: "AI・テクノロジー",
-    thumbnailType: "ai",
+    thumbnail: resolveArticleThumbnail({
+      source: "TechCrunch Japan",
+      genre: "AI・テクノロジー",
+    }),
     tags: ["AI", "開発ツール"],
   },
   {
@@ -122,7 +131,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: false,
     isArchived: false,
     category: "環境・エネルギー",
-    thumbnailType: "energy",
+    thumbnail: resolveArticleThumbnail({
+      source: "日経クロステック",
+      genre: "環境・エネルギー",
+    }),
     tags: ["再エネ"],
   },
   {
@@ -137,7 +149,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: false,
     isArchived: false,
     category: "モバイル",
-    thumbnailType: "mobile",
+    thumbnail: resolveArticleThumbnail({
+      source: "ITmedia Mobile",
+      genre: "モバイル",
+    }),
     tags: [],
   },
   {
@@ -152,7 +167,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: false,
     isArchived: true,
     category: "ビジネス",
-    thumbnailType: "business",
+    thumbnail: resolveArticleThumbnail({
+      source: "日本経済新聞",
+      genre: "ビジネス",
+    }),
     tags: ["半導体"],
   },
   {
@@ -167,7 +185,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: true,
     isArchived: false,
     category: "AI・テクノロジー",
-    thumbnailType: "robot",
+    thumbnail: resolveArticleThumbnail({
+      source: "朝日新聞デジタル",
+      genre: "AI・テクノロジー",
+    }),
     tags: ["AI", "生成AI"],
   },
   {
@@ -182,7 +203,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: false,
     isArchived: true,
     category: "宇宙",
-    thumbnailType: "space",
+    thumbnail: resolveArticleThumbnail({
+      source: "WIRED.jp",
+      genre: "宇宙",
+    }),
     tags: [],
   },
   {
@@ -197,7 +221,10 @@ const mockHistoryItems: HistoryItem[] = [
     isNew: false,
     isArchived: false,
     category: "ライフスタイル",
-    thumbnailType: "lifestyle",
+    thumbnail: resolveArticleThumbnail({
+      source: "ライフハッカー日本版",
+      genre: "ライフスタイル",
+    }),
     tags: [],
   },
 ];
@@ -227,25 +254,6 @@ const isHistoryFilter = (value: string): value is ArticleHistoryFilter =>
 const toReadState = (readState: ArticleHistoryItemDto["readState"]): ReadState =>
   readState === "unread" ? "unread" : "read";
 
-const toThumbnailType = (genre: string): HistoryItem["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("エネルギー") || genre.includes("環境")) {
-    return "energy";
-  }
-  if (genre.includes("モバイル") || genre.includes("スマホ")) {
-    return "mobile";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  if (genre.includes("宇宙")) {
-    return "space";
-  }
-  return "lifestyle";
-};
-
 const mapTauriHistoryItemToUi = (
   article: ArticleHistoryItemDto
 ): HistoryItem => {
@@ -266,7 +274,11 @@ const mapTauriHistoryItemToUi = (
     isNew: isArticleNew(article),
     isArchived: article.isArchived,
     category: article.genre || "未分類",
-    thumbnailType: toThumbnailType(article.genre),
+    // 「未分類」に置き換える前の値で決め、ホーム（genre をそのまま渡す）と同じ結果にする。
+    thumbnail: resolveArticleThumbnail({
+      source: article.sourceName,
+      genre: article.genre,
+    }),
     summaryState: article.summaryState,
     tags: normalizeArticleTags(article.tags),
   };
@@ -293,74 +305,6 @@ const matchesHistoryFilter = (
 
 const getFallbackHistoryItems = (filter: ArticleHistoryFilter): HistoryItem[] =>
   mockHistoryItems.filter((item) => matchesHistoryFilter(item, filter));
-
-// Thumbnail component
-function HistoryThumbnail({ type }: { type: HistoryItem["thumbnailType"] }) {
-  const thumbnailStyles: Record<string, string> = {
-    ai: "from-blue-600 to-cyan-400",
-    energy: "from-green-500 to-teal-400",
-    mobile: "from-purple-500 to-pink-400",
-    business: "from-emerald-500 to-green-400",
-    robot: "from-indigo-500 to-purple-400",
-    space: "from-slate-700 to-blue-900",
-    lifestyle: "from-amber-500 to-orange-400",
-  };
-
-  const icons: Record<string, React.ReactNode> = {
-    ai: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-      </svg>
-    ),
-    energy: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-      </svg>
-    ),
-    mobile: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <rect x="5" y="2" width="14" height="20" rx="2" />
-        <circle cx="12" cy="18" r="1" />
-      </svg>
-    ),
-    business: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <path d="M3 3v18h18" />
-        <path d="M7 16l4-4 4 4 5-6" />
-      </svg>
-    ),
-    robot: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <rect x="4" y="8" width="16" height="12" rx="2" />
-        <circle cx="9" cy="14" r="2" />
-        <circle cx="15" cy="14" r="2" />
-        <path d="M12 2v4M8 4h8" />
-      </svg>
-    ),
-    space: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <circle cx="12" cy="12" r="10" />
-        <ellipse cx="12" cy="12" rx="10" ry="4" />
-        <path d="M12 2a15 15 0 010 20M12 2a15 15 0 000 20" />
-      </svg>
-    ),
-    lifestyle: (
-      <svg className="w-8 h-8 text-white/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-        <path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3" />
-      </svg>
-    ),
-  };
-
-  return (
-    <div
-      className={`w-16 h-16 rounded-lg bg-gradient-to-br ${thumbnailStyles[type]} flex items-center justify-center flex-shrink-0`}
-      aria-hidden="true"
-    >
-      {icons[type]}
-    </div>
-  );
-}
 
 // Filter Chip
 function FilterChipButton({
@@ -424,7 +368,11 @@ function HistoryItemCard({
       onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
-        <HistoryThumbnail type={item.thumbnailType} />
+        <ArticleThumbnail
+          thumbnail={item.thumbnail}
+          className="w-16 h-16"
+          iconClassName="w-8 h-8"
+        />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">{item.title}</h3>

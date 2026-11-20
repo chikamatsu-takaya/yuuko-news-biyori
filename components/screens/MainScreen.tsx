@@ -46,6 +46,11 @@ import {
 import type { YuukoNotificationState } from "@/lib/tauri/yuuko";
 import { getUserSettings } from "@/lib/tauri/settings";
 import { useToast } from "@/hooks/use-toast";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import {
+  resolveArticleThumbnail,
+  type ArticleThumbnailStyle,
+} from "@/lib/article-thumbnail.mjs";
 
 // ============================================
 // TypeScript Types
@@ -68,7 +73,7 @@ type Article = {
   timeAgo: string;
   isNew: boolean;
   isFavorite: boolean;
-  thumbnailType: "ai" | "business" | "quantum";
+  thumbnail: ArticleThumbnailStyle;
 };
 
 type QuickAccessItem = {
@@ -112,7 +117,10 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "5分前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "ai",
+    thumbnail: resolveArticleThumbnail({
+      source: "TechCrunch Japan",
+      genre: "AI・テクノロジー",
+    }),
   },
   {
     id: "article-002",
@@ -125,7 +133,10 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "1時間前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "business",
+    thumbnail: resolveArticleThumbnail({
+      source: "日経ビジネス",
+      genre: "ビジネス",
+    }),
   },
   {
     id: "article-003",
@@ -138,7 +149,10 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "2時間前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "quantum",
+    thumbnail: resolveArticleThumbnail({
+      source: "ITmedia NEWS",
+      genre: "テクノロジー",
+    }),
   },
 ];
 
@@ -182,16 +196,6 @@ const toCategoryColor = (genre: string): string => {
   return "bg-purple-500";
 };
 
-const toThumbnailType = (genre: string): Article["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  return "quantum";
-};
-
 const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   id: article.articleId,
   category: article.genre,
@@ -202,7 +206,10 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   timeAgo: article.publishedAtText,
   isNew: article.readState === "unread",
   isFavorite: article.isFavorite,
-  thumbnailType: toThumbnailType(article.genre),
+  thumbnail: resolveArticleThumbnail({
+    source: article.sourceName,
+    genre: article.genre,
+  }),
 });
 
 const toRefreshErrorLabel = (kind: string): string => {
@@ -256,95 +263,6 @@ function PawIcon({ className }: { className?: string }) {
   );
 }
 
-function ThumbnailPlaceholder({ type }: { type: Article["thumbnailType"] }) {
-  const configs = {
-    ai: {
-      gradient: "from-blue-400 to-cyan-400",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <ellipse cx="32" cy="32" rx="20" ry="16" />
-          <path d="M20 28 Q32 20 44 28" />
-          <path d="M20 36 Q32 44 44 36" />
-          <circle cx="24" cy="32" r="2" fill="currentColor" />
-          <circle cx="40" cy="32" r="2" fill="currentColor" />
-          <path d="M12 20 L8 12" />
-          <path d="M52 20 L56 12" />
-          <path d="M12 44 L8 52" />
-          <path d="M52 44 L56 52" />
-        </svg>
-      ),
-    },
-    business: {
-      gradient: "from-emerald-400 to-green-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M12 52 L12 36 L20 36 L20 52" fill="currentColor" />
-          <path d="M24 52 L24 28 L32 28 L32 52" fill="currentColor" />
-          <path d="M36 52 L36 20 L44 20 L44 52" fill="currentColor" />
-          <path d="M48 52 L48 12 L56 12 L56 52" fill="currentColor" />
-          <path d="M8 52 L60 52" strokeWidth="3" />
-          <path d="M10 40 Q32 8 58 16" strokeDasharray="4 2" />
-        </svg>
-      ),
-    },
-    quantum: {
-      gradient: "from-purple-500 to-indigo-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        >
-          <ellipse cx="32" cy="32" rx="24" ry="8" />
-          <ellipse
-            cx="32"
-            cy="32"
-            rx="24"
-            ry="8"
-            transform="rotate(60 32 32)"
-          />
-          <ellipse
-            cx="32"
-            cy="32"
-            rx="24"
-            ry="8"
-            transform="rotate(120 32 32)"
-          />
-          <circle cx="32" cy="32" r="4" fill="currentColor" />
-          <circle cx="32" cy="24" r="2" fill="currentColor" />
-          <circle cx="32" cy="40" r="2" fill="currentColor" />
-          <circle cx="24" cy="28" r="2" fill="currentColor" />
-          <circle cx="40" cy="36" r="2" fill="currentColor" />
-        </svg>
-      ),
-    },
-  };
-
-  const config = configs[type];
-
-  return (
-    <div
-      className={`w-24 h-20 rounded-lg bg-gradient-to-br ${config.gradient} flex items-center justify-center shrink-0 [@media(max-height:719px)]:size-12 [@media(max-height:719px)]:[&>svg]:size-7`}
-    >
-      {config.icon}
-    </div>
-  );
-}
-
 // ホームの記事カード。ウィンドウの高さが 720px 未満（既定の 800×600 など）では、記事が1件しか見えなかったため
 // 小さい表示に切り替える（サムネイル 48px・題名2行まで・出典と時刻は1行・要約は隠す）。
 // 切り替えは CSS の高さ条件だけで行い、リサイズ監視は持たない。720px 以上の見た目は変えない（2026-11-20 藤井判断の試行）。
@@ -366,7 +284,11 @@ function ArticleCard({
       onClick={() => onClick(article.id)}
     >
       <CardContent className="p-4 flex gap-4 [@media(max-height:719px)]:p-2.5 [@media(max-height:719px)]:gap-3">
-        <ThumbnailPlaceholder type={article.thumbnailType} />
+        <ArticleThumbnail
+          thumbnail={article.thumbnail}
+          className="w-24 h-20 [@media(max-height:719px)]:size-12 [@media(max-height:719px)]:[&>svg]:size-7"
+          iconClassName="w-12 h-12"
+        />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5 [@media(max-height:719px)]:mb-1">
             <Badge
