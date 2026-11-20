@@ -1822,6 +1822,7 @@ mod tests {
             read_state: ArticleReadState::Unread,
             recommendation_score: 0.5,
             summary_state: state,
+            tags: Vec::new(),
         }
     }
 

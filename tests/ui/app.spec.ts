@@ -1221,6 +1221,75 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
   await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
 });
 
+// 記事サムネイルは全画面共通のルール（lib/article-thumbnail.mjs）で決める（2026-11-20 藤井判断）。
+// 同じ記事はホームとニュース一覧で同じ絵（タグ→題名→ジャンル→アイコン）と色（媒体名→色）になり、
+// 媒体が違えば色が分かれることを確かめる。
+test("article thumbnails match between home and today-news list, and differ by source", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const base = {
+      publishedAtText: "2026-06-05T00:00:00Z",
+      summary: "UI確認用のモックニュースです。",
+      isFavorite: false,
+      readState: "unread",
+      recommendationScore: 0.9,
+      fetchedAt: new Date().toISOString(),
+      isArchived: false,
+    };
+    const items = [
+      // タグがあればタグで絵が決まる（ホームの記事・一覧の記事のどちらにも同じタグを返す）。
+      { ...base, articleId: "thumb-1", title: "サムネ記事テック", sourceName: "E2E News", genre: "テクノロジー", tags: ["半導体", "AI"] },
+      { ...base, articleId: "thumb-2", title: "サムネ記事経済", sourceName: "経済ニュースB", genre: "ビジネス・経済" },
+      { ...base, articleId: "thumb-3", title: "サムネ記事スポーツ", sourceName: "サイエンス通信", genre: "Sports" },
+    ];
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles" || cmd === "list_article_history") {
+        return items;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+  const readThumbnail = async (card: ReturnType<Page["locator"]>) => {
+    const thumb = card.locator("[data-thumbnail-kind]");
+    await expect(thumb).toHaveCount(1);
+    return {
+      kind: await thumb.getAttribute("data-thumbnail-kind"),
+      palette: await thumb.getAttribute("data-thumbnail-palette"),
+      background: await thumb.evaluate((el) => getComputedStyle(el).backgroundImage),
+    };
+  };
+  const titles = ["サムネ記事テック", "サムネ記事経済", "サムネ記事スポーツ"];
+
+  await openHome(page);
+  await expect(page.getByTestId("home-article-card")).toHaveCount(3);
+  const home = [];
+  for (const title of titles) {
+    home.push(
+      await readThumbnail(page.getByTestId("home-article-card").filter({ hasText: title }))
+    );
+  }
+  // タグ → 題名 → ジャンルの順で絵が決まる（1件目はタグ「半導体」、2・3件目は題名の「経済」「スポーツ」）。
+  expect(home.map((t) => t.kind)).toEqual(["semiconductor", "business", "sports"]);
+  // 媒体が違えば色が分かれる。
+  expect(new Set(home.map((t) => t.palette)).size).toBe(3);
+  for (const thumb of home) {
+    expect(thumb.background).toContain("linear-gradient");
+  }
+
+  await openTodayNewsList(page);
+  const main = page.locator("main");
+  for (const [index, title] of titles.entries()) {
+    const listThumb = await readThumbnail(main.getByRole("button", { name: title }));
+    expect(listThumb).toEqual(home[index]);
+  }
+});
+
 test.describe("article date display", () => {
   // 日時は端末ローカル時刻で出すため、日本時間に固定して確かめる。
   test.use({ timezoneId: "Asia/Tokyo" });

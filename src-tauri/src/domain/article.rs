@@ -238,6 +238,11 @@ pub struct ArticleSummaryDto {
     /// 自動要約の状態。ゆうこ状態ファイルに保存された旧データにも無いため既定値で読む。
     #[serde(default)]
     pub summary_state: SummaryState,
+    /// 記事のタグ（ArticleHistoryItemDto と同じ保存値・同じ整形〔display_tags〕）。
+    /// ホームとニュース一覧で同じ記事のサムネイルの絵をそろえるため、一覧と同じ値を返す。
+    /// タグの無い記事（未要約など）・ゆうこ状態ファイルに保存された旧データでは空。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
