@@ -743,6 +743,7 @@ mod tests {
             read_state: ArticleReadState::Unread,
             recommendation_score: 0.9,
             summary_state: Default::default(),
+            tags: Vec::new(),
         }
     }
 

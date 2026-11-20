@@ -62,6 +62,11 @@ import {
   normalizeArticleTags,
 } from "@/components/news/ArticleTagList";
 import { useToast } from "@/hooks/use-toast";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import {
+  resolveArticleThumbnail,
+  type ArticleThumbnailStyle,
+} from "@/lib/article-thumbnail.mjs";
 // 範囲選択→「解説」ボタン表示の純粋ロジック（DOM非依存・node --test 済み）。
 import {
   shouldShowExplainButton,
@@ -132,7 +137,8 @@ type RelatedArticle = {
   source: string;
   timeAgo: string;
   isNew: boolean;
-  thumbnailType: "ai" | "business" | "quantum";
+  // ホーム・ニュース一覧と同じ共通ルール（lib/article-thumbnail.mjs）で決める。
+  thumbnail: ArticleThumbnailStyle;
 };
 
 // 右サイド「用語サポート」に既定で並べる候補語の件数。超える分は「すべての関連ワードを見る」で展開する。
@@ -326,25 +332,18 @@ const toCategoryColor = (genre: string): string => {
   return "border-purple-500 text-purple-600 bg-white";
 };
 
-const toThumbnailType = (
-  genre: string
-): RelatedArticle["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  return "quantum";
-};
-
 const toRelatedFallback = (article: ReaderArticleDetail): RelatedArticle => ({
   id: article.id,
   title: article.title,
   source: article.source,
   timeAgo: article.timeAgo,
   isNew: true,
-  thumbnailType: toThumbnailType(article.category),
+  thumbnail: resolveArticleThumbnail({
+    source: article.source,
+    genre: article.category,
+    title: article.title,
+    tags: article.tags,
+  }),
 });
 
 const getFallbackArticleById = (articleId?: string): ReaderArticleDetail =>
@@ -430,7 +429,12 @@ const mapSummaryToRelated = (
   source: article.sourceName,
   timeAgo: formatArticleDateTime(article.publishedAtText),
   isNew: isArticleNew(article),
-  thumbnailType: toThumbnailType(article.genre),
+  thumbnail: resolveArticleThumbnail({
+    source: article.sourceName,
+    genre: article.genre,
+    title: article.title,
+    tags: article.tags,
+  }),
 });
 
 function PawIcon({ className }: { className?: string }) {
@@ -837,72 +841,6 @@ function TermPopup({
           用語解説を表示できなかったよ。
         </p>
       ) : null}
-    </div>
-  );
-}
-
-function ThumbnailPlaceholder({ type }: { type: RelatedArticle["thumbnailType"] }) {
-  const configs = {
-    ai: {
-      gradient: "from-blue-400 to-cyan-400",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="h-8 w-8 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <ellipse cx="32" cy="32" rx="20" ry="16" />
-          <path d="M20 28 Q32 20 44 28" />
-          <path d="M20 36 Q32 44 44 36" />
-          <circle cx="24" cy="32" r="2" fill="currentColor" />
-          <circle cx="40" cy="32" r="2" fill="currentColor" />
-        </svg>
-      ),
-    },
-    business: {
-      gradient: "from-emerald-400 to-green-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="h-8 w-8 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M12 52 L12 36 L20 36 L20 52" fill="currentColor" />
-          <path d="M24 52 L24 28 L32 28 L32 52" fill="currentColor" />
-          <path d="M36 52 L36 20 L44 20 L44 52" fill="currentColor" />
-        </svg>
-      ),
-    },
-    quantum: {
-      gradient: "from-purple-500 to-indigo-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="h-8 w-8 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        >
-          <ellipse cx="32" cy="32" rx="20" ry="6" />
-          <ellipse cx="32" cy="32" rx="20" ry="6" transform="rotate(60 32 32)" />
-          <ellipse cx="32" cy="32" rx="20" ry="6" transform="rotate(120 32 32)" />
-          <circle cx="32" cy="32" r="3" fill="currentColor" />
-        </svg>
-      ),
-    },
-  };
-
-  const config = configs[type];
-
-  return (
-    <div
-      className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${config.gradient}`}
-    >
-      {config.icon}
     </div>
   );
 }
@@ -2307,7 +2245,8 @@ export default function NewsReaderScreen({
                 </p>
                 )}
                 {autoSummaryReason ? (
-                  /* 自動要約が進まない理由（ゲーム・発表中で休んでいる・設定で無効など。D158）。固定文言だけを出す。 */
+                  /* 自動要約が進まない理由（ゲーム・発表中で休んでいる・AIの準備ができていないなど。D158）。固定文言だけを出す。
+                     設定で無効のときは出さない（2026-11-18 藤井）。理由が無いときは要素ごと出さず、隙間を残さない。 */
                   <p
                     role="status"
                     data-testid="auto-summary-reason"
@@ -2485,7 +2424,11 @@ export default function NewsReaderScreen({
                   className="flex w-full items-center gap-3 text-left"
                   onClick={() => onOpenArticle?.(featuredRelatedArticle.id)}
                 >
-                  <ThumbnailPlaceholder type={featuredRelatedArticle.thumbnailType} />
+                  <ArticleThumbnail
+                    thumbnail={featuredRelatedArticle.thumbnail}
+                    className="h-14 w-14"
+                    iconClassName="h-8 w-8"
+                  />
                   <div className="min-w-0 flex-1">
                     <h4 className="mb-1 line-clamp-1 text-sm font-medium text-foreground">
                       {featuredRelatedArticle.title}

@@ -18,7 +18,7 @@
 | `models/` | **空にする**（2026-11-16 から。モデル `gemma-4-E2B-it-Q4_K_M.gguf`〔3,106,738,272 B〕は初回起動時に `%LOCALAPPDATA%\<識別子>\local_llm\models\<版の名前>\` へ取得する。`.gguf` が残っていると `check-bundle.mjs` がバンドルを止める）。以前は `stario-qwen3.5-2b-q4_k_m.gguf`（1,312,164,800 B）を置いていた | 0 B | 追跡しない（`.gitignore`） |
 | `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
-合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。**2026-11-16 からはモデルを入れないため、インストーラーは MSI 約 29.6MiB・NSIS 約 19.8MiB（§3.3.1）。**
+合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。**2026-11-16 からはモデルを入れないため、インストーラーは NSIS 約 19.8MiB（§3.3.1。MSI も作っていた当時の実測では MSI 約 29.6MiB。2026-11-18 から MSI は作らない〔§4.2〕）。**
 
 ### 1.1 Visual C++ ランタイムを同梱する理由と範囲（判断台帳 D112）
 
@@ -53,7 +53,7 @@ node scripts/local-llm/check-bundle.mjs
 ### 3.1 前提
 
 - `開発環境構築手順書.md` の Node.js / pnpm / Rust / C++ Build Tools がそろっていること。
-- 初めて `pnpm tauri build` を動かすとき、Tauri CLI はインストーラー作成ツール（WiX Toolset v3・NSIS）を自動でダウンロードする（Tauri v2 の既定の動作）。**ビルドするパソコンにインターネット接続が要る**。社内の取り決めでツールの取得に確認が要る場合は、先に確認する。
+- 初めて `pnpm tauri build` を動かすとき、Tauri CLI はインストーラー作成ツール（NSIS）を自動でダウンロードする（Tauri v2 の既定の動作。MSI を作っていた 2026-11-18 より前は WiX Toolset v3 も取得していた）。**ビルドするパソコンにインターネット接続が要る**。社内の取り決めでツールの取得に確認が要る場合は、先に確認する。
 - ビルドの出力先（`src-tauri/target/`）に、同梱物の写し（tauri-build が `target/<profile>/local_llm` へ写す約 1.3GB）とインストーラー（約 1.3GB × 形式の数）が増える。空き容量を 5GB 以上見ておく（目安・未検証）。**これはモデルを同梱していた 2026-11-16 までの見積もり。今は `local_llm` の写しが約 45MB、インストーラーが約 30MiB 以下（§3.3.1）。**
 
 ### 3.2 コマンド
@@ -64,30 +64,27 @@ node scripts/local-llm/check-bundle.mjs
 
 # 2. 配布用ビルド（next build → cargo build --release → check-bundle → インストーラー作成）
 pnpm tauri build
-
-# 3. MSI の作成が失敗したときだけ: NSIS だけを作る（判断台帳 D111。未検証）
-pnpm tauri build --bundles nsis
 ```
 
-- `tauri.conf.json` は `bundle.targets: "all"` のまま（判断台帳 D111）。Windows では **MSI（WiX）と NSIS（.exe）の両方** を作る。
-- MSI の作成が失敗した（2GB 上限など。§4）ときは、設定を変えずに `pnpm tauri build --bundles nsis` で NSIS だけを作って配る。
-- 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`、`src-tauri/target/release/bundle/msi/*.msi`。
+- `tauri.conf.json` は `bundle.targets: ["nsis"]`。**作るのは NSIS（.exe）だけで、MSI は作らない**（藤井さんの判断 2026-11-18「exe版だけで良いです」。§4.2）。
+- 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`（`CARGO_TARGET_DIR` を指定したときはその下の `release/bundle/nsis/`）。2026-11-18 より前のビルドの `bundle/msi/` が残っていることがあるが、今のビルドでは作られない（配らない）。
 - ビルド前に、APIキー・`.env`・`app-data/` の実データが混入していないことを確かめる（`開発環境構築手順書.md` §15.3）。
 
-### 3.3 作った後に確かめること（初回は必ず実施。1・3・4 は 2026-11-18 に確かめた〔§3.3.1〕。2 は未検証）
+### 3.3 作った後に確かめること（初回は必ず実施。1・3・4 は 2026-11-18 に確かめた〔§3.3.1〕。2 は未検証。5 は 2026-11-18 に NSIS で確かめた〔§3.3.2〕）
 
 1. インストーラーの大きさ（約 30MiB 以下か。2026-11-16 からモデルを入れないため。結果は §3.3.1）。
 2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（手順は §3.4）。
 3. インストール先の `local_llm/LICENSES/` にライセンス本文があるか。
 4. アンインストールで `local_llm/` が消えるか（NSIS で確かめた。§3.3.1）。
+5. アンインストールで、取得したモデル（`%LOCALAPPDATA%\<識別子>\local_llm\models`）だけが消え、ほかのアプリのデータが残るか（チェックを外したとき）。版を上げたときにモデルが残るか（§3.3.2）。
 
 ### 3.3.1 結果（2026-11-18・初回ダウンロード 5/5。develop `cb01f9e`）
 
 インストーラーを実際に作り、開発用の PC（Windows 11・論理 14 コア・メモリ 15.5GB。VC++ 再頒布可能パッケージは入っている）で確かめた。
 
 - 同梱物は `node scripts/local-llm/place-bundle.mjs <すでに置いた同梱物のフォルダ>` で置いた（モデルは写さず `models/` は空）。`check-bundle.mjs` は通った。
-- 大きさ: **MSI 31,031,296 B（約 29.6MiB）・NSIS 20,718,600 B（約 19.8MiB）**。モデルを入れないため、§4 の 2GB の上限は問題にならなくなった。
-- 中身（MSI を `msiexec /a` で展開して確かめた）: `local_llm/` は `runtime/`（25 個・44,453,556 B）・`LICENSES/`（10 個・59,771 B）・`models/`（`.gitignore` だけ）。`.gguf` は無い。`runtime/`・`models/` の `.gitignore` もインストール先に入る（害は無い）。
+- 大きさ: **MSI 31,031,296 B（約 29.6MiB）・NSIS 20,718,600 B（約 19.8MiB）**（MSI も作っていた当時の実測。今は MSI を作らない）。モデルを入れないため、§4 の 2GB の上限は問題にならなくなった。
+- 中身（当時の MSI を `msiexec /a` で展開して確かめた。NSIS も同じ `bundle.resources` から作る）: `local_llm/` は `runtime/`（25 個・44,453,556 B）・`LICENSES/`（10 個・59,771 B）・`models/`（`.gitignore` だけ）。`.gguf` は無い。`runtime/`・`models/` の `.gitignore` もインストール先に入る（害は無い）。
 - インストール: NSIS は利用者ごと（`%LOCALAPPDATA%\<productName>\`）に入り、管理者権限（UAC）は求められなかった。
 - 初回起動の流れ（§7.3 の 1 つ目。確かめ用に識別子と productName だけを替えた版で行った。開発者の実データに触れないため）:
   1. 初回起動の案内を終えると、ホームに「初期セッティング中」が出て、10 秒の数え下げの後に取得が始まった（`autoDownloadStartedAt` が書かれた）。
@@ -97,6 +94,41 @@ pnpm tauri build --bundles nsis
 - アンインストール（設定 → アプリ から。NSIS）: 「Delete the application data」のチェック（既定は外れている）を入れると、インストール先と `%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>`（取得したモデルを含む）が消えた。チェックを外したときの残り方は確かめていない。
 - 未確認: VC++ ランタイムの無い環境（§3.4）・オフライン・プロキシ・キャンセル・途中終了からの再開など、§7.3 の 2 つ目以降（設計案）は今回は確かめていない。
 - 注意（確かめ方）: Claude Desktop などの MSIX のアプリの中のシェルからインストーラーを動かすと、インストール先が MSIX の仮想化（`%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\`）に入り、そこから起動したアプリでは「ローカル」が `Missing`（`local llm bundle directory is not available`）になった。エクスプローラーからインストールし直すと起きなかったため、確かめ方の問題と見ている（原因は切り分けていない）。インストールは通常どおりエクスプローラーから行う。
+
+### 3.3.2 アンインストールで取得したモデルを消す（2026-11-18・設計案 Q10）
+
+藤井さんの判断（2026-11-18）により、アンインストールで取得したモデルを必ず消す（設計案 §0.3.2）。
+
+- 消すもの: `%LOCALAPPDATA%\<識別子>\local_llm\models`（版のフォルダ・`.part`・`.part.json` を含む）だけ。その上の `local_llm` は空のときだけ消す。
+- 残すもの: ほかのアプリのデータ（`%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>` の残り）。「Delete the application data」のチェック（既定は外れている）を入れたときだけ、今までどおり Tauri のテンプレートが全部を消す。
+- 仕組み（NSIS）: `tauri.conf.json` の `bundle.windows.nsis.installerHooks` に `windows/installer-hooks.nsh` を指定し、`NSIS_HOOK_POSTUNINSTALL`（Tauri のテンプレートの `Section Uninstall` の終わり。ファイル・レジストリと、チェック時のアプリのデータを消した後）で消す。フックの名前・`BUNDLEID`・`$UpdateMode` は Tauri CLI 2.10.1 に入っている NSIS のテンプレートで確かめた。
+- 消さないとき（モデルが残る場合）:
+  - 更新（`/UPDATE`）。
+  - アンインストーラーがインストール先から直接動いているとき（`$EXEDIR` がインストール先と同じ）。Tauri の NSIS は版を上げるとき既定で「古い版をアンインストールしてから入れる」を選び、`_?=<インストール先>` を付けて古い版のアンインストーラーをその場で動かすため、これに当たる。取り直し（約 3GB）を版ごとにさせないため（藤井さんの判断 2026-11-18「版を上げるときは残す」）。同じ版を入れ直すときの「Uninstall」を選んだ場合、「Uninstall before installing」の後でインストールをキャンセルした場合、スクリプトなどが `uninstall.exe /S _?=<dir>` で呼んだ場合も同じ扱いで、モデルは残る（設定画面の［モデルを削除］か手で消す）。
+  - 設定 → アプリ や `uninstall.exe` のダブルクリックでは、NSIS がアンインストーラーを `%TEMP%` へ写して動かす（NSIS の仕様。マニュアル §3.2.2 の `_?=`）ため、消す。実機で確かめたのは 設定 → アプリ からの場合だけ。
+  - `%LOCALAPPDATA%` が UNC（`\server\...`）などに向け直されている環境では、守り（`X:\...` の形だけ）により消さない（安全側）。
+- 広く・別の場所を消さない守り（セキュリティ詳細設計書 §11.8）:
+  - 識別子が空ならインストーラーを作らない（`!error`）。`$LOCALAPPDATA`（`SetShellVarContext current`）が `X:\...` の形で、フォルダとして在るときだけ使う。消すのは `$LOCALAPPDATA\<識別子>\local_llm\models` の固定の形で、在るときだけ。
+  - ジャンクション・シンボリックリンクをたどらない（2026-11-18 の独立レビューの指摘で直した）。NSIS の `RMDir /r` はリンクの先まで消すため使わない。`<識別子>`・`local_llm`・`models` のどれかが再解析ポイントなら何も消さない（3GB の `models` を別のドライブへリンクしている人の、先のファイルを消さない）。`models` の中は 1 段だけたどる（取得の置き方は `models\<版>\<ファイル>` の 1 段だけ）: リンクの子はリンクそのものだけを外し、普通の子フォルダは直下のファイルだけを消して空なら外し、直下のファイルは消す。最後に `models`、空なら `local_llm` を外す。
+  - 限界: これは本フック（「Delete the application data」のチェックを外したとき）の話で、チェックを入れたときは本フックより前に Tauri のテンプレートが `RmDir /r "$LOCALAPPDATA\${BUNDLEID}"` を行い、NSIS 3.11 の `RMDir /r` はリンクの先までたどって消す（Tauri の従来の動き。本変更で増えたものではない）。直すなら `NSIS_HOOK_PREUNINSTALL` でリンクになっている `models` を先に外す案がある（別のタスク）。
+  - 前提は `installMode` が `currentUser`（Tauri の既定・本アプリの設定）。perMachine / both へ変えるときはフックを見直す（変えるとビルドで `!warning` が出る）。
+- 消し切れないとき: 動いている `llama-server` やウイルス対策ソフトがファイルを開いていると残ることがある。アンインストーラーの詳細に `Local LLM model: could not remove completely` が出る。残ったら手で `%LOCALAPPDATA%\<識別子>\local_llm\models` を消すか、アンインストールの前に設定画面の［モデルを削除］で消す。
+- MSI: **対応していない**。配るのは NSIS（.exe）だけにすると決まり（藤井さん 2026-11-18）、`bundle.targets` を `["nsis"]` にして MSI を作らなくした（§4.2）。以下は MSI を検討したときの記録。Tauri の WiX のテンプレートは全員向け（`perMachine`）で、アンインストールでアプリのデータに触れない（モデルを含めて残る）。WiX の断片（`bundle.windows.wix.fragmentPaths`）で利用者ごとのフォルダを消すことはできる見込みだが、(1) アンインストールした人の分しか消えない、(2) 版を上げるとき（`MajorUpgrade`）にも古い版のアンインストールが走るため `UPGRADINGPRODUCTCODE` で除く必要がある、(3) 管理者の確認（UAC）が要り、この PC で自動では確かめられない。MSI を再び配ることにするなら、設定画面の［モデルを削除］を案内するか、上の断片を別に作って確かめる（当時の提案）。
+- 確かめ方: 識別子と productName を替えた版（`jp.star-system.yuuko-news.installer-check` / `yuuko-news-uninstall-check`。`--config` で上書きし、コミットしない）を v0.1.0 と v0.1.1 で作り、エクスプローラーからインストールする。ダミーのモデル・`.part`・ほかのデータのダミーを置き、(a) v0.1.1 で版を上げてモデルが残るか、(b) 設定 → アプリ からチェックを外してアンインストールし `local_llm\models` だけが消えるか、(c) チェックを入れて全部消えるかを見る。ダミーはエクスプローラーで置く（Claude Desktop などの MSIX のアプリの中のシェルから `%LOCALAPPDATA%` に書くと、MSIX の仮想化〔`%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\Local\`〕に入り、本物の場所に置かれない。2026-11-18 に確かめた）。
+- 結果（2026-11-18・**ジャンクション対応の前の版**〔`RMDir /r`〕で確かめた。この PC〔Windows 11〕・NSIS・利用者ごと。確かめ用の版。生成された `installer.nsi` にフックが入っていることも確かめた）。ダミーは `local_llm\models\gemma-4-e2b-it-q4-k-m-740185b2\` に `.gguf`・`.part`・`.part.json`、ほかに `%LOCALAPPDATA%\<識別子>\keep-local.txt`・`local_llm\keep-in-local_llm.txt`・`%APPDATA%\<識別子>\keep-roaming.txt` を置いた。
+  1. **版を上げる（v0.1.0 → v0.1.1）**: エクスプローラーから v0.1.1 を開くと「Already Installed」で既定は「Uninstall before installing」だった。そのまま進むと古い版のアンインストーラーが `インストール先\uninstall.exe` のまま動き（一時フォルダへ写されない）、「Delete the application data」は外れたまま。詳細に `Local LLM model: kept (uninstall called by a newer installer)`（当時の文言。今は `kept (uninstaller runs in place, e.g. called by a newer installer)`）が出て、**ダミーは全部残った**。版は 0.1.1 になった。
+  2. **アンインストール・チェックを外す**（設定 → アプリ → インストールされているアプリ → アンインストール）: アンインストーラーは `%TEMP%\~nsu1.tmp\Un.exe` に写されて動いた。詳細に `Local LLM model: removing ...\local_llm\models` が出て、**`local_llm\models` だけが消えた**。`keep-local.txt`・`local_llm\keep-in-local_llm.txt`（中身があるので `local_llm` は残る）・`keep-roaming.txt` は残った。インストール先も消えた。
+  3. **入れ直してアンインストール・チェックを入れる**: ダミーを置き直してから行った。`%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>`・インストール先・アンインストールのレジストリが**全部消えた**（モデルは Tauri のテンプレートが先に消すため、フックは何もしない）。
+  - 後片付け: 確かめ用のアプリ・データ・ダミーは残っていない。開発者の実データ（`jp.star-system.yuuko-news`）には触れていない。
+  - 注意: インストール後の画面の「Run ...」は外した（確かめ用の版を起動すると、実際のモデルの取得が始まるため）。
+- ジャンクション対応の確かめ（2026-11-18・実機のインストールはやり直していない）: フックの消す処理（`YUUKO_REMOVE_DOWNLOADED_MODEL`）をそのまま取り込んだ小さな NSIS（Tauri が使う NSIS 3.11）を作り、一時フォルダで次を確かめた。どの場合もリンクの先のファイルは消えなかった。
+  1. 普通の置き方（`models\v1\` に `.gguf`・`.part`・`.part.json`、`models` 直下のファイル）: `models` が全部消えた。`<識別子>` と `local_llm` の中のほかのファイルは残り、`local_llm` は中身があれば残り、空なら消えた。
+  2. `models` がジャンクション: 何も消さなかった。
+  3. 版のフォルダがジャンクション: リンクだけが外れ、ほかの版のフォルダと `models` は消えた。
+  4. 版のフォルダの中にジャンクション: 版のフォルダの直下のファイルは消え、リンクと版のフォルダ・`models` は残った（消し切れない扱い）。
+  5. `<識別子>` / `local_llm` がジャンクション: 何も消さなかった。
+  6. `%LOCALAPPDATA%` が空・`X:\` の形でない: 何も消さなかった。
+  - 直した版で確かめ用のインストーラーを作り直し、生成された `installer.nsi` にフックが入り、`makensis` が通ることを確かめた。
 
 ### 3.4 VC++ ランタイムが入っていないパソコンで確かめる（判断台帳 D112・未検証）
 
@@ -117,7 +149,7 @@ pnpm tauri build --bundles nsis
 
 インストーラーを作らずに確かめたい場合は、`src-tauri/resources/local_llm/runtime/` を丸ごと上の環境へ写し、PowerShell で `.\llama-server.exe --version` が版を表示して終わるかを見る（DLL が足りなければ「コンピューターに ～.dll がないため」の画面が出る）。
 
-## 4. MSI の 2GB 制限と配布形式（判断台帳 D111）
+## 4. 配布形式（NSIS だけ。2026-11-18）と MSI の 2GB 制限（判断台帳 D111・過去の記録）
 
 ### 4.1 事実関係
 
@@ -127,13 +159,19 @@ pnpm tauri build --bundles nsis
 - NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_model_path` の差し替え・D101 の将来案）を検討する。
 - WiX は 1.3GB の CAB を高圧縮で作るため、ビルドに時間がかかる（GGUF はほぼ縮まない）。NSIS は `bundle.windows.nsis.compression` で圧縮方式（`lzma` / `zlib` / `bzip2` / `none`）を選べる（未検証）。
 
-### 4.2 決定した運用（判断台帳 D111・2026-10-13）
+### 4.2 決定した運用（2026-11-18・藤井さん「exe版だけで良いです」）
 
-- `bundle.targets` は `"all"` のまま、**MSI と NSIS の両方を作る**。
-- **MSI の作成が失敗したら、`pnpm tauri build --bundles nsis` で NSIS だけを作る**（設定は変えない）。
+- `bundle.targets` は `["nsis"]`。**NSIS（.exe）だけを作って配り、MSI は作らない。**
+- 理由: (1) Tauri の MSI は全員向け（`perMachine`）で、インストールに管理者の確認（UAC）が要る。NSIS は利用者ごと（`currentUser`）で要らない。(2) アンインストールで取得したモデルを消すフック（`src-tauri/windows/installer-hooks.nsh`。§3.3.2）は NSIS にしか入らず、MSI では動きが違ってしまう。
+- 判断台帳 D111（2026-10-13）の「`"all"` のまま MSI と NSIS の両方を作り、MSI が失敗したら `--bundles nsis`」は、これで置き換わった。
+
+#### 4.2.1 以前の運用（判断台帳 D111・2026-10-13〜2026-11-18。過去の記録）
+
+- `bundle.targets` は `"all"` のまま、MSI と NSIS の両方を作る。
+- MSI の作成が失敗したら、`pnpm tauri build --bundles nsis` で NSIS だけを作る（設定は変えない）。
 - 配るのは作れた形式。両方作れた場合の使い分けは配布先の都合に合わせる。
 
-背景（NSIS を代わりの形式にする理由）:
+背景（当時 NSIS を代わりの形式にした理由）:
 
 - 1 つの .exe で配れる。Tauri の NSIS は既定で利用者ごと（管理者権限なし）にインストールできる。
 - MSI の CAB / MSI ファイルの 2GB 上限と、大きな CAB の作成時間を避けられる。

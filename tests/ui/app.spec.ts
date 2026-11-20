@@ -96,6 +96,85 @@ test("home screen renders and primary controls are hittable", async ({
   await captureScreen(page, testInfo, "home");
 });
 
+// 手動更新の結果はカードにせず1行の通知だけにする（一覧を押し下げない。藤井判断・選択肢1）。
+// 800x600 で更新の前後に見えている記事の数と先頭記事の位置を比べる。
+async function measureHomeArticles(page: Page) {
+  return page.evaluate(() => {
+    const titles = Array.from(document.querySelectorAll("h3")).filter((el) =>
+      /^件数記事\d+$/.test(el.textContent?.trim() ?? "")
+    );
+    // 一覧はスクロール領域の中にあるため、その領域に収まっている見出しを数える。
+    const list = titles[0]?.closest(".overflow-y-auto");
+    const listRect = list?.getBoundingClientRect();
+    const bottom = Math.min(listRect?.bottom ?? window.innerHeight, window.innerHeight);
+    const tops = titles.map((el) => el.getBoundingClientRect().top);
+    const visible = titles.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.top >= (listRect?.top ?? 0) && rect.bottom <= bottom;
+    }).length;
+    return { firstTop: Math.min(...tops), visible };
+  });
+}
+
+test("home refresh success shows only a one-line notice and keeps the article list in place", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_RECOMMENDED_POOL__ = 10;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText("ニュースを更新しました。");
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("更新成功", { exact: true })).toHaveCount(0);
+  for (const label of ["sources", "fetched", "saved", "errors"]) {
+    await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  }
+
+  const after = await measureHomeArticles(page);
+  // 通知1行ぶん（文字＋余白）を超えて下がらず、見えている記事の数も減らない。
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(32);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible);
+});
+
+test("home refresh with partial errors shows a short amber line instead of a card", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_RECOMMENDED_POOL__ = 10;
+    win.__E2E_REFRESH_PARTIAL_ERRORS__ = true;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText(
+    "ニュースを更新しました（一部の取得元でエラー 2 件：フィード取得失敗 / 記事取得失敗）。"
+  );
+  await expect(notice).toHaveClass(/text-amber-700/);
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("一部エラーあり", { exact: true })).toHaveCount(0);
+  // 取得元の URL は画面に出さない。
+  await expect(page.getByText("example.invalid")).toHaveCount(0);
+
+  // 2行までに収まる（text-xs の行の高さ 16px × 2 まで。超える分は line-clamp で切る）。
+  const box = await notice.boundingBox();
+  expect(box?.height ?? 0).toBeLessThanOrEqual(34);
+
+  const after = await measureHomeArticles(page);
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(48);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible - 1);
+});
+
 for (const screen of majorScreens) {
   test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
@@ -1140,6 +1219,75 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
   await expect(main.getByText("公開本日だが取得前日の記事")).toHaveCount(0);
   // カード（h3見出し）はちょうど1件。
   await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
+});
+
+// 記事サムネイルは全画面共通のルール（lib/article-thumbnail.mjs）で決める（2026-11-20 藤井判断）。
+// 同じ記事はホームとニュース一覧で同じ絵（タグ→題名→ジャンル→アイコン）と色（媒体名→色）になり、
+// 媒体が違えば色が分かれることを確かめる。
+test("article thumbnails match between home and today-news list, and differ by source", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const base = {
+      publishedAtText: "2026-06-05T00:00:00Z",
+      summary: "UI確認用のモックニュースです。",
+      isFavorite: false,
+      readState: "unread",
+      recommendationScore: 0.9,
+      fetchedAt: new Date().toISOString(),
+      isArchived: false,
+    };
+    const items = [
+      // タグがあればタグで絵が決まる（ホームの記事・一覧の記事のどちらにも同じタグを返す）。
+      { ...base, articleId: "thumb-1", title: "サムネ記事テック", sourceName: "E2E News", genre: "テクノロジー", tags: ["半導体", "AI"] },
+      { ...base, articleId: "thumb-2", title: "サムネ記事経済", sourceName: "経済ニュースB", genre: "ビジネス・経済" },
+      { ...base, articleId: "thumb-3", title: "サムネ記事スポーツ", sourceName: "サイエンス通信", genre: "Sports" },
+    ];
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles" || cmd === "list_article_history") {
+        return items;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+  const readThumbnail = async (card: ReturnType<Page["locator"]>) => {
+    const thumb = card.locator("[data-thumbnail-kind]");
+    await expect(thumb).toHaveCount(1);
+    return {
+      kind: await thumb.getAttribute("data-thumbnail-kind"),
+      palette: await thumb.getAttribute("data-thumbnail-palette"),
+      background: await thumb.evaluate((el) => getComputedStyle(el).backgroundImage),
+    };
+  };
+  const titles = ["サムネ記事テック", "サムネ記事経済", "サムネ記事スポーツ"];
+
+  await openHome(page);
+  await expect(page.getByTestId("home-article-card")).toHaveCount(3);
+  const home = [];
+  for (const title of titles) {
+    home.push(
+      await readThumbnail(page.getByTestId("home-article-card").filter({ hasText: title }))
+    );
+  }
+  // タグ → 題名 → ジャンルの順で絵が決まる（1件目はタグ「半導体」、2・3件目は題名の「経済」「スポーツ」）。
+  expect(home.map((t) => t.kind)).toEqual(["semiconductor", "business", "sports"]);
+  // 媒体が違えば色が分かれる。
+  expect(new Set(home.map((t) => t.palette)).size).toBe(3);
+  for (const thumb of home) {
+    expect(thumb.background).toContain("linear-gradient");
+  }
+
+  await openTodayNewsList(page);
+  const main = page.locator("main");
+  for (const [index, title] of titles.entries()) {
+    const listThumb = await readThumbnail(main.getByRole("button", { name: title }));
+    expect(listThumb).toEqual(home[index]);
+  }
 });
 
 test.describe("article date display", () => {
@@ -4009,9 +4157,10 @@ test("reader summary: a waiting article explains that auto summary is waiting wh
   await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
 });
 
-test("reader summary: an unsummarized article outside the queue explains why auto summary is off", async ({
+test("reader summary: no reason is shown for an unsummarized article when auto summary is off in settings", async ({
   page,
 }) => {
+  // 設定で自動要約がオフのときは一言を出さない（2026-11-18 藤井）。空の要素も残さない。「要約を作成」はそのまま使える。
   await page.addInitScript(() => {
     (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ = true;
   });
@@ -4020,10 +4169,9 @@ test("reader summary: an unsummarized article outside the queue explains why aut
   const main = page.locator("main");
 
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
-  await expect(main.getByTestId("auto-summary-reason")).toContainText(
-    "自動の要約は設定でオフになっているよ。"
-  );
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(main.getByText("設定でオフになっている")).toHaveCount(0);
 });
 
 test("reader summary: no reason is shown for a pause unrelated to an article outside the queue", async ({
@@ -10752,6 +10900,22 @@ async function installTauriMocks(page: Page) {
             };
           }
           case "refresh_news":
+            // 一部ソース失敗の表示確認用: フラグ時は2種類のエラーを返す（URL はダミー）。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_REFRESH_PARTIAL_ERRORS__
+            ) {
+              return {
+                sourcesProcessed: 2,
+                fetched: 1,
+                saved: 1,
+                errors: [
+                  { url: "https://example.invalid/feed", kind: "feed_fetch_failed" },
+                  { url: "https://example.invalid/a", kind: "article_fetch_failed" },
+                ],
+                genreFilterFallback: false,
+              };
+            }
             return {
               sourcesProcessed: 1,
               fetched: 1,

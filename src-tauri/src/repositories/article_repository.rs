@@ -2008,6 +2008,7 @@ impl PersistedArticleRecord {
             read_state: self.read_state.clone(),
             recommendation_score: self.recommendation_score,
             summary_state: self.persisted_summary_state(),
+            tags: display_tags(&self.tags),
         }
     }
 
@@ -3517,6 +3518,21 @@ mod tests {
             .get_article_detail("article-tagged")
             .unwrap();
         assert_eq!(detail.tags, vec!["AI", "生成AI"]);
+
+        // ホーム（おすすめ）も一覧と同じ保存値・同じ整形・同じ順のタグを返す（サムネイルの絵をそろえるため）。
+        let candidates = context.repository.list_recommendation_candidates().unwrap();
+        let recommended_tags_of = |id: &str| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.summary.article_id == id)
+                .map(|candidate| candidate.summary.tags.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            recommended_tags_of("article-tagged"),
+            tags_of("article-tagged")
+        );
+        assert!(recommended_tags_of("article-untagged").is_empty());
     }
 
     #[test]
