@@ -32,26 +32,9 @@ type ScreenCase = {
 // それ以外の失敗は通常どおりテストを落とす。直ったら（失敗しなくなったら）そのまま通る。
 type KnownIssue = { owner: string; note: string; checks: string[] };
 const KNOWN_ISSUES: Record<string, Partial<Record<ViewportKey, KnownIssue>>> = {
-  home: {
-    // MainScreen は小柳さんの「ホーム画面のレイアウト修正」（md-776e3776c75db0b8, Doing）で作り直し中のため直さない。
-    // 2026-11-18 時点で、画面内のタイトルバー（40px）を廃止したため、帯の無い 800x600 ではこの崩れは起きず検査は通る。
-    // ローカルAIの案内の帯が出て画面の高さが 560px 以下になったときの同じ崩れは HOME_BANNER_KNOWN_ISSUE に分けている。
-    "800x600": {
-      owner: "小柳（md-776e3776c75db0b8 ホーム画面のレイアウト修正）",
-      note: "中央列が約336pxで、ゆうこ表示の分だけ記事一覧の領域が潰れ、先頭カードが最初から欠けて見える",
-      checks: ["reach:先頭の記事カード"],
-    },
-  },
-};
-
-// ローカルAIの案内の帯（下の local model banner のテスト）が出たときだけ起きるホームの崩れ。
-// 帯が無ければ 800x600 のホームは崩れない（上の KNOWN_ISSUES.home["800x600"] の検査は今は通っている）。
-const HOME_BANNER_KNOWN_ISSUE: KnownIssue = {
-  owner: "小柳（md-776e3776c75db0b8 ホーム画面のレイアウト修正。帯による発生は未連絡のため要連絡）",
-  note:
-    "ローカルAIの案内の帯（高さ 40px）が出て画面の高さが 560px 以下になると、ゆうこ表示の分だけ記事一覧の領域が潰れ、" +
-    "先頭の記事カードが欠ける。帯が持ち込む崩れで、帯が無い 800x600 では起きない",
-  checks: ["先頭の記事カード"],
+  // ホーム（MainScreen）の 800x600 で先頭の記事カードが欠ける崩れ（小柳さん担当分）は、
+  // 2026-11-20 の低い高さ向けの小さい表示（藤井判断の試行）で起きなくなったため外した。
+  // ローカルAIの案内の帯が出たときの同じ崩れ（旧 HOME_BANNER_KNOWN_ISSUE）も同じ変更で起きなくなっている。
 };
 
 const sidebarButton = (page: Page, name: string) =>
@@ -306,12 +289,11 @@ for (const expected of RIGHT_COLUMN_WIDTHS) {
 // 高さは高 DPI（1366×768 の 150% 等）でも作業領域に収まるよう 440 とし、中央列の見出し・本文が縦スクロールで届くことを確かめる。
 // 設定画面は最小サイズのまま開き、左サイドバーの設定タブがすべて届いて押せることも確かめる
 // （ヒントカードが設定メニューを高さ 0 に押し潰していたため、低い高さではカードを隠している）。
-// ほかの画面は既定の 800×600 で開いてから最小サイズへ縮める。ホーム（小柳さん担当）は高さ 440 で
-// 記事一覧がゆうこ表示に押されて高さ 0 になり、そこから記事詳細を開けないため（レイアウト側の別対応が要る）。
+// ほかの画面は既定の 800×600 で開いてから最小サイズへ縮める（以前はホームの記事一覧が高さ 440 でゆうこ表示に押されて高さ 0 になり、
+// そこから記事詳細を開けなかったため。2026-11-20 の低い高さ向けの小さい表示で潰れなくなったが、手順はそのままにしている）。
 const MIN_WINDOW = { width: 800, height: 440 } as const;
 // 中央列として最低限ほしい幅（スマートフォン相当の 320px）。
 const MIN_CENTER_WIDTH = 320;
-// ホーム（MainScreen）は小柳さんの作り直し中のため、中央列が見えることだけを確かめる。
 const MIN_WINDOW_SCREENS = ["home", "reader", "dictionary", "history", "settings-1"] as const;
 
 for (const id of MIN_WINDOW_SCREENS) {
@@ -365,7 +347,6 @@ for (const id of MIN_WINDOW_SCREENS) {
     expect(measured.centerRight - measured.left).toBeGreaterThanOrEqual(MIN_CENTER_WIDTH);
     expect(measured.top).toBeLessThan(measured.docClientHeight);
     expect(Math.min(measured.bottom, measured.docClientHeight) - Math.max(measured.top, 0)).toBeGreaterThan(0);
-    if (id === "home") return;
 
     // 中央列そのもの・ページ全体に横のはみ出しが無いこと。
     expect(measured.scrollWidth).toBeLessThanOrEqual(measured.clientWidth + 1);
@@ -504,6 +485,124 @@ for (const viewport of VIEWPORTS) {
   });
 }
 
+// ホームの低い高さ向けの小さい表示（2026-11-20 藤井判断の試行。画面詳細設計書 §5.3）。
+// ウィンドウの高さが 720px 未満では記事カードとゆうこを小さくし、既定の 800×600 で記事を3件見せる。
+// 720px 以上（1280×720・1280×800 など）は従来の見た目のまま（要約が見え、サムネイル 96px、カード高さ 140px 以上）。
+// どのサイズでも、見出し・記事一覧・ゆうこが重ならず、ゆうこが中央列の下に見えることを確かめる。
+const HOME_COMPACT_CASES = [
+  { width: 800, height: 600, compact: true, minFullCards: 3 },
+  { width: 800, height: 440, compact: true, minFullCards: 1 },
+  { width: 1024, height: 700, compact: true, minFullCards: 3 },
+  { width: 1280, height: 720, compact: false, minFullCards: 1 },
+  { width: 1280, height: 800, compact: false, minFullCards: 2 },
+] as const;
+
+for (const size of HOME_COMPACT_CASES) {
+  test(`home compact @ ${size.width}x${size.height}: ${size.compact ? "compact cards" : "unchanged cards"}, no overlap, yuuko visible`, async ({
+    page,
+  }, testInfo) => {
+    // 記事を3件にする（監査の既定モックは1件のため）。題名の長さを変え、2行に折り返す題名も含める。
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const w = window as any;
+      const original = w.__TAURI_INTERNALS__.invoke;
+      w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === "get_recommended_articles") {
+          const base = {
+            sourceName: "E2E News",
+            publishedAtText: "2026-06-05T00:00:00Z",
+            genre: "AI・テクノロジー",
+            summary: "UI確認用のモックニュースです。要約は低い高さでは隠れます。",
+            isFavorite: false,
+            readState: "unread",
+            recommendationScore: 0.9,
+          };
+          return [
+            { ...base, articleId: "compact-1", title: "E2Eテスト用ニュース" },
+            { ...base, articleId: "compact-2", title: "生成AIが変えるソフトウェア開発の未来と、これからのエンジニアの役割" },
+            { ...base, articleId: "compact-3", title: "量子コンピュータの実用化に向けた新たな一歩", sourceName: "とても長い名前のニュース配信元サイト" },
+          ];
+        }
+        return original(cmd, args);
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await openHome(page);
+    const cards = page.getByTestId("home-article-card");
+    await expect(cards).toHaveCount(3);
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: testInfo.outputPath(`home-compact-${size.width}x${size.height}.png`) });
+
+    const m = await page.evaluate(() => {
+      const mainNode = document.querySelector("main")!;
+      const list = mainNode.querySelector(".overflow-y-auto")!;
+      const heading = Array.from(mainNode.querySelectorAll("h2")).find((h) =>
+        h.textContent?.includes("今日のおすすめニュース")
+      )!;
+      const yuuko = mainNode.querySelector('img[alt="ゆうこ"]') as HTMLImageElement;
+      const yuukoArea = yuuko.closest("main > *")!;
+      const r = (el: Element) => {
+        const b = el.getBoundingClientRect();
+        return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, height: b.height, width: b.width };
+      };
+      const cardNodes = Array.from(list.querySelectorAll('[data-testid="home-article-card"]'));
+      return {
+        main: r(mainNode),
+        list: r(list),
+        heading: r(heading),
+        refresh: r(Array.from(mainNode.querySelectorAll("button")).find((b) => b.textContent?.includes("ニュースを更新"))!),
+        yuuko: r(yuuko),
+        yuukoArea: r(yuukoArea),
+        yuukoVisible: getComputedStyle(yuuko).display !== "none" && getComputedStyle(yuuko).visibility !== "hidden",
+        cards: cardNodes.map((card) => ({
+          ...r(card),
+          summaryDisplay: getComputedStyle(card.querySelector("p")!).display,
+          thumbWidth: card.querySelector('[data-slot="card-content"] > div')!.getBoundingClientRect().width,
+        })),
+        vh: document.documentElement.clientHeight,
+      };
+    });
+
+    // 一覧のスクロール領域の中に欠けずに収まっているカードの数。
+    const fullCards = m.cards.filter((c) => c.top >= m.list.top - 1 && c.bottom <= m.list.bottom + 1).length;
+    console.log(
+      `home compact ${size.width}x${size.height}: cardHeights=${m.cards.map((c) => Math.round(c.height)).join("/")} ` +
+        `fullCards=${fullCards} yuukoArea=${Math.round(m.yuukoArea.height)}`
+    );
+    expect(fullCards).toBeGreaterThanOrEqual(size.minFullCards);
+
+    for (const card of m.cards) {
+      if (size.compact) {
+        expect(card.summaryDisplay).toBe("none");
+        expect(card.thumbWidth).toBeCloseTo(48, 0);
+        expect(card.height).toBeLessThanOrEqual(100);
+      } else {
+        expect(card.summaryDisplay).not.toBe("none");
+        expect(card.thumbWidth).toBeCloseTo(96, 0);
+        expect(card.height).toBeGreaterThanOrEqual(140);
+      }
+    }
+
+    // 見出し・更新ボタン → 記事一覧 → ゆうこの順に縦に並び、重ならない。
+    expect(m.heading.bottom).toBeLessThanOrEqual(m.list.top + 0.5);
+    expect(m.refresh.bottom).toBeLessThanOrEqual(m.list.top + 0.5);
+    expect(m.list.bottom).toBeLessThanOrEqual(m.yuukoArea.top + 0.5);
+
+    // ゆうこは中央列の下に、画面内で見えている（隠さない）。
+    expect(m.yuukoVisible).toBe(true);
+    expect(m.yuuko.height).toBeGreaterThan(80);
+    expect(m.yuuko.left).toBeGreaterThanOrEqual(m.main.left - 0.5);
+    expect(m.yuuko.right).toBeLessThanOrEqual(m.main.right + 0.5);
+    expect(m.yuuko.bottom).toBeLessThanOrEqual(Math.min(m.main.bottom, m.vh) + 0.5);
+    expect(m.yuukoArea.bottom).toBeGreaterThanOrEqual(m.main.bottom - 1);
+    if (size.compact) {
+      expect(m.yuukoArea.height).toBeLessThanOrEqual(160);
+    }
+  });
+}
+
 // ローカルAIのモデルの案内の帯（設計案 §4.2・U5）。キャンセル・失敗の後の起動で、画面の外枠の一番上に出す。
 // 帯は画面に重ねず、その高さの分だけ画面を下へ押し下げる（2026-11-18 に画面内のタイトルバーを廃止したため）。
 // 全画面・最小ウィンドウを含む 3 サイズで、帯がどの画面のボタン・リンク・見出し・画像・カードにも重ならず、
@@ -631,19 +730,11 @@ for (const viewport of BANNER_VIEWPORTS) {
       }
 
       // 見出し・主要ボタン（帯で押し下げても、画面内か縦スクロールで届く）と、サイドバーのメニュー。
-      // ホームの先頭の記事カードは、帯が出て画面の高さが 560px 以下になると欠ける（帯が無い 800x600 では欠けない）。
-      // 帯が持ち込む崩れだが、直すにはホームの縦の配分（MainScreen.tsx。担当は別）を変える必要があるため、
-      // KNOWN_ISSUES.home の banner として分けて fixme にする（担当者へ伝える）。
-      const knownFailures: string[] = [];
+      // ホームの先頭の記事カードも、帯が出た 800x440 を含めて届く（2026-11-20 の低い高さ向けの小さい表示から）。
       for (const target of screen.keyTargets(page)) {
         const problem = await checkReachable(page, target.locator);
         if (problem) {
-          // 帯の分（40px）を引いた画面の高さが 560px 以下のときだけ既知として扱う。
-          const known =
-            screen.id === "home" &&
-            HOME_BANNER_KNOWN_ISSUE.checks.includes(target.name) &&
-            viewport.height - 40 <= 560;
-          (known ? knownFailures : failures).push(`${target.name}: ${problem}`);
+          failures.push(`${target.name}: ${problem}`);
         }
       }
       const navButtons = page.getByRole("navigation").first().getByRole("button");
@@ -680,9 +771,6 @@ for (const viewport of BANNER_VIEWPORTS) {
         return r ? { top: r.top, height: r.height } : null;
       });
       expect(screenBox).toEqual({ top: 0, height: viewport.height });
-      if (knownFailures.length > 0) {
-        test.fixme(true, `既知の崩れ（担当: ${HOME_BANNER_KNOWN_ISSUE.owner}）: ${HOME_BANNER_KNOWN_ISSUE.note} / ${knownFailures.join(" / ")}`);
-      }
     });
   }
 }

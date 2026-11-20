@@ -338,13 +338,16 @@ function ThumbnailPlaceholder({ type }: { type: Article["thumbnailType"] }) {
 
   return (
     <div
-      className={`w-24 h-20 rounded-lg bg-gradient-to-br ${config.gradient} flex items-center justify-center shrink-0`}
+      className={`w-24 h-20 rounded-lg bg-gradient-to-br ${config.gradient} flex items-center justify-center shrink-0 [@media(max-height:719px)]:size-12 [@media(max-height:719px)]:[&>svg]:size-7`}
     >
       {config.icon}
     </div>
   );
 }
 
+// ホームの記事カード。ウィンドウの高さが 720px 未満（既定の 800×600 など）では、記事が1件しか見えなかったため
+// 小さい表示に切り替える（サムネイル 48px・題名2行まで・出典と時刻は1行・要約は隠す）。
+// 切り替えは CSS の高さ条件だけで行い、リサイズ監視は持たない。720px 以上の見た目は変えない（2026-11-20 藤井判断の試行）。
 function ArticleCard({
   article,
   onClick,
@@ -358,13 +361,14 @@ function ArticleCard({
 }) {
   return (
     <Card
-      className="border-0 shadow-sm hover:shadow-md transition-shadow py-3 px-0 cursor-pointer"
+      data-testid="home-article-card"
+      className="border-0 shadow-sm hover:shadow-md transition-shadow py-3 px-0 cursor-pointer [@media(max-height:719px)]:py-0"
       onClick={() => onClick(article.id)}
     >
-      <CardContent className="p-4 flex gap-4">
+      <CardContent className="p-4 flex gap-4 [@media(max-height:719px)]:p-2.5 [@media(max-height:719px)]:gap-3">
         <ThumbnailPlaceholder type={article.thumbnailType} />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 [@media(max-height:719px)]:mb-1">
             <Badge
               className={`${article.categoryColor} text-white border-0 text-[10px] px-2 py-0`}
             >
@@ -376,20 +380,20 @@ function ArticleCard({
               </Badge>
             )}
           </div>
-          <h3 className="font-semibold text-sm text-foreground mb-1 line-clamp-1">
+          <h3 className="font-semibold text-sm text-foreground mb-1 line-clamp-1 [@media(max-height:719px)]:mb-0.5 [@media(max-height:719px)]:line-clamp-2 [@media(max-height:719px)]:text-[13px] [@media(max-height:719px)]:leading-snug">
             {article.title}
           </h3>
-          <p className="text-xs text-muted-foreground line-clamp-2 mb-2">
+          <p className="text-xs text-muted-foreground line-clamp-2 mb-2 [@media(max-height:719px)]:hidden">
             {article.description}
           </p>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <span>{article.source}</span>
-              <span>・</span>
-              <span>{article.timeAgo}</span>
+          <div className="flex items-center justify-between [@media(max-height:719px)]:gap-2">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground [@media(max-height:719px)]:min-w-0 [@media(max-height:719px)]:gap-1">
+              <span className="[@media(max-height:719px)]:truncate">{article.source}</span>
+              <span className="[@media(max-height:719px)]:shrink-0">・</span>
+              <span className="[@media(max-height:719px)]:shrink-0 [@media(max-height:719px)]:whitespace-nowrap">{article.timeAgo}</span>
             </div>
             <button
-              className="text-muted-foreground hover:text-yellow-500 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              className="text-muted-foreground hover:text-yellow-500 [@media(max-height:719px)]:shrink-0 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               disabled={isFavoriteSaving}
               onClick={(e) => {
                 e.stopPropagation();
@@ -428,8 +432,8 @@ function QuickAccessButton({
 
 function YuukoSpeechBubble({ message }: { message: string }) {
   return (
-    <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px]">
-      <p className="text-xs text-foreground whitespace-pre-line leading-relaxed">
+    <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px] [@media(max-height:719px)]:px-3 [@media(max-height:719px)]:py-2">
+      <p className="text-xs text-foreground whitespace-pre-line leading-relaxed [@media(max-height:719px)]:text-[11px] [@media(max-height:719px)]:leading-normal">
         {message}
       </p>
       {/* Speech bubble tail */}
@@ -446,7 +450,7 @@ function YuukoCharacter() {
         width={224}
         height={224}
         alt="ゆうこ"
-        className="w-56 h-auto drop-shadow-lg animate-float"
+        className="w-56 h-auto drop-shadow-lg animate-float [@media(max-height:719px)]:w-28"
         onError={(e) => {
           // Fallback to placeholder if image fails to load
           const target = e.target as HTMLImageElement;
@@ -455,8 +459,8 @@ function YuukoCharacter() {
         }}
       />
       {/* Fallback placeholder */}
-      <div className="hidden w-56 h-56 bg-gradient-to-b from-gray-800 to-gray-900 rounded-full flex items-center justify-center">
-        <PawIcon className="w-20 h-20 text-pink-300" />
+      <div className="hidden w-56 h-56 [@media(max-height:719px)]:size-28 bg-gradient-to-b from-gray-800 to-gray-900 rounded-full flex items-center justify-center">
+        <PawIcon className="w-20 h-20 text-pink-300 [@media(max-height:719px)]:size-10" />
       </div>
     </div>
   );
@@ -748,11 +752,11 @@ export default function MainScreen({
 
         {/* Center Content */}
         <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
-          {/* News Section */}
-          <div className="flex-1 min-h-0 flex flex-col p-6 pb-0">
+          {/* News Section（高さ 720px 未満では記事を多く見せるため余白を詰める。ArticleCard の注記を参照） */}
+          <div className="flex-1 min-h-0 flex flex-col p-6 pb-0 [@media(max-height:719px)]:px-4 [@media(max-height:719px)]:pt-3">
             <div className="shrink-0">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 [@media(max-height:719px)]:mb-2 [@media(max-height:719px)]:gap-x-3 [@media(max-height:719px)]:gap-y-1.5">
+                <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 [@media(max-height:719px)]:text-base">
                   <Sparkles className="w-5 h-5 text-yellow-500" />
                   今日のおすすめニュース
                 </h2>
@@ -760,7 +764,7 @@ export default function MainScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="text-xs"
+                    className="text-xs [@media(max-height:719px)]:h-7"
                     onClick={() => void handleRefreshNews()}
                     disabled={isRefreshingNews}
                   >
@@ -774,7 +778,7 @@ export default function MainScreen({
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className="text-xs text-muted-foreground hover:text-foreground [@media(max-height:719px)]:h-7"
                     // 当日取得したニュースの一覧画面（NewsListScreen）へ遷移する。
                     onClick={() => handleNavigate("news")}
                   >
@@ -827,7 +831,7 @@ export default function MainScreen({
               ) : null}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1 [@media(max-height:719px)]:space-y-2">
               {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
@@ -840,8 +844,8 @@ export default function MainScreen({
             </div>
           </div>
 
-          {/* Yuuko Character Area */}
-          <div className="shrink-0 relative flex items-end justify-center pb-4 pt-2">
+          {/* Yuuko Character Area（高さ 720px 未満では絵を小さくし、吹き出しを横に並べたまま約 150px に収める。中央下には常に出す） */}
+          <div className="shrink-0 relative flex items-end justify-center pb-4 pt-2 [@media(max-height:719px)]:pb-2 [@media(max-height:719px)]:pt-1">
             <div className="flex items-end gap-2">
               <YuukoSpeechBubble message={yuukoBalloonMessage} />
               <YuukoCharacter />
