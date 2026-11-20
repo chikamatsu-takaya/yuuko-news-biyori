@@ -1,21 +1,34 @@
 // 記事カードのサムネイル（全画面共通。2026-11-20 藤井判断）。
-// 外部画像は読み込まず、アイコン（ジャンルから）と背景のグラデーション（媒体名から）で描く。
+// 外部画像は読み込まず、アイコン（記事の話題: タグ・題名・ジャンルから）と背景のグラデーション（媒体名から）で描く。
 // どの絵・色にするかは lib/article-thumbnail.mjs の resolveArticleThumbnail で決め、ここは描くだけにする。
 // 同じ記事がホーム・ニュース一覧・履歴などで同じ見た目になるよう、画面ごとの対応表は持たない。
 // 大きさは画面ごとに違うため、外枠とアイコンのクラスは呼び出し側から渡す。
 
 import type { CSSProperties } from "react";
 import {
+  AtSign,
   Bot,
+  BotMessageSquare,
+  Brain,
+  Car,
   Clapperboard,
+  Cloud,
+  Code,
   Cpu,
+  Database,
   FlaskConical,
+  Gamepad2,
   Globe,
   HeartPulse,
   House,
+  Laptop,
   Leaf,
+  Lock,
+  Monitor,
   Newspaper,
+  RadioTower,
   Rocket,
+  Scale,
   ShieldCheck,
   Smartphone,
   TrendingUp,
@@ -31,18 +44,31 @@ import type {
 
 const THUMBNAIL_ICONS: Record<ArticleThumbnailKind, LucideIcon> = {
   security: ShieldCheck,
-  ai: Bot,
+  privacy: Lock,
+  regulation: Scale,
   space: Rocket,
-  science: FlaskConical,
+  car: Car,
+  robot: Bot,
+  genai: BotMessageSquare,
+  semiconductor: Cpu,
+  cloud: Cloud,
+  network: RadioTower,
   mobile: Smartphone,
-  tech: Cpu,
+  game: Gamepad2,
+  dev: Code,
+  hardware: Laptop,
+  data: Database,
+  web: AtSign,
+  ai: Brain,
+  business: TrendingUp,
   energy: Leaf,
   health: HeartPulse,
-  business: TrendingUp,
-  world: Globe,
-  society: Users,
+  science: FlaskConical,
   sports: Trophy,
   entertainment: Clapperboard,
+  tech: Monitor,
+  world: Globe,
+  society: Users,
   lifestyle: House,
   general: Newspaper,
 };

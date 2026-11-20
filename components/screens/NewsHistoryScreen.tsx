@@ -116,6 +116,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "TechCrunch Japan",
       genre: "AI・テクノロジー",
+      title: "AIコーディング支援ツールの最新動向まとめ",
     }),
     tags: ["AI", "開発ツール"],
   },
@@ -134,6 +135,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "日経クロステック",
       genre: "環境・エネルギー",
+      title: "再生可能エネルギーの未来と課題",
     }),
     tags: ["再エネ"],
   },
@@ -152,6 +154,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "ITmedia Mobile",
       genre: "モバイル",
+      title: "iOS 19、注目の新機能を徹底解説",
     }),
     tags: [],
   },
@@ -170,6 +173,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "日本経済新聞",
       genre: "ビジネス",
+      title: "日経平均、続伸　半導体株がけん引",
     }),
     tags: ["半導体"],
   },
@@ -188,6 +192,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "朝日新聞デジタル",
       genre: "AI・テクノロジー",
+      title: "身近になる生成AI、生活をどう変える？",
     }),
     tags: ["AI", "生成AI"],
   },
@@ -206,6 +211,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "WIRED.jp",
       genre: "宇宙",
+      title: "宇宙ビジネスの最前線、2025年の展望",
     }),
     tags: [],
   },
@@ -224,6 +230,7 @@ const mockHistoryItems: HistoryItem[] = [
     thumbnail: resolveArticleThumbnail({
       source: "ライフハッカー日本版",
       genre: "ライフスタイル",
+      title: "集中力を高める「朝の習慣」5つのコツ",
     }),
     tags: [],
   },
@@ -278,6 +285,7 @@ const mapTauriHistoryItemToUi = (
     thumbnail: resolveArticleThumbnail({
       source: article.sourceName,
       genre: article.genre,
+      title: article.title,
     }),
     summaryState: article.summaryState,
     tags: normalizeArticleTags(article.tags),

@@ -540,8 +540,10 @@ function Pagination({
 }
 
 // 関連ニュースのサムネイル。辞書項目は関連記事の題名しか持たず媒体名・ジャンルが分からないため、
-// 共通ルール（lib/article-thumbnail.mjs）の既定（新聞アイコン・空文字の色）で描く。
-const RELATED_NEWS_THUMBNAIL = resolveArticleThumbnail({ source: "", genre: "" });
+// 共通ルール（lib/article-thumbnail.mjs）に題名だけを渡す。絵は題名の話題で決まり（記事側も題名を優先するので、
+// 題名で決まる記事なら同じ絵になる）、色は既定（空文字の色）になる。
+const toRelatedNewsThumbnail = (title: string) =>
+  resolveArticleThumbnail({ source: "", genre: "", title });
 
 export default function DictionaryScreen({
   onNavigate,
@@ -1148,7 +1150,7 @@ export default function DictionaryScreen({
                     {selectedEntry.relatedArticle ? (
                       <div className="flex items-start gap-2">
                         <ArticleThumbnail
-                          thumbnail={RELATED_NEWS_THUMBNAIL}
+                          thumbnail={toRelatedNewsThumbnail(selectedEntry.relatedArticle)}
                           className="h-14 w-14"
                           iconClassName="h-8 w-8"
                         />

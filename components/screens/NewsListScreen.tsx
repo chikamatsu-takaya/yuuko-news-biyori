@@ -107,6 +107,7 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   thumbnail: resolveArticleThumbnail({
     source: article.sourceName,
     genre: article.genre,
+    title: article.title,
   }),
   summaryState: article.summaryState,
   tags: normalizeArticleTags(article.tags),
@@ -127,6 +128,7 @@ const fallbackTodayArticles: TodayArticle[] = [
     thumbnail: resolveArticleThumbnail({
       source: "E2E News",
       genre: "AI・テクノロジー",
+      title: "今日取得したAIニュースのサンプル",
     }),
     tags: ["AI", "サンプル"],
   },

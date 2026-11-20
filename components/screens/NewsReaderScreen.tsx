@@ -341,6 +341,7 @@ const toRelatedFallback = (article: ReaderArticleDetail): RelatedArticle => ({
   thumbnail: resolveArticleThumbnail({
     source: article.source,
     genre: article.category,
+    title: article.title,
   }),
 });
 
@@ -430,6 +431,7 @@ const mapSummaryToRelated = (
   thumbnail: resolveArticleThumbnail({
     source: article.sourceName,
     genre: article.genre,
+    title: article.title,
   }),
 });
 

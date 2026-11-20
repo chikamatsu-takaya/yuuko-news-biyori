@@ -120,6 +120,7 @@ const fallbackMockArticles: Article[] = [
     thumbnail: resolveArticleThumbnail({
       source: "TechCrunch Japan",
       genre: "AI・テクノロジー",
+      title: "生成AIが変えるソフトウェア開発の未来",
     }),
   },
   {
@@ -136,6 +137,7 @@ const fallbackMockArticles: Article[] = [
     thumbnail: resolveArticleThumbnail({
       source: "日経ビジネス",
       genre: "ビジネス",
+      title: "国内スタートアップの資金調達、過去最高に",
     }),
   },
   {
@@ -152,6 +154,7 @@ const fallbackMockArticles: Article[] = [
     thumbnail: resolveArticleThumbnail({
       source: "ITmedia NEWS",
       genre: "テクノロジー",
+      title: "量子コンピュータの実用化に向けた新たな一歩",
     }),
   },
 ];
@@ -209,6 +212,7 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   thumbnail: resolveArticleThumbnail({
     source: article.sourceName,
     genre: article.genre,
+    title: article.title,
   }),
 });
 
