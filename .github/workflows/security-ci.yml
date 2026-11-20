@@ -123,5 +123,10 @@ jobs:
         run: pnpm --version
 
       # 高重大度以上の脆弱性を検出したら CI を失敗させる（監査の意味は維持）。
+      # 一時的な例外（2026-11-20 藤井の判断）: GHSA-fc5q-39xc-vjpf（picomatch <=4.0.7 の ReDoS、2026-10-19 公表）だけを見逃す。
+      # - 修正版が未公開（advisory の first_patched_version が空。npm の最新は 4.0.7）で、更新して直す手段が無い。
+      # - picomatch は eslint-config-next などの開発用の依存の中だけで使われ、配布物には入らない（pnpm audit --prod は 0 件）。
+      # - このままだと依存を変える PR（Next.js の脆弱性修正 #468 を含む）がすべて止まる。
+      # 外す条件: picomatch の修正版が出たら、依存を上げてこの --ignore を消す。ほかの high は従来どおり失敗させる。
       - name: Run node dependency audit
-        run: pnpm audit --audit-level=high
+        run: pnpm audit --audit-level=high --ignore GHSA-fc5q-39xc-vjpf
