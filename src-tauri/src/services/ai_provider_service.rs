@@ -371,11 +371,10 @@ impl AiProviderService {
                 request.context.as_deref().unwrap_or(""),
             ))
             .unwrap_or_default(),
-            // 用語解説: 決定的で解析可能な JSON を返す（外部通信なし・APIキー未設定/失敗フォールバックでも
-            // 用語解説を返せるようにする）。選択語＝input_text。記事本文・context の生値は載せない。
+            // 用語解説: 決定的で解析可能な JSON を返す（外部通信なし。Mock を明示的に選んだときだけ通る）。選択語＝input_text。記事本文・context の生値は載せない。
             id if id == TERM_EXPLANATION_PROMPT_ID => {
                 // 選択語はユーザー由来（例: `Vec<String>`）。そのまま埋め込むと用語解説の出力検証
-                // （HTML・制御文字）に落ちて Mock fallback でも解説を返せなくなるため、要約の種と同じく無害化する。
+                // （HTML・制御文字）に落ちて Mock でも解説を返せなくなるため、要約の種と同じく無害化する。
                 let term = neutralize_html_and_control(request.input_text.trim());
                 let term = term.as_str();
                 serde_json::json!({

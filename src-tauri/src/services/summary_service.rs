@@ -278,8 +278,9 @@ impl SummaryService {
         // 保存・返却する。
         // どれか1つでも（Mock を含めて）有効な出力を得られなければ、保存せず固定文言のエラーを返す。
         // その場合、記事Markdownに保存済みの要約・再説明・感想は上書きされずに残る。
-        // 自動要約（RejectFallback）では、Mock に切り替わった時点で残りの AI 呼び出しをせずに止める
-        // （キー未設定・利用枠超過のときに、保存しない出力のために外部AIを呼び続けないため）。
+        // 自動要約（RejectFallback）では、出力が Mock だった時点で残りの AI 呼び出しをせずに止める
+        // （Mock は設定で明示的に選んだときだけ返る。Gemini のキー未設定・利用枠超過・失敗は
+        // `AiUnavailable` で返り、`?` でそのまま止まる）。
         // 順序は 要点 → 要約 → 再説明 → 感想（D167）。要約は先に作った要点（事実の箇条書き）を軸に組み立てさせる
         // （本文抜粋だけから要約させると、小さいモデルが中心の出来事を落としたり主語と目的語を取り違えたりした一方、
         // 要点は正確だったため）。再説明・感想の入力には前の2つの出力を使う。生成の回数は変わらない。
@@ -317,8 +318,8 @@ impl SummaryService {
             &request_validated,
         )?;
 
-        // 要約（D167）の実AI入力: 無害化したタイトル・本文抜粋と、いま作った要点。要点が Mock の代替（手動生成で
-        // 要点だけ Gemini が失敗したとき。本文の文と定型文）なら入れない（実AIの出力ではない文を実AIの入力に混ぜない）。
+        // 要約（D167）の実AI入力: 無害化したタイトル・本文抜粋と、いま作った要点。要点が Mock の結果（Mock を
+        // 明示的に選んだとき。本文の文と定型文）なら入れない（実AIの出力ではない文を実AIの入力に混ぜない）。
         let summary_key_points =
             (points_response.provider != PROVIDER_MOCK).then_some(points.key_points.as_slice());
         let summary_input = build_summary_input(
@@ -358,7 +359,7 @@ impl SummaryService {
         // 再説明・一言の実AI入力: 同じ生成で得た要約・要点（検証済み）。定型文の言い換えにさせないため、
         // 記事の中身を渡す。AI 出力も外部データ由来なので、種と同じく無害化・切り詰めてから渡す
         // （プロンプト側でも「記事情報（外部データ）」の見出しの下に置く）。
-        // 要約が Mock の代替（手動生成で要約だけ Gemini が失敗したとき）は、本文の短い抜粋（実AIの出力ではない）なので入力に入れない。
+        // 要約が Mock の結果（Mock を明示的に選んだとき）は、本文の短い抜粋（実AIの出力ではない）なので入力に入れない。
         let speech_summary =
             (summary_response.provider != PROVIDER_MOCK).then_some(summary_response.text.as_str());
         let yuuko_speech_input =
@@ -440,7 +441,7 @@ impl SummaryService {
         } = points;
         // タグは検証を通ったとき（3〜5件）だけ反映し、落ちたとき（空）は既存のタグを残す。
         // タグの失敗では要約の保存を止めない（D11。要点・注目ポイントの検証落ちとは扱いが違う）。
-        // Mock（provider=Mock・Gemini 失敗時の代替）のタグはジャンルからの定型なので、既存のタグを
+        // Mock（provider=Mock。Mock を明示的に選んだときだけ）のタグはジャンルからの定型なので、既存のタグを
         // 上書きせず、空のときだけ入れる（安全側。実AIの有効なタグは置き換える）。
         let tags = if tags.is_empty() {
             ArticleTagsUpdate::Keep
@@ -593,6 +594,16 @@ where
         // 手動要約との重なり・アプリの終了による停止（自動要約の取得手段が返す）は、握りつぶさずに返す。
         Err(error @ AppError::Validation(_)) => {
             log::info!("the summary regeneration was stopped; the summary was not regenerated");
+            return Err(error);
+        }
+        // AI がいま使えない失敗は、最初の要約に戻して続けず、そのまま返す（要点・再説明の作り直しと同じ）。
+        // 続けると後の段（再説明・感想）でも同じ失敗の待ちを重ね、最初の要約が使えないときは
+        // AiOutputRejected（品質の問題）として案内されてしまうため。
+        Err(error @ (AppError::AiUnavailable | AppError::LocalAi(_))) => {
+            log::info!(
+                "the summary regeneration failed ({}); nothing was saved",
+                error_label(&error)
+            );
             return Err(error);
         }
         Err(error) => {
@@ -3248,6 +3259,61 @@ mod tests {
         let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
         assert_eq!(detail.yuuko_explanation.as_deref(), Some(template.as_str()));
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn summary_regeneration_failing_because_the_ai_is_unavailable_stops_generation() {
+        // 要約が点検で落ち、作り直しが「AIが使えない」失敗（AiUnavailable / LocalAi）になったときは、
+        // 最初の要約に戻して後の段（再説明・感想）へ進まず、そのエラーで止めて保存しない
+        // （AiOutputRejected として案内したり、同じ失敗の待ちを重ねたりしないため）。
+        for (label, unavailable) in [
+            ("gemini", AppError::AiUnavailable),
+            ("local", AppError::LocalAi(LocalAiFailure::Timeout)),
+        ] {
+            let root_dir = temp_root(&format!("ai-unavailable-summary-{label}"));
+            let (service, repository) =
+                build_service_with_title(&root_dir, LOSS_TITLE, LOSS_EXCERPT);
+            let unavailable = RefCell::new(Some(unavailable));
+            let summary_calls = Cell::new(0);
+            let later_calls = Cell::new(0);
+            let result = service.generate_article_summary_with(
+                params(),
+                FallbackPolicy::SaveFallback,
+                |_request, kind, _provider, _level| {
+                    let text = match kind {
+                        SummaryOutputKind::Points => loss_points(),
+                        SummaryOutputKind::Summary => {
+                            summary_calls.set(summary_calls.get() + 1);
+                            if summary_calls.get() == 1 {
+                                // 反対の意味（点検で落ちる）→ 作り直しへ。
+                                "みなとシーガルズはサヨナラ勝ちした。".to_string()
+                            } else {
+                                return Err(unavailable.borrow_mut().take().unwrap());
+                            }
+                        }
+                        SummaryOutputKind::Explanation | SummaryOutputKind::Comment => {
+                            later_calls.set(later_calls.get() + 1);
+                            "悔しい負けだね".to_string()
+                        }
+                    };
+                    select_valid_output(kind, response(&text, label))
+                },
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{label}: must stop when the AI is unavailable"),
+            };
+            match label {
+                "gemini" => assert!(matches!(error, AppError::AiUnavailable), "{error:?}"),
+                _ => assert!(matches!(error, AppError::LocalAi(_)), "{error:?}"),
+            }
+            assert_eq!(summary_calls.get(), 2, "{label}");
+            assert_eq!(later_calls.get(), 0, "{label}");
+            let detail = repository.get_article_detail(ARTICLE_ID).unwrap();
+            assert_eq!(detail.yuuko_explanation, None, "{label}");
+            assert_eq!(detail.yuuko_comment, None, "{label}");
+            let _ = std::fs::remove_dir_all(&root_dir);
+        }
     }
 
     #[test]
