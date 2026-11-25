@@ -709,6 +709,18 @@ impl LocalLlmService {
             && check_model_size(&bundle.model, self.shared.config.model_size) == ModelCheck::Missing
     }
 
+    /// 照合済みの印を立てる（テスト用。取得の制御が `forget_model` を呼んだかを確かめるため）。
+    #[cfg(test)]
+    pub(crate) fn mark_model_verified_for_tests(&self) {
+        self.shared.lock_state().verified = true;
+    }
+
+    /// 照合済みの印が立っているか（テスト用）。
+    #[cfg(test)]
+    pub(crate) fn is_model_verified_for_tests(&self) -> bool {
+        self.shared.lock_state().verified
+    }
+
     /// モデルのファイルを消す・置き直す前後に呼ぶ（取得の制御から。設計案 §3.4 の `discard_local_model`）。
     /// 動いていれば llama-server を止め、照合済みの印と「壊れていた」の印を下ろし、モデルの取っ手を閉じる
     /// （取っ手を持ったままでは消せない。消した後に古い照合の結果で起動しない・取り直したものを改めて照合するため）。

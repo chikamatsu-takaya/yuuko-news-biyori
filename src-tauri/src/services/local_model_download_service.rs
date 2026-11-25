@@ -230,7 +230,7 @@ impl LocalModelDownloadService {
         let mut run = lock(&self.inner.run);
         if self.recheck_ready(&mut run) {
             drop(run);
-            self.forget_lost_model();
+            self.after_model_lost();
             run = lock(&self.inner.run);
         }
         let mut phase = run.phase;
@@ -275,7 +275,7 @@ impl LocalModelDownloadService {
             let mut run = lock(&self.inner.run);
             if self.recheck_ready(&mut run) {
                 drop(run);
-                self.forget_lost_model();
+                self.after_model_lost();
                 run = lock(&self.inner.run);
             }
             if run.shut_down
@@ -461,23 +461,48 @@ impl LocalModelDownloadService {
     /// 状態は取得の完了・削除・起動時にしか決め直さないため、その後にファイルが消えた・ウイルス対策ソフトに
     /// 隔離された・大きさが変わった場合も「使える」と答え続け、取り直す手段（未取得の画面）が出なかった。
     /// 見るのは有無と大きさ（メタデータ 1 回）だけで、SHA-256 は読まない（3.1GB を状態の取得のたびに読まないため。
-    /// 中身の照合は従来どおり `LocalLlmService` が起動前に行う）。使えなくなっていれば、既存の「未取得」
-    /// （取得元が無いモデルなら「取得元なし」）へ戻し、true を返す（呼び出し側はロックを外してから
-    /// `forget_lost_model` を呼ぶ）。取得の最中は取得のスレッドが状態を持つため見ない。
+    /// 中身の照合は従来どおり `LocalLlmService` が起動前に行う）。
+    /// 「無い」（NotFound）か「大きさが違う」と確かめられたときだけ、既存の「未取得」（取得元が無いモデルなら
+    /// 「取得元なし」）へ戻して true を返す（呼び出し側はロックを外してから `after_model_lost` を呼ぶ）。
+    /// アクセス拒否・ドライブが一時的に見えないなどのほかのエラーでは「使える」のままにする
+    /// （一時的なエラーで 3.1GB を取り直させないため）。取得の最中は取得のスレッドが状態を持つため見ない。
     fn recheck_ready(&self, run: &mut Run) -> bool {
         if run.phase != LocalModelPhase::Ready || run.worker_active {
             return false;
         }
-        let phase = self.idle_phase();
-        if phase == LocalModelPhase::Ready {
+        let Some(path) = self.model_file_path() else {
             return false;
+        };
+        let metadata = std::fs::metadata(&path).map(|meta| (meta.is_file(), meta.len()));
+        match classify_ready_recheck(metadata, self.inner.spec.size) {
+            ReadyRecheck::Usable => false,
+            ReadyRecheck::Unknown => {
+                // パスもエラーの中身も出さない（固定の文言だけ）。次の確認でまた確かめる。
+                log::warn!("could not check the local model file; keeping it as ready for now");
+                false
+            }
+            ReadyRecheck::Lost => {
+                log::warn!(
+                    "local model file is missing or its size changed; marking it as not downloaded"
+                );
+                run.phase = if self.inner.spec.source.is_none() {
+                    LocalModelPhase::NoSource
+                } else {
+                    LocalModelPhase::NotDownloaded
+                };
+                run.failure = None;
+                run.needed_more = None;
+                true
+            }
         }
-        // パスは出さない（固定の文言だけ）。
-        log::warn!("local model file is missing or its size changed; marking it as not downloaded");
-        run.phase = phase;
-        run.failure = None;
-        run.needed_more = None;
-        true
+    }
+
+    /// `recheck_ready` で使えなくなったと分かったときの後始末。`run` のロックを持たずに呼ぶ。
+    /// 照合済みの印・取っ手を下ろし、イベントだけを見ている画面にも新しい状態を知らせる
+    /// （知らせの状態づくりで `status` を呼ぶが、もう Ready ではないので確かめ直しは繰り返さない）。
+    fn after_model_lost(&self) {
+        self.forget_lost_model();
+        self.notify_status();
     }
 
     /// 使えなくなったモデルについて、llama-server を止め、照合済みの印と取っ手を下ろす。
@@ -487,14 +512,19 @@ impl LocalModelDownloadService {
         self.inner.local_llm.forget_model();
     }
 
-    /// 走っていないときの状態（使える・取得元が無い・未取得）。
-    fn idle_phase(&self) -> LocalModelPhase {
-        let path = self.inner.model_path.clone().or_else(|| {
+    /// 使えるかを見るモデルのファイルの場所（`LocalLlmService` と同じ場所。無ければ取得先）。
+    fn model_file_path(&self) -> Option<PathBuf> {
+        self.inner.model_path.clone().or_else(|| {
             self.inner
                 .model_dir
                 .as_ref()
                 .map(|dir| dir.join(self.inner.spec.file_name))
-        });
+        })
+    }
+
+    /// 走っていないときの状態（使える・取得元が無い・未取得）。
+    fn idle_phase(&self) -> LocalModelPhase {
+        let path = self.model_file_path();
         if path.is_some_and(|path| check_model_size(&path, self.inner.spec.size) == ModelCheck::Ok)
         {
             LocalModelPhase::Ready
@@ -536,6 +566,29 @@ impl LocalModelDownloadService {
             notify(&status);
         }
         status
+    }
+}
+
+/// 「使える」の確かめ直しの結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyRecheck {
+    /// ファイルがあり、大きさも合う。
+    Usable,
+    /// 無い（NotFound）・ファイルでない・大きさが違うと確かめられた（取り直しが要る）。
+    Lost,
+    /// アクセス拒否・ドライブが一時的に見えないなどで確かめられなかった（「使える」のままにする）。
+    Unknown,
+}
+
+/// メタデータの読み取り結果（ファイルか・大きさ）から、「使える」のままでよいかを決める。
+/// 一時的なエラーで 3.1GB を取り直させないよう、無いと確かめられたとき（NotFound）と大きさの違いだけを
+/// 「使えない」とする（`infra::local_llm_runtime::check_model_size` はエラーをすべて Missing にするため使わない）。
+fn classify_ready_recheck(metadata: std::io::Result<(bool, u64)>, expected: u64) -> ReadyRecheck {
+    match metadata {
+        Ok((true, len)) if len == expected => ReadyRecheck::Usable,
+        Ok(_) => ReadyRecheck::Lost,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ReadyRecheck::Lost,
+        Err(_) => ReadyRecheck::Unknown,
     }
 }
 
@@ -902,9 +955,19 @@ mod tests {
         let model = downloaded_model_dir(&SPEC, &f.root.join("local")).join(SPEC.file_name);
         // 取得の後にファイルが消えた（ウイルス対策ソフトの隔離など）。
         std::fs::remove_file(&model).unwrap();
+        // 取得のスレッドの最後の知らせ（Ready）は並べ直しのフックより先に送られる。フックを待ってから数え始める。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while f.ready_hooks.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lock(&f.events).clear();
+        f.service.inner.local_llm.mark_model_verified_for_tests();
         let status = f.service.status();
         assert_eq!(status.phase, LocalModelPhase::NotDownloaded);
         assert_eq!(status.received_bytes, 0);
+        // 照合済みの印を下ろし（古い照合の結果を使わない）、イベントでも知らせる。
+        assert!(!f.service.inner.local_llm.is_model_verified_for_tests());
+        assert_eq!(*lock(&f.events), vec![LocalModelPhase::NotDownloaded]);
         // 既存の取得の画面からもう一度取れる。
         f.service.start(false).unwrap();
         assert!(wait_for(&f, LocalModelPhase::Ready));
@@ -923,6 +986,37 @@ mod tests {
         assert!(wait_for(&f, LocalModelPhase::Ready));
         assert_eq!(f.calls.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(&model).unwrap(), b"data");
+    }
+
+    #[test]
+    fn ready_recheck_demotes_only_on_not_found_or_a_size_mismatch() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            classify_ready_recheck(Ok((true, 4)), 4),
+            ReadyRecheck::Usable
+        );
+        assert_eq!(classify_ready_recheck(Ok((true, 3)), 4), ReadyRecheck::Lost);
+        // 同じ名前のフォルダはモデルとして使えない。
+        assert_eq!(
+            classify_ready_recheck(Ok((false, 4)), 4),
+            ReadyRecheck::Lost
+        );
+        assert_eq!(
+            classify_ready_recheck(Err(Error::from(ErrorKind::NotFound)), 4),
+            ReadyRecheck::Lost
+        );
+        // 一時的なエラーでは取り直させない。
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::TimedOut,
+            ErrorKind::Other,
+        ] {
+            assert_eq!(
+                classify_ready_recheck(Err(Error::from(kind)), 4),
+                ReadyRecheck::Unknown,
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
