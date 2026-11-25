@@ -6169,6 +6169,37 @@ test("settings reports unsaved changes to Rust and clears them after save", asyn
   await expect.poll(readReports).toEqual([true, false]);
 });
 
+// 「保存する」を続けて押しても保存は1回だけ（保存中はボタンを止め、重ねて送らない）。
+test("settings save button saves only once when pressed repeatedly", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_SAVE_USER_SETTINGS_DELAY_MS__ = 600;
+  });
+  const readSaveCount = () =>
+    page.evaluate(
+      () =>
+        ((window as unknown as Record<string, unknown>).__E2E_SAVE_USER_SETTINGS_COUNT__ as
+          | number
+          | undefined) ?? 0
+    );
+  await openSettings(page);
+  await page.getByRole("switch").first().click();
+  const saveButton = page.getByRole("button", { name: "保存する" });
+  await expect(saveButton).toBeEnabled();
+  // 保存の応答を待つあいだに続けて押す（disabled になった後のクリックは force で直接届ける）。
+  await saveButton.click();
+  // 応答待ち（600ms）のあいだは押せず、保存状況に「保存中…」が出ること。
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存中…");
+  await saveButton.click({ force: true });
+  await saveButton.dblclick({ force: true });
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByText("設定を保存したよ").first()).toBeVisible();
+  // 保存が終わった後も回数が増えないこと。
+  await page.waitForTimeout(300);
+  expect(await readSaveCount()).toBe(1);
+  await expect(page.getByText("保存済み", { exact: true })).toBeVisible();
+});
+
 // ストレージ状況は Rust（get_storage_usage）が返す保存データの大きさを区分ごとに出す（実機テスト B9）。
 // 「準備中」の文言は出さず、読めないときも固定の仮値・生エラー・パスは出さない（SCR-003）。
 test("settings storage panel shows saved data usage from the backend", async ({
@@ -11521,6 +11552,16 @@ async function installTauriMocks(page: Page) {
                 .__E2E_SAVE_USER_SETTINGS_FAIL__
             ) {
               throw new Error("E2E settings save failure");
+            }
+            {
+              // 連打で二重に保存しないことの確認用に、呼ばれた回数を数え、指定があれば応答を遅らせる。
+              const saveWin = window as unknown as Record<string, number | undefined>;
+              saveWin.__E2E_SAVE_USER_SETTINGS_COUNT__ =
+                (saveWin.__E2E_SAVE_USER_SETTINGS_COUNT__ ?? 0) + 1;
+              const saveDelayMs = saveWin.__E2E_SAVE_USER_SETTINGS_DELAY_MS__;
+              if (saveDelayMs) {
+                await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
+              }
             }
             (
               window as typeof window & {

@@ -370,7 +370,7 @@ for (const id of MIN_WINDOW_SCREENS) {
 }
 
 // 起動時の大きさ（tauri.conf.json の 800×600）で、左サイドバーの画面ナビがスクロールせずに全部見えること（実機テスト B8）。
-// 高さが足りないときは「ゆうこの一言」カードを隠してメニューに場所を譲る。ホーム（小柳さん担当）と設定（別タスク）は対象外。
+// 高さが足りないときは「ゆうこの一言」カードを隠してメニューに場所を譲る。ホーム（小柳さん担当）は対象外、設定は下の専用テストで確かめる。
 const NAV_FIT_SCREENS = ["news-list", "reader", "history", "past-news", "dictionary", "customize", "gacha"] as const;
 
 for (const id of NAV_FIT_SCREENS) {
@@ -402,6 +402,90 @@ for (const id of NAV_FIT_SCREENS) {
     await expect(page.locator("aside").first().getByText(/ゆうこの(一言|おはなし)/)).toBeVisible();
   });
 }
+
+// 設定画面（SCR-003）の起動時の大きさ（800×600）: 設定メニュー7項目がスクロールせずに全部見え、
+// 「AIプロバイダー」の選択欄がカードからはみ出さず、ジャンル名が途中で折り返さないこと。
+// 高さ 800px 未満では左サイドバーのヒントカードを隠してメニューに場所を譲る（他画面の「ゆうこの一言」カードと同じ考え方）。
+test("settings @ 800x600: all menu items fit, AI provider select stays in its card, genre labels do not wrap", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await openFromSidebar("設定", "設定")(page);
+  await page.waitForLoadState("networkidle");
+  await page.screenshot({ path: testInfo.outputPath("settings-menu-800x600.png") });
+
+  const menu = page.getByRole("navigation", { name: "設定メニュー" });
+  const result = await menu.evaluate((node) => {
+    const navRect = node.getBoundingClientRect();
+    const vh = document.documentElement.clientHeight;
+    const buttons = Array.from(node.querySelectorAll("button"));
+    const hidden = buttons
+      .filter((button) => {
+        const rect = button.getBoundingClientRect();
+        return rect.top < navRect.top - 1 || rect.bottom > Math.min(navRect.bottom, vh) + 1;
+      })
+      .map((button) => (button.textContent ?? "").trim());
+    return { count: buttons.length, hidden, scrollable: node.scrollHeight > node.clientHeight + 1 };
+  });
+  expect(result.count).toBe(settingsTabs.length);
+  expect(result.hidden).toEqual([]);
+  expect(result.scrollable).toBe(false);
+
+  // 「AIプロバイダー」の選択欄は、どの選択肢を選んでもカードの内側に収まること（最も長い表示名で確かめる）。
+  await page.getByRole("button", { name: "解説・AI設定", exact: true }).click();
+  const trigger = page.getByRole("combobox").first();
+  await trigger.click();
+  await page.getByRole("option", { name: "開発・デモ用（本物のAIは使いません）" }).click();
+  const fit = await trigger.evaluate((node) => {
+    const card = node.closest("[data-slot='card']") ?? node.closest("main")!;
+    const rect = node.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      cardLeft: cardRect.left,
+      cardRight: cardRect.right,
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+    };
+  });
+  expect(fit.left).toBeGreaterThanOrEqual(fit.cardLeft - 1);
+  expect(fit.right).toBeLessThanOrEqual(fit.cardRight + 1);
+  expect(fit.scrollWidth).toBeLessThanOrEqual(fit.clientWidth + 1);
+  // 入りきらない表示名は末尾が「…」で省略され、title で全文が分かること。
+  await expect(trigger).toHaveAttribute("title", "開発・デモ用（本物のAIは使いません）");
+  const valueStyle = await trigger.locator("[data-slot='select-value']").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      display: style.display,
+      textOverflow: style.textOverflow,
+      truncated: node.scrollWidth > node.clientWidth,
+    };
+  });
+  expect(valueStyle).toEqual({ display: "block", textOverflow: "ellipsis", truncated: true });
+
+  // ジャンル名（例:「セキュリティ」）は1行に収まり、語の途中で折り返さないこと。
+  await page.getByRole("button", { name: "その他", exact: true }).click();
+  const labels = page.locator("label[for^='genre-']");
+  await expect(labels.first()).toBeVisible();
+  const wrapped = await labels.evaluateAll((nodes) =>
+    nodes
+      .filter((node) => {
+        const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 14;
+        const card = node.closest("[data-slot='card']") ?? node.closest("main")!;
+        const rect = node.getBoundingClientRect();
+        // 2行以上に折り返している、またはカードの外へはみ出している。
+        return rect.height > lineHeight * 1.5 || rect.right > card.getBoundingClientRect().right + 1;
+      })
+      .map((node) => (node.textContent ?? "").trim())
+  );
+  expect(wrapped).toEqual([]);
+
+  // 高さ 800px 以上ではヒントカードを出したまま、メニュー7項目も収まること（隠すのは低いときだけ）。
+  await page.setViewportSize({ width: 800, height: 800 });
+  await expect(page.locator("aside").first().getByText("設定のヒント")).toBeVisible();
+  expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight + 1)).toBe(false);
+});
 
 // 本文以外の文字（サイドバー・状態表示・ボタン・タブ）はドラッグで選択されず、
 // 記事の本文（要約など）は選べるままであること（実機テスト B12）。
