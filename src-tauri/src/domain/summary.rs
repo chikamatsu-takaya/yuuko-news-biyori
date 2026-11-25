@@ -86,7 +86,7 @@ pub struct AiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiResponse {
     pub text: String,
-    /// 実際に応答を生成したプロバイダ（"gemini" = 実AI成功 / "mock" = 未設定・他プロバイダ・失敗フォールバック）。
+    /// 実際に応答を生成したプロバイダ（"gemini" / "local" = 実AI成功 / "mock" = 設定で Mock を明示的に選んだとき）。
     pub provider: String,
 }
 

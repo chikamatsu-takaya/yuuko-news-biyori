@@ -48,7 +48,7 @@ impl TermExplanationAi for AiProviderService {
         provider: AiProvider,
         explanation_level: ExplanationLevel,
     ) -> Result<AiResponse, AppError> {
-        // 既存経路（Provider選択・Gemini可否・Mock fallback・エラー安全化）へそのまま委譲する。
+        // 既存経路（Provider選択・Gemini可否・AI が使えないときの AiUnavailable・エラー安全化）へそのまま委譲する。
         self.request_text(request, provider, explanation_level)
     }
 }
@@ -477,7 +477,7 @@ fn parse_ai_term_explanation(text: &str) -> Result<AiTermExplanation, AppError> 
     // 山括弧を含む語の説明が正当に出るため、要約と同じ基準（util::text_safety）で拒否すると
     // Gemini 利用時に表示できない。`<` は全角 `＜` へ置換し、制御文字は改行・タブ以外を除去する
     // （`\r` も除去されるが、表示上は `\n` だけで改行として足りる）。置換後は HTML タグとして解釈され得ず、
-    // React 側もテキストとして描画する。要約・再説明・感想は従来どおり拒否→Mock 切り替え（summary_service）。
+    // React 側もテキストとして描画する。要約・再説明・感想は従来どおり拒否（summary_service。Mock へは切り替えない）。
     // Markdown 見出し・区切り行は扱わない: 用語解説は辞書JSONの値として保存され、記事Markdownの
     // セクションや front matter に埋め込まれないため、構造を壊す余地がない。
     let short = neutralize_html_and_control(&parsed.short);
@@ -1768,7 +1768,8 @@ mod tests {
     #[test]
     fn explain_uses_real_ai_provider_mock_path_without_network() {
         // 実 AiProviderService を注入し、既定設定（provider=Mock）で外部通信なしに解説を得る。
-        // ＝APIキー未設定・非Gemini時の既存 Mock fallback 経路で、有効な short/detail が得られる。
+        // ＝Mock を明示的に選んだときの経路で、有効な short/detail が得られる
+        // （Gemini のキー未設定・非実装プロバイダでは Mock へ切り替えず AiUnavailable になる）。
         let unique_suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

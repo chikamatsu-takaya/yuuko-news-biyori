@@ -91,7 +91,7 @@ NewsReaderScreen（記事本文・候補語）
 | 辞書へ保存できない | `NewsReaderScreen.tsx` の `saveDictionaryEntry` → `dictionary_commands.rs` → `domain/dictionary.rs` の検証 |
 | 保存した用語が辞書画面に表示されない | `DictionaryScreen.tsx` の `listDictionaryEntries` → `dictionary_repository.rs` の一覧取得 |
 | 同じ用語が重複保存される | `repositories/dictionary_repository.rs` の `find_saved_entry` ＋ `domain/dictionary.rs` の `normalize_text`（正規化と一致条件） |
-| AI Provider未設定時に安全に失敗しない | `services/dictionary_service.rs` の `explain_with_ai` → `services/ai_provider_service.rs`（Gemini はキー未設定・失敗時に Mock fallback。ローカルLLMの失敗は `AppError::LocalAi` で返り、Mock へは切り替えない）と `.claude/rules/security.md` を参照 |
+| AI Provider未設定時に安全に失敗しない | `services/dictionary_service.rs` の `explain_with_ai` → `services/ai_provider_service.rs`（Gemini のキー未設定・失敗は `AppError::AiUnavailable`、ローカルLLMの失敗は `AppError::LocalAi` で返り、どちらも Mock へは切り替えない。Mock は設定で明示的に選んだときだけ）と `.claude/rules/security.md` を参照 |
 
 ## 関連設計書（必要な章だけを優先）
 
