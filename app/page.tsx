@@ -90,6 +90,10 @@ export default function Page() {
   // 見た目専用で、通知状態（yuukoNotificationState）や backend 確定には使わない。
   const [exitingNotification, setExitingNotification] =
     React.useState<YuukoNotificationState | null>(null);
+  // 報酬通知の OK（handle_yuuko_clicked）で Rust 側の未確認報酬が確定した回数。
+  // 通知状態は OK を押した瞬間に null になり確定より先に変わるため、確定後にこの値を進めて
+  // ホームの「未確認の報酬」件数を読み直させる。
+  const [rewardStateRevision, setRewardStateRevision] = React.useState(0);
 
   // メインウィンドウが表示中か。close-to-hide 等で非表示の間は候補生成を止め、
   // 未表示のまま通知枠だけ消費されるのを防ぐ（アプリ内通知は表示中しか描画できないため）。
@@ -397,6 +401,8 @@ export default function Page() {
   // 「詳しく見る」/再クリック確定: 対象記事を開く。dismiss ではなくクリック確定系を使う。
   const handleNotificationOpen = () => {
     const articleId = currentNotificationArticleId();
+    // 終端処理で通知状態が外れる前に、報酬通知の OK かを控えておく。
+    const wasRewardNotice = isActiveRewardNotice(yuukoNotificationState);
     // 表示セッションを終了（古いクリック結果・scheduler由来の再表示を抑止）してから遷移・確定する。
     yuukoActionTokenRef.current += 1;
     beginTerminalAction(articleId);
@@ -407,6 +413,9 @@ export default function Page() {
     // handle_yuuko_clicked が Leaving まで進んで active が解消したら終端フラグを戻す。
     void confirmYuukoClick().finally(() => {
       endTerminalAction();
+      if (wasRewardNotice) {
+        setRewardStateRevision((revision) => revision + 1);
+      }
     });
   };
 
@@ -457,6 +466,7 @@ export default function Page() {
             onNavigate={handleNavigate}
             onOpenArticle={openArticleFrom("home")}
             yuukoNotificationState={yuukoNotificationState}
+            rewardStateRevision={rewardStateRevision}
           />
         );
       }
@@ -530,6 +540,7 @@ export default function Page() {
         onNavigate={handleNavigate}
         onOpenArticle={openArticleFrom("home")}
         yuukoNotificationState={yuukoNotificationState}
+        rewardStateRevision={rewardStateRevision}
       />
     );
   };
