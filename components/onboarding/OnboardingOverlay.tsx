@@ -273,7 +273,9 @@ export default function OnboardingOverlay({
     <Dialog open={isOpen} onOpenChange={handleDialogOpenChange}>
       <DialogContent
         showCloseButton={isReplay}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
+        // 低いウィンドウ（最小 800×440）では全体スクロールだと「はじめる」が画面外に出て、続きがあることにも気づきにくかった。
+        // 見出しと下部のボタンは固定し、項目の部分だけをスクロールさせる。
+        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-lg"
         onEscapeKeyDown={(event) => {
           if (!isReplay || isSaving) {
             event.preventDefault();
@@ -282,7 +284,7 @@ export default function OnboardingOverlay({
         onPointerDownOutside={(event) => event.preventDefault()}
         onInteractOutside={(event) => event.preventDefault()}
       >
-        <DialogHeader>
+        <DialogHeader className="shrink-0 px-6 pt-6 pb-3">
           <DialogTitle className="text-[var(--yuuko-green-text)]">
             {isReplay ? "ゆうこの設定、もう一度見てみよう！" : "はじめまして、ゆうこだよ！"}
           </DialogTitle>
@@ -293,7 +295,10 @@ export default function OnboardingOverlay({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-5 py-2">
+        <div
+          data-testid="onboarding-scroll-area"
+          className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-6 py-2"
+        >
           <fieldset>
             <legend className="mb-2 text-sm font-medium text-foreground">
               関心のあるジャンル
@@ -388,7 +393,7 @@ export default function OnboardingOverlay({
           </div>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t border-border px-6 py-3">
           {isReplay ? (
             <Button variant="outline" onClick={close} disabled={isSaving}>
               閉じる

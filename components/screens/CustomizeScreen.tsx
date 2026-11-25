@@ -801,8 +801,9 @@ export default function CustomizeScreen({
               テーマや呼び名を設定して、もっと仲良くなろう！
             </p>
 
-            {/* Tabs */}
-            <div className="flex gap-1 mb-4 overflow-x-auto pb-1" role="tablist">
+            {/* Tabs（既定ウィンドウ 800×600 では中央列が狭く、横スクロールだと「飾り」「吹き出し」が右で切れて
+                あることに気づけなかったため、横に並びきらないときは次の行へ折り返して全部見せる） */}
+            <div className="flex flex-wrap gap-1 mb-4" role="tablist">
               {tabItems.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeTab === tab.id;
