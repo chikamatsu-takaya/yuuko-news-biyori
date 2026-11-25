@@ -175,6 +175,162 @@ test("home refresh with partial errors shows a short amber line instead of a car
   expect(after.visible).toBeGreaterThanOrEqual(before.visible - 1);
 });
 
+// ホーム右列は実データだけを出す（友情ランク・かけら・未確認の報酬）。架空の数値やボタンは置かない。
+test("home right column shows real rank, star fragments and pending rewards without dead buttons", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 4,
+      currentPoint: 12,
+      nextRequiredPoint: 30,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    w.__E2E_GACHA_OVERRIDE__ = { starFragments: 1234 };
+    w.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: true },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: ["theme_001"],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("4");
+  await expect(page.getByTestId("home-friendship-progress-text")).toHaveText("12 / 30");
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("1,234");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("1");
+  // 以前の仮の値（ランク 15・350 / 1000・1,250・2）は出さない。
+  await expect(page.getByText("1,250", { exact: true })).toHaveCount(0);
+  // 処理の無い「受け取る」「＋」とフッターのヘルプは置かない（画面詳細設計書 §3.3）。
+  await expect(page.getByRole("button", { name: "受け取る" })).toHaveCount(0);
+  const footer = page.locator("footer");
+  await expect(footer.getByRole("button")).toHaveCount(0);
+  // 通知が無いときはフッターに架空のお知らせを出さない。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.getByTestId("home-footer-status")).toHaveCount(0);
+});
+
+test("home right column shows a dash instead of numbers when the states cannot be loaded", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_FRIENDSHIP_STATE__ = "fail";
+    w.__E2E_GACHA_LOAD_FAIL__ = true;
+    w.__E2E_REWARD_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("—");
+  await expect(page.getByTestId("home-friendship-progress-text")).toHaveCount(0);
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("—");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("—");
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  // 記事一覧は影響を受けない。
+  await expect(page.getByTestId("home-article-card")).toHaveCount(1);
+});
+
+test("home shows an empty-state hint instead of sample articles when there are no recommendations", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles") {
+        return [];
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-articles-state")).toHaveText(
+    "まだニュースがないみたい。「ニュースを更新」を押すと、ニュースを取りに行くよ。"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByText("TechCrunch Japan")).toHaveCount(0);
+});
+
+test("home shows a loading notice (not sample articles) until the recommendations arrive", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const gate = new Promise<void>((resolve) => {
+      w.__E2E_RELEASE_RECOMMENDED__ = resolve;
+    });
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles") {
+        await gate;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-articles-state")).toContainText(
+    "おすすめニュースを読み込んでいるよ…"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByText("TechCrunch Japan")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_RELEASE_RECOMMENDED__();
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await expect(page.getByTestId("home-article-card")).toHaveCount(1);
+  await expect(page.getByTestId("home-articles-state")).toHaveCount(0);
+});
+
+test("home outside Tauri shows an app-only notice and no invented values", async ({
+  page,
+}) => {
+  await openHome(page);
+  // Tauri 外にしてからホームを開き直す（ホームのマウント時に isTauriRuntime が false になる）。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュース履歴", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ニュース履歴" }).first()).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ホーム", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
+  await expect(page.getByTestId("home-articles-state")).toHaveText(
+    "おすすめニュースは、アプリで開いたときに表示されるよ。"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("—");
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("—");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("—");
+});
+
 for (const screen of majorScreens) {
   test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
@@ -1324,6 +1480,28 @@ test.describe("article date display", () => {
       .click();
     await expect(main.getByText("2026/06/05 15:43").first()).toBeVisible();
     await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+
+  test("home formats dates and shows NEW only for articles published within 24 hours", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_HISTORY_DATE_DISPLAY__ = true;
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await openHome(page);
+
+    const cards = page.getByTestId("home-article-card");
+    const freshCard = cards.filter({ hasText: "公開直後の記事" });
+    const oldCard = cards.filter({ hasText: "4か月前に公開された記事" });
+    await expect(freshCard).toContainText("NEW");
+    await expect(freshCard).toContainText(/\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/);
+    // 未読でも4か月前に公開された記事は NEW にしない（B2）。
+    await expect(oldCard).not.toContainText("NEW");
+    // RFC3339 のままではなく、日本時間の「YYYY/MM/DD HH:mm」で出す（B1）。
+    await expect(oldCard).toContainText("2026/06/05 15:43");
+    await expect(page.locator("main")).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
 });
 
@@ -7213,8 +7391,9 @@ for (const screen of sidebarAutostartOpeners) {
 }
 
 // サイドバーの「常駐を終了する」は確認ダイアログを挟んでから quit_resident_app を呼ぶ
-// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホーム（MainScreen）は別タスクのため対象外。
+// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホームも同じ共通部品を使う。
 const quitResidentOpeners = [
+  { id: "home", open: openHome },
   ...sidebarAutostartScreens.map((screen) => ({
     id: screen.id,
     open: (page: Page) =>
@@ -8717,6 +8896,55 @@ test("pending reward notice shows a balloon with OK and confirms through handle_
   await expect(
     page.getByRole("heading", { name: "今日のおすすめニュース" })
   ).toBeVisible();
+});
+
+// 報酬通知の OK で Rust 側の未確認報酬が確定したら、ホームの「未確認の報酬」件数も読み直して 0 になる。
+// OK を押した瞬間に通知状態は外れ（確定より先）、その時点の読み直しではまだ 1 件のため、確定後の読み直しを確かめる。
+test("home pending reward count refreshes to 0 after the reward notice OK is confirmed", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const rewardState = (pendingRewardIds: string[]) => ({
+      currentRank: 3,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: pendingRewardIds.length > 0 },
+      ],
+      pendingRewardIds,
+      activeThemeId: "default",
+    });
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_reward_state") {
+        return rewardState(w.__E2E_REWARD_CONFIRMED__ ? [] : ["theme_001"]);
+      }
+      if (cmd === "handle_yuuko_clicked") {
+        // 確定を遅らせ、通知状態が外れた直後の読み直しが確定前に走る状況を作る。
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const result = await original(cmd, args);
+        w.__E2E_REWARD_CONFIRMED__ = true;
+        w.__E2E_BACKEND_ACTIVE__ = null;
+        return result;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("1");
+
+  await notification.getByRole("button", { name: "OK", exact: true }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("0");
 });
 
 test("pending reward notice is not auto-dismissed after the balloon timeout", async ({
@@ -10600,6 +10828,26 @@ async function installTauriMocks(page: Page) {
               const limit =
                 typeof params.limit === "number" ? params.limit : pool.length;
               return pool.slice(0, limit);
+            }
+            // 日時表示・NEW 判定テスト用（ホーム）: list_article_history の同名フラグと同じ2件。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            if ((window as any).__E2E_HISTORY_DATE_DISPLAY__) {
+              /* eslint-enable @typescript-eslint/no-explicit-any */
+              const now = new Date();
+              return [
+                {
+                  ...articleSummary,
+                  articleId: "date-fresh",
+                  title: "公開直後の記事",
+                  publishedAtText: new Date(now.getTime() - 60 * 60 * 1000).toISOString(),
+                },
+                {
+                  ...articleSummary,
+                  articleId: "date-old",
+                  title: "4か月前に公開された記事",
+                  publishedAtText: "2026-06-05T06:43:31Z",
+                },
+              ];
             }
             return [articleSummary];
           }
