@@ -413,7 +413,7 @@ impl ArticleRepository {
         let _write_guard = self.lock_writes()?;
 
         let favorite_store = self.load_favorite_store_or_default()?;
-        let records = self.load_article_records()?;
+        let records = self.load_records_for_archive_maintenance()?;
         let archive_index = self.load_archive_index_or_default()?;
 
         // 新規候補と既存アーカイブ済み記事を月別に分ける。
@@ -816,7 +816,7 @@ impl ArticleRepository {
         let index = self.load_archive_index_or_default()?;
         let mut records_by_month: BTreeMap<String, Vec<PersistedArticleRecord>> = BTreeMap::new();
 
-        for record in self.load_article_records()? {
+        for record in self.load_records_for_archive_maintenance()? {
             if record.archive_state != PersistedArchiveState::Archived {
                 continue;
             }
@@ -1694,8 +1694,38 @@ impl ArticleRepository {
             .find(|article| article.article_id == article_id))
     }
 
-    /// 書き込み・削除・圧縮を伴う処理用の厳格ローダー。
-    /// 破損ファイルを見落としたままZIP化・退避・復元すると記事を失いうるため、1件でも読めなければ中止する。
+    /// 日次アーカイブ保守（月次ZIP作成・元Markdownの退避）用のローダー。
+    ///
+    /// 読めない（Front Matter破損・非UTF-8）記事は1件ずつ飛ばして残りを処理する。厳格ローダーで1件でも
+    /// 失敗すると保守全体が止まり、完了日が保存されないため 30 分ごとの確認のたびに全記事の再読込と失敗を
+    /// 繰り返し続けるため。飛ばした記事は ZIP にも入れず、退避（移動）もしないので元ファイルはそのまま残る
+    /// （既にアーカイブ済みの記事なら ZIP 側の内容から月次ZIPを作り直すため失われない）。
+    /// ログはパスと分類だけ（`load_readable_article_records`）。本文は出さない。
+    /// 正規の保存先が破損ファイルで塞がれている記事も除く。保存・移動で破損ファイルを上書きしないため。
+    fn load_records_for_archive_maintenance(
+        &self,
+    ) -> Result<Vec<PersistedArticleRecord>, AppError> {
+        let loaded = self.load_readable_article_records()?;
+        let skipped_paths = loaded.skipped_paths;
+        Ok(loaded
+            .records
+            .into_iter()
+            .filter(|record| {
+                let occupied = skipped_paths.contains(&self.article_path(record));
+                if occupied {
+                    log::warn!(
+                        "Skipping article in archive maintenance; its path is occupied by a corrupt file: {}",
+                        record.article_id
+                    );
+                }
+                !occupied
+            })
+            .collect())
+    }
+
+    /// 書き込み・削除・圧縮を伴う処理用の厳格ローダー（復元・月削除・退避候補一覧）。
+    /// 破損ファイルを見落としたまま復元・削除すると記事を失いうるため、1件でも読めなければ中止する。
+    /// 日次アーカイブ保守だけは `load_records_for_archive_maintenance` で破損記事を飛ばす。
     fn load_article_records(&self) -> Result<Vec<PersistedArticleRecord>, AppError> {
         let mut markdown_paths = Vec::new();
         collect_markdown_files(&self.article_news_dir, &mut markdown_paths)?;
@@ -1770,6 +1800,13 @@ impl ArticleRepository {
             .join(format!("{}.md", article.article_id))
     }
 
+    /// お気に入り一覧を読む。無ければ空。
+    ///
+    /// JSON として読めない場合は、他の状態ファイルと同じく `article_favorites.corrupt.json` へ退避してから
+    /// 空の一覧で作り直す（セキュリティ詳細設計書 §11.4 / 判断台帳 D57。`corrupt_json::read_json_or_reset`）。
+    /// 壊れたままだと記事一覧・詳細・お気に入り・アーカイブ保守が毎回エラーになり続けるため。
+    /// 記事 Front Matter の `favorite` も併用している（`is_effectively_favorite`）ので、画面から付けた
+    /// お気に入りの多くは作り直し後も残る。退避に失敗したら上書きせずエラーを返す（元ファイルはそのまま）。
     fn load_favorite_store_or_default(&self) -> Result<ArticleFavoriteStore, AppError> {
         self.restore_backup_if_primary_missing();
 
@@ -1777,8 +1814,15 @@ impl ArticleRepository {
             return Ok(ArticleFavoriteStore::default());
         }
 
-        let raw = std::fs::read_to_string(&self.article_favorites_path)?;
-        let mut store = serde_json::from_str::<ArticleFavoriteStore>(&raw)?;
+        let mut store = super::corrupt_json::read_json_or_reset(
+            &self.article_favorites_path,
+            "article favorites",
+            || {
+                let store = ArticleFavoriteStore::default();
+                self.save_favorite_store(&store)?;
+                Ok(store)
+            },
+        )?;
         if store.version == 0 {
             store.version = 1;
         }
@@ -5391,7 +5435,89 @@ mod tests {
     }
 
     #[test]
-    fn archive_candidates_aborts_without_changes_when_markdown_is_corrupt() {
+    fn corrupt_favorites_file_is_backed_up_and_reset_so_reads_keep_working() {
+        let context = TestRepositoryContext::new();
+        context.repository.seed_sample_articles_for_tests();
+        let path = favorites_path(&context);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let corrupt_bytes = b"{\"favorite_article_ids\": [\"article-001\"".to_vec();
+        std::fs::write(&path, &corrupt_bytes).unwrap();
+
+        // 壊れたお気に入りで一覧・詳細・お気に入り一覧が止まり続けないこと。
+        assert_eq!(
+            context
+                .repository
+                .list_recommendation_candidates()
+                .unwrap()
+                .len(),
+            3
+        );
+        let detail = context
+            .repository
+            .get_article_detail("article-002")
+            .unwrap();
+        assert_eq!(detail.article_id, "article-002");
+        context
+            .repository
+            .list_history(ArticleHistoryFilter::Favorite, 10)
+            .unwrap();
+
+        // 他の状態ファイルと同じく、壊れた中身は `.corrupt.json` へそのまま退避し、本体は空で作り直す。
+        let backup = super::super::corrupt_json::corrupt_backup_path(&path);
+        assert_eq!(std::fs::read(&backup).unwrap(), corrupt_bytes);
+        let reset: super::ArticleFavoriteStore =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(reset.favorite_article_ids.is_empty());
+
+        // 作り直し後はお気に入りの更新も通る。
+        context
+            .repository
+            .update_article_favorite("article-002", true)
+            .unwrap();
+        assert!(
+            context
+                .repository
+                .get_article_detail("article-002")
+                .unwrap()
+                .is_favorite
+        );
+        // 2回目以降は正常に読めるので、退避ファイルは上書きされない。
+        assert_eq!(std::fs::read(&backup).unwrap(), corrupt_bytes);
+    }
+
+    #[test]
+    fn corrupt_favorites_file_does_not_stop_archive_maintenance() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let old_article = PersistedArticleRecord {
+            article_id: "old-plain".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::legacy_seed_articles().remove(0)
+        };
+        context
+            .repository
+            .save_article_record(&old_article)
+            .unwrap();
+        let path = favorites_path(&context);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not json").unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let summary = context.repository.archive_candidates(now).unwrap();
+
+        assert_eq!(summary.archived_article_count, 1);
+        assert_eq!(
+            std::fs::read(super::super::corrupt_json::corrupt_backup_path(&path)).unwrap(),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn archive_candidates_skips_corrupt_markdown_and_archives_the_rest() {
         use chrono::{TimeZone, Utc};
 
         let context = TestRepositoryContext::new();
@@ -5409,25 +5535,25 @@ mod tests {
             .unwrap();
         let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
 
+        // 破損記事が1件あっても保守全体は止めず、読める記事だけをZIP化する
+        // （止めると完了日が保存されず、30分ごとに全件の再読込と失敗を繰り返すため）。
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
-        assert!(context.repository.archive_candidates(now).is_err());
+        let summary = context.repository.archive_candidates(now).unwrap();
+        assert_eq!(summary.archived_article_count, 1);
+        assert_eq!(summary.zip_files.len(), 1);
+        assert_eq!(summary.zip_files[0].article_count, 1);
 
-        // 圧縮・archived印付けを行わず、破損ファイルも保持する（安全側で中止）。
-        assert!(!context
-            .root_dir
-            .join("archive")
-            .join("archive_index.json")
-            .exists());
         let saved = context
             .repository
             .load_article_record(&context.news_dir.join("202605").join("old-plain.md"))
             .unwrap();
-        assert!(!saved.is_archived);
+        assert!(saved.is_archived);
+        // 破損ファイルは消さず・書き換えず、そのまま残す。
         assert_files_unchanged(&corrupt);
     }
 
     #[test]
-    fn retire_archived_markdown_aborts_without_deleting_when_markdown_is_corrupt() {
+    fn retire_archived_markdown_skips_corrupt_markdown_and_retires_the_rest() {
         use chrono::{TimeZone, Utc};
 
         let context = TestRepositoryContext::new();
@@ -5444,10 +5570,54 @@ mod tests {
         context.repository.archive_candidates(now).unwrap();
         let corrupt = write_corrupt_markdown_files(&context.news_dir, "202605");
 
-        assert!(context.repository.retire_archived_markdown().is_err());
+        let summary = context.repository.retire_archived_markdown().unwrap();
 
-        assert!(context.news_dir.join("202605").join("retire-a.md").exists());
+        assert_eq!(summary.retired_article_count, 1);
+        assert!(!summary.cleanup_pending);
+        assert!(!context.news_dir.join("202605").join("retire-a.md").exists());
+        // 破損ファイルは退避（移動）対象にせず、元の場所に残す。
         assert_files_unchanged(&corrupt);
+    }
+
+    #[test]
+    fn archive_maintenance_does_not_overwrite_corrupt_file_at_canonical_path() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        // 読める記事を本来とは別の月バケット（202606）に置き、本来の保存先（202605/old-a.md）を破損ファイルにする。
+        let article = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::legacy_seed_articles().remove(0)
+        };
+        let misplaced_dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&misplaced_dir).unwrap();
+        std::fs::write(
+            misplaced_dir.join("old-a.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+        let canonical_dir = context.news_dir.join("202605");
+        std::fs::create_dir_all(&canonical_dir).unwrap();
+        let corrupt_path = canonical_dir.join("old-a.md");
+        let corrupt_bytes = b"---
+articleId: [unterminated
+---
+"
+        .to_vec();
+        std::fs::write(&corrupt_path, &corrupt_bytes).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let summary = context.repository.archive_candidates(now).unwrap();
+        let retirement = context.repository.retire_archived_markdown().unwrap();
+
+        // 保存先が破損ファイルで塞がれている記事は対象外にし、破損ファイルを上書きしない。
+        assert_eq!(summary.archived_article_count, 0);
+        assert_eq!(retirement.retired_article_count, 0);
+        assert_eq!(std::fs::read(&corrupt_path).unwrap(), corrupt_bytes);
     }
 
     #[test]
