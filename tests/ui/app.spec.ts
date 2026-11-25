@@ -7169,8 +7169,9 @@ test("settings shows the development note only while MockProvider is selected", 
   await expect(note).toHaveCount(0);
 });
 
-// 以前に OpenAI を保存していた場合も画面が壊れず、MockProvider として表示・保存できること。
-test("settings treats a saved openai provider as MockProvider", async ({
+// 以前に OpenAI を保存していた場合も画面が壊れず、Mock には見せず未選択で表示すること（2026-11-25 藤井）。
+// Rust は openai を "unknown" として渡すが、"openai" が届いた場合も同じ表示にし、選び直さなければそのまま送り返す。
+test("settings shows a saved openai provider as unselected, not MockProvider", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -7183,16 +7184,57 @@ test("settings treats a saved openai provider as MockProvider", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
+    page.getByRole("combobox").filter({ hasText: "未選択" })
   ).toBeVisible();
+  await expect(page.getByTestId("mock-provider-note")).toHaveCount(0);
+  await expect(page.getByTestId("unknown-provider-note")).toBeVisible();
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
 
+  // ほかの設定だけ変えて保存しても、AI プロバイダは受け取った値のまま送り返す（mock へ書き換えない）。
+  await page.getByRole("combobox").filter({ hasText: "ふつう" }).click();
+  await page.getByRole("option", { name: "詳しく" }).click();
   await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = (await readSavedSettings(page)) as
+    | { aiProvider?: string; explanationLevel?: string }
+    | undefined;
+  expect(saved?.explanationLevel).toBe("detailed");
+  expect(saved?.aiProvider).toBe("openai");
+});
+
+// 読み取れない保存値（Rust が "unknown" で返す）は Mock と見せず未選択で表示し、
+// ほかの設定だけ保存しても "unknown" のまま送り返す（Rust は保存値を書き換えない。2026-11-25 藤井）。
+test("settings shows an unrecognized saved AI provider as unselected, not MockProvider", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error: E2E override（読み取れない保存値として unknown を返させる）
+    window.__E2E_USER_SETTINGS_OVERRIDE__ = {
+      aiProvider: "unknown",
+    };
+  });
+
+  await openSettings(page);
+  await openSettingsMenu(page, "解説・AI設定");
+  await expect(
+    page.getByRole("combobox").filter({ hasText: "未選択" })
+  ).toBeVisible();
+  await expect(page.getByTestId("mock-provider-note")).toHaveCount(0);
+  await expect(page.getByTestId("unknown-provider-note")).toHaveText(
+    "保存されているAIの設定が読み取れないから、いまはAIを使えないよ。使うAIを選んで保存してね。"
+  );
+  // 読み込んだだけでは未保存の変更にならない。
+  await expect(page.getByRole("button", { name: "保存する" })).toBeDisabled();
+
+  // 選び直せば注記は消え、その値で保存される。
+  await page.getByRole("combobox").filter({ hasText: "未選択" }).click();
+  await page.getByRole("option", { name: "ローカル（おすすめ）" }).click();
+  await expect(page.getByTestId("unknown-provider-note")).toHaveCount(0);
+  await page.getByRole("button", { name: "保存する" }).click();
+  const saved = (await readSavedSettings(page)) as
     | { aiProvider?: string }
     | undefined;
-  expect(saved?.aiProvider).toBe("mock");
+  expect(saved?.aiProvider).toBe("local");
 });
 
 // 自動起動の呼び出し履歴（set_autostart_enabled に渡した enabled の並び）。

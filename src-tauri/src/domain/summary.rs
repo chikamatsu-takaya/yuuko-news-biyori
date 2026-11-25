@@ -64,7 +64,7 @@ pub enum AutoSummaryStatusKind {
     LocalModelNotDownloaded,
     /// Gemini の APIキーが設定されていない（キーの値は扱わない）。
     GeminiNotReady,
-    /// 設定が一時的に読めず判定できない。
+    /// 設定が一時的に読めず判定できない。AI プロバイダの保存値が読み取れない（手編集など）ときもこれにする。
     Unknown,
 }
 

@@ -974,7 +974,13 @@ mod tests {
             root_dir.join("archive"),
         );
         article_repository.save_fetched_articles(articles).unwrap();
-        // 設定ファイルは未作成 → load_or_default で既定（provider=Mock）になる（決定的・外部通信なし）。
+        // Mock を明示的に選んだ設定で動かす（決定的・外部通信なし）。設定ファイルが無いときの既定は
+        // ローカルになったため（2026-11-25 藤井）、未作成のままにはしない。
+        std::fs::write(
+            root_dir.join("settings.json"),
+            r#"{ "version": 1, "ai": { "provider": "mock" } }"#,
+        )
+        .unwrap();
         DictionaryService::new(
             DictionaryRepository::with_path(root_dir.join("dictionary").join("entries.json")),
             article_repository,
