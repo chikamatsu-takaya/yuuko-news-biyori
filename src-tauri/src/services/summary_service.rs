@@ -2607,6 +2607,7 @@ mod tests {
                 read_state: ArticleReadState::Unread,
             }])
             .unwrap();
+        write_explicit_mock_settings(root_dir);
         let service = SummaryService::new(
             AiProviderService::new(&AppPaths::new(root_dir.join("ai"))),
             article_repository.clone(),
@@ -5107,6 +5108,17 @@ mod tests {
     }
 
     /// 初回起動時のサンプル記事（タグ付き）を置いた、既定（provider=Mock）のサービス。
+    /// テストは Mock（決定的・外部通信なし）で動かす。設定ファイルが無いときの既定はローカルになったため
+    /// （2026-11-25 藤井）、Mock を明示的に選んだ設定を書いておく。各テストが後で設定を保存すれば上書きされる。
+    fn write_explicit_mock_settings(root_dir: &Path) {
+        std::fs::create_dir_all(root_dir).unwrap();
+        std::fs::write(
+            root_dir.join("settings.json"),
+            r#"{ "version": 1, "ai": { "provider": "mock" } }"#,
+        )
+        .unwrap();
+    }
+
     fn build_service_with_sample_articles(root_dir: &Path) -> (SummaryService, ArticleRepository) {
         let article_repository = ArticleRepository::with_paths(
             root_dir.join("news"),
@@ -5114,6 +5126,7 @@ mod tests {
             root_dir.join("archive"),
         );
         article_repository.seed_sample_articles_for_tests();
+        write_explicit_mock_settings(root_dir);
         let service = SummaryService::new(
             AiProviderService::new(&AppPaths::new(root_dir.join("ai"))),
             article_repository.clone(),

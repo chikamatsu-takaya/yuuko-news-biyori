@@ -156,8 +156,9 @@ impl SettingsService {
     /// 起動時に設定ファイルが無ければ初期値（`PersistedSettings::initial`）で作成する。
     /// ここで新規作成する場合だけが「初回起動」なので、案内（オンボーディング）を未完了で記録し、
     /// AI はローカル・自動要約は無効で始める（判断台帳 D103、自動要約は 2026-11-18 藤井。案内の保存はこの値を引き継ぐ）。
-    /// 既存ファイル（旧形式でフィールドが無いものを含む）は触らず、完了扱いのまま案内を出さない。
-    /// 既存ファイルの AI 設定も変えない（欄が無ければ従来どおり mock・自動要約無効として読む）。
+    /// 既存ファイル（旧形式でフィールドが無いものを含む）は完了扱いのまま案内を出さない。
+    /// 既存ファイルで AI プロバイダの欄が無いときだけ、ローカルとして一度書き戻す（Mock にしない。2026-11-25 藤井）。
+    /// 自動要約など AI のほかの欄は変えない（欄が無ければ従来どおり無効として読む）。
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
         let _guard = self.repository.lock_updates();
         if !self.repository.exists() {
@@ -168,6 +169,16 @@ impl SettingsService {
                 persisted.ui.onboarding_completed = false;
             }
             self.repository.save(&persisted)?;
+        } else {
+            // 移行の失敗（壊れたファイル・一時的に読めない等）で起動を止めない。読み込み時もローカルとして
+            // 扱われるので動作は変わらず、次回の起動でまた書き戻しを試みる。壊れたファイルは設定画面の初期化に任せる。
+            match self.repository.migrate_missing_ai_provider() {
+                Ok(true) => log::info!("settings: missing ai.provider was saved as local"),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("settings: could not migrate missing ai.provider: {error}")
+                }
+            }
         }
         Ok(())
     }
@@ -507,10 +518,76 @@ mod tests {
         let dto = service.get_user_settings().unwrap();
         assert_eq!(dto.onboarding_completed, Some(true));
         assert_eq!(dto.nickname, "old");
-        // 既存ユーザーの AI 設定は欄が無くても切り替えない（mock・自動要約無効のまま）。
-        assert_eq!(dto.ai_provider, AiProvider::Mock);
+        // AI プロバイダの欄が無い既存ファイルはローカルとして扱い、自動要約は無効のまま（2026-11-25 藤井）。
+        assert_eq!(dto.ai_provider, AiProvider::Local);
         assert!(!dto.auto_summary_enabled);
 
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn startup_saves_missing_ai_provider_as_local_once() {
+        // 欄の無い旧ファイルは、起動時に一度だけローカルとして書き戻す（ほかの値は保つ）。
+        let (service, path) = temp_service();
+        std::fs::write(
+            &path,
+            br#"{ "version": 1, "user": { "nickname": "old" }, "ai": { "autoSummaryEnabled": true } }"#,
+        )
+        .unwrap();
+
+        service.initialize_default_if_missing().unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["ai"]["provider"], "local");
+        assert_eq!(stored["ai"]["autoSummaryEnabled"], true);
+        assert_eq!(stored["user"]["nickname"], "old");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn startup_keeps_explicit_mock_and_unknown_provider_values() {
+        // 明示的な mock と未知の値は、起動時の移行で書き換えない（欄の欠落だけが対象）。
+        let raws: [&[u8]; 2] = [
+            br#"{ "version": 1, "ai": { "provider": "mock" } }"#,
+            br#"{ "version": 1, "ai": { "provider": "future_ai" } }"#,
+        ];
+        for raw in raws {
+            let (service, path) = temp_service();
+            std::fs::write(&path, raw).unwrap();
+            service.initialize_default_if_missing().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("json.bak"));
+        }
+        // 未知の値は画面へ Unknown として渡し、ほかの設定の保存でも保存値を残す。
+        let (service, path) = temp_service();
+        std::fs::write(&path, raws[1]).unwrap();
+        let dto = service.get_user_settings().unwrap();
+        assert_eq!(dto.ai_provider, AiProvider::Unknown);
+        service
+            .save_user_settings(UserSettingsDto {
+                max_daily_recommendations: 7,
+                ..dto
+            })
+            .unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["ai"]["provider"], "future_ai");
+        assert_eq!(stored["news"]["maxDailyRecommendations"], 7);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn startup_migration_failure_does_not_block_startup() {
+        // 壊れたファイルは移行できなくても起動を止めず、ファイルも書き換えない（初期化は設定画面に任せる）。
+        let (service, path) = temp_service();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        service.initialize_default_if_missing().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));
     }

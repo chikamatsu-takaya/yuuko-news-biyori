@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type AiProvider = "mock" | "gemini" | "openai" | "local";
+// "unknown" は Rust が読み取れない保存値（手編集・新しい版の値）を表すときだけ返す。選択肢には出さず、
+// そのまま送り返すと Rust は保存値を書き換えない（2026-11-25 藤井）。
+export type AiProvider = "mock" | "gemini" | "openai" | "local" | "unknown";
 export type ExplanationLevel = "simple" | "normal" | "detailed";
 // 通知モード（Rust: domain::notification_mode の保存値。判断台帳 D143）。
 export type NotificationMode = "random_in_work_time" | "random" | "fixed_time" | "none";

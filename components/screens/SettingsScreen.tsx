@@ -171,8 +171,10 @@ const mockSettings: SettingsState = {
   },
   ai: {
     explanationDetail: "ふつう",
-    provider: "mock",
-    providerStatus: "MockProviderで動作中",
+    // 読み込み中・読み込み失敗のあいだは保存値が分からないため、Mock を選んでいるように見せず未選択にする
+    // （2026-11-25 藤井「Mock を選んだとき以外は Mock に見せない」）。
+    provider: "",
+    providerStatus: "",
     autoSummaryEnabled: false,
   },
   news: {
@@ -194,6 +196,8 @@ const settingsMenuItems: SettingsMenuItem[] = [
   { id: "other", label: "その他", icon: Settings },
 ];
 
+// 設定を読めなかったときの保存の土台。aiProvider は "unknown" にし、未選択のまま保存しても
+// Rust 側は保存済みの AI プロバイダを書き換えない（Mock にも既定値にも黙って変えない）。
 const fallbackUserSettingsDto: UserSettingsDto = {
   genres: ["AI", "IT"],
   notifyStartTime: "09:00",
@@ -214,7 +218,7 @@ const fallbackUserSettingsDto: UserSettingsDto = {
   selectedToneId: "gentle",
   selectedPersonalityId: "standard",
   nickname: "",
-  aiProvider: "mock",
+  aiProvider: "unknown",
   maxDailyRecommendations: 10,
   autoSummaryEnabled: false,
 };
@@ -251,15 +255,23 @@ const labelToExplanationLevel = (label: string): ExplanationLevel => {
   }
 };
 
+// 保存済みの Provider を選択欄の値へ写す。
+// 読み取れない保存値（"unknown"）と、選択肢から外した未実装の "openai" は、どちらも Mock としては動かない
+// （Rust は AI_UNAVAILABLE を返す）ため、Mock を選んでいるように見せず未選択（""）にする
+// （2026-11-25 藤井「Mock を選んだとき以外は Mock に見せない」）。Rust は openai も "unknown" として渡すが、
+// 古いバックエンドなどから "openai" が届いても同じ表示にする。未選択のまま保存すると buildDtoForSave が
+// 受け取った値をそのまま送り返し、Rust は保存値（"openai" など）を残す。
+const providerForSelect = (provider: string): string => {
+  if (provider === "openai" || provider === "unknown") return "";
+  return provider;
+};
+
 const mapSettingsFromDto = (
   base: SettingsState,
   dto: UserSettingsDto
 ): SettingsState => {
   const workTimeRanges = normalizeWorkTimeRanges(dto.workTimeRanges);
-  // OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
-  // もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
-  const providerForDisplay =
-    dto.aiProvider === "openai" ? "mock" : dto.aiProvider;
+  const providerForDisplay = providerForSelect(dto.aiProvider);
 
   return {
     ...base,
@@ -343,8 +355,8 @@ const buildDtoForSave = (
 // 比較は「保存したら書かれる DTO」同士で行う。保存済み DTO も一度画面状態へ写してから
 // 保存と同じ正規化（通知時間帯・解説レベル・ジャンル既定値など）を通すため、
 // 読み込んだだけで「未保存」になる誤表示を防ぐ。
-// ただし aiProvider だけは保存値そのものと比べる。選択肢から外した openai は画面上 MockProvider と
-// 表示され、保存すると mock へ書き換わるため、ファイルとずれている事実を「未保存」として示す。
+// ただし aiProvider だけは保存値そのものと比べる（未選択で表示する unknown / openai は、選び直さない限り
+// 受け取った値をそのまま送り返すため、読み込んだだけでは「未保存」にならない）。
 const toComparableDto = (dto: UserSettingsDto): UserSettingsDto => ({
   ...dto,
   // ジャンルは選択の順序に意味が無いため、付け外しで順序だけ変わっても変更なしとみなす。
@@ -393,6 +405,8 @@ const aiProviderShortLabel = (
       return "開発・デモ用";
     case "openai":
       return "未対応のAI";
+    case "unknown":
+      return "読み取れない設定";
     default:
       return null;
   }
@@ -956,13 +970,12 @@ export default function SettingsScreen({
   };
 
   const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
-  // 接続テストは保存済みの Provider を確かめる。保存済みの openai は画面上 mock と表示するため、比較も同じ扱いにする。
+  // 接続テストは保存済みの Provider を確かめる。未選択で表示する unknown / openai は、比較も同じ扱いにする。
   const savedAiProvider = backendSettings?.aiProvider ?? null;
   const savedAiProviderLabel = aiProviderShortLabel(savedAiProvider);
   const isAiProviderSelectionUnsaved =
     savedAiProvider !== null &&
-    settings.ai.provider !==
-      (savedAiProvider === "openai" ? "mock" : savedAiProvider);
+    settings.ai.provider !== providerForSelect(savedAiProvider);
 
   // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
   // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
@@ -1461,7 +1474,7 @@ export default function SettingsScreen({
                       }}
                     >
                       <SelectTrigger className="w-72 max-w-full">
-                        <SelectValue />
+                        <SelectValue placeholder="未選択" />
                       </SelectTrigger>
                       <SelectContent>
                         {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
@@ -1469,7 +1482,7 @@ export default function SettingsScreen({
                             保存値（value）は従来のまま変えない。 */}
                         <SelectItem value="local">ローカル（おすすめ）</SelectItem>
                         <SelectItem value="gemini">Gemini（APIキーが必要）</SelectItem>
-                        {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
+                        {/* OpenAI は選択肢から外した。保存済みの openai は未選択で表示する（Mock に見せない）。 */}
                         <SelectItem value="mock">開発・デモ用（本物のAIは使いません）</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1482,6 +1495,16 @@ export default function SettingsScreen({
                       data-testid="mock-provider-note"
                     >
                       いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。
+                    </p>
+                  )}
+                  {/* 保存値が読み取れない（手編集・新しい版の値・未実装の openai）ときは未選択で表示し、AIを使わないことと選び直しを案内する。
+                      読み込み中・読み込み失敗（保存値をまだ受け取っていない）ときは未選択でも出さない。 */}
+                  {settings.ai.provider === "" && backendSettings !== null && (
+                    <p
+                      className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-2 my-2 leading-relaxed"
+                      data-testid="unknown-provider-note"
+                    >
+                      保存されているAIの設定が読み取れないから、いまはAIを使えないよ。使うAIを選んで保存してね。
                     </p>
                   )}
                   {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}

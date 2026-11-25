@@ -580,7 +580,7 @@ impl BusyCause {
 enum OffReason {
     /// 設定 `ai.autoSummaryEnabled` が無効。
     DisabledInSettings,
-    /// AI プロバイダが実AI（Gemini・ローカル）ではない（Mock・未実装の openai）。
+    /// AI プロバイダが実AI（Gemini・ローカル）ではない（Mock・未実装の openai・読み取れない保存値）。
     NotRealAi(AiProvider),
     /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている・モデルをまだ取得していない）。
     AiNotReady(AiProvider),
@@ -1126,6 +1126,8 @@ fn status_kind_for(
     if let Some(reason) = auto_summary_off_reason(settings, ai_ready) {
         return match reason {
             OffReason::DisabledInSettings => AutoSummaryStatusKind::DisabledInSettings,
+            // 読み取れない保存値は「開発・デモ用」ではないため、その案内（NotRealAi）を出さず「判定できない」にする。
+            OffReason::NotRealAi(AiProvider::Unknown) => AutoSummaryStatusKind::Unknown,
             OffReason::NotRealAi(_) => AutoSummaryStatusKind::NotRealAi,
             OffReason::AiNotReady(AiProvider::Local) => AutoSummaryStatusKind::LocalAiNotReady,
             OffReason::AiNotReady(_) => AutoSummaryStatusKind::GeminiNotReady,
@@ -2354,6 +2356,11 @@ mod tests {
             auto_summary_off_reason(&settings_with(true, "mock", 10), with_key),
             Some(OffReason::NotRealAi(AiProvider::Mock))
         );
+        // 読み取れない保存値（手編集など）は Mock 扱いにせず、実AIではないとして動かさない。
+        assert_eq!(
+            auto_summary_off_reason(&settings_with(true, "future_ai", 10), with_key),
+            Some(OffReason::NotRealAi(AiProvider::Unknown))
+        );
         assert_eq!(
             auto_summary_off_reason(&settings_with(true, "local", 10), without_key),
             Some(OffReason::AiNotReady(AiProvider::Local))
@@ -2751,6 +2758,11 @@ mod tests {
         assert_eq!(
             status_kind_for(&settings_with(true, "mock", 10), with_key, false, None),
             K::NotRealAi
+        );
+        // 読み取れない保存値には「開発・デモ用」の案内を出さない（判定できない扱い）。
+        assert_eq!(
+            status_kind_for(&settings_with(true, "future_ai", 10), with_key, false, None),
+            K::Unknown
         );
         assert_eq!(
             status_kind_for(&local, without_key, false, paused_game),
