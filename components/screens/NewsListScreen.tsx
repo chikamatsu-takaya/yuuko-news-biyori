@@ -205,7 +205,7 @@ function TodayArticleCard({
 
 // 0件のときの案内から行ける画面（既存の画面遷移の id）。
 const GUIDE_LINKS = [
-  { id: "home", label: "ホームで更新する" },
+  { id: "home", label: "ホームへ戻る" },
   { id: "history", label: "ニュース履歴を見る" },
   { id: "past-news", label: "過去ニュースを見る" },
 ] as const;

@@ -830,6 +830,21 @@ for (const viewport of SMALL_WINDOWS) {
   });
 }
 
+// ゆうこ辞書: 「並び替え：」のラベルは既定ウィンドウ（800×600）でも途中で折り返さず 1 行で出ること。
+test("dictionary sort label @ 800x600: stays on one line", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await SCREENS.find((s) => s.id === "dictionary")!.open(page);
+  const label = page.getByText("並び替え：", { exact: true });
+  await expect(label).toBeVisible();
+  const lines = await label.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    // 行ごとに矩形が分かれるため、文字の矩形の上端が 1 種類なら 1 行。
+    return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
+  });
+  expect(lines).toBe(1);
+});
+
 // ガチャ: 引けないときの理由は、既定ウィンドウ（800×600）ではスクロールせずにボタンのそばに見えること。
 // 最小ウィンドウ（800×440）では画面の高さが足りないため、縦スクロールで届けばよい。
 for (const viewport of SMALL_WINDOWS) {

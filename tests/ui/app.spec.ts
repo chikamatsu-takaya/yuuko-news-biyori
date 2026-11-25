@@ -1549,7 +1549,7 @@ test("today-news list with 0 items guides to update on home, history and past ne
   await expect(page.getByRole("heading", { name: "過去ニュース", exact: true })).toBeVisible();
 
   await openTodayNewsList(page);
-  await page.getByTestId("news-list-empty-guide").getByRole("button", { name: "ホームで更新する" }).click();
+  await page.getByTestId("news-list-empty-guide").getByRole("button", { name: "ホームへ戻る" }).click();
   await expect(page.getByRole("heading", { name: "今日のおすすめニュース" })).toBeVisible();
 });
 
