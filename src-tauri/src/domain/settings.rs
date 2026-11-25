@@ -43,6 +43,10 @@ pub enum AiProvider {
     Gemini,
     Openai,
     Local,
+    /// 保存値が既知のどれでもない（手編集・新しい版で保存した値など。2026-11-25 藤井）。
+    /// Mock として動かすと本物のAIの結果に見えてしまうため、要約・用語解説は AI_UNAVAILABLE で返し、
+    /// 自動要約も動かさない。保存値そのものは `ai.provider` に残し、ほかの設定の保存では書き換えない。
+    Unknown,
 }
 
 impl AiProvider {
@@ -52,7 +56,7 @@ impl AiProvider {
             "gemini" => Self::Gemini,
             "openai" => Self::Openai,
             "local" => Self::Local,
-            _ => Self::Mock,
+            _ => Self::Unknown,
         }
     }
 
@@ -62,6 +66,8 @@ impl AiProvider {
             Self::Gemini => "gemini",
             Self::Openai => "openai",
             Self::Local => "local",
+            // 保存には使わない（`apply_from_dto` は Unknown のとき保存値を残す）。DTO の表記と揃えるためだけの値。
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -294,9 +300,9 @@ impl PersistedSettings {
     /// 気になったものをすぐ要約したい想定のため。D103 当初の「有効」から変更）。
     ///
     /// `Default` とは分けている。`Default` は既存の settings.json に欄が無いときの読み込み値
-    /// （serde の `#[serde(default)]`）でもあるため、そこを変えると、欄の無い旧ファイルの利用者まで
-    /// 黙って Mock → ローカルに切り替わってしまう。既存ファイルの値（欄が無い場合を含む）は
-    /// 従来どおり `mock` / 自動要約無効として読み、新しく作る設定だけをこの初期値にする。
+    /// （serde の `#[serde(default)]`）でもある。AI プロバイダは欄が無ければローカルとして読む
+    /// （`AiSettings::default`。起動時に一度だけ書き戻す。2026-11-25 藤井）が、自動要約などほかの欄は
+    /// 従来どおり旧既定のまま読み、黙って変えない。
     pub fn initial() -> Self {
         let mut settings = Self::default();
         settings.ai.provider = AiProvider::Local.as_storage().to_string();
@@ -369,7 +375,11 @@ impl PersistedSettings {
                 end: dto.notify_end_time.clone(),
             }],
         };
-        self.ai.provider = dto.ai_provider.as_storage().to_string();
+        // 読み取れない保存値（Unknown）のまま送り返されたときは、保存値をそのまま残す
+        // （ほかの設定を保存しただけで、手編集・新しい版の値を黙って書き換えないため）。
+        if dto.ai_provider != AiProvider::Unknown {
+            self.ai.provider = dto.ai_provider.as_storage().to_string();
+        }
         self.ai.auto_summary_enabled = dto.auto_summary_enabled;
         self.explanation.level = dto.explanation_level.as_storage().to_string();
         self.ui.theme_id = dto.selected_theme_id;
@@ -510,12 +520,16 @@ pub struct AiSettings {
     pub auto_summary_enabled: bool,
 }
 
-/// 既存の settings.json に欄が無いときの読み込み値（旧既定のまま）。新規作成の初期値は
+/// 既存の settings.json に欄が無いときの読み込み値。新規作成の初期値は
 /// `PersistedSettings::initial`（ローカル・自動要約無効）。
+/// AI プロバイダの欄が無い旧ファイル・設定ファイルが無いときはローカルとして扱う（2026-11-25 藤井）。
+/// 以前は mock だったが、Mock は明示的に選んだときだけにする方針（PR #432）のため、欄の欠落で Mock にしない。
+/// 欄が無かったファイルは起動時に一度だけローカルとして書き戻す（`SettingsRepository::migrate_missing_ai_provider`）。
+/// 明示的に保存された "mock" はそのまま Mock として読む。
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
-            provider: "mock".to_string(),
+            provider: "local".to_string(),
             allow_free_tier: true,
             send_minimized_text_only: true,
             auto_summary_enabled: false,
@@ -665,16 +679,22 @@ mod tests {
 
     #[test]
     fn existing_files_keep_their_ai_values_even_when_fields_are_missing() {
-        // 既存ファイルで欄が無いときは旧既定（mock・自動要約無効）として読み、黙って切り替えない。
+        // 既存ファイルで欄が無いとき、AI プロバイダはローカルとして読む（Mock にしない。2026-11-25 藤井）。
+        // 自動要約は旧既定（無効）のまま読み、黙って切り替えない。
         for legacy in [
             r#"{ "version": 1 }"#,
             r#"{ "version": 1, "ai": {} }"#,
             r#"{ "version": 1, "ai": { "allowFreeTier": true } }"#,
         ] {
             let parsed: PersistedSettings = serde_json::from_str(legacy).unwrap();
-            assert_eq!(parsed.ai.provider, "mock", "{legacy}");
+            assert_eq!(parsed.ai.provider, "local", "{legacy}");
+            assert_eq!(parsed.to_dto().ai_provider, AiProvider::Local, "{legacy}");
             assert!(!parsed.ai.auto_summary_enabled, "{legacy}");
         }
+        // 明示的に保存された mock は Mock のまま（欄の欠落とは区別する）。
+        let explicit_mock: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ai": { "provider": "mock" } }"#).unwrap();
+        assert_eq!(explicit_mock.to_dto().ai_provider, AiProvider::Mock);
         // 保存済みの値はそのまま読む（新規の既定が無効になっても、有効で保存済みの利用者は有効のまま）。
         let saved: PersistedSettings = serde_json::from_str(
             r#"{ "version": 1, "ai": { "provider": "gemini", "autoSummaryEnabled": false } }"#,
@@ -687,6 +707,39 @@ mod tests {
         )
         .unwrap();
         assert!(saved_on.ai.auto_summary_enabled);
+    }
+
+    #[test]
+    fn unknown_ai_provider_is_not_treated_as_mock_and_is_kept_on_save() {
+        // 既知でない保存値（手編集・新しい版の値）は Mock にせず Unknown として画面へ渡す（2026-11-25 藤井）。
+        for raw in ["claude", "MOCK", "", "unknown"] {
+            assert_eq!(
+                AiProvider::from_storage(raw),
+                AiProvider::Unknown,
+                "{raw:?}"
+            );
+        }
+        let mut settings: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ai": { "provider": "future_ai" } }"#).unwrap();
+        let dto = settings.to_dto();
+        assert_eq!(dto.ai_provider, AiProvider::Unknown);
+        assert_eq!(serde_json::to_value(&dto).unwrap()["aiProvider"], "unknown");
+
+        // 画面が Unknown のまま送り返しても（ほかの設定だけ変えた保存）、保存値は書き換えない。
+        settings.apply_from_dto(UserSettingsDto {
+            max_daily_recommendations: 5,
+            ..dto
+        });
+        assert_eq!(settings.ai.provider, "future_ai");
+        assert_eq!(settings.news.max_daily_recommendations, 5);
+
+        // 利用者が選び直したときは、その値で上書きする。
+        let chosen = UserSettingsDto {
+            ai_provider: AiProvider::Local,
+            ..settings.to_dto()
+        };
+        settings.apply_from_dto(chosen);
+        assert_eq!(settings.ai.provider, "local");
     }
 
     #[test]

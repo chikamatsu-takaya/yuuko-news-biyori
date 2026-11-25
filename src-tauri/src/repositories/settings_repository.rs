@@ -58,6 +58,28 @@ impl SettingsRepository {
         Ok(settings)
     }
 
+    /// AI プロバイダの欄（`ai.provider`）が無い旧形式の設定ファイルを、ローカルとして書き戻す（一度だけの移行）。
+    /// 欄が無いときの読み込み値は `AiSettings::default` でローカルになっているので、読んだ値をそのまま保存すれば
+    /// 「ローカル」がファイルに明記される（2026-11-25 藤井）。欄の有無は生の JSON で確かめ、明示的な
+    /// "mock" や未知の値（手編集など）は書き換えない。書き戻した場合だけ true。
+    /// ファイルが無いときは何もしない（新規作成は `SettingsService::initialize_default_if_missing`）。
+    /// 呼び出し側が `lock_updates` を取ってから呼ぶ。
+    pub fn migrate_missing_ai_provider(&self) -> Result<bool, AppError> {
+        let Some(raw) = atomic_file::read_if_exists(&self.settings_path)? else {
+            return Ok(false);
+        };
+        let raw = String::from_utf8(raw)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let value: serde_json::Value = serde_json::from_str(crate::util::strip_utf8_bom(&raw))?;
+        if value.get("ai").and_then(|ai| ai.get("provider")).is_some() {
+            return Ok(false);
+        }
+        let mut settings = serde_json::from_value::<PersistedSettings>(value)?;
+        settings.normalize_after_load();
+        self.save(&settings)?;
+        Ok(true)
+    }
+
     pub fn exists(&self) -> bool {
         self.settings_path.exists()
     }
@@ -249,5 +271,30 @@ mod tests {
         assert_eq!(loaded.notification.work_time_ranges[0].end, "12:00");
         assert_eq!(loaded.notification.work_time_ranges[1].start, "13:00");
         assert_eq!(loaded.notification.work_time_ranges[1].end, "18:00");
+    }
+
+    #[test]
+    fn missing_settings_file_loads_ai_provider_as_local() {
+        // 設定ファイルが無いときの読み込み値も Mock にしない（2026-11-25 藤井）。
+        let path = unique_settings_path();
+        let repo = SettingsRepository::with_path(path.clone());
+        let loaded = repo.load_or_default().unwrap();
+        assert_eq!(loaded.ai.provider, "local");
+        // ファイルが無ければ移行も何もしない（新規作成は起動時の初期化が行う）。
+        assert!(!repo.migrate_missing_ai_provider().unwrap());
+        assert!(!path.exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migrate_missing_ai_provider_tolerates_utf8_bom_and_runs_once() {
+        let path = unique_settings_path();
+        std::fs::write(&path, "\u{feff}{ \"version\": 1, \"ai\": {} }").unwrap();
+        let repo = SettingsRepository::with_path(path.clone());
+        assert!(repo.migrate_missing_ai_provider().unwrap());
+        assert_eq!(repo.load_or_default().unwrap().ai.provider, "local");
+        // 2回目は欄があるので書き戻さない。
+        assert!(!repo.migrate_missing_ai_provider().unwrap());
+        cleanup(&path);
     }
 }

@@ -231,11 +231,19 @@ mod tests {
 
     #[test]
     fn connection_test_returns_some_provider_on_success() {
-        // 設定ファイルが無ければ既定（provider=mock）で読み込め、Some(provider) の通常結果になる。
-        let settings_path = temp_path("missing_settings.json");
-        let settings_service = SettingsService::new(SettingsRepository::with_path(settings_path));
+        // 設定を読めれば Some(provider) の通常結果になる。Mock を明示的に選んだ設定で確かめる
+        // （設定ファイルが無いときの既定はローカルで、同梱AIの起動を伴うため）。
+        let settings_path = temp_path("mock_settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{ "version": 1, "ai": { "provider": "mock" } }"#,
+        )
+        .unwrap();
+        let settings_service =
+            SettingsService::new(SettingsRepository::with_path(settings_path.clone()));
 
         let result = run_ai_provider_connection_test(&settings_service, &ai_service());
+        let _ = std::fs::remove_file(&settings_path);
         assert_eq!(result.provider, Some(AiProvider::Mock));
         assert_eq!(result.checked_provider, Some(AiProvider::Mock));
         assert_eq!(result.status, AiProviderConnectionStatus::Available);

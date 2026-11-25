@@ -188,12 +188,13 @@ impl AiProviderService {
 
     /// 実AIを呼べる見込みがあるかの安い確認（自動要約の可否判定用・判断台帳 D56 / D103）。
     /// AI を呼ばず、ローカルLLMも起動しない。Gemini はキーの有無（値は扱わない）、
-    /// ローカルは同梱物の有無と大きさだけを見る。Mock・未実装の openai は実AIではないので false。
+    /// ローカルは同梱物の有無と大きさだけを見る。Mock・未実装の openai・読み取れない保存値（Unknown）は
+    /// 実AIではないので false。
     pub fn is_real_ai_ready(&self, provider: AiProvider) -> bool {
         match provider {
             AiProvider::Gemini => is_gemini_key_configured(),
             AiProvider::Local => self.local_llm.is_bundle_present(),
-            AiProvider::Mock | AiProvider::Openai => false,
+            AiProvider::Mock | AiProvider::Openai | AiProvider::Unknown => false,
         }
     }
 
@@ -245,6 +246,12 @@ impl AiProviderService {
             }
             // ローカル: 同梱の llama-server で生成する。失敗は固定分類で返し、Mock へは切り替えない。
             AiProvider::Local => self.request_local(request, explanation_level),
+            // 読み取れない保存値（手編集・新しい版の値）。どの AI を使うか分からないので呼ばず、
+            // Mock の文面も返さない（2026-11-25 藤井）。保存値はログに出さない（手編集の任意文字列のため）。
+            AiProvider::Unknown => {
+                log::info!("the saved AI provider is not recognized; the AI request was not made");
+                Err(AppError::AiUnavailable)
+            }
         }
     }
 
@@ -336,7 +343,8 @@ impl AiProviderService {
                 }
                 result
             }
-            AiProvider::Openai => {
+            // 読み取れない保存値も、どの AI か分からないため未対応として返す（外部通信はしない）。
+            AiProvider::Openai | AiProvider::Unknown => {
                 log::info!("test_ai_provider: provider is not implemented");
                 not_implemented_result(provider)
             }
@@ -2244,6 +2252,26 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, AppError::AiUnavailable), "{error:?}");
+    }
+
+    #[test]
+    fn unrecognized_provider_returns_ai_unavailable_and_is_not_ready() {
+        // 読み取れない保存値（手編集・新しい版の値）は Mock にせず AI_UNAVAILABLE（2026-11-25 藤井）。
+        let service = service();
+        for prompt_id in [SUMMARY_PROMPT_ID, TERM_EXPLANATION_PROMPT_ID] {
+            let error = service
+                .request_text(
+                    request_for(prompt_id, "本文"),
+                    AiProvider::Unknown,
+                    ExplanationLevel::Normal,
+                )
+                .unwrap_err();
+            assert!(matches!(error, AppError::AiUnavailable), "{error:?}");
+        }
+        assert!(!service.is_real_ai_ready(AiProvider::Unknown));
+        let result = service.test_connection(AiProvider::Unknown);
+        assert_eq!(result.status, AiProviderConnectionStatus::NotImplemented);
+        assert_eq!(result.checked_provider, Some(AiProvider::Unknown));
     }
 
     #[test]

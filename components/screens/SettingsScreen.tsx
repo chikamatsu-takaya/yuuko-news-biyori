@@ -251,15 +251,23 @@ const labelToExplanationLevel = (label: string): ExplanationLevel => {
   }
 };
 
+// 保存済みの Provider を選択欄の値へ写す。
+// OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
+// もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
+// 読み取れない保存値（"unknown"）は Mock として動かないため、Mock を選んでいるように見せず未選択（""）にする
+// （2026-11-25 藤井）。未選択のまま保存すると buildDtoForSave が "unknown" を送り返し、Rust は保存値を残す。
+const providerForSelect = (provider: string): string => {
+  if (provider === "openai") return "mock";
+  if (provider === "unknown") return "";
+  return provider;
+};
+
 const mapSettingsFromDto = (
   base: SettingsState,
   dto: UserSettingsDto
 ): SettingsState => {
   const workTimeRanges = normalizeWorkTimeRanges(dto.workTimeRanges);
-  // OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
-  // もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
-  const providerForDisplay =
-    dto.aiProvider === "openai" ? "mock" : dto.aiProvider;
+  const providerForDisplay = providerForSelect(dto.aiProvider);
 
   return {
     ...base,
@@ -393,6 +401,8 @@ const aiProviderShortLabel = (
       return "開発・デモ用";
     case "openai":
       return "未対応のAI";
+    case "unknown":
+      return "読み取れない設定";
     default:
       return null;
   }
@@ -961,8 +971,7 @@ export default function SettingsScreen({
   const savedAiProviderLabel = aiProviderShortLabel(savedAiProvider);
   const isAiProviderSelectionUnsaved =
     savedAiProvider !== null &&
-    settings.ai.provider !==
-      (savedAiProvider === "openai" ? "mock" : savedAiProvider);
+    settings.ai.provider !== providerForSelect(savedAiProvider);
 
   // 未保存の変更があるあいだは、非表示待機が続いてもメインウィンドウを破棄しないよう Rust へ知らせる（D133）。
   // 変更なしに戻ったとき・画面を離れたときは cleanup で解除する。送れなくても画面操作は止めない。
@@ -1461,7 +1470,7 @@ export default function SettingsScreen({
                       }}
                     >
                       <SelectTrigger className="w-72 max-w-full">
-                        <SelectValue />
+                        <SelectValue placeholder="未選択" />
                       </SelectTrigger>
                       <SelectContent>
                         {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
@@ -1482,6 +1491,15 @@ export default function SettingsScreen({
                       data-testid="mock-provider-note"
                     >
                       いまは開発・デモ用の設定だよ。本物のAIは使わないの。要約は記事の先頭を少し抜き出しただけで、解説やゆうこの一言は決まった文だよ。ふだん使うなら「ローカル（おすすめ）」に切り替えて保存してね。
+                    </p>
+                  )}
+                  {/* 保存値が読み取れない（手編集・新しい版の値）ときは未選択で表示し、AIを使わないことと選び直しを案内する。 */}
+                  {settings.ai.provider === "" && (
+                    <p
+                      className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-2 my-2 leading-relaxed"
+                      data-testid="unknown-provider-note"
+                    >
+                      保存されているAIの設定が読み取れないから、いまはAIを使えないよ。使うAIを選んで保存してね。
                     </p>
                   )}
                   {/* ローカルは初回の起動・モデル照合に時間がかかるため、待ち時間があることを先に伝える。 */}
