@@ -1081,9 +1081,14 @@ export default function NewsHistoryScreen({
           <span>お知らせ</span>
           <span className="mx-1" aria-hidden="true">|</span>
           <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">●</span>
-          <span>
-            {visibleHistoryItems.length}件を表示中 / 保存済み履歴
-            {historyItems.length}件
+          {/* 読み込み中・読込失敗時に「0件」を出すと履歴が消えたように見えるため、件数は読み込みに成功したときだけ出す。
+              お気に入り・取り出しの個別失敗では一覧は残っているので件数を出す。 */}
+          <span data-testid="history-status-count">
+            {isLoading
+              ? "読み込み中..."
+              : loadNoticeKind === "error"
+                ? "履歴を読み込めませんでした"
+                : `${visibleHistoryItems.length}件を表示中 / 保存済み履歴${historyItems.length}件`}
           </span>
         </div>
         {/* ヘルプ画面は未実装のため、押しても何も起きないヘルプボタンは置かない。 */}

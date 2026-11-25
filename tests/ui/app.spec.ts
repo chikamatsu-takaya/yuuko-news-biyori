@@ -1527,6 +1527,49 @@ test("today-news list shows the empty state (no crash, no cards) when nothing wa
   ).toHaveCount(0);
 });
 
+test("today-news list with 0 items guides to update on home, history and past news", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_EMPTY__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  // 次にできること（ホームの「ニュースを更新」・履歴・過去ニュース）を案内し、各ボタンは既存の画面へ移る。
+  const guide = page.getByTestId("news-list-empty-guide");
+  await expect(guide).toContainText("ニュースを更新");
+  await guide.getByRole("button", { name: "ニュース履歴を見る" }).click();
+  await expect(page.getByRole("heading", { name: "ニュース履歴" }).first()).toBeVisible();
+
+  await openTodayNewsList(page);
+  await page.getByTestId("news-list-empty-guide").getByRole("button", { name: "過去ニュースを見る" }).click();
+  await expect(page.getByRole("heading", { name: "過去ニュース", exact: true })).toBeVisible();
+
+  await openTodayNewsList(page);
+  await page.getByTestId("news-list-empty-guide").getByRole("button", { name: "ホームで更新する" }).click();
+  await expect(page.getByRole("heading", { name: "今日のおすすめニュース" })).toBeVisible();
+});
+
+test("today-news list does not show the empty guide or 0件 when loading fails", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_HISTORY_RETRY_MODE__ = true;
+    (window as any).__E2E_HISTORY_FAIL__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await openTodayNewsList(page);
+
+  await expect(page.getByRole("button", { name: "再試行" })).toBeVisible();
+  await expect(page.getByTestId("news-list-empty-guide")).toHaveCount(0);
+  await expect(page.getByText(/0件/)).toHaveCount(0);
+});
+
 test("today-news list shows a safe error and recovers after 再試行", async ({
   page,
 }) => {
@@ -1687,6 +1730,93 @@ const openDictionary = async (page: Page) => {
     page.getByRole("heading", { name: "ゆうこ辞書" }).first()
   ).toBeVisible();
 };
+
+// 読み込み中・読込失敗のときに「0件」を出すと、履歴や辞書が消えたように見える（件数は成功時だけ出す）。
+test("news history shows loading instead of 0件 and keeps 0件 hidden when loading fails", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_HISTORY_LOAD_GATE__ = new Promise<void>((resolve) => {
+      w.__E2E_RELEASE_HISTORY_LOAD__ = resolve;
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュース履歴", exact: true })
+    .click();
+  const status = page.getByTestId("history-status-count");
+  await expect(status).toHaveText("読み込み中...");
+  await expect(page.getByText("ニュース履歴を読み込んでいます...")).toBeVisible();
+
+  // 読込失敗: お知らせ＋再試行を出し、件数（0件）は出さない。
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_HISTORY_RETRY_MODE__ = true;
+    w.__E2E_HISTORY_FAIL__ = true;
+    w.__E2E_RELEASE_HISTORY_LOAD__();
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await expect(page.getByRole("button", { name: "再試行" })).toBeVisible();
+  await expect(status).toHaveText("履歴を読み込めませんでした");
+  await expect(page.getByText(/0件/)).toHaveCount(0);
+
+  // 再試行で読めたら件数を出す。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_HISTORY_FAIL__ = false;
+  });
+  await page.getByRole("button", { name: "再試行" }).click();
+  await expect(status).toHaveText("1件を表示中 / 保存済み履歴1件");
+});
+
+test("news history shows 0件 only after a successful empty load", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_HISTORY_EMPTY__ = true;
+  });
+  await openNewsHistory(page);
+  await expect(page.getByTestId("history-status-count")).toHaveText(
+    "0件を表示中 / 保存済み履歴0件"
+  );
+});
+
+test("dictionary shows loading instead of 全 0 件 and hides the count when loading fails", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_DICTIONARY_LOAD_GATE__ = new Promise<void>((resolve) => {
+      w.__E2E_RELEASE_DICTIONARY_LOAD__ = resolve;
+    });
+    w.__E2E_DICTIONARY_LOAD_FAIL__ = true;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openDictionary(page);
+  await expect(page.getByText("辞書一覧を読み込んでいます...")).toBeVisible();
+  await expect(page.getByText(/全 0 件/)).toHaveCount(0);
+
+  await page.evaluate(() => {
+    (window as unknown as { __E2E_RELEASE_DICTIONARY_LOAD__: () => void }).__E2E_RELEASE_DICTIONARY_LOAD__();
+  });
+  const retry = page.getByRole("button", { name: "再試行" });
+  await expect(retry).toBeVisible();
+  await expect(page.getByText(/全 0 件/)).toHaveCount(0);
+  await expect(page.getByText(/0件/)).toHaveCount(0);
+  // 生エラー・内部パスは出さない。
+  await expect(page.getByText("/internal/secret/path")).toHaveCount(0);
+
+  // 再試行で読めたら件数を出す。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__E2E_DICTIONARY_LOAD_FAIL__ = false;
+  });
+  await retry.click();
+  await expect(page.getByText(/^全 \d+ 件/)).toBeVisible();
+});
 
 test("dictionary shows the empty-dictionary state when there are no entries", async ({
   page,
@@ -10898,6 +11028,11 @@ async function installTauriMocks(page: Page) {
             const historyWin = window as any;
             /* eslint-enable @typescript-eslint/no-explicit-any */
 
+            // 読み込み中の表示テスト用: テスト側が解決するまで応答を止める。
+            if (historyWin.__E2E_HISTORY_LOAD_GATE__) {
+              await historyWin.__E2E_HISTORY_LOAD_GATE__;
+            }
+
             // お気に入り切替テスト用: 登録済み2件＋未登録1件。「お気に入り」フィルタ時は登録済みだけ返す。
             if (historyWin.__E2E_HISTORY_FAVORITES__) {
               const items = [
@@ -11751,6 +11886,14 @@ async function installTauriMocks(page: Page) {
                 .filter((entry) => !params.type || entry.type === params.type)
                 .filter((entry) => params.starredOnly !== true || entry.isStarred)
                 .map((entry) => ({ ...entry }));
+            }
+            // 読み込み中の表示テスト用: テスト側が解決するまで応答を止める。
+            if ((window as any).__E2E_DICTIONARY_LOAD_GATE__) {
+              await (window as any).__E2E_DICTIONARY_LOAD_GATE__;
+            }
+            // 読込失敗の表示テスト用: フラグが true の間は本番と同じ失敗形式（reject）。
+            if ((window as any).__E2E_DICTIONARY_LOAD_FAIL__) {
+              throw new Error("E2E raw failure /internal/secret/path");
             }
             // 辞書が空の状態を再現する（空状態と検索結果なしの区別の検証用）。
             if ((window as any).__E2E_DICTIONARY_EMPTY__) {

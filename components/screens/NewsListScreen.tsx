@@ -203,6 +203,13 @@ function TodayArticleCard({
   );
 }
 
+// 0件のときの案内から行ける画面（既存の画面遷移の id）。
+const GUIDE_LINKS = [
+  { id: "home", label: "ホームで更新する" },
+  { id: "history", label: "ニュース履歴を見る" },
+  { id: "past-news", label: "過去ニュースを見る" },
+] as const;
+
 export default function NewsListScreen({
   onNavigate,
   onOpenArticle,
@@ -351,7 +358,8 @@ export default function NewsListScreen({
             <h1 className="text-xl font-bold text-foreground">
               本日取得したニュース
             </h1>
-            {!isLoading && (
+            {/* 読込失敗時に「0件」を出すと記事が消えたように見えるため、件数は成功時だけ出す。 */}
+            {!isLoading && loadNoticeKind !== "error" && (
               <Badge className="bg-[var(--yuuko-green)] text-white border-0 text-xs">
                 {articles.length}件
               </Badge>
@@ -393,6 +401,32 @@ export default function NewsListScreen({
             </Alert>
           )}
 
+          {/* 0件のときに行き止まりにならないよう、次にできることを案内する。
+              取得はホームの「ニュースを更新」が担うため、ここでは既存の画面遷移だけを使い、新しい処理は持たない。 */}
+          {!isLoading && loadNoticeKind === "empty" && onNavigate && (
+            <div
+              data-testid="news-list-empty-guide"
+              className="mb-4 rounded-lg border border-dashed border-[var(--yuuko-green)]/40 bg-white p-3 text-xs text-muted-foreground"
+            >
+              <p className="mb-2 leading-relaxed">
+                ホームの「ニュースを更新」で新しいニュースを取りに行けるよ。前に取得したニュースは、ニュース履歴や過去ニュースで見られるよ。
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {GUIDE_LINKS.map((link) => (
+                  <Button
+                    key={link.id}
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-3 text-[11px] border-[var(--yuuko-green)]/30 text-[var(--yuuko-green-text)] hover:bg-[var(--yuuko-green-light)]"
+                    onClick={() => handleNavigate(link.id)}
+                  >
+                    {link.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* List */}
           <div className="flex-1 overflow-y-auto space-y-2 pr-1">
             {isLoading ? (
@@ -427,7 +461,9 @@ export default function NewsListScreen({
         <span>
           {isLoading
             ? "読み込み中..."
-            : `今日取得したニュース ${articles.length}件`}
+            : loadNoticeKind === "error"
+              ? "今日のニュースを読み込めませんでした"
+              : `今日取得したニュース ${articles.length}件`}
         </span>
         <span className="text-[var(--yuuko-green-text)]" aria-hidden="true">
           🐾

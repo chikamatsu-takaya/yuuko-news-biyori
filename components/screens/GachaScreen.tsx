@@ -638,8 +638,9 @@ export default function GachaScreen({
             <div
               className="flex flex-col lg:grid lg:grid-cols-[minmax(420px,1fr)_280px] gap-4 h-full lg:min-w-[720px]"
             >
-              {/* Center: Gacha Animation Area */}
-              <Card className="overflow-hidden relative h-full min-h-[420px]">
+              {/* Center: Gacha Animation Area（最低の高さは既定ウィンドウ 800×600 の表示域に収まる 360px にする。
+                  以前の 420px では枠が表示域より下へはみ出し、枠の下端に置いた案内が見えなかったため） */}
+              <Card className="overflow-hidden relative h-full min-h-[360px]">
                 <div className="absolute inset-0 bg-gradient-to-b from-[#E8F4EA] to-[#F5EFE0]">
                   {/* Background decorations（文字を含まない装飾なので、ハイコントラストでも元の配色で描く・D148） */}
                   <div className="absolute inset-0 overflow-hidden forced-color-adjust-none" aria-hidden="true">
@@ -700,6 +701,18 @@ export default function GachaScreen({
 
                 {/* Gacha Button（1回引く・1個もらえる。かけら不足・コンプリート・抽選中は押せない） */}
                 <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-white via-white/95 to-transparent">
+                  {/* 引けない理由などの案内はボタンのすぐ上に出す。ボタンの下だと既定ウィンドウ（800×600）で
+                      画面の下へはみ出し、押せない理由がスクロールしないと見えなかったため。 */}
+                  {/* ゆうこの足もとに重なるため、文言があるときだけ白い下地を敷いて読みやすくする。 */}
+                  <p
+                    role="status"
+                    className={`mx-auto mb-2 min-h-4 w-fit max-w-full rounded-md px-2 text-center text-xs text-muted-foreground ${
+                      statusMessage ? "bg-white/90" : ""
+                    }`}
+                    data-testid="gacha-status-message"
+                  >
+                    {statusMessage}
+                  </p>
                   <div className="flex items-center justify-center">
                     <Button
                       className="h-16 px-10 text-lg font-bold rounded-xl bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white shadow-lg"
@@ -718,13 +731,6 @@ export default function GachaScreen({
                       </span>
                     </Button>
                   </div>
-                  <p
-                    role="status"
-                    className="mt-2 min-h-4 text-center text-xs text-muted-foreground"
-                    data-testid="gacha-status-message"
-                  >
-                    {statusMessage}
-                  </p>
                 </div>
               </Card>
 

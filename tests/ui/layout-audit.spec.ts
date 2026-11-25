@@ -775,6 +775,86 @@ for (const viewport of BANNER_VIEWPORTS) {
   }
 }
 
+// 既定ウィンドウ（800×600）と最小ウィンドウ（800×440）での、画面ごとの小さな表示の確認（タスク RZ69KQ）。
+const SMALL_WINDOWS = [
+  { width: 800, height: 600 },
+  { width: 800, height: 440 },
+] as const;
+
+for (const viewport of SMALL_WINDOWS) {
+  const key = `${viewport.width}x${viewport.height}`;
+
+  // カスタマイズのタブ: 横スクロールで右に隠れず、折り返して全部が中央列の幅に収まること。
+  test(`customize tabs @ ${key}: every tab is visible without horizontal scrolling`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await SCREENS.find((s) => s.id === "customize")!.open(page);
+    const tablist = page.getByRole("tablist");
+    const list = await tablist.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth };
+    });
+    expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth + 1);
+    for (const name of ["テーマ", "模様", "呼び名", "飾り", "吹き出し"]) {
+      const tab = page.getByRole("tab", { name, exact: true });
+      expect(await checkReachable(page, tab), `タブ「${name}」`).toBeNull();
+      const box = await tab.boundingBox();
+      expect(box, `タブ「${name}」`).not.toBeNull();
+      expect(box!.x, `タブ「${name}」`).toBeGreaterThanOrEqual(list.left - 1);
+      expect(box!.x + box!.width, `タブ「${name}」`).toBeLessThanOrEqual(list.right + 1);
+    }
+  });
+
+  // 初回の案内: 項目だけがスクロールし、「スキップ」「はじめる」はスクロールせずに見えて押せること。
+  test(`onboarding @ ${key}: footer buttons stay visible and only the items scroll`, async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__LAYOUT_SETTINGS_OVERRIDE__ = { onboardingCompleted: false };
+    });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    const dialog = page.getByRole("dialog", { name: "はじめまして、ゆうこだよ！" });
+    await expect(dialog).toBeVisible();
+    // 開くときの拡大アニメーションが終わってから測る。
+    await page.waitForTimeout(300);
+    const start = dialog.getByRole("button", { name: "はじめる" });
+    const skip = dialog.getByRole("button", { name: "スキップ" });
+    expect(await checkReachable(page, start, true), "はじめる").toBeNull();
+    expect(await checkReachable(page, skip, true), "スキップ").toBeNull();
+
+    const scrollArea = page.getByTestId("onboarding-scroll-area");
+    const before = await start.boundingBox();
+    // 項目の部分を一番下までスクロールしても、ボタンの位置は変わらない（最後の項目にも届く）。
+    await scrollArea.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    await expect(dialog.getByRole("switch", { name: "PC起動時の自動起動" })).toBeInViewport();
+    expect(await start.boundingBox()).toEqual(before);
+    expect(await checkReachable(page, start, true), "スクロール後のはじめる").toBeNull();
+  });
+}
+
+// ガチャ: 引けないときの理由は、既定ウィンドウ（800×600）ではスクロールせずにボタンのそばに見えること。
+// 最小ウィンドウ（800×440）では画面の高さが足りないため、縦スクロールで届けばよい。
+for (const viewport of SMALL_WINDOWS) {
+  const key = `${viewport.width}x${viewport.height}`;
+  const noScroll = viewport.height >= 600;
+  test(`gacha blocked reason @ ${key}: shown next to the draw button${noScroll ? " without scrolling" : ""}`, async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__LAYOUT_GACHA_OVERRIDE__ = { starFragments: 4, canDraw: false };
+    });
+    await page.setViewportSize(viewport);
+    await SCREENS.find((s) => s.id === "gacha")!.open(page);
+    const message = page.getByTestId("gacha-status-message");
+    const button = page.getByRole("button", { name: /まわす/ }).first();
+    await expect(message).toContainText("かけらが足りないよ（あと 6 個）");
+    await expect(button).toBeDisabled();
+    expect(await checkReachable(page, message, noScroll), "引けない理由").toBeNull();
+    expect(await checkReachable(page, button, noScroll), "まわすボタン").toBeNull();
+    // 理由はボタンのすぐ上（間が 24px 以内）にある。
+    const messageBox = (await message.boundingBox())!;
+    const buttonBox = (await button.boundingBox())!;
+    expect(messageBox.y + messageBox.height).toBeLessThanOrEqual(buttonBox.y + 1);
+    expect(buttonBox.y - (messageBox.y + messageBox.height)).toBeLessThanOrEqual(24);
+  });
+}
+
 // 要素を縦スクロールで見える位置へ移し、横方向が画面内に収まり、中心が前面に出ているかを確かめる。
 async function checkReachable(
   page: Page,
@@ -933,6 +1013,8 @@ async function installLayoutMocks(page: Page) {
       { itemId: "theme-002", kind: "theme", name: "よぞら色テーマ", text: null },
     ];
     const owned = new Set(["card-001", "theme-001"]);
+    // 個別の監査（引けないときのガチャ・初回の案内）だけが、addInitScript で置いた
+    // __LAYOUT_GACHA_OVERRIDE__ / __LAYOUT_SETTINGS_OVERRIDE__ で返す値を上書きする。
     const gachaState = {
       starFragments: 30,
       cost: 10,
@@ -949,6 +1031,8 @@ async function installLayoutMocks(page: Page) {
         text: owned.has(m.itemId) ? m.text : null,
       })),
     };
+    // 上書きは beforeEach のモックより後の addInitScript で置かれるため、command が呼ばれた時点で読む。
+    const currentGachaState = () => ({ ...gachaState, ...(w.__LAYOUT_GACHA_OVERRIDE__ ?? {}) });
     const responses: Record<string, (params: Record<string, unknown>) => unknown> = {
       get_recommended_articles: () => [articleSummary],
       list_article_history: () => [historyItem],
@@ -986,6 +1070,7 @@ async function installLayoutMocks(page: Page) {
         aiProvider: "mock",
         maxDailyRecommendations: 10,
         autoSummaryEnabled: false,
+        ...(w.__LAYOUT_SETTINGS_OVERRIDE__ ?? {}),
       }),
       get_autostart_enabled: () => false,
       get_storage_usage: () => ({
@@ -1030,8 +1115,8 @@ async function installLayoutMocks(page: Page) {
           isStarred: false,
         },
       ],
-      get_gacha_state: () => gachaState,
-      mark_gacha_items_seen: () => gachaState,
+      get_gacha_state: () => currentGachaState(),
+      mark_gacha_items_seen: () => currentGachaState(),
       record_friendship_event: () => null,
       get_friendship_state: () => ({
         currentRank: 4,
@@ -1075,3 +1160,4 @@ async function installLayoutMocks(page: Page) {
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 }
+

@@ -920,8 +920,9 @@ export default function DictionaryScreen({
                   <h2 className="text-sm font-semibold text-foreground">
                     登録済みの辞書
                   </h2>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
+                  <div className="flex shrink-0 items-center gap-2">
+                    {/* 狭い幅で「並び替え：」が途中で折り返して読みにくくなるため、ラベルは改行させない。 */}
+                    <span className="whitespace-nowrap text-xs text-muted-foreground">
                       並び替え：
                     </span>
                     <Select
@@ -999,7 +1000,8 @@ export default function DictionaryScreen({
                   </div>
                 ) : null}
 
-                {!isLoading ? (
+                {/* 読込失敗時に「全 0 件」を出すと辞書が消えたように見えるため、成功時だけ件数を出す（失敗時はお知らせ＋再試行）。 */}
+                {!isLoading && loadNoticeKind !== "error" ? (
                   <Pagination
                     currentPage={currentPage}
                     totalPages={totalPages}
