@@ -391,6 +391,14 @@ type AiConnectionTestView = {
   providerLabel: string | null;
 };
 
+// 選択欄の表示名（SelectItem の文言と同じ）。狭い列で末尾が省略されたときに title で全文を見せる。
+// 選択肢に無い値（未選択で表示する unknown / openai）は undefined にして title を出さない。
+const AI_PROVIDER_OPTION_LABELS: Record<string, string> = {
+  local: "ローカル（おすすめ）",
+  gemini: "Gemini（APIキーが必要）",
+  mock: "開発・デモ用（本物のAIは使いません）",
+};
+
 // 接続テストの見出し・案内に出す AI の短い表示名。選択欄の表示名（「ローカル（おすすめ）」など）から
 // 補足を除いたもの。openai は選択肢に無いが、保存済みなら Rust 側は未対応として確かめるため別名にする。
 const aiProviderShortLabel = (
@@ -514,7 +522,9 @@ function SettingRow({
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
       </div>
-      <div>{children}</div>
+      {/* 入力欄が次の行へ折り返したとき、中身の固定幅（w-72 など）で行の幅を超えてカードからはみ出さないよう、
+          行の幅を上限にして縮められるようにする（800×600 で「AIプロバイダー」の選択欄がはみ出していた）。 */}
+      <div className="min-w-0 max-w-full">{children}</div>
     </div>
   );
 }
@@ -580,6 +590,10 @@ export default function SettingsScreen({
   // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
   const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
   const isMigrationImportingRef = React.useRef(false);
+  // 保存の応答待ちか。「保存済み」に戻るのは応答の後なので、それまでボタンが押せたままだと
+  // 続けて押すたびに save_user_settings が重ねて呼ばれていた。state はボタンの無効化、ref は同じ描画内の連打を止める。
+  const [isSaving, setIsSaving] = React.useState(false);
+  const isSavingRef = React.useRef(false);
   // 右サイドバー「ストレージ状況」: 保存データの大きさ（Rust の get_storage_usage）。
   // 画面を開いたときと「最新にする」・データ取り込みの後にだけ読む（常時ポーリングはしない）。
   // preview は Tauri 外（ブラウザでの開発表示）で、実データが無いことを示す。
@@ -831,7 +845,12 @@ export default function SettingsScreen({
   // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
   // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
   const handleToggleAutostart = async (enabled: boolean) => {
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    // 保存中も同じ設定ファイルへ書くため、書き込みが重ならないよう待たせる。
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
     isUpdatingAutostartRef.current = true;
@@ -883,9 +902,15 @@ export default function SettingsScreen({
   const handleSave = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
     // データ取り込み中も、置き換え中の設定ファイルへ書き込まないよう止める。
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
+    isSavingRef.current = true;
+    setIsSaving(true);
     try {
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
@@ -909,6 +934,12 @@ export default function SettingsScreen({
         title: "保存に失敗しちゃった",
         description: "設定の保存ができなかったよ。もう一度試してみてね。",
       });
+    } finally {
+      // 成功・失敗どちらでも解除し、失敗時はもう一度押せるようにする。
+      isSavingRef.current = false;
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -927,7 +958,12 @@ export default function SettingsScreen({
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    // 保存中も、保存の応答後に古い DTO で「保存済み」の基準を上書きしないよう待たせる。
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
     try {
@@ -1081,9 +1117,10 @@ export default function SettingsScreen({
           </nav>
 
           {/* Settings Hint Card */}
-          {/* 高さの低いウィンドウ（最小 800×440）ではヒントカードが設定メニューを押し潰して高さ 0 にするため、
-              高さ 560px 以下では隠してメニューの領域を確保する（800×600 以上の見た目は変えない）。 */}
-          <div className="p-3 [@media(max-height:560px)]:hidden">
+          {/* ヒントカード（約 210px）を出したままだと、起動時の 800×600 では設定メニュー7項目のうち3項目しか見えず、
+              最小 800×440 ではメニューが高さ 0 に押し潰される。7項目がカードと並んで収まるのは高さ 800px 以上なので、
+              それ未満では隠してメニューの領域を確保する（他画面の「ゆうこの一言」カードを 740px 未満で隠すのと同じ考え方）。 */}
+          <div className="p-3 [@media(max-height:799px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-2">
@@ -1114,6 +1151,8 @@ export default function SettingsScreen({
               onClick={() => {
                 setResetDialogOpen(true);
               }}
+              // 保存の応答待ちのあいだは初期化と書き込みが重ならないよう押せない。
+              disabled={isSaving}
             >
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
@@ -1473,7 +1512,14 @@ export default function SettingsScreen({
                         updateAi("provider", v);
                       }}
                     >
-                      <SelectTrigger className="w-72 max-w-full">
+                      {/* 列が狭いと最も長い表示名が入りきらないため、欄は列幅まで縮め、収まらない名前は末尾を省略する。 */}
+                      {/* 共通部品の trigger は値（select-value）を flex にするため、そのままでは末尾の「…」が出ない。
+                          SelectValue の className は描画に渡らないので、trigger 側から値だけ block（important で上書き）＋省略にし、
+                          省略しても全文が分かるよう title に表示名を入れる。 */}
+                      <SelectTrigger
+                        className="w-72 max-w-full min-w-0 *:data-[slot=select-value]:block! *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:truncate"
+                        title={AI_PROVIDER_OPTION_LABELS[settings.ai.provider]}
+                      >
                         <SelectValue placeholder="未選択" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1681,7 +1727,9 @@ export default function SettingsScreen({
                     <div className="flex items-center gap-1.5 mb-3">
                       <span className="text-sm text-foreground">関心のあるジャンル</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {/* 固定の列数だと 800×600 の狭い列で「セキュリティ」などが語の途中で折り返すため、
+                        最も長い名前が1行に収まる幅（7.5rem）を下限に、入るだけの列を並べる。 */}
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-3">
                       {GENRE_OPTIONS.map((genre) => (
                         <div key={genre} className="flex items-center space-x-2">
                           <Checkbox
@@ -1700,7 +1748,7 @@ export default function SettingsScreen({
                           />
                           <label
                             htmlFor={`genre-${genre}`}
-                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                            className="text-sm font-medium leading-none whitespace-nowrap peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                           >
                             {genre}
                           </label>
@@ -1730,6 +1778,7 @@ export default function SettingsScreen({
                 </ImmediateApplyNote>
                 <DataMigrationPanel
                   onImportingChange={handleMigrationImportingChange}
+                  importBlocked={isSaving}
                 />
                 <ArchiveManagePanel onDeleted={() => void loadStorageUsage()} />
               </>
@@ -1749,7 +1798,8 @@ export default function SettingsScreen({
                     <Switch
                       aria-label="PC起動時の自動起動"
                       checked={settings.integration.autoStartOnPcBoot}
-                      disabled={isUpdatingAutostart || autostartReadFailed}
+                      // 保存の応答待ちのあいだも、同じ設定ファイルへの書き込みが重ならないよう切り替えさせない。
+                      disabled={isUpdatingAutostart || autostartReadFailed || isSaving}
                       onCheckedChange={(checked) =>
                         void handleToggleAutostart(checked)
                       }
@@ -1922,7 +1972,15 @@ export default function SettingsScreen({
           <span className="text-sm text-muted-foreground">設定の保存状況</span>
           {/* 保存済み DTO と画面の値の差分で切り替える（§7.7）。 */}
           <span role="status" aria-live="polite" data-testid="settings-save-state">
-            {hasUnsavedChanges ? (
+            {/* 保存の応答待ちは「保存中…」と伝え、ボタンが押せない理由を分かるようにする。 */}
+            {isSaving ? (
+              <Badge
+                variant="outline"
+                className="bg-muted text-muted-foreground border-border gap-1"
+              >
+                保存中…
+              </Badge>
+            ) : hasUnsavedChanges ? (
               <Badge
                 variant="outline"
                 className="bg-amber-50 text-amber-800 border-amber-300 gap-1"
@@ -1957,7 +2015,9 @@ export default function SettingsScreen({
               loadNoticeKind === "error" ||
               // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
               isLoading ||
-              isMigrationImporting
+              isMigrationImporting ||
+              // 保存の応答待ちのあいだは押せない（連打で二重に保存しない）。
+              isSaving
             }
           >
             <Check className="w-4 h-4" />

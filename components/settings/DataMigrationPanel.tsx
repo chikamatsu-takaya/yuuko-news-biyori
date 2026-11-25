@@ -66,9 +66,12 @@ const consoleErrorKind = (error: unknown) =>
 
 export function DataMigrationPanel({
   onImportingChange,
+  importBlocked = false,
 }: {
   /** 取り込みの開始・終了を親へ伝える（親は保存などの操作を止める）。 */
   onImportingChange?: (importing: boolean) => void;
+  /** 親が設定ファイルへ書き込み中（保存中など）のあいだは、置き換えが重ならないよう取り込みを始めさせない。 */
+  importBlocked?: boolean;
 }) {
   const [runningTask, setRunningTask] = React.useState<MigrationTask | null>(
     null
@@ -100,6 +103,10 @@ export function DataMigrationPanel({
   React.useEffect(() => {
     onImportingChangeRef.current = onImportingChange;
   }, [onImportingChange]);
+  const importBlockedRef = React.useRef(importBlocked);
+  React.useEffect(() => {
+    importBlockedRef.current = importBlocked;
+  }, [importBlocked]);
 
   const begin = (task: MigrationTask) => {
     if (runningRef.current) {
@@ -218,7 +225,7 @@ export function DataMigrationPanel({
   const handleConfirmImport = async () => {
     const target = confirmTarget;
     setConfirmTarget(null);
-    if (!target || !begin("import")) {
+    if (!target || importBlockedRef.current || !begin("import")) {
       return;
     }
     setImportOutcome(null);
@@ -442,7 +449,7 @@ export function DataMigrationPanel({
                     className="shrink-0"
                     aria-label={`${candidate.fileName} を読み込む`}
                     onClick={() => setConfirmTarget(candidate)}
-                    disabled={isBusy}
+                    disabled={isBusy || importBlocked}
                   >
                     読み込む
                   </Button>
