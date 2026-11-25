@@ -391,6 +391,14 @@ type AiConnectionTestView = {
   providerLabel: string | null;
 };
 
+// 選択欄の表示名（SelectItem の文言と同じ）。狭い列で末尾が省略されたときに title で全文を見せる。
+// 選択肢に無い値（未選択で表示する unknown / openai）は undefined にして title を出さない。
+const AI_PROVIDER_OPTION_LABELS: Record<string, string> = {
+  local: "ローカル（おすすめ）",
+  gemini: "Gemini（APIキーが必要）",
+  mock: "開発・デモ用（本物のAIは使いません）",
+};
+
 // 接続テストの見出し・案内に出す AI の短い表示名。選択欄の表示名（「ローカル（おすすめ）」など）から
 // 補足を除いたもの。openai は選択肢に無いが、保存済みなら Rust 側は未対応として確かめるため別名にする。
 const aiProviderShortLabel = (
@@ -837,7 +845,12 @@ export default function SettingsScreen({
   // 自動起動は OS への登録・解除なので、保存ボタンを待たずスイッチ操作で即時反映する。
   // 失敗時は表示を変えず（OS 状態のまま）固定文言で知らせる。
   const handleToggleAutostart = async (enabled: boolean) => {
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    // 保存中も同じ設定ファイルへ書くため、書き込みが重ならないよう待たせる。
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
     isUpdatingAutostartRef.current = true;
@@ -945,7 +958,12 @@ export default function SettingsScreen({
   // 実際の初期化はRust側 reset_user_settings が担当し、React側は結果DTOを反映するだけにする。
   const handleConfirmReset = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    // 保存中も、保存の応答後に古い DTO で「保存済み」の基準を上書きしないよう待たせる。
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
     try {
@@ -1133,6 +1151,8 @@ export default function SettingsScreen({
               onClick={() => {
                 setResetDialogOpen(true);
               }}
+              // 保存の応答待ちのあいだは初期化と書き込みが重ならないよう押せない。
+              disabled={isSaving}
             >
               <RotateCcw className="w-4 h-4" />
               設定を初期状態に戻す
@@ -1493,8 +1513,14 @@ export default function SettingsScreen({
                       }}
                     >
                       {/* 列が狭いと最も長い表示名が入りきらないため、欄は列幅まで縮め、収まらない名前は末尾を省略する。 */}
-                      <SelectTrigger className="w-72 max-w-full min-w-0">
-                        <SelectValue placeholder="未選択" className="block min-w-0 truncate" />
+                      {/* 共通部品の trigger は値（select-value）を flex にするため、そのままでは末尾の「…」が出ない。
+                          SelectValue の className は描画に渡らないので、trigger 側から値だけ block（important で上書き）＋省略にし、
+                          省略しても全文が分かるよう title に表示名を入れる。 */}
+                      <SelectTrigger
+                        className="w-72 max-w-full min-w-0 *:data-[slot=select-value]:block! *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:truncate"
+                        title={AI_PROVIDER_OPTION_LABELS[settings.ai.provider]}
+                      >
+                        <SelectValue placeholder="未選択" />
                       </SelectTrigger>
                       <SelectContent>
                         {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
@@ -1752,6 +1778,7 @@ export default function SettingsScreen({
                 </ImmediateApplyNote>
                 <DataMigrationPanel
                   onImportingChange={handleMigrationImportingChange}
+                  importBlocked={isSaving}
                 />
                 <ArchiveManagePanel onDeleted={() => void loadStorageUsage()} />
               </>
@@ -1771,7 +1798,8 @@ export default function SettingsScreen({
                     <Switch
                       aria-label="PC起動時の自動起動"
                       checked={settings.integration.autoStartOnPcBoot}
-                      disabled={isUpdatingAutostart || autostartReadFailed}
+                      // 保存の応答待ちのあいだも、同じ設定ファイルへの書き込みが重ならないよう切り替えさせない。
+                      disabled={isUpdatingAutostart || autostartReadFailed || isSaving}
                       onCheckedChange={(checked) =>
                         void handleToggleAutostart(checked)
                       }
@@ -1944,7 +1972,15 @@ export default function SettingsScreen({
           <span className="text-sm text-muted-foreground">設定の保存状況</span>
           {/* 保存済み DTO と画面の値の差分で切り替える（§7.7）。 */}
           <span role="status" aria-live="polite" data-testid="settings-save-state">
-            {hasUnsavedChanges ? (
+            {/* 保存の応答待ちは「保存中…」と伝え、ボタンが押せない理由を分かるようにする。 */}
+            {isSaving ? (
+              <Badge
+                variant="outline"
+                className="bg-muted text-muted-foreground border-border gap-1"
+              >
+                保存中…
+              </Badge>
+            ) : hasUnsavedChanges ? (
               <Badge
                 variant="outline"
                 className="bg-amber-50 text-amber-800 border-amber-300 gap-1"

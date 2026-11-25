@@ -6057,6 +6057,9 @@ test("settings save button saves only once when pressed repeatedly", async ({ pa
   await expect(saveButton).toBeEnabled();
   // 保存の応答を待つあいだに続けて押す（disabled になった後のクリックは force で直接届ける）。
   await saveButton.click();
+  // 応答待ち（600ms）のあいだは押せず、保存状況に「保存中…」が出ること。
+  await expect(saveButton).toBeDisabled();
+  await expect(page.getByTestId("settings-save-state")).toHaveText("保存中…");
   await saveButton.click({ force: true });
   await saveButton.dblclick({ force: true });
   await expect(saveButton).toBeDisabled();

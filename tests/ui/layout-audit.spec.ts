@@ -452,6 +452,17 @@ test("settings @ 800x600: all menu items fit, AI provider select stays in its ca
   expect(fit.left).toBeGreaterThanOrEqual(fit.cardLeft - 1);
   expect(fit.right).toBeLessThanOrEqual(fit.cardRight + 1);
   expect(fit.scrollWidth).toBeLessThanOrEqual(fit.clientWidth + 1);
+  // 入りきらない表示名は末尾が「…」で省略され、title で全文が分かること。
+  await expect(trigger).toHaveAttribute("title", "開発・デモ用（本物のAIは使いません）");
+  const valueStyle = await trigger.locator("[data-slot='select-value']").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      display: style.display,
+      textOverflow: style.textOverflow,
+      truncated: node.scrollWidth > node.clientWidth,
+    };
+  });
+  expect(valueStyle).toEqual({ display: "block", textOverflow: "ellipsis", truncated: true });
 
   // ジャンル名（例:「セキュリティ」）は1行に収まり、語の途中で折り返さないこと。
   await page.getByRole("button", { name: "その他", exact: true }).click();
