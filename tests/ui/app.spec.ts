@@ -175,6 +175,162 @@ test("home refresh with partial errors shows a short amber line instead of a car
   expect(after.visible).toBeGreaterThanOrEqual(before.visible - 1);
 });
 
+// ホーム右列は実データだけを出す（友情ランク・かけら・未確認の報酬）。架空の数値やボタンは置かない。
+test("home right column shows real rank, star fragments and pending rewards without dead buttons", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_FRIENDSHIP_STATE__ = {
+      currentRank: 4,
+      currentPoint: 12,
+      nextRequiredPoint: 30,
+      dailyEarnedPoint: 0,
+      dailyPointLimit: 50,
+    };
+    w.__E2E_GACHA_OVERRIDE__ = { starFragments: 1234 };
+    w.__E2E_REWARD_STATE__ = {
+      currentRank: 4,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: true },
+        { rewardId: "theme_002", type: "theme", name: "さくら", unlockRank: 7, unlocked: false, pending: false },
+      ],
+      pendingRewardIds: ["theme_001"],
+      activeThemeId: "default",
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("4");
+  await expect(page.getByTestId("home-friendship-progress-text")).toHaveText("12 / 30");
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("1,234");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("1");
+  // 以前の仮の値（ランク 15・350 / 1000・1,250・2）は出さない。
+  await expect(page.getByText("1,250", { exact: true })).toHaveCount(0);
+  // 処理の無い「受け取る」「＋」とフッターのヘルプは置かない（画面詳細設計書 §3.3）。
+  await expect(page.getByRole("button", { name: "受け取る" })).toHaveCount(0);
+  const footer = page.locator("footer");
+  await expect(footer.getByRole("button")).toHaveCount(0);
+  // 通知が無いときはフッターに架空のお知らせを出さない。
+  await expect(page.getByText("新しいニュースが3件届いてるよ！")).toHaveCount(0);
+  await expect(page.getByTestId("home-footer-status")).toHaveCount(0);
+});
+
+test("home right column shows a dash instead of numbers when the states cannot be loaded", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    w.__E2E_FRIENDSHIP_STATE__ = "fail";
+    w.__E2E_GACHA_LOAD_FAIL__ = true;
+    w.__E2E_REWARD_STATE__ = "fail";
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("—");
+  await expect(page.getByTestId("home-friendship-progress-text")).toHaveCount(0);
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("—");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("—");
+  await expect(page.getByText("secret/path")).toHaveCount(0);
+  // 記事一覧は影響を受けない。
+  await expect(page.getByTestId("home-article-card")).toHaveCount(1);
+});
+
+test("home shows an empty-state hint instead of sample articles when there are no recommendations", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles") {
+        return [];
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-articles-state")).toHaveText(
+    "まだニュースがないみたい。「ニュースを更新」を押すと、ニュースを取りに行くよ。"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByText("TechCrunch Japan")).toHaveCount(0);
+});
+
+test("home shows a loading notice (not sample articles) until the recommendations arrive", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const gate = new Promise<void>((resolve) => {
+      w.__E2E_RELEASE_RECOMMENDED__ = resolve;
+    });
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles") {
+        await gate;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  await expect(page.getByTestId("home-articles-state")).toContainText(
+    "おすすめニュースを読み込んでいるよ…"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByText("TechCrunch Japan")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (window as any).__E2E_RELEASE_RECOMMENDED__();
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await expect(page.getByTestId("home-article-card")).toHaveCount(1);
+  await expect(page.getByTestId("home-articles-state")).toHaveCount(0);
+});
+
+test("home outside Tauri shows an app-only notice and no invented values", async ({
+  page,
+}) => {
+  await openHome(page);
+  // Tauri 外にしてからホームを開き直す（ホームのマウント時に isTauriRuntime が false になる）。
+  await page.evaluate(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ニュース履歴", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "ニュース履歴" }).first()).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "ホーム", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+
+  await expect(page.getByTestId("home-articles-state")).toHaveText(
+    "おすすめニュースは、アプリで開いたときに表示されるよ。"
+  );
+  await expect(page.getByTestId("home-article-card")).toHaveCount(0);
+  await expect(page.getByTestId("home-friendship-rank")).toHaveText("—");
+  await expect(page.getByTestId("home-star-fragments")).toHaveText("—");
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("—");
+});
+
 for (const screen of majorScreens) {
   test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
@@ -7176,8 +7332,9 @@ for (const screen of sidebarAutostartOpeners) {
 }
 
 // サイドバーの「常駐を終了する」は確認ダイアログを挟んでから quit_resident_app を呼ぶ
-// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホーム（MainScreen）は別タスクのため対象外。
+// （詳細設計書 §10.1.1 / 画面詳細設計書 §3.3）。ホームも同じ共通部品を使う。
 const quitResidentOpeners = [
+  { id: "home", open: openHome },
   ...sidebarAutostartScreens.map((screen) => ({
     id: screen.id,
     open: (page: Page) =>

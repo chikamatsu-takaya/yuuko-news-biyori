@@ -10,6 +10,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { AppTitleBar } from "@/components/layout/AppTitleBar";
 import { SidebarNavItem } from "@/components/layout/SidebarNavItem";
 import { AutostartStatus } from "@/components/layout/AutostartStatus";
+import { QuitResidentButton } from "@/components/layout/QuitResidentButton";
 import {
   Alert,
   AlertDescription,
@@ -25,9 +26,7 @@ import {
   Gift,
   Settings,
   Star,
-  Plus,
   Bell,
-  HelpCircle,
   ChevronRight,
   Sparkles,
   PlayCircle,
@@ -43,7 +42,13 @@ import {
   refreshNews,
   type RefreshNewsResult as TauriRefreshNewsResult,
 } from "@/lib/tauri/news";
-import type { YuukoNotificationState } from "@/lib/tauri/yuuko";
+import {
+  getFriendshipState,
+  type FriendshipState,
+  type YuukoNotificationState,
+} from "@/lib/tauri/yuuko";
+import { getGachaState } from "@/lib/tauri/gacha";
+import { getRewardState } from "@/lib/tauri/rewards";
 import { getUserSettings } from "@/lib/tauri/settings";
 import { useToast } from "@/hooks/use-toast";
 import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
@@ -51,6 +56,10 @@ import {
   resolveArticleThumbnail,
   type ArticleThumbnailStyle,
 } from "@/lib/article-thumbnail.mjs";
+import {
+  formatArticleDateTime,
+  isArticleNew,
+} from "@/lib/article-date-display.mjs";
 
 // ============================================
 // TypeScript Types
@@ -82,14 +91,6 @@ type QuickAccessItem = {
   icon: React.ElementType;
 };
 
-type UserStats = {
-  rank: number;
-  currentExp: number;
-  maxExp: number;
-  starFragments: number;
-  unclaimedRewards: number;
-};
-
 // ============================================
 // Mock Data
 // ============================================
@@ -105,60 +106,6 @@ const mockNavigationItems: NavigationItem[] = [
   { id: "settings", label: "設定", icon: Settings },
 ];
 
-const fallbackMockArticles: Article[] = [
-  {
-    id: "article-001",
-    category: "AI・テクノロジー",
-    categoryColor: "bg-blue-500",
-    title: "生成AIが変えるソフトウェア開発の未来",
-    description:
-      "AIがコードの自動生成やレビューを支援し、開発効率が大きく向上。今後のエンジニアの役割も変わっていくかもしれません。",
-    source: "TechCrunch Japan",
-    timeAgo: "5分前",
-    isNew: true,
-    isFavorite: false,
-    thumbnail: resolveArticleThumbnail({
-      source: "TechCrunch Japan",
-      genre: "AI・テクノロジー",
-      title: "生成AIが変えるソフトウェア開発の未来",
-    }),
-  },
-  {
-    id: "article-002",
-    category: "ビジネス",
-    categoryColor: "bg-emerald-500",
-    title: "国内スタートアップの資金調達、過去最高に",
-    description:
-      "2024年の資金調達額は前年比120%増。AI・SaaS領域を中心に大型調達が相次いでいます。",
-    source: "日経ビジネス",
-    timeAgo: "1時間前",
-    isNew: true,
-    isFavorite: false,
-    thumbnail: resolveArticleThumbnail({
-      source: "日経ビジネス",
-      genre: "ビジネス",
-      title: "国内スタートアップの資金調達、過去最高に",
-    }),
-  },
-  {
-    id: "article-003",
-    category: "テクノロジー",
-    categoryColor: "bg-purple-500",
-    title: "量子コンピュータの実用化に向けた新たな一歩",
-    description:
-      "エラー耐性の高い量子ビットの実現に成功。産業応用が現実味を帯びてきました。",
-    source: "ITmedia NEWS",
-    timeAgo: "2時間前",
-    isNew: true,
-    isFavorite: false,
-    thumbnail: resolveArticleThumbnail({
-      source: "ITmedia NEWS",
-      genre: "テクノロジー",
-      title: "量子コンピュータの実用化に向けた新たな一歩",
-    }),
-  },
-];
-
 const mockQuickAccessItems: QuickAccessItem[] = [
   { id: "news", label: "ニュースを見る", icon: Newspaper },
   { id: "dictionary", label: "ゆうこ辞書", icon: BookOpen },
@@ -167,14 +114,6 @@ const mockQuickAccessItems: QuickAccessItem[] = [
   { id: "gacha", label: "ガチャ", icon: Gift },
   { id: "settings", label: "設定", icon: Settings },
 ];
-
-const mockUserStats: UserStats = {
-  rank: 15,
-  currentExp: 350,
-  maxExp: 1000,
-  starFragments: 1250,
-  unclaimedRewards: 2,
-};
 
 const fallbackYuukoMessage = `ふむふむ…
 これなんか
@@ -186,8 +125,6 @@ const mockYuukoComment = `今日もいろんな
 ニュースがあるよ〜！
 気になるの、
 一緒に見てこっ♪`;
-
-const fallbackStatusMessage = "新しいニュースが3件届いてるよ！";
 
 const toCategoryColor = (genre: string): string => {
   if (genre.includes("AI")) {
@@ -206,8 +143,9 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   title: article.title,
   description: article.summary ?? "要約は準備中だよ。気になったら開いてみてね。",
   source: article.sourceName,
-  timeAgo: article.publishedAtText,
-  isNew: article.readState === "unread",
+  // 日時と NEW は他の記事一覧と同じ共通関数でそろえる（画面詳細設計書 §3.6）。
+  timeAgo: formatArticleDateTime(article.publishedAtText),
+  isNew: isArticleNew(article),
   isFavorite: article.isFavorite,
   thumbnail: resolveArticleThumbnail({
     source: article.sourceName,
@@ -407,7 +345,10 @@ export default function MainScreen({
   // 通知状態は Page 側スケジューラが一元取得する。MainScreen は受け取って表示するだけ。
   yuukoNotificationState?: YuukoNotificationState | null;
 }) {
-  const [articles, setArticles] = React.useState<Article[]>(fallbackMockArticles);
+  // 初期値は空。読み込み中・0件・Tauri 外では偽の記事を出さず、一覧の位置に状態の案内を出す。
+  const [articles, setArticles] = React.useState<Article[]>([]);
+  // Tauri 外（ブラウザでの開発表示）でおすすめを取得できないとき true。
+  const [isArticlesUnavailable, setIsArticlesUnavailable] = React.useState(false);
   const [favoriteSavingArticleId, setFavoriteSavingArticleId] =
     React.useState<string | null>(null);
   const [articleNotice, setArticleNotice] = React.useState<string | null>(null);
@@ -425,7 +366,12 @@ export default function MainScreen({
   );
   const [yuukoBalloonMessage, setYuukoBalloonMessage] =
     React.useState(fallbackYuukoMessage);
-  const [statusMessage, setStatusMessage] = React.useState(fallbackStatusMessage);
+  // フッターのお知らせ。通知が無いときは null にして何も出さない（架空の件数を出さない）。
+  const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
+  // 右列の状態表示。取得できない（Tauri 外・失敗）ときは null のままにし、数値の代わりに「—」を出す。
+  const [friendship, setFriendship] = React.useState<FriendshipState | null>(null);
+  const [starFragments, setStarFragments] = React.useState<number | null>(null);
+  const [pendingRewardCount, setPendingRewardCount] = React.useState<number | null>(null);
 
   const { toast } = useToast();
 
@@ -463,8 +409,49 @@ export default function MainScreen({
       return;
     }
 
-    setStatusMessage(fallbackStatusMessage);
+    setStatusMessage(null);
   }, [yuukoNotificationState]);
+
+  // 友情ランクと流れ星のかけらは画面を開いたときに1回だけ読む（常駐負荷を増やさないため定期取得はしない）。
+  React.useEffect(() => {
+    let active = true;
+    void getFriendshipState()
+      .then((state) => {
+        if (active) setFriendship(state);
+      })
+      .catch((error) => {
+        console.warn("Failed to load friendship state:", error);
+      });
+    void getGachaState()
+      .then((state) => {
+        if (active) setStarFragments(state ? state.starFragments : null);
+      })
+      .catch((error) => {
+        console.warn("Failed to load gacha state:", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 未確認の報酬の件数は rewards.json の pendingRewards（get_reward_state の pendingRewardIds）が正。
+  // 報酬通知（rewardNotification）は通知中だけ載るため件数の元にはしない。ゆうこの OK 等で確認されると
+  // 通知の報酬 ID が変わるので、そのときだけ読み直して件数を合わせる。
+  const rewardNoticeKey =
+    yuukoNotificationState?.rewardNotification?.rewardIds.join(",") ?? "";
+  React.useEffect(() => {
+    let active = true;
+    void getRewardState()
+      .then((state) => {
+        if (active) setPendingRewardCount(state ? state.pendingRewardIds.length : null);
+      })
+      .catch((error) => {
+        console.warn("Failed to load reward state:", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, [rewardNoticeKey]);
 
   const loadRecommendedArticles = React.useCallback(async (): Promise<boolean> => {
     setIsLoadingArticles(true);
@@ -485,12 +472,13 @@ export default function MainScreen({
 
       const recommendedArticles = await getRecommendedArticles({ limit });
       if (!recommendedArticles) {
+        setIsArticlesUnavailable(true);
         return false;
       }
 
-      if (recommendedArticles.length > 0) {
-        setArticles(recommendedArticles.map(mapTauriArticleToUi));
-      }
+      // 0件でも実際の結果として反映する（以前の一覧や仮の記事を残さない）。
+      setIsArticlesUnavailable(false);
+      setArticles(recommendedArticles.map(mapTauriArticleToUi));
 
       return true;
     } catch (error) {
@@ -508,6 +496,18 @@ export default function MainScreen({
   React.useEffect(() => {
     void loadRecommendedArticles();
   }, [loadRecommendedArticles]);
+
+  // 上限ランクでは nextRequiredPoint が 0 になるため、進捗は満タン扱いにする（0 除算を避ける。カスタマイズ画面と同じ）。
+  const isMaxRank = friendship !== null && friendship.nextRequiredPoint <= 0;
+  const rankProgressPercent =
+    friendship === null
+      ? 0
+      : isMaxRank
+        ? 100
+        : Math.min(
+            100,
+            Math.max(0, (friendship.currentPoint / friendship.nextRequiredPoint) * 100)
+          );
 
   const handleNavigate = (id: string) => {
     if (onNavigate) {
@@ -666,14 +666,7 @@ export default function MainScreen({
           {/* Auto Start & Exit */}
           <div className="p-3 border-t border-border/50">
             <AutostartStatus className="mb-2" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full text-xs h-8"
-              onClick={() => console.log("Exit resident mode")}
-            >
-              常駐を終了する
-            </Button>
+            <QuitResidentButton className="w-full text-xs h-8" />
           </div>
         </aside>
 
@@ -759,6 +752,25 @@ export default function MainScreen({
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1 [@media(max-height:719px)]:space-y-2">
+              {/* 記事が無いときは状態に合った案内だけを出す。読み込み失敗は上の loadNotice（再試行つき）で伝える。 */}
+              {articles.length === 0 && !loadNotice ? (
+                <p
+                  data-testid="home-articles-state"
+                  role="status"
+                  className="flex items-center gap-2 rounded-xl bg-white px-4 py-6 text-xs text-muted-foreground shadow-sm"
+                >
+                  {isLoadingArticles ? (
+                    <>
+                      <Spinner className="size-4" />
+                      おすすめニュースを読み込んでいるよ…
+                    </>
+                  ) : isArticlesUnavailable ? (
+                    "おすすめニュースは、アプリで開いたときに表示されるよ。"
+                  ) : (
+                    "まだニュースがないみたい。「ニュースを更新」を押すと、ニュースを取りに行くよ。"
+                  )}
+                </p>
+              ) : null}
               {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
@@ -797,17 +809,32 @@ export default function MainScreen({
               </div>
               <div className="flex items-baseline gap-2 mb-1">
                 <span className="text-xs opacity-80">ランク</span>
-                <span className="text-4xl font-bold">{mockUserStats.rank}</span>
+                <span className="text-4xl font-bold" data-testid="home-friendship-rank">
+                  {friendship ? friendship.currentRank : "—"}
+                </span>
               </div>
-              <div className="text-xs opacity-80 mb-2">つぎのランクまで</div>
-              <div className="text-right text-sm mb-1">
-                <span className="font-semibold">{mockUserStats.currentExp}</span>
-                <span className="opacity-80"> / {mockUserStats.maxExp}</span>
-              </div>
-              <Progress
-                value={(mockUserStats.currentExp / mockUserStats.maxExp) * 100}
-                className="h-2 bg-white/30"
-              />
+              {/* 取得できないときは進捗を出さない（架空の値を見せない）。 */}
+              {friendship ? (
+                <>
+                  <div className="text-xs opacity-80 mb-2">
+                    {isMaxRank ? "いちばん上のランクだよ！" : "つぎのランクまで"}
+                  </div>
+                  {!isMaxRank ? (
+                    <div
+                      className="text-right text-sm mb-1"
+                      data-testid="home-friendship-progress-text"
+                    >
+                      <span className="font-semibold">{friendship.currentPoint}</span>
+                      <span className="opacity-80"> / {friendship.nextRequiredPoint}</span>
+                    </div>
+                  ) : null}
+                  <Progress
+                    value={rankProgressPercent}
+                    className="h-2 bg-white/30"
+                    aria-label="ランク進捗"
+                  />
+                </>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -820,19 +847,12 @@ export default function MainScreen({
                   流れ星のかけら
                 </span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-2xl font-bold text-foreground">
-                  {mockUserStats.starFragments.toLocaleString()}
-                </span>
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  className="rounded-full border-[var(--yuuko-green)] text-[var(--yuuko-green)] hover:bg-[var(--yuuko-green-light)]"
-                  onClick={() => console.log("Add star fragments")}
-                >
-                  <Plus className="w-4 h-4" />
-                </Button>
-              </div>
+              <span
+                className="text-2xl font-bold text-foreground"
+                data-testid="home-star-fragments"
+              >
+                {starFragments === null ? "—" : starFragments.toLocaleString()}
+              </span>
             </CardContent>
           </Card>
 
@@ -842,21 +862,17 @@ export default function MainScreen({
               <div className="flex items-center gap-2 mb-2">
                 <Gift className="w-4 h-4 text-red-500" />
                 <span className="text-xs text-muted-foreground">
-                  未受取の報酬
+                  未確認の報酬
                 </span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-2xl font-bold text-foreground">
-                  {mockUserStats.unclaimedRewards}
-                </span>
-                <Button
-                  size="sm"
-                  className="bg-[var(--yuuko-green)] hover:bg-[var(--yuuko-green)]/90 text-white text-xs h-8"
-                  onClick={() => console.log("Claim rewards")}
-                >
-                  受け取る
-                </Button>
-              </div>
+              {/* 報酬はランク到達で自動解放され、確認はランクアップ演出・ゆうこの報酬通知で行う。
+                  ホームに受け取り操作は無いため、件数の表示だけにする（処理の無いボタンは置かない §3.3）。 */}
+              <span
+                className="text-2xl font-bold text-foreground"
+                data-testid="home-pending-rewards"
+              >
+                {pendingRewardCount === null ? "—" : pendingRewardCount}
+              </span>
             </CardContent>
           </Card>
 
@@ -895,16 +911,20 @@ export default function MainScreen({
         <div className="flex items-center gap-3">
           <Bell className="w-4 h-4 text-muted-foreground" />
           <span className="text-xs text-muted-foreground">お知らせ</span>
-          <span className="text-xs text-muted-foreground">|</span>
-          <span className="text-xs text-[var(--yuuko-green)] flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]" />
-            {statusMessage}
-          </span>
+          {statusMessage ? (
+            <>
+              <span className="text-xs text-muted-foreground">|</span>
+              <span
+                className="text-xs text-[var(--yuuko-green)] flex items-center gap-1"
+                data-testid="home-footer-status"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--yuuko-green)]" />
+                {statusMessage}
+              </span>
+            </>
+          ) : null}
         </div>
         <div className="flex items-center gap-3">
-          <button className="text-muted-foreground hover:text-foreground transition-colors">
-            <HelpCircle className="w-4 h-4" />
-          </button>
           <PawIcon className="w-4 h-4 text-pink-300" />
         </div>
       </footer>
