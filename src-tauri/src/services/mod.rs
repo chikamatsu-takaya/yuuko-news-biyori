@@ -19,4 +19,5 @@ pub mod recommendation_service;
 pub mod reward_service;
 pub mod settings_service;
 pub mod summary_service;
+pub(crate) mod worker_guard;
 pub mod yuuko_service;

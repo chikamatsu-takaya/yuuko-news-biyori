@@ -227,7 +227,12 @@ impl LocalModelDownloadService {
     }
 
     pub fn status(&self) -> LocalModelStatus {
-        let run = lock(&self.inner.run);
+        let mut run = lock(&self.inner.run);
+        if self.recheck_ready(&mut run) {
+            drop(run);
+            self.forget_lost_model();
+            run = lock(&self.inner.run);
+        }
         let mut phase = run.phase;
         // 止まっている間は、許可リストの欄の変更をその場で反映する（走っている取得は止めない。設計案 U9 の (c)）。
         if !run.worker_active
@@ -268,6 +273,11 @@ impl LocalModelDownloadService {
     pub fn start(&self, auto_started: bool) -> Result<LocalModelStatus, AppError> {
         {
             let mut run = lock(&self.inner.run);
+            if self.recheck_ready(&mut run) {
+                drop(run);
+                self.forget_lost_model();
+                run = lock(&self.inner.run);
+            }
             if run.shut_down
                 || run.phase == LocalModelPhase::Ready
                 || self.inner.spec.source.is_none()
@@ -445,6 +455,36 @@ impl LocalModelDownloadService {
         drop(run);
         self.inner.wake.notify_all();
         true
+    }
+
+    /// 「使える」のまま止まっている状態を、モデルのファイルが今もあるかで確かめ直す。
+    /// 状態は取得の完了・削除・起動時にしか決め直さないため、その後にファイルが消えた・ウイルス対策ソフトに
+    /// 隔離された・大きさが変わった場合も「使える」と答え続け、取り直す手段（未取得の画面）が出なかった。
+    /// 見るのは有無と大きさ（メタデータ 1 回）だけで、SHA-256 は読まない（3.1GB を状態の取得のたびに読まないため。
+    /// 中身の照合は従来どおり `LocalLlmService` が起動前に行う）。使えなくなっていれば、既存の「未取得」
+    /// （取得元が無いモデルなら「取得元なし」）へ戻し、true を返す（呼び出し側はロックを外してから
+    /// `forget_lost_model` を呼ぶ）。取得の最中は取得のスレッドが状態を持つため見ない。
+    fn recheck_ready(&self, run: &mut Run) -> bool {
+        if run.phase != LocalModelPhase::Ready || run.worker_active {
+            return false;
+        }
+        let phase = self.idle_phase();
+        if phase == LocalModelPhase::Ready {
+            return false;
+        }
+        // パスは出さない（固定の文言だけ）。
+        log::warn!("local model file is missing or its size changed; marking it as not downloaded");
+        run.phase = phase;
+        run.failure = None;
+        run.needed_more = None;
+        true
+    }
+
+    /// 使えなくなったモデルについて、llama-server を止め、照合済みの印と取っ手を下ろす。
+    /// 古い照合の結果を使わない・古い取っ手が取り直したファイルの置き換えを妨げないようにするため。
+    /// 照合の途中ならその終わりを待つので、`run` のロックを持たずに呼ぶ（状態の取得を長く待たせない）。
+    fn forget_lost_model(&self) {
+        self.inner.local_llm.forget_model();
     }
 
     /// 走っていないときの状態（使える・取得元が無い・未取得）。
@@ -852,6 +892,52 @@ mod tests {
         for forbidden in ["example", "m.gguf", "0123456789", "local_llm"] {
             assert!(!json.contains(forbidden), "{json}");
         }
+    }
+
+    #[test]
+    fn ready_model_that_disappears_returns_to_not_downloaded_and_can_be_fetched_again() {
+        let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        let model = downloaded_model_dir(&SPEC, &f.root.join("local")).join(SPEC.file_name);
+        // 取得の後にファイルが消えた（ウイルス対策ソフトの隔離など）。
+        std::fs::remove_file(&model).unwrap();
+        let status = f.service.status();
+        assert_eq!(status.phase, LocalModelPhase::NotDownloaded);
+        assert_eq!(status.received_bytes, 0);
+        // 既存の取得の画面からもう一度取れる。
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ready_model_whose_size_changed_is_rechecked_in_start() {
+        let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        let model = downloaded_model_dir(&SPEC, &f.root.join("local")).join(SPEC.file_name);
+        // 大きさが変わった（壊れた）。状態を読まずにすぐ「始める」を押しても取り直す。
+        std::fs::write(&model, b"broken data").unwrap();
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(&model).unwrap(), b"data");
+    }
+
+    #[test]
+    fn ready_model_that_is_still_present_stays_ready_without_fetching() {
+        let f = fixture(SPEC, Vec::new(), Box::new(|_, dir, _, _| complete(dir)));
+        f.service.start(false).unwrap();
+        assert!(wait_for(&f, LocalModelPhase::Ready));
+        for _ in 0..3 {
+            assert_eq!(f.service.status().phase, LocalModelPhase::Ready);
+        }
+        assert_eq!(
+            f.service.start(false).unwrap().phase,
+            LocalModelPhase::Ready
+        );
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
