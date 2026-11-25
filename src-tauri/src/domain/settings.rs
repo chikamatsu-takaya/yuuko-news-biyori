@@ -35,10 +35,11 @@ pub(crate) fn validate_nickname(nickname: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+// 既定値（Default）は持たせない。欄の欠落・ファイル無しはローカル（`AiSettings::default`）として読み、
+// Mock は明示的に選んだときだけにするため、暗黙の既定が Mock になる余地を残さない（2026-11-25 藤井）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
-    #[default]
     Mock,
     Gemini,
     Openai,
