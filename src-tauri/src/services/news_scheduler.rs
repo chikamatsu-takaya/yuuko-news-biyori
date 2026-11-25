@@ -47,6 +47,7 @@ use crate::services::archive_scheduler::{ArchiveMaintenanceOutcome, ArchiveSched
 use crate::services::article_service::ArticleService;
 use crate::services::auto_summary_queue::AutoSummaryQueue;
 use crate::services::news_service::{NewsService, RefreshNewsResult};
+use crate::services::worker_guard::run_isolated;
 
 /// 取得すべきかを確認する間隔（低頻度）。まずは30分とする。壁時計で次の確認時刻を決める。
 const CHECK_INTERVAL: TimeDelta = TimeDelta::minutes(30);
@@ -275,6 +276,8 @@ impl NewsScheduler {
     /// `app` は refresh 成功の通知（emit）にだけ使う。
     pub fn start<R: Runtime>(self, app: AppHandle<R>) {
         std::thread::spawn(move || {
+            // 1回の確認で panic してもスレッドを終わらせない（終わると再起動まで定期取得・アーカイブ保守が
+            // 止まるため）。確認の中で段ごとに受け止める（`run_tick_steps`）。
             self.tick_blocking(&app, TickKind::Startup);
             let mut clock = CheckClock::new(Utc::now());
             loop {
@@ -300,32 +303,15 @@ impl NewsScheduler {
 
     fn tick_blocking<R: Runtime>(&self, app: &AppHandle<R>, kind: TickKind) -> NewsTickOutcome {
         let today = local_today();
-        match self.archive_scheduler.run_if_due(&today) {
-            Ok(ArchiveMaintenanceOutcome::Skipped) => {}
-            Ok(ArchiveMaintenanceOutcome::Completed {
-                archived_article_count,
-                retired_article_count,
-            }) => log::info!(
-                "daily archive maintenance completed: archived={archived_article_count}, retired={retired_article_count}"
-            ),
-            Ok(ArchiveMaintenanceOutcome::CleanupPending {
-                archived_article_count,
-                retired_article_count,
-            }) => log::warn!(
-                "daily archive maintenance cleanup is pending; will retry: archived={archived_article_count}, retired={retired_article_count}"
-            ),
-            Err(error) => log::warn!(
-                "daily archive maintenance failed; will retry on next check: {error}"
-            ),
-        }
-
-        // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
-        let outcome = tauri::async_runtime::block_on(self.tick_news(kind, &today));
-        if let NewsTickOutcome::Refreshed(saved_count) = outcome {
-            notify_news_refreshed(app, saved_count, matches!(kind, TickKind::Startup));
-            self.auto_summary_queue.enqueue_unsummarized();
-        }
-        outcome
+        run_tick_steps(
+            || self.archive_scheduler.run_if_due(&today),
+            // refresh は async のため tauri ランタイム上で実行する（本スレッドは tokio worker ではない）。
+            || tauri::async_runtime::block_on(self.tick_news(kind, &today)),
+            |saved_count| {
+                notify_news_refreshed(app, saved_count, matches!(kind, TickKind::Startup));
+                self.auto_summary_queue.enqueue_unsummarized();
+            },
+        )
     }
 
     /// 必要なら refresh する。成功時は新規保存件数、取得を試みて失敗したら Failed を返す。
@@ -384,6 +370,47 @@ impl NewsScheduler {
             }
         }
     }
+}
+
+/// 1回の確認の段（アーカイブ保守 → 取得 → 取得後の通知・自動要約の並べ直し）を、段ごとに panic から切り離して行う。
+///
+/// 以前は1回の確認のどこかで panic するとスケジューラのスレッドごと終わり、アプリを再起動するまで
+/// 定期取得もアーカイブ保守（30分ごとの確認）も二度と動かなかった。段ごとに受け止めることで、
+/// 片方の panic がもう片方と以後の確認を止めないようにする（worker_guard）。
+/// - アーカイブ保守の panic: 完了を保存していないため、次の確認でやり直される。
+/// - 取得の panic: 取得日・取得時刻は成功時にしか保存しないため、失敗（`Failed`）と同じく次の確認で再試行される。
+/// - 取得後の段の panic: 取得そのものは成功して保存済みのため、結果は `Refreshed` のまま返す。
+fn run_tick_steps(
+    archive: impl FnOnce() -> Result<ArchiveMaintenanceOutcome, AppError>,
+    news: impl FnOnce() -> NewsTickOutcome,
+    on_refreshed: impl FnOnce(usize),
+) -> NewsTickOutcome {
+    match run_isolated("daily archive maintenance", archive) {
+        // panic は worker_guard がログに残した。
+        None => {}
+        Some(Ok(ArchiveMaintenanceOutcome::Skipped)) => {}
+        Some(Ok(ArchiveMaintenanceOutcome::Completed {
+            archived_article_count,
+            retired_article_count,
+        })) => log::info!(
+            "daily archive maintenance completed: archived={archived_article_count}, retired={retired_article_count}"
+        ),
+        Some(Ok(ArchiveMaintenanceOutcome::CleanupPending {
+            archived_article_count,
+            retired_article_count,
+        })) => log::warn!(
+            "daily archive maintenance cleanup is pending; will retry: archived={archived_article_count}, retired={retired_article_count}"
+        ),
+        Some(Err(error)) => {
+            log::warn!("daily archive maintenance failed; will retry on next check: {error}")
+        }
+    }
+
+    let outcome = run_isolated("scheduled news refresh", news).unwrap_or(NewsTickOutcome::Failed);
+    if let NewsTickOutcome::Refreshed(saved_count) = outcome {
+        run_isolated("news refreshed follow-up", || on_refreshed(saved_count));
+    }
+    outcome
 }
 
 /// refresh 成功をメインウィンドウへ通知する。
@@ -1014,5 +1041,76 @@ mod tests {
         let loaded = NewsRefreshState::load(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded, NewsRefreshState::default());
+    }
+
+    #[test]
+    fn archive_panic_does_not_stop_the_news_refresh() {
+        let mut refreshed = 0;
+        let outcome = run_tick_steps(
+            || panic!("archive blew up"),
+            || NewsTickOutcome::Refreshed(2),
+            |saved| refreshed = saved,
+        );
+        assert_eq!(outcome, NewsTickOutcome::Refreshed(2));
+        assert_eq!(refreshed, 2);
+    }
+
+    #[test]
+    fn news_refresh_panic_is_treated_as_a_failed_check() {
+        let mut follow_up_called = false;
+        let outcome = run_tick_steps(
+            || Ok(ArchiveMaintenanceOutcome::Skipped),
+            || panic!("refresh blew up"),
+            |_| follow_up_called = true,
+        );
+        // 失敗と同じ扱い（取得時刻を保存しないので次の確認で再試行される）。
+        assert_eq!(outcome, NewsTickOutcome::Failed);
+        assert!(!follow_up_called);
+    }
+
+    #[test]
+    fn follow_up_panic_keeps_the_refresh_result() {
+        let outcome = run_tick_steps(
+            || Ok(ArchiveMaintenanceOutcome::Skipped),
+            || NewsTickOutcome::Refreshed(1),
+            |_| panic!("follow-up blew up"),
+        );
+        assert_eq!(outcome, NewsTickOutcome::Refreshed(1));
+    }
+
+    #[test]
+    fn checks_keep_running_after_a_panicking_check() {
+        // 1回目の確認で取得が panic しても、次の確認（ループの次の回）は通常どおり動く。
+        let mut clock = CheckClock::new(at("2026-05-01T09:00:00Z"));
+        let mut attempts = 0;
+        let mut results = Vec::new();
+        for minutes in [30, 60] {
+            let now = at("2026-05-01T09:00:00Z") + TimeDelta::minutes(minutes);
+            let checked = clock.step(
+                || now,
+                |_| {
+                    attempts += 1;
+                    let attempt = attempts;
+                    run_tick_steps(
+                        || Ok(ArchiveMaintenanceOutcome::Skipped),
+                        move || {
+                            if attempt == 1 {
+                                panic!("first refresh blew up");
+                            }
+                            NewsTickOutcome::Refreshed(3)
+                        },
+                        |_| {},
+                    )
+                },
+            );
+            results.push(checked.map(|(_, outcome)| outcome));
+        }
+        assert_eq!(
+            results,
+            vec![
+                Some(NewsTickOutcome::Failed),
+                Some(NewsTickOutcome::Refreshed(3))
+            ]
+        );
     }
 }
