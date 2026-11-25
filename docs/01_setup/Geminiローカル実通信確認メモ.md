@@ -65,7 +65,7 @@ Geminiを使用する可能性があるのは、取得済み記事に対する�
 - 辞書未命中時の用語解説
 - AI Providerの接続確認
 
-したがって、Gemini APIキーがなくてもニュース取得・保存・ルールベース推薦は動作する。ProviderがGeminiでも、APIキー未設定またはGemini生成失敗時は、現在の安全設計に従ってMockProviderへフォールバックする。
+したがって、Gemini APIキーがなくてもニュース取得・保存・ルールベース推薦は動作する。ProviderがGeminiでも、APIキー未設定またはGemini生成失敗時は、現在の安全設計に従ってMockProviderへフォールバックする。（確認時点の挙動。2026-11-09 から Mock へは切り替えず `AI_UNAVAILABLE` を返し、画面は「いまはAIが使えない」と案内する）
 
 ## 4. 既定モデルでの実通信確認
 
