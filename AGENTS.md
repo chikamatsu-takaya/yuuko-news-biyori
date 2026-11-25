@@ -28,7 +28,7 @@ Claude Code / Codex 共通の開発ルール（全タスクで必ず守る最小
 | 中核ロジック | Rust |
 | パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
-| AI利用 | 同梱ローカルLLM（llama-server + Qwen3.5-2B。主経路）+ Gemini API（任意）+ MockProvider |
+| AI利用 | 同梱ローカルLLM（llama-server + Gemma 4 E2B〔Q4_K_M・初回起動時に取得〕。主経路。2026-11 に Qwen3.5-2B から変更）+ Gemini API（任意）+ MockProvider |
 
 C++ / Qt / QML は MVP段階では使用しない（過去案は別資料として残す）。
 

@@ -30,7 +30,7 @@ Tauri版MVPでは、以下の技術構成を前提とする。
 | 中核ロジック | Rust | ニュース取得、保存、AI連携、辞書、ランク管理 |
 | ビルド | Next.js / pnpm | フロントエンド開発、Tauri起動 |
 | 保存 | Markdown / JSON | ローカルニュース、設定、辞書、状態保存 |
-| AI | 同梱ローカルLLM（llama-server＋Qwen3.5-2B。主経路）/ Gemini API（任意）/ MockProvider | 要約、再説明、用語解説 |
+| AI | 同梱ローカルLLM（llama-server＋Gemma 4 E2B〔初回起動時に取得〕。主経路）/ Gemini API（任意）/ MockProvider | 要約、再説明、用語解説 |
 | エディタ | VS Code | 開発、拡張機能、AI駆動開発 |
 
 ### 2.2 C++ / Qt / QMLの扱い
@@ -459,7 +459,7 @@ MVPではデモ用の簡易体験に留める。
 - 高度なLive2D制御は後続検討とする
 
 ### 7.6 OpenAI API等の複数AI正式対応
-- 当初はGemini API + MockProviderを中心とする方針だったが、判断台帳 D99〜D103 で同梱ローカルLLM（llama-server＋Qwen3.5-2B）を主経路とした（実装済み。§15.3）。Gemini API は任意の切り替え先、MockProvider は開発・デモ用として残す
+- 当初はGemini API + MockProviderを中心とする方針だったが、判断台帳 D99〜D103 で同梱ローカルLLM（当時は llama-server＋Qwen3.5-2B）を主経路とした（実装済み。§15.3。2026-11 にモデルを Gemma 4 E2B へ変更し、モデルは初回起動時に取得する形にした）。Gemini API は任意の切り替え先、MockProvider は開発・デモ用として残す
 - OpenAI APIは将来候補
 
 ---
@@ -750,7 +750,7 @@ MVPは、以下を満たした時点で完了とみなす。
 
 ### 15.3 第三拡張
 - Live2D等の高度演出
-- ~~ローカルLLM対応~~ → 実装済み（同梱 llama-server＋Qwen3.5-2B。判断台帳 D99〜D103。配布手順・ライセンス・実測は `docs/01_setup/ローカルLLM同梱配布手順.md`）
+- ~~ローカルLLM対応~~ → 実装済み（同梱 llama-server＋Gemma 4 E2B〔2026-11 に Qwen3.5-2B から変更。モデルは初回起動時に取得〕。判断台帳 D99〜D103。配布手順・ライセンス・実測は `docs/01_setup/ローカルLLM同梱配布手順.md`）
 - OpenAI API等の追加Provider
 - 社内ニュース連携
 - 季節イベント

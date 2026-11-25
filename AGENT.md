@@ -61,7 +61,7 @@ AIによるPull Requestレビューでは、通常の要約よりも実害のあ
 | 中核ロジック | Rust |
 | パッケージ管理 | pnpm |
 | ローカル保存 | Markdown / JSON |
-| AI利用 | Gemini API + MockProvider |
+| AI利用 | 同梱ローカルLLM（llama-server + Gemma 4 E2B〔Q4_K_M・初回起動時に取得〕。主経路）+ Gemini API（任意）+ MockProvider（最新は `AGENTS.md` §1） |
 | エディタ | VS Code |
 | Git | Git for Windows |
 

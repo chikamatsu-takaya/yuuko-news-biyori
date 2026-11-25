@@ -35,7 +35,7 @@ MVP必須シナリオの通し確認や、複数機能をまたぐ問題調査�
 
 - **通知・ホーム**: ゆうこ通知・軽量プレビューのフロント接続は実装済み（吹き出し→プレビュー→記事遷移、終端操作の一回きり保証、backend 操作の直列化）。ただし Playwright は Tauri command を Mock 化しており、**Rust バックエンドを含む実機確認は別途必要**。ホーム画面レイアウト（ゆうこ本体とおすすめ一覧の同時表示）は別の MVP 必須残件。→ [`yuuko-home.md`](./yuuko-home.md)
 - **用語解説・辞書**: （2026-10-19 更新）本文の範囲選択＋「解説」ボタン方式。`explain_selected_term` は辞書未命中の実記事で AI Provider（ローカルLLM / Gemini / Mock）を呼ぶ。実記事 ID は `ArticleRepository` で解決する（固定サンプル article-001〜003 だけは固定解説）。範囲選択→解説→保存の Mock E2E はある。→ [`term-dictionary.md`](./term-dictionary.md)
-- **AI**: 主経路は同梱ローカルLLM（llama-server＋Qwen3.5-2B。判断台帳 D99〜D103。新規インストールの既定）。同梱物が無い開発環境ではローカルが使えないため、設定で Gemini（APIキー設定時）か Mock に切り替えて確認する。ローカルLLMの失敗は Mock へ黙って切り替わらず、失敗として表示される。
+- **AI**: 主経路は同梱ローカルLLM（llama-server＋Gemma 4 E2B。判断台帳 D99〜D103。新規インストールの既定。2026-11 に Qwen3.5-2B から変更。モデルは初回起動時に取得）。同梱物が無い開発環境ではローカルが使えないため、設定で Gemini（APIキー設定時）か Mock に切り替えて確認する。ローカルLLMの失敗は Mock へ黙って切り替わらず、失敗として表示される。
 - **設定**: 保存後の再読込で MVP 対象設定が保持されることを確認対象とする。DTO・repository の詳細は複製しない。→ [`settings.md`](./settings.md)
 
 ## MVP通しデモの確認順
