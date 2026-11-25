@@ -26,7 +26,7 @@
 - VC++ ランタイムの 3 つ自身が読み込むのも、この 3 つと `api-ms-win-crt-*` と `KERNEL32` だけ。`msvcp140_1` / `msvcp140_2` / `vcruntime140_threads` / `concrt140` などは、どの部品も読み込まないため同梱しない。
 - `api-ms-win-crt-*`（ユニバーサル C ランタイム・UCRT）は Windows 10 以降に標準で入っているため同梱しない。
 - Windows は、実行ファイルと同じフォルダの DLL を先に探す。`runtime/`（`llama-server.exe` の隣）に置くことで、VC++ 再頒布可能パッケージが入っていないパソコンでも起動できる見込み（入っていないパソコンでの確認は未実施。§3.4）。入っているパソコンでも、`llama-server` は隣に置いた版を使う。
-- 同梱するのは上の DLL 3 個だけで、VC++ 再頒布可能パッケージのインストーラー（`vc_redist.x64.exe`）は同梱も実行もしない（`tauri.conf.json` の `bundle` は `resources/local_llm` を写すだけで、`windows/installer-hooks.nsh` にもその処理は無い）。3 個が `runtime/` に無い・SHA-256 が違うときは、バンドル前の `check-bundle.mjs` が止め、実行時の照合（`runtime_manifest`）でも「見つからない／壊れている」として `llama-server` を起動しない。
+- 同梱するのは上の DLL 3 個だけで、VC++ 再頒布可能パッケージのインストーラー（`vc_redist.x64.exe`）は同梱も実行もしない（`tauri.conf.json` の `bundle.resources` は `resources/local_llm` を写すだけで、`windows/installer-hooks.nsh` にもその処理は無い）。3 個が `runtime/` に無い・SHA-256 が違うときは、バンドル前の `check-bundle.mjs` が止め、実行時の照合（`runtime_manifest`）でも「見つからない／壊れている」として `llama-server` を起動しない。
 - 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。
 
 `tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_runtime_dir`（実行の部品）と `resolve_model_path`（モデル）でここを見る。
@@ -274,7 +274,7 @@ pnpm tauri build
   - `-t` は、今回の計測では 4 スレッドをほぼ使い切って上の速さが出ている。増やした場合の比較（`-t 6` など）は、テストからスレッド数を変える口が無いため測っていない（本番コードを実験のためだけに変えない）。常駐アプリとしてほかのアプリの操作感を守るため、根拠なく増やさない。
 - **メモリに余裕のない 16GB 機では、生成が 180 秒の上限で打ち切られることがある**（前回の暫定値では 6 回中 2 回）。そのときは llama-server のワーキングセットが OS に削られ、CPU をほとんど使えなくなっていた（ページング待ち）。上限時間やスレッド数ではなくメモリ不足が原因のため、この場合はメモリに余裕ができてからやり直す。
 - 照合は debug ビルドでは約 30 秒かかるが、配布版（release）では約 1〜2 秒（モデルが OS のキャッシュに載った状態。キャッシュに無い初回は、ディスクから 1.22GB を読む時間が加わる。未計測）。
-- **（この計測時点〔D112 の対応前〕の記録）`llama-server` と DLL は Visual C++ ランタイム（`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll`）を必要とするが、同梱していなかった。今は同梱している（§1.1）。** 当時は、再頒布可能パッケージが入っていないパソコンでは起動できない（アプリは「起動できません」系の失敗になる）見込み（未検証）だった。**決定（判断台帳 D112・2026-10-13）**: `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll` を `runtime/`（`llama-server.exe` と同じ場所）へ同梱し、照合の表にも加える。**対応済み（2026-10-13）**: 照合の表 `VC_RUNTIME_FILES`・`place-bundle.mjs --vc-crt`・§1 の大きさとファイル数・§1.1 の範囲・§5 のライセンス表・`LICENSES/README.txt` §3 に反映した。§6.1.1 の暫定値は同梱前の値（VC++ 再頒布可能パッケージが入ったパソコン）、§6.1 の再計測は同梱した版で測った。入っていないパソコンでの確認（§3.4）は未実施。
+- （この計測時点〔D112 の対応前〕の記録。今は同梱している〔§1.1〕）**`llama-server` と DLL は Visual C++ ランタイム（`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll`）を必要とするが、同梱していない。** 再頒布可能パッケージが入っていないパソコンでは起動できない（アプリは「起動できません」系の失敗になる）見込み（未検証）。**決定（判断台帳 D112・2026-10-13）**: `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` / `MSVCP140.dll` を `runtime/`（`llama-server.exe` と同じ場所）へ同梱し、照合の表にも加える。**対応済み（2026-10-13）**: 照合の表 `VC_RUNTIME_FILES`・`place-bundle.mjs --vc-crt`・§1 の大きさとファイル数・§1.1 の範囲・§5 のライセンス表・`LICENSES/README.txt` §3 に反映した。§6.1.1 の暫定値は同梱前の値（VC++ 再頒布可能パッケージが入ったパソコン）、§6.1 の再計測は同梱した版で測った。入っていないパソコンでの確認（§3.4）は未実施。
 
 ### 6.3 計測方法（再計測するとき）
 
