@@ -514,7 +514,9 @@ function SettingRow({
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-foreground">{label}</span>
       </div>
-      <div>{children}</div>
+      {/* 入力欄が次の行へ折り返したとき、中身の固定幅（w-72 など）で行の幅を超えてカードからはみ出さないよう、
+          行の幅を上限にして縮められるようにする（800×600 で「AIプロバイダー」の選択欄がはみ出していた）。 */}
+      <div className="min-w-0 max-w-full">{children}</div>
     </div>
   );
 }
@@ -580,6 +582,10 @@ export default function SettingsScreen({
   // 取り込み中は保存・リセット・自動起動の切り替えを止める（データ設計書 §15.7）。
   const [isMigrationImporting, setIsMigrationImporting] = React.useState(false);
   const isMigrationImportingRef = React.useRef(false);
+  // 保存の応答待ちか。「保存済み」に戻るのは応答の後なので、それまでボタンが押せたままだと
+  // 続けて押すたびに save_user_settings が重ねて呼ばれていた。state はボタンの無効化、ref は同じ描画内の連打を止める。
+  const [isSaving, setIsSaving] = React.useState(false);
+  const isSavingRef = React.useRef(false);
   // 右サイドバー「ストレージ状況」: 保存データの大きさ（Rust の get_storage_usage）。
   // 画面を開いたときと「最新にする」・データ取り込みの後にだけ読む（常時ポーリングはしない）。
   // preview は Tauri 外（ブラウザでの開発表示）で、実データが無いことを示す。
@@ -883,9 +889,15 @@ export default function SettingsScreen({
   const handleSave = async () => {
     // 自動起動の切り替え中は Rust 側が同じ設定ファイルへ写しを書くため、読み書きが重ならないよう待たせる。
     // データ取り込み中も、置き換え中の設定ファイルへ書き込まないよう止める。
-    if (isUpdatingAutostartRef.current || isMigrationImportingRef.current) {
+    if (
+      isUpdatingAutostartRef.current ||
+      isMigrationImportingRef.current ||
+      isSavingRef.current
+    ) {
       return;
     }
+    isSavingRef.current = true;
+    setIsSaving(true);
     try {
       const dto = buildDtoForSave(settings, backendSettings);
       await saveUserSettings(dto);
@@ -909,6 +921,12 @@ export default function SettingsScreen({
         title: "保存に失敗しちゃった",
         description: "設定の保存ができなかったよ。もう一度試してみてね。",
       });
+    } finally {
+      // 成功・失敗どちらでも解除し、失敗時はもう一度押せるようにする。
+      isSavingRef.current = false;
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -1081,9 +1099,10 @@ export default function SettingsScreen({
           </nav>
 
           {/* Settings Hint Card */}
-          {/* 高さの低いウィンドウ（最小 800×440）ではヒントカードが設定メニューを押し潰して高さ 0 にするため、
-              高さ 560px 以下では隠してメニューの領域を確保する（800×600 以上の見た目は変えない）。 */}
-          <div className="p-3 [@media(max-height:560px)]:hidden">
+          {/* ヒントカード（約 210px）を出したままだと、起動時の 800×600 では設定メニュー7項目のうち3項目しか見えず、
+              最小 800×440 ではメニューが高さ 0 に押し潰される。7項目がカードと並んで収まるのは高さ 800px 以上なので、
+              それ未満では隠してメニューの領域を確保する（他画面の「ゆうこの一言」カードを 740px 未満で隠すのと同じ考え方）。 */}
+          <div className="p-3 [@media(max-height:799px)]:hidden">
             <Card className="border-[var(--yuuko-green)]/20 bg-[var(--yuuko-green-light)]/30">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-2">
@@ -1473,8 +1492,9 @@ export default function SettingsScreen({
                         updateAi("provider", v);
                       }}
                     >
-                      <SelectTrigger className="w-72 max-w-full">
-                        <SelectValue placeholder="未選択" />
+                      {/* 列が狭いと最も長い表示名が入りきらないため、欄は列幅まで縮め、収まらない名前は末尾を省略する。 */}
+                      <SelectTrigger className="w-72 max-w-full min-w-0">
+                        <SelectValue placeholder="未選択" className="block min-w-0 truncate" />
                       </SelectTrigger>
                       <SelectContent>
                         {/* 主経路のローカル（同梱の llama-server・このパソコンの中で動くAI。判断台帳 D99）を先頭に置き、
@@ -1681,7 +1701,9 @@ export default function SettingsScreen({
                     <div className="flex items-center gap-1.5 mb-3">
                       <span className="text-sm text-foreground">関心のあるジャンル</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {/* 固定の列数だと 800×600 の狭い列で「セキュリティ」などが語の途中で折り返すため、
+                        最も長い名前が1行に収まる幅（7.5rem）を下限に、入るだけの列を並べる。 */}
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-3">
                       {GENRE_OPTIONS.map((genre) => (
                         <div key={genre} className="flex items-center space-x-2">
                           <Checkbox
@@ -1700,7 +1722,7 @@ export default function SettingsScreen({
                           />
                           <label
                             htmlFor={`genre-${genre}`}
-                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                            className="text-sm font-medium leading-none whitespace-nowrap peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                           >
                             {genre}
                           </label>
@@ -1957,7 +1979,9 @@ export default function SettingsScreen({
               loadNoticeKind === "error" ||
               // 初回読み込み・再試行の最中も、画面の値はまだ保存値ではないため保存させない。
               isLoading ||
-              isMigrationImporting
+              isMigrationImporting ||
+              // 保存の応答待ちのあいだは押せない（連打で二重に保存しない）。
+              isSaving
             }
           >
             <Check className="w-4 h-4" />
