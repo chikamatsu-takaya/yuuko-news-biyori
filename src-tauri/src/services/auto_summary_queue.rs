@@ -100,6 +100,7 @@ use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::article_service::ArticleService;
 use crate::services::local_llm_service::LocalLlmService;
 use crate::services::summary_service::{AutoSummaryOutcome, SummaryService};
+use crate::services::worker_guard::run_isolated;
 
 /// 1記事あたりの試行回数の上限（初回を含めた合計）。
 const MAX_ATTEMPTS: u32 = 3;
@@ -107,6 +108,10 @@ const MAX_ATTEMPTS: u32 = 3;
 /// 起動後、最初の1件を処理するまでの待ち時間。起動時のニュース取得・画面表示と競合させず、
 /// OS 自動起動の直後でネットワークがまだ使えない時間帯に AI を呼ばないため 60 秒待つ。
 const STARTUP_DELAY: Duration = Duration::from_secs(60);
+
+/// ワーカーの1回分が panic した後、次の1回までに空ける間隔。同じ原因で panic を繰り返しても、
+/// CPU とログを使い続けないため（終了要求があればすぐ戻る）。
+const PANIC_RECOVERY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Gemini で1件処理するごとに空ける間隔。1件で AI を3回呼ぶため、Gemini の無料枠の毎分上限に
 /// 近づかないよう、30秒空けて「1分あたり最大2件（AI呼び出し6回）」程度に抑える。
@@ -335,14 +340,19 @@ impl QueueCore {
             article_id
         };
 
-        if is_done(&article_id) {
-            let mut state = self.lock();
-            state.processing = None;
-            state.failure_counts.remove(&article_id);
-            return StepOutcome::Skipped(article_id);
-        }
-
-        let result = summarize(&article_id);
+        // 確認・要約のどちらかで panic しても「処理中」の印を残さないよう、ここで受け止めて失敗の1回に数える
+        // （印が残ると、その記事は「処理中」のまま表示され、次の記事も取り出せなくなるため。worker_guard）。
+        let result = match run_isolated("auto summary done check", || is_done(&article_id)) {
+            Some(true) => {
+                let mut state = self.lock();
+                state.processing = None;
+                state.failure_counts.remove(&article_id);
+                return StepOutcome::Skipped(article_id);
+            }
+            Some(false) => run_isolated("auto summary generation", || summarize(&article_id))
+                .unwrap_or_else(|| Err(panicked_error())),
+            None => Err(panicked_error()),
+        };
 
         let mut state = self.lock();
         state.processing = None;
@@ -386,6 +396,23 @@ impl QueueCore {
         }
     }
 
+    /// ワーカーの1回分が `process_next_unless_paused` の外で panic した後に呼ぶ。
+    /// 「処理中」の印が残っていれば下ろし、その記事を失敗の1回に数える（上限なら `Failed`、それ以外は待機列の最後へ）。
+    /// 印が残ったままだと画面は「処理中」のまま、`wait_for_work` も次の記事を渡さなくなるため。
+    fn abandon_processing(&self) {
+        let mut state = self.lock();
+        let Some(article_id) = state.processing.take() else {
+            return;
+        };
+        let count = state.failure_counts.entry(article_id.clone()).or_insert(0);
+        *count += 1;
+        if *count >= MAX_ATTEMPTS {
+            state.failed.insert(article_id);
+        } else {
+            state.pending.push_back(article_id);
+        }
+    }
+
     /// 待機中の記事が来るか終了要求が来るまで待つ。続けてよければ true。
     fn wait_for_work(&self) -> bool {
         let mut state = self.lock();
@@ -417,6 +444,11 @@ impl QueueCore {
         let _state = self.lock();
         self.signal.notify_all();
     }
+}
+
+/// 記事の確認・要約が panic したときに、失敗の1回として扱うためのエラー（本文やペイロードは入れない）。
+fn panicked_error() -> AppError {
+    AppError::Io(std::io::Error::other("auto summary step panicked"))
 }
 
 /// 実AIを呼べる見込みがあるかの判定（Gemini はキーの有無、ローカルは同梱物の有無）。AI は呼ばない。
@@ -801,7 +833,10 @@ impl AutoSummaryQueue {
         std::thread::spawn(move || {
             // 終了要求があれば待ちを打ち切る（その後の wait_for_work が false を返して終わる）。
             queue.core.wait_interval(STARTUP_DELAY);
-            queue.enqueue_unsummarized();
+            // 並べ直しで panic してもスレッドを終わらせない（次の投入はニュース取得後などに来る）。
+            run_isolated("auto summary startup enqueue", || {
+                queue.enqueue_unsummarized()
+            });
             queue.run_worker();
         });
     }
@@ -810,59 +845,78 @@ impl AutoSummaryQueue {
         // 設定が続けて読めなかった回数（確かめ直す間隔を延ばすため）。
         let mut settings_unavailable_streak: u32 = 0;
         while self.core.wait_for_work() {
-            // 手動の要求の最中・直後、起動を控えている間は取り出さない（記事は待機列の先頭に残る）。
-            if let Some(wait) = self.local_llm_wait() {
-                self.note(QueueNotice::WaitingForLocalLlm);
-                log::debug!(
-                    "auto summary is waiting {}s for the local llm",
-                    wait.as_secs()
-                );
-                self.core.wait_interval(wait);
-                continue;
-            }
-            let outcome = self.core.process_next_unless_paused(
-                || self.is_enabled(),
-                || self.is_paused(),
-                |article_id| self.is_done_or_taken(article_id),
-                |article_id| {
-                    // AI を呼ぶ直前。止まっていた後（待ち・一時停止・空）から動き出したときだけ1行残す。
-                    self.note(QueueNotice::Running);
-                    self.summary_service
-                        .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
-                            article_id: article_id.to_string(),
-                        })
-                },
+            self.run_iteration_isolated(&mut settings_unavailable_streak);
+        }
+    }
+
+    /// ワーカーの1回分を panic から切り離して実行する。panic したら「処理中」の印を下ろし（失敗の1回に数える）、
+    /// 少し待ってからループへ戻す。1回の panic でスレッドが終わり、再起動まで自動要約が止まっていたため。
+    /// 待つのは、同じ原因で panic を繰り返すときに CPU とログを使い続けないため。
+    fn run_iteration_isolated(&self, settings_unavailable_streak: &mut u32) {
+        if run_isolated("auto summary worker step", || {
+            self.run_iteration(settings_unavailable_streak)
+        })
+        .is_none()
+        {
+            self.core.abandon_processing();
+            self.core.wait_interval(PANIC_RECOVERY_INTERVAL);
+        }
+    }
+
+    /// ワーカーの1回分（ローカルLLM待ちの確認 → 1件の処理 → 次までの間隔）。
+    fn run_iteration(&self, settings_unavailable_streak: &mut u32) {
+        // 手動の要求の最中・直後、起動を控えている間は取り出さない（記事は待機列の先頭に残る）。
+        if let Some(wait) = self.local_llm_wait() {
+            self.note(QueueNotice::WaitingForLocalLlm);
+            log::debug!(
+                "auto summary is waiting {}s for the local llm",
+                wait.as_secs()
             );
-            self.notify_if_drained(&outcome);
-            if outcome != StepOutcome::SettingsUnavailable {
-                settings_unavailable_streak = 0;
+            self.core.wait_interval(wait);
+            return;
+        }
+        let outcome = self.core.process_next_unless_paused(
+            || self.is_enabled(),
+            || self.is_paused(),
+            |article_id| self.is_done_or_taken(article_id),
+            |article_id| {
+                // AI を呼ぶ直前。止まっていた後（待ち・一時停止・空）から動き出したときだけ1行残す。
+                self.note(QueueNotice::Running);
+                self.summary_service
+                    .generate_article_summary_without_fallback(GenerateArticleSummaryParams {
+                        article_id: article_id.to_string(),
+                    })
+            },
+        );
+        self.notify_if_drained(&outcome);
+        if outcome != StepOutcome::SettingsUnavailable {
+            *settings_unavailable_streak = 0;
+        }
+        match outcome {
+            // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける
+            // （Gemini は毎分上限を守るため、ローカルは CPU を他の操作へ返すため）。
+            StepOutcome::Succeeded(_)
+            | StepOutcome::AlreadySummarized(_)
+            | StepOutcome::YieldedToManual(_)
+            | StepOutcome::Retrying(_) => self.core.wait_interval(self.item_interval()),
+            StepOutcome::Failed(article_id) => {
+                log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
+                self.core.wait_interval(self.item_interval())
             }
-            match outcome {
-                // AI を呼んだ後は、保存しなかった場合も含めて間隔を空ける
-                // （Gemini は毎分上限を守るため、ローカルは CPU を他の操作へ返すため）。
-                StepOutcome::Succeeded(_)
-                | StepOutcome::AlreadySummarized(_)
-                | StepOutcome::YieldedToManual(_)
-                | StepOutcome::Retrying(_) => self.core.wait_interval(self.item_interval()),
-                StepOutcome::Failed(article_id) => {
-                    log::warn!("auto summary gave up after {MAX_ATTEMPTS} attempts: {article_id}");
-                    self.core.wait_interval(self.item_interval())
-                }
-                StepOutcome::Paused => {
-                    log::debug!("auto summary paused while the pc is busy");
-                    self.core.wait_interval(PAUSE_RECHECK_INTERVAL)
-                }
-                // 設定が読めなかった。待機列は残し、少し待って確かめ直す。
-                StepOutcome::SettingsUnavailable => {
-                    settings_unavailable_streak = settings_unavailable_streak.saturating_add(1);
-                    self.core
-                        .wait_interval(settings_retry_interval(settings_unavailable_streak));
-                }
-                StepOutcome::Skipped(_)
-                | StepOutcome::Idle
-                | StepOutcome::Stopped
-                | StepOutcome::Disabled => {}
+            StepOutcome::Paused => {
+                log::debug!("auto summary paused while the pc is busy");
+                self.core.wait_interval(PAUSE_RECHECK_INTERVAL)
             }
+            // 設定が読めなかった。待機列は残し、少し待って確かめ直す。
+            StepOutcome::SettingsUnavailable => {
+                *settings_unavailable_streak = settings_unavailable_streak.saturating_add(1);
+                self.core
+                    .wait_interval(settings_retry_interval(*settings_unavailable_streak));
+            }
+            StepOutcome::Skipped(_)
+            | StepOutcome::Idle
+            | StepOutcome::Stopped
+            | StepOutcome::Disabled => {}
         }
     }
 
@@ -2818,5 +2872,124 @@ mod tests {
             json,
             serde_json::json!({ "kind": "pausedLowMemoryWhileActive" })
         );
+    }
+
+    #[test]
+    fn summary_that_panics_once_is_retried_and_never_stays_processing() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a"]));
+        let outcome = core.process_next(
+            || true,
+            not_done,
+            |_| -> Result<AutoSummaryOutcome, AppError> { panic!("summary step blew up") },
+        );
+        assert_eq!(outcome, StepOutcome::Retrying("a".to_string()));
+        // 「処理中」のまま残らない（画面の表示も次の取り出しも止まらない）。
+        assert_eq!(core.state_of("a"), SummaryState::Waiting);
+        assert!(core.lock().processing.is_none());
+        assert_eq!(core.lock().failure_counts.get("a"), Some(&1));
+
+        // 次の回はふつうに要約できる。
+        let outcome = core.process_next(|| true, not_done, |_| Ok(SAVED));
+        assert_eq!(outcome, StepOutcome::Succeeded("a".to_string()));
+        assert!(core.is_drained());
+    }
+
+    #[test]
+    fn done_check_that_panics_counts_as_a_failure_and_releases_the_article() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a", "b"]));
+        let outcome = core.process_next(
+            || true,
+            |_| -> bool { panic!("done check blew up") },
+            |_| panic!("must not summarize when the check panicked"),
+        );
+        assert_eq!(outcome, StepOutcome::Retrying("a".to_string()));
+        assert!(core.lock().processing.is_none());
+        // 他の記事は続けて処理できる。
+        let outcome = core.process_next(|| true, not_done, |_| Ok(SAVED));
+        assert_eq!(outcome, StepOutcome::Succeeded("b".to_string()));
+    }
+
+    #[test]
+    fn summary_that_keeps_panicking_ends_as_failed_like_other_failures() {
+        let core = QueueCore::default();
+        core.replace_pending(ids(&["a"]));
+        let mut last = StepOutcome::Idle;
+        for _ in 0..MAX_ATTEMPTS {
+            last = core.process_next(
+                || true,
+                not_done,
+                |_| -> Result<AutoSummaryOutcome, AppError> { panic!("always") },
+            );
+        }
+        assert_eq!(last, StepOutcome::Failed("a".to_string()));
+        assert_eq!(core.state_of("a"), SummaryState::Failed);
+        assert!(core.is_drained());
+    }
+
+    #[test]
+    fn abandon_processing_releases_a_stuck_article_as_one_failed_attempt() {
+        let core = QueueCore::default();
+        // 印が無ければ何もしない。
+        core.abandon_processing();
+        assert!(core.lock().failure_counts.is_empty());
+
+        core.lock().processing = Some("a".to_string());
+        core.abandon_processing();
+        assert_eq!(core.state_of("a"), SummaryState::Waiting);
+        assert_eq!(core.lock().failure_counts.get("a"), Some(&1));
+
+        // 上限に達していれば Failed にする。
+        core.lock().pending.clear();
+        core.lock()
+            .failure_counts
+            .insert("a".to_string(), MAX_ATTEMPTS - 1);
+        core.lock().processing = Some("a".to_string());
+        core.abandon_processing();
+        assert_eq!(core.state_of("a"), SummaryState::Failed);
+        assert!(core.lock().processing.is_none());
+    }
+
+    #[test]
+    fn worker_step_that_panics_outside_the_summary_is_recovered() {
+        let ctx = queue_context_with("panicking-step", "local", true);
+        let panicked = Arc::new(AtomicBool::new(false));
+        let flag = panicked.clone();
+        // 1回目だけ panic する（ローカルLLM待ちの確認は要約の外＝`process_next_unless_paused` の外で呼ばれる）。
+        let queue = ctx.queue.clone().with_local_llm_wait(move || {
+            if !flag.swap(true, Ordering::SeqCst) {
+                panic!("local llm wait check blew up");
+            }
+            None
+        });
+        // 1回分の途中で印が残った状態を作る。
+        queue.core.lock().processing = Some("unsummarized".to_string());
+        // 回復後の待ちをすぐ抜けるよう、終了要求を出しておく（待ちの長さに依らずに確かめるため）。
+        queue.core.request_stop();
+        let mut streak = 0;
+        queue.run_iteration_isolated(&mut streak);
+        assert!(panicked.load(Ordering::SeqCst));
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+        assert!(queue.core.lock().processing.is_none());
+
+        // 2回目は panic せずに戻る（終了要求済みなので取り出さない）。
+        queue.run_iteration_isolated(&mut streak);
+        assert_eq!(queue.core.state_of("unsummarized"), SummaryState::Waiting);
+    }
+
+    #[test]
+    fn queue_lock_poisoned_by_a_panic_is_still_usable() {
+        let core = Arc::new(QueueCore::default());
+        core.replace_pending(ids(&["a"]));
+        let poisoner = core.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            panic!("poison the queue lock");
+        })
+        .join();
+        assert!(core.state.is_poisoned());
+        let outcome = core.process_next(|| true, not_done, |_| Ok(SAVED));
+        assert_eq!(outcome, StepOutcome::Succeeded("a".to_string()));
     }
 }
