@@ -1481,6 +1481,28 @@ test.describe("article date display", () => {
     await expect(main.getByText("2026/06/05 15:43").first()).toBeVisible();
     await expect(main).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
+
+  test("home formats dates and shows NEW only for articles published within 24 hours", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).__E2E_HISTORY_DATE_DISPLAY__ = true;
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+    await openHome(page);
+
+    const cards = page.getByTestId("home-article-card");
+    const freshCard = cards.filter({ hasText: "公開直後の記事" });
+    const oldCard = cards.filter({ hasText: "4か月前に公開された記事" });
+    await expect(freshCard).toContainText("NEW");
+    await expect(freshCard).toContainText(/\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/);
+    // 未読でも4か月前に公開された記事は NEW にしない（B2）。
+    await expect(oldCard).not.toContainText("NEW");
+    // RFC3339 のままではなく、日本時間の「YYYY/MM/DD HH:mm」で出す（B1）。
+    await expect(oldCard).toContainText("2026/06/05 15:43");
+    await expect(page.locator("main")).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
 });
 
 test("today-news list shows the empty state (no crash, no cards) when nothing was acquired today", async ({
@@ -8839,6 +8861,55 @@ test("pending reward notice shows a balloon with OK and confirms through handle_
   ).toBeVisible();
 });
 
+// 報酬通知の OK で Rust 側の未確認報酬が確定したら、ホームの「未確認の報酬」件数も読み直して 0 になる。
+// OK を押した瞬間に通知状態は外れ（確定より先）、その時点の読み直しではまだ 1 件のため、確定後の読み直しを確かめる。
+test("home pending reward count refreshes to 0 after the reward notice OK is confirmed", async ({
+  page,
+}) => {
+  await enableRewardNotice(page);
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const rewardState = (pendingRewardIds: string[]) => ({
+      currentRank: 3,
+      rewards: [
+        { rewardId: "theme_001", type: "theme", name: "そらいろ", unlockRank: 3, unlocked: true, pending: pendingRewardIds.length > 0 },
+      ],
+      pendingRewardIds,
+      activeThemeId: "default",
+    });
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_reward_state") {
+        return rewardState(w.__E2E_REWARD_CONFIRMED__ ? [] : ["theme_001"]);
+      }
+      if (cmd === "handle_yuuko_clicked") {
+        // 確定を遅らせ、通知状態が外れた直後の読み直しが確定前に走る状況を作る。
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const result = await original(cmd, args);
+        w.__E2E_REWARD_CONFIRMED__ = true;
+        w.__E2E_BACKEND_ACTIVE__ = null;
+        return result;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+  await openHome(page);
+
+  const notification = page.getByRole("region", { name: NOTIFICATION_REGION });
+  await expect(notification.getByText(REWARD_NOTICE_TEXT)).toBeVisible();
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("1");
+
+  await notification.getByRole("button", { name: "OK", exact: true }).click();
+
+  await expect(notification).toHaveCount(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_HANDLE_CLICKED_CALL_COUNT__"))
+    .toBe(1);
+  await expect(page.getByTestId("home-pending-rewards")).toHaveText("0");
+});
+
 test("pending reward notice is not auto-dismissed after the balloon timeout", async ({
   page,
 }) => {
@@ -10720,6 +10791,26 @@ async function installTauriMocks(page: Page) {
               const limit =
                 typeof params.limit === "number" ? params.limit : pool.length;
               return pool.slice(0, limit);
+            }
+            // 日時表示・NEW 判定テスト用（ホーム）: list_article_history の同名フラグと同じ2件。
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            if ((window as any).__E2E_HISTORY_DATE_DISPLAY__) {
+              /* eslint-enable @typescript-eslint/no-explicit-any */
+              const now = new Date();
+              return [
+                {
+                  ...articleSummary,
+                  articleId: "date-fresh",
+                  title: "公開直後の記事",
+                  publishedAtText: new Date(now.getTime() - 60 * 60 * 1000).toISOString(),
+                },
+                {
+                  ...articleSummary,
+                  articleId: "date-old",
+                  title: "4か月前に公開された記事",
+                  publishedAtText: "2026-06-05T06:43:31Z",
+                },
+              ];
             }
             return [articleSummary];
           }

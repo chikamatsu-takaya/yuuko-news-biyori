@@ -339,11 +339,14 @@ export default function MainScreen({
   onNavigate,
   onOpenArticle,
   yuukoNotificationState,
+  rewardStateRevision = 0,
 }: {
   onNavigate?: (screen: string) => void;
   onOpenArticle?: (articleId: string) => void;
   // 通知状態は Page 側スケジューラが一元取得する。MainScreen は受け取って表示するだけ。
   yuukoNotificationState?: YuukoNotificationState | null;
+  // 報酬通知の OK で未確認報酬が確定したら Page 側が進める値。変わったら件数を読み直す。
+  rewardStateRevision?: number;
 }) {
   // 初期値は空。読み込み中・0件・Tauri 外では偽の記事を出さず、一覧の位置に状態の案内を出す。
   const [articles, setArticles] = React.useState<Article[]>([]);
@@ -435,8 +438,9 @@ export default function MainScreen({
   }, []);
 
   // 未確認の報酬の件数は rewards.json の pendingRewards（get_reward_state の pendingRewardIds）が正。
-  // 報酬通知（rewardNotification）は通知中だけ載るため件数の元にはしない。ゆうこの OK 等で確認されると
-  // 通知の報酬 ID が変わるので、そのときだけ読み直して件数を合わせる。
+  // 報酬通知（rewardNotification）は通知中だけ載るため件数の元にはしない。通知の報酬 ID が変わったとき、
+  // および報酬通知の OK が Rust 側で確定したとき（rewardStateRevision。OK 直後は確定前に通知状態が
+  // 外れるため、ID の変化だけでは確定後に読み直せない）に読み直して件数を合わせる。
   const rewardNoticeKey =
     yuukoNotificationState?.rewardNotification?.rewardIds.join(",") ?? "";
   React.useEffect(() => {
@@ -451,7 +455,7 @@ export default function MainScreen({
     return () => {
       active = false;
     };
-  }, [rewardNoticeKey]);
+  }, [rewardNoticeKey, rewardStateRevision]);
 
   const loadRecommendedArticles = React.useCallback(async (): Promise<boolean> => {
     setIsLoadingArticles(true);
