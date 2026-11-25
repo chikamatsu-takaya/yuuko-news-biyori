@@ -7169,8 +7169,9 @@ test("settings shows the development note only while MockProvider is selected", 
   await expect(note).toHaveCount(0);
 });
 
-// 以前に OpenAI を保存していた場合も画面が壊れず、MockProvider として表示・保存できること。
-test("settings treats a saved openai provider as MockProvider", async ({
+// 以前に OpenAI を保存していた場合も画面が壊れず、Mock には見せず未選択で表示すること（2026-11-25 藤井）。
+// Rust は openai を "unknown" として渡すが、"openai" が届いた場合も同じ表示にし、選び直さなければそのまま送り返す。
+test("settings shows a saved openai provider as unselected, not MockProvider", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -7183,16 +7184,22 @@ test("settings treats a saved openai provider as MockProvider", async ({
   await openSettings(page);
   await openSettingsMenu(page, "解説・AI設定");
   await expect(
-    page.getByRole("combobox").filter({ hasText: "開発・デモ用" })
+    page.getByRole("combobox").filter({ hasText: "未選択" })
   ).toBeVisible();
+  await expect(page.getByTestId("mock-provider-note")).toHaveCount(0);
+  await expect(page.getByTestId("unknown-provider-note")).toBeVisible();
   await expect(page.getByText(/OpenAI/)).toHaveCount(0);
 
+  // ほかの設定だけ変えて保存しても、AI プロバイダは受け取った値のまま送り返す（mock へ書き換えない）。
+  await page.getByRole("combobox").filter({ hasText: "ふつう" }).click();
+  await page.getByRole("option", { name: "詳しく" }).click();
   await page.getByRole("button", { name: "保存する" }).click();
 
   const saved = (await readSavedSettings(page)) as
-    | { aiProvider?: string }
+    | { aiProvider?: string; explanationLevel?: string }
     | undefined;
-  expect(saved?.aiProvider).toBe("mock");
+  expect(saved?.explanationLevel).toBe("detailed");
+  expect(saved?.aiProvider).toBe("openai");
 });
 
 // 読み取れない保存値（Rust が "unknown" で返す）は Mock と見せず未選択で表示し、

@@ -49,6 +49,17 @@ pub enum AiProvider {
     Unknown,
 }
 
+/// 画面・判定へ渡す AI プロバイダ。選択肢から外した未実装の openai も、読み取れない値と同じ Unknown にする
+/// （設定画面で Mock に見せないため。2026-11-25 藤井「Mock を選んだとき以外は Mock に見せない」）。
+/// どちらも AI は呼ばず AI_UNAVAILABLE になる点は同じ。保存値は `apply_from_dto` が Unknown のとき残すので、
+/// 利用者が選び直さない限り "openai" のまま変わらない。
+fn dto_ai_provider(stored: &str) -> AiProvider {
+    match AiProvider::from_storage(stored) {
+        AiProvider::Openai => AiProvider::Unknown,
+        provider => provider,
+    }
+}
+
 impl AiProvider {
     pub fn from_storage(value: &str) -> Self {
         match value {
@@ -346,7 +357,7 @@ impl PersistedSettings {
             selected_tone_id: self.ui.tone_id.clone(),
             selected_personality_id: self.ui.personality_id.clone(),
             nickname: self.user.nickname.clone(),
-            ai_provider: AiProvider::from_storage(&self.ai.provider),
+            ai_provider: dto_ai_provider(&self.ai.provider),
             max_daily_recommendations: self.news.max_daily_recommendations,
             auto_summary_enabled: self.ai.auto_summary_enabled,
             onboarding_completed: Some(self.ui.onboarding_completed),
@@ -732,6 +743,14 @@ mod tests {
         });
         assert_eq!(settings.ai.provider, "future_ai");
         assert_eq!(settings.news.max_daily_recommendations, 5);
+
+        // 未実装の openai も画面へは Unknown として渡し（Mock に見せない）、保存では "openai" を残す。
+        let mut openai: PersistedSettings =
+            serde_json::from_str(r#"{ "version": 1, "ai": { "provider": "openai" } }"#).unwrap();
+        let openai_dto = openai.to_dto();
+        assert_eq!(openai_dto.ai_provider, AiProvider::Unknown);
+        openai.apply_from_dto(openai_dto);
+        assert_eq!(openai.ai.provider, "openai");
 
         // 利用者が選び直したときは、その値で上書きする。
         let chosen = UserSettingsDto {

@@ -252,13 +252,13 @@ const labelToExplanationLevel = (label: string): ExplanationLevel => {
 };
 
 // 保存済みの Provider を選択欄の値へ写す。
-// OpenAI は選択肢から外した。以前に保存された "openai" は実AI未実装で
-// もともと MockProvider で動いていたため、表示も MockProvider に合わせる（空の選択欄にしない）。
-// 読み取れない保存値（"unknown"）は Mock として動かないため、Mock を選んでいるように見せず未選択（""）にする
-// （2026-11-25 藤井）。未選択のまま保存すると buildDtoForSave が "unknown" を送り返し、Rust は保存値を残す。
+// 読み取れない保存値（"unknown"）と、選択肢から外した未実装の "openai" は、どちらも Mock としては動かない
+// （Rust は AI_UNAVAILABLE を返す）ため、Mock を選んでいるように見せず未選択（""）にする
+// （2026-11-25 藤井「Mock を選んだとき以外は Mock に見せない」）。Rust は openai も "unknown" として渡すが、
+// 古いバックエンドなどから "openai" が届いても同じ表示にする。未選択のまま保存すると buildDtoForSave が
+// 受け取った値をそのまま送り返し、Rust は保存値（"openai" など）を残す。
 const providerForSelect = (provider: string): string => {
-  if (provider === "openai") return "mock";
-  if (provider === "unknown") return "";
+  if (provider === "openai" || provider === "unknown") return "";
   return provider;
 };
 
@@ -351,8 +351,8 @@ const buildDtoForSave = (
 // 比較は「保存したら書かれる DTO」同士で行う。保存済み DTO も一度画面状態へ写してから
 // 保存と同じ正規化（通知時間帯・解説レベル・ジャンル既定値など）を通すため、
 // 読み込んだだけで「未保存」になる誤表示を防ぐ。
-// ただし aiProvider だけは保存値そのものと比べる。選択肢から外した openai は画面上 MockProvider と
-// 表示され、保存すると mock へ書き換わるため、ファイルとずれている事実を「未保存」として示す。
+// ただし aiProvider だけは保存値そのものと比べる（未選択で表示する unknown / openai は、選び直さない限り
+// 受け取った値をそのまま送り返すため、読み込んだだけでは「未保存」にならない）。
 const toComparableDto = (dto: UserSettingsDto): UserSettingsDto => ({
   ...dto,
   // ジャンルは選択の順序に意味が無いため、付け外しで順序だけ変わっても変更なしとみなす。
@@ -966,7 +966,7 @@ export default function SettingsScreen({
   };
 
   const hasUnsavedChanges = hasUnsavedSettingsChanges(settings, backendSettings);
-  // 接続テストは保存済みの Provider を確かめる。保存済みの openai は画面上 mock と表示するため、比較も同じ扱いにする。
+  // 接続テストは保存済みの Provider を確かめる。未選択で表示する unknown / openai は、比較も同じ扱いにする。
   const savedAiProvider = backendSettings?.aiProvider ?? null;
   const savedAiProviderLabel = aiProviderShortLabel(savedAiProvider);
   const isAiProviderSelectionUnsaved =
@@ -1478,7 +1478,7 @@ export default function SettingsScreen({
                             保存値（value）は従来のまま変えない。 */}
                         <SelectItem value="local">ローカル（おすすめ）</SelectItem>
                         <SelectItem value="gemini">Gemini（APIキーが必要）</SelectItem>
-                        {/* OpenAI は選択肢から外した。保存済みの openai は読込時に mock として扱う。 */}
+                        {/* OpenAI は選択肢から外した。保存済みの openai は未選択で表示する（Mock に見せない）。 */}
                         <SelectItem value="mock">開発・デモ用（本物のAIは使いません）</SelectItem>
                       </SelectContent>
                     </Select>
