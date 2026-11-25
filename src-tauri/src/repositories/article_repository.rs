@@ -1702,16 +1702,26 @@ impl ArticleRepository {
     /// （既にアーカイブ済みの記事なら ZIP 側の内容から月次ZIPを作り直すため失われない）。
     /// ログはパスと分類だけ（`load_readable_article_records`）。本文は出さない。
     /// 正規の保存先が破損ファイルで塞がれている記事も除く。保存・移動で破損ファイルを上書きしないため。
+    /// 比較は ASCII の大文字・小文字を区別しない。Windows（NTFS）では `A.md` と `a.md` が同じファイルを
+    /// 指すため、区別すると別ファイル扱いになり破損ファイルを上書きしうる（区別しすぎて除外が増えるのは安全側）。
     fn load_records_for_archive_maintenance(
         &self,
     ) -> Result<Vec<PersistedArticleRecord>, AppError> {
         let loaded = self.load_readable_article_records()?;
-        let skipped_paths = loaded.skipped_paths;
+        let skipped_paths = loaded
+            .skipped_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
         Ok(loaded
             .records
             .into_iter()
             .filter(|record| {
-                let occupied = skipped_paths.contains(&self.article_path(record));
+                let canonical = self
+                    .article_path(record)
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                let occupied = skipped_paths.contains(&canonical);
                 if occupied {
                     log::warn!(
                         "Skipping article in archive maintenance; its path is occupied by a corrupt file: {}",
@@ -5617,6 +5627,108 @@ articleId: [unterminated
         // 保存先が破損ファイルで塞がれている記事は対象外にし、破損ファイルを上書きしない。
         assert_eq!(summary.archived_article_count, 0);
         assert_eq!(retirement.retired_article_count, 0);
+        assert_eq!(std::fs::read(&corrupt_path).unwrap(), corrupt_bytes);
+    }
+
+    #[test]
+    fn archive_candidates_keeps_archived_article_from_zip_when_its_local_markdown_is_corrupt() {
+        use chrono::{TimeZone, Utc};
+        use zip::ZipArchive;
+
+        let context = TestRepositoryContext::new();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let old_a = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::legacy_seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_a).unwrap();
+        context.repository.archive_candidates(now).unwrap();
+
+        // アーカイブ済みAのローカルMarkdownを壊し、同じ月に新しい候補Bを足す。
+        let a_path = context.news_dir.join("202605").join("old-a.md");
+        let corrupt_bytes = b"---
+articleId: [unterminated
+---
+"
+        .to_vec();
+        std::fs::write(&a_path, &corrupt_bytes).unwrap();
+        let old_b = PersistedArticleRecord {
+            article_id: "old-b".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            published_at_text: "2026-05-02T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::legacy_seed_articles().remove(0)
+        };
+        context.repository.save_article_record(&old_b).unwrap();
+
+        let summary = context.repository.archive_candidates(now).unwrap();
+        assert_eq!(summary.archived_article_count, 1);
+
+        // 月次ZIPの作り直しでは、ローカルが読めないAも既存ZIP側の内容から引き継ぐ。
+        let archive_dir = context.root_dir.join("archive");
+        let file = std::fs::File::open(archive_dir.join("2026-05.zip")).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 2);
+        assert!(archive.by_name("old-a.md").is_ok());
+        assert!(archive.by_name("old-b.md").is_ok());
+
+        let index = context.repository.load_archive_index_or_default().unwrap();
+        let month = index
+            .archives
+            .iter()
+            .find(|archive| archive.month == "2026-05")
+            .unwrap();
+        let mut ids = month
+            .articles
+            .iter()
+            .map(|article| article.article_id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["old-a", "old-b"]);
+        assert_eq!(std::fs::read(&a_path).unwrap(), corrupt_bytes);
+    }
+
+    #[test]
+    fn archive_maintenance_treats_corrupt_file_path_case_insensitively() {
+        use chrono::{TimeZone, Utc};
+
+        let context = TestRepositoryContext::new();
+        let article = PersistedArticleRecord {
+            article_id: "old-a".to_string(),
+            fetched_at: "2026-05-01T00:00:00Z".to_string(),
+            published_at_text: "2026-05-01T00:00:00Z".to_string(),
+            favorite: false,
+            is_archived: false,
+            ..super::legacy_seed_articles().remove(0)
+        };
+        let misplaced_dir = context.news_dir.join("202606");
+        std::fs::create_dir_all(&misplaced_dir).unwrap();
+        std::fs::write(
+            misplaced_dir.join("old-a.md"),
+            super::serialize_article_markdown(&article).unwrap(),
+        )
+        .unwrap();
+        // 正規の保存先（202605/old-a.md）と大文字・小文字だけ違う名前の破損ファイル。
+        // NTFS では同じファイルを指すため、保守の対象外にして上書きしない。
+        let canonical_dir = context.news_dir.join("202605");
+        std::fs::create_dir_all(&canonical_dir).unwrap();
+        let corrupt_path = canonical_dir.join("OLD-A.md");
+        let corrupt_bytes = b"---
+articleId: [unterminated
+---
+"
+        .to_vec();
+        std::fs::write(&corrupt_path, &corrupt_bytes).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let summary = context.repository.archive_candidates(now).unwrap();
+
+        assert_eq!(summary.archived_article_count, 0);
         assert_eq!(std::fs::read(&corrupt_path).unwrap(), corrupt_bytes);
     }
 
