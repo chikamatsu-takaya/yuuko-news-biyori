@@ -46,6 +46,11 @@ import {
 import type { YuukoNotificationState } from "@/lib/tauri/yuuko";
 import { getUserSettings } from "@/lib/tauri/settings";
 import { useToast } from "@/hooks/use-toast";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import {
+  resolveArticleThumbnail,
+  type ArticleThumbnailStyle,
+} from "@/lib/article-thumbnail.mjs";
 
 // ============================================
 // TypeScript Types
@@ -68,7 +73,7 @@ type Article = {
   timeAgo: string;
   isNew: boolean;
   isFavorite: boolean;
-  thumbnailType: "ai" | "business" | "quantum";
+  thumbnail: ArticleThumbnailStyle;
 };
 
 type QuickAccessItem = {
@@ -83,11 +88,6 @@ type UserStats = {
   maxExp: number;
   starFragments: number;
   unclaimedRewards: number;
-};
-
-type RefreshMetricProps = {
-  label: string;
-  value: number;
 };
 
 // ============================================
@@ -117,7 +117,11 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "5分前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "ai",
+    thumbnail: resolveArticleThumbnail({
+      source: "TechCrunch Japan",
+      genre: "AI・テクノロジー",
+      title: "生成AIが変えるソフトウェア開発の未来",
+    }),
   },
   {
     id: "article-002",
@@ -130,7 +134,11 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "1時間前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "business",
+    thumbnail: resolveArticleThumbnail({
+      source: "日経ビジネス",
+      genre: "ビジネス",
+      title: "国内スタートアップの資金調達、過去最高に",
+    }),
   },
   {
     id: "article-003",
@@ -143,7 +151,11 @@ const fallbackMockArticles: Article[] = [
     timeAgo: "2時間前",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "quantum",
+    thumbnail: resolveArticleThumbnail({
+      source: "ITmedia NEWS",
+      genre: "テクノロジー",
+      title: "量子コンピュータの実用化に向けた新たな一歩",
+    }),
   },
 ];
 
@@ -187,16 +199,6 @@ const toCategoryColor = (genre: string): string => {
   return "bg-purple-500";
 };
 
-const toThumbnailType = (genre: string): Article["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  return "quantum";
-};
-
 const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   id: article.articleId,
   category: article.genre,
@@ -207,7 +209,12 @@ const mapTauriArticleToUi = (article: TauriArticleSummary): Article => ({
   timeAgo: article.publishedAtText,
   isNew: article.readState === "unread",
   isFavorite: article.isFavorite,
-  thumbnailType: toThumbnailType(article.genre),
+  thumbnail: resolveArticleThumbnail({
+    source: article.sourceName,
+    genre: article.genre,
+    title: article.title,
+    tags: article.tags,
+  }),
 });
 
 const toRefreshErrorLabel = (kind: string): string => {
@@ -236,7 +243,8 @@ const summarizeRefreshErrors = (
     new Set(result.errors.map((error) => toRefreshErrorLabel(error.kind)))
   );
 
-  return `エラー ${result.errors.length} 件（${kinds.join(" / ")}）`;
+  // ホームの通知1行の括弧内に入れるため、ここでは括弧を重ねない。
+  return `一部の取得元でエラー ${result.errors.length} 件：${kinds.join(" / ")}`;
 };
 
 // ============================================
@@ -260,95 +268,9 @@ function PawIcon({ className }: { className?: string }) {
   );
 }
 
-function ThumbnailPlaceholder({ type }: { type: Article["thumbnailType"] }) {
-  const configs = {
-    ai: {
-      gradient: "from-blue-400 to-cyan-400",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <ellipse cx="32" cy="32" rx="20" ry="16" />
-          <path d="M20 28 Q32 20 44 28" />
-          <path d="M20 36 Q32 44 44 36" />
-          <circle cx="24" cy="32" r="2" fill="currentColor" />
-          <circle cx="40" cy="32" r="2" fill="currentColor" />
-          <path d="M12 20 L8 12" />
-          <path d="M52 20 L56 12" />
-          <path d="M12 44 L8 52" />
-          <path d="M52 44 L56 52" />
-        </svg>
-      ),
-    },
-    business: {
-      gradient: "from-emerald-400 to-green-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M12 52 L12 36 L20 36 L20 52" fill="currentColor" />
-          <path d="M24 52 L24 28 L32 28 L32 52" fill="currentColor" />
-          <path d="M36 52 L36 20 L44 20 L44 52" fill="currentColor" />
-          <path d="M48 52 L48 12 L56 12 L56 52" fill="currentColor" />
-          <path d="M8 52 L60 52" strokeWidth="3" />
-          <path d="M10 40 Q32 8 58 16" strokeDasharray="4 2" />
-        </svg>
-      ),
-    },
-    quantum: {
-      gradient: "from-purple-500 to-indigo-500",
-      icon: (
-        <svg
-          viewBox="0 0 64 64"
-          className="w-12 h-12 text-white/90"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        >
-          <ellipse cx="32" cy="32" rx="24" ry="8" />
-          <ellipse
-            cx="32"
-            cy="32"
-            rx="24"
-            ry="8"
-            transform="rotate(60 32 32)"
-          />
-          <ellipse
-            cx="32"
-            cy="32"
-            rx="24"
-            ry="8"
-            transform="rotate(120 32 32)"
-          />
-          <circle cx="32" cy="32" r="4" fill="currentColor" />
-          <circle cx="32" cy="24" r="2" fill="currentColor" />
-          <circle cx="32" cy="40" r="2" fill="currentColor" />
-          <circle cx="24" cy="28" r="2" fill="currentColor" />
-          <circle cx="40" cy="36" r="2" fill="currentColor" />
-        </svg>
-      ),
-    },
-  };
-
-  const config = configs[type];
-
-  return (
-    <div
-      className={`w-24 h-20 rounded-lg bg-gradient-to-br ${config.gradient} flex items-center justify-center shrink-0`}
-    >
-      {config.icon}
-    </div>
-  );
-}
-
+// ホームの記事カード。ウィンドウの高さが 720px 未満（既定の 800×600 など）では、記事が1件しか見えなかったため
+// 小さい表示に切り替える（サムネイル 48px・題名2行まで・出典と時刻は1行・要約は隠す）。
+// 切り替えは CSS の高さ条件だけで行い、リサイズ監視は持たない。720px 以上の見た目は変えない（2026-11-20 藤井判断の試行）。
 function ArticleCard({
   article,
   onClick,
@@ -362,13 +284,18 @@ function ArticleCard({
 }) {
   return (
     <Card
-      className="border-0 shadow-sm hover:shadow-md transition-shadow py-3 px-0 cursor-pointer"
+      data-testid="home-article-card"
+      className="border-0 shadow-sm hover:shadow-md transition-shadow py-3 px-0 cursor-pointer [@media(max-height:719px)]:py-0"
       onClick={() => onClick(article.id)}
     >
-      <CardContent className="p-4 flex gap-4">
-        <ThumbnailPlaceholder type={article.thumbnailType} />
+      <CardContent className="p-4 flex gap-4 [@media(max-height:719px)]:p-2.5 [@media(max-height:719px)]:gap-3">
+        <ArticleThumbnail
+          thumbnail={article.thumbnail}
+          className="w-24 h-20 [@media(max-height:719px)]:size-12 [@media(max-height:719px)]:[&>svg]:size-7"
+          iconClassName="w-12 h-12"
+        />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 [@media(max-height:719px)]:mb-1">
             <Badge
               className={`${article.categoryColor} text-white border-0 text-[10px] px-2 py-0`}
             >
@@ -380,20 +307,20 @@ function ArticleCard({
               </Badge>
             )}
           </div>
-          <h3 className="font-semibold text-sm text-foreground mb-1 line-clamp-1">
+          <h3 className="font-semibold text-sm text-foreground mb-1 line-clamp-1 [@media(max-height:719px)]:mb-0.5 [@media(max-height:719px)]:line-clamp-2 [@media(max-height:719px)]:text-[13px] [@media(max-height:719px)]:leading-snug">
             {article.title}
           </h3>
-          <p className="text-xs text-muted-foreground line-clamp-2 mb-2">
+          <p className="text-xs text-muted-foreground line-clamp-2 mb-2 [@media(max-height:719px)]:hidden">
             {article.description}
           </p>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <span>{article.source}</span>
-              <span>・</span>
-              <span>{article.timeAgo}</span>
+          <div className="flex items-center justify-between [@media(max-height:719px)]:gap-2">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground [@media(max-height:719px)]:min-w-0 [@media(max-height:719px)]:gap-1">
+              <span className="[@media(max-height:719px)]:truncate">{article.source}</span>
+              <span className="[@media(max-height:719px)]:shrink-0">・</span>
+              <span className="[@media(max-height:719px)]:shrink-0 [@media(max-height:719px)]:whitespace-nowrap">{article.timeAgo}</span>
             </div>
             <button
-              className="text-muted-foreground hover:text-yellow-500 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              className="text-muted-foreground hover:text-yellow-500 [@media(max-height:719px)]:shrink-0 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               disabled={isFavoriteSaving}
               onClick={(e) => {
                 e.stopPropagation();
@@ -430,21 +357,10 @@ function QuickAccessButton({
   );
 }
 
-function RefreshMetric({ label, value }: RefreshMetricProps) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-center">
-      <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="text-sm font-semibold text-foreground">{value}</div>
-    </div>
-  );
-}
-
 function YuukoSpeechBubble({ message }: { message: string }) {
   return (
-    <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px]">
-      <p className="text-xs text-foreground whitespace-pre-line leading-relaxed">
+    <div className="relative bg-white rounded-2xl px-4 py-3 shadow-md border border-border/50 max-w-[180px] [@media(max-height:719px)]:px-3 [@media(max-height:719px)]:py-2">
+      <p className="text-xs text-foreground whitespace-pre-line leading-relaxed [@media(max-height:719px)]:text-[11px] [@media(max-height:719px)]:leading-normal">
         {message}
       </p>
       {/* Speech bubble tail */}
@@ -461,7 +377,7 @@ function YuukoCharacter() {
         width={224}
         height={224}
         alt="ゆうこ"
-        className="w-56 h-auto drop-shadow-lg animate-float"
+        className="w-56 h-auto drop-shadow-lg animate-float [@media(max-height:719px)]:w-28"
         onError={(e) => {
           // Fallback to placeholder if image fails to load
           const target = e.target as HTMLImageElement;
@@ -470,8 +386,8 @@ function YuukoCharacter() {
         }}
       />
       {/* Fallback placeholder */}
-      <div className="hidden w-56 h-56 bg-gradient-to-b from-gray-800 to-gray-900 rounded-full flex items-center justify-center">
-        <PawIcon className="w-20 h-20 text-pink-300" />
+      <div className="hidden w-56 h-56 [@media(max-height:719px)]:size-28 bg-gradient-to-b from-gray-800 to-gray-900 rounded-full flex items-center justify-center">
+        <PawIcon className="w-20 h-20 text-pink-300 [@media(max-height:719px)]:size-10" />
       </div>
     </div>
   );
@@ -496,8 +412,11 @@ export default function MainScreen({
     React.useState<string | null>(null);
   const [articleNotice, setArticleNotice] = React.useState<string | null>(null);
   const [refreshNotice, setRefreshNotice] = React.useState<string | null>(null);
-  const [refreshResult, setRefreshResult] =
-    React.useState<TauriRefreshNewsResult | null>(null);
+  // 一部ソースでエラーがあった更新だけ注意色（amber）の1行にする。
+  // 取得件数のカードは一覧を押し下げるため出さない（藤井判断・選択肢1）。
+  const [refreshNoticeKind, setRefreshNoticeKind] = React.useState<
+    "info" | "warning"
+  >("info");
   const [isRefreshingNews, setIsRefreshingNews] = React.useState(false);
   const [isLoadingArticles, setIsLoadingArticles] = React.useState(true);
   const [loadNotice, setLoadNotice] = React.useState<string | null>(null);
@@ -661,18 +580,17 @@ export default function MainScreen({
   const handleRefreshNews = React.useCallback(async () => {
     setIsRefreshingNews(true);
     setRefreshNotice(null);
+    setRefreshNoticeKind("info");
 
     try {
       const result = await refreshNews();
       if (!result) {
-        setRefreshResult(null);
         setRefreshNotice(
           "ニュース更新はTauriデスクトップ実行時にのみ利用できます。"
         );
         return;
       }
 
-      setRefreshResult(result);
       const reloaded = await loadRecommendedArticles();
       if (!reloaded) {
         setRefreshNotice(
@@ -686,9 +604,11 @@ export default function MainScreen({
         return;
       }
 
-      setRefreshNotice("ニュース更新は完了しましたが、一部ソースでエラーがありました。");
+      setRefreshNoticeKind("warning");
+      setRefreshNotice(
+        `ニュースを更新しました（${summarizeRefreshErrors(result)}）。`
+      );
     } catch (error) {
-      setRefreshResult(null);
       setRefreshNotice(
         "ニュース更新に失敗しました。設定ファイルやネットワークを確認してください。"
       );
@@ -759,11 +679,11 @@ export default function MainScreen({
 
         {/* Center Content */}
         <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
-          {/* News Section */}
-          <div className="flex-1 min-h-0 flex flex-col p-6 pb-0">
+          {/* News Section（高さ 720px 未満では記事を多く見せるため余白を詰める。ArticleCard の注記を参照） */}
+          <div className="flex-1 min-h-0 flex flex-col p-6 pb-0 [@media(max-height:719px)]:px-4 [@media(max-height:719px)]:pt-3">
             <div className="shrink-0">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 [@media(max-height:719px)]:mb-2 [@media(max-height:719px)]:gap-x-3 [@media(max-height:719px)]:gap-y-1.5">
+                <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 [@media(max-height:719px)]:text-base">
                   <Sparkles className="w-5 h-5 text-yellow-500" />
                   今日のおすすめニュース
                 </h2>
@@ -771,7 +691,7 @@ export default function MainScreen({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="text-xs"
+                    className="text-xs [@media(max-height:719px)]:h-7"
                     onClick={() => void handleRefreshNews()}
                     disabled={isRefreshingNews}
                   >
@@ -785,7 +705,7 @@ export default function MainScreen({
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className="text-xs text-muted-foreground hover:text-foreground [@media(max-height:719px)]:h-7"
                     // 当日取得したニュースの一覧画面（NewsListScreen）へ遷移する。
                     onClick={() => handleNavigate("news")}
                   >
@@ -823,56 +743,22 @@ export default function MainScreen({
               ) : null}
 
               {refreshNotice ? (
-                <p className="mb-3 text-xs text-[var(--yuuko-green)]">
+                <p
+                  data-testid="home-refresh-notice"
+                  // エラーの種類が多くても一覧を押し下げないよう2行で切り、全文は title で読めるようにする。
+                  title={refreshNotice}
+                  className={
+                    refreshNoticeKind === "warning"
+                      ? "mb-3 line-clamp-2 text-xs text-amber-700"
+                      : "mb-3 line-clamp-2 text-xs text-[var(--yuuko-green)]"
+                  }
+                >
                   {refreshNotice}
                 </p>
               ) : null}
-
-              {refreshResult ? (
-                <Card className="mb-4 border border-[var(--yuuko-green)]/20 bg-white/90 py-0 shadow-none">
-                  <CardContent className="flex flex-col gap-3 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
-                          取得結果を反映しました
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {refreshResult.errors.length === 0
-                            ? "すべての対象ソースを処理できました。"
-                            : summarizeRefreshErrors(refreshResult)}
-                        </p>
-                      </div>
-                      <Badge
-                        className={
-                          refreshResult.errors.length === 0
-                            ? "border-0 bg-[var(--yuuko-green)] text-white"
-                            : "border-0 bg-amber-500 text-white"
-                        }
-                      >
-                        {refreshResult.errors.length === 0
-                          ? "更新成功"
-                          : "一部エラーあり"}
-                      </Badge>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <RefreshMetric
-                        label="sources"
-                        value={refreshResult.sourcesProcessed}
-                      />
-                      <RefreshMetric label="fetched" value={refreshResult.fetched} />
-                      <RefreshMetric label="saved" value={refreshResult.saved} />
-                      <RefreshMetric
-                        label="errors"
-                        value={refreshResult.errors.length}
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : null}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1 [@media(max-height:719px)]:space-y-2">
               {articles.map((article) => (
                 <ArticleCard
                   key={article.id}
@@ -885,8 +771,8 @@ export default function MainScreen({
             </div>
           </div>
 
-          {/* Yuuko Character Area */}
-          <div className="shrink-0 relative flex items-end justify-center pb-4 pt-2">
+          {/* Yuuko Character Area（高さ 720px 未満では絵を小さくし、吹き出しを横に並べたまま約 150px に収める。中央下には常に出す） */}
+          <div className="shrink-0 relative flex items-end justify-center pb-4 pt-2 [@media(max-height:719px)]:pb-2 [@media(max-height:719px)]:pt-1">
             <div className="flex items-end gap-2">
               <YuukoSpeechBubble message={yuukoBalloonMessage} />
               <YuukoCharacter />

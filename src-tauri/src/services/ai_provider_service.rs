@@ -38,6 +38,10 @@ use crate::util::url_text::remove_urls;
 
 use super::local_llm_service::LocalLlmService;
 
+/// 評価専用: 要約・再説明の作り方の案を評価の経路だけで試す（テストビルド専用・本番のプロンプトは変えない）。
+#[cfg(test)]
+pub(crate) mod method_variants;
+
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// 永続化メタ（ai_provider）用：実際に応答を生成したプロバイダ名。
 const PROVIDER_GEMINI: &str = "gemini";
@@ -3419,7 +3423,9 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("resources")
             .join("local_llm");
-        let local = LocalLlmService::new(Some(dir));
+        let local = LocalLlmService::new(Some(
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
+        ));
         let service = service().with_local_llm(local.clone());
 
         let started = Instant::now();
@@ -3534,7 +3540,9 @@ mod tests {
                     .join("resources")
                     .join("local_llm")
             });
-        let local = LocalLlmService::new(Some(dir));
+        let local = LocalLlmService::new(Some(
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
+        ));
         let service = service().with_local_llm(local.clone());
         let context = "タイトル: 中小企業のデジタル化に新補助金
             抜粋: 政府は来年度から、中小企業のデジタル化を支援する新しい補助金制度を始めると発表した。";
@@ -3584,7 +3592,9 @@ mod tests {
                     .join("resources")
                     .join("local_llm")
             });
-        let local = LocalLlmService::new(Some(dir));
+        let local = LocalLlmService::new(Some(
+            crate::infra::local_llm_runtime::LocalLlmBundle::from_manual_env(&dir),
+        ));
         let service = service().with_local_llm(local.clone());
         let fde = "タイトル: 米テック企業、FDE職の採用を拡大\n\
             抜粋: 米企業でFDE（フォワードデプロイドエンジニアリング）の担当者が増えている。\

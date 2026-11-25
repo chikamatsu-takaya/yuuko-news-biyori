@@ -163,6 +163,23 @@ pub struct RefreshNewsResult {
     pub genre_filter_fallback: bool,
 }
 
+impl RefreshNewsResult {
+    /// 取得元が1つ以上あり、その全部がフィードの段階で失敗したか（ネットワーク未接続などの判定用）。
+    ///
+    /// 取得元ごとのフィード段階の失敗（URL拒否・取得失敗）はそれぞれ1件ずつ errors に入るため、
+    /// アイテムが1件も得られず、その件数が取得元の数に達していれば全部失敗とみなす。
+    /// 全部が URL 拒否（設定の問題で通信していない）の場合は、再試行しても直らないため含めない。
+    pub fn all_feeds_failed(&self) -> bool {
+        let count = |kind: &str| self.errors.iter().filter(|e| e.kind == kind).count();
+        let fetch_failed = count(ERROR_FEED_FETCH_FAILED);
+        let url_rejected = count(ERROR_FEED_URL_REJECTED);
+        self.sources_processed > 0
+            && self.fetched == 0
+            && fetch_failed > 0
+            && fetch_failed + url_rejected >= self.sources_processed
+    }
+}
+
 /// 興味ジャンルによる取得元の絞り込み結果。
 #[derive(Debug, PartialEq, Eq)]
 struct SourceSelection<'a> {

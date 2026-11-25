@@ -9,8 +9,8 @@
 //!   起動時に残っている未要約記事をもう一度並べ直す。
 //! - 失敗した記事は他の記事の後ろへ回して再試行し、合計 `MAX_ATTEMPTS` 回失敗したら
 //!   再起動まで `Failed` のままにする（他の記事の処理は止めない）。
-//! - 設定 `ai.autoSummaryEnabled` が有効なときだけ動く（新規インストールの既定は有効・判断台帳 D103。
-//!   既存の設定ファイルで欄が無いときは従来どおり無効として読む）。
+//! - 設定 `ai.autoSummaryEnabled` が有効なときだけ動く（新規インストールの既定は無効・2026-11-18 藤井。
+//!   既存の設定ファイルで欄が無いときも従来どおり無効として読み、保存済みの値はそのまま使う）。
 //! - 設定の AI プロバイダが実装済みの実AI（Gemini・同梱ローカルLLM）以外のときは動かない（判断台帳 D56 / D103）。
 //!   固定応答で記事を「要約済み」にしてしまうと、後で実AIを使えるようになっても自動では作り直されないため。
 //! - 実AIを呼べる見込みが無いときも動かさない（投入・取り出しの両方で確かめる）。Gemini はキーの有無
@@ -27,10 +27,21 @@
 //!   判定はゆうこ通知と同じ OS 問い合わせ（`fullscreen_detector` / `meeting_detector`）を使うが、全画面の種類の
 //!   見方は分ける（通知は種類を問わず抑制、自動要約は `FullscreenStatus::pauses_auto_summary` のときだけ止める）。
 //!   通知の抑制設定には左右されない（通知を出すかどうかと、PC に負荷をかけてよいかは別の話のため）。
-//! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から5分で止まる（`local_llm_service`）。
+//! - ローカルLLMの自動要約は「PCを触っていない時間」に進める。利用者が操作中（最後のキーボード・マウス入力から
+//!   `ACTIVE_INPUT_WINDOW` 未満）で、かつ物理メモリの空きが `MIN_AVAILABLE_MEMORY_WHILE_ACTIVE` 未満のときだけ
+//!   取り出しを止めて待つ（`BusyCause::LowMemoryWhileActive`）。操作していない・画面ロック中（入力が無いので
+//!   経過が延びる）なら空きが少なくても進め、操作中でも空きが足りていれば従来どおり進める。llama-server を
+//!   起動済みのときは、そのサーバーが既に使っている分（`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して比べる
+//!   （足し戻さないと、1件目で読み込んだモデルの分だけ2件目から毎回止まり、止まって解放→再開して読み込み直し、を繰り返すため）。
+//!   ただし起動済みでも、空きそのものが `MIN_AVAILABLE_WHILE_LLM_RUNNING`（1GiB）未満なら待つ（足し戻しの二重計上への下限）。
+//!   このメモリ不足で止めたときだけ `LocalLlmService::release_soon` を頼み、llama-server の約1.8GB を2分待たずに返す
+//!   （ゲーム・発表・マイクで止めたときは従来どおり頼まない）。
+//!   OS への問い合わせ（`user_activity_detector`）は全画面・マイクで止めないときだけ、取り出しの前と
+//!   確かめ直し（`PAUSE_RECHECK_INTERVAL`）のときに行う。値が取れないときは止めない（fail-open）。手動の要約には関係しない。
+//! - ローカルLLMは要約の要求が来たときにだけ起動し、最後の利用から2分で止まる（`local_llm_service`）。
 //!   キューは1件ずつ短い間隔で処理するため、まとめて要約する間はモデルを読み込んだまま使う。
 //!   待機列が空になったら `LocalLlmService::release_soon` を呼び、利用者の操作が直近に無ければ
-//!   5分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約2GBを長く握らないため）。
+//!   2分を待たずに約60秒で止めてもらう（自動要約の後にメモリ約1.8GBを長く握らないため）。
 //!   自動要約からの要求は `for_background` の窓口を通し、利用者の操作とは別に数える（summary_service）。
 //!   要約済みの記事は AI を呼ばずに外すので、要約するものが無いときは起動しない。
 //! - 終了時は新しい記事を取り出さない。処理中の1件は待たずに終了してよい。記事の保存は
@@ -84,6 +95,7 @@ use crate::infra::fullscreen_detector::{
     FullscreenDetector, FullscreenKind, FullscreenStatus, SystemFullscreenDetector,
 };
 use crate::infra::meeting_detector::{MeetingDetector, SystemMeetingDetector};
+use crate::infra::user_activity_detector::{SystemUserActivityDetector, UserActivityDetector};
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::article_service::ArticleService;
 use crate::services::local_llm_service::LocalLlmService;
@@ -101,12 +113,39 @@ const STARTUP_DELAY: Duration = Duration::from_secs(60);
 const GEMINI_ITEM_INTERVAL: Duration = Duration::from_secs(30);
 
 /// ローカルLLMで1件処理するごとに空ける間隔。利用枠は無いが、1件の生成中は CPU を使い続けるため、
-/// 10秒だけ空けて他の操作に CPU を返す。ローカルLLMの「5分使わなければ止める」より十分短いので、
+/// 10秒だけ空けて他の操作に CPU を返す。ローカルLLMの「2分使わなければ止める」より十分短いので、
 /// まとめて要約する間にモデルを読み込み直すことはない。
 const LOCAL_ITEM_INTERVAL: Duration = Duration::from_secs(10);
 
-/// ゲーム・発表中・マイク使用中で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
+/// ゲーム・発表中・マイク使用中・操作中のメモリ不足で止めたとき、次に確かめるまでの間隔（OS への問い合わせを繰り返しすぎないため）。
 const PAUSE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 最後のキーボード・マウス入力からこの時間未満なら「操作中」とみなす。記事を読んで手を止める・考えるといった
+/// 1〜2分の間は操作中のままにし、席を外したときは数分で「触っていない」に移れる長さとして 3 分にする
+/// （Windows の画面オフ・ロックの既定〔5〜15 分〕より短い）。確かめ直しは 60 秒ごとなので、席を外してから
+/// 再開まで最長で約 4 分。
+const ACTIVE_INPUT_WINDOW: Duration = Duration::from_secs(3 * 60);
+
+/// 操作中に、llama-server が止まっているとき物理メモリの空きがこれ未満なら自動要約を待たせる（2,368MiB）。
+/// 見積もり `LOCAL_LLM_RESIDENT_ESTIMATE`（Gemma 4 E2B の生成中の最大の WS）に、利用者のアプリと OS の
+/// ファイルキャッシュが押し出されないための余裕 0.5GiB（512MiB）を足した値（Qwen3.5-2B のときは 1.5GiB＋0.5GiB＝2GiB）。
+const MIN_AVAILABLE_MEMORY_WHILE_ACTIVE: u64 = LOCAL_LLM_RESIDENT_ESTIMATE + 512 * 1024 * 1024;
+
+/// llama-server を起動済みのときに、空きへ足し戻す「既に使っている分」の見積もり（1,856MiB。約 1.81GiB）。
+/// Gemma 4 E2B を `--no-repack` で動かしたときの生成中のワーキングセットは最大 1,812MB（うちプライベート約 0.54GB。
+/// 残りは mmap のモデルのページ。要約の機械点検の評価 §23.4 の実記事の回）で、それを 64MiB 単位で切り上げた値
+/// （Qwen3.5-2B のときは 1.5GiB）。起動済みならその分は既に空きから引かれているため、そのまま比べると2件目から毎回止まってしまう。
+const LOCAL_LLM_RESIDENT_ESTIMATE: u64 = 1_856 * 1024 * 1024;
+
+/// llama-server を起動済みのときでも、物理メモリの空きそのものに求める下限（1GiB〔1024MiB〕）。
+/// llama.cpp はモデルを mmap で読むため、OS に削られたモデルのページは standby に移って空き（ullAvailPhys）にも
+/// 数えられる。そこへ見積もりを足し戻すと二重に数え、足し戻しだけでは実質「空き 0.5GiB」
+/// （止まっているときの基準 − 見積もり）まで進めてしまうため、生成で削られたページを読み戻し・KV キャッシュを確保しても
+/// 利用者のアプリを押し出さない余裕として 1GiB を残す。起動中の実質の基準は max(1GiB, 0.5GiB)＝1GiB で、
+/// この下限が決める（足し戻しは下限より緩いので矛盾しない）。
+/// そのため起動前の空きが止まっているときの基準＋0.5GiB 付近より少ないと、読み込み後に下限へかかって2件目で止まり、
+/// 解放→再開→読み込み直し（約2〜4秒）を繰り返しうる（操作中のときだけ）。
+const MIN_AVAILABLE_WHILE_LLM_RUNNING: u64 = 1_024 * 1024 * 1024;
 
 /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待つときの、1回の待ちの上限。
 /// 起動を控える 10 分を1回で待たず、設定の切り替え（Gemini への変更など）に追いつけるようにする。
@@ -383,7 +422,7 @@ impl QueueCore {
 /// 実AIを呼べる見込みがあるかの判定（Gemini はキーの有無、ローカルは同梱物の有無）。AI は呼ばない。
 type AiReadyCheck = Arc<dyn Fn(AiProvider) -> bool + Send + Sync>;
 
-/// ゲーム・発表中・マイク使用中（会議中を含む）かの判定。ローカルLLMの自動要約を止めるために使う。
+/// ゲーム・発表中・マイク使用中（会議中を含む）・操作中のメモリ不足かの判定。ローカルLLMの自動要約を止めるために使う。
 type UserBusyCheck = Arc<dyn Fn() -> Option<BusyCause> + Send + Sync>;
 
 /// 待機列が空になったときの知らせ。本番は `LocalLlmService::release_soon`（早めの停止の予約）。
@@ -392,21 +431,29 @@ type DrainedHook = Arc<dyn Fn() + Send + Sync>;
 /// ローカルLLMの都合で取り出しを待つ長さ。本番は `LocalLlmService::background_wait`。
 type LocalLlmWait = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 
+/// ローカルAIのモデルをまだ取得していないか。本番は `LocalLlmService::is_model_not_downloaded`。
+type LocalModelNotDownloadedCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// ゲーム（Direct3D 全画面）・発表（プレゼンモード）中、またはマイク使用中か。会議中は
 /// 「会議アプリ起動中 かつ マイク使用中」なので、マイク使用中を見れば含まれる。
 /// OS 判定に失敗したときは止めない（ゆうこ通知と同じ fail-open）。
 /// どのアプリかは扱わず、どの理由かだけを返す（ログと画面の状態表示に理由を出すため）。
-fn user_busy_cause_on_this_pc() -> Option<BusyCause> {
-    busy_cause_from(SystemFullscreenDetector.detect(), || {
-        SystemMeetingDetector.is_mic_in_use()
-    })
+/// `local_llm_running` は llama-server を起動済みか（メモリの空きの見方に使う。操作中のときだけ尋ねる）。
+fn user_busy_cause_on_this_pc(local_llm_running: impl FnOnce() -> bool) -> Option<BusyCause> {
+    busy_cause_from(
+        SystemFullscreenDetector.detect(),
+        || SystemMeetingDetector.is_mic_in_use(),
+        || low_memory_while_active_on(&SystemUserActivityDetector, local_llm_running),
+    )
 }
 
-/// 全画面の判定結果とマイク使用中の判定から、自動要約を止める理由を決める（純粋関数・D158）。
-/// ふつうの全画面（`FullscreenKind::App`）では止めない。マイクは全画面で止めないときだけ尋ねる。
+/// 全画面の判定結果・マイク使用中・操作中のメモリ不足の判定から、自動要約を止める理由を決める（純粋関数・D158）。
+/// ふつうの全画面（`FullscreenKind::App`）では止めない。マイクは全画面で止めないときだけ、
+/// メモリはマイクでも止めないときだけ尋ねる（OS への問い合わせを要るものだけにする）。
 fn busy_cause_from(
     fullscreen: FullscreenStatus,
     mic_in_use: impl FnOnce() -> bool,
+    low_memory_while_active: impl FnOnce() -> bool,
 ) -> Option<BusyCause> {
     // 止める全画面かどうかは `pauses_auto_summary` だけで決める（通知側の判定と混ぜないため）。
     if fullscreen.pauses_auto_summary() {
@@ -418,10 +465,57 @@ fn busy_cause_from(
             },
         );
     }
-    mic_in_use().then_some(BusyCause::MicInUse)
+    if mic_in_use() {
+        return Some(BusyCause::MicInUse);
+    }
+    low_memory_while_active().then_some(BusyCause::LowMemoryWhileActive)
 }
 
-/// ローカルLLMの自動要約を止める理由（ゲーム・発表中・マイク使用中）。
+/// `detector` の値で、操作中かつ物理メモリに余裕がないかを決める。入力の経過を先に見て、
+/// 操作中のときだけメモリの空きと llama-server の起動状態を尋ねる。
+fn low_memory_while_active_on(
+    detector: &dyn UserActivityDetector,
+    local_llm_running: impl FnOnce() -> bool,
+) -> bool {
+    low_memory_while_active(
+        detector.idle_time(),
+        || detector.available_memory_bytes(),
+        local_llm_running,
+    )
+}
+
+/// 操作中（最後の入力から `ACTIVE_INPUT_WINDOW` 未満）かつ物理メモリの空きが足りないなら true（純粋関数）。
+/// - 操作していない（画面ロック中を含む。入力が無いので経過が延びる）なら、空きが少なくても止めない。
+/// - 操作中でも空きが足りていれば止めない。llama-server を起動済みなら、既に使っている分
+///   （`LOCAL_LLM_RESIDENT_ESTIMATE`）を空きに足し戻して `MIN_AVAILABLE_MEMORY_WHILE_ACTIVE` と比べ、あわせて空きそのものが
+///   `MIN_AVAILABLE_WHILE_LLM_RUNNING`（1GiB）以上であることも求める（mmap のページの二重計上への下限。
+///   今の値では起動中は下限 1GiB のほうが厳しく、実質この下限で決まる）。
+/// - 入力の経過・空きが取れないとき（Windows 以外・OS 判定の失敗）は止めない（fail-open。他の一時停止と同じ）。
+fn low_memory_while_active(
+    idle_time: Option<Duration>,
+    available_memory: impl FnOnce() -> Option<u64>,
+    local_llm_running: impl FnOnce() -> bool,
+) -> bool {
+    let Some(idle) = idle_time else {
+        return false;
+    };
+    if idle >= ACTIVE_INPUT_WINDOW {
+        return false;
+    }
+    let Some(available) = available_memory() else {
+        return false;
+    };
+    let enough = if local_llm_running() {
+        available >= MIN_AVAILABLE_WHILE_LLM_RUNNING
+            && available.saturating_add(LOCAL_LLM_RESIDENT_ESTIMATE)
+                >= MIN_AVAILABLE_MEMORY_WHILE_ACTIVE
+    } else {
+        available >= MIN_AVAILABLE_MEMORY_WHILE_ACTIVE
+    };
+    !enough
+}
+
+/// ローカルLLMの自動要約を止める理由（ゲーム・発表中・マイク使用中・操作中のメモリ不足）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyCause {
     /// Direct3D 全画面（主にゲーム）。
@@ -429,6 +523,8 @@ enum BusyCause {
     /// プレゼンテーションモード（発表中）。
     Presentation,
     MicInUse,
+    /// 利用者が操作中で、物理メモリに余裕がない（`low_memory_while_active`）。
+    LowMemoryWhileActive,
     /// テストで差し替えた判定（理由を区別しない）。
     #[cfg(test)]
     Test,
@@ -440,6 +536,7 @@ impl BusyCause {
             Self::Game => "d3d_fullscreen",
             Self::Presentation => "presentation",
             Self::MicInUse => "mic_in_use",
+            Self::LowMemoryWhileActive => "low_memory_while_active",
             #[cfg(test)]
             Self::Test => "test",
         }
@@ -453,7 +550,7 @@ enum OffReason {
     DisabledInSettings,
     /// AI プロバイダが実AI（Gemini・ローカル）ではない（Mock・未実装の openai）。
     NotRealAi(AiProvider),
-    /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている）。
+    /// 実AIを呼べる見込みが無い（Gemini はキー未設定、ローカルは同梱物が無い・壊れている・モデルをまだ取得していない）。
     AiNotReady(AiProvider),
 }
 
@@ -472,7 +569,7 @@ impl OffReason {
 enum QueueNotice {
     /// 動かさないと決めた（理由付き）。
     Off(OffReason),
-    /// ゲーム・発表中・マイク使用中のため取り出しを止めている。
+    /// ゲーム・発表中・マイク使用中・操作中のメモリ不足のため取り出しを止めている。
     Paused(BusyCause),
     /// ローカルLLMの都合（手動の要求の優先・起動を控えている間）で取り出しを待っている。
     WaitingForLocalLlm,
@@ -492,12 +589,18 @@ pub struct AutoSummaryQueue {
     /// 本番は `SummaryService::is_real_ai_ready`。テストでは環境変数・同梱物を用意せずに差し替える
     /// （並列テストで環境変数を書き換えると互いに干渉するため）。
     ai_ready: AiReadyCheck,
-    /// 本番は `user_busy_cause_on_this_pc`。テストでは OS に依存しない判定へ差し替える。
+    /// 本番は `user_busy_cause_on_this_pc`（`with_local_llm` で llama-server の起動状態をつなぐ）。
+    /// テストでは OS に依存しない判定へ差し替える。
     user_busy: UserBusyCheck,
     /// 待機列が空になったときに呼ぶ。既定は何もしない（`with_local_llm` で差し込む）。
     on_drained: DrainedHook,
+    /// 操作中のメモリ不足で止めたときに呼ぶ（本番は `LocalLlmService::release_soon`）。既定は何もしない。
+    on_low_memory_pause: DrainedHook,
     /// 取り出す前に待つ長さ（ローカルLLMの設定のときだけ見る）。既定は待たない（`with_local_llm` で差し込む）。
     local_llm_wait: LocalLlmWait,
+    /// 状態の種類で「同梱物が無い・壊れている」と「モデルをまだ取得していない」を分けるための確認。
+    /// 既定は常に false（`with_local_llm` で差し込む）。
+    local_model_not_downloaded: LocalModelNotDownloadedCheck,
     /// 設定が読めない状態か。警告を状態が変わったときだけ出すために持つ（clone しても同じ値を指す）。
     settings_unreadable: Arc<AtomicBool>,
     /// 最後に INFO ログへ出した状態の知らせ。同じ知らせを繰り返さないために持つ（clone しても同じ値を指す）。
@@ -517,9 +620,12 @@ impl AutoSummaryQueue {
             summary_service,
             settings_repository,
             ai_ready: Arc::new(move |provider| readiness.is_real_ai_ready(provider)),
-            user_busy: Arc::new(user_busy_cause_on_this_pc),
+            // ローカルLLMとつなぐまでは、llama-server は起動していないものとして空きを見る。
+            user_busy: Arc::new(|| user_busy_cause_on_this_pc(|| false)),
             on_drained: Arc::new(|| {}),
+            on_low_memory_pause: Arc::new(|| {}),
             local_llm_wait: Arc::new(|| None),
+            local_model_not_downloaded: Arc::new(|| false),
             settings_unreadable: Arc::new(AtomicBool::new(false)),
             last_notice: Arc::new(Mutex::new(None)),
         }
@@ -527,12 +633,30 @@ impl AutoSummaryQueue {
 
     /// 同梱ローカルLLMとつなぐ（lib.rs で、要約・用語解説に使うのと同じ窓口を渡す）。
     /// - 待機列が空になったら早めの停止を頼む。動いていなければ何もしない。直近の手動操作があるときに
-    ///   いつ止めるか（手動操作から5分たつまでは止めない）は `LocalLlmService` が決める。
+    ///   いつ止めるか（手動操作から2分たつまでは止めない）は `LocalLlmService` が決める。
     /// - 次の記事を取り出す前に、手動の要求の最中・直後か、起動を控えている間かを尋ね、その間は待つ。
+    /// - 操作中のメモリ不足を見るときに、llama-server を起動済みか（既に使っている分を足し戻すか）を尋ねる。
+    /// - 操作中のメモリ不足で止めたら早めの停止を頼み、モデルの分のメモリを利用者へ早く返す。
     pub fn with_local_llm(mut self, local_llm: LocalLlmService) -> Self {
         let release = local_llm.clone();
         self.on_drained = Arc::new(move || release.release_soon());
+        let release = local_llm.clone();
+        self.on_low_memory_pause = Arc::new(move || release.release_soon());
+        let running = local_llm.clone();
+        self.user_busy = Arc::new(move || user_busy_cause_on_this_pc(|| running.is_running()));
+        let model = local_llm.clone();
+        self.local_model_not_downloaded = Arc::new(move || model.is_model_not_downloaded());
         self.local_llm_wait = Arc::new(move || local_llm.background_wait());
+        self
+    }
+
+    /// 「モデルをまだ取得していない」の判定を差し替える（テスト用）。
+    #[cfg(test)]
+    fn with_local_model_not_downloaded(
+        mut self,
+        check: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.local_model_not_downloaded = Arc::new(check);
         self
     }
 
@@ -563,7 +687,19 @@ impl AutoSummaryQueue {
         self
     }
 
-    /// ゲーム・発表中・マイク使用中の判定を差し替える（テスト用）。
+    /// 止める理由をそのまま返す判定へ差し替え、メモリ不足で止めたときの知らせを数えられるようにする（テスト用）。
+    #[cfg(test)]
+    fn with_busy_cause(
+        mut self,
+        cause: impl Fn() -> Option<BusyCause> + Send + Sync + 'static,
+        on_low_memory_pause: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.user_busy = Arc::new(cause);
+        self.on_low_memory_pause = Arc::new(on_low_memory_pause);
+        self
+    }
+
+    /// ゲーム・発表中・マイク使用中・操作中のメモリ不足の判定を差し替える（テスト用）。
     #[cfg(test)]
     fn with_busy_check(mut self, user_busy: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         self.user_busy = Arc::new(move || user_busy().then_some(BusyCause::Test));
@@ -759,9 +895,9 @@ impl AutoSummaryQueue {
         local_llm_wait_for(provider, || (self.local_llm_wait)())
     }
 
-    /// ローカルLLMで要約する設定のときだけ、ゲーム・発表中・マイク使用中なら止める。
+    /// ローカルLLMで要約する設定のときだけ、ゲーム・発表中・マイク使用中・操作中のメモリ不足なら止める。
     /// Gemini は このパソコンの CPU をほとんど使わないため止めない。
-    /// 止めたときは理由（ゲーム・発表・マイク使用中）を INFO ログへ1回だけ残す（画面の状態表示にも使う）。
+    /// 止めたときは理由（ゲーム・発表・マイク使用中・操作中のメモリ不足）を INFO ログへ1回だけ残す（画面の状態表示にも使う）。
     fn is_paused(&self) -> bool {
         let is_local = self
             .load_settings()
@@ -771,7 +907,12 @@ impl AutoSummaryQueue {
         }
         match (self.user_busy)() {
             Some(cause) => {
-                self.note(QueueNotice::Paused(cause));
+                let newly_paused = self.note(QueueNotice::Paused(cause));
+                // 操作中のメモリ不足で止めたときだけ、早めの停止を頼んで llama-server の約1.8GB を返す。止まり始めの1回だけ頼む
+                // （60 秒ごとの確かめ直しのたびに頼むと、予約の時刻が延び続けて止まらなくなるため）。
+                if newly_paused && cause == BusyCause::LowMemoryWhileActive {
+                    (self.on_low_memory_pause)();
+                }
                 true
             }
             None => false,
@@ -791,11 +932,14 @@ impl AutoSummaryQueue {
                     .last_notice
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                status_kind_for(
-                    &settings,
-                    |provider| (self.ai_ready)(provider),
-                    self.core.is_drained(),
-                    last_notice,
+                split_local_not_ready(
+                    status_kind_for(
+                        &settings,
+                        |provider| (self.ai_ready)(provider),
+                        self.core.is_drained(),
+                        last_notice,
+                    ),
+                    || (self.local_model_not_downloaded)(),
                 )
             }
         };
@@ -941,6 +1085,9 @@ fn status_kind_for(
             Some(QueueNotice::Paused(BusyCause::MicInUse)) => {
                 return AutoSummaryStatusKind::PausedMicInUse;
             }
+            Some(QueueNotice::Paused(BusyCause::LowMemoryWhileActive)) => {
+                return AutoSummaryStatusKind::PausedLowMemoryWhileActive;
+            }
             Some(QueueNotice::Paused(_)) => {
                 return AutoSummaryStatusKind::PausedGameOrPresentation;
             }
@@ -951,6 +1098,21 @@ fn status_kind_for(
         }
     }
     AutoSummaryStatusKind::Running
+}
+
+/// 「ローカルAIを使えない」を、モデルをまだ取得していないとき（初回ダウンロードの前・途中・失敗）だけ
+/// `LocalModelNotDownloaded` へ分ける（純粋関数）。同梱物が無い・壊れているときとは案内が違うため。
+/// 自動要約を動かすかの判定（`auto_summary_off_reason`）は変えない（どちらも動かさない）。
+/// 確かめるのは `LocalAiNotReady` のときだけ（ほかの種類ではファイルを見ない）。
+fn split_local_not_ready(
+    kind: AutoSummaryStatusKind,
+    model_not_downloaded: impl FnOnce() -> bool,
+) -> AutoSummaryStatusKind {
+    if kind == AutoSummaryStatusKind::LocalAiNotReady && model_not_downloaded() {
+        AutoSummaryStatusKind::LocalModelNotDownloaded
+    } else {
+        kind
+    }
 }
 
 /// 待機列から記事を取り出した（または無効で捨てた）結果か。取り出していない
@@ -1032,6 +1194,15 @@ mod tests {
     use crate::domain::ai_connection::LocalAiFailure;
     use crate::domain::article::ArticleReadState;
     use std::cell::RefCell;
+
+    #[test]
+    fn local_item_interval_is_shorter_than_llm_idle_stop() {
+        // まとめて要約する間に llama-server を止めて起動し直さないため、記事ごとの間隔と手動優先の待ちは
+        // ローカルLLMの「しばらく使わなければ止める」（既定 2 分）より十分短くしておく。
+        let idle_stop = crate::services::local_llm_service::LocalLlmConfig::default().idle_stop;
+        assert!(LOCAL_ITEM_INTERVAL * 4 < idle_stop);
+        assert!(crate::services::local_llm_service::MANUAL_PRIORITY_GRACE < idle_stop);
+    }
 
     const SAVED: AutoSummaryOutcome = AutoSummaryOutcome::Saved;
 
@@ -1304,6 +1475,43 @@ mod tests {
         let ctx = queue_context_with("local-missing", "local", false);
         ctx.queue.enqueue_unsummarized();
         assert!(ctx.queue.core.lock().pending.is_empty());
+    }
+
+    /// ローカルAIを使えないとき、モデルをまだ取得していなければ別の種類で返す（同梱物が無い・壊れているとは分ける）。
+    /// どちらでも待機列には並べない。
+    #[test]
+    fn status_separates_a_model_not_yet_downloaded_from_a_missing_or_broken_bundle() {
+        use AutoSummaryStatusKind as K;
+        let ctx = queue_context_with("local-not-downloaded", "local", false);
+        assert_eq!(ctx.queue.status().kind, K::LocalAiNotReady);
+        let queue = ctx.queue.clone().with_local_model_not_downloaded(|| true);
+        queue.enqueue_unsummarized();
+        assert!(queue.core.lock().pending.is_empty());
+        assert_eq!(queue.status().kind, K::LocalModelNotDownloaded);
+
+        // 確かめるのは LocalAiNotReady のときだけ。ほかの種類はそのまま。
+        let must_not_check = || -> bool { panic!("must not check the model file") };
+        assert_eq!(
+            split_local_not_ready(K::GeminiNotReady, must_not_check),
+            K::GeminiNotReady
+        );
+        assert_eq!(
+            split_local_not_ready(K::Running, must_not_check),
+            K::Running
+        );
+        assert_eq!(
+            split_local_not_ready(K::LocalAiNotReady, || false),
+            K::LocalAiNotReady
+        );
+        // 新しい種類は camelCase の新しい値で返す（既存の値は変えない）。
+        assert_eq!(
+            serde_json::to_string(&K::LocalModelNotDownloaded).unwrap(),
+            "\"localModelNotDownloaded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&K::LocalAiNotReady).unwrap(),
+            "\"localAiNotReady\""
+        );
     }
 
     #[test]
@@ -1615,6 +1823,7 @@ mod tests {
             read_state: ArticleReadState::Unread,
             recommendation_score: 0.5,
             summary_state: state,
+            tags: Vec::new(),
         }
     }
 
@@ -1928,6 +2137,7 @@ mod tests {
     /// 初回起動と同じ順序・同じ配線（lib.rs）で作った実キュー。同梱物は小さな偽物を一時フォルダへ置く。
     struct FirstRunContext {
         queue: AutoSummaryQueue,
+        local_llm: LocalLlmService,
         root: std::path::PathBuf,
     }
 
@@ -1938,6 +2148,11 @@ mod tests {
     }
 
     fn first_run_context(name: &str, fetched: usize) -> FirstRunContext {
+        first_run_context_with(name, fetched, true)
+    }
+
+    /// `model_present` が false のときは、モデルを取得する版で取得前（実行の部品だけある）の状態から始める。
+    fn first_run_context_with(name: &str, fetched: usize, model_present: bool) -> FirstRunContext {
         use crate::infra::local_llm_runtime::{ChildProcessLauncher, LocalLlmBundle};
         use crate::paths::AppPaths;
         use crate::repositories::article_repository::ArticleRepository;
@@ -1952,7 +2167,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let paths = AppPaths::new(root.join("app-data"));
         paths.ensure_storage_dirs().expect("create storage dirs");
-        // 起動時と同じく、設定ファイルが無ければ初期値（ローカル・自動要約オン）で作る。
+        // 起動時と同じく、設定ファイルが無ければ初期値（ローカル・自動要約オフ。2026-11-18 藤井）で作る。
         SettingsService::new(SettingsRepository::new(&paths))
             .initialize_default_if_missing()
             .expect("initialize settings");
@@ -1986,12 +2201,15 @@ mod tests {
         std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
         std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
         std::fs::write(&bundle.exe, b"exe").unwrap();
-        std::fs::write(&bundle.model, b"model").unwrap();
+        if model_present {
+            std::fs::write(&bundle.model, b"model").unwrap();
+        }
         let local_llm = LocalLlmService::with_parts(
-            Some(bundle_dir),
+            Some(bundle),
             Arc::new(ChildProcessLauncher),
             LocalLlmConfig {
                 model_size: 5,
+                model_downloadable: !model_present,
                 ..LocalLlmConfig::default()
             },
         );
@@ -2005,15 +2223,59 @@ mod tests {
             ),
             SettingsRepository::new(&paths),
         )
-        .with_local_llm(local_llm)
+        .with_local_llm(local_llm.clone())
         .with_busy_check(|| false);
-        FirstRunContext { queue, root }
+        FirstRunContext {
+            queue,
+            local_llm,
+            root,
+        }
     }
 
     #[test]
-    fn first_run_enqueues_fetched_articles_with_the_initial_local_settings() {
+    fn first_run_model_download_ready_hook_does_not_start_auto_summary_while_off() {
+        use crate::infra::local_llm_runtime::LocalLlmBundle;
+
+        // 新規インストール（自動要約オフの初期値）で、モデルの取得がまだの状態から始める。
+        let ctx = first_run_context_with("download-ready", 60, false);
+        assert!(ctx.local_llm.is_model_not_downloaded());
+        assert_eq!(*ctx.queue.last_notice.lock().unwrap(), None);
+
+        // 取得が終わった（モデルが置かれた）後、lib.rs と同じく取得の制御の on_ready から並べ直しを呼ぶ。
+        let bundle = LocalLlmBundle::in_dir(&ctx.root.join("local_llm"));
+        std::fs::write(&bundle.model, b"model").unwrap();
+        assert!(ctx.local_llm.is_bundle_present());
+        let queue = ctx.queue.clone();
+        let on_ready: Box<dyn Fn() + Send + Sync> = Box::new(move || queue.enqueue_unsummarized());
+        on_ready();
+
+        // 設定でオフのため並べず、理由を「設定で無効」として残す。llama-server も起動しない。
+        assert!(ctx.queue.core.lock().pending.is_empty());
+        assert_eq!(
+            *ctx.queue.last_notice.lock().unwrap(),
+            Some(QueueNotice::Off(OffReason::DisabledInSettings))
+        );
+        assert!(!ctx.local_llm.is_running());
+    }
+
+    #[test]
+    fn first_run_does_not_enqueue_until_auto_summary_is_turned_on() {
         let ctx = first_run_context("enqueue", 60);
         let queue = &ctx.queue;
+        // 新規インストールの初期値では自動要約はオフ（2026-11-18 藤井）。取得しても並べない。
+        queue.enqueue_unsummarized();
+        assert!(queue.core.lock().pending.is_empty());
+        assert_eq!(
+            *queue.last_notice.lock().unwrap(),
+            Some(QueueNotice::Off(OffReason::DisabledInSettings))
+        );
+
+        // 設定画面で自動要約をオンにすれば、初期値のローカル設定のまま並べて動く。
+        let repository =
+            SettingsRepository::new(&crate::paths::AppPaths::new(ctx.root.join("app-data")));
+        let mut settings = repository.load_or_default().unwrap();
+        settings.ai.auto_summary_enabled = true;
+        repository.save(&settings).unwrap();
         queue.enqueue_unsummarized();
         assert_eq!(queue.core.lock().pending.len(), 10);
         assert_eq!(*queue.last_notice.lock().unwrap(), None);
@@ -2109,41 +2371,306 @@ mod tests {
         assert_eq!(secs(u32::MAX), 600);
     }
 
-    /// D158: 自動要約はゲーム（D3D 全画面）・発表（プレゼンモード）・マイク使用中だけで止め、
+    /// D158: 自動要約はゲーム（D3D 全画面）・発表（プレゼンモード）・マイク使用中・操作中のメモリ不足だけで止め、
     /// ふつうの全画面（QUNS_BUSY）では止めない。OS 判定に失敗したときも止めない（fail-open）。
     #[test]
-    fn auto_summary_pauses_only_for_games_presentations_and_the_mic() {
+    fn auto_summary_pauses_only_for_games_presentations_the_mic_and_low_memory() {
         let no_mic = || false;
+        let enough_memory = || false;
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Game),
+                no_mic,
+                enough_memory
+            ),
             Some(BusyCause::Game)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Presentation), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Presentation),
+                no_mic,
+                enough_memory
+            ),
             Some(BusyCause::Presentation)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), no_mic),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::App),
+                no_mic,
+                enough_memory
+            ),
             None
         );
-        assert_eq!(busy_cause_from(FullscreenStatus::Free, no_mic), None);
-        assert_eq!(busy_cause_from(FullscreenStatus::Unknown, no_mic), None);
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Free, no_mic, enough_memory),
+            None
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Unknown, no_mic, enough_memory),
+            None
+        );
         // ふつうの全画面でも、マイク使用中なら止める。
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::App), || true),
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::App),
+                || true,
+                enough_memory
+            ),
             Some(BusyCause::MicInUse)
         );
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Free, || true),
+            busy_cause_from(FullscreenStatus::Free, || true, enough_memory),
             Some(BusyCause::MicInUse)
         );
-        // ゲーム・発表で止めるときは、マイクを尋ねない（OS への問い合わせを1回で済ませる）。
+        // 全画面・マイクで止めないとき、操作中のメモリ不足なら止める。
         assert_eq!(
-            busy_cause_from(FullscreenStatus::Busy(FullscreenKind::Game), || {
-                panic!("mic must not be queried")
-            }),
+            busy_cause_from(FullscreenStatus::Free, no_mic, || true),
+            Some(BusyCause::LowMemoryWhileActive)
+        );
+        assert_eq!(
+            busy_cause_from(FullscreenStatus::Unknown, no_mic, || true),
+            Some(BusyCause::LowMemoryWhileActive)
+        );
+        // ゲーム・発表で止めるときは、マイク・メモリを尋ねない（OS への問い合わせを1回で済ませる）。
+        assert_eq!(
+            busy_cause_from(
+                FullscreenStatus::Busy(FullscreenKind::Game),
+                || panic!("mic must not be queried"),
+                || panic!("memory must not be queried")
+            ),
             Some(BusyCause::Game)
         );
+        // マイクで止めるときは、メモリを尋ねない。
+        assert_eq!(
+            busy_cause_from(
+                FullscreenStatus::Free,
+                || true,
+                || { panic!("memory must not be queried") }
+            ),
+            Some(BusyCause::MicInUse)
+        );
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn active() -> Option<Duration> {
+        Some(Duration::from_secs(10))
+    }
+
+    fn not_running() -> bool {
+        false
+    }
+
+    /// 待たせるのは「操作中 かつ 空きが足りない」ときだけ（決定表）。
+    #[test]
+    fn low_memory_pause_needs_both_activity_and_low_memory() {
+        let low = || Some(GIB);
+        let enough = || Some(4 * GIB);
+        // 操作中 × 空きが少ない → 待つ（例: Chrome を開いて作業中）。
+        assert!(low_memory_while_active(active(), low, not_running));
+        // 操作中 × 空きが足りている → 従来どおり進める。
+        assert!(!low_memory_while_active(active(), enough, not_running));
+        // 席を外して 5 分 × 空きが少ない → 進める。
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(5 * 60)),
+            low,
+            not_running
+        ));
+        // 席を外して 5 分 × 空きが足りている → 進める。
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(5 * 60)),
+            enough,
+            not_running
+        ));
+    }
+
+    /// 「操作中」の境目は最後の入力から 3 分。ちょうど 3 分たったら操作していない側。
+    #[test]
+    fn active_window_boundary_is_three_minutes() {
+        let low = || Some(GIB);
+        assert_eq!(ACTIVE_INPUT_WINDOW, Duration::from_secs(180));
+        assert!(low_memory_while_active(
+            Some(ACTIVE_INPUT_WINDOW - Duration::from_secs(1)),
+            low,
+            not_running
+        ));
+        assert!(!low_memory_while_active(
+            Some(ACTIVE_INPUT_WINDOW),
+            low,
+            not_running
+        ));
+        // 入力の直後（経過 0）も操作中。
+        assert!(low_memory_while_active(
+            Some(Duration::ZERO),
+            low,
+            not_running
+        ));
+    }
+
+    /// llama-server が止まっているときの空きの境目は、見積もり＋0.5GiB（2,368MiB）。ちょうどあれば進める
+    /// （1 バイト足りなければ待つ）。
+    #[test]
+    fn memory_threshold_boundary_is_the_estimate_plus_half_a_gibibyte() {
+        assert_eq!(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE, 2_368 * 1024 * 1024);
+        assert!(low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE - 1),
+            not_running
+        ));
+        assert!(!low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE),
+            not_running
+        ));
+    }
+
+    /// 画面ロック中は入力が無いので経過が延び、3 分を過ぎれば空きが少なくても進める。
+    /// 操作していないときは、メモリ・llama-server の状態を尋ねない（OS への問い合わせを減らす）。
+    #[test]
+    fn idle_or_locked_pc_proceeds_without_asking_memory() {
+        assert!(!low_memory_while_active(
+            Some(Duration::from_secs(30 * 60)),
+            || panic!("memory must not be queried while idle"),
+            || panic!("llm state must not be queried while idle")
+        ));
+    }
+
+    /// 入力の経過・空きが取れない（Windows 以外・OS 判定の失敗）ときは待たせない（fail-open）。
+    #[test]
+    fn unknown_activity_or_memory_does_not_pause() {
+        assert!(!low_memory_while_active(
+            None,
+            || panic!("memory must not be queried without activity"),
+            not_running
+        ));
+        assert!(!low_memory_while_active(active(), || None, not_running));
+    }
+
+    /// llama-server を起動済みなら、既に使っている分（約 1.81GiB。Gemma 4 E2B の実測）を空きへ足し戻して比べる
+    /// （2件目から毎回止まって、解放→読み込み直しを繰り返さないため）。
+    #[test]
+    fn running_local_llm_memory_is_counted_as_available() {
+        assert_eq!(LOCAL_LLM_RESIDENT_ESTIMATE, 1_856 * 1024 * 1024);
+        let after_load = || Some(GIB + GIB / 2);
+        assert!(low_memory_while_active(active(), after_load, || false));
+        assert!(!low_memory_while_active(active(), after_load, || true));
+        // 起動済みでも、空きが下限にも足し戻し後の基準にも届かないほど無ければ待つ。
+        assert!(low_memory_while_active(
+            active(),
+            || Some(256 * 1024 * 1024),
+            || true
+        ));
+    }
+
+    /// 起動済みでも、空きそのものが 1GiB 未満なら待つ（mmap のページを足し戻しで二重に数えないための下限）。
+    /// 足し戻しだけなら 0.5GiB（基準 − 見積もり）まで進めてしまうので、起動中の実質の境目はこの下限 1GiB になる。
+    #[test]
+    fn running_local_llm_still_needs_one_gibibyte_free() {
+        assert_eq!(MIN_AVAILABLE_WHILE_LLM_RUNNING, GIB);
+        // 足し戻しだけなら通る境目（0.5GiB）ちょうどでも、下限を下回るので待つ。
+        assert!(low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_MEMORY_WHILE_ACTIVE - LOCAL_LLM_RESIDENT_ESTIMATE),
+            || true
+        ));
+        assert!(low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_WHILE_LLM_RUNNING - 1),
+            || true
+        ));
+        assert!(!low_memory_while_active(
+            active(),
+            || Some(MIN_AVAILABLE_WHILE_LLM_RUNNING),
+            || true
+        ));
+        // 足し戻すと基準を超える 0.6GiB・0.9GiB でも、下限を下回るので待つ。
+        assert!(low_memory_while_active(
+            active(),
+            || Some(GIB * 6 / 10),
+            || true
+        ));
+        assert!(low_memory_while_active(
+            active(),
+            || Some(GIB * 9 / 10),
+            || true
+        ));
+    }
+
+    /// 操作中のメモリ不足で止めたときだけ、止まり始めに1回 早めの停止を頼む（ゲーム・マイクでは頼まない）。
+    #[test]
+    fn low_memory_pause_asks_the_local_llm_to_stop_early_only_once() {
+        let ctx = queue_context_with("low-memory-release", "local", true);
+        ctx.queue.core.replace_pending(ids(&["a"]));
+        let cause = Arc::new(Mutex::new(Some(BusyCause::LowMemoryWhileActive)));
+        let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queue = {
+            let cause = cause.clone();
+            let released = released.clone();
+            ctx.queue.clone().with_busy_cause(
+                move || *cause.lock().unwrap(),
+                move || {
+                    released.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+        let step = || {
+            queue.core.process_next_unless_paused(
+                || queue.is_enabled(),
+                || queue.is_paused(),
+                not_done,
+                |_| panic!("must not run the local llm while paused"),
+            )
+        };
+
+        assert_eq!(step(), StepOutcome::Paused);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        // 確かめ直しでも止まったままなら、もう頼まない（予約の時刻を延ばし続けない）。
+        assert_eq!(step(), StepOutcome::Paused);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+
+        // ゲーム・マイクで止めたときは頼まない（従来どおり）。
+        for other in [
+            BusyCause::Game,
+            BusyCause::Presentation,
+            BusyCause::MicInUse,
+        ] {
+            *cause.lock().unwrap() = Some(other);
+            assert_eq!(step(), StepOutcome::Paused);
+        }
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+
+        // 別の理由を挟んで、またメモリ不足で止まったら、もう一度頼む。
+        *cause.lock().unwrap() = Some(BusyCause::LowMemoryWhileActive);
+        assert_eq!(step(), StepOutcome::Paused);
+        assert_eq!(released.load(Ordering::SeqCst), 2);
+    }
+
+    /// 差し替えた OS の値（trait 実装）が判定へそのまま渡る。
+    #[test]
+    fn detector_values_feed_the_low_memory_decision() {
+        #[derive(Debug)]
+        struct Fixed(Option<Duration>, Option<u64>);
+        impl UserActivityDetector for Fixed {
+            fn idle_time(&self) -> Option<Duration> {
+                self.0
+            }
+            fn available_memory_bytes(&self) -> Option<u64> {
+                self.1
+            }
+        }
+        assert!(low_memory_while_active_on(
+            &Fixed(active(), Some(GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(
+            &Fixed(Some(Duration::from_secs(600)), Some(GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(
+            &Fixed(active(), Some(8 * GIB)),
+            not_running
+        ));
+        assert!(!low_memory_while_active_on(&Fixed(None, None), not_running));
     }
 
     /// 状態の種類は「設定で動かさない理由」→「待機列が空」→「一時停止・待ち（ローカルのみ）」→「動いている」の順。
@@ -2155,6 +2682,7 @@ mod tests {
         let paused_game = Some(QueueNotice::Paused(BusyCause::Game));
         let paused_presentation = Some(QueueNotice::Paused(BusyCause::Presentation));
         let paused_mic = Some(QueueNotice::Paused(BusyCause::MicInUse));
+        let paused_low_memory = Some(QueueNotice::Paused(BusyCause::LowMemoryWhileActive));
 
         // 設定で動かさない理由が最優先（待機列・知らせより先）。
         assert_eq!(
@@ -2195,6 +2723,19 @@ mod tests {
         assert_eq!(
             status_kind_for(&local, with_key, false, paused_mic),
             K::PausedMicInUse
+        );
+        assert_eq!(
+            status_kind_for(&local, with_key, false, paused_low_memory),
+            K::PausedLowMemoryWhileActive
+        );
+        // 待機列が空なら、メモリ不足の古い知らせが残っていても休みとは言わない。Gemini では使わない。
+        assert_eq!(
+            status_kind_for(&local, with_key, true, paused_low_memory),
+            K::Idle
+        );
+        assert_eq!(
+            status_kind_for(&gemini, with_key, false, paused_low_memory),
+            K::Running
         );
         assert_eq!(
             status_kind_for(
@@ -2246,6 +2787,12 @@ mod tests {
 
         queue.note(QueueNotice::Paused(BusyCause::MicInUse));
         assert_eq!(queue.status().kind, AutoSummaryStatusKind::PausedMicInUse);
+
+        queue.note(QueueNotice::Paused(BusyCause::LowMemoryWhileActive));
+        assert_eq!(
+            queue.status().kind,
+            AutoSummaryStatusKind::PausedLowMemoryWhileActive
+        );
     }
 
     #[test]
@@ -2263,5 +2810,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, serde_json::json!({ "kind": "waitingForLocalAi" }));
+        let json = serde_json::to_value(AutoSummaryStatusDto {
+            kind: AutoSummaryStatusKind::PausedLowMemoryWhileActive,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "pausedLowMemoryWhileActive" })
+        );
     }
 }

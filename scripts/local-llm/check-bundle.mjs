@@ -2,9 +2,10 @@
 //
 // tauri.conf.json の `build.beforeBundleCommand` から呼ばれる（`pnpm tauri build` のときだけ。
 // `tauri dev`・cargo のビルド・テスト・CI の検査では呼ばれない）。
-// 同梱物（git 外・約1.3GB）を置き忘れたままインストーラーを作ると「ローカル」が使えない版を配ってしまうため、
+// 同梱物（git 外）を置き忘れたままインストーラーを作ると「ローカル」が使えない版を配ってしまうため、
 // src-tauri/resources/local_llm/ の実行の部品（VC++ ランタイムを含む）とモデルを Rust の表と照合し、1つでも合わなければ
-// 失敗で終わらせてバンドルを止める。置き方は開発環境構築手順書 §17.5。
+// 失敗で終わらせてバンドルを止める。ACTIVE_MODEL に取得元がある（初回に取得する）ときは、モデルは求めない。
+// 置き方は開発環境構築手順書 §17.5。
 import { pathToFileURL } from "node:url";
 
 import { BUNDLE_DIR, loadBundleManifest, verifyBundleDir } from "./bundle-manifest.mjs";

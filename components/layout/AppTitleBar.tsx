@@ -1,13 +1,15 @@
-"use client";
-
 import type { ReactNode } from "react";
-import { cn } from "@/lib/utils";
 
 /**
- * 各画面上部のアプリ名表示（D147）。
- * 最小化・最大化・閉じるは OS のタイトルバーに任せ、ここには操作ボタンを置かない
- * （二重のタイトルバーで押しても動かないボタンが並ぶのを避けるため）。
- * OS の閉じるは Rust 側の close-to-hide でバックグラウンド待機へ戻る。
+ * 各画面上部のアプリ名表示（D147 → 2026-11-18 の判断で表示を廃止）。
+ *
+ * 2026-11-18、藤井の判断（案 A）で、タイトルバーは OS（Windows）のものだけにした。
+ * OS のタイトルバーと同じアプリ名を画面内にもう一段出すと、ヘッダーが二重に見え、縦の表示領域も 40px 失うため、
+ * このコンポーネントは何も描かない（最小化・最大化・閉じるは D147 で既に OS のタイトルバーへ一本化済み）。
+ *
+ * それでも残しているのは、各画面（特に担当者が別の `MainScreen.tsx`）がまだ `<AppTitleBar />` を描いているため。
+ * 使い所を各画面から外しきった時点で、このファイルごと削除してよい。
+ * props は既存の呼び出しをそのまま通すためだけに残している（表示には使わない）。
  */
 type AppTitleBarProps = {
   title?: string;
@@ -15,26 +17,7 @@ type AppTitleBarProps = {
   className?: string;
 };
 
-export function AppTitleBar({
-  title = "ゆうこと、ニュースを読みやすく。",
-  logo,
-  className,
-}: AppTitleBarProps) {
-  return (
-    <header
-      className={cn(
-        "h-10 bg-white border-b border-border flex items-center px-4 shrink-0",
-        className
-      )}
-    >
-      <div className="flex items-center gap-2">
-        {logo ?? (
-          <div className="w-6 h-6 rounded-full bg-[var(--yuuko-green)] flex items-center justify-center">
-            <span className="text-white text-xs">🐾</span>
-          </div>
-        )}
-        <span className="text-sm font-medium text-foreground">{title}</span>
-      </div>
-    </header>
-  );
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- 既存の呼び出し互換のため props を受けるだけ。
+export function AppTitleBar(_props: AppTitleBarProps) {
+  return null;
 }

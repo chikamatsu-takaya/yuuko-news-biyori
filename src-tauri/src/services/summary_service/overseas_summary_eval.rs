@@ -46,6 +46,7 @@ use crate::domain::article::{ArticleDetailDto, SummaryState};
 use crate::domain::settings::{AiProvider, ExplanationLevel, PersistedSettings};
 use crate::domain::speech_tone::SpeechTone;
 use crate::domain::summary::AiRequest;
+use crate::infra::local_llm_runtime::LocalLlmBundle;
 use crate::paths::AppPaths;
 use crate::repositories::settings_repository::SettingsRepository;
 use crate::services::ai_provider_service::AiProviderService;
@@ -280,7 +281,7 @@ fn overseas_summary_eval() {
         .save(&PersistedSettings::initial())
         .expect("save temp settings");
 
-    let local = LocalLlmService::new(Some(bundle_dir()));
+    let local = LocalLlmService::new(Some(LocalLlmBundle::from_manual_env(&bundle_dir())));
     let ai = AiProviderService::new(&paths).with_local_llm(local.clone());
     let jsonl = out_dir.join("results.jsonl");
     // 1回目の記事に起動・モデルの照合時間が乗らないよう、先に接続確認を済ませて別に記録する。

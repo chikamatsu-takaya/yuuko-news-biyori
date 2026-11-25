@@ -155,7 +155,7 @@ impl SettingsService {
 
     /// 起動時に設定ファイルが無ければ初期値（`PersistedSettings::initial`）で作成する。
     /// ここで新規作成する場合だけが「初回起動」なので、案内（オンボーディング）を未完了で記録し、
-    /// AI はローカル・自動要約は有効で始める（判断台帳 D103。案内の保存はこの値を引き継ぐ）。
+    /// AI はローカル・自動要約は無効で始める（判断台帳 D103、自動要約は 2026-11-18 藤井。案内の保存はこの値を引き継ぐ）。
     /// 既存ファイル（旧形式でフィールドが無いものを含む）は触らず、完了扱いのまま案内を出さない。
     /// 既存ファイルの AI 設定も変えない（欄が無ければ従来どおり mock・自動要約無効として読む）。
     pub fn initialize_default_if_missing(&self) -> Result<(), AppError> {
@@ -175,7 +175,7 @@ impl SettingsService {
     /// 設定を初期値へ戻して保存し、初期化後のDTOを返す。
     /// 破壊的操作のためUI側で確認ダイアログを挟む前提（画面詳細設計書 SCR-003 §7.6）。
     /// 初期値は新規インストールと同じ `PersistedSettings::initial()` を唯一の源とする
-    /// （AI はローカル・自動要約は有効。判断台帳 D103）。
+    /// （AI はローカル・自動要約は無効。判断台帳 D103、自動要約は 2026-11-18 藤井）。
     /// ただし自動起動は OS 登録が正で、リセットでは OS 登録を変えないため、写しの値は引き継ぐ
     /// （ここで OFF にすると OS 状態と設定値がずれる）。
     /// 設定ファイルが破損（JSON_ERROR）している場合は、上書きする前に別名で1世代だけ退避する。
@@ -183,22 +183,41 @@ impl SettingsService {
     /// 初回起動の案内の完了状態も引き継ぐ（リセットで案内を再表示しない）。読めない場合は完了扱い。
     pub fn reset_user_settings(&self) -> Result<UserSettingsDto, AppError> {
         let _guard = self.repository.lock_updates();
-        let (current_auto_start, onboarding_completed) = match self.repository.load_or_default() {
-            Ok(persisted) => (
-                persisted.ui.auto_start_on_pc_boot,
-                persisted.ui.onboarding_completed,
-            ),
-            Err(AppError::Json(_)) => {
-                self.repository.backup_corrupt_file()?;
-                (false, true)
-            }
-            Err(_) => (false, true),
-        };
+        let (current_auto_start, onboarding_completed, local_model) =
+            match self.repository.load_or_default() {
+                Ok(persisted) => (
+                    persisted.ui.auto_start_on_pc_boot,
+                    persisted.ui.onboarding_completed,
+                    persisted.local_model,
+                ),
+                Err(AppError::Json(_)) => {
+                    self.repository.backup_corrupt_file()?;
+                    (false, true, Default::default())
+                }
+                Err(_) => (false, true, Default::default()),
+            };
         let mut defaults = PersistedSettings::initial();
         defaults.ui.auto_start_on_pc_boot = current_auto_start;
         defaults.ui.onboarding_completed = onboarding_completed;
+        // モデルの取得を自動で始めた記録も引き継ぐ（初期化で自動の取得がもう一度始まらないように。設計案 §2.1）。
+        defaults.local_model = local_model;
         self.repository.save(&defaults)?;
         Ok(defaults.to_dto())
+    }
+
+    /// モデルの取得を自動で始めたことがあるか（読めなければ「ある」とみなし、自動では始めない）。
+    pub fn local_model_auto_download_started(&self) -> bool {
+        self.repository.load_or_default().map_or(true, |persisted| {
+            persisted.local_model.auto_download_started_at.is_some()
+        })
+    }
+
+    /// モデルの取得を自動で始めることを記録する（通信の前に呼ぶ。失敗したら呼び出し側は始めない）。
+    pub fn record_local_model_auto_download_started(&self) -> Result<(), AppError> {
+        let _guard = self.repository.lock_updates();
+        let mut persisted = self.repository.load_or_default()?;
+        persisted.local_model.auto_download_started_at = Some(chrono::Local::now().to_rfc3339());
+        self.repository.save(&persisted)
     }
 
     /// 自動起動の設定値（OS 登録状態の写し）だけを更新する。値が同じなら書き込まない。
@@ -354,12 +373,12 @@ mod tests {
         };
         service.save_user_settings(changed).unwrap();
 
-        // リセットすると初期値（新規インストールと同じ。AI はローカル・自動要約は有効）が返り、永続化される。
+        // リセットすると初期値（新規インストールと同じ。AI はローカル・自動要約は無効）が返り、永続化される。
         let reset = service.reset_user_settings().unwrap();
         assert_eq!(reset.nickname, "");
         assert_eq!(reset.notify_max_per_day, 3);
         assert_eq!(reset.ai_provider, AiProvider::Local);
-        assert!(reset.auto_summary_enabled);
+        assert!(!reset.auto_summary_enabled);
 
         let reloaded = service.get_user_settings().unwrap();
         assert_eq!(reloaded.nickname, "");
@@ -462,10 +481,10 @@ mod tests {
             service.get_user_settings().unwrap().onboarding_completed,
             Some(false)
         );
-        // 新規インストールは AI をローカル・自動要約を有効で始める（判断台帳 D103）。
+        // 新規インストールは AI をローカル・自動要約を無効で始める（D103、自動要約は 2026-11-18 藤井）。
         let created = service.get_user_settings().unwrap();
         assert_eq!(created.ai_provider, AiProvider::Local);
-        assert!(created.auto_summary_enabled);
+        assert!(!created.auto_summary_enabled);
 
         // 2回目以降の起動（ファイルあり）では作り直さず、未完了のまま変えない。
         service.initialize_default_if_missing().unwrap();
@@ -511,9 +530,9 @@ mod tests {
         service.save_user_settings(dto).unwrap();
         let saved = service.get_user_settings().unwrap();
         assert_eq!(saved.onboarding_completed, Some(true));
-        // 案内は読み込んだ設定を土台に保存するため、新規インストールの初期値（D103）が残る。
+        // 案内は読み込んだ設定を土台に保存するため、新規インストールの初期値（ローカル・自動要約無効）が残る。
         assert_eq!(saved.ai_provider, AiProvider::Local);
-        assert!(saved.auto_summary_enabled);
+        assert!(!saved.auto_summary_enabled);
         assert_eq!(saved.genres, vec!["セキュリティ".to_string()]);
         assert_eq!(saved.nickname, "ゆう");
 
@@ -565,6 +584,20 @@ mod tests {
         let reset = service.reset_user_settings().unwrap();
         assert!(reset.auto_start_on_pc_boot);
         assert!(service.get_user_settings().unwrap().auto_start_on_pc_boot);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn local_model_auto_download_record_survives_reset() {
+        let (service, path) = temp_service();
+        service.initialize_default_if_missing().unwrap();
+        assert!(!service.local_model_auto_download_started());
+        service.record_local_model_auto_download_started().unwrap();
+        assert!(service.local_model_auto_download_started());
+        service.reset_user_settings().unwrap();
+        assert!(service.local_model_auto_download_started());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json.bak"));

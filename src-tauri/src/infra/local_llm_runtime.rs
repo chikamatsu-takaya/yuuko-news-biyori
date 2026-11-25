@@ -12,7 +12,8 @@
 //! - `--offline`（モデル等を取りに行かない）・`--no-slots`（直前の処理内容を見せる口を閉じる）で起動する。
 //! - 応答本文はメモリへ全量展開する前に受信バイト上限を適用する。
 
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,18 +27,66 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::http_body::declared_length_exceeds;
-use super::url_guard::{local_llm_url, LocalLlmRoute, SpawnedLocalLlmPort};
+use super::url_guard::{local_llm_url, LocalLlmRoute, ModelSource, SpawnedLocalLlmPort};
 use crate::domain::summary::{
     ARTICLE_TAGS_MAX_ITEMS, ARTICLE_TAGS_MIN_ITEMS, ARTICLE_TAG_MAX_CHARS, FOCUS_POINTS_MAX_ITEMS,
     FOCUS_POINTS_MIN_ITEMS, KEY_POINTS_MAX_ITEMS, KEY_POINTS_MIN_ITEMS, POINT_ITEM_MAX_CHARS,
     SHORT_INPUT_FOCUS_POINTS_ITEMS, SHORT_INPUT_KEY_POINTS_ITEMS,
 };
 
-/// 同梱するモデル（判断台帳 D100: 参照アプリ「すたりお」と同じ Qwen3.5-2B Q4_K_M）。
-/// 値を変えたら `scripts/local-llm/place-bundle.mjs` が読む値と開発環境構築手順書も一緒に直す。
-pub const MODEL_FILE: &str = "stario-qwen3.5-2b-q4_k_m.gguf";
-pub const MODEL_SIZE: u64 = 1_312_164_800;
-pub const MODEL_SHA256: &str = "5405508fd56e0bace3ec4c2484eb4d0f606cbded87760cf3756896e234068b35";
+/// モデルの表の 1 行（ファイル名・大きさ・SHA-256）。
+/// ファイル名と照合の期待値を 1 か所にまとめ、モデルを差し替えるときに組で替えられるようにする
+/// （場所だけ・期待値だけを替えると、別のモデルの値で照合して壊れていると判定してしまうため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub file_name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    /// 取得元（設計案 §2.2）。無いモデルは初回ダウンロードできない（同梱だけで使う）。
+    pub source: Option<ModelSource>,
+}
+
+impl ModelSpec {
+    /// 版の名前（設計案 §2.2 の `id`）。取得したモデルの置き場所のフォルダ名に使う。
+    /// ファイル名（拡張子を除く）と SHA-256 の先頭 8 桁から作り、英数字・`.`・`-` だけにする
+    /// （古いファイルの削除で、本アプリが作った名前の形だけを消すため。設計案 §5.2）。
+    pub fn version_id(&self) -> String {
+        let stem = self
+            .file_name
+            .strip_suffix(".gguf")
+            .unwrap_or(self.file_name);
+        let hash = self.sha256.get(..8).unwrap_or(self.sha256);
+        format!("{stem}-{hash}")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+}
+
+/// 使うモデル（藤井さん 2026-11-16: Gemma 4 E2B Q4_K_M に替える。前は D100 の Qwen3.5-2B）。
+/// どのモデルを使うかはビルドに入れたこの定数だけで決め、設定ファイル・画面からは選ばせない。
+/// 取得元のあるモデルはインストーラーに入れず、初回に取得する（`scripts/local-llm/*.mjs` は同梱物として求めない）。
+/// 値を変えたら `scripts/local-llm/bundle-manifest.mjs` が読む形（`ACTIVE_MODEL` の 3 項目と `source: Some(`）を保ち、
+/// 開発環境構築手順書・`LICENSES/README.txt` も一緒に直す。
+pub const ACTIVE_MODEL: ModelSpec = ModelSpec {
+    file_name: "gemma-4-E2B-it-Q4_K_M.gguf",
+    size: 3_106_738_272,
+    sha256: "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
+    // Hugging Face の unsloth/gemma-4-E2B-it-GGUF を、コミットで版を固定して取る（main は使わない。設計案 §2.2）。
+    // コミットのファイルの大きさ・LFS の oid が上の値と一致することを公開 API で確かめた（2026-11-16）。
+    // 転送先は、実際に送った HEAD・Range 0-0 の GET で返った配信用のホストだけを許す（設計案 §3.1）。
+    source: Some(ModelSource {
+        host: "huggingface.co",
+        path: "/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf",
+        redirect_hosts: &["us.aws.cdn.hf.co"],
+    }),
+};
 
 /// 同梱する実行の部品（llama.cpp b11269 win-cpu-x64 から、llama-server が使うものだけ）と SHA-256。
 /// `ggml-cpu-*.dll` は CPU の種類ごとの部品で、llama-server が起動時に合うものを選んで読む。
@@ -171,7 +220,9 @@ const SERVER_EXE: &str = "llama-server";
 /// 文脈の長さ（トークン）。入力は 3000 文字未満のため、参照アプリ（8192）より小さくしてメモリを抑える。
 pub const CONTEXT_TOKENS: u32 = 4096;
 /// 使うCPUスレッドの上限。常駐アプリなので、生成中もパソコンの操作が重くならないよう抑える。
-const MAX_THREADS: usize = 4;
+/// 2026-11-09 の release ビルドの計測（論理14コア・同じ記事の要約を2回ずつ）で、4→2 にすると要約1件の時間は
+/// 1回目 60→82秒・2回目 62→63秒、生成中の CPU は平均 27〜28%→14〜15% に半減したため、軽さを優先して 2 にした。
+const MAX_THREADS: usize = 2;
 /// 合言葉の付いた要求1回の応答本文の受信上限（256 KiB。Gemini の成功本文と同じ）。
 const MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 /// 繰り返し（止まらずに書き続ける回）を抑える値。`build_chat_body` を参照。
@@ -179,7 +230,9 @@ const PRESENCE_PENALTY: f64 = 1.5;
 /// 起動待ちの間の `/health` 1回の待ち上限。
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// 同梱物の場所（実行ファイル・モデル）。
+/// 起動に使う場所（実行ファイル・モデル）。
+/// 実行の部品（インストール先）とモデルは別の場所に置けるよう、それぞれ別に受け取って組み立てる
+/// （モデルを初回にダウンロードする形へ替えるとき、モデルの場所だけを差し替えるため）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalLlmBundle {
     pub exe: PathBuf,
@@ -187,38 +240,119 @@ pub struct LocalLlmBundle {
 }
 
 impl LocalLlmBundle {
-    /// `<dir>/runtime/llama-server(.exe)` と `<dir>/models/<MODEL_FILE>`。
-    pub fn in_dir(dir: &Path) -> Self {
+    /// `<runtime_dir>/llama-server(.exe)` と、`model`（ファイルがまだ無くてもよい）。
+    pub fn new(runtime_dir: &Path, model: PathBuf) -> Self {
         Self {
-            exe: dir.join(RUNTIME_DIR_NAME).join(SERVER_EXE),
-            model: dir.join(MODELS_DIR_NAME).join(MODEL_FILE),
+            exe: runtime_dir.join(SERVER_EXE),
+            model,
         }
+    }
+
+    /// 同梱の並び（`<dir>/runtime/` と `<dir>/models/<ACTIVE_MODEL>`）。テスト・評価で同梱物の形を作るときに使う。
+    #[cfg(test)]
+    pub fn in_dir(dir: &Path) -> Self {
+        Self::new(
+            &bundled_runtime_dir(dir),
+            bundled_model_path(dir, &ACTIVE_MODEL),
+        )
+    }
+
+    /// 手動の確認・評価（`#[ignore]`）で使う場所。実行の部品は `<dir>/runtime/`、モデルは `model` があればそこ
+    /// （取得したモデルは同梱物のフォルダに無いため。開発環境構築手順書 §17）、無ければ `in_dir` と同じ。
+    #[cfg(test)]
+    pub fn for_manual_runs(dir: &Path, model: Option<PathBuf>) -> Self {
+        match model {
+            Some(model) => Self::new(&bundled_runtime_dir(dir), model),
+            None => Self::in_dir(dir),
+        }
+    }
+
+    /// `for_manual_runs` に環境変数 `YUUKO_LOCAL_LLM_MODEL`（モデルのファイルのパス）を渡す。
+    #[cfg(test)]
+    pub fn from_manual_env(dir: &Path) -> Self {
+        Self::for_manual_runs(
+            dir,
+            std::env::var_os("YUUKO_LOCAL_LLM_MODEL").map(PathBuf::from),
+        )
+    }
+
+    /// 実行の部品のフォルダ（実行ファイルの親）。部品の照合に使う。
+    pub fn runtime_dir(&self) -> Option<&Path> {
+        self.exe.parent()
     }
 }
 
-/// 同梱物のフォルダを決める。
-///
-/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm`）。
+/// 同梱物のフォルダの中の、実行の部品のフォルダ（`<dir>/runtime`）。
+fn bundled_runtime_dir(dir: &Path) -> PathBuf {
+    dir.join(RUNTIME_DIR_NAME)
+}
+
+/// 同梱物のフォルダの中の、モデルのファイル（`<dir>/models/<file_name>`）。
+fn bundled_model_path(dir: &Path, spec: &ModelSpec) -> PathBuf {
+    dir.join(MODELS_DIR_NAME).join(spec.file_name)
+}
+
+/// 開発中（debug ビルド）だけ使う、ソースツリー側の同梱物のフォルダ（`src-tauri/resources/local_llm`）。
 /// tauri-build はビルドし直すたびに `src-tauri/resources/local_llm` を `target/<profile>/local_llm` へ写すため、
 /// 開発中もふつうはリソースフォルダ側に揃っている。ただし同梱物を置いた後にまだビルドし直していない
-/// （写されていない）ことがあるので、開発中（debug ビルド）だけは、リソースフォルダに実行ファイルが
-/// 無ければ `src-tauri/resources/local_llm` を直接使う。配布版（release）ではこの代わりを使わない。
-/// 将来「初回にダウンロード」へ替える場合も、この関数の返す場所を差し替えるだけで済む（D101）。
-pub fn resolve_bundle_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
-    let bundled = resource_dir.map(|dir| dir.join(BUNDLE_DIR_NAME));
-    if cfg!(debug_assertions) {
-        let has_exe = bundled
-            .as_deref()
-            .is_some_and(|dir| LocalLlmBundle::in_dir(dir).exe.is_file());
-        if !has_exe {
-            return Some(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("resources")
-                    .join(BUNDLE_DIR_NAME),
-            );
-        }
+/// （写されていない）ことがあるので、リソースフォルダに無いときの代わりにする。配布版（release）では使わない。
+fn dev_bundle_dir() -> Option<PathBuf> {
+    cfg!(debug_assertions).then(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLE_DIR_NAME)
+    })
+}
+
+/// 実行の部品（llama-server と DLL）のフォルダを決める。
+///
+/// 配布版は Tauri のリソースフォルダ（`resource_dir/local_llm/runtime`）。
+/// debug ビルドだけは、そこに実行ファイルが無ければ `src-tauri/resources/local_llm/runtime` を使う。
+pub fn resolve_runtime_dir(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let bundled = resource_dir.map(|dir| bundled_runtime_dir(&dir.join(BUNDLE_DIR_NAME)));
+    if bundled
+        .as_deref()
+        .is_some_and(|dir| dir.join(SERVER_EXE).is_file())
+    {
+        return bundled;
     }
-    bundled
+    dev_bundle_dir()
+        .map(|dir| bundled_runtime_dir(&dir))
+        .or(bundled)
+}
+
+/// 取得したモデルの置き場所（`<local_data_dir>/local_llm/models/<版の名前>`。設計案 §2.3）。
+/// `local_data_dir` は Tauri の `app_local_data_dir()`（端末ごとのデータの置き場）で、利用者の値は使わない。
+fn downloaded_models_root(local_data_dir: &Path) -> PathBuf {
+    local_data_dir.join(BUNDLE_DIR_NAME).join(MODELS_DIR_NAME)
+}
+
+/// 取得したモデルのフォルダ（`downloaded_models_root` の下の版の名前のフォルダ）。
+pub fn downloaded_model_dir(spec: &ModelSpec, local_data_dir: &Path) -> PathBuf {
+    downloaded_models_root(local_data_dir).join(spec.version_id())
+}
+
+/// モデルのファイルの場所を決める（ファイルがまだ無くてもパスは返す）。
+///
+/// モデルの場所はこの関数だけで決める。取得先（`downloaded_model_dir`）→ 同梱の場所
+/// （`resource_dir/local_llm/models/<file_name>`）→ debug ビルドだけ `src-tauri/resources/local_llm/models/` の順に探す。
+/// どこにも無ければ取得先のパスを返す（`LocalLlmService` は起動時に 1 回だけパスを決めるので、
+/// 同梱の場所を返すと、取得を終えてもアプリを再起動するまで見つけられない）。
+/// 取得先を決められないとき（`local_data_dir` が None）だけ、従来どおり同梱の場所を返す。
+pub fn resolve_model_path(
+    spec: &ModelSpec,
+    local_data_dir: Option<&Path>,
+    resource_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let downloaded = local_data_dir.map(|dir| downloaded_model_dir(spec, dir).join(spec.file_name));
+    let bundled = resource_dir.map(|dir| bundled_model_path(&dir.join(BUNDLE_DIR_NAME), spec));
+    let dev = dev_bundle_dir().map(|dir| bundled_model_path(&dir, spec));
+    let found = [&downloaded, &bundled, &dev]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+        .cloned();
+    found.or(downloaded).or(dev).or(bundled)
 }
 
 /// モデルの照合の結果。
@@ -238,11 +372,44 @@ pub fn check_model_size(path: &Path, expected: u64) -> ModelCheck {
     }
 }
 
-/// SHA-256 を見る（1.3GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
+/// SHA-256 を見る（3.1GB を読むので重い。呼び出し側がアプリの起動中に1度だけにする）。
 pub fn check_model_sha256(path: &Path, expected_hex: &str) -> ModelCheck {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(mut file) = File::open(path) else {
         return ModelCheck::Missing;
     };
+    sha256_matches(&mut file, expected_hex)
+}
+
+/// 照合するモデルを、ほかのプログラムが書き換え・削除・名前の変更をできない形で開く（設計案 §3.2）。
+/// Windows では共有モードを読み取りだけにする。照合した後に同じ大きさの別のファイルへすり替えられて、
+/// 次の llama-server の起動でそのまま読み込まれる（大きさしか見ない）ことを防ぐため、呼び出し側は
+/// 照合が通った取っ手をアプリの終了まで（消す・置き直す前まで）持ち続ける。
+/// llama-server（`--no-repack`）の読み取り・mmap は妨げない（設計案 §8 の 14 で確認済み）。
+/// ほかのプログラムが書き込みで開いている間は、共有の違反で開けない（呼び出し側は照合しない）。
+pub fn open_model_locked(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
+}
+
+/// 開いた取っ手から大きさと SHA-256 を見る。取っ手を持ったまま読むので、照合した中身と、
+/// その後に llama-server が読む中身が同じになる（パスで開き直すと、その間にすり替えられうる）。
+pub fn check_model_file(file: &mut File, expected_size: u64, expected_hex: &str) -> ModelCheck {
+    match file.metadata() {
+        Ok(meta) if meta.len() == expected_size => {}
+        Ok(_) => return ModelCheck::Broken,
+        Err(_) => return ModelCheck::Missing,
+    }
+    sha256_matches(file, expected_hex)
+}
+
+fn sha256_matches(file: &mut File, expected_hex: &str) -> ModelCheck {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -286,7 +453,7 @@ pub fn runtime_manifest() -> Vec<(String, String)> {
         .collect()
 }
 
-/// 生成に使うスレッド数。論理コア数の半分（1〜4）。常駐中のほかの作業を重くしないため。
+/// 生成に使うスレッド数。論理コア数の半分（1〜2）。常駐中のほかの作業を重くしないため。
 pub fn thread_count() -> usize {
     let logical = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -301,6 +468,11 @@ pub fn thread_count() -> usize {
 /// - `--cache-ram 0`: 要求をまたぐプロンプトのキャッシュ（既定は最大 8GB）を切る。既定のままだと
 ///   要約などの1回ごとにメモリが 45〜64MB ずつ増え続ける（実測）。要求ごとに文面が違い再利用も
 ///   起きていないため、切っても速さは変わらない。
+/// - `--no-repack`: CPU 向けに重みを並べ替えた専用の写し（約590MB）を作らず、モデルファイルの mmap の
+///   ページのまま使う。生成中の専用メモリ（Private）が約1.28→0.69GB に減り、残りのページは他のアプリが
+///   メモリを使うときに OS が書き出しなしで手放せる。この PC（AVX-VNNI/AVX2）では遅くならず、
+///   架空の記事 30 件の評価で誤りが増えたとは言えなかった
+///   （`docs/01_setup/軽量常駐性能確認手順.md` §11.3。AVX-512・AMX の CPU では未確認）。
 pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Vec<String> {
     vec![
         "-m".to_string(),
@@ -321,6 +493,7 @@ pub fn server_args(model: &Path, port: u16, api_key: &str, threads: usize) -> Ve
         "--offline".to_string(),
         "--cache-ram".to_string(),
         "0".to_string(),
+        "--no-repack".to_string(),
     ]
 }
 
@@ -436,7 +609,7 @@ impl ServerLauncher for ChildProcessLauncher {
             command.current_dir(parent);
         }
         let child = command.spawn()?;
-        // アプリが異常終了しても llama-server（約2GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
+        // アプリが異常終了しても llama-server（生成中は約1.5GB）を残さないよう、アプリと一緒に終わるジョブへ入れる。
         // 入れられなくても生成はできる（通常の終了経路では shutdown が止める）ため、記録だけ残して続ける。
         if !exit_job::attach(&child) {
             log::warn!("could not attach llama-server to the kill-on-exit job");
@@ -981,19 +1154,112 @@ mod tests {
     fn bundle_paths_point_to_runtime_and_models() {
         let bundle = LocalLlmBundle::in_dir(Path::new("res/local_llm"));
         assert!(bundle.exe.ends_with(Path::new("runtime").join(SERVER_EXE)));
-        assert!(bundle.model.ends_with(Path::new("models").join(MODEL_FILE)));
+        assert!(bundle
+            .model
+            .ends_with(Path::new("models").join(ACTIVE_MODEL.file_name)));
+        assert_eq!(
+            bundle.runtime_dir(),
+            Some(Path::new("res/local_llm/runtime"))
+        );
+        // 2 つの場所から作ると、実行ファイルは実行の部品のフォルダ、モデルは渡したパスのまま。
+        let split = LocalLlmBundle::new(Path::new("rt"), PathBuf::from("data/m.gguf"));
+        assert_eq!(split.exe, Path::new("rt").join(SERVER_EXE));
+        assert_eq!(split.model, PathBuf::from("data/m.gguf"));
     }
 
     #[test]
-    fn resolve_bundle_dir_uses_resource_dir_when_runtime_exists() {
+    fn active_model_is_gemma_fetched_from_a_pinned_commit() {
+        assert_eq!(ACTIVE_MODEL.file_name, "gemma-4-E2B-it-Q4_K_M.gguf");
+        assert_eq!(ACTIVE_MODEL.size, 3_106_738_272);
+        assert_eq!(
+            ACTIVE_MODEL.sha256,
+            "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8"
+        );
+        assert_eq!(ACTIVE_MODEL.version_id(), "gemma-4-e2b-it-q4-k-m-740185b2");
+        let source = ACTIVE_MODEL.source.expect("Gemma is fetched on first run");
+        let url = crate::infra::url_guard::model_download_url(&source).unwrap();
+        // 版はコミットのハッシュ（40 桁）で固定し、動く名前（main など）は使わない。
+        let revision = url.path().split('/').nth(4).unwrap();
+        assert_eq!(url.host_str(), Some("huggingface.co"));
+        assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(url.path().ends_with(ACTIVE_MODEL.file_name));
+        assert_eq!(source.redirect_hosts, ["us.aws.cdn.hf.co"]);
+    }
+
+    /// 手動の確認（`#[ignore]`）で使う場所: `YUUKO_LOCAL_LLM_MODEL` があればモデルだけをそこへ向ける。
+    #[test]
+    fn manual_bundle_takes_the_model_from_the_environment_only_when_set() {
+        let dir = Path::new("res/local_llm");
+        assert_eq!(
+            LocalLlmBundle::for_manual_runs(dir, None),
+            LocalLlmBundle::in_dir(dir)
+        );
+        let bundle = LocalLlmBundle::for_manual_runs(dir, Some(PathBuf::from("dl/m.gguf")));
+        assert_eq!(bundle.exe, LocalLlmBundle::in_dir(dir).exe);
+        assert_eq!(bundle.model, PathBuf::from("dl/m.gguf"));
+    }
+
+    /// 分けた 2 つの関数で組み立てた場所（lib.rs と同じ組み立て方）。
+    fn resolved_bundle(resource_dir: Option<PathBuf>) -> Option<LocalLlmBundle> {
+        let runtime = resolve_runtime_dir(resource_dir.clone())?;
+        let model = resolve_model_path(&ACTIVE_MODEL, None, resource_dir)?;
+        Some(LocalLlmBundle::new(&runtime, model))
+    }
+
+    #[test]
+    fn resolved_paths_use_resource_dir_when_bundle_exists() {
         let root = std::env::temp_dir().join(format!("yuuko-llm-res-{}", std::process::id()));
         let bundle = LocalLlmBundle::in_dir(&root.join(BUNDLE_DIR_NAME));
         std::fs::create_dir_all(bundle.exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bundle.model.parent().unwrap()).unwrap();
         std::fs::write(&bundle.exe, b"exe").unwrap();
+        std::fs::write(&bundle.model, b"model").unwrap();
         assert_eq!(
-            resolve_bundle_dir(Some(root.clone())),
-            Some(root.join(BUNDLE_DIR_NAME))
+            resolve_runtime_dir(Some(root.clone())),
+            Some(root.join(BUNDLE_DIR_NAME).join("runtime"))
         );
+        // 分ける前（`resolve_bundle_dir` → `in_dir`）と同じ場所になる。
+        assert_eq!(resolved_bundle(Some(root.clone())), Some(bundle));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolved_paths_fall_back_to_source_tree_in_debug_builds() {
+        // リソースフォルダに同梱物が無い・リソースフォルダを決められない（テストは debug ビルド）→
+        // 分ける前と同じく `src-tauri/resources/local_llm` の下を見る。
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLE_DIR_NAME);
+        let expected = Some(LocalLlmBundle::in_dir(&source));
+        let empty = std::env::temp_dir().join(format!("yuuko-llm-empty-{}", std::process::id()));
+        assert_eq!(resolved_bundle(Some(empty)), expected);
+        assert_eq!(resolved_bundle(None), expected);
+    }
+
+    #[test]
+    fn model_path_prefers_downloaded_then_bundled_then_returns_download_path() {
+        let root = std::env::temp_dir().join(format!("yuuko-llm-dl-{}", std::process::id()));
+        let (local, resources) = (root.join("local"), root.join("res"));
+        let downloaded = downloaded_model_dir(&ACTIVE_MODEL, &local).join(ACTIVE_MODEL.file_name);
+        assert!(downloaded.ends_with(
+            Path::new("local_llm/models/gemma-4-e2b-it-q4-k-m-740185b2")
+                .join(ACTIVE_MODEL.file_name)
+        ));
+        let bundled = LocalLlmBundle::in_dir(&resources.join(BUNDLE_DIR_NAME)).model;
+        for path in [&downloaded, &bundled] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"m").unwrap();
+        }
+        let resolve = || resolve_model_path(&ACTIVE_MODEL, Some(&local), Some(resources.clone()));
+        assert_eq!(resolve(), Some(downloaded.clone()));
+        std::fs::remove_file(&downloaded).unwrap();
+        assert_eq!(resolve(), Some(bundled.clone()));
+        std::fs::remove_file(&bundled).unwrap();
+        // どこにも無ければ取得先（開発用の同梱物を置いている環境ではそちらが見つかる）。
+        let dev = dev_bundle_dir().map(|dir| bundled_model_path(&dir, &ACTIVE_MODEL));
+        if !dev.as_deref().is_some_and(Path::is_file) {
+            assert_eq!(resolve(), Some(downloaded));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1047,6 +1313,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--no-slots"));
         assert!(args.iter().any(|arg| arg == "--offline"));
         assert_eq!(value_of("--cache-ram"), "0");
+        assert!(args.iter().any(|arg| arg == "--no-repack"));
         assert!(!args.iter().any(|arg| arg == "--mmproj"));
     }
 
@@ -1062,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_count_is_between_one_and_four() {
+    fn thread_count_is_between_one_and_the_cap() {
         let threads = thread_count();
         assert!((1..=MAX_THREADS).contains(&threads));
     }

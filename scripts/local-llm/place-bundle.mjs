@@ -10,8 +10,9 @@
 // --vc-crt には Visual Studio の再頒布用フォルダ（vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll がある所）を
 // 渡す（D112。VC++ 再頒布可能パッケージが無いパソコンでも llama-server が起動できるよう runtime/ に一緒に置く）。
 // --vc-crt を省いた場合は <同梱物のフォルダ>/runtime/ に同じファイルがあればそれを使い、無ければ止める。
-// 写すのは Rust の表（src-tauri/src/infra/local_llm_runtime.rs の RUNTIME_FILES / VC_RUNTIME_FILES / MODEL_*）に
-// あるものだけ（CLI・ベンチマーク・量子化用の DLL などは写さない）。写す前に元のファイルを、写した後に置いたファイルを
+// 写すのは Rust の表（src-tauri/src/infra/local_llm_runtime.rs の RUNTIME_FILES / VC_RUNTIME_FILES / ACTIVE_MODEL）に
+// あるものだけ（CLI・ベンチマーク・量子化用の DLL などは写さない）。ACTIVE_MODEL に取得元がある（初回に取得する）
+// ときは、モデルは写さず models/ を空にする（インストーラーに入れないため。<同梱物のフォルダ> に models/ は要らない）。写す前に元のファイルを、写した後に置いたファイルを
 // 表の SHA-256 と照合し、1つでも合わなければ止める（写す前に止めた場合は何も置かない）。
 // 置いたファイルは .gitignore で除外されている（コミットしない）。
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
@@ -71,7 +72,7 @@ export async function placeBundle(sourceDir, destDir = BUNDLE_DIR, { vcCrtDir } 
 
   const sourceProblems = [
     ...(await verifyRuntimeFiles(sources)),
-    ...(await verifyModelFile(sourceDir, manifest)),
+    ...(manifest.model.downloadable ? [] : await verifyModelFile(sourceDir, manifest)),
   ];
   if (sourceProblems.length > 0) {
     throw new Error(`元のファイルが表と合いません:\n  ${sourceProblems.join("\n  ")}`);
@@ -85,10 +86,12 @@ export async function placeBundle(sourceDir, destDir = BUNDLE_DIR, { vcCrtDir } 
   for (const { name, path } of sources) {
     copyFileSync(path, join(runtimeDest, name));
   }
-  copyFileSync(
-    join(sourceDir, "models", manifest.model.file),
-    join(modelsDest, manifest.model.file)
-  );
+  if (!manifest.model.downloadable) {
+    copyFileSync(
+      join(sourceDir, "models", manifest.model.file),
+      join(modelsDest, manifest.model.file)
+    );
+  }
 
   const placedProblems = await verifyBundleDir(destDir, manifest);
   if (placedProblems.length > 0) {
@@ -97,7 +100,7 @@ export async function placeBundle(sourceDir, destDir = BUNDLE_DIR, { vcCrtDir } 
   return {
     runtimeFiles: manifest.runtime.length,
     vcRuntimeFiles: sources.filter((entry) => entry.source === "vc").length,
-    model: manifest.model.file,
+    model: manifest.model.downloadable ? null : manifest.model.file,
     size: manifest.model.size,
   };
 }
@@ -148,8 +151,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       vcCrtDir: args.vcCrtDir ? resolve(args.vcCrtDir) : undefined,
     })
       .then((result) => {
+        const model = result.model
+          ? `${result.model} (${result.size} B)`
+          : "no model (downloaded on first run)";
         console.log(
-          `placed: runtime ${result.runtimeFiles} files (VC++ runtime ${result.vcRuntimeFiles}), ${result.model} (${result.size} B) -> ${BUNDLE_DIR}`
+          `placed: runtime ${result.runtimeFiles} files (VC++ runtime ${result.vcRuntimeFiles}), ${model} -> ${BUNDLE_DIR}`
         );
       })
       .catch((error) => {

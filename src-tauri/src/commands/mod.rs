@@ -8,6 +8,7 @@ pub mod dressup_commands;
 pub mod friendship_commands;
 pub mod gacha_commands;
 pub mod health_commands;
+pub mod local_model_commands;
 pub mod news_commands;
 pub mod pattern_commands;
 pub mod reward_commands;

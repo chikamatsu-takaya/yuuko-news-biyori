@@ -12,6 +12,7 @@ import CustomizeScreen from "@/components/screens/CustomizeScreen";
 import GachaScreen from "@/components/screens/GachaScreen";
 import YuukoInAppNotification from "@/components/notifications/YuukoInAppNotification";
 import OnboardingOverlay from "@/components/onboarding/OnboardingOverlay";
+import LocalModelSetupNotice from "@/components/layout/LocalModelSetupNotice";
 import PatternGround from "@/components/layout/PatternGround";
 import { YuukoDressupProvider } from "@/components/yuuko/YuukoDressupProvider";
 import { useNotificationScheduler } from "@/hooks/use-notification-scheduler";
@@ -557,8 +558,15 @@ export default function Page() {
   return (
     // ゆうこの着せかえ（吹き出し・飾り。D155）を各画面とアプリ内通知へ配る。保存済みの値はマウント時に 1 回読む。
     <YuukoDressupProvider>
-      {/* 画面の地に模様を1枚で敷く外枠（D152〜D154）。通知・案内は模様と無関係なので外に置く。 */}
-      <PatternGround>{renderCurrentScreen()}</PatternGround>
+      {/* 画面の外枠（app/globals.css の .app-shell）。上から順に、ローカルAIの案内の帯（出ているときだけ）と各画面を縦に並べる。
+          帯は画面に重ねず、その高さの分だけ画面を下へ押し下げる（各画面の h-dvh は外枠の中の残りの高さへ置き換える）。
+          ことわりを見せられない間（ウィンドウ非表示・初回起動の案内の表示中）は出さず、自動でも始めない。
+          初期セッティングのパネルは fixed で重ねるため、ここに置いても縦の並びには加わらない（設計案 §4.1・§4.2）。 */}
+      <div className="app-shell">
+        <LocalModelSetupNotice active={isWindowVisible && !isOnboardingOpen} />
+        {/* 画面の地に模様を1枚で敷く外枠（D152〜D154）。通知・案内は模様と無関係なので外に置く。 */}
+        <PatternGround>{renderCurrentScreen()}</PatternGround>
+      </div>
       {/* ウィンドウ非表示中は描画しない＝アンマウントで自動退場タイマーを停止する。
           （非表示中に mark_yuuko_ignored 等で未表示消費しないため。再表示時は
           scheduler の resurface（get）と保持中 Page state で active を拾い直す。） */}

@@ -24,6 +24,9 @@ export type ArticleSummaryDto = {
   readState: ArticleReadState;
   recommendationScore: number;
   summaryState: ArticleSummaryState;
+  // 記事のタグ（ArticleHistoryItemDto と同じ保存値・同じ整形）。サムネイルの絵の判定に使う。
+  // 旧バックエンド・ゆうこ状態ファイルの旧データでは欠けうるため省略可。照合にだけ使い、HTML としては扱わない。
+  tags?: string[];
 };
 
 export type ArticleHistoryFilter =
@@ -245,10 +248,13 @@ export type AutoSummaryStatusKind =
   | "idle"
   | "pausedGameOrPresentation"
   | "pausedMicInUse"
+  | "pausedLowMemoryWhileActive"
   | "waitingForLocalAi"
   | "disabledInSettings"
   | "notRealAi"
   | "localAiNotReady"
+  // ローカルAIのモデルをまだダウンロードしていない（初回ダウンロードの前・途中・失敗）。
+  | "localModelNotDownloaded"
   | "geminiNotReady"
   | "unknown";
 

@@ -96,6 +96,85 @@ test("home screen renders and primary controls are hittable", async ({
   await captureScreen(page, testInfo, "home");
 });
 
+// 手動更新の結果はカードにせず1行の通知だけにする（一覧を押し下げない。藤井判断・選択肢1）。
+// 800x600 で更新の前後に見えている記事の数と先頭記事の位置を比べる。
+async function measureHomeArticles(page: Page) {
+  return page.evaluate(() => {
+    const titles = Array.from(document.querySelectorAll("h3")).filter((el) =>
+      /^件数記事\d+$/.test(el.textContent?.trim() ?? "")
+    );
+    // 一覧はスクロール領域の中にあるため、その領域に収まっている見出しを数える。
+    const list = titles[0]?.closest(".overflow-y-auto");
+    const listRect = list?.getBoundingClientRect();
+    const bottom = Math.min(listRect?.bottom ?? window.innerHeight, window.innerHeight);
+    const tops = titles.map((el) => el.getBoundingClientRect().top);
+    const visible = titles.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.top >= (listRect?.top ?? 0) && rect.bottom <= bottom;
+    }).length;
+    return { firstTop: Math.min(...tops), visible };
+  });
+}
+
+test("home refresh success shows only a one-line notice and keeps the article list in place", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__E2E_RECOMMENDED_POOL__ = 10;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText("ニュースを更新しました。");
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("更新成功", { exact: true })).toHaveCount(0);
+  for (const label of ["sources", "fetched", "saved", "errors"]) {
+    await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  }
+
+  const after = await measureHomeArticles(page);
+  // 通知1行ぶん（文字＋余白）を超えて下がらず、見えている記事の数も減らない。
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(32);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible);
+});
+
+test("home refresh with partial errors shows a short amber line instead of a card", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.addInitScript(() => {
+    const win = window as unknown as Record<string, unknown>;
+    win.__E2E_RECOMMENDED_POOL__ = 10;
+    win.__E2E_REFRESH_PARTIAL_ERRORS__ = true;
+  });
+  await openHome(page);
+  await expect(page.getByText("件数記事1", { exact: true })).toBeVisible();
+  const before = await measureHomeArticles(page);
+
+  await page.getByRole("button", { name: "ニュースを更新" }).click();
+  const notice = page.getByTestId("home-refresh-notice");
+  await expect(notice).toHaveText(
+    "ニュースを更新しました（一部の取得元でエラー 2 件：フィード取得失敗 / 記事取得失敗）。"
+  );
+  await expect(notice).toHaveClass(/text-amber-700/);
+  await expect(page.getByText("取得結果を反映しました")).toHaveCount(0);
+  await expect(page.getByText("一部エラーあり", { exact: true })).toHaveCount(0);
+  // 取得元の URL は画面に出さない。
+  await expect(page.getByText("example.invalid")).toHaveCount(0);
+
+  // 2行までに収まる（text-xs の行の高さ 16px × 2 まで。超える分は line-clamp で切る）。
+  const box = await notice.boundingBox();
+  expect(box?.height ?? 0).toBeLessThanOrEqual(34);
+
+  const after = await measureHomeArticles(page);
+  expect(after.firstTop - before.firstTop).toBeLessThanOrEqual(48);
+  expect(after.visible).toBeGreaterThanOrEqual(before.visible - 1);
+});
+
 for (const screen of majorScreens) {
   test(`opens ${screen.id} screen and verifies critical elements`, async ({
     page,
@@ -1140,6 +1219,75 @@ test("today-news list filters by fetchedAt: today only (excludes prev-day, inval
   await expect(main.getByText("公開本日だが取得前日の記事")).toHaveCount(0);
   // カード（h3見出し）はちょうど1件。
   await expect(main.getByRole("heading", { level: 3 })).toHaveCount(1);
+});
+
+// 記事サムネイルは全画面共通のルール（lib/article-thumbnail.mjs）で決める（2026-11-20 藤井判断）。
+// 同じ記事はホームとニュース一覧で同じ絵（タグ→題名→ジャンル→アイコン）と色（媒体名→色）になり、
+// 媒体が違えば色が分かれることを確かめる。
+test("article thumbnails match between home and today-news list, and differ by source", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const w = window as any;
+    const original = w.__TAURI_INTERNALS__.invoke;
+    const base = {
+      publishedAtText: "2026-06-05T00:00:00Z",
+      summary: "UI確認用のモックニュースです。",
+      isFavorite: false,
+      readState: "unread",
+      recommendationScore: 0.9,
+      fetchedAt: new Date().toISOString(),
+      isArchived: false,
+    };
+    const items = [
+      // タグがあればタグで絵が決まる（ホームの記事・一覧の記事のどちらにも同じタグを返す）。
+      { ...base, articleId: "thumb-1", title: "サムネ記事テック", sourceName: "E2E News", genre: "テクノロジー", tags: ["半導体", "AI"] },
+      { ...base, articleId: "thumb-2", title: "サムネ記事経済", sourceName: "経済ニュースB", genre: "ビジネス・経済" },
+      { ...base, articleId: "thumb-3", title: "サムネ記事スポーツ", sourceName: "サイエンス通信", genre: "Sports" },
+    ];
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+      if (cmd === "get_recommended_articles" || cmd === "list_article_history") {
+        return items;
+      }
+      return original(cmd, args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+
+  const readThumbnail = async (card: ReturnType<Page["locator"]>) => {
+    const thumb = card.locator("[data-thumbnail-kind]");
+    await expect(thumb).toHaveCount(1);
+    return {
+      kind: await thumb.getAttribute("data-thumbnail-kind"),
+      palette: await thumb.getAttribute("data-thumbnail-palette"),
+      background: await thumb.evaluate((el) => getComputedStyle(el).backgroundImage),
+    };
+  };
+  const titles = ["サムネ記事テック", "サムネ記事経済", "サムネ記事スポーツ"];
+
+  await openHome(page);
+  await expect(page.getByTestId("home-article-card")).toHaveCount(3);
+  const home = [];
+  for (const title of titles) {
+    home.push(
+      await readThumbnail(page.getByTestId("home-article-card").filter({ hasText: title }))
+    );
+  }
+  // タグ → 題名 → ジャンルの順で絵が決まる（1件目はタグ「半導体」、2・3件目は題名の「経済」「スポーツ」）。
+  expect(home.map((t) => t.kind)).toEqual(["semiconductor", "business", "sports"]);
+  // 媒体が違えば色が分かれる。
+  expect(new Set(home.map((t) => t.palette)).size).toBe(3);
+  for (const thumb of home) {
+    expect(thumb.background).toContain("linear-gradient");
+  }
+
+  await openTodayNewsList(page);
+  const main = page.locator("main");
+  for (const [index, title] of titles.entries()) {
+    const listThumb = await readThumbnail(main.getByRole("button", { name: title }));
+    expect(listThumb).toEqual(home[index]);
+  }
 });
 
 test.describe("article date display", () => {
@@ -4000,9 +4148,32 @@ test("reader summary: a waiting article explains that auto summary is resting du
   );
 });
 
-test("reader summary: an unsummarized article outside the queue explains why auto summary is off", async ({
+test("reader summary: a waiting article explains that auto summary is waiting while the pc is busy with low memory", async ({
   page,
 }) => {
+  await setReaderSummaryState(page, "waiting");
+  await setAutoSummaryStatus(page, "pausedLowMemoryWhileActive");
+  await openReaderFromHome(page);
+  const main = page.locator("main");
+
+  // 作業中でメモリに余裕がないときは、その理由を添える。手動の「今すぐ要約」はそのまま使える。
+  await expect(main.getByTestId("auto-summary-reason")).toHaveText(
+    "いまはパソコンで作業中で、メモリに余裕がないみたいだから、自動の要約はひと休みしているよ。手が空いたら続きを作るね。"
+  );
+  await expect(page.getByRole("button", { name: "今すぐ要約" })).toBeVisible();
+
+  // 手が空いて動き出した → ニュース取得の完了時に読み直し、一言を消す。
+  await page.evaluate(() => {
+    (window as unknown as Record<string, string>).__E2E_AUTO_SUMMARY_STATUS__ = "running";
+  });
+  await emitNewsRefreshed(page);
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+});
+
+test("reader summary: no reason is shown for an unsummarized article when auto summary is off in settings", async ({
+  page,
+}) => {
+  // 設定で自動要約がオフのときは一言を出さない（2026-11-18 藤井）。空の要素も残さない。「要約を作成」はそのまま使える。
   await page.addInitScript(() => {
     (window as unknown as Record<string, boolean>).__E2E_ARTICLE_DETAIL_UNSUMMARIZED__ = true;
   });
@@ -4011,10 +4182,9 @@ test("reader summary: an unsummarized article outside the queue explains why aut
   const main = page.locator("main");
 
   await expect(main.getByText(READER_UNSUMMARIZED_TEXT)).toBeVisible();
-  await expect(main.getByTestId("auto-summary-reason")).toContainText(
-    "自動の要約は設定でオフになっているよ。"
-  );
   await expect(page.getByRole("button", { name: "要約を作成" })).toBeVisible();
+  await expect(main.getByTestId("auto-summary-reason")).toHaveCount(0);
+  await expect(main.getByText("設定でオフになっている")).toHaveCount(0);
 });
 
 test("reader summary: no reason is shown for a pause unrelated to an article outside the queue", async ({
@@ -8694,13 +8864,15 @@ test("does not generate candidates while the window is hidden and generates afte
 
 // Rust の news_scheduler が refresh 成功時に送る news-refreshed を模擬する。
 // 戻り値は届いたハンドラ数（購読済みかの確認に使う）。
-function emitNewsRefreshed(page: Page) {
-  return page.evaluate(() =>
-    (
-      window as unknown as {
-        __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
-      }
-    ).__E2E_EMIT_EVENT__("news-refreshed", { savedCount: 2 })
+function emitNewsRefreshed(page: Page, startup = false) {
+  return page.evaluate(
+    (isStartup) =>
+      (
+        window as unknown as {
+          __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+        }
+      ).__E2E_EMIT_EVENT__("news-refreshed", { savedCount: 2, startup: isStartup }),
+    startup
   );
 }
 
@@ -8888,6 +9060,87 @@ test("yuuko-summoned message is dropped when the window is hidden and does not c
   await setVisible(true);
   await page.waitForTimeout(200);
   await expect(page.getByText(message)).toHaveCount(0);
+});
+
+test("news list reloads right away for the startup news refresh even while shown", async ({
+  page,
+}) => {
+  // 起動直後の一覧は取得前の古い内容のため、起動時の取得（startup）は表示中でもすぐ読み直す。
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const initialLoads = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+
+  await expect.poll(() => emitNewsRefreshed(page, true)).toBeGreaterThan(0);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(initialLoads);
+  await expect(
+    page.getByRole("heading", { name: "今日のおすすめニュース" })
+  ).toBeVisible();
+  await page.waitForTimeout(200);
+  const afterStartupReload = await readCount(
+    page,
+    "__E2E_RECOMMENDED_CALL_COUNT__"
+  );
+
+  // 反映済みなので、次の再表示で二重に読み直さない。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, (visible: boolean) => void>;
+    w.__E2E_SET_WINDOW_VISIBLE__(false);
+    w.__E2E_SET_WINDOW_VISIBLE__(true);
+  });
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    afterStartupReload
+  );
+});
+
+test("startup news refresh while hidden or arriving late waits for the next re-show", async ({
+  page,
+}) => {
+  // 起動時の取得でも、非表示中に届いたもの・起動から時間がたって届いたものは、操作中の一覧を作り直さない。
+  await page.clock.install();
+  await installVisibilityControl(page, false);
+  await openHome(page);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const initialLoads = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+  const setVisible = (visible: boolean) =>
+    page.evaluate(
+      (v) =>
+        (
+          window as unknown as Record<string, (visible: boolean) => void>
+        ).__E2E_SET_WINDOW_VISIBLE__(v),
+      visible
+    );
+
+  // 非表示中に届いた起動時の取得は、再表示で1回だけ反映する。
+  await setVisible(false);
+  await expect.poll(() => emitNewsRefreshed(page, true)).toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    initialLoads
+  );
+  await setVisible(true);
+  await expect
+    .poll(() => readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__"))
+    .toBeGreaterThan(initialLoads);
+  await page.waitForTimeout(200);
+  const afterReshow = await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__");
+
+  // 起動から時間がたってから届いた起動時の取得は、表示中でもその場では読み直さない。
+  await page.clock.fastForward(31_000);
+  await emitNewsRefreshed(page, true);
+  await page.waitForTimeout(200);
+  expect(await readCount(page, "__E2E_RECOMMENDED_CALL_COUNT__")).toBe(
+    afterReshow
+  );
 });
 
 test("news list reloads on the next re-show after a scheduled news refresh", async ({
@@ -10694,6 +10947,22 @@ async function installTauriMocks(page: Page) {
             };
           }
           case "refresh_news":
+            // 一部ソース失敗の表示確認用: フラグ時は2種類のエラーを返す（URL はダミー）。
+            if (
+              (window as unknown as Record<string, unknown>)
+                .__E2E_REFRESH_PARTIAL_ERRORS__
+            ) {
+              return {
+                sourcesProcessed: 2,
+                fetched: 1,
+                saved: 1,
+                errors: [
+                  { url: "https://example.invalid/feed", kind: "feed_fetch_failed" },
+                  { url: "https://example.invalid/a", kind: "article_fetch_failed" },
+                ],
+                genreFilterFallback: false,
+              };
+            }
             return {
               sourcesProcessed: 1,
               fetched: 1,
@@ -10718,6 +10987,42 @@ async function installTauriMocks(page: Page) {
               balloonText: "E2E確認中だよ。",
               hasNotification: false,
             };
+          }
+          // ローカルAIのモデルの初回ダウンロード（設計案 §3.4）。既定は取得元なし（今の同梱の配布物）。
+          // __E2E_LOCAL_MODEL__ で状態を差し替え、呼ばれた command と引数を __E2E_LOCAL_MODEL_CALLS__ に記録する。
+          case "get_local_model_status":
+          case "start_local_model_download":
+          case "pause_local_model_download":
+          case "cancel_local_model_download":
+          case "discard_local_model": {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const lmWin = window as any;
+            const current = (lmWin.__E2E_LOCAL_MODEL__ ||= {
+              phase: "no_source",
+              failure: null,
+              receivedBytes: 0,
+              totalBytes: 3_100_000_000,
+              neededMoreBytes: null,
+              autoDownloadStarted: false,
+            });
+            (lmWin.__E2E_LOCAL_MODEL_CALLS__ ||= []).push({ cmd, args: args ?? null });
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            const autoStarted = (args as { autoStarted?: boolean } | undefined)?.autoStarted;
+            if (cmd === "start_local_model_download" && !(autoStarted && current.autoDownloadStarted)) {
+              Object.assign(current, {
+                phase: "downloading",
+                failure: null,
+                autoDownloadStarted: current.autoDownloadStarted || Boolean(autoStarted),
+              });
+            } else if (cmd === "pause_local_model_download") {
+              current.phase = "paused";
+            } else if (cmd === "cancel_local_model_download") {
+              // 取得前のキャンセルでも、Rust は「自動で始めた」記録を書く（設計案 U10）。
+              Object.assign(current, { phase: "not_downloaded", autoDownloadStarted: true });
+            } else if (cmd === "discard_local_model") {
+              Object.assign(current, { phase: "not_downloaded", receivedBytes: 0 });
+            }
+            return { ...current };
           }
           case "get_user_settings": {
             /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -12139,4 +12444,221 @@ test("notification Escape closes it when focus is inside the notification", asyn
   await expect
     .poll(() => readCount(page, "__E2E_DISMISS_NOTIFICATION_CALL_COUNT__"))
     .toBeGreaterThanOrEqual(1);
+});
+
+// ローカルAIのモデルの初回ダウンロードの案内（設計案 §4。藤井さんの判断 U1・U5・U7、推奨 U3・U6）。
+const setLocalModel = (page: Page, status: Record<string, unknown>) =>
+  page.addInitScript((value) => {
+    // 案内は AI がローカルのときだけ出す（設計案 §4.2）。
+    (window as unknown as Record<string, unknown>).__E2E_USER_SETTINGS_OVERRIDE__ = {
+      aiProvider: "local",
+    };
+    (window as unknown as Record<string, unknown>).__E2E_LOCAL_MODEL__ = {
+      phase: "not_downloaded",
+      failure: null,
+      receivedBytes: 0,
+      totalBytes: 3_100_000_000,
+      neededMoreBytes: null,
+      autoDownloadStarted: false,
+      ...value,
+    };
+  }, status);
+
+const readLocalModelCalls = (page: Page) =>
+  page.evaluate(() =>
+    (
+      ((window as unknown as Record<string, unknown>).__E2E_LOCAL_MODEL_CALLS__ ?? []) as {
+        cmd: string;
+        args: unknown;
+      }[]
+    ).filter((call) => call.cmd !== "get_local_model_status")
+  );
+
+const emitLocalModel = (page: Page, status: Record<string, unknown>) =>
+  page.evaluate((value) => {
+    const w = window as unknown as {
+      __E2E_EMIT_EVENT__: (event: string, payload: unknown) => number;
+    };
+    w.__E2E_EMIT_EVENT__("local-model-download-progress", {
+      failure: null,
+      totalBytes: 3_100_000_000,
+      neededMoreBytes: null,
+      autoDownloadStarted: true,
+      ...value,
+    });
+  }, status);
+
+const openAiSettings = async (page: Page) => {
+  await page
+    .getByRole("navigation")
+    .first()
+    .getByRole("button", { name: "設定", exact: true })
+    .click();
+  await openSettingsMenu(page, "解説・AI設定");
+};
+
+test("local model: no source (bundled 2B) shows neither the setup panel, the banner nor the settings section", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await openHome(page);
+  await page.clock.runFor(11_000);
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  await expect(page.getByTestId("local-model-banner")).toHaveCount(0);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await openAiSettings(page);
+  await expect(page.getByTestId("local-model-panel")).toHaveCount(0);
+});
+
+test("local model: first run shows the notice, waits 10 seconds, then starts; pause, resume and cancel", async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await expect(panel.getByRole("heading", { name: "初期セッティング中" })).toBeVisible();
+  await expect(panel).toContainText("インターネットからAIのデータ（約 3.1GB）をダウンロードします");
+  await expect(panel).toContainText("秒後にダウンロードを始めます。");
+  await captureScreen(page, testInfo, "local-model-setup-countdown");
+  // ことわりを出してすぐには始めない。
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await page.clock.runFor(11_000);
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: true } }]);
+
+  await emitLocalModel(page, { phase: "downloading", receivedBytes: 1_200_000_000 });
+  await expect(panel).toContainText("1.2GB / 3.1GB（38%）");
+  await captureScreen(page, testInfo, "local-model-setup-downloading");
+  await panel.getByRole("button", { name: "一時停止" }).click();
+  await emitLocalModel(page, { phase: "paused", receivedBytes: 1_200_000_000 });
+  await expect(panel).toContainText("ダウンロードを一時停止しています");
+  await panel.getByRole("button", { name: "再開する" }).click();
+  await expect(panel.getByRole("button", { name: "キャンセル" })).toBeVisible();
+  await panel.getByRole("button", { name: "キャンセル" }).click();
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual([
+      "start_local_model_download",
+      "pause_local_model_download",
+      "start_local_model_download",
+      "cancel_local_model_download",
+    ]);
+  // 再開は利用者の操作なので、自動の印は付けない。
+  expect((await readLocalModelCalls(page))[2].args).toEqual({ autoStarted: false });
+});
+
+test("local model: cancel during the countdown does not start; start now starts at once", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await panel.getByRole("button", { name: "キャンセル" }).click();
+  await expect(panel).toContainText("今はダウンロードしません。設定画面から、いつでも始められます。");
+  await page.clock.runFor(15_000);
+  // 待ちの間のキャンセルは Rust に記録させ（次の起動から自動では始めない）、取得は始めない。
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual(["cancel_local_model_download"]);
+  await panel.getByRole("button", { name: "閉じる" }).click();
+  await expect(panel).toHaveCount(0);
+
+  await page.reload();
+  await panel.getByRole("button", { name: "すぐ始める" }).click();
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: true } }]);
+});
+
+test("local model: the countdown stops when the AI setting is saved as non-local", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setLocalModel(page, {});
+  await openHome(page);
+  const panel = page.getByTestId("local-model-setup");
+  await expect(panel).toBeVisible();
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent("yuuko:user-settings-saved", { detail: { aiProvider: "gemini" } })
+    )
+  );
+  await expect(panel).toHaveCount(0);
+  await page.clock.runFor(15_000);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+});
+
+test("local model: hidden window does not count down until the main window is shown", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installVisibilityControl(page, true);
+  await setLocalModel(page, {});
+  await page.goto("/");
+  await page.clock.runFor(30_000);
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await page.evaluate(() =>
+    (
+      window as unknown as { __E2E_SET_WINDOW_VISIBLE__: (visible: boolean) => void }
+    ).__E2E_SET_WINDOW_VISIBLE__(true)
+  );
+  await expect(page.getByTestId("local-model-setup")).toContainText(
+    "10 秒後にダウンロードを始めます。"
+  );
+});
+
+test("local model: after a cancel or failure, a thin banner is shown on every start and is dismissible", async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  await setLocalModel(page, { autoDownloadStarted: true });
+  await openHome(page);
+  const banner = page.getByTestId("local-model-banner");
+  await expect(banner).toContainText("AIの準備がまだです。");
+  await expect(page.getByTestId("local-model-setup")).toHaveCount(0);
+  await captureScreen(page, testInfo, "local-model-banner");
+  await page.clock.runFor(11_000);
+  // 自動では始めない（U7）。
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await banner.getByRole("button", { name: "始める" }).click();
+  await expect
+    .poll(() => readLocalModelCalls(page))
+    .toEqual([{ cmd: "start_local_model_download", args: { autoStarted: false } }]);
+  await emitLocalModel(page, { phase: "failed", failure: "network", receivedBytes: 0 });
+  await expect(banner).toContainText("インターネットにつながらないため、ダウンロードできませんでした。");
+  await expect(banner.getByRole("button", { name: "もう一度試す" })).toBeVisible();
+  await banner.getByRole("button", { name: "閉じる" }).click();
+  await expect(banner).toHaveCount(0);
+});
+
+test("local model: settings section shows the state, starts, and deletes after confirmation", async ({
+  page,
+}, testInfo) => {
+  await setLocalModel(page, {
+    phase: "ready",
+    receivedBytes: 3_100_000_000,
+    autoDownloadStarted: true,
+  });
+  await openHome(page);
+  await expect(page.getByTestId("local-model-banner")).toHaveCount(0);
+  await openAiSettings(page);
+  const section = page.getByTestId("local-model-panel");
+  await expect(section).toContainText("ダウンロード済み（約 3.1GB）");
+  await captureScreen(page, testInfo, "local-model-settings");
+  await section.getByRole("button", { name: "削除" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("削除すると、もう一度ダウンロードするまでローカルAIは使えません。");
+  await dialog.getByRole("button", { name: "キャンセル" }).click();
+  expect(await readLocalModelCalls(page)).toEqual([]);
+  await section.getByRole("button", { name: "削除" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "削除する" }).click();
+  await expect(section).toContainText("AIの準備がまだです。");
+  await section.getByRole("button", { name: "始める" }).click();
+  await expect
+    .poll(async () => (await readLocalModelCalls(page)).map((call) => call.cmd))
+    .toEqual(["discard_local_model", "start_local_model_download"]);
 });

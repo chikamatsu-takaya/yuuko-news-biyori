@@ -25,7 +25,6 @@ import {
   AlertTitle,
 } from "@/components/ui/alert";
 import {
-  Newspaper,
   ArrowLeft,
   Sparkles,
   Info,
@@ -37,6 +36,11 @@ import {
   type ArticleSummaryState,
 } from "@/lib/tauri/articles";
 import { SummaryStateTag } from "@/components/news/SummaryStateTag";
+import { ArticleThumbnail } from "@/components/news/ArticleThumbnail";
+import {
+  resolveArticleThumbnail,
+  type ArticleThumbnailStyle,
+} from "@/lib/article-thumbnail.mjs";
 import {
   ArticleTagList,
   normalizeArticleTags,
@@ -56,29 +60,11 @@ type TodayArticle = {
   genre: string;
   isNew: boolean;
   isFavorite: boolean;
-  thumbnailType: "ai" | "energy" | "mobile" | "business" | "space" | "lifestyle";
+  // ホーム・履歴と同じ共通ルール（lib/article-thumbnail.mjs）で決める。
+  thumbnail: ArticleThumbnailStyle;
   summaryState?: ArticleSummaryState;
   // 記事のタグ（表示のみ。絞り込みはニュース履歴画面で行う）。
   tags: string[];
-};
-
-const toThumbnailType = (genre: string): TodayArticle["thumbnailType"] => {
-  if (genre.includes("AI")) {
-    return "ai";
-  }
-  if (genre.includes("エネルギー") || genre.includes("環境")) {
-    return "energy";
-  }
-  if (genre.includes("モバイル") || genre.includes("スマホ")) {
-    return "mobile";
-  }
-  if (genre.includes("ビジネス")) {
-    return "business";
-  }
-  if (genre.includes("宇宙")) {
-    return "space";
-  }
-  return "lifestyle";
 };
 
 // MVPの取得上限。list_article_history は fetched_at 降順で返るため、当日分は先頭に集まる。
@@ -117,7 +103,13 @@ const mapToTodayArticle = (article: ArticleHistoryItemDto): TodayArticle => ({
   // 未読でも公開（無ければ取得）から24時間を過ぎた記事には NEW を付けない。
   isNew: isArticleNew(article),
   isFavorite: article.isFavorite,
-  thumbnailType: toThumbnailType(article.genre),
+  // 「未分類」に置き換える前の値で決め、ホーム（genre をそのまま渡す）と同じ結果にする。
+  thumbnail: resolveArticleThumbnail({
+    source: article.sourceName,
+    genre: article.genre,
+    title: article.title,
+    tags: article.tags,
+  }),
   summaryState: article.summaryState,
   tags: normalizeArticleTags(article.tags),
 });
@@ -134,29 +126,14 @@ const fallbackTodayArticles: TodayArticle[] = [
     genre: "AI・テクノロジー",
     isNew: true,
     isFavorite: false,
-    thumbnailType: "ai",
+    thumbnail: resolveArticleThumbnail({
+      source: "E2E News",
+      genre: "AI・テクノロジー",
+      title: "今日取得したAIニュースのサンプル",
+    }),
     tags: ["AI", "サンプル"],
   },
 ];
-
-function TodayThumbnail({ type }: { type: TodayArticle["thumbnailType"] }) {
-  const styles: Record<TodayArticle["thumbnailType"], string> = {
-    ai: "from-blue-600 to-cyan-400",
-    energy: "from-green-500 to-teal-400",
-    mobile: "from-purple-500 to-pink-400",
-    business: "from-emerald-500 to-green-400",
-    space: "from-slate-700 to-blue-900",
-    lifestyle: "from-amber-500 to-orange-400",
-  };
-  return (
-    <div
-      className={`w-16 h-16 rounded-lg bg-gradient-to-br ${styles[type]} flex items-center justify-center flex-shrink-0`}
-      aria-hidden="true"
-    >
-      <Newspaper className="w-7 h-7 text-white/90" />
-    </div>
-  );
-}
 
 // 当日ニュース1件分のカード。通常の記事選択（クリック）で記事詳細を開く。
 function TodayArticleCard({
@@ -178,7 +155,11 @@ function TodayArticleCard({
       onKeyDown={activateOnEnterOrSpace(onClick)}
     >
       <CardContent className="p-3 flex gap-3">
-        <TodayThumbnail type={article.thumbnailType} />
+        <ArticleThumbnail
+          thumbnail={article.thumbnail}
+          className="w-16 h-16"
+          iconClassName="w-7 h-7"
+        />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <h3 id={titleId} className="font-semibold text-sm text-foreground truncate">

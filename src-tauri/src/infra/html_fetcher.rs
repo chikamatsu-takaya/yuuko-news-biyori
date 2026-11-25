@@ -178,7 +178,23 @@ const END_OF_ARTICLE_MARKERS: &[&str] = &[
     "この記事を書いた人",
     "Related articles",
     "Related Articles",
+    "関連コンテンツ",
+    "オススメ記事",
 ];
+/// 終端の目印の前に付く箇条書きの記号（「・関連記事」「■関連リンク」）。目印の照合の前に外す。
+const END_MARKER_BULLETS: &[char] = &[
+    '・', '■', '□', '●', '○', '◆', '◇', '▼', '▽', '▶', '►', '≫', '»',
+];
+/// 「この連載の記事をもっと見る」のような、他記事の一覧へ誘うリンクの文言（リンクの文字に含まれるか）。
+/// 記事末尾の見出し付きの囲みに、本文の段落の外に置かれたこのリンクがあれば、その囲みを連載・関連記事の紹介とみなす
+/// （`trailing_more_articles_box`）。実記事（ITmedia の連載記事）で確かめた言い回しだけを入れる。
+/// 「記事一覧」「バックナンバー」などは、本文の最後の節の「記事一覧へ」ボタンにも付きうるため入れない
+/// （段落の外かどうかを祖先の要素名だけで見るので、その節が丸ごと消えるのを避ける）。
+const MORE_ARTICLES_LINK_LABELS: &[&str] = &["記事をもっと見る"];
+/// 上のリンクとみなすリンク文字の最大文字数（空白を除く）。ボタン・テキストリンクのラベルはこれに収まる。
+const MORE_ARTICLES_LINK_MAX_CHARS: usize = 30;
+/// 記事末尾の見出し付きの囲み（連載の紹介など）とみなす見出しの最大文字数。連載名・コーナー名はこれに収まる。
+const TRAILING_BOX_HEADING_MAX_CHARS: usize = 60;
 /// 本文の先頭・末尾に付く操作ボタンのラベル（ブロック全体がこの文言と一致するときだけ）。
 /// 「3D プリンターで印刷する技術」のような本文の文を落とさないため、部分一致にしない。
 const EDGE_ACTION_LABELS: &[&str] = &[
@@ -206,9 +222,34 @@ const TRAILING_SITE_NAV_LABELS: &[&str] = &[
     "ページの先頭へ",
     "このページの先頭へ",
     "トップへ戻る",
+    "RECOMMEND",
+    "Recommend",
 ];
 /// 末尾のサイト案内のうち「ITmedia NEWS SNS」のような SNS への案内とみなす行の最大文字数。
 const TRAILING_SNS_LABEL_MAX_CHARS: usize = 20;
+/// 記事末尾の定型のブロック（`is_trailing_meta_block`）とみなす最大文字数。著者紹介・支援の呼びかけはこれに収まる。
+const TRAILING_META_MAX_CHARS: usize = 300;
+/// 他言語版への案内の書き出し（GIGAZINE の英語版への案内で確かめた文言だけ）。
+const TRAILING_OTHER_LANGUAGE_PREFIXES: &[&str] =
+    &["You can read the machine translated English article"];
+/// 支援・購読の呼びかけで、読者へ依頼する言い回し（APPEAL_KEYWORDS と両方を含むときだけ。GIGAZINE で確かめた文言だけ）。
+/// APPEAL_CALL_MARKERS（本文の途中でも当てる）より弱い言い回しなので、記事末尾の並びの中で、引用を含まないときだけ当てる。
+const TRAILING_APPEAL_REQUESTS: &[&str] = &["いただけないでしょうか"];
+/// 支援の呼びかけの後に添える定型の一文（GIGAZINE で確かめた文言だけ）。
+const TRAILING_APPEAL_FOLLOWUPS: &[&str] = &["引き続き記事をお読みください"];
+const TRAILING_APPEAL_FOLLOWUP_MAX_CHARS: usize = 100;
+/// 著者紹介の末尾に付くリンクのラベル（Publickey で確かめた文言）。
+const AUTHOR_BIO_LINK_LABEL: &str = "詳しいプロフィール";
+/// 新着情報・SNS のフォローの案内に特有の言い回し（Publickey で確かめた文言だけ）。
+const TRAILING_FOLLOW_PHRASES: &[&str] = &["新着情報をチェックしませんか"];
+const TRAILING_FOLLOW_MAX_CHARS: usize = 150;
+/// 署名（「By サッカーキング編集部」「（Full-Count編集部）」）の名前の部分の最大文字数。
+const BYLINE_MAX_NAME_CHARS: usize = 40;
+/// 署名の後ろに置かれるサイトの紹介文の語尾（サッカーキングで確かめた形）と、その最大文字数。
+const SITE_TAGLINE_SUFFIXES: &[&str] = &["情報サイト"];
+const SITE_TAGLINE_MAX_CHARS: usize = 20;
+/// 日付の行の後ろに付く投稿者の案内（GIGAZINE で確かめた形）。
+const DATELINE_POSTED_BY: &str = "Posted by";
 /// 著作権表示の行（「Copyright © …」「(C) …」「… All Rights Reserved.」）とみなす最大文字数。
 /// 著作権表示に一言の注記（生成 AI の利用の断りなど）が続く行もこの長さに収まり、
 /// 著作権に触れる本文の段落はふつうこれより長い。末尾の並びの中にあるときだけ除く
@@ -222,7 +263,7 @@ const END_MARKER_BODY_PARAGRAPH_CHARS: usize = 60;
 const LENIENT_RATIO: usize = 4;
 const LENIENT_MAX_STRICT_CHARS: usize = 400;
 /// 1 つのコンテナから集める文字数の目安。抜粋の上限の 2 倍あれば、抜粋の組み立てにも比率の判定にも足りる。
-const EXTRACTION_COLLECT_LIMIT_CHARS: usize = MAX_EXCERPT_CHARS * 2;
+const EXTRACTION_COLLECT_LIMIT_FACTOR: usize = 2;
 /// 【…】で始まる誘導・告知の行（「【画像】…」「【あわせて読みたい】…」）。この文字数以下の
 /// ブロックが BRACKET_NOISE_LABELS のどれかの見出しで始まるときだけ除く（strict のみ）。
 /// 誘導行は見出し＋他記事のタイトル程度の長さに収まり、本文の段落はふつうこれより長い。
@@ -341,6 +382,26 @@ impl HtmlFetcher {
         let (_final_url, html) = self.fetch_html(article_url, &allowlist).await?;
         let (excerpt, excerpt_source) = extract_excerpt_with_source(&html);
 
+        Ok(HtmlFetchResult {
+            html_extracted: excerpt.is_some(),
+            excerpt,
+            excerpt_source,
+        })
+    }
+
+    /// 評価専用（テストのビルドだけ）: 取得・URL 検証は `fetch_and_extract` と同じで、抜粋の上限だけを
+    /// `limit` 文字にする（記事の最後までの本文を評価ハーネスのメモリ上で扱うため。保存はしない）。
+    #[cfg(test)]
+    pub async fn fetch_and_extract_with_limit(
+        &self,
+        article_url: &str,
+        limit: usize,
+    ) -> Result<HtmlFetchResult, AppError> {
+        let allowlist = NetworkAllowlist::load(&self.allowlist_path)?;
+        let article_url =
+            canonicalize_request_url(validate_url(article_url, UrlPurpose::Article, &allowlist)?)?;
+        let (_final_url, html) = self.fetch_html(article_url, &allowlist).await?;
+        let (excerpt, excerpt_source) = extract_excerpt_with_limit(&html, limit);
         Ok(HtmlFetchResult {
             html_extracted: excerpt.is_some(),
             excerpt,
@@ -568,7 +629,7 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 //    - 判定あり（strict）: 要素名による除外 ＋ class / id の語による除外 ＋ 終端の目印での打ち切り。
 //    - 判定なし（lenient）: 要素名による除外だけ（class / id の語と終端の目印は使わない）。
 //    どちらも空・画像だけのブロックは飛ばし、短いノイズ文言と重複を除く。
-//    集めた文字数が EXTRACTION_COLLECT_LIMIT_CHARS を超えたら走査をやめる（巨大ページの負荷対策）。
+//    集めた文字数が抜粋の上限の EXTRACTION_COLLECT_LIMIT_FACTOR 倍を超えたら走査をやめる（巨大ページの負荷対策）。
 //    strict ではさらに、テキストだけで分かる定型ブロックを除く（いずれも短いブロックに限る）:
 //    「【画像】」「【あわせて読みたい】」などの誘導行、本文の後ろの「【PR】」の囲み（後ろに本文が続けば囲みだけ）、
 //    リンクが大半のブロックの連続（関連記事・参考リンクの一覧）、寄付・会員登録・メルマガの呼びかけ、ページ送り、
@@ -590,6 +651,40 @@ fn canonicalize_request_url(mut url: Url) -> Result<Url, AppError> {
 // 追加の取得が要るため、この関数では扱わない。
 // ---------------------------------------------------------------------------
 
+/// 抜粋の上限（本番は常に MAX_EXCERPT_CHARS）。テストのビルドでだけ、評価ハーネス
+/// （段落ごとの1行まとめの評価・Firestore タスク t3JFzB）が記事の最後までの本文を得るために一時的に引き上げられる。
+fn excerpt_limit() -> usize {
+    excerpt_limit_override().unwrap_or(MAX_EXCERPT_CHARS)
+}
+
+#[cfg(not(test))]
+fn excerpt_limit_override() -> Option<usize> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXCERPT_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn excerpt_limit_override() -> Option<usize> {
+    EXCERPT_LIMIT_OVERRIDE.with(std::cell::Cell::get)
+}
+
+/// 評価専用（テストのビルドだけ）: 抜粋の上限を `limit` 文字にして本文を抽出する。
+/// 抽出の規則は本番と同じで、上限（と、それに比例する集める文字数の目安）だけを変える。
+#[cfg(test)]
+pub(crate) fn extract_excerpt_with_limit(
+    html: &str,
+    limit: usize,
+) -> (Option<String>, ExcerptSource) {
+    let previous = EXCERPT_LIMIT_OVERRIDE.with(|cell| cell.replace(Some(limit)));
+    let extracted = extract_excerpt_with_source(html);
+    EXCERPT_LIMIT_OVERRIDE.with(|cell| cell.set(previous));
+    extracted
+}
+
 fn extract_excerpt(html: &str) -> Option<String> {
     extract_excerpt_with_source(html).0
 }
@@ -600,13 +695,13 @@ fn extract_excerpt_with_source(html: &str) -> (Option<String>, ExcerptSource) {
     let document = Html::parse_document(html);
     if let Some(excerpt) = find_best_candidate_excerpt(&document) {
         return (
-            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            Some(truncate_text(&excerpt, excerpt_limit())),
             ExcerptSource::Body,
         );
     }
     match extract_meta_description(&document) {
         Some(excerpt) => (
-            Some(truncate_text(&excerpt, MAX_EXCERPT_CHARS)),
+            Some(truncate_text(&excerpt, excerpt_limit())),
             ExcerptSource::MetaDescription,
         ),
         None => (None, ExcerptSource::None),
@@ -855,10 +950,11 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
     // リンク密度は空白を除いた文字数で数える（lenient に入れたブロックだけ）。
     let mut lenient_dense_chars = 0usize;
     let mut lenient_link_chars = 0usize;
+    let collect_limit = excerpt_limit() * EXTRACTION_COLLECT_LIMIT_FACTOR;
 
     for block in container.select(&selectors.blocks) {
         // strict は lenient の部分集合なので、strict が上限に届けば lenient も届いている。
-        if strict_chars >= EXTRACTION_COLLECT_LIMIT_CHARS {
+        if strict_chars >= collect_limit {
             break;
         }
         let region = cache.region_of(&block, Some(container));
@@ -883,7 +979,7 @@ fn extract_excerpt_pair<'a, K: Hash + Eq>(
             });
         }
         // lenient は比率の判定に足りる分だけ持てばよい。
-        if lenient_chars < EXTRACTION_COLLECT_LIMIT_CHARS {
+        if lenient_chars < collect_limit {
             lenient_chars += text_chars;
             lenient_dense_chars += dense_chars;
             lenient_link_chars += link_chars;
@@ -921,23 +1017,51 @@ fn select_strict_blocks(
     candidates: &[StrictBlock],
     selectors: &BlockSelectors,
 ) -> Vec<String> {
-    let mut selected = Vec::new();
+    let mut selected: Vec<String> = Vec::new();
     let mut selected_chars = 0;
-    // 本文途中の【PR】の囲み。この要素の内側のブロックは飛ばす。
+    // 本文途中の【PR】の囲み・関連記事の囲み。この要素の内側のブロックは飛ばす。
     let mut skipped_pr_box: Option<ElementRef> = None;
+    // 直前に選んだブロック（入れ子の重複を段落に分け直すのに使う。`NestedSplit`）。
+    let mut open_outer: Option<NestedSplit> = None;
     for (index, block) in candidates.iter().enumerate() {
         let text = &block.text;
         if skipped_pr_box.is_some_and(|pr_box| is_inside(&block.element, &pr_box)) {
             continue;
         }
-        if is_end_of_article_marker(text) {
-            let body_continues = candidates[index + 1..]
-                .iter()
-                .any(|later| later.is_long_paragraph);
+        if is_end_of_article_marker(text)
+            || (block.is_link_dense && starts_with_end_of_article_marker(text))
+        {
+            // 目印を含む囲み（見出し＋他記事の一覧・紹介文）の外に本文の段落が続くかを先読みする。
+            // 囲みの中の長い紹介文や、リンクが大半の段落（他記事の見出し＋紹介文のリンク）は本文に数えない。
+            let section = if index == 0 {
+                block.element
+            } else {
+                related_section_box(container, candidates, index, selectors)
+            };
+            let body_continues = candidates[index + 1..].iter().any(|later| {
+                later.is_long_paragraph
+                    && !later.is_link_dense
+                    && !is_inside(&later.element, &section)
+            });
             if body_continues {
+                skipped_pr_box = Some(section);
                 continue;
             }
             break;
+        }
+        if selected_chars >= PR_SECTION_MIN_PRECEDING_CHARS && index > 0 {
+            if let Some(section) =
+                trailing_more_articles_box(container, candidates, index, selectors)
+            {
+                let body_continues = candidates[index + 1..].iter().any(|later| {
+                    later.is_long_paragraph
+                        && !later.is_link_dense
+                        && !is_inside(&later.element, &section)
+                });
+                if !body_continues {
+                    break;
+                }
+            }
         }
         if is_pr_section_header(text) {
             if selected_chars < PR_SECTION_MIN_PRECEDING_CHARS || index == 0 {
@@ -968,11 +1092,247 @@ fn select_strict_blocks(
         if block.is_link_dense && is_in_link_run(candidates, index) {
             continue;
         }
+        // 直前に選んだブロック（埋め込み投稿の blockquote・li など）の内側にあり、その残りの文に含まれるブロック（中の p）は、
+        // 外側と同じ文の重複。外側のブロックを内側の段落ごとに分け直す（`NestedSplit::split`）。
+        if let Some(split) = open_outer.as_mut() {
+            if split.outer.id() != block.element.id()
+                && is_inside(&block.element, &split.outer)
+                && split.split(&mut selected, text)
+            {
+                continue;
+            }
+        }
         selected_chars += text.chars().count();
         selected.push(text.clone());
+        open_outer = Some(NestedSplit {
+            outer: block.element,
+            remainder: text.clone(),
+            last_inner: None,
+        });
     }
     trim_edge_label_blocks(&mut selected);
+    trim_trailing_meta_blocks(&mut selected);
     selected
+}
+
+/// 入れ子の重複の分け直し（strict のみ）。埋め込み投稿の `blockquote` と中の `p` のように、外側と内側の両方がブロックとして
+/// 拾われると同じ文が 2 回入る。外側のブロックを内側の段落ごとに分け直し、内側の段落の区切りと順序を保つ。
+/// 外側にしかない文（前置き・投稿者の表示など）は、隣の内側の段落につなぐ（最初の内側より前の文はその頭へ、
+/// 内側の間と最後の内側より後ろの文は直前の内側の末尾へ）。別のブロックにしないのは、同じ投稿者の表示が
+/// 複数の投稿で同じ文になり、`join_body_blocks` の重複除去や短いノイズの除去で落ちるため。文は増えも減りもしない。
+struct NestedSplit<'a> {
+    /// 外側のブロックの要素。
+    outer: ElementRef<'a>,
+    /// 外側の文のうち、まだ内側の段落に分けていない残り。
+    remainder: String,
+    /// 最後に分けた内側の段落の selected の中の位置と、その段落の（残りをつなぐ前の）文。
+    /// None のときは、外側のブロックがそのまま selected の末尾にある。
+    last_inner: Option<(usize, String)>,
+}
+
+impl NestedSplit<'_> {
+    /// 内側のブロックの文 `inner` が残りに含まれれば分け直して true を返す。含まれなければ何もせず false。
+    /// selected の末尾は常にこの外側（または最後に分けた内側）のブロック（間に別のブロックが選ばれると、そのブロックが新しい外側になる）。
+    fn split(&mut self, selected: &mut Vec<String>, inner: &str) -> bool {
+        let Some(pos) = self.remainder.find(inner) else {
+            return false;
+        };
+        let before = self.remainder[..pos].trim().to_string();
+        let after = self.remainder[pos + inner.len()..].trim().to_string();
+        let base = match self.last_inner.take() {
+            None => {
+                // 最初の内側: 外側のブロックを「前の文＋内側」に置き換える。
+                let base = join_with_space(&before, inner);
+                let slot = selected.len() - 1;
+                selected[slot] = join_with_space(&base, &after);
+                self.last_inner = Some((slot, base));
+                self.remainder = after;
+                return true;
+            }
+            Some((slot, base)) => {
+                // 2 つ目以降の内側: 間の文を直前の内側の末尾につなぎ、内側を新しい段落として足す。
+                selected[slot] = join_with_space(&base, &before);
+                inner.to_string()
+            }
+        };
+        selected.push(join_with_space(&base, &after));
+        self.last_inner = Some((selected.len() - 1, base));
+        self.remainder = after;
+        true
+    }
+}
+
+/// 2 つの文を空白 1 つでつなぐ（片方が空ならもう片方だけ）。
+fn join_with_space(head: &str, tail: &str) -> String {
+    match (head.is_empty(), tail.is_empty()) {
+        (true, _) => tail.to_string(),
+        (_, true) => head.to_string(),
+        _ => format!("{head} {tail}"),
+    }
+}
+
+/// 選んだブロックの末尾から、本文でない定型のブロック（`is_trailing_meta_block`）が続く間を除く（strict のみ）。
+/// 末尾から見て最初の本文のブロックで止めるので、本文の途中にある同じ形のブロックは残す。
+/// サイトの紹介文（`is_site_tagline`）は、署名（`is_byline`）のすぐ後ろにあるときだけ署名と一緒に除く。
+/// 除いた後の末尾にサイト案内のラベルなどが現れたときのため、`trim_edge_label_blocks` の末尾の判定も続けて当てる。
+fn trim_trailing_meta_blocks(blocks: &mut Vec<String>) {
+    loop {
+        let Some(last) = blocks.last() else {
+            return;
+        };
+        if is_trailing_meta_block(last) || is_trailing_label_block(last) {
+            blocks.pop();
+            continue;
+        }
+        if is_site_tagline(last) && blocks.len() >= 2 && is_byline(&blocks[blocks.len() - 2]) {
+            blocks.truncate(blocks.len() - 2);
+            continue;
+        }
+        return;
+    }
+}
+
+/// 記事末尾に付く、本文でない定型のブロックか（末尾の並びの中だけで使う）。どれも短く、実記事で確かめた定型の語か形に限る。
+/// - 日付・投稿者の行（`is_dateline`）。
+/// - 他言語版への案内（TRAILING_OTHER_LANGUAGE_PREFIXES で始まる）。
+/// - 支援の呼びかけ（`is_trailing_support_appeal`）。
+/// - 著者紹介（「（詳しいプロフィール）」のリンクで終わる）。
+/// - 新着情報・SNS のフォローの案内（TRAILING_FOLLOW_PHRASES を含む）。
+/// - 署名（`is_byline`）。
+fn is_trailing_meta_block(text: &str) -> bool {
+    let text = text.trim();
+    let chars = text.chars().count();
+    if chars > TRAILING_META_MAX_CHARS {
+        return false;
+    }
+    is_dateline(text)
+        || TRAILING_OTHER_LANGUAGE_PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+        || is_trailing_support_appeal(text)
+        || is_author_bio(text)
+        || (chars <= TRAILING_FOLLOW_MAX_CHARS
+            && TRAILING_FOLLOW_PHRASES
+                .iter()
+                .any(|phrase| text.contains(phrase)))
+        || is_byline(text)
+}
+
+/// 本文の引用（「」『』）を含むか。引用を含むブロックは、呼びかけの語があっても記事の本文（発言の紹介）とみなして残す。
+fn has_quotation(text: &str) -> bool {
+    text.contains(['「', '」', '『', '』'])
+}
+
+/// 記事末尾の支援・購読の呼びかけか。引用を含まず、次のどちらかに当たるときだけ。
+/// - 呼びかけの話題の語（APPEAL_KEYWORDS）と、読者への依頼の言い回し（TRAILING_APPEAL_REQUESTS）の両方を含む。
+/// - 呼びかけの後に添える定型の一文（TRAILING_APPEAL_FOLLOWUPS）を含み、TRAILING_APPEAL_FOLLOWUP_MAX_CHARS 以下。
+fn is_trailing_support_appeal(text: &str) -> bool {
+    if has_quotation(text) {
+        return false;
+    }
+    (APPEAL_KEYWORDS.iter().any(|word| text.contains(word))
+        && TRAILING_APPEAL_REQUESTS
+            .iter()
+            .any(|request| text.contains(request)))
+        || (text.chars().count() <= TRAILING_APPEAL_FOLLOWUP_MAX_CHARS
+            && TRAILING_APPEAL_FOLLOWUPS
+                .iter()
+                .any(|phrase| text.contains(phrase)))
+}
+
+/// 著者紹介か。「（詳しいプロフィール）」のようなリンクのラベルで終わる（閉じ括弧・空白は除いて見る）。
+fn is_author_bio(text: &str) -> bool {
+    text.trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, '）' | ')' | '】' | ']'))
+        .ends_with(AUTHOR_BIO_LINK_LABEL)
+}
+
+/// 署名の行か。次のどちらか。どちらも句読点を含まない短い行に限り、「〜と同社の担当者は話した。」のような本文の文は当たらない。
+/// - 「By 」＋名前（「By サッカーキング編集部」）。名前に数字・句読点がなく、英文の文（`is_sentence_like_english`）でない。
+/// - 括弧で囲んだ名前だけの行（数字・コロンを含まない）で、「編集部」で終わるか「 / 」で名前の表記を並べたもの
+///   （「（Full-Count編集部）」「（山田太郎 / Taro Yamada）」）。「（出典：総務省 / 経済産業省）」は当たらない。
+fn is_byline(text: &str) -> bool {
+    let text = text.trim();
+    let has_sentence_marks =
+        |name: &str| name.contains(['。', '、', '，', '．', ',', '.', '!', '?', '！', '？']);
+    if let Some(name) = text.strip_prefix("By ") {
+        let name = name.trim();
+        return !name.is_empty()
+            && name.chars().count() <= BYLINE_MAX_NAME_CHARS
+            && !has_sentence_marks(name)
+            && !name.chars().any(|ch| ch.is_ascii_digit())
+            && !is_sentence_like_english(name);
+    }
+    let inner = ['（', '(']
+        .iter()
+        .find_map(|open| text.strip_prefix(*open))
+        .and_then(|rest| {
+            ['）', ')']
+                .iter()
+                .find_map(|close| rest.strip_suffix(*close))
+        });
+    let Some(name) = inner.map(str::trim) else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().count() <= BYLINE_MAX_NAME_CHARS
+        && !has_sentence_marks(name)
+        && !name.contains(['（', '(', '）', ')', '：', ':'])
+        && !name.chars().any(|ch| ch.is_ascii_digit())
+        && (name.ends_with("編集部") || name.contains(" / "))
+}
+
+/// 署名のすぐ後ろに置かれるサイトの紹介文か（「サッカー総合情報サイト」）。句読点のない短い行で、SITE_TAGLINE_SUFFIXES で終わる。
+fn is_site_tagline(text: &str) -> bool {
+    let text = text.trim();
+    text.chars().count() <= SITE_TAGLINE_MAX_CHARS
+        && !text.contains(['。', '、'])
+        && SITE_TAGLINE_SUFFIXES
+            .iter()
+            .any(|suffix| text.ends_with(suffix))
+}
+
+/// 日付の行か。GIGAZINE の記事末尾で確かめた「2026年11月10日 15時00分00秒 in メモ , Posted by …」の形だけを当てる:
+/// 年月日＋時分秒の日時で始まり、その後ろが「Posted by」を含む投稿者・分類の案内で、「。」「」を含まない行。
+/// 日付・日時だけの行（イベント告知の末尾の「2026年11月10日（火） 14:00」など）や、
+/// 「2026年11月10日、同社は発表した。」のような本文の文は当たらない。
+fn is_dateline(text: &str) -> bool {
+    let Some(rest) = strip_leading_datetime(text) else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.contains(DATELINE_POSTED_BY) && !rest.contains(['。', '「', '」'])
+}
+
+/// 先頭の「YYYY年M月D日 H時M分S秒」を外した残りを返す（日付と時刻の間は空白 1 つ以上）。この形で始まらなければ None。
+fn strip_leading_datetime(text: &str) -> Option<&str> {
+    let (year, rest) = take_digits(text.trim_start(), 4, 4)?;
+    if !(year.starts_with("19") || year.starts_with("20")) {
+        return None;
+    }
+    let rest = rest.strip_prefix('年')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('月')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('日')?;
+    let trimmed = rest.trim_start();
+    if trimmed.len() == rest.len() {
+        return None;
+    }
+    let (_, rest) = take_digits(trimmed, 1, 2)?;
+    let rest = rest.strip_prefix('時')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    let rest = rest.strip_prefix('分')?;
+    let (_, rest) = take_digits(rest, 1, 2)?;
+    rest.strip_prefix('秒')
+}
+
+/// 先頭の ASCII 数字を min〜max 桁取り、(数字, 残り) を返す。桁数が範囲外なら None。
+fn take_digits(text: &str, min: usize, max: usize) -> Option<(&str, &str)> {
+    let len = text
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (min..=max).contains(&len).then(|| text.split_at(len))
 }
 
 /// 選んだブロックの先頭・末尾にある短いラベルを除く（strict のみ。まとめの 2）。
@@ -1301,7 +1661,7 @@ fn join_body_blocks(texts: Vec<String>) -> Option<String> {
     if blocks.is_empty() {
         return None;
     }
-    Some(join_excerpt_blocks(&blocks, MAX_EXCERPT_CHARS))
+    Some(join_excerpt_blocks(&blocks, excerpt_limit()))
 }
 
 /// ブロック（または候補コンテナ）がどの領域にあるか。
@@ -1481,12 +1841,123 @@ fn split_identifier_tokens(identifier: &str) -> Vec<String> {
     tokens
 }
 
-/// 短いブロックが本文の終わりの目印（「関連記事」等）で始まるか。
+/// 短いブロックが本文の終わりの目印か。目印（「関連記事」等）で始まるか、箇条書きの記号を除くと目印だけ
+/// （「・関連記事」「■ 関連リンク：」）のとき。記号付きで後ろに文が続くもの（「・関連記事も参照。」）は本文の文として残す。
 fn is_end_of_article_marker(text: &str) -> bool {
-    text.chars().count() <= NOISE_PATTERN_MAX_BLOCK_CHARS
-        && END_OF_ARTICLE_MARKERS
+    if text.chars().count() > NOISE_PATTERN_MAX_BLOCK_CHARS {
+        return false;
+    }
+    if END_OF_ARTICLE_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+    {
+        return true;
+    }
+    let bare = strip_end_marker_bullets(text)
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '：'));
+    END_OF_ARTICLE_MARKERS.contains(&bare)
+}
+
+fn strip_end_marker_bullets(text: &str) -> &str {
+    text.trim_start_matches(|ch: char| END_MARKER_BULLETS.contains(&ch) || ch.is_whitespace())
+}
+
+/// ブロックが（箇条書きの記号を除いて）終端の目印で始まるか。長さは見ない。
+/// 長いブロックに当てるのは、リンクが大半のとき（「・関連記事」の見出しと他記事のリンクを 1 つの段落に並べた形）だけにする。
+fn starts_with_end_of_article_marker(text: &str) -> bool {
+    let text = strip_end_marker_bullets(text);
+    END_OF_ARTICLE_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+/// 終端の目印（index のブロック）を含む囲み。`pr_section_box` と同じ広げ方をしたうえで、囲みが本文の入れ物まで
+/// 広がった形を目印のブロックだけに戻す（変更前と同じ動き。本文を落とさない側）。次のどちらかなら戻す。
+/// - 囲みの中にリンクがない（他記事の一覧・紹介ならリンクがある）。
+/// - 囲みの中の、リンクでない長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上・リンクが大半でない p / blockquote）の数が、
+///   囲みの中のリンクの数を超える（他記事の紹介文はふつう 1 件に 1 つ以上のリンクが付く）。
+fn related_section_box<'a>(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock<'a>],
+    index: usize,
+    selectors: &BlockSelectors,
+) -> ElementRef<'a> {
+    let marker = candidates[index].element;
+    let section = pr_section_box(
+        container,
+        &marker,
+        &candidates[index - 1].element,
+        selectors,
+    );
+    if section.id() == marker.id() {
+        return section;
+    }
+    let links = section.select(&selectors.links).count();
+    let body_paragraphs = candidates[index + 1..]
+        .iter()
+        .filter(|later| {
+            later.is_long_paragraph && !later.is_link_dense && is_inside(&later.element, &section)
+        })
+        .count();
+    if links == 0 || body_paragraphs > links {
+        return marker;
+    }
+    section
+}
+
+/// index のブロックが、記事末尾の連載・関連記事の紹介の囲みの見出しなら、その囲みを返す。次のすべてに当たるときだけ。
+/// - h2 / h3 で、TRAILING_BOX_HEADING_MAX_CHARS 以下（連載名・コーナー名の見出し）。
+/// - 見出しを含む囲み（`pr_section_box` と同じ広げ方。直前の本文を含まず、本文の区画ほど大きくない）に、
+///   他記事の一覧へ誘うリンク（`is_more_articles_link`）が、本文のブロック（p / li / blockquote / 見出し）の外に置かれている。
+///
+/// 本文の最後の節（見出し＋段落）と形が同じなので、リンクの文言と置き場所の両方を条件にする。
+fn trailing_more_articles_box<'a>(
+    container: &ElementRef<'_>,
+    candidates: &[StrictBlock<'a>],
+    index: usize,
+    selectors: &BlockSelectors,
+) -> Option<ElementRef<'a>> {
+    let heading = &candidates[index];
+    if !matches!(heading.element.value().name(), "h2" | "h3")
+        || heading.text.chars().count() > TRAILING_BOX_HEADING_MAX_CHARS
+    {
+        return None;
+    }
+    let section = pr_section_box(
+        container,
+        &heading.element,
+        &candidates[index - 1].element,
+        selectors,
+    );
+    if section.id() == heading.element.id() {
+        return None;
+    }
+    section
+        .select(&selectors.links)
+        .any(|link| is_more_articles_link(&link, &section))
+        .then_some(section)
+}
+
+/// 他記事の一覧へ誘うリンク（「この連載の記事をもっと見る」など）が、本文のブロックの外にあるか。
+/// 本文の段落の中の「過去の記事一覧はこちら」のようなリンクは数えない。
+fn is_more_articles_link(link: &ElementRef<'_>, section: &ElementRef<'_>) -> bool {
+    let label: String = link
+        .text()
+        .flat_map(|text| text.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if label.chars().count() > MORE_ARTICLES_LINK_MAX_CHARS
+        || !MORE_ARTICLES_LINK_LABELS
             .iter()
-            .any(|marker| text.starts_with(marker))
+            .any(|word| label.contains(word))
+    {
+        return false;
+    }
+    !link
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .take_while(|node| node.id() != section.id())
+        .any(|node| matches!(node.value().name(), "p" | "li" | "blockquote" | "h2" | "h3"))
 }
 
 fn extract_meta_description(document: &Html) -> Option<String> {
@@ -1600,6 +2071,9 @@ enum NormalizedRequestHost {
 }
 
 #[cfg(test)]
+mod related_blurb_eval;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::infra::allowlist::NetworkAllowlist;
@@ -1703,6 +2177,27 @@ mod tests {
         assert!(excerpt.contains("二つ目の段落です。重要な背景情報をここに含めます。"));
         assert!(!excerpt.contains("alert"));
         assert!(!excerpt.contains("シェア"));
+    }
+
+    #[test]
+    fn eval_only_limit_extracts_the_whole_body_and_restores_the_default() {
+        // 評価専用の上限の引き上げ（テストのビルドだけ）: 記事の最後まで取れ、終われば本番の上限に戻る。
+        let paragraphs: Vec<String> = (0..40)
+            .map(|i| format!("<p>段落{i}の本文です。{}</p>", "あ".repeat(90)))
+            .collect();
+        let html = format!(
+            "<!doctype html><html><body><article>{}</article></body></html>",
+            paragraphs.concat()
+        );
+        let (full, source) = extract_excerpt_with_limit(&html, 30_000);
+        assert_eq!(source, ExcerptSource::Body);
+        let full = full.unwrap();
+        assert!(full.chars().count() > MAX_EXCERPT_CHARS);
+        assert!(full.contains("段落39の本文です。"));
+        assert_eq!(full.split("\n\n").count(), 40);
+        let default = extract_excerpt(&html).unwrap();
+        assert!(default.chars().count() <= MAX_EXCERPT_CHARS);
+        assert!(!default.contains("段落39の本文です。"));
     }
 
     #[test]
@@ -2323,7 +2818,8 @@ mod tests {
 <p><a href="https://example.org/ref">ESO - Ribbons and pearls</a></p>
 <p>RECOMMEND</p><p><a href="/r">オススメ記事</a></p><p><a href="/k">注目のタグ</a></p>"#
         ));
-        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}\n\nRECOMMEND"));
+        // 末尾に残る「RECOMMEND」の見出しも、末尾のサイト案内のラベルとして除く。
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}"));
     }
 
     #[test]
@@ -2697,5 +3193,437 @@ mod tests {
         for text in ["若者の間で広がるSNS", "ITmediaSNS", "人気のSNS"] {
             assert!(!is_sns_nav_label(text), "{text}");
         }
+    }
+
+    /// 他記事の紹介文（60 文字以上。長い段落とみなされる長さ）。
+    const BLURB_1: &str = "別の記事の紹介文その一です。新しい端末の発売日と価格が明らかになり、予約の受け付けも始まったことを紹介しています。";
+    const BLURB_2: &str = "別の記事の紹介文その二です。昨年の不具合をめぐる裁判で判決が出て、同社が控訴する方針を示したことを紹介しています。";
+
+    #[test]
+    fn drops_trailing_related_cards_with_long_blurbs() {
+        // 「関連記事」の見出しの後ろに、他記事の見出し＋長い紹介文のカードが並ぶ形。
+        // 以前は紹介文が長い段落として数えられ、目印だけを飛ばして紹介文が本文に残っていた。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{BODY_2}</p><p>{LONG_BODY}</p>
+<div class="box"><h2>関連記事</h2><ul>
+<li><h3><a href="/a/1">他の記事の見出しその一</a></h3><p>{BLURB_1}</p></li>
+<li><h3><a href="/a/2">他の記事の見出しその二</a></h3><p>{BLURB_2}</p></li>
+</ul></div>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{BODY_2}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_related_links_with_linked_blurbs_in_flat_body() {
+        // 囲みの要素がない平らな構造でも、目印の後ろがリンクだけの紹介文なら本文に数えず打ち切る。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p><h3>関連リンク</h3>
+<p><a href="/a/1">{BLURB_1}</a></p><p><a href="/a/2">{BLURB_2}</a></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_bulleted_related_paragraph_made_of_links() {
+        // 「・関連記事」の見出しと他記事のリンクを 1 つの段落に並べた形（見出し＋リンクで 30 文字を超える）。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<p><b>・関連記事</b><br><b><a href="/a/1">他の記事の見出しその一が入ります - 媒体名</a></b><br><br><b><a href="/a/2">他の記事の見出しその二が入ります - 媒体名</a></b></p>
+<p><b>・関連コンテンツ</b></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn skips_mid_article_related_box_with_blurbs_and_keeps_following_body() {
+        // 本文の途中の関連記事の囲み（紹介文つき）は囲みごと飛ばし、後ろの本文は残す。
+        let tail = "四つ目の段落です。関連の囲みの後にも本文が続き、この段落は六十文字を超える長さで今後の提供予定と価格について説明しています。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div class="box"><h3>関連記事</h3><ul><li><a href="/a/1">他の記事の見出し</a><p>{BLURB_1}</p></li></ul></div>
+<p>{BODY_2}</p><p>{tail}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}\n\n{tail}")
+        );
+    }
+
+    #[test]
+    fn keeps_body_paragraphs_after_related_heading_in_body_section() {
+        // 「関連記事」で始まる短い見出しの後ろに、本文の段落（リンクでない長い段落）が続くときは、見出しだけを飛ばす
+        // （囲みは本文の区画ほど大きくならないように広げるので、本文の段落を囲みに含めない）。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><div><h2>関連記事</h2>{}</div>",
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains(BODY_1));
+        for i in 0..3 {
+            assert!(excerpt.contains(&format!("本文の段落{i}です。")), "{i}");
+        }
+        assert!(!excerpt.contains("関連記事"));
+    }
+
+    #[test]
+    fn keeps_body_blocks_that_mention_related_words() {
+        // 「関連」で始まる・「関連記事」を含む本文の文は、リンクでなければ長さによらず残す。
+        let blocks = [
+            "関連会社の株価も大きく下落した。",
+            "関連する法改正は来年4月に施行される予定で、事業者は準備を急いでいる。",
+            "・関連記事でも触れたとおり、同社は昨年から段階的にこの機能を提供してきた。利用者は国内で100万人を超える。",
+            "この問題に関連して、総務省は事業者への聞き取りを始めた。",
+        ];
+        for block in blocks {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{block}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{block}"),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_trailing_series_box_with_more_articles_link() {
+        // ITmedia の連載記事の末尾の形（連載名の見出し＋連載の紹介文＋「この連載の記事をもっと見る」のボタン）。
+        let series_blurb = "本連載は、世界中の幅広い分野から最先端の研究を独自の視点で選んで解説する。執筆は研究メディアを主宰する筆者が担当している。";
+        let excerpt = extract_body(&format!(
+            r#"{}<div><h2>研究の最前線</h2><p class="c-label">{series_blurb}</p>
+<div><a href="/alert">連載新着通知を受け取る</a></div><ul class="series-list"></ul>
+<a href="/series/1/" class="c-button"><span>この連載の記事をもっと見る</span></a></div>
+<h2>この記事の著者</h2><h2>関連記事</h2><ul><li><h3><a href="/a/1">他の記事の見出し</a></h3></li></ul>"#,
+            long_paragraphs(3)
+        ));
+        assert!(!excerpt.contains(series_blurb));
+        assert!(!excerpt.contains("研究の最前線"));
+        for i in 0..3 {
+            assert!(excerpt.contains(&format!("本文の段落{i}です。")), "{i}");
+        }
+    }
+
+    #[test]
+    fn keeps_last_body_section_without_standalone_more_articles_link() {
+        // 本文の最後の節（見出し＋段落）は、他記事の一覧へのリンクが本文の段落の中にあるだけなら残す。
+        let last = "まとめの段落です。今回の変更で、利用者はこれまでより安く使えるようになる。過去の記事一覧はこちらから読める。";
+        let excerpt = extract_body(&format!(
+            r#"{}<section><h2>まとめ</h2><p>{}</p></section>"#,
+            long_paragraphs(3),
+            last.replace("過去の記事一覧", r#"<a href="/list">過去の記事一覧</a>"#)
+        ));
+        assert!(excerpt.contains("まとめ"));
+        // リンクの前後には抽出で空白が入るので、段落の頭と終わりで確かめる。
+        assert!(excerpt.contains("まとめの段落です。"));
+        assert!(excerpt.ends_with("はこちらから読める。"));
+        // 見出し＋段落だけの最後の節も残す。
+        let excerpt = extract_body(&format!(
+            "{}<section><h2>今後の予定</h2><p>{LONG_BODY}</p></section>",
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains("今後の予定"));
+        assert!(excerpt.ends_with(LONG_BODY));
+    }
+
+    #[test]
+    fn keeps_series_box_when_body_continues_after_it() {
+        // 連載の紹介の囲みの後ろに本文が続くなら（記事の冒頭・途中の囲み）、この規則では何も除かない。
+        let series_blurb = "本連載は、世界中の幅広い分野から最先端の研究を独自の視点で選んで解説する。執筆は研究メディアを主宰する筆者が担当している。";
+        let excerpt = extract_body(&format!(
+            r#"{}<div><h2>研究の最前線</h2><p>{series_blurb}</p><a href="/series/1/">この連載の記事をもっと見る</a></div><p>{LONG_BODY}</p>"#,
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains(series_blurb));
+        assert!(excerpt.ends_with(LONG_BODY));
+    }
+
+    #[test]
+    fn end_marker_accepts_leading_bullets() {
+        for text in [
+            "・関連記事",
+            "■関連リンク",
+            "▼ 関連ニュース",
+            "・関連コンテンツ",
+            "オススメ記事",
+        ] {
+            assert!(is_end_of_article_marker(text), "{text}");
+        }
+        for text in [
+            "関連会社の株価も下落",
+            "・関連する法案",
+            "おすすめの使い方",
+            "・関連記事も参照。",
+        ] {
+            assert!(!is_end_of_article_marker(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn keeps_last_body_section_with_article_list_button() {
+        // 本文の最後の節（見出し＋段落 2 つ）の後ろに「記事一覧へ」のボタンがあっても、節を残す。
+        let excerpt = extract_body(&format!(
+            r#"{}<section><h2>今後の予定</h2><p>{LONG_BODY}</p><p>{BLURB_1}</p>
+<div class="btn"><a href="/list">記事一覧へ</a></div></section>"#,
+            long_paragraphs(3)
+        ));
+        assert!(excerpt.contains("今後の予定"));
+        assert!(excerpt.contains(LONG_BODY));
+        assert!(excerpt.ends_with(BLURB_1));
+    }
+
+    #[test]
+    fn keeps_body_wrapped_together_with_related_marker_box() {
+        // 目印の囲みを祖先へ広げると本文の入れ物まで包む形。リンクより本文の段落が多いので、
+        // 囲みを目印だけに戻し、包まれた本文の 2 段落を残す。
+        let body_a = "四つ目の段落です。同社は新しい料金体系を来月から導入し、既存の利用者には三か月の移行期間を設けると記者会見で説明しています。";
+        let body_b = "五つ目の段落です。業界団体は今回の値下げについて、ほかの事業者にも同様の動きが広がる可能性があるとの見方を示しています。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div><div><h3>関連記事</h3><ul><li><a href="/a/1">他の記事の見出し</a></li></ul></div>
+<div class="txt"><p>{body_a}</p><p>{body_b}</p></div></div>"#
+        ));
+        // どちらも長い段落（END_MARKER_BODY_PARAGRAPH_CHARS 以上）として数えられる長さにしておく。
+        assert!(body_a.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(body_b.chars().count() >= END_MARKER_BODY_PARAGRAPH_CHARS);
+        assert!(excerpt.contains(body_a));
+        assert!(excerpt.contains(body_b));
+        assert!(!excerpt.contains("関連記事"));
+    }
+
+    #[test]
+    fn keeps_body_after_short_sentence_starting_with_bulleted_related_word() {
+        // 「・関連記事も参照。」のような短い本文の文は終端の目印にしない（後ろの本文を打ち切らない）。
+        // この文自体は、変更前からある短いノイズ文言の除去（「関連記事」を含む 30 文字以下のブロック）で除かれる。
+        let note = "・関連記事も参照。";
+        assert!(!is_end_of_article_marker(note));
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{note}</p><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}\n\n{BODY_2}"));
+    }
+
+    #[test]
+    fn drops_trailing_dateline_language_guide_and_support_appeal() {
+        // GIGAZINE の記事末尾の形（日付・分類・投稿者の行、英語版への案内、サーバー代の支援の呼びかけと添え書き）。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><p>{LONG_BODY}</p>\
+<p>2026年11月10日 15時00分00秒 in メモ , Posted by example_writer</p>\
+<p>You can read the machine translated English article A new service was launched… .</p>\
+<p>お邪魔して申し訳ないです。読者のための記事を掲載し続けるため、どうかサーバー代として300円をご寄付いただけないでしょうか。</p>\
+<p>喜んでメールでリマインドさせていただきます。 引き続き記事をお読みください。</p>"
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_trailing_author_bio_and_follow_guide() {
+        // Publickey の記事末尾の形（著者紹介＋「詳しいプロフィール」のリンク、新着情報のフォローの案内）。
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{LONG_BODY}</p>
+<div class="author"><p>山田太郎（yamada） 雑誌の編集者を経て独立。2010年にこのサイトを開始しました。 （ <a href="/profile">詳しいプロフィール</a> ）</p></div>
+<p>このサイトの新着情報をチェックしませんか？ Twitterで ： <a href="/x">@example</a> RSSリーダーで ： <a href="/feed">Feed</a></p>"#
+        ));
+        assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"));
+    }
+
+    #[test]
+    fn drops_trailing_bylines() {
+        // 「By 〜編集部」＋サイトの紹介文（サッカーキング）、括弧の署名（Full-Count）。
+        let cases = [
+            "<p>By 架空スポーツ編集部</p><p>スポーツ総合情報サイト</p>",
+            "<p>（架空スポーツ編集部）</p>",
+            "<p>（山田太郎 / Taro Yamada）</p>",
+        ];
+        for tail in cases {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p>{tail}"));
+            assert_eq!(excerpt, format!("{BODY_1}\n\n{LONG_BODY}"), "{tail}");
+        }
+    }
+
+    #[test]
+    fn keeps_trailing_body_sentences_that_resemble_meta_blocks() {
+        // 末尾にあっても、本文の文（日付で始まる文・発言の紹介・引用・投稿の紹介）は残す。
+        let lasts = [
+            "サービスは来月から始まる予定だと同社の担当者は話した。",
+            "2026年11月10日、同社は新しい料金体系を発表した。",
+            "2026.11.10に開かれた会見で、社長は値下げの理由を説明した。",
+            "同団体は「活動を続けるため、ご寄付をいただけないでしょうか」と呼びかけた。",
+            "選手は「引き続き記事をお読みください」と冗談めかしてXに投稿した。",
+            "監督は試合後、「チームはまだ成長できる」とX（旧Twitter）に投稿した。",
+            "By 2027, the company plans to expand the service to all regions.",
+            "（写真は本人提供）",
+            "（編集部注：価格は税込み）",
+            "国内最大級の情報サイト",
+            "新着情報は公式サイトで確認できる。",
+        ];
+        for last in lasts {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_meta_like_blocks_in_the_middle_of_body() {
+        // 末尾の並びにない日付の行・署名は残す（本文の途中の小見出し・クレジットなど）。
+        for middle in [
+            "2026年11月10日",
+            "（架空スポーツ編集部）",
+            "By 架空スポーツ編集部",
+        ] {
+            let excerpt =
+                extract_body(&format!("<p>{BODY_1}</p><p>{middle}</p><p>{LONG_BODY}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{middle}\n\n{LONG_BODY}"),
+                "{middle}"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_nested_duplicate_of_embedded_post_only() {
+        // 埋め込み投稿（blockquote の中の p）は、外側と内側の両方がブロックとして拾われて同じ文が 2 回入っていた。
+        // 内側の p を 1 つの段落として残し、外側にしかない投稿者の表示はその末尾につなぐ。
+        let post = "新しい料金体系を来月から導入します。詳しくは公式サイトをご覧ください。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{post} — 架空の会社 (@example) November 10, 2026\n\n{LONG_BODY}")
+        );
+        // 本文の段落が投稿の文を引用しているだけ（入れ子でない）なら、同じ文が含まれていても残す。
+        let quoting = format!("同社は「{post}」とXに投稿した。");
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><p>{quoting}</p><blockquote class="twitter-tweet"><p>{post}</p>— 架空の会社 (@example) November 10, 2026</blockquote>"#
+        ));
+        assert!(excerpt.contains(&quoting));
+        assert!(excerpt.ends_with("November 10, 2026"));
+        assert_eq!(excerpt.matches(post).count(), 2);
+    }
+
+    #[test]
+    fn keeps_single_copy_of_nested_list_paragraph() {
+        // 外側の li に p が入る形では外側の文が内側を含むため、内側の重複だけを除き、文は 1 回だけ残る。
+        let excerpt = extract_body(&format!(
+            "<p>{BODY_1}</p><ul><li><p>{LONG_BODY}</p></li></ul><p>{BODY_2}</p>"
+        ));
+        assert_eq!(excerpt.matches(LONG_BODY).count(), 1);
+        assert!(excerpt.contains(BODY_1));
+        assert!(excerpt.ends_with(BODY_2));
+    }
+
+    #[test]
+    fn dateline_and_byline_shapes() {
+        // 当たるのは、実記事（GIGAZINE）で確かめた「年月日 時分秒 … Posted by …」の形だけ。
+        for text in [
+            "2026年11月10日 15時00分00秒 in AI , ハードウェア , Posted by writer_a",
+            "2026年1月5日 9時05分00秒 in メモ , Posted by writer_b",
+        ] {
+            assert!(is_dateline(text), "{text}");
+        }
+        for text in [
+            "2026年11月10日",
+            "2026.11.10",
+            "2026/11/10 12:30",
+            "2026-11-10 12:30:05",
+            "2026年11月10日（火） 14:00",
+            "2026年11月10日（予定）",
+            "2026年11月10日 15時00分00秒",
+            "2026年11月10日、同社は発表した。",
+            "2026.11.10に開かれた会見",
+            "20261110",
+            "2026年11月10日 15時00分 in 東京、Posted by の表示を廃止した。",
+            "1億2000万円の赤字",
+        ] {
+            assert!(!is_dateline(text), "{text}");
+        }
+        for text in [
+            "By 架空スポーツ編集部",
+            "（架空編集部）",
+            "(山田太郎 / Taro Yamada)",
+        ] {
+            assert!(is_byline(text), "{text}");
+        }
+        for text in [
+            "By 2027",
+            "By the end of the year",
+            "（写真は本人提供）",
+            "（編集部注：価格は税込み）",
+            "（編集部注：価格は税込み / 送料別）",
+            "（出典：総務省 / 経済産業省）",
+            "（2026年 / 架空編集部）",
+            "（了）",
+            "By 編集部、取材は東京で",
+        ] {
+            assert!(!is_byline(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn keeps_trailing_date_only_lines() {
+        // イベント告知の末尾の日時・日付だけの行は、末尾にあっても残す（日付の行として当てない）。
+        for last in [
+            "2026年11月10日（火） 14:00",
+            "2026年11月10日（予定）",
+            "2026.11.10",
+        ] {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_trailing_parenthesized_notes_with_slash() {
+        for last in [
+            "（編集部注：価格は税込み / 送料別）",
+            "（出典：総務省 / 経済産業省）",
+        ] {
+            let excerpt = extract_body(&format!("<p>{BODY_1}</p><p>{LONG_BODY}</p><p>{last}</p>"));
+            assert_eq!(
+                excerpt,
+                format!("{BODY_1}\n\n{LONG_BODY}\n\n{last}"),
+                "{last}"
+            );
+        }
+    }
+
+    #[test]
+    fn splits_quote_box_into_inner_paragraphs_in_order() {
+        // 引用の囲み（前置き＋英文の投稿＋訳の 2 段落＋投稿者の表示）。変更前は外側の 1 ブロック＋内側の 2 段落の重複だった。
+        // 内側の 2 段落をそのままの順で 2 つの段落として残し、外側にしかない文（前置き・間の文・投稿者の表示）は隣の段落につなぐ。
+        let english = "We are launching a new pricing plan next month for all existing customers.";
+        let japanese =
+            "来月から既存のすべての利用者を対象に新しい料金体系を導入すると投稿しました。";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote>投稿の引用 <p>{english}</p>（訳） <p>{japanese}</p>— Example Corp (@example) November 10, 2026</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!(
+                "{BODY_1}\n\n投稿の引用 {english} （訳）\n\n{japanese} — Example Corp (@example) November 10, 2026\n\n{LONG_BODY}"
+            )
+        );
+    }
+
+    #[test]
+    fn keeps_each_post_attribution_when_posts_share_the_same_author() {
+        // 同じ投稿者の埋め込み投稿が 2 つ並ぶと、投稿者の表示が同じ文になる。重複除去で片方の表示が落ちないこと。
+        let post_a = "一つ目の投稿です。新しい料金体系を来月から導入します。";
+        let post_b = "二つ目の投稿です。既存の利用者には移行期間を設けます。";
+        let credit = "— 架空の会社 (@example) November 10, 2026";
+        let excerpt = extract_body(&format!(
+            r#"<p>{BODY_1}</p><blockquote><p>{post_a}</p>{credit}</blockquote><blockquote><p>{post_b}</p>{credit}</blockquote><p>{LONG_BODY}</p>"#
+        ));
+        assert_eq!(
+            excerpt,
+            format!("{BODY_1}\n\n{post_a} {credit}\n\n{post_b} {credit}\n\n{LONG_BODY}")
+        );
     }
 }

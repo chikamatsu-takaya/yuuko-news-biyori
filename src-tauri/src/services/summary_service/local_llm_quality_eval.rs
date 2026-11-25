@@ -20,6 +20,9 @@
 //! - `YUUKO_LLM_EVAL_PER_SOURCE`: 取得元1件あたりの記事数（既定 4。追加取得元の `maxArticles` が優先）。
 //! - `YUUKO_LLM_EVAL_MAX_ARTICLES`: 全体の上限（既定 30）。
 //! - `YUUKO_LLM_EVAL_TERMS`: 用語の指定ファイル（既定 `<RUN>/terms.json`）。
+//! - `YUUKO_METHOD_EVAL_VARIANT`: 要約・再説明の作り方の案（`rules` / `extract` / `short` / `rules_speech`。
+//!   省略・`base` は本番のまま。`ai_provider_service::method_variants`）。要約・要約の作り直し・再説明の指示
+//!   だけを案の文にする（`rules_speech` は再説明だけ）。開始時に1回だけ読み、未知の値ならそこで止める。
 //! - `YUUKO_LLM_EVAL_FORCE_TERM_PROMPT`: 指定すると、フレーズも用語解説のプロンプトで作らせる
 //!   （フレーズ対応 D21 の前の挙動との比較用。後処理前の出力は記録の `raw` にある）。
 //!
@@ -48,8 +51,9 @@
 //! $env:YUUKO_LLM_EVAL_CONFIG_DIR = "$env:APPDATA\jp.star-system.yuuko-news\config"
 //! cargo test --manifest-path src-tauri/Cargo.toml local_llm_quality_eval -- --ignored --nocapture
 //! ```
-//! 同梱物（モデル・llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
-//! `YUUKO_LOCAL_LLM_DIR` で場所を指す。
+//! 実行の部品（llama-server）は `scripts/local-llm/place-bundle.mjs` で `resources/local_llm` に置くか、
+//! `YUUKO_LOCAL_LLM_DIR` で場所を指す。初回に取得するモデル（`ACTIVE_MODEL` に取得元がある）は同梱物に無いため、
+//! `YUUKO_LOCAL_LLM_MODEL` で取得したファイルのパスを指す（開発環境構築手順書 §17）。
 //! 同梱と別のモデルで回すとき（D168 のモデル比較）は `YUUKO_LLM_EVAL_MODEL` などを指定する（`eval_model_override`）。
 
 use std::cell::RefCell;
@@ -64,6 +68,7 @@ use serde_json::{json, Value};
 
 use super::eval_model_override::{eval_local_llm, ModelProfile};
 use super::output_check::{check_japanese_summary, IssueKind};
+use super::paragraph_points_eval::longest_common_run;
 use super::{
     clean_ai_speech, select_valid_output_in_tone, validate_article_points, validate_summary_output,
     FallbackPolicy, SummaryGeneration, SummaryOutputKind, SummaryService,
@@ -84,6 +89,7 @@ use crate::paths::{AppPaths, NETWORK_ALLOWLIST_RELATIVE_PATH, NEWS_SOURCES_RELAT
 use crate::repositories::article_repository::ArticleRepository;
 use crate::repositories::dictionary_repository::DictionaryRepository;
 use crate::repositories::settings_repository::SettingsRepository;
+use crate::services::ai_provider_service::method_variants::MethodVariant;
 use crate::services::ai_provider_service::summary_fixed_prompt_texts;
 use crate::services::ai_provider_service::AiProviderService;
 use crate::services::dictionary_service::{DictionaryService, TermExplanationAi};
@@ -138,6 +144,8 @@ fn local_llm_quality_eval() {
 
     let phase = std::env::var(PHASE_ENV).unwrap_or_default();
     let run_all = phase.is_empty();
+    // 作り方の案は開始時に1回だけ読んで確かめる（未知の値は llama-server を起動する前に止める）。
+    let variant = MethodVariant::from_env();
     if let Some(articles_file) = std::env::var_os(ARTICLES_ENV).map(PathBuf::from) {
         // 保存済みの記事を使う回は通信しない（fetch 段を指定していても取得し直さない）。
         import_articles(&articles_file, &run_dir, &paths);
@@ -158,7 +166,7 @@ fn local_llm_quality_eval() {
         check.status
     );
     if run_all || phase == "summary" {
-        run_summaries(&run_dir, &paths, &ai);
+        run_summaries(&run_dir, &paths, &ai, variant);
     }
     if run_all || phase == "terms" {
         run_terms(&run_dir, &paths, &ai);
@@ -525,7 +533,12 @@ pub(super) fn error_label(error: &AppError) -> String {
 
 /// 要約生成の本体（generate_article_summary_with）を、本番と同じ取得手段（request_text → 検証）で呼ぶ。
 /// 差し替えるのは「段ごとの生出力・検証結果・所要時間を記録する」ことだけで、入力・順序・検証・保存は本番のまま。
-fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
+fn run_summaries(
+    out_dir: &Path,
+    paths: &AppPaths,
+    ai: &AiProviderService,
+    variant: Option<MethodVariant>,
+) {
     let service = SummaryService::new(
         ai.clone(),
         ArticleRepository::new(paths),
@@ -553,7 +566,9 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
                 if kind == SummaryOutputKind::Points && source.borrow().is_none() {
                     source.replace(Some(request.input_text.clone()));
                 }
-                record_stage(&service, &stages, &source, request, kind, provider, level)
+                record_stage(
+                    &service, &stages, &source, variant, request, kind, provider, level,
+                )
             },
         );
         let total_ms = started.elapsed().as_millis();
@@ -585,10 +600,12 @@ fn run_summaries(out_dir: &Path, paths: &AppPaths, ai: &AiProviderService) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_stage(
     service: &SummaryService,
     stages: &RefCell<Vec<Value>>,
     source: &RefCell<Option<String>>,
+    variant: Option<MethodVariant>,
     request: AiRequest,
     kind: SummaryOutputKind,
     provider: AiProvider,
@@ -608,9 +625,10 @@ fn record_stage(
     )
     .then(|| request.input_text.clone());
     let started = Instant::now();
+    // 作り方の案の評価（`method_variants`。案は開始時に1回だけ読んだもの）。案が無ければ本番の request_text と同じ。
     let raw = service
         .ai_provider_service
-        .request_text(request, provider, level);
+        .request_text_with_variant(request, provider, level, variant);
     let elapsed_ms = started.elapsed().as_millis();
     let mut stage = json!({
         "kind": kind.label(),
@@ -619,6 +637,7 @@ fn record_stage(
         "inputChars": input_chars,
         "speechInput": speech_input,
         "calmTone": tone == SpeechTone::Calm,
+        "variant": variant.map(MethodVariant::label),
     });
     let raw = match raw {
         Ok(raw) => raw,
@@ -653,6 +672,21 @@ fn record_stage(
     let selected = select_valid_output_in_tone(kind, tone, &input_text, raw);
     if let Ok(response) = &selected {
         stage["accepted"] = json!(response.text);
+        if matches!(
+            kind,
+            SummaryOutputKind::Summary | SummaryOutputKind::Explanation
+        ) {
+            // 本文の写しの度合い（記事とのいちばん長い共通の文字列）と、案の指示の写し（案のときだけ）。
+            stage["sourceCopyRun"] = json!(longest_common_run(&source_text, &response.text));
+            if let Some(variant) = variant {
+                stage["variantEchoRun"] = json!(variant
+                    .fixed_texts()
+                    .iter()
+                    .map(|text| longest_common_run(text, &response.text))
+                    .max()
+                    .unwrap_or(0));
+            }
+        }
         // 機械点検（D166）の結果。要約は作り直しの判断と同じ点検、要点・注目ポイントは記録だけ（作り直さない）。
         let checked = match kind {
             SummaryOutputKind::Summary => Some(response.text.clone()),

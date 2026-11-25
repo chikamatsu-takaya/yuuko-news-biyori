@@ -78,6 +78,7 @@ import { useToast } from "@/hooks/use-toast";
 import { TimeInput } from "@/components/settings/TimeInput";
 import { DataMigrationPanel } from "@/components/settings/DataMigrationPanel";
 import { ArchiveManagePanel } from "@/components/settings/ArchiveManagePanel";
+import { LocalModelPanel } from "@/components/settings/LocalModelPanel";
 import { ImmediateApplyNote } from "@/components/settings/ImmediateApplyNote";
 import {
   DEFAULT_NOTIFICATION_MODE,
@@ -457,6 +458,8 @@ const localAiConnectionMessage = (
   switch (result.errorKind) {
     case "local_ai_missing":
       return "ローカルAIの部品が見つかりません";
+    case "local_ai_not_ready":
+      return "ローカルAIの準備がまだ終わっていません（AIのデータのダウンロードが必要です）";
     case "local_ai_broken":
       return "ローカルAIの部品が壊れています";
     case "local_ai_start_failed":
@@ -1562,6 +1565,8 @@ export default function SettingsScreen({
                       )}
                     </div>
                   </div>
+                  {/* ローカルAIのモデルの初回ダウンロード（設計案 §4.3）。取得元が無い配布物では出ない。 */}
+                  <LocalModelPanel />
                   <SettingRow label="解説の詳しさ">
                     <Select
                       value={settings.ai.explanationDetail}
@@ -1577,7 +1582,7 @@ export default function SettingsScreen({
                       </SelectContent>
                     </Select>
                   </SettingRow>
-                  {/* 取得後の自動要約。新規インストールの初期値は有効（AIはローカル。判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
+                  {/* 取得後の自動要約。新規インストールの初期値は無効（2026-11-18 藤井。AIはローカル＝判断台帳 D103）。保存ボタンで他のAI設定と一緒に保存する。 */}
                   {/* 実際に動くかは Rust 側が判定する（実AI＝Gemini・ローカルのときだけ）。ここでは案内だけ出す。 */}
                   <div className="py-3 border-b border-border/50">
                     <div className="flex items-center justify-between">

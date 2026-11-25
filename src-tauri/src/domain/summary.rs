@@ -47,14 +47,21 @@ pub enum AutoSummaryStatusKind {
     PausedGameOrPresentation,
     /// マイク使用中（会議中を含む）のため、ローカルLLMの自動要約を休んでいる。
     PausedMicInUse,
+    /// 利用者がPCを操作中で物理メモリに余裕がないため、ローカルLLMの自動要約を待たせている。
+    PausedLowMemoryWhileActive,
     /// 手動の要求を優先している・ローカルLLMの起動を控えている間のため待っている。
     WaitingForLocalAi,
     /// 設定で自動要約が無効。
     DisabledInSettings,
     /// AI の設定が実AI（Gemini・ローカル）ではない（Mock など）。
     NotRealAi,
-    /// ローカルAIの同梱物が無い・壊れているなど、ローカルAIの準備ができていない。
+    /// ローカルAIの同梱物（実行の部品・モデル）が無い・壊れている（照合で合わないと分かった）など、
+    /// ローカルAIを使えない。モデルをまだ取得していないときは `LocalModelNotDownloaded` を使う。
+    /// （画面の型 `lib/tauri` と合わせた名前のため変えない。接続テストの `LocalAiFailure::NotReady` とは別の意味。）
     LocalAiNotReady,
+    /// ローカルAIのモデルをまだ取得していない（初回ダウンロードの前・途中・失敗。`LocalAiFailure::NotReady` と同じ条件）。
+    /// 取得が終われば、待機列を並べ直して自動要約が動き出す。
+    LocalModelNotDownloaded,
     /// Gemini の APIキーが設定されていない（キーの値は扱わない）。
     GeminiNotReady,
     /// 設定が一時的に読めず判定できない。

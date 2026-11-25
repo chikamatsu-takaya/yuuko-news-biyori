@@ -1,6 +1,8 @@
 # ローカルLLM同梱配布手順
 
-同梱ローカルLLM（llama.cpp の `llama-server` ＋ Qwen3.5-2B Q4_K_M。判断台帳 D99〜D102）を入れた配布用インストーラーを作る手順と、ライセンス本文の置き場所、実機での速度・メモリの実測結果をまとめる。
+同梱ローカルLLM（llama.cpp の `llama-server`。判断台帳 D99〜D102）を入れた配布用インストーラーを作る手順と、ライセンス本文の置き場所、実機での速度・メモリの実測結果をまとめる。
+
+- **2026-11-16 の変更**: モデルを Qwen3.5-2B から Gemma 4 E2B Q4_K_M（約3.1GB）に替え、**モデルはインストーラーに入れず、初回起動時に Hugging Face から取得する**ようにした（`docs/02_design/ローカルLLMモデル初回ダウンロード_設計案.md`）。インストーラーに入るのは `runtime/` と `LICENSES/` だけ。以下の大きさ・実測値のうち 2B に基づくものは当時の記録で、インストーラーを作っての確かめ直しは初回ダウンロードの 5/5 で行った（2026-11-18。§3.3.1）。
 
 - 開発環境で「ローカル」を動かすだけなら `開発環境構築手順書.md` §17.5 で足りる。本書は **配布物を作る人** 向け。
 - 設計は `docs/02_design/詳細設計書.md` §5.4.5.1（LocalLlmService）。
@@ -13,10 +15,10 @@
 | 置き場所（`src-tauri/resources/local_llm/` 配下） | 中身 | 大きさ | git |
 |---|---|---|---|
 | `runtime/` | `llama-server.exe` と、それが使う DLL 21 個（llama.cpp b11269 win-cpu-x64。表は `src-tauri/src/infra/local_llm_runtime.rs` の `RUNTIME_FILES`）＋ Visual C++ ランタイム 3 個（`vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`。判断台帳 D112。表は同じファイルの `VC_RUNTIME_FILES`） | 計 44,453,280 B（約 42.4 MiB。うち VC++ ランタイム 732,064 B） | 追跡しない（`.gitignore`） |
-| `models/stario-qwen3.5-2b-q4_k_m.gguf` | Qwen3.5-2B を GGUF・Q4_K_M に変換・量子化したもの（`MODEL_FILE` / `MODEL_SIZE` / `MODEL_SHA256`） | 1,312,164,800 B（約 1.22 GiB） | 追跡しない（`.gitignore`） |
+| `models/` | **空にする**（2026-11-16 から。モデル `gemma-4-E2B-it-Q4_K_M.gguf`〔3,106,738,272 B〕は初回起動時に `%LOCALAPPDATA%\<識別子>\local_llm\models\<版の名前>\` へ取得する。`.gguf` が残っていると `check-bundle.mjs` がバンドルを止める）。以前は `stario-qwen3.5-2b-q4_k_m.gguf`（1,312,164,800 B）を置いていた | 0 B | 追跡しない（`.gitignore`） |
 | `LICENSES/` | 同梱部品のライセンス本文と `README.txt`（改変の告知・VC++ ランタイムの再頒布の表記を含む） | 約 58 KiB | **追跡する** |
 
-合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。
+合計は約 1.36 GB（1,356,676,964 B ＝ runtime＋モデル＋LICENSES。2026-10-13 に VC++ ランタイムを加えた後の値）。GGUF はほぼ圧縮が効かないため、インストーラーもおおむねこの大きさになる（未検証）。**2026-11-16 からはモデルを入れないため、インストーラーは NSIS 約 19.8MiB（§3.3.1。MSI も作っていた当時の実測では MSI 約 29.6MiB。2026-11-18 から MSI は作らない〔§4.2〕）。**
 
 ### 1.1 Visual C++ ランタイムを同梱する理由と範囲（判断台帳 D112）
 
@@ -26,7 +28,7 @@
 - Windows は、実行ファイルと同じフォルダの DLL を先に探す。`runtime/`（`llama-server.exe` の隣）に置くことで、VC++ 再頒布可能パッケージが入っていないパソコンでも起動できる。入っているパソコンでも、`llama-server` は隣に置いた版を使う。
 - 入手元: Visual Studio 2022 Build Tools の再頒布用フォルダ `VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/`（ファイルの版 14.44.35211.0）。インターネットからは取らない。版を替えるときは `VC_RUNTIME_FILES` の SHA-256 も直す。
 
-`tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_bundle_dir` でここを見る。
+`tauri.conf.json` の `bundle.resources` で `resources/local_llm` → `local_llm` に写され、インストール先のリソースフォルダ（`resource_dir/local_llm`）に入る。アプリは `resolve_runtime_dir`（実行の部品）と `resolve_model_path`（モデル）でここを見る。
 
 ## 2. 同梱物を置く・確かめる
 
@@ -42,7 +44,7 @@ node scripts/local-llm/place-bundle.mjs C:/WS/saiyou_creater/src-tauri/resources
 node scripts/local-llm/check-bundle.mjs
 ```
 
-- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `VC_RUNTIME_FILES` / `MODEL_*`）にあるファイルだけを写す。llama.cpp の部品は `<同梱物のフォルダ>/runtime/` から、VC++ ランタイムは `--vc-crt` のフォルダから写す（`--vc-crt` を省くと `<同梱物のフォルダ>/runtime/` を探し、無ければ指定のしかたを示して止める）。別のプロジェクトの同梱物のフォルダへ VC++ ランタイムを写し足す必要はない。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
+- `place-bundle.mjs`: Rust の表（`RUNTIME_FILES` / `VC_RUNTIME_FILES` / `ACTIVE_MODEL`）にあるファイルだけを写す。llama.cpp の部品は `<同梱物のフォルダ>/runtime/` から、VC++ ランタイムは `--vc-crt` のフォルダから写す（`--vc-crt` を省くと `<同梱物のフォルダ>/runtime/` を探し、無ければ指定のしかたを示して止める）。別のプロジェクトの同梱物のフォルダへ VC++ ランタイムを写し足す必要はない。写す前に元を、写した後に置いたものを SHA-256 で照合し、合わなければ止める。`runtime/`・`models/` の中は `.gitignore` 以外を一度消してから写す（前の版や表に無い DLL を残さない）。
 - `check-bundle.mjs`: 置いてあるものを同じ表と照合する。`tauri.conf.json` の `build.beforeBundleCommand` に入っているため、`pnpm tauri build` のときはインストーラーを作る直前に必ず走り、欠け・不一致があればバンドルを止める（`tauri dev`・cargo のビルド・テスト・CI では走らない）。
 - 置いたファイル（runtime・モデル）は **コミットしない**。`git status` に出ないことを確かめる（`LICENSES/` は追跡対象）。
 
@@ -51,8 +53,8 @@ node scripts/local-llm/check-bundle.mjs
 ### 3.1 前提
 
 - `開発環境構築手順書.md` の Node.js / pnpm / Rust / C++ Build Tools がそろっていること。
-- 初めて `pnpm tauri build` を動かすとき、Tauri CLI はインストーラー作成ツール（WiX Toolset v3・NSIS）を自動でダウンロードする（Tauri v2 の既定の動作）。**ビルドするパソコンにインターネット接続が要る**。社内の取り決めでツールの取得に確認が要る場合は、先に確認する。
-- ビルドの出力先（`src-tauri/target/`）に、同梱物の写し（tauri-build が `target/<profile>/local_llm` へ写す約 1.3GB）とインストーラー（約 1.3GB × 形式の数）が増える。空き容量を 5GB 以上見ておく（目安・未検証）。
+- 初めて `pnpm tauri build` を動かすとき、Tauri CLI はインストーラー作成ツール（NSIS）を自動でダウンロードする（Tauri v2 の既定の動作。MSI を作っていた 2026-11-18 より前は WiX Toolset v3 も取得していた）。**ビルドするパソコンにインターネット接続が要る**。社内の取り決めでツールの取得に確認が要る場合は、先に確認する。
+- ビルドの出力先（`src-tauri/target/`）に、同梱物の写し（tauri-build が `target/<profile>/local_llm` へ写す約 1.3GB）とインストーラー（約 1.3GB × 形式の数）が増える。空き容量を 5GB 以上見ておく（目安・未検証）。**これはモデルを同梱していた 2026-11-16 までの見積もり。今は `local_llm` の写しが約 45MB、インストーラーが約 30MiB 以下（§3.3.1）。**
 
 ### 3.2 コマンド
 
@@ -62,22 +64,71 @@ node scripts/local-llm/check-bundle.mjs
 
 # 2. 配布用ビルド（next build → cargo build --release → check-bundle → インストーラー作成）
 pnpm tauri build
-
-# 3. MSI の作成が失敗したときだけ: NSIS だけを作る（判断台帳 D111。未検証）
-pnpm tauri build --bundles nsis
 ```
 
-- `tauri.conf.json` は `bundle.targets: "all"` のまま（判断台帳 D111）。Windows では **MSI（WiX）と NSIS（.exe）の両方** を作る。
-- MSI の作成が失敗した（2GB 上限など。§4）ときは、設定を変えずに `pnpm tauri build --bundles nsis` で NSIS だけを作って配る。
-- 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`、`src-tauri/target/release/bundle/msi/*.msi`。
+- `tauri.conf.json` は `bundle.targets: ["nsis"]`。**作るのは NSIS（.exe）だけで、MSI は作らない**（藤井さんの判断 2026-11-18「exe版だけで良いです」。§4.2）。
+- 出力先（Tauri v2 の既定）: `src-tauri/target/release/bundle/nsis/*-setup.exe`（`CARGO_TARGET_DIR` を指定したときはその下の `release/bundle/nsis/`）。2026-11-18 より前のビルドの `bundle/msi/` が残っていることがあるが、今のビルドでは作られない（配らない）。
 - ビルド前に、APIキー・`.env`・`app-data/` の実データが混入していないことを確かめる（`開発環境構築手順書.md` §15.3）。
 
-### 3.3 作った後に確かめること（未検証・初回は必ず実施）
+### 3.3 作った後に確かめること（初回は必ず実施。1・3・4 は 2026-11-18 に確かめた〔§3.3.1〕。2 は未検証。5 は 2026-11-18 に NSIS で確かめた〔§3.3.2〕）
 
-1. インストーラーの大きさ（約 1.3GB 前後か）。
+1. インストーラーの大きさ（約 30MiB 以下か。2026-11-16 からモデルを入れないため。結果は §3.3.1）。
 2. ネットにつながっていない、または **Visual C++ 再頒布可能パッケージが入っていない** きれいな Windows にインストールし、設定の AI を「ローカル」にして接続テストが「利用できます」になるか（手順は §3.4）。
 3. インストール先の `local_llm/LICENSES/` にライセンス本文があるか。
-4. アンインストールで `local_llm/` が消えるか。
+4. アンインストールで `local_llm/` が消えるか（NSIS で確かめた。§3.3.1）。
+5. アンインストールで、取得したモデル（`%LOCALAPPDATA%\<識別子>\local_llm\models`）だけが消え、ほかのアプリのデータが残るか（チェックを外したとき）。版を上げたときにモデルが残るか（§3.3.2）。
+
+### 3.3.1 結果（2026-11-18・初回ダウンロード 5/5。develop `cb01f9e`）
+
+インストーラーを実際に作り、開発用の PC（Windows 11・論理 14 コア・メモリ 15.5GB。VC++ 再頒布可能パッケージは入っている）で確かめた。
+
+- 同梱物は `node scripts/local-llm/place-bundle.mjs <すでに置いた同梱物のフォルダ>` で置いた（モデルは写さず `models/` は空）。`check-bundle.mjs` は通った。
+- 大きさ: **MSI 31,031,296 B（約 29.6MiB）・NSIS 20,718,600 B（約 19.8MiB）**（MSI も作っていた当時の実測。今は MSI を作らない）。モデルを入れないため、§4 の 2GB の上限は問題にならなくなった。
+- 中身（当時の MSI を `msiexec /a` で展開して確かめた。NSIS も同じ `bundle.resources` から作る）: `local_llm/` は `runtime/`（25 個・44,453,556 B）・`LICENSES/`（10 個・59,771 B）・`models/`（`.gitignore` だけ）。`.gguf` は無い。`runtime/`・`models/` の `.gitignore` もインストール先に入る（害は無い）。
+- インストール: NSIS は利用者ごと（`%LOCALAPPDATA%\<productName>\`）に入り、管理者権限（UAC）は求められなかった。
+- 初回起動の流れ（§7.3 の 1 つ目。確かめ用に識別子と productName だけを替えた版で行った。開発者の実データに触れないため）:
+  1. 初回起動の案内を終えると、ホームに「初期セッティング中」が出て、10 秒の数え下げの後に取得が始まった（`autoDownloadStartedAt` が書かれた）。
+  2. 取得は約 2 分 20 秒（141 秒。3,106,738,272 B。この PC の回線で約 22MB/秒）。参考: 1 回目の確かめ（下の「注意」の MSIX の仮想化に入ったインストールで、ローカル AI は `Missing` で使えなかった回）では約 1 分 55 秒（115 秒）だった。途中は `.part` と `.part.json`（URL を含まない）があり、照合が通ると `.gguf` に名前が変わり、記録は消えた。`Get-FileHash` の SHA-256 も表と一致した。取得中、`app.log`（警告・エラーだけ）には何も出なかった。
+  3. 設定画面に「ダウンロード済み（約 3.1GB）」が出て、接続テストは押してから約 6〜8 秒で「使えます」（照合と llama-server の起動を含む）。
+  4. 記事 1 件の「要約を作成」が動いた（時間とメモリは `軽量常駐性能確認手順.md` §12）。
+- アンインストール（設定 → アプリ から。NSIS）: 「Delete the application data」のチェック（既定は外れている）を入れると、インストール先と `%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>`（取得したモデルを含む）が消えた。チェックを外したときの残り方は確かめていない。
+- 未確認: VC++ ランタイムの無い環境（§3.4）・オフライン・プロキシ・キャンセル・途中終了からの再開など、§7.3 の 2 つ目以降（設計案）は今回は確かめていない。
+- 注意（確かめ方）: Claude Desktop などの MSIX のアプリの中のシェルからインストーラーを動かすと、インストール先が MSIX の仮想化（`%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\`）に入り、そこから起動したアプリでは「ローカル」が `Missing`（`local llm bundle directory is not available`）になった。エクスプローラーからインストールし直すと起きなかったため、確かめ方の問題と見ている（原因は切り分けていない）。インストールは通常どおりエクスプローラーから行う。
+
+### 3.3.2 アンインストールで取得したモデルを消す（2026-11-18・設計案 Q10）
+
+藤井さんの判断（2026-11-18）により、アンインストールで取得したモデルを必ず消す（設計案 §0.3.2）。
+
+- 消すもの: `%LOCALAPPDATA%\<識別子>\local_llm\models`（版のフォルダ・`.part`・`.part.json` を含む）だけ。その上の `local_llm` は空のときだけ消す。
+- 残すもの: ほかのアプリのデータ（`%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>` の残り）。「Delete the application data」のチェック（既定は外れている）を入れたときだけ、今までどおり Tauri のテンプレートが全部を消す。
+- 仕組み（NSIS）: `tauri.conf.json` の `bundle.windows.nsis.installerHooks` に `windows/installer-hooks.nsh` を指定し、`NSIS_HOOK_POSTUNINSTALL`（Tauri のテンプレートの `Section Uninstall` の終わり。ファイル・レジストリと、チェック時のアプリのデータを消した後）で消す。フックの名前・`BUNDLEID`・`$UpdateMode` は Tauri CLI 2.10.1 に入っている NSIS のテンプレートで確かめた。
+- 消さないとき（モデルが残る場合）:
+  - 更新（`/UPDATE`）。
+  - アンインストーラーがインストール先から直接動いているとき（`$EXEDIR` がインストール先と同じ）。Tauri の NSIS は版を上げるとき既定で「古い版をアンインストールしてから入れる」を選び、`_?=<インストール先>` を付けて古い版のアンインストーラーをその場で動かすため、これに当たる。取り直し（約 3GB）を版ごとにさせないため（藤井さんの判断 2026-11-18「版を上げるときは残す」）。同じ版を入れ直すときの「Uninstall」を選んだ場合、「Uninstall before installing」の後でインストールをキャンセルした場合、スクリプトなどが `uninstall.exe /S _?=<dir>` で呼んだ場合も同じ扱いで、モデルは残る（設定画面の［モデルを削除］か手で消す）。
+  - 設定 → アプリ や `uninstall.exe` のダブルクリックでは、NSIS がアンインストーラーを `%TEMP%` へ写して動かす（NSIS の仕様。マニュアル §3.2.2 の `_?=`）ため、消す。実機で確かめたのは 設定 → アプリ からの場合だけ。
+  - `%LOCALAPPDATA%` が UNC（`\server\...`）などに向け直されている環境では、守り（`X:\...` の形だけ）により消さない（安全側）。
+- 広く・別の場所を消さない守り（セキュリティ詳細設計書 §11.8）:
+  - 識別子が空ならインストーラーを作らない（`!error`）。`$LOCALAPPDATA`（`SetShellVarContext current`）が `X:\...` の形で、フォルダとして在るときだけ使う。消すのは `$LOCALAPPDATA\<識別子>\local_llm\models` の固定の形で、在るときだけ。
+  - ジャンクション・シンボリックリンクをたどらない（2026-11-18 の独立レビューの指摘で直した）。NSIS の `RMDir /r` はリンクの先まで消すため使わない。`<識別子>`・`local_llm`・`models` のどれかが再解析ポイントなら何も消さない（3GB の `models` を別のドライブへリンクしている人の、先のファイルを消さない）。`models` の中は 1 段だけたどる（取得の置き方は `models\<版>\<ファイル>` の 1 段だけ）: リンクの子はリンクそのものだけを外し、普通の子フォルダは直下のファイルだけを消して空なら外し、直下のファイルは消す。最後に `models`、空なら `local_llm` を外す。
+  - 限界: これは本フック（「Delete the application data」のチェックを外したとき）の話で、チェックを入れたときは本フックより前に Tauri のテンプレートが `RmDir /r "$LOCALAPPDATA\${BUNDLEID}"` を行い、NSIS 3.11 の `RMDir /r` はリンクの先までたどって消す（Tauri の従来の動き。本変更で増えたものではない）。直すなら `NSIS_HOOK_PREUNINSTALL` でリンクになっている `models` を先に外す案がある（別のタスク）。
+  - 前提は `installMode` が `currentUser`（Tauri の既定・本アプリの設定）。perMachine / both へ変えるときはフックを見直す（変えるとビルドで `!warning` が出る）。
+- 消し切れないとき: 動いている `llama-server` やウイルス対策ソフトがファイルを開いていると残ることがある。アンインストーラーの詳細に `Local LLM model: could not remove completely` が出る。残ったら手で `%LOCALAPPDATA%\<識別子>\local_llm\models` を消すか、アンインストールの前に設定画面の［モデルを削除］で消す。
+- MSI: **対応していない**。配るのは NSIS（.exe）だけにすると決まり（藤井さん 2026-11-18）、`bundle.targets` を `["nsis"]` にして MSI を作らなくした（§4.2）。以下は MSI を検討したときの記録。Tauri の WiX のテンプレートは全員向け（`perMachine`）で、アンインストールでアプリのデータに触れない（モデルを含めて残る）。WiX の断片（`bundle.windows.wix.fragmentPaths`）で利用者ごとのフォルダを消すことはできる見込みだが、(1) アンインストールした人の分しか消えない、(2) 版を上げるとき（`MajorUpgrade`）にも古い版のアンインストールが走るため `UPGRADINGPRODUCTCODE` で除く必要がある、(3) 管理者の確認（UAC）が要り、この PC で自動では確かめられない。MSI を再び配ることにするなら、設定画面の［モデルを削除］を案内するか、上の断片を別に作って確かめる（当時の提案）。
+- 確かめ方: 識別子と productName を替えた版（`jp.star-system.yuuko-news.installer-check` / `yuuko-news-uninstall-check`。`--config` で上書きし、コミットしない）を v0.1.0 と v0.1.1 で作り、エクスプローラーからインストールする。ダミーのモデル・`.part`・ほかのデータのダミーを置き、(a) v0.1.1 で版を上げてモデルが残るか、(b) 設定 → アプリ からチェックを外してアンインストールし `local_llm\models` だけが消えるか、(c) チェックを入れて全部消えるかを見る。ダミーはエクスプローラーで置く（Claude Desktop などの MSIX のアプリの中のシェルから `%LOCALAPPDATA%` に書くと、MSIX の仮想化〔`%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\Local\`〕に入り、本物の場所に置かれない。2026-11-18 に確かめた）。
+- 結果（2026-11-18・**ジャンクション対応の前の版**〔`RMDir /r`〕で確かめた。この PC〔Windows 11〕・NSIS・利用者ごと。確かめ用の版。生成された `installer.nsi` にフックが入っていることも確かめた）。ダミーは `local_llm\models\gemma-4-e2b-it-q4-k-m-740185b2\` に `.gguf`・`.part`・`.part.json`、ほかに `%LOCALAPPDATA%\<識別子>\keep-local.txt`・`local_llm\keep-in-local_llm.txt`・`%APPDATA%\<識別子>\keep-roaming.txt` を置いた。
+  1. **版を上げる（v0.1.0 → v0.1.1）**: エクスプローラーから v0.1.1 を開くと「Already Installed」で既定は「Uninstall before installing」だった。そのまま進むと古い版のアンインストーラーが `インストール先\uninstall.exe` のまま動き（一時フォルダへ写されない）、「Delete the application data」は外れたまま。詳細に `Local LLM model: kept (uninstall called by a newer installer)`（当時の文言。今は `kept (uninstaller runs in place, e.g. called by a newer installer)`）が出て、**ダミーは全部残った**。版は 0.1.1 になった。
+  2. **アンインストール・チェックを外す**（設定 → アプリ → インストールされているアプリ → アンインストール）: アンインストーラーは `%TEMP%\~nsu1.tmp\Un.exe` に写されて動いた。詳細に `Local LLM model: removing ...\local_llm\models` が出て、**`local_llm\models` だけが消えた**。`keep-local.txt`・`local_llm\keep-in-local_llm.txt`（中身があるので `local_llm` は残る）・`keep-roaming.txt` は残った。インストール先も消えた。
+  3. **入れ直してアンインストール・チェックを入れる**: ダミーを置き直してから行った。`%APPDATA%\<識別子>`・`%LOCALAPPDATA%\<識別子>`・インストール先・アンインストールのレジストリが**全部消えた**（モデルは Tauri のテンプレートが先に消すため、フックは何もしない）。
+  - 後片付け: 確かめ用のアプリ・データ・ダミーは残っていない。開発者の実データ（`jp.star-system.yuuko-news`）には触れていない。
+  - 注意: インストール後の画面の「Run ...」は外した（確かめ用の版を起動すると、実際のモデルの取得が始まるため）。
+- ジャンクション対応の確かめ（2026-11-18・実機のインストールはやり直していない）: フックの消す処理（`YUUKO_REMOVE_DOWNLOADED_MODEL`）をそのまま取り込んだ小さな NSIS（Tauri が使う NSIS 3.11）を作り、一時フォルダで次を確かめた。どの場合もリンクの先のファイルは消えなかった。
+  1. 普通の置き方（`models\v1\` に `.gguf`・`.part`・`.part.json`、`models` 直下のファイル）: `models` が全部消えた。`<識別子>` と `local_llm` の中のほかのファイルは残り、`local_llm` は中身があれば残り、空なら消えた。
+  2. `models` がジャンクション: 何も消さなかった。
+  3. 版のフォルダがジャンクション: リンクだけが外れ、ほかの版のフォルダと `models` は消えた。
+  4. 版のフォルダの中にジャンクション: 版のフォルダの直下のファイルは消え、リンクと版のフォルダ・`models` は残った（消し切れない扱い）。
+  5. `<識別子>` / `local_llm` がジャンクション: 何も消さなかった。
+  6. `%LOCALAPPDATA%` が空・`X:\` の形でない: 何も消さなかった。
+  - 直した版で確かめ用のインストーラーを作り直し、生成された `installer.nsi` にフックが入り、`makensis` が通ることを確かめた。
 
 ### 3.4 VC++ ランタイムが入っていないパソコンで確かめる（判断台帳 D112・未検証）
 
@@ -98,22 +149,29 @@ pnpm tauri build --bundles nsis
 
 インストーラーを作らずに確かめたい場合は、`src-tauri/resources/local_llm/runtime/` を丸ごと上の環境へ写し、PowerShell で `.\llama-server.exe --version` が版を表示して終わるかを見る（DLL が足りなければ「コンピューターに ～.dll がないため」の画面が出る）。
 
-## 4. MSI の 2GB 制限と配布形式（判断台帳 D111）
+## 4. 配布形式（NSIS だけ。2026-11-18）と MSI の 2GB 制限（判断台帳 D111・過去の記録）
 
 ### 4.1 事実関係
 
 - Windows Installer（MSI）と WiX には、1 ファイル・1 キャビネット（CAB）・MSI ファイル自体についておおむね **2GB の上限** がある。Tauri の WiX テンプレートは同梱物を 1 つの CAB にまとめて MSI へ埋め込む（`EmbedCab`）ため、**同梱物の合計が 2GB に近づくと MSI が作れない・壊れる** おそれがある（Tauri の公開資料・既知の不具合報告からの知識。本プロジェクトでは未検証）。
+- （この項と次の項は 2026-11-16 まで〔モデル同梱時〕の記述。今はインストーラー約 30MiB〔§3.3.1〕で、2GB の上限は問題にならない）
 - 現在の同梱物は約 1.36GB（§1）で、2GB には収まる見込み。ただし余裕は 0.6GB ほどしかなく、**モデルを大きくする（例: 4B 級の Q4 は約 2.5GB）と MSI は確実に上限を超える**。
-- NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_bundle_dir` の差し替え・D101 の将来案）を検討する。
+- NSIS にも、インストーラーに詰めるデータ全体でおおむね 2GB の上限がある（32 ビットのオフセット）。現在の大きさなら NSIS でも収まる見込み（未検証）。2GB を超えるモデルを同梱するなら、どちらの形式でも同梱をやめて「初回ダウンロード」（`resolve_model_path` の差し替え・D101 の将来案）を検討する。
 - WiX は 1.3GB の CAB を高圧縮で作るため、ビルドに時間がかかる（GGUF はほぼ縮まない）。NSIS は `bundle.windows.nsis.compression` で圧縮方式（`lzma` / `zlib` / `bzip2` / `none`）を選べる（未検証）。
 
-### 4.2 決定した運用（判断台帳 D111・2026-10-13）
+### 4.2 決定した運用（2026-11-18・藤井さん「exe版だけで良いです」）
 
-- `bundle.targets` は `"all"` のまま、**MSI と NSIS の両方を作る**。
-- **MSI の作成が失敗したら、`pnpm tauri build --bundles nsis` で NSIS だけを作る**（設定は変えない）。
+- `bundle.targets` は `["nsis"]`。**NSIS（.exe）だけを作って配り、MSI は作らない。**
+- 理由: (1) Tauri の MSI は全員向け（`perMachine`）で、インストールに管理者の確認（UAC）が要る。NSIS は利用者ごと（`currentUser`）で要らない。(2) アンインストールで取得したモデルを消すフック（`src-tauri/windows/installer-hooks.nsh`。§3.3.2）は NSIS にしか入らず、MSI では動きが違ってしまう。
+- 判断台帳 D111（2026-10-13）の「`"all"` のまま MSI と NSIS の両方を作り、MSI が失敗したら `--bundles nsis`」は、これで置き換わった。
+
+#### 4.2.1 以前の運用（判断台帳 D111・2026-10-13〜2026-11-18。過去の記録）
+
+- `bundle.targets` は `"all"` のまま、MSI と NSIS の両方を作る。
+- MSI の作成が失敗したら、`pnpm tauri build --bundles nsis` で NSIS だけを作る（設定は変えない）。
 - 配るのは作れた形式。両方作れた場合の使い分けは配布先の都合に合わせる。
 
-背景（NSIS を代わりの形式にする理由）:
+背景（当時 NSIS を代わりの形式にした理由）:
 
 - 1 つの .exe で配れる。Tauri の NSIS は既定で利用者ごと（管理者権限なし）にインストールできる。
 - MSI の CAB / MSI ファイルの 2GB 上限と、大きな CAB の作成時間を避けられる。
@@ -124,12 +182,12 @@ pnpm tauri build --bundles nsis
 ## 5. ライセンス表記
 
 - 置き場所: `src-tauri/resources/local_llm/LICENSES/`（git で追跡）。`bundle.resources` で `local_llm/LICENSES/` としてインストーラーへ同梱される。
-- `README.txt` に、各部品の入手元・版・ライセンス本文のファイル名と、Qwen の重みを GGUF へ変換・量子化した **改変の告知**（Apache License 2.0 第4条(b)）を書いている。文言は持ち主の確認対象のため、変更するときは持ち主に確認する。
+- `README.txt` に、各部品の入手元・版・ライセンス本文のファイル名と、モデル（Gemma 4 E2B）の出所・初回に取得すること・本アプリは改変しない旨（GGUF 化・量子化は unsloth。Apache License 2.0 第4条(b) の告知は本アプリとしては要らない見込み）を書いている。文言は持ち主の確認対象のため、変更するときは持ち主に確認する。
 - 同梱部品とライセンス本文の対応（2026-10-13 に `RUNTIME_FILES` と実物の DLL を突き合わせて確認）:
 
 | 同梱物 | ライセンス本文 |
 |---|---|
-| `models/stario-qwen3.5-2b-q4_k_m.gguf`（Qwen3.5-2B） | `Qwen3.5-Apache-2.0.txt`（改変の告知は `README.txt`） |
+| （同梱しない）初回に取得する `gemma-4-E2B-it-Q4_K_M.gguf`（Gemma 4 E2B） | `Gemma-4-Apache-2.0.txt`（出所は `README.txt` §1） |
 | `llama-server.exe` / `llama-server-impl.dll` / `llama-common.dll` / `llama.dll` / `mtmd.dll` / `ggml.dll` / `ggml-base.dll` / `ggml-cpu-*.dll`（CPU の種類ごとの 14 個） | `llama.cpp-MIT.txt`（ggml を含む） |
 | `libomp.dll` | `LLVM-OpenMP-Apache-2.0-with-LLVM-exception.txt` |
 | `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll`（Microsoft Visual C++ ランタイム。D112） | 本文ファイルは置かない。`README.txt` §3 に「Visual Studio のライセンス条項（再頒布可能コードの条件）に従って再頒布する」旨を書いている（VS の再頒布用フォルダにライセンス本文のファイルは無い。2026-10-13 確認） |
@@ -174,7 +232,7 @@ pnpm tauri build --bundles nsis
 
 - 前回（暫定値）と比べ、メモリの値はほぼ同じ。前回 OS にワーキングセットを削られた回（1,328 MB まで減少）のような落ち込みは今回は無かった。
 - アプリ本体（Tauri＋WebView2）のメモリは **計測していない**（テストは Rust の処理だけを動かすため）。参考の常駐時の値は `軽量常駐性能確認手順.md` を見る。
-- ローカル AI を使っている間は、上の約 2.1〜2.3GB がアプリ本体に上乗せされる。最後に使ってから5分で止まり、そのメモリは戻る（詳細設計書 §5.4.5.1）。自動要約だけで使っていたときは、待機列が空になってから60〜90秒で止まる（直近5分以内に手動の要約・用語解説を使っていれば、その操作から5分たってから）。2026-10-15 に同梱物（debug ビルド）で、自動要約用の窓口から1回生成して `release_soon` を呼んだところ、約83秒後に llama-server が終了した（確認の間隔30秒を含む。ほかのアプリの llama-server が同時に動いていたため、生成の所要時間は参考にならない）。
+- ローカル AI を使っている間は、上の約 2.1〜2.3GB がアプリ本体に上乗せされる。最後に使ってから2分で止まり、そのメモリは戻る（詳細設計書 §5.4.5.1。2026-11-09 に5分から短縮）。自動要約だけで使っていたときは、待機列が空になってから60〜90秒で止まる（直近2分以内に手動の要約・用語解説を使っていれば、その操作から2分たってから）。2026-10-15 に同梱物（debug ビルド）で、自動要約用の窓口から1回生成して `release_soon` を呼んだところ、約83秒後に llama-server が終了した（確認の間隔30秒を含む。ほかのアプリの llama-server が同時に動いていたため、生成の所要時間は参考にならない）。
 
 #### 6.1.1 前回の暫定値（2026-10-13・比較用。メモリに余裕のない状態）
 
@@ -186,7 +244,7 @@ pnpm tauri build --bundles nsis
 
 | 項目 | 1回目 | 2回目 | 3回目 | メモ |
 |---|---|---|---|---|
-| 照合（モデル・部品の SHA-256。アプリ起動中、照合が通るまで。一度通れば `verified` を覚え、5分使わずに止まった後の再起動でもやり直さない） | 約 39 秒 | 約 28 秒 | 約 33 秒 | テスト（debug ビルド）で、テスト開始から llama-server が現れるまでの時間から推定。最適化した SHA-256（`Get-FileHash`）では 1.22GB のモデルが 2.8〜3.6 秒のため、配布版（release）は数秒の見込み（未検証） |
+| 照合（モデル・部品の SHA-256。アプリ起動中、照合が通るまで。一度通れば `verified` を覚え、2分使わずに止まった後の再起動でもやり直さない） | 約 39 秒 | 約 28 秒 | 約 33 秒 | テスト（debug ビルド）で、テスト開始から llama-server が現れるまでの時間から推定。最適化した SHA-256（`Get-FileHash`）では 1.22GB のモデルが 2.8〜3.6 秒のため、配布版（release）は数秒の見込み（未検証） |
 | 起動（照合なし・`/health` が応えるまで） | 4.0 秒 | 4.2 秒 | — | llama-server を同じ引数で直接起動して計測 |
 | 接続テスト（照合＋起動＋16トークン生成） | 120.3 秒 | 32.4 秒 | 38.5 秒 | 1回目はファイルが OS のキャッシュに無く、ページングも重かった |
 | 要約 `summary_v1`（入力 848 文字） | **180 秒で打ち切り（失敗）** | 20.2 秒 | 17.1 秒 | 出力 100〜112 文字 |
@@ -210,7 +268,7 @@ pnpm tauri build --bundles nsis
 ### 6.2 分かったこと・懸念
 
 - 静かな状態（§6.1）では、起動済みなら要約は 9〜13 秒、用語解説は 10〜16 秒、記事 1 件の自動要約（4 生成）は 44〜59 秒。前回の暫定値（§6.1.1: 要約 17〜20 秒・記事 1 件 71〜89 秒）より 3〜4 割短い。
-- 静かな状態では 8 回とも 180 秒の上限に近づかなかった（1回の生成の最長 25.3 秒）。**生成の上限 180 秒と `-t 4`（論理コア数の半分・上限 4）は変えない**。判断台帳 D115（2026-10-13）で据え置きに決定（再計測は D113 で、静かな状態で測り直してから決めるとしたため行った）。理由:
+- 静かな状態では 8 回とも 180 秒の上限に近づかなかった（1回の生成の最長 25.3 秒）。**生成の上限 180 秒と `-t 4`（論理コア数の半分・上限 4）は変えない**。判断台帳 D115（2026-10-13）で据え置きに決定（再計測は D113 で、静かな状態で測り直してから決めるとしたため行った）。**→ 2026-11-09 にスレッドの上限を 2 へ変更**（release ビルドで同じ記事の要約を 2 回ずつ比べ、4→2 で 1 回目 60→82 秒・2 回目 62→63 秒、生成中の CPU は平均 27〜28%→14〜15% に半減したため。2 回ずつ・1 台の計測。軽量常駐性能確認手順 §11.1）。以下の理由の記述は当時の判断として残す。理由:
   - 180 秒は最長の 1 回の約 7 倍で、遅いパソコンや発熱でクロックが下がったときの余裕になる。縮めても、メモリ不足でページング待ちになった回（§6.1.1）が早く失敗するだけで、成功する回は増えない。延ばしても、ページング待ちの回が成功する見込みは低く、利用者を待たせる時間が延びる。
   - `-t` は、今回の計測では 4 スレッドをほぼ使い切って上の速さが出ている。増やした場合の比較（`-t 6` など）は、テストからスレッド数を変える口が無いため測っていない（本番コードを実験のためだけに変えない）。常駐アプリとしてほかのアプリの操作感を守るため、根拠なく増やさない。
 - **メモリに余裕のない 16GB 機では、生成が 180 秒の上限で打ち切られることがある**（前回の暫定値では 6 回中 2 回）。そのときは llama-server のワーキングセットが OS に削られ、CPU をほとんど使えなくなっていた（ページング待ち）。上限時間やスレッド数ではなくメモリ不足が原因のため、この場合はメモリに余裕ができてからやり直す。
@@ -234,4 +292,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib real_local_llm_term_explan
 - メモリは、テストを動かしている間、別の PowerShell で 0.5 秒ごとに `Get-Process llama-server` の `WorkingSet64` / `PrivateMemorySize64` を記録し、最大値を取った。
 - 待機時のメモリと起動時間は、`llama-server.exe` をアプリと同じ引数（`-m <モデル> --host 127.0.0.1 --port <空き番号> -c 4096 -np 1 -t 4 --api-key <使い捨ての値> --no-slots --offline`）で直接起動し、`/health` が 200 を返すまでの時間と、その後 30 秒間のメモリを記録した。
 - アプリが渡す引数は、2026-10-13 から上記に `--cache-ram 0` が加わった（要求をまたぐプロンプトのキャッシュを切り、1 回ごとにメモリが 45〜64MB ずつ増え続けるのを防ぐ。速さは変わらない）。Windows では優先度を「通常以下」（`BELOW_NORMAL_PRIORITY_CLASS`）にして起動する。§6.1 の値はこの変更前の引数・優先度で測った。今後の計測は `--cache-ram 0` を付けて行う（直接起動では優先度は通常のままなので、必要なら `start /belownormal` などで合わせる）。
+- 2026-11-10 から `--no-repack` も加わった（CPU 向けに重みを並べ替えた専用の写し〔約590MB〕を作らず、mmap のページのまま使う。生成中の Private が約1.28→0.69GB に減る。`docs/01_setup/軽量常駐性能確認手順.md` §11.3）。今後の計測は `--no-repack` も付けて行う。
 - 同じ条件で比べられるよう、空きメモリ（`Get-Counter '\Memory\Available MBytes'`）も一緒に記録する。

@@ -68,6 +68,31 @@ impl NetworkAllowlist {
         })
     }
 
+    /// ローカルLLMのモデルの取得を止めるか（欄 `blockModelDownload`。セキュリティ詳細設計書 §6.2 の例外、
+    /// 設計案 Q2 の C・U9。藤井 2026-11-16）。取得先はコードに固定で、この欄は止めることしかできない。
+    ///
+    /// - ファイルが無い・欄が無い: 止めない（既存の許可リストへは欄を足さない方針のため）。
+    /// - 欄が `true` / `false`: その値。
+    /// - ファイルが壊れている・欄の型が違う・読めない: 取得だけを止める（安全側）。起動を止めるかどうかは
+    ///   `load` の従来の方針のまま（この関数は起動の判定に使わない）。
+    ///
+    /// 取得の制御が、開始・再開・自動のやり直しのたびに呼ぶ（読み直すことで欄の変更が次の回から効く）。
+    pub fn model_download_blocked(path: &Path) -> bool {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        match serde_json::from_str::<serde_json::Value>(crate::util::strip_utf8_bom(&raw)) {
+            Ok(serde_json::Value::Object(map)) => match map.get("blockModelDownload") {
+                None => false,
+                Some(serde_json::Value::Bool(blocked)) => *blocked,
+                Some(_) => true,
+            },
+            _ => true,
+        }
+    }
+
     /// 設定ファイルが無い場合のみデフォルトを書き出す（settings と同じ初期化方針）。
     pub fn initialize_default_if_missing(path: &Path) -> Result<(), AppError> {
         if path.exists() {
@@ -142,6 +167,31 @@ mod tests {
             }
             other => panic!("expected validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn model_download_block_field_defaults_open_and_fails_safe() {
+        let path = unique_temp_path();
+        // ファイルが無い・欄が無い → 止めない。
+        assert!(!NetworkAllowlist::model_download_blocked(&path));
+        let base = serde_json::to_value(NetworkAllowlist::default()).unwrap();
+        std::fs::write(&path, base.to_string()).unwrap();
+        assert!(!NetworkAllowlist::model_download_blocked(&path));
+        let with = |value: serde_json::Value| {
+            let mut json = base.clone();
+            json["blockModelDownload"] = value;
+            std::fs::write(&path, json.to_string()).unwrap();
+            NetworkAllowlist::model_download_blocked(&path)
+        };
+        assert!(with(serde_json::json!(true)));
+        assert!(!with(serde_json::json!(false)));
+        // 型が違う → 取得だけを止める。ほかの欄の読み込み（起動の判定）は従来どおり通る。
+        assert!(with(serde_json::json!("false")));
+        assert!(NetworkAllowlist::load(&path).is_ok());
+        // 壊れている → 取得を止める（起動を止めるかは `load` の従来の方針）。
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(NetworkAllowlist::model_download_blocked(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

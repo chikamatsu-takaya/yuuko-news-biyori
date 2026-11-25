@@ -100,6 +100,7 @@ impl AppError {
             Self::ImportRejected(_) => "IMPORT_ZIP_REJECTED",
             Self::ImportIncompletePrevious => "IMPORT_INCOMPLETE_PREVIOUS",
             Self::LocalAi(LocalAiFailure::Missing) => "LOCAL_AI_MISSING",
+            Self::LocalAi(LocalAiFailure::NotReady) => "LOCAL_AI_NOT_READY",
             Self::LocalAi(LocalAiFailure::Broken) => "LOCAL_AI_BROKEN",
             Self::LocalAi(LocalAiFailure::StartFailed) => "LOCAL_AI_START_FAILED",
             Self::LocalAi(LocalAiFailure::Timeout) => "LOCAL_AI_TIMEOUT",
@@ -134,6 +135,7 @@ impl AppError {
             // パス・番号・合言葉・llama-server の出力は含めない。
             Self::LocalAi(failure) => match failure {
                 LocalAiFailure::Missing => "local ai files are missing",
+                LocalAiFailure::NotReady => "local ai model is not ready",
                 LocalAiFailure::Broken => "local ai model is broken",
                 LocalAiFailure::StartFailed => "local ai could not be started",
                 LocalAiFailure::Timeout => "local ai did not respond in time",
@@ -341,6 +343,7 @@ mod tests {
     fn local_ai_errors_use_fixed_codes_and_messages() {
         let cases = [
             (LocalAiFailure::Missing, "LOCAL_AI_MISSING"),
+            (LocalAiFailure::NotReady, "LOCAL_AI_NOT_READY"),
             (LocalAiFailure::Broken, "LOCAL_AI_BROKEN"),
             (LocalAiFailure::StartFailed, "LOCAL_AI_START_FAILED"),
             (LocalAiFailure::Timeout, "LOCAL_AI_TIMEOUT"),

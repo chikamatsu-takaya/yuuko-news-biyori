@@ -35,6 +35,7 @@ use services::dressup_service::DressupService;
 use services::friendship_service::FriendshipService;
 use services::gacha_service::GachaService;
 use services::local_llm_service::LocalLlmService;
+use services::local_model_download_service::LocalModelDownloadService;
 use services::news_scheduler::NewsScheduler;
 use services::news_service::NewsService;
 use services::pattern_service::PatternService;
@@ -44,7 +45,7 @@ use services::settings_service::SettingsService;
 use services::summary_service::SummaryService;
 use services::yuuko_service::YuukoService;
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -131,9 +132,35 @@ pub fn run() {
             );
             // 同梱ローカルLLM（D99）。ここでは場所を決めるだけで起動しない（初めて使うときに起動する）。
             // リソースフォルダを決められなくてもアプリは起動を続け、「ローカル」の利用時に Missing を返す。
-            let local_llm_service = LocalLlmService::new(
-                infra::local_llm_runtime::resolve_bundle_dir(app.path().resource_dir().ok()),
+            // 実行の部品とモデルの場所は別々に決める（モデルだけを後から別の置き場へ替えられるように）。
+            // モデルは取得先（app_local_data_dir の下）→ 同梱の場所の順に探し、無ければ取得先のパスを使う。
+            let local_data_dir = app.path().app_local_data_dir().ok();
+            let (local_llm_service, model_path) = {
+                use infra::local_llm_runtime::{
+                    resolve_model_path, resolve_runtime_dir, LocalLlmBundle, ACTIVE_MODEL,
+                };
+                let resource_dir = app.path().resource_dir().ok();
+                let runtime_dir = resolve_runtime_dir(resource_dir.clone());
+                let model_path =
+                    resolve_model_path(&ACTIVE_MODEL, local_data_dir.as_deref(), resource_dir);
+                let service = LocalLlmService::new(
+                    runtime_dir
+                        .zip(model_path.clone())
+                        .map(|(runtime_dir, model)| LocalLlmBundle::new(&runtime_dir, model)),
+                );
+                (service, model_path)
+            };
+            // モデルの初回ダウンロードの制御。ここでは始めない（自動の開始は、メイン画面がことわりを表示した後の
+            // command だけ。設計案 §2.1 の不変条件）。起動時は古い版のフォルダの片付けだけを行う。
+            let local_model_download_service = LocalModelDownloadService::new(
+                infra::local_llm_runtime::ACTIVE_MODEL,
+                local_data_dir.as_deref(),
+                model_path,
+                paths.network_allowlist_path.clone(),
+                settings_service.clone(),
+                local_llm_service.clone(),
             );
+            local_model_download_service.remove_old_versions();
             // 接続テスト・要約生成・辞書未命中時の用語解説生成で同一設定の AiProviderService を共有する。
             let ai_provider_service =
                 AiProviderService::new(&paths).with_local_llm(local_llm_service.clone());
@@ -172,7 +199,7 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             );
             // 自動要約キュー（設定で有効なときだけ動く）。ニュース取得後に NewsScheduler から投入する。
-            // 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（直近に手動操作があれば、その操作から5分たってから止まる）。
+            // 待機列が空になったら、同梱ローカルLLMへ早めの停止を頼む（直近に手動操作があれば、その操作から2分たってから止まる）。
             // 手動の要求の最中・直後と、llama-server の起動を控えている間は、次の記事を取り出さない。
             let auto_summary_queue = AutoSummaryQueue::new(
                 article_service.clone(),
@@ -180,6 +207,23 @@ pub fn run() {
                 SettingsRepository::new(&paths),
             )
             .with_local_llm(local_llm_service.clone());
+            // 取得が終わったら、準備ができていない間に空にされた自動要約の待機列を並べ直す（設計案 §2.6）。
+            // 進み具合はメインウィンドウだけへ送る（常駐ゆうこウィンドウへは送らない）。
+            {
+                let queue = auto_summary_queue.clone();
+                local_model_download_service
+                    .set_on_ready(Box::new(move || queue.enqueue_unsummarized()));
+                let handle = app.handle().clone();
+                local_model_download_service.set_notifier(Box::new(move |status| {
+                    if let Err(error) = handle.emit_to(
+                        app_lifecycle::MAIN_WINDOW_LABEL,
+                        services::local_model_download_service::LOCAL_MODEL_DOWNLOAD_EVENT,
+                        status,
+                    ) {
+                        log::warn!("failed to notify main window of local model download: {error}");
+                    }
+                }));
+            }
             let news_scheduler = NewsScheduler::new(
                 &paths,
                 news_service.clone(),
@@ -219,6 +263,7 @@ pub fn run() {
                 friendship_service,
                 gacha_service,
                 local_llm_service,
+                local_model_download_service,
                 news_service,
                 pattern_service,
                 dressup_service,
@@ -279,6 +324,11 @@ pub fn run() {
             commands::dictionary_commands::update_dictionary_favorite,
             commands::dictionary_commands::delete_dictionary_entry,
             commands::health_commands::ping,
+            commands::local_model_commands::get_local_model_status,
+            commands::local_model_commands::start_local_model_download,
+            commands::local_model_commands::pause_local_model_download,
+            commands::local_model_commands::cancel_local_model_download,
+            commands::local_model_commands::discard_local_model,
             commands::settings_commands::get_user_settings,
             commands::settings_commands::get_ui_theme_id,
             commands::settings_commands::save_user_settings,
